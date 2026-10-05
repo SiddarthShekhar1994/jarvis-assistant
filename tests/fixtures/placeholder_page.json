@@ -1,0 +1,105 @@
+{
+  "page_id": "00112233445566778899aabbccddeeff",
+  "responses": {
+    "00112233445566778899aabbccddeeff": [
+      {
+        "object": "list",
+        "results": [
+          {
+            "object": "block",
+            "id": "44fae9a7-b1ce-4246-811b-c1a949a41acc",
+            "parent": {
+              "type": "page_id",
+              "page_id": "00112233-4455-6677-8899-aabbccddeeff"
+            },
+            "created_time": "2026-10-03T21:40:00.000Z",
+            "last_edited_time": "2026-10-03T21:40:00.000Z",
+            "created_by": {
+              "object": "user",
+              "id": "00000000-0000-4000-8000-0000000000a0"
+            },
+            "last_edited_by": {
+              "object": "user",
+              "id": "00000000-0000-4000-8000-0000000000a0"
+            },
+            "has_children": false,
+            "archived": false,
+            "in_trash": false,
+            "type": "paragraph",
+            "paragraph": {
+              "rich_text": [
+                {
+                  "type": "text",
+                  "text": {
+                    "content": "Updated: never",
+                    "link": null
+                  },
+                  "annotations": {
+                    "bold": false,
+                    "italic": false,
+                    "strikethrough": false,
+                    "underline": false,
+                    "code": false,
+                    "color": "default"
+                  },
+                  "plain_text": "Updated: never",
+                  "href": null
+                }
+              ],
+              "color": "default"
+            }
+          },
+          {
+            "object": "block",
+            "id": "42ed862b-b86f-432e-803a-9f80e2798237",
+            "parent": {
+              "type": "page_id",
+              "page_id": "00112233-4455-6677-8899-aabbccddeeff"
+            },
+            "created_time": "2026-10-03T21:40:00.000Z",
+            "last_edited_time": "2026-10-03T21:40:00.000Z",
+            "created_by": {
+              "object": "user",
+              "id": "00000000-0000-4000-8000-0000000000a0"
+            },
+            "last_edited_by": {
+              "object": "user",
+              "id": "00000000-0000-4000-8000-0000000000a0"
+            },
+            "has_children": false,
+            "archived": false,
+            "in_trash": false,
+            "type": "paragraph",
+            "paragraph": {
+              "rich_text": [
+                {
+                  "type": "text",
+                  "text": {
+                    "content": "This page is overwritten twice a day by the Daily Briefing scheduled tasks. The briefing-reader app on the PC reads it aloud. Do not edit by hand.",
+                    "link": null
+                  },
+                  "annotations": {
+                    "bold": false,
+                    "italic": false,
+                    "strikethrough": false,
+                    "underline": false,
+                    "code": false,
+                    "color": "default"
+                  },
+                  "plain_text": "This page is overwritten twice a day by the Daily Briefing scheduled tasks. The briefing-reader app on the PC reads it aloud. Do not edit by hand.",
+                  "href": null
+                }
+              ],
+              "color": "default"
+            }
+          }
+        ],
+        "next_cursor": null,
+        "has_more": false,
+        "type": "block",
+        "block": {},
+        "request_id": "4d416096-c403-4f4e-a186-b84e9e272eec"
+      }
+    ]
+  }
+}

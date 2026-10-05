@@ -1,0 +1,16 @@
+# briefing-reader dependencies (Python 3.13). Install from this folder with:
+#   py -3.13 -m pip install -r requirements.txt
+#
+# There is deliberately no separate mp3 player package: audio is played with
+# QtMultimedia, which is part of PySide6 (PySide6 pulls in PySide6-Addons,
+# where QtMultimedia and its bundled FFmpeg backend live).
+# pyttsx3 brings comtypes and pywin32 on Windows (used for the offline voice).
+requests>=2.31
+edge-tts>=7.0
+pyttsx3>=2.99
+PySide6>=6.7
+python-dotenv>=1.0
+# Google Calendar actions (Approve adds an event; OAuth sign-in, README step 8):
+google-api-python-client>=2.100
+google-auth-oauthlib>=1.2
+google-auth-httplib2>=0.2

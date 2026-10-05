@@ -1,0 +1,12 @@
+# Text files are stored with LF line endings in the repository, whatever
+# core.autocrlf the committer uses. Python, PowerShell 5.1 and Notepad all
+# read LF files on Windows.
+* text=auto eol=lf
+
+# Binary files: never touch their bytes.
+*.ttf binary
+*.otf binary
+*.png binary
+*.ico binary
+*.mp3 binary
+*.wav binary

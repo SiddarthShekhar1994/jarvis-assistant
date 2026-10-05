@@ -1,0 +1,60 @@
+# Secrets: the Notion integration token and page id live here (copy .env.example)
+.env
+.env.*
+!.env.example
+
+# Google OAuth client for Calendar actions (README step 8): private.
+# The patterns also catch Google's download name (client_secret_....json),
+# browser re-downloads ("google_client_secret (1).json"), a doubled ending
+# (google_client_secret.json.json) and backups.
+google_client_secret.json
+client_secret*.json
+*client_secret*
+credentials*.json
+service_account*.json
+# A place for a client file with another name ([calendar] client_secret)
+secrets/
+# The Google sign-in, if a copy is ever kept here (the app saves it in
+# %LOCALAPPDATA%\briefing-reader\google_token.json)
+google_token.json
+google_token.json.*
+token.json
+
+# App state and logs live in %LOCALAPPDATA%\briefing-reader and %TEMP%\briefing-reader.
+# Guard against copies (or a LOCALAPPDATA pointed at this folder) ending up here.
+/briefing-reader/
+/logs/
+/actions.json
+/runstate.json
+*.log
+*.log.*
+*.bak
+
+# Generated speech
+*.mp3
+*.wav
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Claude Code's local settings (absolute paths, permission lists)
+.claude/
+CLAUDE.local.md
+
+# Editors and Windows
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

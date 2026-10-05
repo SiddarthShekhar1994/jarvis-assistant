@@ -1,0 +1,112 @@
+# briefing-reader settings
+#
+# Every key is optional: delete a line to go back to its built-in default.
+# A bad value never stops the app; it is replaced by the default and a warning
+# is written to %LOCALAPPDATA%\briefing-reader\logs\briefing-reader.log.
+#
+# The Notion token and page id do NOT go here. Put NOTION_TOKEN and
+# BRIEFING_PAGE_ID (both required) in the .env file next to this one.
+
+[voice]
+# Online voice used by edge-tts. To list every available voice, run:
+#   py -3.13 -m edge_tts --list-voices
+voice = "en-US-GuyNeural"
+# Speaking speed relative to normal, from "-50%" to "+100%".
+# Examples: "+15%" is faster, "-10%" is slower.
+rate = "+0%"
+# Loudness relative to normal, from "-100%" to "+100%" (e.g. "-20%" is quieter).
+volume = "+0%"
+# Offline fallback (Windows built-in voices), used when edge-tts cannot be
+# reached. Any part of the voice name, e.g. "Zira" or "David".
+# Leave empty for the Windows default voice.
+offline_voice = ""
+# Silence between sections, in milliseconds (0 to 10000).
+section_gap_ms = 600
+# Silence where the page has a divider line, in milliseconds (0 to 10000).
+divider_pause_ms = 900
+
+[prompt]
+# Delays for the "Later" buttons, in minutes (1 to 1440).
+later_short_minutes = 10
+later_long_minutes = 30
+# If the prompt is not answered within this many seconds (10 to 3600),
+# it counts as the short Later.
+ignore_after_seconds = 120
+# true: when the prompt comes back after Later it also takes keyboard focus.
+# false: it appears on top but does not steal focus from what you are typing.
+refocus_on_reprompt = false
+
+[polling]
+# With --run am / --run pm the app waits for the new briefing: it checks the
+# page every interval_seconds (10 to 3600) ...
+interval_seconds = 60
+# ... for at most timeout_minutes (1 to 720), then reads whatever is there
+# with a spoken note that it may be stale.
+timeout_minutes = 15
+
+[sections]
+# Sections under these headings are skipped unless you click "Read everything".
+# Matching ignores case and a trailing count, and also catches headings that
+# start with the name, e.g. "Ignore (14)" or "Ignored".
+ignore = ["Ignore"]
+
+[sections.announce]
+# How each section heading is announced:  "Heading on the page" = "What to say"
+# Matching ignores case and a trailing count such as "(3)". Headings that are
+# not listed are announced as written.
+"Work inbox" = "Work inbox"
+"Due" = "Due"
+"Actionable" = "Actionable"
+"Newsletters" = "Newsletters"
+
+[notion]
+# Notion API version sent with every request. Leave this unless you know you
+# need a different one.
+version = "2022-06-28"
+
+[calendar]
+# Calendar actions: the briefing can propose calendar invites, which appear
+# under NEEDS YOUR OK. Approve adds one to Google Calendar; nothing is ever
+# created without your Approve. false: proposals are still shown, but Approve
+# never contacts Google.
+enabled = true
+# The OAuth client file downloaded from Google Cloud (README step 8). A path
+# relative to this folder, or an absolute path. Keep the file private.
+client_secret = "google_client_secret.json"
+# The calendar new events go to. "primary" is your main calendar; another
+# calendar's id is in Google Calendar under its Settings > Integrate calendar.
+calendar_id = "primary"
+
+[actions]
+# The heading the briefing writes its proposals under. Matching ignores case
+# and a trailing count. One name, or a list such as ["Proposed actions", "Actions"].
+heading = "Proposed actions"
+
+[schedule]
+# When the "Briefing AM" and "Briefing PM" tasks run (24-hour HH:MM).
+# install-schedule.ps1 uses these unless you pass -AmTime / -PmTime, and the
+# app uses them to know which briefing an answer belongs to (and whether the
+# catch-up at logon or unlock should ask about a missed one). The values below
+# are only examples: set them a few minutes after your own briefing task writes
+# the page. After changing them, run install-schedule.ps1 again.
+am = "10:12"
+pm = "23:42"
+
+[hotkey]
+# A global hotkey that reads the briefing: it brings the running app forward
+# and starts reading, or starts the app. Rerun install-schedule.ps1 after a
+# change. false: install-schedule.ps1 removes the "Briefing hotkey" task.
+enabled = true
+# ctrl, alt, shift, win plus one letter, digit or F1..F24, e.g. "ctrl+alt+j"
+# or "ctrl+shift+F9". A letter or digit needs ctrl, alt or win.
+combo = "ctrl+alt+j"
+
+[agenda]
+# The TODAY panel shows tomorrow from this hour on (0 to 24; 24 = never).
+evening_from_hour = 18
+# DEADLINES looks this many days ahead (1 to 60).
+deadline_days = 14
+# The Google calendars listed in TODAY ("primary" is your main calendar).
+calendars = ["primary"]
+# Calendar events whose title contains one of these words count as deadlines.
+deadline_keywords = ["due", "deadline", "exam", "midterm", "final", "quiz", "submit", "submission", "assignment", "lab report", "application"]
