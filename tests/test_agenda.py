@@ -250,8 +250,8 @@ class EventRowsTests(unittest.TestCase):
         self.assertIsInstance(row, tuple)
         time_text, title, meta, state = row
         self.assertEqual((time_text, title, meta, state),
-                         ("15:00", "Lab", f"in 20 min{DOT}Room 4", "upcoming"))
-        self.assertEqual(row.time_text, "15:00")
+                         ("3:00 PM", "Lab", f"in 20 min{DOT}Room 4", "upcoming"))
+        self.assertEqual(row.time_text, "3:00 PM")
 
     def test_upcoming_soon_counts_minutes(self) -> None:
         cases = [
@@ -268,19 +268,19 @@ class EventRowsTests(unittest.TestCase):
 
     def test_upcoming_later_shows_the_location(self) -> None:
         self.assertEqual(self.row(timed("Lab", at(5, 15, 41), location="Room 4")),
-                         EventRow("15:41", "Lab", "Room 4", "upcoming"))
+                         EventRow("3:41 PM", "Lab", "Room 4", "upcoming"))
         self.assertEqual(self.row(timed("Lab", at(5, 17, 0))).meta, "")
 
     def test_now(self) -> None:
         self.assertEqual(self.row(timed("Lecture", at(5, 14, 30), 60)),
-                         EventRow("14:30", "Lecture", "now", "now"))
+                         EventRow("2:30 PM", "Lecture", "now", "now"))
         self.assertEqual(self.row(timed("Lecture", at(5, 14, 30), 60, "Central Library")).meta,
                          f"now{DOT}Central Library")
         self.assertEqual(self.row(timed("Starts now", NOW)).state, "now")
 
     def test_ended(self) -> None:
         self.assertEqual(self.row(timed("Standup", at(5, 9, 0), 15, location="Room 4")),
-                         EventRow("09:00", "Standup", "ended", "past"))
+                         EventRow("9:00 AM", "Standup", "ended", "past"))
         self.assertEqual(self.row(timed("Ends now", at(5, 13, 40), 60)).state, "past")
         self.assertEqual(self.row(timed("No length", at(5, 14, 0), 0)).meta, "ended")
 
@@ -318,22 +318,22 @@ class EventRowsTests(unittest.TestCase):
 
     def test_times_are_shown_in_the_time_zone_of_now(self) -> None:
         utc = timed("Final exam", datetime(2026, 10, 5, 16, 0, tzinfo=timezone.utc))
-        self.assertEqual(self.row(utc).time_text, "09:00")
+        self.assertEqual(self.row(utc).time_text, "9:00 AM")
         self.assertEqual(self.row(utc).state, "past")
         late = timed("Late", datetime(2026, 10, 6, 6, 30, tzinfo=timezone.utc))
-        self.assertEqual(self.row(late).time_text, "23:30")
+        self.assertEqual(self.row(late).time_text, "11:30 PM")
 
     def test_naive_times(self) -> None:
         event = timed("Lab", datetime(2026, 10, 5, 15, 0), location="Room 4")
         self.assertEqual(self.row(event, datetime(2026, 10, 5, 14, 40)),
-                         EventRow("15:00", "Lab", f"in 20 min{DOT}Room 4", "upcoming"))
+                         EventRow("3:00 PM", "Lab", f"in 20 min{DOT}Room 4", "upcoming"))
 
     def test_tomorrow_window(self) -> None:
         evening = at(5, 20, 0)
         rows = event_rows([timed("Lab", at(6, 9, 0), location="Room 4"),
                            all_day("Holiday", date(2026, 10, 6))], evening)
         self.assertEqual(rows, [EventRow(ALL_DAY_TEXT, "Holiday", "", "upcoming"),
-                                EventRow("09:00", "Lab", "Room 4", "upcoming")])
+                                EventRow("9:00 AM", "Lab", "Room 4", "upcoming")])
         just_after = event_rows([timed("Night owl", at(6, 0, 15))], at(5, 23, 30))
         self.assertEqual(just_after[0].meta, "in 45 min")
 
@@ -344,6 +344,22 @@ class EventRowsTests(unittest.TestCase):
         self.assertEqual([row.title for row in event_rows(events, NOW)],
                          ["Holiday", "Standup", "Lecture", "Lab"])
         self.assertEqual(event_rows([], NOW), [])
+
+    def test_12_hour_clock_edges(self) -> None:
+        cases = [(at(5, 0, 0), "12:00 AM"), (at(5, 12, 0), "12:00 PM"), (at(5, 9, 5), "9:05 AM"),
+                 (at(5, 23, 59), "11:59 PM"), (at(5, 12, 30), "12:30 PM")]
+        for start, shown in cases:
+            with self.subTest(shown=shown):
+                self.assertEqual(self.row(timed("Block", start, 1)).time_text, shown)
+
+    def test_24_hour_clock(self) -> None:
+        events = [timed("Midnight", at(5, 0, 0), 1), timed("Standup", at(5, 9, 5), 15),
+                  timed("Lab", at(5, 15, 0), location="Room 4"), timed("Late", at(5, 23, 59), 1),
+                  all_day("Holiday", date(2026, 10, 5))]
+        rows = event_rows(events, NOW, hour24=True)
+        self.assertEqual([row.time_text for row in rows], [ALL_DAY_TEXT, "00:00", "09:05", "15:00", "23:59"])
+        self.assertEqual(rows[3], EventRow("15:00", "Lab", f"in 20 min{DOT}Room 4", "upcoming"))
+        self.assertEqual([row[1:] for row in rows], [row[1:] for row in event_rows(events, NOW)])
 
 
 # --------------------------------------------------------------------------
@@ -858,7 +874,7 @@ class DaylightSavingTests(unittest.TestCase):
         inside = events_in_window(events, start, end)
         self.assertEqual([e.title for e in inside], ["Brunch", "Late show"])
         self.assertEqual([(r.time_text, r.title) for r in event_rows(inside, self.NOW)],
-                         [("10:00", "Brunch"), ("23:30", "Late show")])
+                         [("10:00 AM", "Brunch"), ("11:30 PM", "Late show")])
 
     def test_deadline_days_after_the_change(self) -> None:
         due = _local(2026, 11, 3, 23, 30)

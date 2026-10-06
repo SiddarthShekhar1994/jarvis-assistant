@@ -316,8 +316,9 @@ labels and times.
   window. The small **X** at its right end closes it (on the prompt that counts
   as Later (10 min), on the reading screen it is the same as Done). The window
   stays on top of other windows.
-- **Header.** The JARVIS wordmark, three service chips and the date and time
-  (the small prompt window has room for the time only):
+- **Header.** The JARVIS wordmark, three service chips and the date and time,
+  such as TUE 06 OCT 1:05 PM (`[display] clock = "24h"` shows 13:05; the
+  small prompt window has room for the time only):
   **notion** (grey: checking, green: loaded, amber: retrying, red: error),
   **voice** (grey: no audio yet, green: online voice, amber: offline Windows
   voice, red: no speech could be generated) and **calendar** (green:
@@ -410,10 +411,10 @@ The left column of the reading screen shows your day next to the briefing.
 **TODAY** lists the events on your Google Calendar for today; from 18:00 on it
 says **TOMORROW** and lists tomorrow's (`[agenda] evening_from_hour`). Each row
 has a coloured bar (cyan: still to come, green: happening now, dim: over), the
-start time ("ALL DAY" for all-day events), the title and a short line: "now",
-"in 20 min" (up to an hour ahead) or "ended", and the place. A place that is only
-a meeting link is left out. Point at a row for its full text. The calendars
-are `[agenda] calendars` (your main calendar by default).
+start time ("9:00 AM", or "ALL DAY" for all-day events), the title and a short
+line: "now", "in 20 min" (up to an hour ahead) or "ended", and the place. A
+place that is only a meeting link is left out. Point at a row for its full
+text. The calendars are `[agenda] calendars` (your main calendar by default).
 
 The panel reads your calendar when the reading screen opens, every 10 minutes
 while it is visible (never while it is hidden or minimized), after you sign in
@@ -791,6 +792,7 @@ log. Changes apply the next time the app starts.
 | `[agenda] deadline_days` | `14` | How many days ahead DEADLINES looks (1-60). |
 | `[agenda] calendars` | `["primary"]` | The Google calendars listed in TODAY: `"primary"` or calendar ids (see `[calendar] calendar_id`). |
 | `[agenda] deadline_keywords` | `["due", "deadline", "exam", "midterm", "final", "quiz", "submit", "submission", "assignment", "lab report", "application"]` | A calendar event in the next `deadline_days` days whose title contains one of these words (whole words, any case) is also listed under DEADLINES. `[]` turns that off. |
+| `[display] clock` | `"12h"` | How the header clock, TODAY, ACTIVITY, STATUS and the Intro line of the SECTIONS list show times: `"12h"` (1:05 PM) or `"24h"` (13:05). Times inside sentences ("Updated today at 10:04 AM", "asking again at 1:15 PM", "until 1:20 PM" on the prompt, in the tray and on the reading screen), the proposal cards, the DEADLINES due labels and the spoken briefing always use 12-hour times. |
 
 The offline voice uses the same `rate` and `volume`: the rate scales Windows'
 default 200 words per minute, and a volume above `+0%` cannot get louder than
@@ -963,7 +965,8 @@ py -3.13 -m unittest discover -v
 
 The tests use saved fake Notion responses (`tests\fixtures`, with an invented
 page and invented people, places and courses) and fake Google Calendar
-services, and never call Notion or Google; they need no `.env`. The live speech tests are
+services, and never call Notion or Google; they need no `.env`. The clock display
+tests run Qt offscreen, so no window appears. The live speech tests are
 skipped unless you opt in; they synthesize a short text with edge-tts (needs
 internet) and with the Windows voice into a temporary folder, and play nothing:
 

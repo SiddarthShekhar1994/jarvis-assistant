@@ -2,7 +2,7 @@
 
     agenda_window(now)               which day the agenda shows: (label, start, end)
     events_in_window(events, s, e)   the events that overlap that day
-    event_rows(events, now)          CalendarEvents -> EventRow display tuples
+    event_rows(events, now)          CalendarEvents -> EventRow display tuples ("9:00 AM" / "09:00")
     extract_deadlines(lines)         pull the "Deadlines" section out of a page's FlatLines
     parse_deadline_line(text)        one line of that section -> Deadline (None if unreadable)
     deadlines_from_events(events)    calendar events whose title says they are deadlines
@@ -126,12 +126,6 @@ def _midnight(day: date, now: datetime) -> datetime:
     return naive.replace(tzinfo=now.tzinfo)
 
 
-def _clock12(moment: datetime) -> str:
-    """"3:00 PM", "11:59 PM", "12:00 AM"."""
-    meridiem = "AM" if moment.hour < 12 else "PM"
-    return f"{moment.hour % 12 or 12}:{moment.minute:02d} {meridiem}"
-
-
 # --------------------------------------------------------------------------
 # agenda_window
 # --------------------------------------------------------------------------
@@ -183,7 +177,7 @@ def events_in_window(events: Iterable[CalendarEvent], start: datetime,
 # --------------------------------------------------------------------------
 
 class EventRow(NamedTuple):
-    """One agenda row: ("09:00" or "ALL DAY", title, meta, "past" | "now" | "upcoming")."""
+    """One agenda row: ("9:00 AM" | "09:00" | "ALL DAY", title, meta, "past" | "now" | "upcoming")."""
 
     time_text: str
     title: str
@@ -191,15 +185,17 @@ class EventRow(NamedTuple):
     state: str
 
 
-def event_rows(events: Iterable[CalendarEvent], now: datetime) -> list[EventRow]:
+def event_rows(events: Iterable[CalendarEvent], now: datetime, *,
+               hour24: bool = False) -> list[EventRow]:
     """Display rows in time order (all-day events first on their day).
 
-    Times are shown in ``now``'s time zone. The meta is "ended" for a past
-    event; "now" or "in 20 min" (up to an hour ahead) joined with the
-    location; else the location. A location that is only a link is left out.
+    Times are shown in ``now``'s time zone, as "9:00 AM" (or "09:00" with
+    ``hour24``). The meta is "ended" for a past event; "now" or "in 20 min"
+    (up to an hour ahead) joined with the location; else the location. A
+    location that is only a link is left out.
     """
     ordered = sorted(events, key=lambda event: _event_key(event, now))
-    return [_event_row(event, now) for event in ordered]
+    return [_event_row(event, now, hour24) for event in ordered]
 
 
 def _event_key(event: CalendarEvent, now: datetime) -> tuple[datetime, int, str]:
@@ -209,7 +205,7 @@ def _event_key(event: CalendarEvent, now: datetime) -> tuple[datetime, int, str]
     return datetime.combine(first, time()), 0, event.title.casefold()
 
 
-def _event_row(event: CalendarEvent, now: datetime) -> EventRow:
+def _event_row(event: CalendarEvent, now: datetime, hour24: bool) -> EventRow:
     place = display_location(event.location)
     current = _now_wall(now)
     if event.start is None:
@@ -220,13 +216,14 @@ def _event_row(event: CalendarEvent, now: datetime) -> EventRow:
         return EventRow(ALL_DAY_TEXT, event.title, place, state)
     start = _wall(event.start, now)
     end = max(_wall(event.end, now), start) if event.end is not None else start
+    shown = text_prep.format_time(start, hour24=hour24)
     if start <= current < end:
-        return EventRow(f"{start:%H:%M}", event.title, _joined("now", place), STATE_NOW)
+        return EventRow(shown, event.title, _joined("now", place), STATE_NOW)
     if current < start:
         minutes = math.ceil((start - current).total_seconds() / 60)
         meta = _joined(f"in {minutes} min", place) if minutes <= _SOON_MINUTES else place
-        return EventRow(f"{start:%H:%M}", event.title, meta, STATE_UPCOMING)
-    return EventRow(f"{start:%H:%M}", event.title, "ended", STATE_PAST)
+        return EventRow(shown, event.title, meta, STATE_UPCOMING)
+    return EventRow(shown, event.title, "ended", STATE_PAST)
 
 
 def _joined(*parts: str) -> str:
@@ -522,9 +519,9 @@ def due_label(due: datetime | date, now: datetime) -> tuple[str, str]:
     """(text, urgency) for the right edge of a deadline row.
 
     Today: "TODAY" for a date, "TODAY 3:00 PM" / "TONIGHT 11:59 PM" for a
-    time; then "TOMORROW", "2D" .. "13D", and "OCT 20" further out; a past
-    day is "OVERDUE". Urgency: "high" up to tomorrow, "medium" for 2-3 days,
-    else "low".
+    time (always 12-hour, like the proposal cards); then "TOMORROW", "2D" ..
+    "13D", and "OCT 20" further out; a past day is "OVERDUE". Urgency:
+    "high" up to tomorrow, "medium" for 2-3 days, else "low".
     """
     day, _ = _due_point(due, now)
     days = (day - _now_wall(now).date()).days
@@ -547,4 +544,4 @@ def _today_text(due: datetime | date, now: datetime) -> str:
         return TODAY_LABEL
     wall = _wall(due, now)
     word = "TONIGHT" if wall.hour >= _TONIGHT_FROM_HOUR else TODAY_LABEL
-    return f"{word} {_clock12(wall)}"
+    return f"{word} {text_prep.format_time(wall)}"

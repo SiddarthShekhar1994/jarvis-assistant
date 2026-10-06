@@ -1237,6 +1237,12 @@ class BriefingWindow(hud.HudWindowFrame):
     def is_reading_view(self) -> bool:
         return self._stack.currentWidget() is self.reading
 
+    def set_hour24(self, hour24: bool) -> None:
+        """The header clock and the activity times: "13:05" (True) or "1:05 PM" (False)."""
+        assert self.header is not None
+        self.header.set_hour24(hour24)
+        self.reading.activity.set_hour24(hour24)
+
     # ---- views and sizes ------------------------------------------------------
 
     def show_prompt_view(self) -> None:
@@ -1332,6 +1338,7 @@ _STATUS_LABELS = {PLAYING: "Playing", PAUSED: "Paused", FINISHED: "Finished"}
 _ORB_FOR_PLAYER = {PLAYING: hud.ORB_SPEAKING, WAITING: hud.ORB_WORKING}
 _STEP_WINDOW = 5                         # section chips shown above the transcript
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+_WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 # Calendar worker stages (card shows WORKING / WAITING FOR GOOGLE SIGN-IN).
 _STAGE_WORKING = "working"
@@ -1562,9 +1569,9 @@ def _agenda_fetch_range(now: datetime, agenda: AgendaConfig) -> tuple[datetime, 
 
 
 def _agenda_rows(events: Sequence[CalendarEvent], now: datetime, start: datetime,
-                 end: datetime) -> list[hud.AgendaRowInfo]:
+                 end: datetime, hour24: bool = False) -> list[hud.AgendaRowInfo]:
     return [hud.AgendaRowInfo(row.time_text, row.title, row.meta, row.state)
-            for row in event_rows(events_in_window(events, start, end), now)]
+            for row in event_rows(events_in_window(events, start, end), now, hour24=hour24)]
 
 
 def _deadline_rows(deadlines: Sequence[Deadline], now: datetime) -> list[hud.DeadlineRowInfo]:
@@ -1616,17 +1623,23 @@ def _describe_poll(result: PollResult) -> str:
     return "fresh" if result.freshness is not None and result.freshness.fresh else "done"
 
 
-def _clock_text(moment: datetime, now: datetime) -> str:
-    """"10:04" in ``now``'s time zone (24-hour, like the HUD clock)."""
+def _clock_text(moment: datetime, now: datetime, hour24: bool = False) -> str:
+    """"10:04 AM" (or "10:04" with ``hour24``) in ``now``'s time zone, like the HUD clock."""
     try:
         local = moment.astimezone(now.tzinfo) if now.tzinfo is not None else moment
     except (TypeError, ValueError, OverflowError):
         local = moment
-    return local.strftime("%H:%M")
+    return format_time(local, hour24=hour24)
 
 
-def _short_updated(header: BriefingHeader, now: datetime) -> str:
-    """"today 10:04", "yesterday 23:31", "Oct 2 09:00" or "not yet" (STATUS telemetry)."""
+def _short_updated(header: BriefingHeader, now: datetime, hour24: bool = False, *,
+                   compact: bool = False) -> str:
+    """"today 10:04 AM", "yesterday 11:31 PM", "Oct 2 9:00 AM" or "not yet" (STATUS telemetry).
+
+    ``hour24``: "today 10:04", "yesterday 23:31", "Oct 2 09:00". ``compact``
+    names yesterday by its weekday ("Mon 11:31 PM") and an older day by its
+    date alone ("Oct 2"), for a narrow STATUS column.
+    """
     updated = header.updated_at
     if updated is None:
         return "not yet"
@@ -1635,12 +1648,13 @@ def _short_updated(header: BriefingHeader, now: datetime) -> str:
         days = (now.date() - local.date()).days
     except (TypeError, ValueError, OverflowError):
         return "unknown"
-    clock = local.strftime("%H:%M")
+    clock = format_time(local, hour24=hour24)
     if days == 0:
         return f"today {clock}"
     if days == 1:
-        return f"yesterday {clock}"
-    return f"{_MONTHS[local.month - 1]} {local.day} {clock}"
+        return f"{_WEEKDAYS[local.weekday()]} {clock}" if compact else f"yesterday {clock}"
+    day = f"{_MONTHS[local.month - 1]} {local.day}"
+    return day if compact else f"{day} {clock}"
 
 
 def _card_kind(action: ProposedAction) -> str:
@@ -1746,6 +1760,7 @@ class AppController(QObject):
         self._bridge = _Bridge(self)
         self._volume = volume
         self.window = BriefingWindow(config.prompt.later_short_minutes, config.prompt.later_long_minutes)
+        self.window.set_hour24(config.display.hour24)
         self.window.header.set_clock(now_func)
         self.player = self._create_player()
         self.tray: QSystemTrayIcon | None = None
@@ -2503,7 +2518,7 @@ class AppController(QObject):
             panel.set_meta("")
             panel.set_message(text, color, link=link, tooltip=tip)
         else:
-            self._show_agenda_rows(panel, _agenda_rows(events, now, start, end))
+            self._show_agenda_rows(panel, _agenda_rows(events, now, start, end, self.config.display.hour24))
         self._show_deadlines(panel, now)
 
     def _agenda_line(self) -> tuple[str, str, str, str]:
@@ -3060,10 +3075,10 @@ class AppController(QObject):
 
     def _section_meta(self, section: Section) -> str:
         if section.key == "intro":
-            # Short enough for the narrowest section column: "AM run · 10:04" / "updated 10:04".
+            # Short enough for the narrowest section column: "AM run · 10:04 AM" / "updated 10:04 AM".
             run = self._script.run_label if self._script is not None else ""
             updated = self._briefing.header.updated_at if self._briefing is not None else None
-            clock = _clock_text(updated, self._now()) if updated is not None else ""
+            clock = _clock_text(updated, self._now(), self.config.display.hour24) if updated is not None else ""
             if run:
                 return f"{run} run {DOT} {clock}" if clock else f"{run} run"
             return f"updated {clock}" if clock else ""
@@ -3117,8 +3132,11 @@ class AppController(QObject):
             reading.updated_bar.set_value("--", 0.0, hud.TEXT_DIM)
         else:
             stale = script.stale if script is not None else not self._cached_is_fresh()
-            reading.updated_bar.set_value(_short_updated(briefing.header, self._now()), 1.0,
-                                          hud.AMBER if stale else hud.TEXT_DIM)
+            now, hour24 = self._now(), self.config.display.hour24
+            # In a narrow column the longer 12-hour values give way to "Mon 11:31 PM" / "Oct 2" (24-hour ones fit).
+            short = "" if hour24 else _short_updated(briefing.header, now, compact=True)
+            reading.updated_bar.set_value(_short_updated(briefing.header, now, hour24), 1.0,
+                                          hud.AMBER if stale else hud.TEXT_DIM, short=short)
 
     # ---- player signals --------------------------------------------------------------------
 

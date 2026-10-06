@@ -33,6 +33,7 @@ from briefing_reader.config import (
     AgendaConfig,
     CalendarConfig,
     Config,
+    DisplayConfig,
     HotkeyConfig,
     PollingConfig,
     PromptConfig,
@@ -172,6 +173,9 @@ class DefaultsTests(ProjectTestCase):
         lists: Any = ["a", "b"]
         self.assertEqual(AgendaConfig(calendars=lists, deadline_keywords=lists).calendars, ("a", "b"))
         self.assertEqual(AgendaConfig(deadline_keywords=lists).deadline_keywords, ("a", "b"))
+        self.assertEqual(DisplayConfig(), DisplayConfig(clock="12h"))
+        self.assertFalse(DisplayConfig().hour24)
+        self.assertTrue(DisplayConfig(clock="24h").hour24)
 
     def test_defaults_without_config_file(self) -> None:
         cfg = self.load_quietly()
@@ -195,6 +199,7 @@ class DefaultsTests(ProjectTestCase):
         self.assertEqual(cfg.schedule, ScheduleConfig())
         self.assertEqual(cfg.hotkey, HotkeyConfig())
         self.assertEqual(cfg.agenda, AgendaConfig())
+        self.assertEqual(cfg.display, DisplayConfig())
 
     def test_load_config_does_not_create_directories(self) -> None:
         cfg = self.load_quietly()
@@ -280,6 +285,9 @@ evening_from_hour = 17
 deadline_days = 21
 calendars = ["primary", "team@group.calendar.google.com"]
 deadline_keywords = ["due", "Exam"]
+
+[display]
+clock = "24h"
 """
 
 
@@ -308,6 +316,7 @@ class ConfigFileTests(ProjectTestCase):
             evening_from_hour=17, deadline_days=21,
             calendars=("primary", "team@group.calendar.google.com"),
             deadline_keywords=("due", "Exam")))
+        self.assertEqual(cfg.display, DisplayConfig(clock="24h"))
 
     def test_partial_file_keeps_other_defaults(self) -> None:
         self.write_config('[voice]\nrate = "-10%"\n')
@@ -344,6 +353,7 @@ class ConfigFileTests(ProjectTestCase):
             "schedule": {f.name for f in dataclasses.fields(ScheduleConfig)},
             "hotkey": {f.name for f in dataclasses.fields(HotkeyConfig)},
             "agenda": {f.name for f in dataclasses.fields(AgendaConfig)},
+            "display": {f.name for f in dataclasses.fields(DisplayConfig)},
         }
         self.assertEqual(set(doc), set(expected_keys))
         for table, keys in expected_keys.items():
@@ -367,6 +377,7 @@ class ConfigFileTests(ProjectTestCase):
         self.assertEqual(cfg.schedule, ScheduleConfig())
         self.assertEqual(cfg.hotkey, HotkeyConfig())
         self.assertEqual(cfg.agenda, AgendaConfig())
+        self.assertEqual(cfg.display, DisplayConfig(clock="12h"))
 
     def test_client_secret_is_gitignored(self) -> None:
         lines = (config.PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
@@ -606,6 +617,35 @@ class ScheduleHotkeyAgendaConfigTests(ProjectTestCase):
         cfg = self.load_warning("[schedule]", "[hotkey]", "[agenda]")
         self.assertEqual((cfg.schedule, cfg.hotkey, cfg.agenda),
                          (ScheduleConfig(), HotkeyConfig(), AgendaConfig()))
+
+    def test_display_clock(self) -> None:
+        for raw, expected in (('"12h"', "12h"), ('"24h"', "24h"), ('" 24H "', "24h"), ('"12H"', "12h")):
+            with self.subTest(raw=raw):
+                self.write_config(f"[display]\nclock = {raw}\n")
+                cfg = self.load_quietly()
+                self.assertEqual(cfg.display, DisplayConfig(clock=expected))
+                self.assertEqual(cfg.display.hour24, expected == "24h")
+
+    def test_missing_display_table_is_12_hour(self) -> None:
+        self.write_config("[agenda]\ndeadline_days = 7\n")
+        self.assertEqual(self.load_quietly().display, DisplayConfig(clock="12h"))
+        self.write_config("[display]\n")
+        self.assertEqual(self.load_quietly().display, DisplayConfig(clock="12h"))
+
+    def test_bad_display_clock_falls_back_to_12_hour(self) -> None:
+        for value in ('"24"', '"12-hour"', '"24 h"', '"AM/PM"', '""', "24", "true", '["24h"]'):
+            with self.subTest(value=value):
+                self.write_config(f"[display]\nclock = {value}\n")
+                cfg = self.load_warning("display.clock", '"12h" or "24h"', "using '12h'")
+                self.assertEqual(cfg.display, DisplayConfig())
+
+    def test_display_unknown_keys_and_wrong_table_are_reported(self) -> None:
+        self.write_config('[display]\nclock = "24h"\nseconds = true\n')
+        cfg = self.load_warning("display.seconds")
+        self.assertEqual(cfg.display, DisplayConfig(clock="24h"))
+        self.write_config('display = "24h"\n')
+        cfg = self.load_warning("[display]")
+        self.assertEqual(cfg.display, DisplayConfig())
 
 
 # --------------------------------------------------------------------------

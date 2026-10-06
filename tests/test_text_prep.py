@@ -8,6 +8,7 @@ does, and assert on the resulting Script. No network access.
 
 from __future__ import annotations
 
+import locale
 import re
 import string
 import unittest
@@ -56,6 +57,7 @@ from briefing_reader.text_prep import (
     ACTIONS_TITLE,
     build_script,
     clean_heading,
+    clock_parts,
     describe_updated,
     format_time,
     is_ignore_heading,
@@ -1427,10 +1429,40 @@ class IsIgnoreHeadingTests(unittest.TestCase):
 class FormatTimeTests(unittest.TestCase):
     def test_formats(self) -> None:
         cases = {(10, 4): "10:04 AM", (23, 31): "11:31 PM", (0, 0): "12:00 AM", (12, 0): "12:00 PM",
-                 (9, 5): "9:05 AM", (12, 30): "12:30 PM", (0, 59): "12:59 AM", (13, 0): "1:00 PM"}
+                 (9, 5): "9:05 AM", (12, 30): "12:30 PM", (0, 59): "12:59 AM", (13, 0): "1:00 PM",
+                 (11, 59): "11:59 AM", (23, 59): "11:59 PM"}
         for (hour, minute), expected in cases.items():
             with self.subTest(hour=hour, minute=minute):
                 self.assertEqual(format_time(datetime(2026, 10, 4, hour, minute, tzinfo=PDT)), expected)
+
+    def test_24_hour(self) -> None:
+        cases = {(10, 4): "10:04", (23, 31): "23:31", (0, 0): "00:00", (12, 0): "12:00",
+                 (9, 5): "09:05", (23, 59): "23:59", (13, 0): "13:00"}
+        for (hour, minute), expected in cases.items():
+            with self.subTest(hour=hour, minute=minute):
+                moment = datetime(2026, 10, 4, hour, minute, tzinfo=PDT)
+                self.assertEqual(format_time(moment, hour24=True), expected)
+                self.assertEqual(clock_parts(moment, hour24=True), (expected, ""))
+
+    def test_parts(self) -> None:
+        cases = {(0, 0): ("12:00", "AM"), (12, 0): ("12:00", "PM"), (9, 5): ("9:05", "AM"),
+                 (13, 5): ("1:05", "PM"), (23, 59): ("11:59", "PM"), (11, 59): ("11:59", "AM")}
+        for (hour, minute), expected in cases.items():
+            with self.subTest(hour=hour, minute=minute):
+                moment = datetime(2026, 10, 4, hour, minute)
+                self.assertEqual(clock_parts(moment), expected)
+                self.assertEqual(format_time(moment), " ".join(expected))
+
+    def test_independent_of_the_locale(self) -> None:
+        # strftime("%p") is empty or translated in some locales; the clock never uses it.
+        saved = locale.setlocale(locale.LC_TIME)
+        self.addCleanup(locale.setlocale, locale.LC_TIME, saved)
+        for name in ("de_DE.UTF-8", "German_Germany.1252", "ja_JP.UTF-8", "Japanese_Japan.932"):
+            try:
+                locale.setlocale(locale.LC_TIME, name)
+            except locale.Error:
+                continue
+            self.assertEqual(format_time(datetime(2026, 10, 4, 13, 5)), "1:05 PM")
 
 
 class DescribeUpdatedTests(unittest.TestCase):

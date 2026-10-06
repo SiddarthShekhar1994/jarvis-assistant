@@ -622,10 +622,24 @@ def _count_sentence(count: int | None) -> str:
 # Time labels and the stale note
 # --------------------------------------------------------------------------
 
-def format_time(dt: datetime) -> str:
-    """"10:04 AM" / "11:31 PM" (no leading zero; avoids platform-specific strftime flags)."""
-    hour = dt.hour % 12 or 12
-    return f"{hour}:{dt.minute:02d} {'AM' if dt.hour < 12 else 'PM'}"
+def clock_parts(dt: datetime, *, hour24: bool = False) -> tuple[str, str]:
+    """("1:05", "PM") / ("12:00", "AM"); with ``hour24`` ("13:05", "") / ("09:05", "").
+
+    The one clock formatter for speech and screens. Built by hand: strftime's
+    %I and %p depend on the locale, and %-I fails on Windows.
+    """
+    if hour24:
+        return f"{dt.hour:02d}:{dt.minute:02d}", ""
+    return f"{dt.hour % 12 or 12}:{dt.minute:02d}", "AM" if dt.hour < 12 else "PM"
+
+
+def format_time(dt: datetime, *, hour24: bool = False) -> str:
+    """"10:04 AM" / "11:31 PM" (no leading zero); "10:04" / "23:31" with ``hour24``.
+
+    Speech always uses the 12-hour clock; the screen follows ``[display] clock``.
+    """
+    digits, meridiem = clock_parts(dt, hour24=hour24)
+    return f"{digits} {meridiem}" if meridiem else digits
 
 
 def _aware(now: datetime) -> datetime:

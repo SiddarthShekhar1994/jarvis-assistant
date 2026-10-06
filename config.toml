@@ -110,3 +110,9 @@ deadline_days = 14
 calendars = ["primary"]
 # Calendar events whose title contains one of these words count as deadlines.
 deadline_keywords = ["due", "deadline", "exam", "midterm", "final", "quiz", "submit", "submission", "assignment", "lab report", "application"]
+
+[display]
+# The header clock and the times in TODAY, ACTIVITY, STATUS and SECTIONS: "12h"
+# shows 1:05 PM, "24h" shows 13:05. Sentences ("Updated today at 10:04 AM"),
+# the cards, DEADLINES and the spoken briefing always use 12-hour times.
+clock = "12h"

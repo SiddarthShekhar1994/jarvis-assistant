@@ -628,11 +628,12 @@ def _years_shown(first: date, last: date, today: date) -> tuple[bool, bool]:
 
 
 def _meridiem(moment: datetime) -> str:
-    return "AM" if moment.hour < 12 else "PM"
+    return _text_prep().clock_parts(moment)[1]
 
 
 def _clock_text(moment: datetime) -> str:
-    return f"{moment.hour % 12 or 12}:{moment.minute:02d}"
+    """"3:00" (12-hour digits; cards always use the 12-hour clock)."""
+    return _text_prep().clock_parts(moment)[0]
 
 
 def _is_short(start: datetime, end: datetime) -> bool:
@@ -697,8 +698,8 @@ def _spoken_clock(moment: datetime, with_meridiem: bool) -> str:
     """"3", "3:30", "noon", "midnight" (plus " PM" when asked, never after noon/midnight)."""
     if moment.minute == 0 and moment.hour in (0, 12):
         return "midnight" if moment.hour == 0 else "noon"
-    hour = moment.hour % 12 or 12
-    text = str(hour) if moment.minute == 0 else f"{hour}:{moment.minute:02d}"
+    digits = _clock_text(moment)
+    text = digits.partition(":")[0] if moment.minute == 0 else digits
     return f"{text} {_meridiem(moment)}" if with_meridiem else text
 
 

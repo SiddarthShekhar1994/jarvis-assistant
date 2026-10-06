@@ -7,7 +7,7 @@ Settings come from three places:
   ``BRIEFING_PAGE_ID`` (both required; there is no default page);
 * the environment itself;
 * ``config.toml`` in the project root for voice, prompt, polling, section,
-  Google Calendar, proposed-action, schedule, hotkey and agenda options.
+  Google Calendar, proposed-action, schedule, hotkey, agenda and display options.
 
 A bad setting never stops the app: invalid values are logged as warnings and
 replaced by their defaults. The Notion token is never logged. As soon as it is
@@ -65,10 +65,12 @@ DEFAULT_CLIENT_SECRET = "google_client_secret.json"
 DEFAULT_ACTIONS_HEADING = "Proposed actions"
 DEFAULT_DEADLINE_KEYWORDS = ("due", "deadline", "exam", "midterm", "final", "quiz", "submit",
                              "submission", "assignment", "lab report", "application")
+CLOCK_12H = "12h"
+CLOCK_24H = "24h"
 
 _MISSING = object()
 _KNOWN_TABLES = ("voice", "prompt", "polling", "sections", "notion", "calendar", "actions",
-                 "schedule", "hotkey", "agenda")
+                 "schedule", "hotkey", "agenda", "display")
 _QUIET_LOGGERS = ("urllib3", "asyncio", "aiohttp", "comtypes", "charset_normalizer")
 _HANDLER_TAG = "_briefing_reader_handler"
 _MIN_SECRET_LEN = 8
@@ -171,6 +173,15 @@ class AgendaConfig:
 
 
 @dataclass(frozen=True)
+class DisplayConfig:
+    clock: str = CLOCK_12H     # times on screen: "12h" (1:05 PM) or "24h" (13:05); speech stays 12-hour
+
+    @property
+    def hour24(self) -> bool:
+        return self.clock == CLOCK_24H
+
+
+@dataclass(frozen=True)
 class Config:
     notion_token: str = field(repr=False)   # "" when missing; NEVER logged
     page_id: str                            # normalized 32-hex, no dashes; "" when missing or invalid
@@ -189,6 +200,7 @@ class Config:
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     hotkey: HotkeyConfig = field(default_factory=HotkeyConfig)
     agenda: AgendaConfig = field(default_factory=AgendaConfig)
+    display: DisplayConfig = field(default_factory=DisplayConfig)
 
     @property
     def notion_url(self) -> str:
@@ -305,6 +317,7 @@ def load_config(project_root: Path | None = None, *,
         schedule=_parse_schedule(doc),
         hotkey=_parse_hotkey(doc),
         agenda=_parse_agenda(doc),
+        display=_parse_display(doc),
     )
 
 
@@ -445,6 +458,18 @@ class _TableReader:
             self._invalid(key, value, "is not in the expected format", default)
             return default
         return text
+
+    def choice(self, key: str, default: str, choices: Sequence[str]) -> str:
+        """One of ``choices``, matched ignoring case and surrounding spaces ("24H " -> "24h")."""
+        value = self._get(key)
+        if value is _MISSING:
+            return default
+        text = value.strip().casefold() if isinstance(value, str) else None
+        for option in choices:
+            if text == option.casefold():
+                return option
+        self._invalid(key, value, "is not " + " or ".join(f'"{option}"' for option in choices), default)
+        return default
 
     def percent(self, key: str, default: str, low: int, high: int) -> str:
         value = self._get(key)
@@ -634,6 +659,12 @@ def _calendar_id_ok(name: str) -> bool:
     logger.warning("config.toml: agenda.calendars entry %s is not a calendar id; skipped",
                    _short_repr(name))
     return False
+
+
+def _parse_display(doc: Mapping[str, Any]) -> DisplayConfig:
+    d = DisplayConfig()
+    r = _TableReader(doc, "display", _field_names(DisplayConfig))
+    return DisplayConfig(clock=r.choice("clock", d.clock, (CLOCK_12H, CLOCK_24H)))
 
 
 def _parse_notion_version(doc: Mapping[str, Any]) -> str:

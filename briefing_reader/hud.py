@@ -5,7 +5,10 @@ ground with a faint cyan grid, chamfered (cut-corner) panels, cyan accents,
 amber for anything that needs the user's OK, and three typefaces: Chakra Petch
 (wordmark), Sora (prose) and JetBrains Mono (labels, meta, numbers). Every
 widget paints itself with QPainter; nothing here knows about briefings,
-Notion or Google, so ``ui.py`` composes the views from these parts.
+Notion or Google, so ``ui.py`` composes the views from these parts. The one
+import from the package is the Qt-free clock formatter
+(``text_prep.clock_parts`` / ``format_time``), so every screen writes times
+the same way.
 
 Public API
 ==========
@@ -50,10 +53,12 @@ Widgets
         (``set_resizable``).
     ``HeaderBar``: logo, JARVIS wordmark, subtitle, ServiceChips
         (``set_service(name, status, tooltip)``), date + clock updated each
-        minute (``set_clock(callable)``, ``clock_texts()``), drag-to-move,
+        minute (``set_clock(callable)``, ``clock_texts()``; "1:52 PM" with a
+        small "PM", or "13:52" after ``set_hour24(True)``), drag-to-move,
         ``close_button`` (accessible name "Close") -> ``closeRequested``.
         Narrow bars drop the subtitle, then the date, then tighten the chips
-        (``compact_level()``), so the 560 px prompt still fits.
+        and the room around them (``compact_level()``), so the 560 px prompt
+        still fits.
     ``ServiceChip``: statuses ``STATUS_OK`` / ``STATUS_WARN`` / ``STATUS_ERROR``
         / ``STATUS_OFF``.
     ``ChamferPanel(title, meta, variant=PANEL_CYAN|PANEL_AMBER, cut, corners)``:
@@ -72,13 +77,15 @@ Widgets
         ``set_animated(bool)``, ``is_animating()``. ~30 fps only while visible
         and not minimized. States in ``ORB_STATES`` (colour, label).
     ``StateLabel``: blinking square + state text (``set_state(state, text=None)``).
-    ``TelemetryBar(label, value, fraction, color)``: ``set_value``.
+    ``TelemetryBar(label, value, fraction, color)``: ``set_value`` (with an
+        optional ``short`` form shown when the value does not fit), ``shown_value()``.
     ``SectionList`` (scroll area of ``SectionRow`` buttons): ``set_rows`` with
         ``SectionRowInfo``, ``set_row_state``, ``row(i)``, ``ensure_visible``,
         ``content_height()``, ``rowClicked(int)``. Row states ``ROW_PLAYED``,
         ``ROW_CURRENT``, ``ROW_UPCOMING``, ``ROW_IGNORED``.
     ``AgendaPanel(title)``: the TODAY / TOMORROW agenda (``AgendaRow`` from
-        ``AgendaRowInfo``: a glowing 3 px bar, mono time, title, meta; states
+        ``AgendaRowInfo``: a glowing 3 px bar, mono time ("12:30 PM" drawn as
+        "12:30" over a small "PM"), title, meta; states
         ``AGENDA_UPCOMING`` cyan, ``AGENDA_NOW`` green, ``AGENDA_PAST`` dim) or
         one message line with an optional link (``set_message``,
         ``linkClicked``), then DEADLINES (``DeadlineRow`` from
@@ -106,7 +113,7 @@ Widgets
         ``set_empty_text``).
     ``ActivityLog``: ``add(tag, message, sub="", when=None)`` newest first,
         at most ``ActivityLog.MAX_ENTRIES``; tags ``TAG_RUN``, ``TAG_DONE``,
-        ``TAG_WAIT``, ``TAG_STOP``; ``entries()``.
+        ``TAG_WAIT``, ``TAG_STOP``; ``entries()``; ``set_hour24(bool)``.
     ``HudChip(text, color)``: small chamfered tag (e.g. "2 NEED YOUR OK").
     ``FlowLayout(h_spacing, v_spacing)``: wrapping row for buttons, so a
         narrow column gets two rows instead of a wider window.
@@ -188,10 +195,13 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpacerItem,
     QStackedLayout,
     QVBoxLayout,
     QWidget,
 )
+
+from .text_prep import clock_parts, format_time
 
 logger = logging.getLogger(__name__)
 
@@ -688,6 +698,18 @@ def paint_dash_bar(painter: QPainter, rect: QRectF, fraction: float, color: str 
 
 def _text_advance(font: QFont, text: str) -> float:
     return QFontMetricsF(font).horizontalAdvance(text)
+
+
+# Times with the widest text on each clock: two-digit hours, both halves of the day.
+_WIDEST_TIMES = (datetime(2000, 1, 1, 0, 0), datetime(2000, 1, 1, 12, 59), datetime(2000, 1, 1, 23, 59))
+
+
+def _clock_width(font: QFont, hour24: bool, part: int | None = None) -> float:
+    """The advance of the widest time on that clock: the whole text ("12:59 PM" / "23:59"),
+    or one part of it (0: the digits, 1: "AM" / "PM", "" on the 24-hour clock)."""
+    texts = (format_time(moment, hour24=hour24) if part is None else clock_parts(moment, hour24=hour24)[part]
+             for moment in _WIDEST_TIMES)
+    return max(_text_advance(font, text) for text in texts)
 
 
 def _line_height(font: QFont) -> float:
@@ -1714,16 +1736,38 @@ class _Brand(QWidget):
 
 
 class _Clock(QWidget):
-    """Date (mono 11 dim) and time (mono 24 bright with glow), baseline aligned."""
+    """Date (mono 11 dim) and time (mono 24 bright with glow), baseline aligned.
+
+    The 12-hour clock ends in a small "AM" / "PM" on the same baseline. The
+    widget is as wide as the widest time, so the header does not move when the
+    hour gains a digit; the time keeps to the right edge and the date to it.
+    """
+
+    _MERIDIEM_GAP = 4
+    _END_ROOM = 6             # after the digits: room for their glow
+    _MERIDIEM_END_ROOM = 2    # after "AM" / "PM", which has no glow
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._date_font = mono_font(11, 400, 0.12)
         self._time_font = mono_font(24, 400)
+        self._meridiem_font = mono_font(11, 500, 0.06)
+        self._hour24 = False
         self._date = ""
-        self._time = ""
+        self._time = ""            # as read: "1:05 PM" (or "13:05")
+        self._digits = ""          # as drawn: "1:05" big, then "PM" small
+        self._meridiem = ""
         self._show_date = True
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+    def set_hour24(self, hour24: bool) -> None:
+        """Takes effect at the next set_now."""
+        if hour24 != self._hour24:
+            self._hour24 = hour24
+            self.updateGeometry()
+
+    def hour24(self) -> bool:
+        return self._hour24
 
     def set_date_visible(self, visible: bool) -> None:
         if visible != self._show_date:
@@ -1735,9 +1779,10 @@ class _Clock(QWidget):
         return self._show_date
 
     def set_now(self, now: datetime) -> None:
-        date, clock = header_date(now), now.strftime("%H:%M")
+        date, clock = header_date(now), format_time(now, hour24=self._hour24)
         if (date, clock) != (self._date, self._time):
             self._date, self._time = date, clock
+            self._digits, self._meridiem = clock_parts(now, hour24=self._hour24)
             self.setAccessibleName(f"{date} {clock}")
             self.updateGeometry()
             self.update()
@@ -1749,10 +1794,16 @@ class _Clock(QWidget):
         return _text_advance(self._date_font, self._date or "WED 00 SEP")
 
     def _time_width(self) -> float:
-        return _text_advance(self._time_font, "00:00")
+        """The widest digits and, on the 12-hour clock, the gap and the wider of "AM" / "PM",
+        with the room after them."""
+        digits = _clock_width(self._time_font, self._hour24, 0)
+        meridiem = _clock_width(self._meridiem_font, self._hour24, 1)
+        if not meridiem:
+            return digits + self._END_ROOM
+        return digits + self._MERIDIEM_GAP + meridiem + self._MERIDIEM_END_ROOM
 
     def width_for(self, date: bool) -> int:
-        return math.ceil((self._date_width() + 12 if date else 0) + self._time_width() + 6)
+        return math.ceil((self._date_width() + 12 if date else 0) + self._time_width())
 
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
         return QSize(self.width_for(self._show_date), _HEADER_HEIGHT)
@@ -1767,19 +1818,26 @@ class _Clock(QWidget):
             dpr = self.devicePixelRatioF()
             metrics = QFontMetricsF(self._time_font)
             baseline = round(self.height() / 2 + (metrics.ascent() - metrics.descent()) / 2)
-            time_x = self.width() - 6 - self._time_width()
+            right = self.width() - (self._MERIDIEM_END_ROOM if self._meridiem else self._END_ROOM)
+            meridiem_x = right - _text_advance(self._meridiem_font, self._meridiem)
+            time_x = (meridiem_x - (self._MERIDIEM_GAP if self._meridiem else 0)
+                      - _text_advance(self._time_font, self._digits))
             if self._show_date:
                 painter.setFont(self._date_font)
                 painter.setPen(QColor(TEXT_DIM))
                 painter.drawText(QPointF(time_x - 12 - self._date_width(), baseline), self._date)
             origin = QPointF(time_x, baseline)
             path = QPainterPath()
-            path.addText(origin, self._time_font, self._time)
+            path.addText(origin, self._time_font, self._digits)
             _draw_glow(painter, path, rgba(ACCENT, 0.6), 14, dpr=dpr,
-                       key=("clock", self._time, round(origin.x(), 1), origin.y()))
+                       key=("clock", self._digits, round(origin.x(), 1), origin.y()))
             painter.setFont(self._time_font)
             painter.setPen(QColor(TEXT_BRIGHT))
-            painter.drawText(origin, self._time)
+            painter.drawText(origin, self._digits)
+            if self._meridiem:
+                painter.setFont(self._meridiem_font)
+                painter.setPen(QColor(TEXT_SOFT))
+                painter.drawText(QPointF(meridiem_x, baseline), self._meridiem)
         finally:
             painter.end()
 
@@ -1790,14 +1848,20 @@ class HeaderBar(QWidget):
     Dragging anywhere but the close button moves the window (double-click does
     nothing). The clock updates on each minute boundary while the bar is shown.
     When the bar is narrow it drops detail in steps (``compact_level()``):
-    1 hides the subtitle, 2 also the date, 3 also tightens the chips.
+    1 hides the subtitle, 2 also the date, 3 also tightens the chips. A
+    12-hour clock is wider, so it has a level 4 that also moves the chips up to
+    the wordmark and the close button closer to the clock (the 560 px prompt),
+    and it keeps at least 12 px from the chips, so its digits and their glow
+    never crowd the last one.
     """
 
     closeRequested = Signal()
 
-    _MAX_LEVEL = 3
+    _MAX_LEVEL = 4           # 3 on the 24-hour clock
     _RIGHT_MARGIN = 8
-    _CLOSE_GAP = 10
+    _CHIP_MARGINS = ((16, 16), (16, 16), (16, 16), (8, 8), (0, 8))   # (left, right) of the chips, per level
+    _CLOSE_GAPS = (10, 10, 10, 10, 6)                                  # between the clock and the X, per level
+    _MERIDIEM_ROOM = 12      # at least this much between the chips and a 12-hour clock
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1825,7 +1889,8 @@ class HeaderBar(QWidget):
         layout.addWidget(self._chips_box)
         layout.addStretch(1)
         layout.addWidget(self._clock)
-        layout.addSpacing(self._CLOSE_GAP)
+        self._close_gap = QSpacerItem(self._CLOSE_GAPS[0], 0, QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
+        layout.addSpacerItem(self._close_gap)
         layout.addWidget(self.close_button, 0, Qt.AlignmentFlag.AlignVCenter)
         self._clock.set_now(self._now())
 
@@ -1860,29 +1925,41 @@ class HeaderBar(QWidget):
     def compact_level(self) -> int:
         return self._level
 
+    def _max_level(self) -> int:
+        return self._MAX_LEVEL - 1 if self._clock.hour24() else self._MAX_LEVEL
+
+    def _chip_margins(self, level: int) -> tuple[int, int]:
+        left, right = self._CHIP_MARGINS[level]
+        return left, right if self._clock.hour24() else max(right, self._MERIDIEM_ROOM)
+
     def _required_width(self, level: int) -> int:
         tight = level >= 3
         chips = [chip.width_for(tight) for chip in self._chips.values()]
-        chips_width = sum(chips) + 4 * max(0, len(chips) - 1) + (2 * (8 if tight else 16) if chips else 0)
+        chips_width = sum(chips) + 4 * max(0, len(chips) - 1) + (sum(self._chip_margins(level)) if chips else 0)
         return (self._brand.width_for(level == 0) + chips_width + self._clock.width_for(level <= 1)
-                + self._CLOSE_GAP + self.close_button.width() + self._RIGHT_MARGIN)
+                + self._CLOSE_GAPS[level] + self.close_button.width() + self._RIGHT_MARGIN)
 
-    def _fit(self) -> None:
+    def _fit(self, force: bool = False) -> None:
+        """Pick the least compact level that fits (``force``: re-apply it after the clock changed)."""
         width = self.width()
-        level = next((lvl for lvl in range(self._MAX_LEVEL + 1) if self._required_width(lvl) <= width),
-                     self._MAX_LEVEL)
-        if level == self._level:
+        level = next((lvl for lvl in range(self._max_level() + 1) if self._required_width(lvl) <= width),
+                     self._max_level())
+        if level == self._level and not force:
             return
         self._level = level
         self._brand.set_subtitle_visible(level == 0)
         self._clock.set_date_visible(level <= 1)
         for chip in self._chips.values():
             chip.set_tight(level >= 3)
-        margin = 8 if level >= 3 else 16
-        self._chip_row.setContentsMargins(margin, 0, margin, 0)
+        left, right = self._chip_margins(level)
+        self._chip_row.setContentsMargins(left, 0, right, 0)
+        if self._close_gap.sizeHint().width() != self._CLOSE_GAPS[level]:
+            self._close_gap.changeSize(self._CLOSE_GAPS[level], 0, QSizePolicy.Policy.Fixed,
+                                       QSizePolicy.Policy.Minimum)
+            self.layout().invalidate()
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
-        return QSize(self._required_width(self._MAX_LEVEL), _HEADER_HEIGHT)
+        return QSize(self._required_width(self._max_level()), _HEADER_HEIGHT)
 
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
@@ -1896,8 +1973,15 @@ class HeaderBar(QWidget):
         self._now = now
         self._tick()
 
+    def set_hour24(self, hour24: bool) -> None:
+        """Show the time as "13:52" (True) or "1:52 PM" (False, the default)."""
+        self._clock.set_hour24(hour24)
+        self._tick()
+        self.updateGeometry()
+        self._fit(force=True)
+
     def clock_texts(self) -> tuple[str, str]:
-        """("SUN 04 OCT", "13:52") as shown."""
+        """("SUN 04 OCT", "1:52 PM") as read (the "PM" is drawn small); "13:52" on the 24-hour clock."""
         return self._clock.texts()
 
     def clock_running(self) -> bool:
@@ -2187,7 +2271,14 @@ class MainPanel(QWidget):
 # --------------------------------------------------------------------------
 
 class TelemetryBar(QWidget):
-    """Label left, value right (mono 11) and a 4 px segmented bar under them."""
+    """Label left, value right (mono 11) and a 4 px segmented bar under them.
+
+    A value given with a ``short`` form ("Mon 11:31 PM" for "yesterday
+    11:31 PM") shows that form while the full value does not fit beside the
+    label with ``_MIN_GAP`` to spare, so a narrow column never crowds them.
+    """
+
+    _MIN_GAP = 8     # between the label and a value that has a short form
 
     def __init__(self, label: str, value: str = "", fraction: float = 0.0, color: str | QColor = ACCENT,
                  parent: QWidget | None = None) -> None:
@@ -2195,6 +2286,7 @@ class TelemetryBar(QWidget):
         self._font = mono_font(11)
         self._label = label
         self._value = value
+        self._short = ""
         self._fraction = max(0.0, min(1.0, fraction))
         self._color = QColor(color)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
@@ -2205,8 +2297,10 @@ class TelemetryBar(QWidget):
         self._update_accessible()
         self.update()
 
-    def set_value(self, value: str, fraction: float | None = None, color: str | QColor | None = None) -> None:
+    def set_value(self, value: str, fraction: float | None = None, color: str | QColor | None = None,
+                  short: str = "") -> None:
         self._value = value
+        self._short = short
         if fraction is not None:
             self._fraction = max(0.0, min(1.0, fraction))
         if color is not None:
@@ -2218,6 +2312,13 @@ class TelemetryBar(QWidget):
         return self._label
 
     def value(self) -> str:
+        return self._value
+
+    def shown_value(self) -> str:
+        """The value as painted at the bar's current width: ``value()`` or its short form."""
+        room = self.width() - _text_advance(self._font, self._label) - self._MIN_GAP
+        if self._short and _text_advance(self._font, self._value) > room:
+            return self._short
         return self._value
 
     def fraction(self) -> float:
@@ -2240,7 +2341,8 @@ class TelemetryBar(QWidget):
             painter.setPen(QColor(TEXT_MUTED))
             painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self._label)
             painter.setPen(QColor(TEXT_BRIGHT))
-            painter.drawText(text_rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, self._value)
+            painter.drawText(text_rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                             self.shown_value())
             paint_dash_bar(painter, QRectF(0, self.height() - 4, self.width(), 4), self._fraction, self._color)
         finally:
             painter.end()
@@ -2504,7 +2606,7 @@ URGENCY_COLORS = {URGENCY_HIGH: RED, URGENCY_MEDIUM: AMBER, URGENCY_LOW: DEADLIN
 
 @dataclass(frozen=True)
 class AgendaRowInfo:
-    """One agenda row: the time ("09:00", "ALL DAY"), title, meta and an AGENDA_* state."""
+    """One agenda row: the time ("9:00 AM", "09:00", "ALL DAY"), title, meta and an AGENDA_* state."""
 
     time: str
     title: str
@@ -2526,12 +2628,23 @@ def _elide(metrics: QFontMetricsF, text: str, width: float) -> str:
     return metrics.elidedText(text, Qt.TextElideMode.ElideRight, max(0.0, width))
 
 
+def _split_meridiem(text: str) -> tuple[str, str]:
+    """("12:30", "PM") for "12:30 PM"; (text, "") for anything else ("09:00", "ALL DAY")."""
+    digits, _, meridiem = text.rpartition(" ")
+    return (digits, meridiem) if digits and meridiem in ("AM", "PM") else (text, "")
+
+
 class AgendaRow(QWidget):
     """The artboard's agenda row: a glowing 3 px bar, the time in mono, the title and a meta line.
 
     Upcoming rows have a cyan bar, the current one a green bar, past ones a
     dim bar without glow. Long titles and metas are cut with an ellipsis
-    (the tooltip has them in full).
+    (the tooltip has them in full). A 12-hour time ("12:30 PM") is drawn as
+    "12:30" on the title's line with a small "PM" under it on the meta line,
+    so it fits the same column as "09:00". Such a row keeps its title on that
+    line even without a meta, and so does every row of a list with 12-hour
+    times (``set_two_line_times``, "ALL DAY" included), so the column keeps
+    one rhythm.
     """
 
     HEIGHT = 44
@@ -2545,13 +2658,24 @@ class AgendaRow(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self._time_font = mono_font(12)
         self._time_small = mono_font(10)
+        self._meridiem_font = mono_font(10, 400, 0.06)
         self._title_font = body_font(14)
         self._meta_font = mono_font(11)
         self._info = info
+        self._two_line_times = False
         self.set_info(info)
 
     def info(self) -> AgendaRowInfo:
         return self._info
+
+    def set_two_line_times(self, two_line: bool) -> None:
+        """True while the list shows 12-hour times: keep the time and title on the first line, as those rows do."""
+        if two_line != self._two_line_times:
+            self._two_line_times = two_line
+            self.update()
+
+    def _two_line(self) -> bool:
+        return self._two_line_times or bool(_split_meridiem(self._info.time)[1])
 
     def set_info(self, info: AgendaRowInfo) -> None:
         self._info = info
@@ -2588,28 +2712,44 @@ class AgendaRow(QWidget):
                 _draw_glow(painter, path, QColor(bar), 10, dpr=self.devicePixelRatioF(),
                            key=("agendabar", bar, bar_rect.top()))
             painter.fillRect(bar_rect, QColor(bar))
-            self._paint_time(painter, rect, time_color)
+            self._paint_time(painter, rect, time_color, meta_color)
             self._paint_texts(painter, rect, title_color, meta_color)
         finally:
             painter.end()
 
-    def _paint_time(self, painter: QPainter, rect: QRectF, color: str) -> None:
-        text = self._info.time
+    def _text_top(self, rect: QRectF, with_meta: bool) -> int:
+        """Top of the title line (and the meta line under it), centred in the row."""
+        block = _line_height(self._title_font) + (_line_height(self._meta_font) if with_meta else 0)
+        return round((rect.height() - block) / 2)
+
+    def _paint_time(self, painter: QPainter, rect: QRectF, color: str, meridiem_color: str) -> None:
+        text, meridiem = _split_meridiem(self._info.time)
         font = self._time_font if _text_advance(self._time_font, text) <= self.TIME_WIDTH else self._time_small
         painter.setFont(font)
         painter.setPen(QColor(color))
         left = self._PAD + 3 + self._GAP
         shown = _elide(QFontMetricsF(font), text, self.TIME_WIDTH + self._GAP - 2)
-        painter.drawText(QRectF(left, 0, self.TIME_WIDTH + self._GAP, rect.height()),
-                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, shown)
+        if not self._two_line():
+            painter.drawText(QRectF(left, 0, self.TIME_WIDTH + self._GAP, rect.height()),
+                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, shown)
+            return
+        # On the lines of a row with a meta, in every row, so the times line up down the column.
+        top = self._text_top(rect, True)
+        title_metrics = QFontMetricsF(self._title_font)
+        painter.drawText(QPointF(left, top + title_metrics.ascent()), shown)
+        if not meridiem:
+            return
+        painter.setFont(self._meridiem_font)
+        painter.setPen(QColor(meridiem_color))
+        meta_ascent = QFontMetricsF(self._meta_font).ascent()
+        painter.drawText(QPointF(left, top + title_metrics.height() + meta_ascent), meridiem)
 
     def _paint_texts(self, painter: QPainter, rect: QRectF, title_color: str, meta_color: str) -> None:
         left = self.text_left()
         width = rect.width() - left - 6
         title_metrics = QFontMetricsF(self._title_font)
         meta_metrics = QFontMetricsF(self._meta_font)
-        block = title_metrics.height() + (meta_metrics.height() if self._info.meta else 0)
-        top = round((rect.height() - block) / 2)
+        top = self._text_top(rect, bool(self._info.meta) or self._two_line())
         painter.setFont(self._title_font)
         painter.setPen(QColor(title_color))
         painter.drawText(QPointF(left, top + title_metrics.ascent()),
@@ -2822,6 +2962,9 @@ class AgendaPanel(ChamferPanel):
     def set_events(self, rows: Sequence[AgendaRowInfo]) -> None:
         """Show these agenda rows (and no message line)."""
         _reuse_rows(self._event_rows, self._events_layout, rows, AgendaRow)
+        two_line = any(_split_meridiem(row.time)[1] for row in rows)
+        for row in self._event_rows:
+            row.set_two_line_times(two_line)
         self._message_box.hide()
 
     def set_message(self, text: str, color: str | QColor = TEXT_SOFT, *, link: str = "",
@@ -3546,14 +3689,33 @@ TAG_COLORS = {TAG_RUN: ACCENT, TAG_DONE: GREEN, TAG_WAIT: AMBER, TAG_STOP: RED}
 
 
 class _ActivityRow(QWidget):
-    def __init__(self, when: str, tag: str, message: str, sub: str) -> None:
+    """One log row. On the 24-hour clock the time and tag columns are 38 and 44 px wide.
+
+    The 12-hour clock sizes them from the font instead: the time column fits
+    the widest time ("12:59 PM", right-aligned so the colons and AM / PM line
+    up) and the tag column the widest tag, which gives the message back most
+    of the width the longer times take.
+    """
+
+    _TIME_WIDTH_24H = 38
+    _TAG_WIDTH_24H = 44
+    _PAD = 3          # after the widest time and the widest tag on the 12-hour clock
+
+    def __init__(self, when: str, tag: str, message: str, sub: str, hour24: bool = False) -> None:
         super().__init__()
         font = mono_font(11)
         self.entry = (when, tag, message, sub)
         time_label = make_label(when, font, TEXT_TIME)
-        time_label.setFixedWidth(38)
         tag_label = make_label(tag, font, TAG_COLORS.get(tag, TEXT_MUTED))
-        tag_label.setFixedWidth(44)
+        if hour24:
+            time_label.setFixedWidth(self._TIME_WIDTH_24H)
+            tag_label.setFixedWidth(self._TAG_WIDTH_24H)
+        else:
+            time_label.setFixedWidth(math.ceil(_clock_width(font, False)) + self._PAD)
+            time_label.setContentsMargins(0, 0, self._PAD, 0)
+            time_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            widest_tag = max(_text_advance(font, text) for text in (*TAG_COLORS, tag))
+            tag_label.setFixedWidth(math.ceil(widest_tag) + self._PAD)
         texts = QVBoxLayout()
         texts.setContentsMargins(0, 0, 0, 0)
         texts.setSpacing(0)
@@ -3570,7 +3732,11 @@ class _ActivityRow(QWidget):
 
 
 class ActivityLog(QScrollArea):
-    """Newest-first log rows "time  tag  message / sub"; keeps the last MAX_ENTRIES."""
+    """Newest-first log rows "time  tag  message / sub"; keeps the last MAX_ENTRIES.
+
+    Times read "1:04 PM", or "13:04" after ``set_hour24(True)``; the 12-hour
+    time column is as wide as its widest time.
+    """
 
     MAX_ENTRIES = 50
 
@@ -3582,10 +3748,15 @@ class ActivityLog(QScrollArea):
         self._layout.setSpacing(6)
         self._layout.addStretch(1)
         self._rows: list[_ActivityRow] = []
+        self._hour24 = False
+
+    def set_hour24(self, hour24: bool) -> None:
+        """The clock of the entries added from now on (call it before the first one)."""
+        self._hour24 = hour24
 
     def add(self, tag: str, message: str, sub: str = "", when: datetime | str | None = None) -> None:
-        stamp = when if isinstance(when, str) else (when or datetime.now()).strftime("%H:%M")
-        row = _ActivityRow(stamp, tag, message, sub)
+        stamp = when if isinstance(when, str) else format_time(when or datetime.now(), hour24=self._hour24)
+        row = _ActivityRow(stamp, tag, message, sub, self._hour24)
         self._layout.insertWidget(0, row)
         self._rows.insert(0, row)
         while len(self._rows) > self.MAX_ENTRIES:
