@@ -92,14 +92,25 @@ from PySide6.QtWidgets import (
 
 from . import hud
 from .actions import (
+    CALENDAR,
     STATUS_CREATED,
     STATUS_DENIED,
+    STATUS_DONE,
     STATUS_EXISTS,
     STATUS_FAILED,
-    UNKNOWN,
+    STATUS_SENT,
+    TODO,
     ActionStore,
+    CardView,
     ProposedAction,
+    card_view,
+    copied_text,
+    copy_text,
     extract_actions,
+    kind_label,
+    link_allowed,
+    link_host,
+    result_text,
 )
 from .agenda import (
     Deadline,
@@ -605,6 +616,8 @@ class ReadingView(QWidget):
     denyClicked = Signal(str)
     lockedClicked = Signal(str)
     openLink = Signal(str)
+    openSource = Signal(str)     # a card's Open (tools row): the action id, never the URL
+    copyText = Signal(str)       # a card's Copy (tools row): the action id
     connectCalendar = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -931,12 +944,16 @@ class ReadingView(QWidget):
         self.approvals.clear()
 
     def add_action_card(self, action_id: str, kind: str, title: str, detail: str,
-                        actionable: bool) -> hud.ActionCard:
-        card = hud.ActionCard(action_id, kind, title, detail, actionable=actionable)
+                        actionable: bool, **options: Any) -> hud.ActionCard:
+        """A NEEDS YOUR OK card; ``options`` are ActionCard's keyword arguments
+        (approve_text, body, title_lines, open_text, copy_text)."""
+        card = hud.ActionCard(action_id, kind, title, detail, actionable=actionable, **options)
         card.approveClicked.connect(self.approveClicked)
         card.denyClicked.connect(self.denyClicked)
         card.lockedClicked.connect(self.lockedClicked)
         card.openClicked.connect(self.openLink)
+        card.sourceClicked.connect(self.openSource)
+        card.copyClicked.connect(self.copyText)
         return self.approvals.add_card(card)
 
     def action_card(self, action_id: str) -> hud.ActionCard | None:
@@ -1346,7 +1363,16 @@ _STAGE_SIGNIN = "signin"
 _STAGE_SIGNED_IN = "signedin"
 _SIGN_IN_CHECK = "sign-in check"         # calendar worker job: report whether a sign-in is saved
 _CARD_FOR_STATUS = {STATUS_CREATED: hud.CARD_ADDED, STATUS_EXISTS: hud.CARD_EXISTS,
-                    STATUS_DENIED: hud.CARD_DENIED, STATUS_FAILED: hud.CARD_FAILED}
+                    STATUS_DENIED: hud.CARD_DENIED, STATUS_FAILED: hud.CARD_FAILED,
+                    STATUS_DONE: hud.CARD_DONE,
+                    STATUS_SENT: hud.CARD_DONE}   # written by later versions; shown as DONE here
+# A second click on the same card's Open this soon after the first opens nothing (no double tabs).
+_SOURCE_OPEN_GUARD_S = 1.0
+# The link next to BLOCK ADDED: the tools row may already have an "Open" (the Todo's own link).
+_BLOCK_LINK_TEXT = "Open event"
+# A key=value proposal's title (a subject can be 250 characters) in an ACTIVITY row; the card's
+# tooltip has all of it.
+_ACTIVITY_TITLE_CHARS = 80
 # An Approve / Deny click this soon after the previous one (on any card) is
 # ignored: a double click, or repeated clicks while the cards are updating,
 # must never decide a second proposal.
@@ -1657,23 +1683,16 @@ def _short_updated(header: BriefingHeader, now: datetime, hour24: bool = False, 
     return day if compact else f"{day} {clock}"
 
 
-def _card_kind(action: ProposedAction) -> str:
-    return "note" if action.kind == UNKNOWN else action.kind
+def _activity_title(action: ProposedAction) -> str:
+    """``action``'s title for an ACTIVITY row: cut to one line for key=value kinds (Calendar as before)."""
+    return _short(action.title, _ACTIVITY_TITLE_CHARS) if action.structured else action.title
 
 
-def _card_title(action: ProposedAction) -> str:
-    return action.raw if action.error else (action.title or action.raw)
-
-
-def _card_detail(action: ProposedAction, today: Any) -> str:
-    if action.error:
-        return f"Can't read this line: {action.error}"
-    if not action.actionable:
-        return "Only calendar proposals can be approved here"
-    parts = [action.describe(today)]
-    if action.where and "://" not in action.where:
-        parts.append(action.where)
-    return f" {DOT} ".join(part for part in parts if part)
+def _card_options(action: ProposedAction, view: CardView) -> dict[str, Any]:
+    """ActionCard keyword arguments for ``view`` (a CardView of ``action``)."""
+    return {"approve_text": view.approve_text or "Approve", "body": view.body,
+            "open_text": view.open_text, "copy_text": view.copy_text,
+            "title_lines": 2 if action.structured else 0}
 
 
 def _remove_audio_dir_after(worker: threading.Thread | None, audio_dir: Path) -> None:
@@ -1716,8 +1735,11 @@ class AppController(QObject):
     """State machine behind the window: prompt -> (snoozed ->) reading -> quit.
 
     A launch for a newer run takes the reading screen back to the prompt once
-    nothing is playing there. Proposed calendar actions are shown as cards;
-    only an explicit Approve creates an event (on the calendar worker).
+    nothing is playing there. Proposed actions are shown as cards; only an
+    explicit Approve creates an event, or Add block a Todo's block (on the
+    calendar worker). The other proposals are hand-offs: Open (an
+    allowlisted link, only on a click), Copy (the drafted text to the
+    clipboard), Done and Deny; nothing is sent.
     ``calendar_factory(config)`` builds the calendar client (tests inject a
     fake); it is only called when ``[calendar] enabled`` is true. An Approve
     or Deny within ``_DECISION_CLICK_GUARD_S`` of the previous one is ignored;
@@ -1819,6 +1841,7 @@ class AppController(QObject):
         self._calendar_jobs: dict[str, str] = {}   # action id -> _STAGE_* while queued or running
         self._calendar_signed_in = False
         self._decision_clicked_at = -math.inf      # click clock of the last Approve / Deny click
+        self._source_opened_at: dict[str, float] = {}   # action id -> click clock of its last Open
         self._connect_running = False              # the agenda's Connect sign-in is queued or running
         self._connect_note = ""                    # why the last Connect failed (shown until the next one)
         self._read_slot: str | None = None         # the scheduled slot this reading settled
@@ -1878,6 +1901,8 @@ class AppController(QObject):
         reading.denyClicked.connect(self.deny_action)
         reading.lockedClicked.connect(self._on_locked_click)
         reading.openLink.connect(self.open_action_link)
+        reading.openSource.connect(self.open_action_source)
+        reading.copyText.connect(self.copy_action_text)
         reading.connectCalendar.connect(self.connect_calendar)
         self.window.closeRequested.connect(self._on_close_requested)
         self.window.visibilityChanged.connect(self._sync_agenda_timer)
@@ -2190,7 +2215,7 @@ class AppController(QObject):
             # nested inside the other and both still land where they belong.
             headings = self.config.actions.headings
             deadlines, lines = extract_deadlines(briefing.lines, stop_names=headings)
-            actions, lines = extract_actions(lines, headings)
+            actions, lines = extract_actions(lines, headings, link_hosts=self.config.actions.link_hosts)
             self._actions_key, self._actions_lines = key, tuple(lines)
             self._page_deadlines = deadlines
             self._set_actions(actions)
@@ -2200,9 +2225,9 @@ class AppController(QObject):
         return dataclasses.replace(briefing, lines=self._actions_lines)
 
     def _pending_actions(self) -> list[ProposedAction]:
-        """Calendar proposals that can be approved and have not been decided yet."""
+        """Proposals that take a decision and have not been decided yet."""
         return [action for action in self._actions
-                if action.actionable and not self._store.is_decided(action.id)]
+                if action.decidable and not self._store.is_decided(action.id)]
 
     def _action(self, action_id: str) -> ProposedAction | None:
         return next((action for action in self._actions if action.id == action_id), None)
@@ -2215,14 +2240,19 @@ class AppController(QObject):
         reading.clear_action_cards()
         today = self._now().date()
         for action in self._actions:
-            reading.add_action_card(action.id, _card_kind(action), _card_title(action),
-                                    _card_detail(action, today), action.actionable)
-            self._show_card_state(action.id)
+            view = card_view(action, today)
+            reading.add_action_card(action.id, view.kind_label, view.title, view.detail,
+                                    view.decidable, **_card_options(action, view))
+            self._show_card_state(action.id)   # also sets the note (warnings) while it waits
         self._sync_card_locks()
         self._refresh_actions_ui()
 
     def _show_card_state(self, action_id: str) -> None:
-        """The card's status from the running job or the saved decision."""
+        """The card's status from the running job or the saved decision.
+
+        While the card waits for a decision (pending, or failed and kept for a
+        retry) its warnings are its note again: WORKING... clears the note.
+        """
         card = self.window.reading.action_card(action_id)
         if card is None or not card.actionable:
             return
@@ -2232,13 +2262,24 @@ class AppController(QObject):
             return
         entry = self._store.get(action_id) or {}
         status = entry.get("status", "")
-        message = entry.get("message", "") if status == STATUS_FAILED else ""
-        card.set_status(_CARD_FOR_STATUS.get(status, hud.CARD_PENDING), message, entry.get("link", ""))
+        action = self._action(action_id)
+        if status == STATUS_FAILED:
+            message = entry.get("message", "")
+        else:
+            message = result_text(action, status) if action is not None else ""
+        shown = _CARD_FOR_STATUS.get(status, hud.CARD_PENDING)
+        block = action is not None and action.kind == TODO
+        card.set_status(shown, message, entry.get("link", ""), _BLOCK_LINK_TEXT if block else "")
+        if (action is not None and shown in (hud.CARD_PENDING, hud.CARD_FAILED)
+                and card.note() != CALENDAR_SETUP_NOTE):
+            note = card_view(action, self._now().date()).note
+            if note:
+                card.set_note(note)
 
     def _refresh_actions_ui(self) -> None:
         """Pending count on the prompt chip, the STATUS bar, the panel meta and the calendar chip."""
         pending = len(self._pending_actions())
-        total = sum(1 for action in self._actions if action.actionable)
+        total = sum(1 for action in self._actions if action.decidable)
         self.window.prompt.set_pending(pending)
         self.window.reading.set_pending(pending, total)
         self._update_service_chips()
@@ -2249,12 +2290,15 @@ class AppController(QObject):
         Every click counts, also an ignored one, so a burst of clicks decides
         at most one proposal until the mouse rests for a second.
         """
-        now = self._click_clock() if self._click_clock is not None else time.monotonic()
+        now = self._click_now()
         previous, self._decision_clicked_at = self._decision_clicked_at, now
         if now - previous < _DECISION_CLICK_GUARD_S:
             logger.info("Ignored a second approval click within 1 s")
             return True
         return False
+
+    def _click_now(self) -> float:
+        return self._click_clock() if self._click_clock is not None else time.monotonic()
 
     # ---- approval lock ----------------------------------------------------------------------
 
@@ -2286,12 +2330,20 @@ class AppController(QObject):
             logger.info(_LOCKED_MESSAGE)
 
     def approve_action(self, action_id: str) -> None:
-        """Approve: create the event on the calendar worker (signing in first when needed)."""
+        """The card's right-hand button: Approve creates the event on the calendar worker
+        (signing in first when needed), Add block adds a Todo's block the same way, and
+        Done (cards Jarvis does not carry out) records that you handled it."""
         if self._decision_click_too_soon() or self._locked_out(action_id):
             return
         action = self._action(action_id)
-        if (action is None or not action.actionable or self.state == STATE_QUITTING
+        if (action is None or not action.decidable or self.state == STATE_QUITTING
                 or action_id in self._calendar_jobs or self._store.is_decided(action_id)):
+            return
+        if not action.actionable:
+            self._mark_done(action)
+            return
+        event = action.block_event() if action.kind == TODO else action
+        if event is None:
             return
         card = self.window.reading.action_card(action_id)
         worker = self._start_calendar()
@@ -2305,21 +2357,69 @@ class AppController(QObject):
         self._calendar_jobs[action_id] = _STAGE_WORKING
         self._show_card_state(action_id)
         self._sync_card_locks()
-        self._activity(hud.TAG_RUN, f"Adding {action.title}", "Google Calendar")
-        worker.approve(action)
+        adding = f"Adding a block for {_activity_title(action)}" if action.kind == TODO else f"Adding {action.title}"
+        self._activity(hud.TAG_RUN, adding, "Google Calendar")
+        worker.approve(event)   # a Todo's block keeps the Todo's id, so the result lands on its card
+
+    def _mark_done(self, action: ProposedAction) -> None:
+        """Done on a card Jarvis does not carry out: you handled it yourself."""
+        logger.info("Marked action %s done", action.id)
+        self._store.set(action.id, STATUS_DONE, kind=action.kind, account=action.account)
+        self._show_card_state(action.id)
+        self._activity(hud.TAG_DONE, f"Done: {_activity_title(action)}", kind_label(action).upper())
+        self._refresh_actions_ui()
 
     def deny_action(self, action_id: str) -> None:
         if self._decision_click_too_soon() or self._locked_out(action_id):
             return
         action = self._action(action_id)
-        if (action is None or not action.actionable or action_id in self._calendar_jobs
+        if (action is None or not action.decidable or action_id in self._calendar_jobs
                 or self._store.is_decided(action_id)):
             return
         logger.info("Denied action %s", action_id)
-        self._store.set(action_id, STATUS_DENIED)
+        self._store.set(action_id, STATUS_DENIED, kind=action.kind, account=action.account)
         self._show_card_state(action_id)
-        self._activity(hud.TAG_STOP, f"Denied {action.title}", "nothing was created")
+        if action.kind == CALENDAR:
+            self._activity(hud.TAG_STOP, f"Denied {action.title}", "nothing was created")
+        elif action.kind == TODO:
+            self._activity(hud.TAG_STOP, f"Dismissed {_activity_title(action)}", "nothing was created")
+        else:
+            self._activity(hud.TAG_STOP, f"Dismissed {_activity_title(action)}", "nothing was sent")
         self._refresh_actions_ui()
+
+    def open_action_source(self, action_id: str) -> None:
+        """A card's Open (tools row): its own link, checked again, in the browser; never by itself."""
+        action = self._action(action_id)
+        if action is None or not action.link or self.state == STATE_QUITTING:
+            return
+        now = self._click_now()
+        previous, self._source_opened_at[action_id] = self._source_opened_at.get(action_id, -math.inf), now
+        if now - previous < _SOURCE_OPEN_GUARD_S:
+            logger.info("Ignored a second Open of action %s within 1 s", action_id)
+            return
+        url = QUrl(action.link, QUrl.ParsingMode.StrictMode)
+        host = url.host(QUrl.ComponentFormattingOption.FullyEncoded).rstrip(".").casefold()
+        if (not link_allowed(action.link, self.config.actions.link_hosts) or not url.isValid()
+                or url.scheme() != "https" or host != link_host(action.link)):
+            logger.info("Not opening the link of action %s: not an allowed https link", action_id)
+            return
+        logger.info("Open the link of action %s (%s)", action_id, action.kind)
+        QDesktopServices.openUrl(url)
+
+    def copy_action_text(self, action_id: str) -> None:
+        """A card's Copy (tools row): the drafted text on the clipboard; decides nothing."""
+        action = self._action(action_id)
+        if action is None or not action.body or self.state == STATE_QUITTING:
+            return
+        if not copy_text(action):
+            return
+        QGuiApplication.clipboard().setText(action.body)
+        card = self.window.reading.action_card(action_id)
+        if card is not None:
+            card.show_copied()
+        self._activity(hud.TAG_DONE, copied_text(action), kind_label(action).upper())
+        logger.info("Copied the text of action %s (%s, %d characters)", action_id, action.kind,
+                    len(action.body))
 
     def open_action_link(self, link: str) -> None:
         if not link.startswith("https://"):
@@ -2356,20 +2456,27 @@ class AppController(QObject):
             return
         self._calendar_jobs.pop(action_id, None)
         action = self._action(action_id)
-        title = action.title if action is not None else "the event"
+        title = _activity_title(action) if action is not None else "the event"
         today = self._now().date()
-        detail = action.describe(today) if action is not None else ""
+        block = action is not None and action.kind == TODO
+        event = action.block_event() if block else action   # a Todo's block: its time is the detail
+        detail = event.describe(today) if event is not None else ""
+        kind = action.kind if action is not None else ""
+        account = action.account if action is not None else ""
         if result is not None and error is None:
-            self._store.set(action_id, status, link=result.link)
+            self._store.set(action_id, status, link=result.link, kind=kind, account=account)
             if result.existed:
                 self._activity(hud.TAG_DONE, f"Already on the calendar: {title}", detail)
+            elif block:
+                self._activity(hud.TAG_DONE, f"Added a block for {title}", detail)
             else:
                 self._activity(hud.TAG_DONE, f"Added {title}", detail)
             self._request_agenda()   # the new event may be on today's agenda
         else:
             message = error or "unknown error"
-            self._store.set(action_id, STATUS_FAILED, message=message)
-            self._activity(hud.TAG_STOP, f"Couldn't add {title}", _short(message))
+            self._store.set(action_id, STATUS_FAILED, message=message, kind=kind, account=account)
+            failed = f"Couldn't add a block for {title}" if block else f"Couldn't add {title}"
+            self._activity(hud.TAG_STOP, failed, _short(message))
         self._show_card_state(action_id)
         self._sync_card_locks()
         if self._calendar_worker is not None:

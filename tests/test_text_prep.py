@@ -17,6 +17,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
 
+from briefing_reader import actions as actions_module
+from briefing_reader import text_prep
 from briefing_reader.actions import parse_action_line
 from briefing_reader.models import (
     BULLETED,
@@ -53,6 +55,7 @@ from briefing_reader.notion_client import (
 )
 from briefing_reader.text_prep import (
     ACTIONS_CLOSING,
+    ACTIONS_CLOSING_MIXED,
     ACTIONS_KEY,
     ACTIONS_TITLE,
     build_script,
@@ -1627,6 +1630,100 @@ class ActionsSectionTests(unittest.TestCase):
         closing = section.items[-1]
         self.assertEqual((closing.kind, closing.display), (ITEM_TEXT, ""))
         self.assertTrue(all(set(item.spoken) <= ALLOWED_SPOKEN_CHARS for item in section.items))
+
+
+# The other proposal kinds (key=value lines; every name, address and id is invented).
+REPLY_LINE = ("Reply: acct=work | thread=18c0ffee00000001 | msgid=CAExample0001@mail.example.com | gmid= | "
+              "to=ana@example.edu, ben@example.edu | cc= | subject=Re: Thursday noon meeting | replied=no | due= | "
+              r"link=https://mail.google.com/mail/#all/18c0ffee00000001 | body=Hi both,\nNoon works.\nThanks")
+TODO_LINE = ("Todo: title=Work on Problem set 3 | due=2026-10-07 23:59 | block=2026-10-06 19:00-21:00 | acct= | "
+             "link=https://example.instructure.com/courses/1/assignments/2")
+OPEN_LINE = "Open: title=Lab safety form | link=https://docs.google.com/forms/d/e/EXAMPLE/viewform"
+SHARE_LINE = ("Share: acct=personal | file=1AbCdEfGhIjKlMnOpQrStUvWxYz0123 | who=sam@example.com | role=viewer | "
+              "title=Trip budget | link=https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123/edit")
+
+
+def reply_line(n: int, **changes: str) -> str:
+    line = REPLY_LINE.replace("CAExample0001", f"CAExample{n:04d}")
+    for key, value in changes.items():
+        line = re.sub(rf"\b{key}=[^|]*", lambda _m, k=key, v=value: f"{k}={v} ", line, count=1)
+    return line
+
+
+class MixedActionsSectionTests(unittest.TestCase):
+    """Pending proposals of other kinds: the mixed wording (Calendar alone keeps its own)."""
+
+    def section(self, *lines: str, now: datetime = NOW) -> Section:
+        script = script_for(now=now, actions=[parse_action_line(line) for line in lines])
+        sections = [s for s in script.sections if s.key == ACTIONS_KEY]
+        self.assertEqual(len(sections), 1)
+        return sections[0]
+
+    def test_one_reply(self) -> None:
+        section = self.section(REPLY_LINE)
+        self.assertEqual([item.spoken for item in section.items], [
+            "One item needs your OK: a reply.",
+            "Reply about Thursday noon meeting, work account.",
+            "You can act on them on the right.",
+        ])
+        self.assertEqual(section.items[1].display,
+                         "Re: Thursday noon meeting - To: ana@example.edu, ben@example.edu")
+        self.assertEqual(section.items[-1], ScriptItem(ITEM_TEXT, ACTIONS_CLOSING_MIXED, ""))
+        self.assertEqual(ACTIONS_CLOSING_MIXED, "You can act on them on the right.")
+        self.assertEqual((section.title, section.ignored), ("Needs your OK", False))
+
+    def test_breakdown_in_order_of_first_appearance(self) -> None:
+        section = self.section(FILM_LINE, reply_line(1), TODO_LINE, reply_line(2))
+        self.assertEqual(section.items[0].spoken,
+                         "Four items need your OK: a calendar invite, two replies and a to-do.")
+        entries = [item for item in section.items if item.kind == ITEM_ENTRY]
+        self.assertEqual(entries[0].spoken,
+                         "Calendar invite: Film Club October General Meeting, Tuesday October 6, 5 to 6 PM.")
+        self.assertEqual(entries[0].display,
+                         f"Film Club October General Meeting - Tue Oct 6 {MIDDLE_DOT} 5:00-6:00 PM")
+        self.assertEqual(entries[2].spoken, "Work on Problem set 3, due Wednesday October 7 at 11:59 PM, "
+                                            "with a block Tuesday October 6, 7 to 9 PM.")
+        self.assertEqual(len(entries), 4)
+        section = self.section(reply_line(1), FILM_LINE)
+        self.assertEqual(section.items[0].spoken, "Two items need your OK: a reply and a calendar invite.")
+
+    def test_counts_from_ten_are_digits(self) -> None:
+        section = self.section(*(reply_line(n) for n in range(10)), FILM_LINE)
+        self.assertEqual(section.items[0].spoken, "11 items need your OK: 10 replies and a calendar invite.")
+        section = self.section(*(reply_line(n) for n in range(9)), FILM_LINE)
+        self.assertEqual(section.items[0].spoken, "10 items need your OK: nine replies and a calendar invite.")
+        section = self.section(*(reply_line(n) for n in range(8)), FILM_LINE)
+        self.assertEqual(section.items[0].spoken, "Nine items need your OK: eight replies and a calendar invite.")
+
+    def test_hand_offs_only(self) -> None:
+        section = self.section(OPEN_LINE, SHARE_LINE)
+        self.assertEqual([item.spoken for item in section.items], [
+            "Two items need your OK: a link to check and a share request.",
+            "Lab safety form.",
+            "Share request for Trip budget, personal account.",
+            "You can act on them on the right.",
+        ])
+
+    def test_lines_that_take_no_decision_are_left_out(self) -> None:
+        section = self.section("Reply: Recruiter about interview slots", reply_line(1, replied="yes"),
+                               reply_line(2, to="bob@"), TODO_LINE)
+        self.assertEqual([item.spoken for item in section.items[:1]], ["One item needs your OK: a to-do."])
+        script = script_for(actions=[parse_action_line(reply_line(1, replied="yes"))])
+        self.assertNotIn(ACTIONS_KEY, [s.key for s in script.sections])
+
+    def test_calendar_only_keeps_the_old_wording(self) -> None:
+        section = self.section(FILM_LINE, "Reply: Recruiter about interview slots")
+        self.assertEqual(section.items[0].spoken, "One calendar invite needs your OK.")
+        self.assertEqual(section.items[-1].spoken, ACTIONS_CLOSING)
+
+    def test_spoken_is_plain(self) -> None:
+        section = self.section(FILM_LINE, REPLY_LINE, TODO_LINE, OPEN_LINE, SHARE_LINE)
+        for item in section.items:
+            with self.subTest(spoken=item.spoken):
+                self.assertTrue(set(item.spoken) <= ALLOWED_SPOKEN_CHARS)
+
+    def test_calendar_kind_matches_actions(self) -> None:
+        self.assertEqual(text_prep._CALENDAR_KIND, actions_module.CALENDAR)
 
 
 if __name__ == "__main__":

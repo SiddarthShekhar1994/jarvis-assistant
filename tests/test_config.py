@@ -349,7 +349,7 @@ class ConfigFileTests(ProjectTestCase):
             "sections": {f.name for f in dataclasses.fields(SectionsConfig)},
             "notion": {"version"},
             "calendar": {"enabled", "client_secret", "calendar_id"},
-            "actions": {"heading"},
+            "actions": {"heading", "link_hosts"},
             "schedule": {f.name for f in dataclasses.fields(ScheduleConfig)},
             "hotkey": {f.name for f in dataclasses.fields(HotkeyConfig)},
             "agenda": {f.name for f in dataclasses.fields(AgendaConfig)},
@@ -546,6 +546,42 @@ class CalendarAndActionsConfigTests(ProjectTestCase):
         self.write_config('[actions]\nheading = ["Actions", 5]\n')
         cfg = self.load_warning("actions.heading")
         self.assertEqual(cfg.actions.headings, ("Actions",))
+
+    # ---- [actions] link_hosts: the extra hosts a card's Open may open ----
+
+    def test_link_hosts_default_is_empty(self) -> None:
+        self.assertEqual(ActionsConfig().link_hosts, ())
+        self.assertEqual(ActionsConfig(link_hosts=["a.example.edu"]).link_hosts, ("a.example.edu",))
+        self.write_config('[actions]\nheading = "Proposed actions"\n')
+        self.assertEqual(self.load_quietly().actions.link_hosts, ())
+
+    def test_link_hosts_exact_and_wildcard(self) -> None:
+        self.write_config('[actions]\nlink_hosts = [" Forms.Example.EDU ", "*.lms.example.edu", '
+                          '"forms.example.edu", "xn--bcher-kva.example.com"]\n')
+        cfg = self.load_quietly()
+        self.assertEqual(cfg.actions.link_hosts,
+                         ("forms.example.edu", "*.lms.example.edu", "xn--bcher-kva.example.com"))
+        self.assertEqual(cfg.actions.headings, ("Proposed actions",))
+
+    def test_bad_link_hosts_are_skipped_with_a_warning(self) -> None:
+        for value in ('"example"', '"*.edu"', '"https://forms.example.edu"', '"forms.example.edu/x"',
+                      '"x_y.example.edu"', '"*.*.example.edu"', '"-a.example.edu"', '"a..example.edu"', "5"):
+            with self.subTest(value=value):
+                self.write_config(f'[actions]\nlink_hosts = [{value}, "ok.example.edu"]\n')
+                cfg = self.load_warning("actions.link_hosts")
+                self.assertEqual(cfg.actions.link_hosts, ("ok.example.edu",))
+
+    def test_link_hosts_as_one_string_or_a_wrong_type(self) -> None:
+        self.write_config('[actions]\nlink_hosts = "forms.example.edu"\n')
+        self.assertEqual(self.load_quietly().actions.link_hosts, ("forms.example.edu",))
+        self.write_config("[actions]\nlink_hosts = 5\n")
+        cfg = self.load_warning("actions.link_hosts")
+        self.assertEqual(cfg.actions.link_hosts, ())
+
+    def test_unknown_actions_keys_are_still_reported(self) -> None:
+        self.write_config('[actions]\nlink_host = ["forms.example.edu"]\n')
+        cfg = self.load_warning("actions.link_host")
+        self.assertEqual(cfg.actions, ActionsConfig())
 
 
 class ScheduleHotkeyAgendaConfigTests(ProjectTestCase):

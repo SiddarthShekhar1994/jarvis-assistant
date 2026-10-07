@@ -81,6 +81,11 @@ calendar_id = "primary"
 # The heading the briefing writes its proposals under. Matching ignores case
 # and a trailing count. One name, or a list such as ["Proposed actions", "Actions"].
 heading = "Proposed actions"
+# Extra web hosts a card's Open button may open, besides the built-in Google
+# (mail, docs, drive, calendar, meet), Slack (*.slack.com) and Canvas
+# (*.instructure.com) hosts. An exact name, or "*.example.edu" for every
+# subdomain. https only.
+link_hosts = []
 
 [schedule]
 # When the "Briefing AM" and "Briefing PM" tasks run (24-hour HH:MM).

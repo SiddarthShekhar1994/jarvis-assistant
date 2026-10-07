@@ -7,6 +7,7 @@ not depend on the machine clock. ActionStore tests use temporary folders.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import logging
@@ -14,19 +15,39 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from briefing_reader import actions
+from briefing_reader import actions, gcal
 from briefing_reader.actions import (
+    BLOCK_WARNING,
+    BUILTIN_LINK_HOSTS,
     CALENDAR,
+    CANCEL,
+    EMAIL,
+    MAX_RECIPIENTS,
+    MOVE,
+    OPEN,
+    REPLIED_WARNING,
+    REPLY,
+    RSVP,
+    SHARE,
+    SLACK,
+    STRUCTURED_KINDS,
+    TODO,
     UNKNOWN,
     ActionStore,
+    CardView,
     ProposedAction,
+    approve_label,
+    card_view,
     extract_actions,
+    link_allowed,
     parse_action_line,
+    result_text,
 )
 from briefing_reader.models import (
     BULLETED,
@@ -836,6 +857,50 @@ class ExtractActionsTests(unittest.TestCase):
         self.assertEqual(found, [])
         self.assertEqual(kept, list(briefing.lines))
 
+    # ---- key=value lines in the section ----
+
+    def mixed_page(self) -> list[FlatLine]:
+        return [
+            heading("Work"),
+            bullet("x"),
+            heading("Proposed actions"),
+            bullet(CHESS),
+            bullet(kv_line("Reply", REPLY_PAIRS)),
+            bullet(kv_line("Todo", TODO_PAIRS)),
+            bullet("Open: title=Lab form | link=https://forms.example.net/lab"),
+            bullet("Reply: Carol about the draft"),
+            bullet("Frobnicate: the widgets"),
+            bullet("Nothing else today."),
+            heading("Ignore"),
+        ]
+
+    def test_link_hosts_reach_the_parser(self) -> None:
+        found, _ = extract_actions(self.mixed_page())
+        form = found[3]
+        self.assertEqual((form.kind, form.decidable), (OPEN, False))
+        self.assertIn("forms.example.net is not on the list", form.error)
+        found, _ = extract_actions(self.mixed_page(), link_hosts=("forms.example.net",))
+        self.assertEqual((found[3].error, found[3].link), ("", "https://forms.example.net/lab"))
+        found, _ = extract_actions(self.mixed_page(), actions.DEFAULT_HEADINGS, link_hosts=["*.example.net"])
+        self.assertTrue(found[3].decidable)
+
+    def test_log_counts_kinds_without_any_text(self) -> None:
+        with self.assertLogs(ACTIONS_LOGGER, level="INFO") as captured:
+            found, _ = extract_actions(self.mixed_page())
+        output = "\n".join(captured.output)
+        self.assertEqual(len(found), 7)
+        self.assertIn("Proposed actions: 7 line(s), 2 actionable, 0 duplicate(s) dropped; "
+                      "3 to decide (calendar 1, reply 2, todo 1, open 1, other 1, note 1)", output)
+        for secret in ("Chess", "Thursday", "ana@example.edu", "18c0ffee", "CAExample", "Problem set",
+                       "instructure", "forms.example.net", "Carol", "Frobnicate", "widgets", "Shall we"):
+            self.assertNotIn(secret, output)
+
+    def test_old_log_prefix_is_kept(self) -> None:
+        with self.assertLogs(ACTIONS_LOGGER, level="INFO") as captured:
+            extract_actions(self.page())
+        output = "\n".join(captured.output)
+        self.assertIn("5 line(s), 3 actionable, 1 duplicate(s) dropped; 3 to decide (calendar 4, reply 1)", output)
+
 
 # --------------------------------------------------------------------------
 # ActionStore
@@ -1011,6 +1076,1070 @@ class ActionStoreTests(unittest.TestCase):
             store.prune(60)
         replace.assert_not_called()
         self.assertTrue(store.is_decided("abc"))
+
+    # ---- the statuses and keys of the other proposal kinds ----
+
+    def test_new_statuses_and_which_are_decisions(self) -> None:
+        store = self.store()
+        cases = (("done", True), ("sent", True), ("running", True), ("unknown", False), ("failed", False))
+        for status, decided in cases:
+            with self.subTest(status=status):
+                store.set(f"id-{status}", status)
+                self.assertEqual(store.is_decided(f"id-{status}"), decided)
+        self.assertEqual(actions.STATUSES, ("created", "exists", "denied", "failed", "done", "sent", "running",
+                                            "unknown"))
+        self.assertEqual(actions.DECIDED_STATUSES,
+                         frozenset({"created", "exists", "denied", "done", "sent", "running"}))
+
+    def test_kind_and_account_round_trip(self) -> None:
+        store = self.store()
+        store.set("abc", "done", kind="reply", account="work")
+        store.set("def", "denied", kind="todo")
+        reopened = self.store()
+        self.assertEqual(reopened.get("abc"), {"status": "done", "at": "2026-10-04T13:52:00-07:00", "link": "",
+                                               "message": "", "kind": "reply", "account": "work"})
+        self.assertEqual(reopened.get("def")["kind"], "todo")
+        self.assertNotIn("account", reopened.get("def"))
+        on_disk = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(on_disk["abc"]["account"], "work")
+
+    def test_an_old_file_without_kind_or_account_loads(self) -> None:
+        self.write_raw(json.dumps({"abc": {"status": "created", "at": "2026-10-04T10:00:00-07:00",
+                                           "link": "https://x", "message": ""},
+                                   "def": {"status": "denied", "kind": 5, "account": ""}}))
+        store = self.store()
+        self.assertEqual(store.get("abc"), {"status": "created", "at": "2026-10-04T10:00:00-07:00",
+                                            "link": "https://x", "message": ""})
+        self.assertEqual(store.get("def"), {"status": "denied", "at": "", "link": "", "message": ""})
+
+    def test_running_becomes_unknown_and_prune_saves_it(self) -> None:
+        self.write_raw(json.dumps({
+            "sending": {"status": "running", "at": NOW.isoformat(), "kind": "reply", "account": "work"},
+            "done": {"status": "done", "at": NOW.isoformat()},
+        }))
+        with self.assertLogs(ACTIONS_LOGGER, level="WARNING") as captured:
+            store = self.store()
+        self.assertEqual("\n".join(captured.output).count("1 action(s) were interrupted; marked unknown"), 1)
+        entry = store.get("sending")
+        self.assertEqual((entry["status"], entry["message"], entry["kind"], entry["account"]),
+                         ("unknown", actions.INTERRUPTED_MESSAGE, "reply", "work"))
+        self.assertEqual(actions.INTERRUPTED_MESSAGE,
+                         "Jarvis stopped while this was running; check before retrying")
+        self.assertFalse(store.is_decided("sending"))
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8"))["sending"]["status"], "running")
+        store.prune(60)   # nothing is old enough, but the change is saved
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8"))["sending"]["status"], "unknown")
+        with mock.patch.object(actions.os, "replace") as replace:
+            store.prune(60)   # saved once is enough
+        replace.assert_not_called()
+
+    def test_log_line_names_id_kind_account_and_status(self) -> None:
+        store = self.store()
+        with self.assertLogs(ACTIONS_LOGGER, level="INFO") as captured:
+            store.set("abc", "done", kind="reply", account="work")
+            store.set("def", "denied")
+        output = "\n".join(captured.output)
+        self.assertIn("Action abc (reply, work): done", output)
+        self.assertIn("Action def (-, -): denied", output)
+
+    def test_an_alias_outside_the_known_ones_is_logged_as_other(self) -> None:
+        # acct= is page text: it could carry a name or a phone number.
+        store = self.store()
+        with self.assertLogs(ACTIONS_LOGGER, level="INFO") as captured:
+            store.set("abc", "done", kind="reply", account="ana-garcia-0100")
+            store.set("def", "denied", kind="email", account="personal")
+        output = "\n".join(captured.output)
+        self.assertIn("Action abc (reply, other): done", output)
+        self.assertIn("Action def (email, personal): denied", output)
+        self.assertNotIn("ana-garcia", output)
+        self.assertEqual(store.get("abc")["account"], "ana-garcia-0100")   # kept in actions.json as written
+
+
+# --------------------------------------------------------------------------
+# key=value lines: the other proposal kinds (all examples invented)
+# --------------------------------------------------------------------------
+
+DOT = " \u00b7 "
+REPLY_BODY = r"Hi both,\nShall we keep it at noon with the two of us, or move it to 2 PM?\nThanks"
+REPLY_PAIRS = (("acct", "work"), ("thread", "18c0ffee00000001"), ("msgid", "CAExample0001@mail.example.com"),
+               ("gmid", ""), ("to", "ana@example.edu, ben@example.edu"), ("cc", ""),
+               ("subject", "Re: Thursday noon meeting"), ("replied", "no"), ("due", ""),
+               ("link", "https://mail.google.com/mail/#all/18c0ffee00000001"), ("body", REPLY_BODY))
+EMAIL_PAIRS = (("acct", "personal"), ("to", "office@example.edu"), ("cc", ""),
+               ("subject", "Question about the lab schedule"), ("due", ""), ("link", ""),
+               ("body", r"Hello,\nIs the lab open on Saturday?\nThanks"))
+RSVP_PAIRS = (("acct", "work"), ("event", "abc123def456ghi789"), ("cal", "primary"), ("answer", "yes"),
+              ("notify", "all"), ("title", "Speaker series"), ("at", "2026-10-06 17:00-18:00"),
+              ("due", "2026-10-06"), ("link", "https://calendar.google.com/calendar/event?eid=ZXhhbXBsZQ"),
+              ("body", ""))
+MOVE_PAIRS = (("acct", "work"), ("event", "abc123def456ghi789_20261008T190000Z"), ("cal", "primary"),
+              ("when", "2026-10-08 14:00-15:00"), ("notify", "all"), ("title", "Project sync"),
+              ("at", "2026-10-08 12:00-13:00"), ("link", ""), ("body", "Moving to 2 PM so everyone can join."))
+CANCEL_PAIRS = (("acct", "personal"), ("event", "zyx987wvu654tsr321"), ("cal", "primary"), ("notify", "all"),
+                ("title", "Study group"), ("at", "2026-10-09 18:00-19:00"), ("link", ""), ("body", ""))
+SHARE_PAIRS = (("acct", "personal"), ("file", "1AbCdEfGhIjKlMnOpQrStUvWxYz0123"), ("who", "sam@example.com"),
+               ("role", "viewer"), ("title", "Trip budget"),
+               ("link", "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123/edit"))
+SLACK_PAIRS = (("team", "T00000000"), ("channel", "D00000000"), ("ts", "1700000000.000100"), ("thread", ""),
+               ("who", "Sam"), ("said", "are you free friday?"),
+               ("link", "https://example.slack.com/archives/D00000000/p1700000000000100"),
+               ("body", "Yes! Friday after 4 works."))
+TODO_PAIRS = (("title", "Work on Problem set 3"), ("due", "2026-10-07 23:59"), ("block", "2026-10-06 19:00-21:00"),
+              ("acct", ""), ("link", "https://example.instructure.com/courses/1/assignments/2"))
+OPEN_PAIRS = (("title", "Lab safety form"), ("link", "https://docs.google.com/forms/d/e/EXAMPLE/viewform"))
+EXAMPLES = {"Reply": REPLY_PAIRS, "Email": EMAIL_PAIRS, "RSVP": RSVP_PAIRS, "Move": MOVE_PAIRS,
+            "Cancel": CANCEL_PAIRS, "Share": SHARE_PAIRS, "Slack": SLACK_PAIRS, "Todo": TODO_PAIRS,
+            "Open": OPEN_PAIRS}
+LABELS = {REPLY: "Reply", EMAIL: "Email", RSVP: "RSVP", MOVE: "Move", CANCEL: "Cancel", SHARE: "Share",
+          SLACK: "Slack", TODO: "Todo", OPEN: "Open"}
+
+
+def kv_line(label: str, pairs: tuple[tuple[str, str], ...], **changes: str | None) -> str:
+    """"<label>: key=value | ..." from ``pairs``; ``changes`` replace values (None drops the key)."""
+    items = []
+    for key, value in pairs:
+        if key in changes:
+            if changes[key] is None:
+                continue
+            value = changes[key]
+        items.append(f"{key}={value}")
+    return f"{label}: " + " | ".join(items)
+
+
+def example(label: str, **changes: str | None) -> ProposedAction:
+    return parse_action_line(kv_line(label, EXAMPLES[label], **changes))
+
+
+def sha16(*parts: str) -> str:
+    return hashlib.sha1("\x1f".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+class StructuredDetectionTests(unittest.TestCase):
+
+    def test_every_label_and_spelling(self) -> None:
+        cases = {"Reply": REPLY, "reply": REPLY, "REPLY": REPLY, "Email": EMAIL, "E-mail": EMAIL,
+                 "e-mail": EMAIL, "RSVP": RSVP, "Rsvp": RSVP, "Move": MOVE, "Cancel": CANCEL, "Share": SHARE,
+                 "Slack": SLACK, "Todo": TODO, "To-do": TODO, "To do": TODO, "TODO": TODO, "Open": OPEN}
+        for label, kind in cases.items():
+            with self.subTest(label=label):
+                line = kv_line(label, EXAMPLES[LABELS[kind]])
+                action = parse_action_line(line)
+                self.assertTrue(action.structured)
+                self.assertEqual(action.kind, kind)
+                self.assertEqual(action.error, "")
+                self.assertTrue(action.decidable)
+                self.assertEqual(action.raw, line)
+        self.assertEqual(STRUCTURED_KINDS, frozenset(LABELS))
+
+    def test_free_text_lines_stay_as_before(self) -> None:
+        for line, kind in (("Reply: Carol about the draft", REPLY), ("Reply: x=1 is wrong", REPLY),
+                           ("Todo: renew parking permit", TODO), ("Move: the dentist to Friday", MOVE),
+                           ("Reply to Bob: yes", REPLY), ("Frobnicate: the widgets | 2026-10-09", "frobnicate"),
+                           ("Reply to Bob: " + kv_line("Reply", REPLY_PAIRS)[len("Reply: "):], REPLY),
+                           ("Open: color=blue | link=https://docs.google.com/x", OPEN),
+                           ("Calendar: title=Sync | 2026-10-09 3pm", CALENDAR)):
+            with self.subTest(line=line):
+                action = parse_action_line(line)
+                self.assertFalse(action.structured)
+                self.assertEqual(action.kind, kind)
+                self.assertEqual((action.fields, action.account, action.link, action.body), ((), "", "", ""))
+        self.assertEqual(parse_action_line("Reply: x=1 is wrong").title, "x=1 is wrong")
+        self.assertFalse(parse_action_line("Reply: Carol about the draft").decidable)
+        self.assertTrue(parse_action_line("Calendar: title=Sync | 2026-10-09 3pm").actionable)
+
+    def test_markdown_wrappers_leaders_and_emoji_before_the_label(self) -> None:
+        base = kv_line("Reply", REPLY_PAIRS)
+        rest = base[len("Reply: "):]
+        prefixes = ("**Reply:** ", "**Reply**: ", "__Reply__: ", "*Reply:* ", "*Reply*: ", "_Reply_: ",
+                    "- Reply: ", "* Reply: ", "+ Reply: ", "\u2022 Reply: ", "1. Reply: ", "2) Reply: ",
+                    "[ ] Reply: ", "[x] Reply: ", "> Reply: ", "- [ ] **Reply:** ", "\U0001F4E7 Reply: ",
+                    "\u2709\ufe0f Reply: ", "- \U0001F4E7 **Reply**: ", "  Reply: ")
+        for prefix in prefixes:
+            with self.subTest(prefix=prefix):
+                action = parse_action_line(prefix + rest)
+                self.assertTrue(action.structured)
+                self.assertEqual(action.error, "")
+                self.assertEqual(action.raw, base)
+                self.assertEqual(action.id, parse_action_line(base).id)
+
+    def test_no_break_spaces_count_as_spaces(self) -> None:
+        base = kv_line("Open", OPEN_PAIRS)
+        for space in ("\u00a0", "\u2007", "\u202f"):
+            with self.subTest(space=hex(ord(space))):
+                action = parse_action_line(base.replace(" ", space))
+                self.assertEqual((action.error, action.title, action.raw), ("", "Lab safety form", base))
+
+    def test_never_raises(self) -> None:
+        lines = ("Reply:", "Reply: acct=", "Reply: =x", "Email: acct=work | to=" + "a" * 13000,
+                 "Open: title=\x00 | link=https://docs.google.com/x", "Todo: title=x | due=9999-99-99",
+                 "Move: acct=work | event=abcdef | when=2026-10-08 23:00-02:00 to 2026-10-09",
+                 "Slack: channel=D00000 | body=" + "\\" * 50, "Share: acct=a | who=<<>> | file=x")
+        for line in lines:
+            with self.subTest(line=line[:40]):
+                action = parse_action_line(line)
+                self.assertIsInstance(action, ProposedAction)
+                self.assertRegex(action.id, r"^[0-9a-f]{16}$")
+
+    def test_a_bug_in_the_reader_is_an_error_not_an_exception(self) -> None:
+        line = kv_line("Reply", REPLY_PAIRS)
+        with mock.patch.object(actions._StructuredReader, "read", side_effect=RuntimeError("boom ana@example.edu")):
+            with self.assertLogs(ACTIONS_LOGGER, level="WARNING") as captured:
+                action = parse_action_line(line)
+        self.assertEqual((action.kind, action.structured, action.error), (REPLY, True, "could not read this line"))
+        self.assertFalse(action.decidable)
+        output = "\n".join(captured.output)
+        self.assertIn("Could not parse a reply line (RuntimeError)", output)
+        self.assertNotIn("ana@example.edu", output)
+
+
+class SplitTests(unittest.TestCase):
+
+    def test_body_takes_the_rest_of_the_line(self) -> None:
+        action = parse_action_line("Email: acct=work | to=a@example.com | subject=Hi | body=one | to=b@example.com"
+                                   " | body=two | bcc=c@example.com")
+        self.assertEqual(action.error, "")
+        self.assertEqual(action.recipients(), ("a@example.com",))
+        self.assertEqual(action.body, "one | to=b@example.com | body=two | bcc=c@example.com")
+        self.assertEqual(parse_action_line("Reply: body=hi").error, "missing acct=")
+
+    def test_a_value_with_a_pipe_is_joined_back(self) -> None:
+        action = parse_action_line("Email: acct=work | to=a@example.com | subject=Q3 | planning | review | body=x")
+        self.assertEqual(action.error, "")
+        self.assertEqual(action.title, "Q3 | planning | review")
+        self.assertEqual(action.field("subject"), "Q3 | planning | review")
+
+    def test_a_key_twice_is_an_error(self) -> None:
+        cases = {
+            "Email: acct=work | to=a@example.com | to=b@example.com | subject=x | body=y": "to= appears twice",
+            "Email: acct=work | to=a@example.com | cc= | CC= | subject=x | body=y": "cc= appears twice",
+            "Email: acct=work | to=a@example.com | subject=x | Acct=home | body=y": "acct= appears twice",
+            # An address slipped into a subject is caught: every key is always written.
+            "Email: acct=work | to=a@example.com | cc= | subject=Hi | to=evil@example.net | due= | link= | body=y":
+                "to= appears twice",
+            "Email: acct=work | to=a@example.com | bcc=b@example.com | subject=x | body=y": "bcc= is not supported",
+        }
+        for line, error in cases.items():
+            with self.subTest(line=line):
+                action = parse_action_line(line)
+                self.assertEqual(action.error, error)
+                self.assertTrue(action.structured)
+                self.assertFalse(action.decidable)
+
+    def test_a_second_body_is_part_of_the_body(self) -> None:
+        action = parse_action_line("Email: acct=work | to=a@example.com | subject=x | body=first | body=second")
+        self.assertEqual((action.error, action.body), ("", "first | body=second"))
+
+    def test_unknown_keys_are_ignored_and_only_counted(self) -> None:
+        with self.assertLogs(ACTIONS_LOGGER, level="DEBUG") as captured:
+            action = parse_action_line(
+                "Open: title=Form | colour=blue | size=3 | link=https://docs.google.com/forms/x")
+        self.assertEqual(action.error, "")
+        self.assertEqual(action.fields, (("title", "Form"), ("link", "https://docs.google.com/forms/x")))
+        output = "\n".join(captured.output)
+        self.assertIn("Ignored 2 unknown key(s) (open line)", output)
+        self.assertNotIn("blue", output)
+        self.assertNotIn("colour", output)
+
+    def test_empty_optional_and_empty_required_values(self) -> None:
+        action = parse_action_line("Email: acct=work | to=a@example.com | cc= | subject=Hi | due= | link= | body=x")
+        self.assertEqual(action.error, "")
+        self.assertEqual((action.cc(), action.field("due"), action.link), ((), "", ""))
+        self.assertIsNone(action.due())
+        for line, error in (("Email: acct=work | to=a@example.com | subject= | body=x", "missing subject="),
+                            ("Email: acct=work | to=a@example.com | subject=Hi | body=", "missing body="),
+                            ("Email: acct=work | to=a@example.com | subject=Hi | body= \\n ", "missing body="),
+                            ("Email: acct= | to=a@example.com | subject=Hi | body=x", "missing acct=")):
+            with self.subTest(line=line):
+                self.assertEqual(parse_action_line(line).error, error)
+
+    def test_escapes_in_body_and_said_only(self) -> None:
+        action = parse_action_line(r"Slack: channel=D00000000 | said=line one\nline two | body=a\nb\\nc\td\\")
+        self.assertEqual(action.error, "")
+        self.assertEqual(action.body, "a\nb\\nc\\td\\")
+        self.assertEqual(action.field("said"), "line one\nline two")
+        other = parse_action_line(r"Open: title=C:\new folder | link=https://docs.google.com/x")
+        self.assertEqual(other.title, r"C:\new folder")
+
+    def test_values_keep_markdown_characters(self) -> None:
+        action = parse_action_line("Email: acct=work | to=a@example.com | subject=*Q3* _plan_ <draft> `x` | "
+                                   "body=**Bold** <b>hi</b> `code` snake_case_id")
+        self.assertEqual(action.error, "")
+        self.assertEqual(action.title, "*Q3* _plan_ <draft> `x`")
+        self.assertEqual(action.body, "**Bold** <b>hi</b> `code` snake_case_id")
+        self.assertEqual(example("Move").field("event"), "abc123def456ghi789_20261008T190000Z")
+
+    def test_line_cap(self) -> None:
+        fixed = "acct=work | to=a@example.com | subject=Hi | body="
+        fits = parse_action_line("Email: " + fixed + "x" * 5000)
+        self.assertEqual(fits.error, "")
+        rest = fixed + "x" * (12001 - len(fixed))
+        action = parse_action_line("Email: " + rest)
+        self.assertEqual(action.error, "the line is too long (12001 characters, at most 12000)")
+        self.assertEqual(parse_action_line("Email: " + rest[:-1]).error,
+                         f"body= is too long ({12000 - len(fixed)} characters, at most 5000)")
+
+    def test_long_runs_of_spaces_parse_in_linear_time(self) -> None:
+        # Lines are read on the GUI thread; a quadratic pattern took about 0.6 s per line like these.
+        spaces = " " * 11900
+        lines = ("Email: acct=work | to=a" + spaces + "b | subject=s | body=x",
+                 "Email: acct=work | to=Ana" + spaces + "<a@example.com> | subject=s | body=x",
+                 "Email: acct=work | to=a@example.com | subject=a" + spaces + "b | body=x",
+                 "Email: acct=work" + spaces + "x | to=a@example.com | subject=s | body=x",
+                 "Share: acct=work | file=1AbCdEfGhIjKlMnOpQrStUvWxYz0123 | who=a" + spaces + "b",
+                 "Todo: title=a" + spaces + "b | due=2026-10-07")
+        for line in lines:
+            with self.subTest(line=line[:30]):
+                started = time.perf_counter()
+                action = parse_action_line(line)
+                self.assertLess(time.perf_counter() - started, 0.15)
+                self.assertTrue(action.structured)
+        self.assertEqual(parse_action_line(lines[1]).recipients(), ("a@example.com",))
+
+
+class FieldValidationTests(unittest.TestCase):
+
+    def test_account_alias(self) -> None:
+        self.assertEqual(example("Email", acct="Work").account, "work")
+        self.assertEqual(example("Email", acct="school_mail-2").account, "school_mail-2")
+        self.assertEqual(example("Email", acct="Work Mail").error,
+                         'acct=: "Work Mail" is not an account name (letters, digits, - or _)')
+        for bad in ("9lives", "a" * 25, "w@rk"):
+            with self.subTest(bad=bad):
+                self.assertIn("is not an account name", example("Email", acct=bad).error)
+
+    def test_bad_values_are_quoted_and_cut_to_40_characters(self) -> None:
+        error = example("Email", acct="x" * 30 + " " + "y" * 30).error
+        quoted = error.split(": ", 1)[1].split(" is not")[0]
+        self.assertEqual(quoted, '"' + "x" * 19 + "..." + "y" * 18 + '"')
+
+    def test_gmail_ids_and_message_ids(self) -> None:
+        self.assertEqual(example("Reply", thread="x").error, 'thread=: "x" is not a Gmail id')
+        for written in ("CAExample0001@mail.example.com", "<CAExample0001@mail.example.com>"):
+            with self.subTest(msgid=written):
+                self.assertEqual(example("Reply", msgid=written).field("msgid"), "<CAExample0001@mail.example.com>")
+        for bad in ("abc", "a@b@c", "@example.com", "a@"):
+            with self.subTest(bad=bad):
+                self.assertEqual(example("Reply", msgid=bad).error, f'msgid=: "{bad}" is not a Message-ID')
+        only_gmid = example("Reply", msgid="", gmid="18c0ffee00000002")
+        self.assertEqual((only_gmid.error, only_gmid.field("gmid"), only_gmid.field("msgid")),
+                         ("", "18c0ffee00000002", ""))
+        self.assertEqual(example("Reply", msgid=None, gmid="bad id!").error, 'gmid=: "bad id!" is not a Gmail id')
+        self.assertEqual(example("Reply", msgid="", gmid="").error, "missing msgid= (or gmid=)")
+
+    def test_addresses_are_normalized(self) -> None:
+        action = example("Reply", to="Ana Lima <Ana@Example.EDU>; ben@example.edu, ana@example.edu",
+                         cc="ben@example.edu, Cy <cy@EXAMPLE.edu>;")
+        self.assertEqual(action.error, "")
+        self.assertEqual(action.recipients(), ("Ana@example.edu", "ben@example.edu"))
+        self.assertEqual(action.cc(), ("cy@example.edu",))
+        self.assertEqual(action.field("to"), "Ana@example.edu, ben@example.edu")
+        self.assertEqual(action.field("cc"), "cy@example.edu")
+        self.assertEqual(example("Reply", cc="ana@example.edu").field("cc"), "")
+
+    def test_bad_addresses(self) -> None:
+        for bad in ("bob@", "@example.edu", "a..b@example.edu", ".a@example.edu", "a.@example.edu",
+                    "a b@example.edu", "a@example", "a@-example.edu", "a@example.e", 'a"b@example.edu',
+                    "Ana <ana@example.edu", "x" * 65 + "@example.edu", "a@" + ("b" * 60 + ".") * 5 + "edu"):
+            with self.subTest(bad=bad[:30]):
+                error = example("Email", to=bad).error
+                self.assertTrue(error.startswith("to=: ") and error.endswith(" is not an email address"), error)
+        self.assertEqual(example("Email", to="bob@").error, 'to=: "bob@" is not an email address')
+        self.assertEqual(example("Email", cc="x@").error, 'cc=: "x@" is not an email address')
+
+    def test_recipient_cap(self) -> None:
+        five = ", ".join(f"p{n}@example.edu" for n in range(5))
+        self.assertEqual(example("Email", to=five).error, "")
+        self.assertEqual(example("Email", to=five, cc="P0@example.edu").error, "")   # counted once
+        self.assertEqual(example("Email", to="p0@example.edu, p1@example.edu, p2@example.edu",
+                                 cc="p3@example.edu, p4@example.edu, p5@example.edu").error,
+                         "to= and cc= name 6 addresses (at most 5)")
+        self.assertEqual(MAX_RECIPIENTS, 5)
+        self.assertEqual(example("Email", to=",;").error, "missing to=")
+
+    def test_subject(self) -> None:
+        self.assertEqual(example("Email", subject="Line one\nline two").error, "subject= has a line break")
+        self.assertEqual(example("Email", subject="Line one\rline two").error, "subject= has a line break")
+        self.assertEqual(example("Email", subject="Bell\x07").error, "subject= has a control character")
+        self.assertEqual(example("Email", subject="  Lots   of\tspace ").title, "Lots of space")
+        self.assertEqual(example("Email", subject="s" * 250).error, "")
+        self.assertEqual(example("Email", subject="s" * 251).error,
+                         "subject= is too long (251 characters, at most 250)")
+        self.assertEqual(example("Reply", subject="Thursday noon meeting").title, "Re: Thursday noon meeting")
+        self.assertEqual(example("Reply", subject="RE: Thursday").title, "RE: Thursday")
+        self.assertEqual(example("Email", subject="Re thursday").title, "Re thursday")
+
+    def test_invisible_format_characters_are_removed(self) -> None:
+        # Direction overrides and zero-width characters could make a value show as something else.
+        self.assertEqual(example("Email", subject="Invoice \u202egnp.exe").title, "Invoice gnp.exe")
+        self.assertEqual(example("Open", title="Lab\u200b form\u2066\u2069").title, "Lab form")
+        self.assertEqual(example("Slack", said="are you \u202efree\u200d?").field("said"), "are you free?")
+        self.assertEqual(example("Email", body="Hi\u200b there\ufeff").body, "Hi there")
+        self.assertEqual(example("Reply", msgid="CAEx\u202eample@mail.example.com").field("msgid"),
+                         "<CAExample@mail.example.com>")
+        # A key written with a zero-width space inside is a key again, so a slipped-in "to=" is caught.
+        hidden = kv_line("Email", EMAIL_PAIRS, subject="Hi | t\u200bo=evil@example.net")
+        self.assertEqual(parse_action_line(hidden).error, "to= appears twice")
+        # A combined emoji keeps its zero-width joiner.
+        emoji = "\U0001f469\U0001f3fd\u200d\U0001f4bb"
+        self.assertEqual(example("Todo", title=f"{emoji} Code review").title, f"{emoji} Code review")
+
+    def test_ids_are_printable_ascii(self) -> None:
+        for bad in ("abc\x01def@mail.example.com", "abc\x00@mail.example.com", "caf\u00e9@mail.example.com"):
+            with self.subTest(msgid=ascii(bad)):
+                self.assertIn("is not a Message-ID", example("Reply", msgid=bad).error)
+        for bad in ("a\x00b", "team\x7f@group.calendar.google.com", "caf\u00e9@group.calendar.google.com",
+                    "a<b>"):
+            with self.subTest(cal=ascii(bad)):
+                self.assertIn("is not a calendar id", example("RSVP", cal=bad).error)
+        self.assertEqual(example("Reply", msgid="a.b+c_d=e/f?g{h}~i@[mail.example.com]").error, "")
+
+    def test_title_and_who_caps(self) -> None:
+        self.assertEqual(example("Open", title="t" * 200).error, "")
+        self.assertEqual(example("Open", title="t" * 201).error, "title= is too long (201 characters, at most 200)")
+        self.assertEqual(example("Slack", who="w" * 80).title, "Slack message from " + "w" * 80)
+        self.assertEqual(example("Slack", who="w" * 81).error, "who= is too long (81 characters, at most 80)")
+        self.assertEqual(example("Todo", title="Line\nbreak").error, "title= has a line break")
+
+    def test_due(self) -> None:
+        cases = {"2026-10-07": date(2026, 10, 7), "2026-10-07 23:59": dt(7, 23, 59),
+                 "2026-10-07 11:59 PM": dt(7, 23, 59), "2026-10-07 11:59pm": dt(7, 23, 59),
+                 "2026-10-07T09:30": dt(7, 9, 30), "2026-10-07 noon": dt(7, 12)}
+        for written, due in cases.items():
+            with self.subTest(due=written):
+                action = example("Todo", due=written)
+                self.assertEqual(action.error, "")
+                self.assertEqual(action.due(), due)
+        self.assertEqual(example("Todo").field("due"), "2026-10-07T23:59")
+        self.assertEqual(example("Todo", due="2026-10-07").field("due"), "2026-10-07")
+        errors = {"2026-02-30": 'due=: "2026-02-30" is not a real date',
+                  "2026-10-07 11": 'due=: the time "11" needs AM/PM or HH:MM (24-hour)',
+                  "2026-10-07 25:00": 'due=: could not read the time "25:00"',
+                  "tomorrow": 'due=: "tomorrow" is not a date (YYYY-MM-DD, optionally with a time)',
+                  "10/07/2026": 'due=: "10/07/2026" is not a date (YYYY-MM-DD, optionally with a time)'}
+        for written, error in errors.items():
+            with self.subTest(due=written):
+                self.assertEqual(example("Todo", due=written).error, error)
+
+    def test_time_ranges(self) -> None:
+        action = example("Todo")
+        self.assertEqual((action.start, action.end), (dt(6, 19), dt(6, 21)))
+        self.assertEqual(action.field("block"), "2026-10-06T19:00/2026-10-06T21:00")
+        self.assertEqual(example("Todo", block="2026-10-06 7pm-9pm").start, dt(6, 19))
+        self.assertEqual(example("Todo", block="2026-10-06 19:00-19:05").error, "")
+        self.assertEqual(example("Todo", block="2026-10-06 07:00-19:00").error, "")
+        errors = {"2026-10-06": "block=: give a time range like 2026-10-06 19:00-21:00",
+                  "2026-10-06 19:00-19:04": "block=: the time range must be 5 minutes to 12 hours long",
+                  "2026-10-06 07:00-19:01": "block=: the time range must be 5 minutes to 12 hours long",
+                  "2026-10-06 25:00": 'block=: could not read the time "25:00"',
+                  "next week": "block=: no date (expected YYYY-MM-DD, optionally with HH:MM-HH:MM)"}
+        for written, error in errors.items():
+            with self.subTest(block=written):
+                self.assertEqual(example("Todo", block=written).error, error)
+        self.assertEqual(example("Move", when="2026-10-08").error,
+                         "when=: give a time range like 2026-10-08 13:00-14:00")
+        move = example("Move")
+        self.assertEqual((move.start, move.end), (dt(8, 14), dt(8, 15)))
+
+    def test_at_is_display_only(self) -> None:
+        action = example("RSVP", at="sometime soon")
+        self.assertEqual(action.error, "")
+        self.assertEqual(action.warnings, ("at= could not be read; not shown",))
+        self.assertEqual(action.field("at"), "")
+        self.assertTrue(action.decidable)
+        self.assertEqual(example("RSVP", at="2026-10-06").field("at"), "2026-10-06/2026-10-06")
+        self.assertEqual(example("RSVP").field("at"), "2026-10-06T17:00/2026-10-06T18:00")
+
+    def test_word_choices_and_defaults(self) -> None:
+        answers = (("yes", "yes"), ("Accept", "yes"), ("accepted", "yes"), ("going", "yes"), ("NO", "no"),
+                   ("decline", "no"), ("Declined", "no"), ("maybe", "maybe"), ("tentative", "maybe"))
+        for written, answer in answers:
+            with self.subTest(answer=written):
+                self.assertEqual(example("RSVP", answer=written).field("answer"), answer)
+        for written, notify in (("all", "all"), ("external", "external"), ("externalOnly", "external"),
+                                ("NONE", "none"), ("", "all"), (None, "all")):
+            with self.subTest(notify=written):
+                self.assertEqual(example("Cancel", notify=written).field("notify"), notify)
+        self.assertEqual(example("Reply", replied=None).field("replied"), "unknown")
+        self.assertEqual(example("Share", role="").field("role"), "viewer")
+        self.assertEqual(example("Share", role="Editor").field("role"), "editor")
+        self.assertEqual(example("RSVP", cal=None).field("cal"), "primary")
+        self.assertEqual(example("RSVP", cal="team@group.calendar.google.com").field("cal"),
+                         "team@group.calendar.google.com")
+        errors = {("RSVP", "answer", "perhaps"): "answer=: use yes, no or maybe",
+                  ("Cancel", "notify", "some"): "notify=: use all, external or none",
+                  ("Reply", "replied", "maybe"): "replied=: use yes, no or unknown",
+                  ("Share", "role", "owner"): "role=: use viewer, commenter or editor",
+                  ("RSVP", "cal", "my cal"): 'cal=: "my cal" is not a calendar id'}
+        for (label, key, value), error in errors.items():
+            with self.subTest(key=key):
+                self.assertEqual(example(label, **{key: value}).error, error)
+
+    def test_ids_of_events_files_and_slack(self) -> None:
+        errors = {("RSVP", "event", "abc"): 'event=: "abc" is not a calendar event id',
+                  ("Share", "file", "short"): 'file=: "short" is not a Drive file id',
+                  ("Slack", "team", "X0000"): 'team=: "X0000" is not a Slack workspace id',
+                  ("Slack", "channel", "Z0000"): 'channel=: "Z0000" is not a Slack channel id',
+                  ("Slack", "ts", "12345"): 'ts=: "12345" is not a Slack message ts',
+                  ("Slack", "thread", "1.2"): 'thread=: "1.2" is not a Slack message ts',
+                  ("Share", "who", "sam@example.com, kim@example.com"): "who=: give exactly one email address"}
+        for (label, key, value), error in errors.items():
+            with self.subTest(key=key):
+                self.assertEqual(example(label, **{key: value}).error, error)
+        self.assertEqual(example("Slack", thread="1700000000.000001").field("thread"), "1700000000.000001")
+        self.assertEqual(example("Share", who="Sam <Sam@Example.com>").field("who"), "Sam@example.com")
+
+    def test_body_caps_and_control_characters(self) -> None:
+        for label, cap in (("Reply", 5000), ("Email", 5000), ("Slack", 5000), ("RSVP", 1000), ("Move", 1000),
+                           ("Cancel", 1000)):
+            with self.subTest(label=label):
+                self.assertEqual(example(label, body="b" * cap).body, "b" * cap)
+                self.assertEqual(example(label, body="b" * (cap + 1)).error,
+                                 f"body= is too long ({cap + 1} characters, at most {cap})")
+        self.assertEqual(example("Slack", said="s" * 400).field("said"), "s" * 400)
+        self.assertEqual(example("Slack", said="s" * 401).error, "said= is too long (401 characters, at most 400)")
+        self.assertEqual(example("Email", body="a\x07b\tc\r\nd").body, "ab\tc\nd")
+
+
+class LinkAllowlistTests(unittest.TestCase):
+
+    def test_built_in_hosts(self) -> None:
+        self.assertEqual(BUILTIN_LINK_HOSTS, ("mail.google.com", "docs.google.com", "drive.google.com",
+                                              "calendar.google.com", "meet.google.com", "*.slack.com",
+                                              "*.instructure.com"))
+        for url in ("https://mail.google.com/mail/#all/1", "https://docs.google.com/document/d/x/edit",
+                    "https://drive.google.com/file/d/x", "https://calendar.google.com/calendar/event?eid=1",
+                    "https://meet.google.com/aaa-bbbb-ccc", "https://example.slack.com/archives/D0/p1",
+                    "https://a.b.slack.com/x", "https://example.instructure.com/courses/1",
+                    "https://www.google.com/calendar/event?eid=1", "HTTPS://DOCS.GOOGLE.COM/x",
+                    "https://docs.google.com:443/x", "https://docs.google.com./x"):
+            with self.subTest(url=url):
+                self.assertTrue(link_allowed(url))
+
+    def test_refused_links(self) -> None:
+        for url in ("https://slack.com/x", "https://instructure.com/x", "https://www.google.com/search?q=x",
+                    "https://www.google.com/calendarx", "http://docs.google.com/x", "ftp://docs.google.com/x",
+                    "https://user@docs.google.com/x", "https://user:pw@docs.google.com/x",
+                    "https://docs.google.com:8443/x", "https://docs.google.com:x/", "https://docs.google.com.evil.example/",
+                    "https://evil.example/docs.google.com", "https://d\u00f6cs.google.com/x",
+                    "https://xn--dcs-xoa.google.com/x", "https://docs.google.com/a b", "https://docs.google.com/\tx",
+                    "https://docs.google.com/\u200bx", "https://docs.google.com\\@evil.example/",
+                    "https://docs.google.com/" + "a" * 2030, "javascript:alert(1)", "", "docs.google.com/x",
+                    "https:///x", "https://docs%2egoogle.com/x"):
+            with self.subTest(url=url[:50]):
+                self.assertFalse(link_allowed(url))
+        self.assertTrue(link_allowed("https://docs.google.com/" + "a" * (2048 - 24)))
+
+    def test_dot_segments_are_refused(self) -> None:
+        # A browser removes "/../" (also written %2e%2e) before it asks the host, so
+        # "www.google.com/calendar/../url?q=..." would open Google's redirector.
+        for url in ("https://www.google.com/calendar/../url?q=https://evil.example",
+                    "https://www.google.com/calendar/%2e%2e/url?q=https://evil.example",
+                    "https://www.google.com/calendar/.%2E/amp/s/evil.example/p",
+                    "https://www.google.com/calendar/%2E./search?q=x",
+                    "https://www.google.com/calendar/./x", "https://www.google.com/calendar/%2e/x",
+                    "https://www.google.com/calendar/x/..", "https://docs.google.com/document/../x"):
+            with self.subTest(url=url):
+                self.assertFalse(link_allowed(url))
+        self.assertEqual(example("Open", link="https://www.google.com/calendar/../url?q=x").error,
+                         "not an https link")
+        for url in ("https://www.google.com/calendar/event?eid=1", "https://docs.google.com/document/d/a..b/edit",
+                    "https://docs.google.com/x/.../y", "https://docs.google.com/x?next=../y"):
+            with self.subTest(url=url):
+                self.assertTrue(link_allowed(url))
+
+    def test_extra_hosts(self) -> None:
+        self.assertTrue(link_allowed("https://forms.example.edu/x", ("forms.example.edu",)))
+        self.assertTrue(link_allowed("https://forms.example.edu/x", ["FORMS.Example.EDU"]))
+        self.assertFalse(link_allowed("https://x.forms.example.edu/x", ("forms.example.edu",)))
+        self.assertTrue(link_allowed("https://a.example.edu/x", ("*.example.edu",)))
+        self.assertTrue(link_allowed("https://a.b.example.edu/x", ("*.example.edu",)))
+        self.assertFalse(link_allowed("https://example.edu/x", ("*.example.edu",)))
+        self.assertFalse(link_allowed("https://badexample.edu/x", ("*.example.edu",)))
+        self.assertFalse(link_allowed("http://forms.example.edu/x", ("forms.example.edu",)))
+        self.assertTrue(link_allowed("https://forms.example.edu/x", "forms.example.edu"))   # one string works
+        # A punycode (IDN) host only when listed by its exact name, never by a wildcard.
+        self.assertFalse(link_allowed("https://xn--bcher-kva.example.edu/", ("*.example.edu",)))
+        self.assertTrue(link_allowed("https://xn--bcher-kva.example.edu/", ("xn--bcher-kva.example.edu",)))
+
+    def test_an_optional_link_that_is_refused_is_hidden_with_a_warning(self) -> None:
+        action = example("Todo", link="http://lms.example.edu/a")
+        self.assertEqual((action.error, action.link), ("", ""))
+        self.assertEqual(action.warnings, ("Link hidden: not an https link",))
+        self.assertNotIn("link", dict(action.fields))
+        action = example("Reply", link="https://forms.example.net/x")
+        self.assertEqual(action.link, "")
+        self.assertEqual(action.warnings, ("Link hidden: forms.example.net is not on the list of hosts Open may "
+                                           "open ([actions] link_hosts)",))
+        listed = parse_action_line(kv_line("Reply", REPLY_PAIRS, link="https://forms.example.net/x"),
+                                   link_hosts=("forms.example.net",))
+        self.assertEqual((listed.link, listed.warnings), ("https://forms.example.net/x", ()))
+        self.assertEqual(listed.id, action.id)   # the link never counts for the id
+
+    def test_an_open_line_needs_a_link_it_may_open(self) -> None:
+        self.assertEqual(example("Open", link="http://forms.example.net/x").error, "not an https link")
+        self.assertEqual(example("Open", link="https://forms.example.net/x").error,
+                         "forms.example.net is not on the list of hosts Open may open ([actions] link_hosts)")
+        action = parse_action_line("Open: title=Form | link=https://forms.example.net/x",
+                                   link_hosts=["forms.example.net"])
+        self.assertEqual((action.error, action.link), ("", "https://forms.example.net/x"))
+
+    def test_parsed_links_pass_the_click_time_check(self) -> None:
+        for label in EXAMPLES:
+            with self.subTest(label=label):
+                action = example(label)
+                self.assertTrue(not action.link or link_allowed(action.link))
+
+
+class KindSchemaTests(unittest.TestCase):
+
+    def test_reply(self) -> None:
+        action = example("Reply")
+        self.assertEqual(action.fields, (
+            ("acct", "work"), ("thread", "18c0ffee00000001"), ("msgid", "<CAExample0001@mail.example.com>"),
+            ("to", "ana@example.edu, ben@example.edu"), ("subject", "Re: Thursday noon meeting"), ("replied", "no"),
+            ("link", "https://mail.google.com/mail/#all/18c0ffee00000001")))
+        self.assertEqual((action.kind, action.account, action.title), (REPLY, "work", "Re: Thursday noon meeting"))
+        self.assertEqual(action.body,
+                         "Hi both,\nShall we keep it at noon with the two of us, or move it to 2 PM?\nThanks")
+        self.assertEqual(action.link, "https://mail.google.com/mail/#all/18c0ffee00000001")
+        self.assertEqual((action.warnings, action.start, action.end), ((), None, None))
+        self.assertEqual((action.recipients(), action.cc(), action.due()),
+                         (("ana@example.edu", "ben@example.edu"), (), None))
+
+    def test_email(self) -> None:
+        action = example("Email")
+        self.assertEqual(action.fields, (("acct", "personal"), ("to", "office@example.edu"),
+                                         ("subject", "Question about the lab schedule")))
+        self.assertEqual((action.account, action.title, action.link), ("personal", "Question about the lab schedule", ""))
+        self.assertEqual(action.body, "Hello,\nIs the lab open on Saturday?\nThanks")
+
+    def test_rsvp(self) -> None:
+        action = example("RSVP")
+        self.assertEqual(action.fields, (
+            ("acct", "work"), ("event", "abc123def456ghi789"), ("cal", "primary"), ("answer", "yes"),
+            ("notify", "all"), ("title", "Speaker series"), ("at", "2026-10-06T17:00/2026-10-06T18:00"),
+            ("due", "2026-10-06"), ("link", "https://calendar.google.com/calendar/event?eid=ZXhhbXBsZQ")))
+        self.assertEqual((action.title, action.body, action.due()), ("Speaker series", "", date(2026, 10, 6)))
+        self.assertEqual(example("RSVP", title="").title, "Calendar invitation")
+
+    def test_move(self) -> None:
+        action = example("Move")
+        self.assertEqual(action.fields, (
+            ("acct", "work"), ("event", "abc123def456ghi789_20261008T190000Z"), ("cal", "primary"),
+            ("when", "2026-10-08T14:00/2026-10-08T15:00"), ("notify", "all"), ("title", "Project sync"),
+            ("at", "2026-10-08T12:00/2026-10-08T13:00")))
+        self.assertEqual((action.start, action.end, action.body),
+                         (dt(8, 14), dt(8, 15), "Moving to 2 PM so everyone can join."))
+        self.assertEqual(example("Move", title=None).title, "Meeting to move")
+
+    def test_cancel(self) -> None:
+        action = example("Cancel")
+        self.assertEqual(action.fields, (
+            ("acct", "personal"), ("event", "zyx987wvu654tsr321"), ("cal", "primary"), ("notify", "all"),
+            ("title", "Study group"), ("at", "2026-10-09T18:00/2026-10-09T19:00")))
+        self.assertEqual((action.account, action.title, action.start), ("personal", "Study group", None))
+        self.assertEqual(example("Cancel", title="").title, "Meeting to cancel")
+
+    def test_share(self) -> None:
+        action = example("Share")
+        self.assertEqual(action.fields, (
+            ("acct", "personal"), ("file", "1AbCdEfGhIjKlMnOpQrStUvWxYz0123"), ("who", "sam@example.com"),
+            ("role", "viewer"), ("title", "Trip budget"),
+            ("link", "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123/edit")))
+        self.assertEqual(example("Share", title="").title, "File share request")
+
+    def test_slack(self) -> None:
+        action = example("Slack")
+        self.assertEqual(action.fields, (
+            ("team", "T00000000"), ("channel", "D00000000"), ("ts", "1700000000.000100"), ("who", "Sam"),
+            ("said", "are you free friday?"),
+            ("link", "https://example.slack.com/archives/D00000000/p1700000000000100")))
+        self.assertEqual((action.account, action.title, action.body),
+                         ("", "Slack message from Sam", "Yes! Friday after 4 works."))
+        self.assertEqual(example("Slack", who="").title, "Slack message")
+
+    def test_todo(self) -> None:
+        action = example("Todo")
+        self.assertEqual(action.fields, (
+            ("title", "Work on Problem set 3"), ("due", "2026-10-07T23:59"),
+            ("block", "2026-10-06T19:00/2026-10-06T21:00"),
+            ("link", "https://example.instructure.com/courses/1/assignments/2")))
+        self.assertEqual((action.title, action.due(), action.start, action.end, action.warnings),
+                         ("Work on Problem set 3", dt(7, 23, 59), dt(6, 19), dt(6, 21), ()))
+        self.assertEqual(example("Todo", acct="Work").account, "work")
+
+    def test_open(self) -> None:
+        action = example("Open")
+        self.assertEqual(action.fields, (("title", "Lab safety form"),
+                                         ("link", "https://docs.google.com/forms/d/e/EXAMPLE/viewform")))
+        self.assertEqual((action.title, action.link),
+                         ("Lab safety form", "https://docs.google.com/forms/d/e/EXAMPLE/viewform"))
+
+    def test_missing_required_keys(self) -> None:
+        required = {"Reply": ("acct", "thread", "to", "subject", "body"), "Email": ("acct", "to", "subject", "body"),
+                    "RSVP": ("acct", "event", "answer"), "Move": ("acct", "event", "when"),
+                    "Cancel": ("acct", "event"), "Share": ("acct", "file", "who"), "Slack": ("channel", "body"),
+                    "Todo": ("title", "due"), "Open": ("title", "link")}
+        for label, keys in required.items():
+            for key in keys:
+                for change in (None, ""):
+                    with self.subTest(label=label, key=key, change=change):
+                        action = example(label, **{key: change})
+                        self.assertEqual(action.error, f"missing {key}=")
+                        self.assertTrue(action.structured)
+                        self.assertFalse(action.decidable)
+
+    def test_the_first_error_in_key_order_wins(self) -> None:
+        action = example("Reply", thread="x", to="bob@")
+        self.assertEqual(action.error, 'thread=: "x" is not a Gmail id')
+        self.assertEqual(action.account, "work")   # what was read before the error is kept
+
+    def test_block_after_the_due_time_warns(self) -> None:
+        self.assertEqual(example("Todo", due="2026-10-06 20:00").warnings, (BLOCK_WARNING,))
+        self.assertEqual(example("Todo", due="2026-10-06", block="2026-10-06 22:00-23:30").warnings, ())
+        self.assertEqual(example("Todo", due="2026-10-06", block="2026-10-06 23:00-01:00").warnings,
+                         (BLOCK_WARNING,))
+        self.assertEqual(example("Todo", block="").warnings, ())
+        self.assertEqual(BLOCK_WARNING, "The block ends after the due time")
+
+    def test_replied(self) -> None:
+        done = example("Reply", replied="yes")
+        self.assertEqual(done.error, "")
+        self.assertFalse(done.decidable)
+        self.assertFalse(done.actionable)
+        self.assertEqual((done.describe(TODAY), done.spoken(TODAY)), ("", ""))
+        for replied in ("unknown", "", None):
+            with self.subTest(replied=replied):
+                action = example("Reply", replied=replied)
+                self.assertEqual(action.warnings, (REPLIED_WARNING,))
+                self.assertTrue(action.decidable)
+        self.assertEqual(example("Reply").warnings, ())
+        self.assertEqual(REPLIED_WARNING, "Couldn't tell if you already replied - check the thread first")
+
+
+class StructuredIdTests(unittest.TestCase):
+
+    def test_exact_ids(self) -> None:
+        expected = {
+            "Reply": sha16("reply", "work", "<CAExample0001@mail.example.com>"),
+            "Email": sha16("email", "personal", "office@example.edu", "question about the lab schedule"),
+            "RSVP": sha16("rsvp", "work", "primary", "abc123def456ghi789"),
+            "Move": sha16("move", "work", "primary", "abc123def456ghi789_20261008T190000Z", "2026-10-08T14:00",
+                          "2026-10-08T15:00"),
+            "Cancel": sha16("cancel", "personal", "primary", "zyx987wvu654tsr321"),
+            "Share": sha16("share", "personal", "1AbCdEfGhIjKlMnOpQrStUvWxYz0123", "sam@example.com"),
+            "Slack": sha16("slack", "", "T00000000", "D00000000", "", "1700000000.000100"),
+            "Todo": sha16("todo", "", "work on problem set 3", "2026-10-07T23:59"),
+            "Open": sha16("open", "", "https://docs.google.com/forms/d/e/EXAMPLE/viewform"),
+        }
+        for label, action_id in expected.items():
+            with self.subTest(label=label):
+                self.assertEqual(example(label).id, action_id)
+        self.assertEqual(example("Reply", msgid="", gmid="18c0ffee00000002").id,
+                         sha16("reply", "work", "gmid:18c0ffee00000002"))
+
+    def test_rewording_keeps_the_id(self) -> None:
+        same = {
+            "Reply": dict(body="Other words", link="", subject="Re: Thursday meeting", due="2026-10-09",
+                          cc="cy@example.edu", replied="unknown", gmid="18c0ffee00000002"),
+            "Email": dict(body="Other words", link="https://mail.google.com/mail/#all/x", due="2026-10-09",
+                          cc="cy@example.edu", to="Office <OFFICE@example.edu>", subject="question  about the LAB schedule"),
+            "RSVP": dict(title="Talk", at="", answer="no", notify="none", due="", body="See you", link=""),
+            "Move": dict(title="Sync", at="", notify="external", body="", link="https://calendar.google.com/x"),
+            "Cancel": dict(title="", at="", notify="none", body="Sorry", cal="primary"),
+            "Share": dict(title="Budget", role="editor", link="", who="SAM@example.com"),
+            "Slack": dict(who="", said="", body="Sure", link=""),
+            "Todo": dict(acct="work", link="", block="2026-10-05 18:00-19:00", title="work on  problem set 3"),
+            "Open": dict(title="Another name"),
+        }
+        for label, changes in same.items():
+            base = example(label).id
+            for key, value in changes.items():
+                with self.subTest(label=label, key=key):
+                    self.assertEqual(example(label, **{key: value}).id, base)
+
+    def test_a_new_target_gets_a_new_id(self) -> None:
+        other = {
+            "Reply": dict(msgid="CAExample0002@mail.example.com", acct="personal"),
+            "Email": dict(subject="Another question", to="lab@example.edu", acct="work"),
+            "RSVP": dict(event="zzz123def456ghi789", cal="team@group.calendar.google.com", acct="personal"),
+            "Move": dict(when="2026-10-08 15:00-16:00", event="abc123def456ghi789"),
+            "Cancel": dict(event="abc123def456ghi789"),
+            "Share": dict(who="kim@example.com", file="1AbCdEfGhIjKlMnOpQrStUvWxYz0124"),
+            "Slack": dict(ts="1700000000.000200", thread="1700000000.000100", channel="C00000000"),
+            "Todo": dict(due="2026-10-08 23:59", title="Work on Problem set 4"),
+            "Open": dict(link="https://docs.google.com/forms/d/e/OTHER/viewform"),
+        }
+        for label, changes in other.items():
+            base = example(label).id
+            for key, value in changes.items():
+                with self.subTest(label=label, key=key):
+                    self.assertNotEqual(example(label, **{key: value}).id, base)
+
+    def test_errored_lines_use_the_old_formula(self) -> None:
+        line = "Reply: acct=work | thread=18c0ffee00000001 | to=ana@example.edu | subject=Re: x | body=hi"
+        action = parse_action_line(line)
+        self.assertEqual(action.id, sha16("reply", " ".join(line.casefold().split()), "", "", "0", ""))
+        self.assertNotEqual(action.id, parse_action_line(line.replace("Re: x", "Re: y")).id)
+
+    def test_all_ids_are_16_hex(self) -> None:
+        for label in EXAMPLES:
+            with self.subTest(label=label):
+                self.assertRegex(example(label).id, r"^[0-9a-f]{16}$")
+                self.assertRegex(example(label, **{EXAMPLES[label][0][0]: "!"}).id, r"^[0-9a-f]{16}$")
+
+
+class DecidableTests(unittest.TestCase):
+
+    def test_matrix(self) -> None:
+        rows = [
+            (example("Reply"), True, False, ""),
+            (example("Email"), True, False, ""),
+            (example("RSVP"), True, False, ""),
+            (example("Move"), True, False, ""),
+            (example("Cancel"), True, False, ""),
+            (example("Share"), True, False, ""),
+            (example("Slack"), True, False, ""),
+            (example("Todo"), True, True, "Add block"),
+            (example("Todo", block=""), True, False, ""),
+            (example("Open"), True, False, ""),
+            (parse_action_line(CHESS), True, True, "Approve"),
+            (parse_action_line("Calendar: Sync | 2026-10-09 25:00"), False, False, ""),
+            (parse_action_line("Reply: Carol about the draft"), False, False, ""),
+            (parse_action_line("Todo: renew parking permit"), False, False, ""),
+            (parse_action_line("Nothing needs your OK today."), False, False, ""),
+            (example("Reply", replied="yes"), False, False, ""),
+            (example("Reply", to="bob@"), False, False, ""),
+            (example("Todo", block="2026-10-06"), False, False, ""),
+            (ProposedAction(id="x", kind=TODO, raw="", title="t", start=dt(6, 19), end=dt(6, 21)), False, False, ""),
+            (ProposedAction(id="x", kind=CALENDAR, raw="", title="t", start=dt(6, 19)), True, True, "Approve"),
+        ]
+        for action, decidable, actionable, label in rows:
+            with self.subTest(raw=action.raw[:40], kind=action.kind):
+                self.assertEqual(action.decidable, decidable)
+                self.assertEqual(action.actionable, actionable)
+                self.assertEqual(approve_label(action), label)
+                self.assertEqual(action.approve_label(), label)
+
+    def test_speech_nouns(self) -> None:
+        nouns = {CALENDAR: ("a calendar invite", "calendar invites"), REPLY: ("a reply", "replies"),
+                 EMAIL: ("an email", "emails"), RSVP: ("an invitation to answer", "invitations to answer"),
+                 MOVE: ("a meeting to move", "meetings to move"), CANCEL: ("a meeting to cancel", "meetings to cancel"),
+                 SHARE: ("a share request", "share requests"), SLACK: ("a Slack reply", "Slack replies"),
+                 TODO: ("a to-do", "to-dos"), OPEN: ("a link to check", "links to check")}
+        for kind, noun in nouns.items():
+            with self.subTest(kind=kind):
+                self.assertEqual(ProposedAction(id="x", kind=kind, raw="").speech_noun, noun)
+
+    def test_still_frozen_and_hashable(self) -> None:
+        action = example("Reply")
+        self.assertEqual(hash(action), hash(example("Reply")))
+        with self.assertRaises(AttributeError):
+            action.body = "x"   # type: ignore[misc]
+
+
+class StructuredWordingTests(unittest.TestCase):
+
+    def test_describe_and_spoken_per_kind(self) -> None:
+        cases = {
+            "Reply": ("To: ana@example.edu, ben@example.edu", "Reply about Thursday noon meeting, work account"),
+            "Email": ("To: office@example.edu", "Email about Question about the lab schedule, personal account"),
+            "RSVP": (f"Answer: yes{DOT}Tue Oct 6{DOT}5:00-6:00 PM{DOT}due Tue Oct 6",
+                     "Accept Speaker series, work account, Tuesday October 6, 5 to 6 PM"),
+            "Move": (f"New time: Thu Oct 8{DOT}2:00-3:00 PM{DOT}guests notified{DOT}was 12:00-1:00 PM",
+                     "Move Project sync to Thursday October 8, 2 to 3 PM, work account"),
+            "Cancel": (f"Fri Oct 9{DOT}6:00-7:00 PM{DOT}guests notified",
+                       "Cancel Study group, personal account, Friday October 9, 6 to 7 PM"),
+            "Share": ("sam@example.com asks for viewer access", "Share request for Trip budget, personal account"),
+            "Slack": ('"are you free friday?"', "Slack reply to Sam"),
+            "Todo": (f"Due Wed Oct 7, 11:59 PM{DOT}block Tue Oct 6{DOT}7:00-9:00 PM",
+                     "Work on Problem set 3, due Wednesday October 7 at 11:59 PM, with a block Tuesday October 6, "
+                     "7 to 9 PM"),
+            "Open": ("docs.google.com", "Lab safety form"),
+        }
+        for label, (describe, spoken) in cases.items():
+            with self.subTest(label=label):
+                action = example(label)
+                self.assertEqual(action.describe(TODAY), describe)
+                self.assertEqual(action.spoken(TODAY), spoken)
+
+    def test_due_words(self) -> None:
+        self.assertEqual(example("Reply", due="2026-10-04").describe(TODAY),
+                         f"To: ana@example.edu, ben@example.edu{DOT}due today")
+        self.assertEqual(example("Reply", due="2026-10-05").spoken(TODAY),
+                         "Reply about Thursday noon meeting, work account, due tomorrow")
+        action = example("Email", cc="cy@example.edu", due="2027-01-04 9:00 AM")
+        self.assertEqual(action.describe(TODAY),
+                         f"To: office@example.edu{DOT}Cc: cy@example.edu{DOT}due Mon Jan 4, 2027, 9:00 AM")
+        self.assertEqual(action.spoken(TODAY), "Email about Question about the lab schedule, personal account, "
+                                               "due Monday January 4, 2027 at 9 AM")
+        self.assertEqual(example("Todo", due="2026-10-05 12:00", block="").spoken(TODAY),
+                         "Work on Problem set 3, due tomorrow at noon")
+        self.assertEqual(example("Todo", due="2026-10-04", block="").describe(TODAY), "Due today")
+
+    def test_rsvp_move_cancel_variants(self) -> None:
+        self.assertTrue(example("RSVP", answer="no").spoken(TODAY).startswith("Decline Speaker series, work account"))
+        self.assertTrue(example("RSVP", answer="maybe").spoken(TODAY).startswith("Answer maybe to Speaker series"))
+        self.assertEqual(example("RSVP", title="", at="", due="").spoken(TODAY), "Accept an invitation, work account")
+        self.assertEqual(example("RSVP", at="", due="").describe(TODAY), "Answer: yes")
+        self.assertEqual(example("Move", title="").spoken(TODAY),
+                         "Move a meeting to Thursday October 8, 2 to 3 PM, work account")
+        self.assertEqual(example("Move", at="2026-10-07 12:00-13:00", notify="external").describe(TODAY),
+                         f"New time: Thu Oct 8{DOT}2:00-3:00 PM{DOT}only outside guests notified{DOT}"
+                         "was Wed Oct 7, 12:00-1:00 PM")
+        self.assertEqual(example("Move", at="", notify="none").describe(TODAY),
+                         f"New time: Thu Oct 8{DOT}2:00-3:00 PM{DOT}guests not notified")
+        self.assertEqual(example("Cancel", at="").describe(TODAY), "guests notified")
+        self.assertEqual(example("Cancel", at="", title="").spoken(TODAY), "Cancel a meeting, personal account")
+
+    def test_share_slack_and_accounts(self) -> None:
+        self.assertEqual(example("Share", title="", role="editor").spoken(TODAY),
+                         "Share request for a file, personal account")
+        self.assertEqual(example("Share", role="editor").describe(TODAY), "sam@example.com asks for editor access")
+        self.assertEqual(example("Slack", who="").spoken(TODAY), "Slack reply")
+        self.assertEqual(example("Slack", said="").describe(TODAY), "From Sam")
+        self.assertEqual(example("Slack", said="w" * 200).describe(TODAY), '"' + "w" * 137 + '..."')
+        self.assertEqual(example("Slack", said=r"two\nlines").describe(TODAY), '"two lines"')
+        self.assertEqual(example("Email", acct="school_mail").spoken(TODAY),
+                         "Email about Question about the lab schedule, school mail account")
+        self.assertEqual(example("Reply", subject="Fwd: RE: Budget").spoken(TODAY), "Reply about Budget, work account")
+
+    def test_spoken_is_plain_ascii_without_a_final_period(self) -> None:
+        for label in EXAMPLES:
+            with self.subTest(label=label):
+                spoken = example(label).spoken(TODAY)
+                self.assertTrue(spoken.isascii())
+                self.assertFalse(spoken.endswith("."))
+                self.assertNotIn("\u00b7", example(label).spoken(TODAY))
+
+    def test_default_today_is_the_real_today(self) -> None:
+        action = example("Todo")
+        self.assertEqual(action.describe(), action.describe(date.today()))
+        self.assertEqual(action.spoken(), action.spoken(date.today()))
+
+
+class BlockEventTests(unittest.TestCase):
+
+    def test_a_todo_block_is_a_calendar_proposal_with_the_todo_id(self) -> None:
+        todo = example("Todo")
+        block = todo.block_event()
+        self.assertIsNotNone(block)
+        self.assertEqual((block.id, block.kind, block.raw, block.title), (todo.id, CALENDAR, todo.raw, todo.title))
+        self.assertEqual((block.start, block.end, block.all_day, block.repeat), (dt(6, 19), dt(6, 21), False, ""))
+        self.assertEqual(block.notes,
+                         "Due Wed Oct 7, 11:59 PM - https://example.instructure.com/courses/1/assignments/2")
+        self.assertTrue(block.actionable)
+        self.assertEqual(block.describe(TODAY), f"Tue Oct 6{DOT}7:00-9:00 PM")
+        body = gcal.build_event_body(block, "America/Los_Angeles")
+        self.assertEqual(body["summary"], "Work on Problem set 3")
+        self.assertTrue(body["start"]["dateTime"].startswith("2026-10-06T19:00"))
+        self.assertTrue(body["end"]["dateTime"].startswith("2026-10-06T21:00"))
+        self.assertTrue(body["description"].startswith("Due Wed Oct 7, 11:59 PM - https://example.instructure.com"))
+
+    def test_notes_variants(self) -> None:
+        self.assertEqual(example("Todo", due="2026-10-07", link="").block_event().notes, "Due Wed Oct 7")
+        self.assertEqual(example("Todo", due="2027-01-05", block="2026-12-30 10:00-11:00", link="")
+                         .block_event().notes, "Due Tue Jan 5, 2027")
+
+    def test_only_a_valid_todo_with_a_block_has_one(self) -> None:
+        for action in (example("Todo", block=""), example("Reply"), example("Move"), parse_action_line(CHESS),
+                       example("Todo", block="2026-10-06"), parse_action_line("Todo: renew parking permit")):
+            with self.subTest(kind=action.kind, raw=action.raw[:30]):
+                self.assertIsNone(action.block_event())
+
+
+class CardViewTests(unittest.TestCase):
+
+    def test_per_kind(self) -> None:
+        reply_body = "Hi both,\nShall we keep it at noon with the two of us, or move it to 2 PM?\nThanks"
+        expected = {
+            "Reply": CardView("reply \u00b7 work", "Re: Thursday noon meeting", "To: ana@example.edu, ben@example.edu",
+                              body=reply_body, open_text="Open thread", copy_text="Copy reply", approve_text="Done",
+                              decidable=True),
+            "Email": CardView("email \u00b7 personal", "Question about the lab schedule", "To: office@example.edu",
+                              body="Hello,\nIs the lab open on Saturday?\nThanks", copy_text="Copy email",
+                              approve_text="Done", decidable=True),
+            "RSVP": CardView("rsvp \u00b7 work", "Speaker series", example("RSVP").describe(TODAY),
+                             open_text="Open event", approve_text="Done", decidable=True),
+            "Move": CardView("move \u00b7 work", "Project sync", example("Move").describe(TODAY),
+                             body="Moving to 2 PM so everyone can join.", copy_text="Copy note", approve_text="Done",
+                             decidable=True),
+            "Cancel": CardView("cancel \u00b7 personal", "Study group", example("Cancel").describe(TODAY),
+                               approve_text="Done", decidable=True),
+            "Share": CardView("share \u00b7 personal", "Trip budget", "sam@example.com asks for viewer access",
+                              open_text="Open request", approve_text="Done", decidable=True),
+            "Slack": CardView("slack", "Slack message from Sam", '"are you free friday?"',
+                              body="Yes! Friday after 4 works.", open_text="Open in Slack", copy_text="Copy reply",
+                              approve_text="Done", decidable=True),
+            "Todo": CardView("todo", "Work on Problem set 3", example("Todo").describe(TODAY),
+                             open_text="Open in Canvas", approve_text="Add block", decidable=True),
+            "Open": CardView("open", "Lab safety form", "docs.google.com", open_text="Open", approve_text="Done",
+                             decidable=True),
+        }
+        for label, view in expected.items():
+            with self.subTest(label=label):
+                self.assertEqual(card_view(example(label), TODAY), view)
+
+    def test_variants(self) -> None:
+        self.assertEqual(card_view(example("Todo", link="https://docs.google.com/x"), TODAY).open_text, "Open")
+        self.assertEqual(card_view(example("Todo", block=""), TODAY).approve_text, "Done")
+        self.assertEqual(card_view(example("RSVP", body="Running late"), TODAY).copy_text, "Copy note")
+        self.assertEqual(card_view(example("Email", link="https://mail.google.com/mail/#all/1"), TODAY).open_text,
+                         "Open")
+        replied = card_view(example("Reply", replied="yes"), TODAY)
+        self.assertEqual(replied, CardView("reply \u00b7 work", "Re: Thursday noon meeting",
+                                           "The briefing says you already replied", open_text="Open thread"))
+
+    def test_calendar_and_legacy_cards(self) -> None:
+        self.assertEqual(card_view(parse_action_line(CHESS), TODAY),
+                         CardView("calendar", "Chess Club Weekly Meeting",
+                                  f"Fri Oct 9{DOT}3:00-4:00 PM{DOT}weekly until Dec 11", approve_text="Approve",
+                                  decidable=True))
+        self.assertEqual(card_view(parse_action_line(FILM), TODAY).detail,
+                         f"Tue Oct 6{DOT}5:00-6:00 PM{DOT}Central Library, Media Lab")
+        self.assertEqual(card_view(parse_action_line("Reply: Carol about the draft"), TODAY),
+                         CardView("reply", "Carol about the draft", "Information only"))
+        self.assertEqual(card_view(parse_action_line("Nothing needs your OK today."), TODAY),
+                         CardView("note", "Nothing needs your OK today.", "Information only"))
+        broken = "Calendar: Dentist checkup | sometime next week"
+        self.assertEqual(card_view(parse_action_line(broken), TODAY),
+                         CardView("calendar", broken, "Can't read this line: no date (expected YYYY-MM-DD, "
+                                                     "optionally with HH:MM-HH:MM)"))
+
+    def test_errored_key_value_line(self) -> None:
+        line = kv_line("Reply", REPLY_PAIRS, to="bob@")
+        view = card_view(parse_action_line(line), TODAY)
+        self.assertEqual(view, CardView("reply \u00b7 work", line[:157].rstrip() + "...",
+                                        'Can\'t read this line: to=: "bob@" is not an email address'))
+        self.assertLessEqual(len(view.title), 160)
+        short = "Open: title=Form | link=http://x.example/a"
+        self.assertEqual(card_view(parse_action_line(short), TODAY).title, short)
+
+    def test_note_shows_at_most_two_warnings(self) -> None:
+        one = card_view(example("Reply", replied=None), TODAY)
+        self.assertEqual(one.note, REPLIED_WARNING)
+        two = card_view(example("Reply", replied=None, link="http://x.example/a", due="2026-10-04"), TODAY)
+        self.assertEqual(two.note, f"Link hidden: not an https link{DOT}{REPLIED_WARNING}")
+        # No kind produces three warnings today, so the cap is checked on a hand-made proposal.
+        three = dataclasses.replace(example("Reply"), warnings=("first", "second", "third"))
+        self.assertTrue(three.decidable)
+        self.assertEqual(card_view(three, TODAY).note, f"first{DOT}second")
+        both = example("Todo", due="2026-10-06 20:00", link="https://lms.example.edu/a", block="2026-10-06 19:00-21:00")
+        self.assertEqual(len(both.warnings), 2)
+        rsvp = example("RSVP", at="soon", link="http://x.example/a")
+        self.assertEqual(rsvp.warnings, ("at= could not be read; not shown", "Link hidden: not an https link"))
+        self.assertEqual(card_view(rsvp, TODAY).note,
+                         f"at= could not be read; not shown{DOT}Link hidden: not an https link")
+
+    def test_result_text(self) -> None:
+        self.assertEqual(result_text(example("Todo"), "created"), "Block added")
+        self.assertEqual(result_text(example("Todo"), "denied"), "")
+        self.assertEqual(result_text(example("Todo", block=""), "denied"), "Dismissed")
+        self.assertEqual(result_text(example("Reply"), "denied"), "Dismissed")
+        self.assertEqual(result_text(example("Reply"), "done"), "")
+        self.assertEqual(result_text(parse_action_line(CHESS), "denied"), "")
+        self.assertEqual(result_text(parse_action_line(CHESS), "created"), "")
+        self.assertEqual(result_text(example("Todo"), "exists"), "")
 
 
 # --------------------------------------------------------------------------

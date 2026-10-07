@@ -2,21 +2,34 @@
 
 The scheduled briefing task (README: "Instructions for the Claude briefing
 task") writes one line per proposal under a heading named
-"Proposed actions":
+"Proposed actions". Two line formats are read:
 
     Calendar: <title> | <when> | <repeat> | <where> | <notes>
+    <Kind>: key=value | key=value | ... | body=<text>
+
+The second one (README: "Proposed actions format") is for the other kinds:
+Reply, Email, RSVP, Move, Cancel, Share, Slack, Todo and Open. A line is read
+that way only when its label is exactly one of those kinds and its first field
+is a key that kind knows; every other line ("Reply: Carol about the draft")
+goes through the Calendar / free-text path exactly as before.
 
     parse_action_line(text)    one line -> ProposedAction (never raises)
     extract_actions(lines)     pull that section out of a page's FlatLines
-    ActionStore(path)          persisted decisions (created / exists / denied / failed)
+    link_allowed(url)          the https hosts a card's Open may open
+    card_view(action, today)   what a card shows (kind label, texts, buttons)
+    ActionStore(path)          persisted decisions (created / exists / denied /
+                               done / failed, plus the later sent / running / unknown)
 
-Only "Calendar:" lines are actionable. Other kinds ("Reply:", "Todo:") and
-lines that cannot be parsed stay informational; ``error`` says why a line could
-not be read. Nothing here talks to Google: gcal.py does that, and only after an
+A Calendar line is approved by creating the event; a Todo with a block= time
+by adding that block through the same calendar flow. The other kinds are
+hand-offs in this version: their cards open the source link, copy the drafted
+text and record Done or Deny, and nothing is sent. Free-text lines and lines
+that cannot be read stay informational; ``error`` says why a line could not be
+read. Nothing here talks to Google: gcal.py does that, and only after an
 explicit Approve.
 
-Qt-free. Briefing content is personal, so only counts and action ids are
-logged, never text.
+Qt-free. Briefing content is personal, so only counts, action ids, kinds,
+account aliases and statuses are logged, never text, addresses or links.
 """
 
 from __future__ import annotations
@@ -28,28 +41,53 @@ import os
 import re
 import tempfile
 import threading
+import unicodedata
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 from .models import DIVIDER, HEADING, PARAGRAPH, FlatLine
 
 logger = logging.getLogger(__name__)
 
 CALENDAR = "calendar"
+REPLY = "reply"       # answer a message in an existing Gmail thread
+EMAIL = "email"       # a new email
+RSVP = "rsvp"         # answer a calendar invitation
+MOVE = "move"         # move an event you organize
+CANCEL = "cancel"     # cancel an event you organize
+SHARE = "share"       # a Drive access request
+SLACK = "slack"       # answer a Slack message
+TODO = "todo"         # something due, optionally with a calendar block to work on it
+OPEN = "open"         # a page to look at
 UNKNOWN = "unknown"
+STRUCTURED_KINDS = frozenset({REPLY, EMAIL, RSVP, MOVE, CANCEL, SHARE, SLACK, TODO, OPEN})
+MAX_RECIPIENTS = 5    # to= plus cc= of a Reply or Email (not configurable)
+# The https hosts a card's Open may open, besides [actions] link_hosts. Calendar's own
+# "https://www.google.com/calendar/..." links are a separate, path-checked rule.
+BUILTIN_LINK_HOSTS = ("mail.google.com", "docs.google.com", "drive.google.com",
+                      "calendar.google.com", "meet.google.com", "*.slack.com", "*.instructure.com")
 DEFAULT_HEADINGS = ("Proposed actions",)
 DEFAULT_DURATION = timedelta(minutes=60)
 
 STATUS_CREATED = "created"   # Approve created the event
 STATUS_EXISTS = "exists"     # Approve found it already on the calendar
-STATUS_DENIED = "denied"
+STATUS_DENIED = "denied"     # Deny (shown as "dismissed" on cards without an Approve)
 STATUS_FAILED = "failed"     # not final: the proposal stays pending and can be retried
-STATUSES = (STATUS_CREATED, STATUS_EXISTS, STATUS_DENIED, STATUS_FAILED)
-DECIDED_STATUSES = frozenset({STATUS_CREATED, STATUS_EXISTS, STATUS_DENIED})
+STATUS_DONE = "done"         # you handled it yourself (a card without an Approve)
+STATUS_SENT = "sent"         # Jarvis carried it out (later versions)
+STATUS_RUNNING = "running"   # written right before a call that is not repeatable (later versions)
+STATUS_UNKNOWN = "unknown"   # stopped or timed out mid-call; never retried by itself
+STATUSES = (STATUS_CREATED, STATUS_EXISTS, STATUS_DENIED, STATUS_FAILED, STATUS_DONE, STATUS_SENT,
+            STATUS_RUNNING, STATUS_UNKNOWN)
+# FAILED and UNKNOWN are not decisions: the card keeps its buttons.
+DECIDED_STATUSES = frozenset({STATUS_CREATED, STATUS_EXISTS, STATUS_DENIED, STATUS_DONE, STATUS_SENT,
+                              STATUS_RUNNING})
+INTERRUPTED_MESSAGE = "Jarvis stopped while this was running; check before retrying"
 
 _WEEKDAY_SHORT = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _WEEKDAY_LONG = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
@@ -83,6 +121,12 @@ class ProposedAction:
     inclusive ``all_day_end`` instead. ``repeat`` holds normalized words
     ("weekly until 2026-12-11", "daily x 5") and ``rrule`` the matching RRULE
     ("" = one-off). ``error`` says why the line could not be read.
+
+    Lines in the key=value format (``structured``) keep their normalized
+    values in ``fields`` (canonical key order, body excluded), the account
+    alias in ``account``, an allowlisted https link in ``link``, the drafted
+    text in ``body`` and soft problems in ``warnings``. ``start``/``end`` are
+    a Todo's block or a Move's new time; ``title`` is the card headline.
     """
 
     id: str
@@ -98,23 +142,89 @@ class ProposedAction:
     where: str = ""
     notes: str = ""
     error: str = ""
+    account: str = ""                          # alias ("work"), "" when none
+    fields: tuple[tuple[str, str], ...] = ()   # normalized values, canonical key order, body excluded
+    link: str = ""                             # allowlisted https link, "" when none or rejected
+    body: str = ""                             # unescaped body (or Slack reply), "" when none
+    warnings: tuple[str, ...] = ()             # soft problems, shown as the card's amber note
+    structured: bool = False                   # read by the key=value path (errored lines too)
+
+    @property
+    def decidable(self) -> bool:
+        """The card takes a decision: Deny plus Approve, Add block or Done.
+
+        A Calendar line without an error, or a key=value line without one
+        (except a Reply the briefing says was already sent). Decidable
+        proposals count as pending until decided and are spoken in "Needs
+        your OK".
+        """
+        if self.error:
+            return False
+        if self.kind == CALENDAR:
+            return True
+        if not self.structured or self.kind not in STRUCTURED_KINDS:
+            return False
+        return not (self.kind == REPLY and self.field("replied") == "yes")
 
     @property
     def actionable(self) -> bool:
-        return self.kind == CALENDAR and not self.error
+        """Approve makes Jarvis carry it out (a Calendar event, a Todo's block)."""
+        return self.decidable and bool(approve_label(self))
 
     @property
     def all_day(self) -> bool:
         return self.all_day_start is not None
 
+    @property
+    def speech_noun(self) -> tuple[str, str]:
+        """("a reply", "replies"): how "Needs your OK" counts this kind."""
+        return _SPEECH_NOUNS.get(self.kind, ("an item", "items"))
+
+    def approve_label(self) -> str:
+        return approve_label(self)
+
+    def field(self, key: str, default: str = "") -> str:
+        """The normalized value of ``key`` ("" or ``default`` when the line has none)."""
+        for name, value in self.fields:
+            if name == key:
+                return value
+        return default
+
+    def recipients(self) -> tuple[str, ...]:
+        """The to= addresses (normalized)."""
+        return _split_list(self.field("to"))
+
+    def cc(self) -> tuple[str, ...]:
+        return _split_list(self.field("cc"))
+
+    def due(self) -> date | datetime | None:
+        """due= as a date, or a naive datetime when it has a time."""
+        return _iso_value(self.field("due"))
+
+    def block_event(self) -> ProposedAction | None:
+        """A Todo's block as a Calendar proposal with the Todo's id ("" when there is no block).
+
+        The calendar worker reports its result under that id, so it lands on the Todo's card.
+        """
+        if self.kind != TODO or not self.decidable or self.start is None or self.end is None:
+            return None
+        due = self.due()
+        notes = f"Due {_due_text(due, show_year=due is not None and due.year != self.start.year)}" if due else ""
+        if self.link:
+            notes = f"{notes} - {self.link}" if notes else self.link
+        return ProposedAction(id=self.id, kind=CALENDAR, raw=self.raw, title=self.title,
+                              start=self.start, end=self.end, notes=notes)
+
     def describe(self, today: date | None = None) -> str:
-        """Display detail: "Fri Oct 9 \u00b7 3:00-4:00 PM \u00b7 weekly until Dec 11" ("" if not actionable).
+        """Display detail: "Fri Oct 9 \u00b7 3:00-4:00 PM \u00b7 weekly until Dec 11" ("" if not decidable).
 
         Years are shown only for dates outside ``today``'s year (default: the real today).
         """
-        if not self.actionable:
+        if not self.decidable:
             return ""
         today = today or date.today()
+        if self.kind != CALENDAR:
+            return _describe_structured(self, today)
         parts = _describe_when(self, today)
         repeat = _repeat_words(self.repeat, today, spoken=False)
         return _SEPARATOR.join(part for part in (*parts, repeat) if part)
@@ -122,23 +232,72 @@ class ProposedAction:
     def spoken(self, today: date | None = None) -> str:
         """"Chess Club Weekly Meeting, Friday October 9, 3 to 4 PM, weekly until December 11".
 
-        No final period (the caller adds one); "" if not actionable.
+        No final period (the caller adds one); "" if not decidable.
         """
-        if not self.actionable:
+        if not self.decidable:
             return ""
         today = today or date.today()
+        if self.kind != CALENDAR:
+            return _spoken_structured(self, today)
         title = _spoken_title(self.title)
         repeat = _repeat_words(self.repeat, today, spoken=True)
         return ", ".join(part for part in (title, *_spoken_when(self, today), repeat) if part)
+
+
+def approve_label(action: ProposedAction) -> str:
+    """The text of the card's Approve button ("" = no Approve in this version: the card gets Done).
+
+    The one place later versions extend: Calendar lines are approved by
+    creating the event, a Todo with a block= time by adding that block.
+    """
+    if not action.decidable:
+        return ""
+    if action.kind == CALENDAR:
+        return "Approve"
+    if action.kind == TODO and action.start is not None:
+        return "Add block"
+    return ""
+
+
+_SPEECH_NOUNS = {
+    CALENDAR: ("a calendar invite", "calendar invites"),
+    REPLY: ("a reply", "replies"),
+    EMAIL: ("an email", "emails"),
+    RSVP: ("an invitation to answer", "invitations to answer"),
+    MOVE: ("a meeting to move", "meetings to move"),
+    CANCEL: ("a meeting to cancel", "meetings to cancel"),
+    SHARE: ("a share request", "share requests"),
+    SLACK: ("a Slack reply", "Slack replies"),
+    TODO: ("a to-do", "to-dos"),
+    OPEN: ("a link to check", "links to check"),
+}
+
+
+def _split_list(value: str) -> tuple[str, ...]:
+    return tuple(item for item in value.split(", ") if item) if value else ()
+
+
+def _iso_value(value: str) -> date | datetime | None:
+    """"2026-10-07" -> date, "2026-10-07T23:59" -> datetime, anything else -> None."""
+    try:
+        return datetime.fromisoformat(value) if "T" in value else date.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 def _action_id(action: ProposedAction) -> str:
     """sha1 of (kind, title, start, end, all-day, rrule); where and notes do not count.
 
     A line that is not actionable has no reliable fields, so its raw text
-    stands in for the title.
+    stands in for the title. A key=value line without an error is keyed by
+    what it acts on (``_structured_target``): rewording the draft, the title
+    or the link keeps the id, a new message or a new time changes it.
     """
-    if action.actionable:
+    if action.structured and not action.error and action.kind in STRUCTURED_KINDS:
+        parts: tuple[str, ...] = (action.kind, *_structured_target(action))
+        return hashlib.sha1("\x1f".join(parts).encode("utf-8")).hexdigest()[:16]
+    calendar = action.kind == CALENDAR and not action.error
+    if calendar:
         name = action.title
         if action.all_day_start is not None:
             first, last = action.all_day_start.isoformat(), _iso(action.all_day_end)
@@ -147,8 +306,30 @@ def _action_id(action: ProposedAction) -> str:
     else:
         name, first, last = action.raw, "", ""
     parts = (action.kind, " ".join(name.casefold().split()), first, last,
-             "1" if action.all_day else "0", action.rrule if action.actionable else "")
+             "1" if action.all_day else "0", action.rrule if calendar else "")
     return hashlib.sha1("\x1f".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def _structured_target(action: ProposedAction) -> tuple[str, ...]:
+    """(account part, *target) for the id of a valid key=value line; never the body, link or warnings."""
+    kind, field = action.kind, action.field
+    if kind == REPLY:
+        target = field("msgid") or "gmid:" + field("gmid")
+        return action.account, target
+    if kind == EMAIL:
+        to = ",".join(sorted(address.casefold() for address in action.recipients()))
+        return action.account, to, " ".join(field("subject").casefold().split())
+    if kind in (RSVP, CANCEL):
+        return action.account, field("cal", "primary"), field("event")
+    if kind == MOVE:
+        return action.account, field("cal", "primary"), field("event"), _iso(action.start), _iso(action.end)
+    if kind == SHARE:
+        return action.account, field("file"), field("who").casefold()
+    if kind == SLACK:
+        return "", field("team"), field("channel"), field("thread"), field("ts")
+    if kind == TODO:
+        return "", " ".join(action.title.casefold().split()), field("due")
+    return "", action.link   # OPEN
 
 
 def _iso(value: date | datetime | None) -> str:
@@ -178,8 +359,16 @@ _CALENDAR_LABELS = frozenset({"calendar", "cal", "calendar event", "calendar inv
 _KIND_ALIASES = {"to do": "todo", "follow up": "followup"}
 
 
-def parse_action_line(text: str) -> ProposedAction:
-    """One line of the section -> ProposedAction. Never raises: problems go to ``error``."""
+def parse_action_line(text: str, *, link_hosts: Sequence[str] = ()) -> ProposedAction:
+    """One line of the section -> ProposedAction. Never raises: problems go to ``error``.
+
+    A key=value line (``_structured_line``) is read by its own parser;
+    ``link_hosts`` are the extra hosts its link may point to ([actions]
+    link_hosts). Every other line is read as before.
+    """
+    structured = _structured_line(text or "", link_hosts)
+    if structured is not None:
+        return structured
     raw = _clean_line(text or "")
     if not raw:
         return _make_action(UNKNOWN, raw, error="empty line")
@@ -229,6 +418,592 @@ def _parse_calendar(raw: str, body: str) -> ProposedAction:
 def _title_text(text: str) -> str:
     # The title is spoken and shown as a heading: a link or URL in it is noise.
     return _text_prep().strip_markdown(text) or text
+
+
+# ---- key=value lines ----------------------------------------------------------
+#
+# "Reply: acct=work | thread=... | to=... | subject=... | body=..." (README:
+# "Proposed actions format"). Values are taken as written: the markdown cleanup
+# above would break Message-IDs, ids with "_" and the drafted text.
+
+_LINE_CAP = 12000
+_LINK_CAP = 2048
+_SUBJECT_CAP = 250
+_TITLE_CAP = 200
+_WHO_CAP = 80
+_SAID_CAP = 400
+_LONG_BODY_CAP = 5000    # Reply, Email, Slack
+_NOTE_BODY_CAP = 1000    # RSVP, Move, Cancel
+_ADDRESS_CAP = 254
+_QUOTE_CHARS = 40        # a bad value quoted in an error, middle elided
+_MIN_RANGE = timedelta(minutes=5)
+_MAX_RANGE = timedelta(hours=12)
+
+_STRUCTURED_LABELS = {
+    "reply": REPLY, "email": EMAIL, "e mail": EMAIL, "rsvp": RSVP, "move": MOVE, "cancel": CANCEL,
+    "share": SHARE, "slack": SLACK, "todo": TODO, "to do": TODO, "open": OPEN,
+}
+
+
+@dataclass(frozen=True)
+class _Key:
+    name: str
+    type: str
+    required: bool = False
+
+
+# Canonical key order per kind (the order the briefing task writes them in).
+_SCHEMAS: dict[str, tuple[_Key, ...]] = {
+    REPLY: (_Key("acct", "alias", True), _Key("thread", "gmail_id", True), _Key("msgid", "msgid"),
+            _Key("gmid", "gmail_id"), _Key("to", "addresses", True), _Key("cc", "addresses"),
+            _Key("subject", "subject", True), _Key("replied", "replied"), _Key("due", "due"),
+            _Key("link", "link"), _Key("body", "body", True)),
+    EMAIL: (_Key("acct", "alias", True), _Key("to", "addresses", True), _Key("cc", "addresses"),
+            _Key("subject", "subject", True), _Key("due", "due"), _Key("link", "link"),
+            _Key("body", "body", True)),
+    RSVP: (_Key("acct", "alias", True), _Key("event", "event_id", True), _Key("cal", "cal_id"),
+           _Key("answer", "answer", True), _Key("notify", "notify"), _Key("title", "title"),
+           _Key("at", "at"), _Key("due", "due"), _Key("link", "link"), _Key("body", "body")),
+    MOVE: (_Key("acct", "alias", True), _Key("event", "event_id", True), _Key("cal", "cal_id"),
+           _Key("when", "range", True), _Key("notify", "notify"), _Key("title", "title"),
+           _Key("at", "at"), _Key("link", "link"), _Key("body", "body")),
+    CANCEL: (_Key("acct", "alias", True), _Key("event", "event_id", True), _Key("cal", "cal_id"),
+             _Key("notify", "notify"), _Key("title", "title"), _Key("at", "at"), _Key("link", "link"),
+             _Key("body", "body")),
+    SHARE: (_Key("acct", "alias", True), _Key("file", "file_id", True), _Key("who", "address", True),
+            _Key("role", "role"), _Key("title", "title"), _Key("link", "link")),
+    SLACK: (_Key("team", "slack_team"), _Key("channel", "slack_channel", True), _Key("ts", "slack_ts"),
+            _Key("thread", "slack_ts"), _Key("who", "who"), _Key("said", "said"), _Key("link", "link"),
+            _Key("body", "body", True)),
+    TODO: (_Key("title", "title", True), _Key("due", "due", True), _Key("block", "range"),
+           _Key("acct", "alias"), _Key("link", "link")),
+    OPEN: (_Key("title", "title", True), _Key("link", "link", True)),
+}
+_KEYS = {kind: frozenset(key.name for key in keys) for kind, keys in _SCHEMAS.items()}
+_BODY_CAPS = {REPLY: _LONG_BODY_CAP, EMAIL: _LONG_BODY_CAP, SLACK: _LONG_BODY_CAP,
+              RSVP: _NOTE_BODY_CAP, MOVE: _NOTE_BODY_CAP, CANCEL: _NOTE_BODY_CAP}
+_DEFAULTS = {"cal_id": "primary", "notify": "all", "replied": "unknown", "role": "viewer"}
+_RANGE_EXAMPLES = {"block": "19:00-21:00", "when": "13:00-14:00"}
+# A card without a title= still needs a headline.
+_FALLBACK_TITLES = {RSVP: "Calendar invitation", MOVE: "Meeting to move", CANCEL: "Meeting to cancel",
+                    SHARE: "File share request"}
+
+_STRUCTURED_SPACES = str.maketrans({"\u00a0": " ", "\u2007": " ", "\u202f": " "})
+_EMOJI_PARTS = frozenset({"So", "Sk", "Mn"})   # what a zero-width joiner joins in a combined emoji
+_LEADER_RE = re.compile(r"^\s*(?:[-*+\u2022]\s+|\d{1,3}[.)]\s+|\[[ xX]?\]\s+|>\s*)")
+_LABEL_EMPHASIS_RE = re.compile(r"^(\*\*|__|\*|_)([A-Za-z][A-Za-z _-]{0,40}?)\s*(?:\1\s*:|:\s*\1)")
+_FIRST_KEY_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_]{0,23})\s*=")
+_FIELD_KEY_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_]{0,23})\s*=")
+# These stay linear on a 12000-character line: a search for "\s*\|\s*" (or a fullmatch of
+# "[^<>]*?\s*<") backtracks quadratically over a long run of spaces, and lines are read on the
+# GUI thread.
+_BODY_START_RE = re.compile(r"(?:^|\|)\s*body\s*=", re.IGNORECASE)
+_ESCAPE_RE = re.compile(r"\\([\\n])")
+_LINE_BREAK_RE = re.compile("[\n\r\x0b\x0c\x85\u2028\u2029]")
+_CONTROL_RE = re.compile("[\x00-\x08\x0e-\x1f\x7f-\x9f]")
+_BODY_CONTROL_RE = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029]")
+_SYMBOL_CATEGORIES = frozenset({"So", "Sk", "Cs"})
+_SYMBOL_EXTRAS = frozenset({"\ufe0e", "\ufe0f", "\u200d"})
+
+_ALIAS_RE = re.compile(r"[a-z][a-z0-9_-]{0,23}")
+_GMAIL_ID_RE = re.compile(r"[0-9A-Za-z_-]{6,64}")
+# Message-ID halves: printable ASCII without "<", ">", "@" or "|" (phase 3 writes it into In-Reply-To).
+_MSGID_PART = r"[\x21-\x3b\x3d\x3f\x41-\x7b\x7d\x7e]{1,250}"
+_MSGID_RE = re.compile(rf"<?({_MSGID_PART})@({_MSGID_PART})>?")
+_LOCAL_PART_RE = re.compile(r"[A-Za-z0-9!#$%&'*+/=?^_`{}~.-]{1,64}")
+_DOMAIN_RE = re.compile(r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}")
+_DISPLAY_NAME_RE = re.compile(r"[^<>]*<(?P<address>[^<>]*)>")
+_ADDRESS_SPLIT_RE = re.compile(r"[,;]")
+_DUE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})(?:(?:\s+|T)(\S.*))?")
+_ISO_DATE_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
+_EVENT_ID_RE = re.compile(r"[A-Za-z0-9_-]{5,1024}")
+_CAL_ID_RE = re.compile(r"primary|[\x21-\x3b\x3d\x3f-\x7b\x7d\x7e]{1,256}")   # printable ASCII but <, >, |
+_FILE_ID_RE = re.compile(r"[A-Za-z0-9_-]{10,200}")
+_SLACK_TEAM_RE = re.compile(r"[TE][A-Z0-9]{2,20}")
+_SLACK_CHANNEL_RE = re.compile(r"[CDG][A-Z0-9]{2,20}")
+_SLACK_TS_RE = re.compile(r"\d{9,12}\.\d{1,6}")
+_ANSWERS = {"yes": "yes", "accept": "yes", "accepted": "yes", "going": "yes", "no": "no",
+            "decline": "no", "declined": "no", "maybe": "maybe", "tentative": "maybe"}
+_NOTIFY = {"all": "all", "external": "external", "externalonly": "external", "none": "none"}
+_REPLIED = ("yes", "no", "unknown")
+_ROLES = ("viewer", "commenter", "editor")
+REPLIED_WARNING = "Couldn't tell if you already replied - check the thread first"
+BLOCK_WARNING = "The block ends after the due time"
+
+
+def _structured_line(text: str, link_hosts: Sequence[str]) -> ProposedAction | None:
+    """The line as a key=value proposal, or None when it is not one (the old path reads it)."""
+    try:
+        raw = _clean_structured(text)
+        found = _structured_kind(raw)
+    except Exception as exc:  # noqa: BLE001 - never lose a line: the old path reads it instead
+        logger.debug("Could not check a proposal line (%s)", type(exc).__name__)
+        return None
+    if found is None:
+        return None
+    kind, rest = found
+    try:
+        return _StructuredReader(kind, link_hosts).read(raw, rest)
+    except Exception as exc:  # noqa: BLE001 - parse_action_line never raises
+        logger.warning("Could not parse a %s line (%s)", kind, type(exc).__name__)
+        return _make_action(kind, raw, error="could not read this line", structured=True)
+
+
+def _clean_structured(text: str) -> str:
+    """Spaces normalized, invisible format characters, list / quote / checkbox markers, leading
+    emoji and an emphasized label ("**Reply:**") removed; otherwise the values stay as written."""
+    text = _drop_format_characters(text.translate(_STRUCTURED_SPACES))
+    for _ in range(4):
+        stripped = _LEADER_RE.sub("", text, count=1)
+        if stripped == text:
+            break
+        text = stripped
+    start = 0
+    while start < len(text) and (text[start].isspace() or text[start] in _SYMBOL_EXTRAS
+                                 or unicodedata.category(text[start]) in _SYMBOL_CATEGORIES):
+        start += 1
+    text = text[start:]
+    text = _LABEL_EMPHASIS_RE.sub(lambda m: m.group(2).rstrip() + ":", text, count=1)
+    return text.strip()
+
+
+def _drop_format_characters(text: str) -> str:
+    """``text`` without invisible format characters (Unicode Cf: zero-width spaces, direction
+    overrides such as U+202E, tag characters), so a value reads exactly as it shows: a "to=" written
+    with a zero-width space inside would show as a key in a subject without being one.
+
+    A zero-width joiner between two emoji parts (one combined emoji) stays.
+    """
+    if text.isascii():
+        return text
+    kept: list[str] = []
+    for index, char in enumerate(text):
+        if unicodedata.category(char) != "Cf":
+            kept.append(char)
+        elif (char == "\u200d" and kept and index + 1 < len(text)
+              and unicodedata.category(kept[-1]) in _EMOJI_PARTS
+              and unicodedata.category(text[index + 1]) in _EMOJI_PARTS):
+            kept.append(char)
+    return "".join(kept)
+
+
+def _structured_kind(line: str) -> tuple[str, str] | None:
+    """(kind, the text after "<Kind>:") when the label is a key=value kind and a known key comes first."""
+    match = _KIND_RE.match(line)
+    if match is None:
+        return None
+    label = " ".join(part for part in re.split(r"[\s_-]+", match.group("label").casefold()) if part)
+    kind = _STRUCTURED_LABELS.get(label)
+    if kind is None:
+        return None
+    rest = line[match.end():]
+    key = _FIRST_KEY_RE.match(rest)
+    if key is None or key.group(1).casefold() not in _KEYS[kind]:
+        return None
+    return kind, rest
+
+
+def _split_fields(kind: str, rest: str) -> dict[str, str]:
+    """key -> value as written (body= swallows the rest of the line; see README)."""
+    if len(rest) > _LINE_CAP:
+        raise _LineError(f"the line is too long ({len(rest)} characters, at most {_LINE_CAP})")
+    head, body = rest, None
+    if "body" in _KEYS[kind]:
+        match = _BODY_START_RE.search(rest)
+        if match is not None:
+            head, body = rest[:match.start()], rest[match.end():].strip()
+    values: dict[str, str] = {}
+    last = ""
+    for fragment in head.split("|"):
+        fragment = fragment.strip()
+        if not fragment:
+            continue
+        key_match = _FIELD_KEY_RE.match(fragment)
+        if key_match is None:
+            # A value that contained " | " (a subject, say): the next part still belongs to it.
+            if last:
+                values[last] += " | " + fragment
+            continue
+        key = key_match.group(1).casefold()
+        if key in values:
+            raise _LineError(f"{key}= appears twice")
+        if key == "bcc":
+            raise _LineError("bcc= is not supported")
+        values[key] = fragment[key_match.end():].strip()
+        last = key
+    unknown = sum(1 for key in values if key not in _KEYS[kind])
+    if unknown:
+        logger.debug("Ignored %d unknown key(s) (%s line)", unknown, kind)
+    if body is not None:
+        values["body"] = body
+    return values
+
+
+def _quoted(text: str) -> str:
+    """A bad value for an error message: in quotes, cut to 40 characters (middle elided)."""
+    text = " ".join(text.split())
+    if len(text) > _QUOTE_CHARS:
+        head = (_QUOTE_CHARS - 3 + 1) // 2
+        tail = _QUOTE_CHARS - 3 - head
+        text = f"{text[:head]}...{text[-tail:]}"
+    return f'"{text}"'
+
+
+def _unescape(text: str) -> str:
+    """body= / said=: "\\n" is a line break and "\\\\" a backslash; other backslashes stay."""
+    return _ESCAPE_RE.sub(lambda m: "\n" if m.group(1) == "n" else "\\", text)
+
+
+class _StructuredReader:
+    """Reads one key=value line of ``kind`` into ProposedAction fields (first error wins)."""
+
+    def __init__(self, kind: str, link_hosts: Sequence[str]) -> None:
+        self.kind = kind
+        self.link_hosts = (link_hosts,) if isinstance(link_hosts, str) else tuple(link_hosts or ())
+        self.attrs: dict[str, Any] = {"structured": True}
+        self.pairs: list[tuple[str, str]] = []
+        self.warnings: list[str] = []
+        self.to: tuple[str, ...] = ()
+        self.cc: tuple[str, ...] = ()
+        self.due: date | datetime | None = None
+        self.block: tuple[datetime, datetime] | None = None
+        self.title = ""
+        self.who = ""
+
+    def read(self, raw: str, rest: str) -> ProposedAction:
+        try:
+            values = _split_fields(self.kind, rest)
+            for key in _SCHEMAS[self.kind]:
+                self._read_key(key, values.get(key.name, ""))
+            self._cross_checks()
+        except _LineError as exc:
+            return self._action(raw, error=str(exc))
+        self.attrs["title"] = self._headline()
+        return self._action(raw)
+
+    def _action(self, raw: str, error: str = "") -> ProposedAction:
+        attrs = dict(self.attrs, fields=tuple(self.pairs), warnings=tuple(self.warnings))
+        if error:
+            attrs["error"] = error
+        return _make_action(self.kind, raw, **attrs)
+
+    def _read_key(self, key: _Key, text: str) -> None:
+        text = text.strip()
+        if key.type in ("body", "said") and text:
+            text = _BODY_CONTROL_RE.sub("", _unescape(text)).strip()
+        if not text:
+            if key.required:
+                raise _LineError(f"missing {key.name}=")
+            default = _DEFAULTS.get(key.type)
+            if default:
+                self.pairs.append((key.name, default))
+            if self.kind == REPLY and key.name == "gmid" and not self._has("msgid"):
+                raise _LineError("missing msgid= (or gmid=)")
+            return
+        value = getattr(self, "_read_" + key.type)(key.name, text)
+        if value is not None:
+            self.pairs.append((key.name, value))
+
+    def _has(self, name: str) -> bool:
+        return any(key == name for key, _ in self.pairs)
+
+    # ---- one reader per value type; each returns the normalized text (None = not kept) ----
+
+    def _read_alias(self, name: str, text: str) -> str:
+        value = text.casefold()
+        if not _ALIAS_RE.fullmatch(value):
+            raise _LineError(f"{name}=: {_quoted(text)} is not an account name (letters, digits, - or _)")
+        self.attrs["account"] = value
+        return value
+
+    def _read_gmail_id(self, name: str, text: str) -> str:
+        if not _GMAIL_ID_RE.fullmatch(text):
+            raise _LineError(f"{name}=: {_quoted(text)} is not a Gmail id")
+        return text
+
+    def _read_msgid(self, name: str, text: str) -> str:
+        match = _MSGID_RE.fullmatch(text)
+        if match is None:
+            raise _LineError(f"{name}=: {_quoted(text)} is not a Message-ID")
+        return f"<{match.group(1)}@{match.group(2)}>"
+
+    def _read_addresses(self, name: str, text: str) -> str | None:
+        addresses = _address_list(name, text)
+        if name == "to":
+            self.to = addresses
+        else:   # an address in both to= and cc= stays in to= only
+            seen = {address.casefold() for address in self.to}
+            addresses = tuple(address for address in addresses if address.casefold() not in seen)
+            self.cc = addresses
+        return ", ".join(addresses) or None
+
+    def _read_address(self, name: str, text: str) -> str:
+        addresses = _address_list(name, text)
+        if len(addresses) != 1:
+            raise _LineError(f"{name}=: give exactly one email address")
+        return addresses[0]
+
+    def _read_subject(self, name: str, text: str) -> str:
+        value = _plain_text(name, text, _SUBJECT_CAP)
+        if self.kind == REPLY and not value.casefold().startswith("re:"):
+            value = "Re: " + value
+        self.title = value
+        return value
+
+    def _read_title(self, name: str, text: str) -> str:
+        self.title = _plain_text(name, text, _TITLE_CAP)
+        return self.title
+
+    def _read_who(self, name: str, text: str) -> str:
+        self.who = _plain_text(name, text, _WHO_CAP)
+        return self.who
+
+    def _read_due(self, name: str, text: str) -> str:
+        self.due = _read_due(name, text)
+        return _iso(self.due)
+
+    def _read_range(self, name: str, text: str) -> str:
+        start, end = _read_range(name, text)
+        self.block = (start, end)
+        self.attrs.update(start=start, end=end)
+        return f"{_iso(start)}/{_iso(end)}"
+
+    def _read_at(self, name: str, text: str) -> str | None:
+        try:
+            when = _parse_when(text)
+        except _LineError:
+            self.warnings.append(f"{name}= could not be read; not shown")
+            return None
+        if when.all_day_start is not None:
+            return f"{_iso(when.all_day_start)}/{_iso(when.all_day_end)}"
+        return f"{_iso(when.start)}/{_iso(when.end)}"
+
+    def _read_answer(self, name: str, text: str) -> str:
+        return _choice(name, text, _ANSWERS, "use yes, no or maybe")
+
+    def _read_notify(self, name: str, text: str) -> str:
+        return _choice(name, text, _NOTIFY, "use all, external or none")
+
+    def _read_replied(self, name: str, text: str) -> str:
+        return _choice(name, text, {word: word for word in _REPLIED}, "use yes, no or unknown")
+
+    def _read_role(self, name: str, text: str) -> str:
+        return _choice(name, text, {word: word for word in _ROLES}, "use viewer, commenter or editor")
+
+    def _read_event_id(self, name: str, text: str) -> str:
+        return _matching(name, text, _EVENT_ID_RE, "is not a calendar event id")
+
+    def _read_cal_id(self, name: str, text: str) -> str:
+        return _matching(name, text, _CAL_ID_RE, "is not a calendar id")
+
+    def _read_file_id(self, name: str, text: str) -> str:
+        return _matching(name, text, _FILE_ID_RE, "is not a Drive file id")
+
+    def _read_slack_team(self, name: str, text: str) -> str:
+        return _matching(name, text, _SLACK_TEAM_RE, "is not a Slack workspace id")
+
+    def _read_slack_channel(self, name: str, text: str) -> str:
+        return _matching(name, text, _SLACK_CHANNEL_RE, "is not a Slack channel id")
+
+    def _read_slack_ts(self, name: str, text: str) -> str:
+        return _matching(name, text, _SLACK_TS_RE, "is not a Slack message ts")
+
+    def _read_link(self, name: str, text: str) -> str | None:
+        problem = _link_problem(text, self.link_hosts)
+        if problem:
+            if self.kind == OPEN:
+                raise _LineError(problem)
+            self.warnings.append(f"Link hidden: {problem}")
+            return None
+        self.attrs["link"] = text
+        return text
+
+    def _read_body(self, name: str, text: str) -> None:
+        cap = _BODY_CAPS.get(self.kind, _LONG_BODY_CAP)
+        if len(text) > cap:
+            raise _LineError(f"{name}= is too long ({len(text)} characters, at most {cap})")
+        self.attrs["body"] = text
+        return None
+
+    def _read_said(self, name: str, text: str) -> str:
+        if len(text) > _SAID_CAP:
+            raise _LineError(f"{name}= is too long ({len(text)} characters, at most {_SAID_CAP})")
+        return text
+
+    # ---- after every key -------------------------------------------------------------------
+
+    def _cross_checks(self) -> None:
+        if self.kind in (REPLY, EMAIL):
+            count = len(self.to) + len(self.cc)
+            if count > MAX_RECIPIENTS:
+                raise _LineError(f"to= and cc= name {count} addresses (at most {MAX_RECIPIENTS})")
+            if not self.to:
+                raise _LineError("missing to=")
+        if self.kind == TODO and self.block is not None and self.due is not None:
+            due = self.due if isinstance(self.due, datetime) else \
+                datetime.combine(self.due + timedelta(days=1), time())
+            if self.block[1] > due:
+                self.warnings.append(BLOCK_WARNING)
+        if self.kind == REPLY and dict(self.pairs).get("replied") == "unknown":
+            self.warnings.append(REPLIED_WARNING)
+
+    def _headline(self) -> str:
+        if self.kind == SLACK:
+            return f"Slack message from {self.who}" if self.who else "Slack message"
+        return self.title or _FALLBACK_TITLES.get(self.kind, "")
+
+
+def _plain_text(name: str, text: str, cap: int) -> str:
+    """A one-line text field: no line breaks or control characters, spaces collapsed."""
+    if _LINE_BREAK_RE.search(text):
+        raise _LineError(f"{name}= has a line break")
+    if _CONTROL_RE.search(text):
+        raise _LineError(f"{name}= has a control character")
+    value = " ".join(text.split())
+    if len(value) > cap:
+        raise _LineError(f"{name}= is too long ({len(value)} characters, at most {cap})")
+    return value
+
+
+def _choice(name: str, text: str, choices: dict[str, str], hint: str) -> str:
+    value = choices.get(text.casefold())
+    if value is None:
+        raise _LineError(f"{name}=: {hint}")
+    return value
+
+
+def _matching(name: str, text: str, pattern: re.Pattern[str], problem: str) -> str:
+    if not pattern.fullmatch(text):
+        raise _LineError(f"{name}=: {_quoted(text)} {problem}")
+    return text
+
+
+def _address_list(name: str, text: str) -> tuple[str, ...]:
+    """"Ana <ana@example.edu>; ben@Example.EDU" -> ("ana@example.edu", "ben@example.edu")."""
+    addresses: list[str] = []
+    seen: set[str] = set()
+    for item in _ADDRESS_SPLIT_RE.split(text):
+        if not item.strip():
+            continue
+        address = _address(name, item.strip())
+        if address.casefold() not in seen:
+            seen.add(address.casefold())
+            addresses.append(address)
+    return tuple(addresses)
+
+
+def _address(name: str, item: str) -> str:
+    """One "local@domain" or "Display Name <local@domain>"; the domain is casefolded."""
+    match = _DISPLAY_NAME_RE.fullmatch(item)
+    address = match.group("address").strip() if match is not None else item
+    local, at, domain = address.rpartition("@")
+    if (not at or not _LOCAL_PART_RE.fullmatch(local) or local.startswith(".") or local.endswith(".")
+            or ".." in local or not _DOMAIN_RE.fullmatch(domain) or len(address) > _ADDRESS_CAP):
+        raise _LineError(f"{name}=: {_quoted(item)} is not an email address")
+    return f"{local}@{domain.casefold()}"
+
+
+def _read_due(name: str, text: str) -> date | datetime:
+    """"2026-10-07", "2026-10-07 23:59" or "2026-10-07 11:59 PM"."""
+    match = _DUE_RE.fullmatch(text)
+    if match is None:
+        raise _LineError(f"{name}=: {_quoted(text)} is not a date (YYYY-MM-DD, optionally with a time)")
+    year, month, day_number = (int(part) for part in _ISO_DATE_RE.fullmatch(match.group(1)).groups())
+    try:
+        day = date(year, month, day_number)
+    except ValueError:
+        raise _LineError(f'{name}=: "{match.group(1)}" is not a real date') from None
+    clock = match.group(2)
+    if clock is None:
+        return day
+    try:
+        minutes = _lone_minutes(_read_clock(" ".join(clock.casefold().split())))
+    except _LineError as exc:
+        raise _LineError(f"{name}=: {exc}") from None
+    return datetime.combine(day, time()) + timedelta(minutes=minutes)
+
+
+def _read_range(name: str, text: str) -> tuple[datetime, datetime]:
+    """A timed range in the Calendar grammar ("2026-10-06 19:00-21:00"), 5 minutes to 12 hours."""
+    try:
+        when = _parse_when(text)
+    except _LineError as exc:
+        raise _LineError(f"{name}=: {exc}") from None
+    if when.start is None or when.end is None:
+        day = when.all_day_start.isoformat() if when.all_day_start is not None else "YYYY-MM-DD"
+        raise _LineError(f"{name}=: give a time range like {day} {_RANGE_EXAMPLES.get(name, '13:00-14:00')}")
+    if not _MIN_RANGE <= when.end - when.start <= _MAX_RANGE:
+        raise _LineError(f"{name}=: the time range must be 5 minutes to 12 hours long")
+    return when.start, when.end
+
+
+# ---- links -----------------------------------------------------------------------
+
+_HOST_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*")
+_NOT_HTTPS = "not an https link"
+
+
+def link_allowed(url: str, extra_hosts: Sequence[str] = ()) -> bool:
+    """True for an https link a card's Open may open.
+
+    https only, no user name or port, an ASCII host that is one of
+    BUILTIN_LINK_HOSTS (www.google.com only under /calendar/) or matches an
+    ``extra_hosts`` pattern ("name.tld" exactly, "*.name.tld" any
+    subdomain). Checked when the line is read and again on the click.
+    """
+    return not _link_problem(url, extra_hosts)
+
+
+def _link_problem(url: str, extra_hosts: Sequence[str] = ()) -> str:
+    """Why Open may not open ``url`` ("" when it may)."""
+    if not isinstance(url, str) or not url or len(url) > _LINK_CAP or "\\" in url:
+        return _NOT_HTTPS
+    if any(ch.isspace() or unicodedata.category(ch) in ("Cc", "Cf") for ch in url):
+        return _NOT_HTTPS
+    if not url[:8].casefold() == "https://":
+        return _NOT_HTTPS
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return _NOT_HTTPS
+    if parts.scheme != "https" or parts.username is not None or parts.password is not None:
+        return _NOT_HTTPS
+    if port not in (None, 443):
+        return _NOT_HTTPS
+    # "/calendar/../url" (also as "%2e%2e" or ".%2E") passes a path check, but the browser removes
+    # the dot segments and opens "/url": refused on every host.
+    if any(unquote(segment) in (".", "..") for segment in parts.path.split("/")):
+        return _NOT_HTTPS
+    host = (parts.hostname or "").rstrip(".")
+    if not host or not host.isascii() or not _HOST_RE.fullmatch(host):
+        return _NOT_HTTPS
+    extras = (extra_hosts,) if isinstance(extra_hosts, str) else tuple(extra_hosts or ())
+    patterns = [pattern.strip().casefold().rstrip(".") for pattern in extras if isinstance(pattern, str)]
+    if any(label.startswith("xn--") for label in host.split(".")):
+        allowed = host in patterns   # an IDN host only when listed by its exact name
+    else:
+        allowed = _host_listed(host, BUILTIN_LINK_HOSTS) or _host_listed(host, patterns) or (
+            host == "www.google.com" and parts.path.startswith("/calendar/"))
+    return "" if allowed else f"{host} is not on the list of hosts Open may open ([actions] link_hosts)"
+
+
+def _host_listed(host: str, patterns: Sequence[str]) -> bool:
+    for pattern in patterns:
+        if pattern.startswith("*."):
+            if host.endswith(pattern[1:]) and len(host) > len(pattern) - 1:
+                return True
+        elif host == pattern:
+            return True
+    return False
+
+
+def link_host(url: str) -> str:
+    """The host of ``url`` ("docs.google.com"), "" when it has none."""
+    try:
+        return (urlsplit(url).hostname or "").rstrip(".")
+    except ValueError:
+        return ""
 
 
 # ---- markdown cleanup that keeps URLs ------------------------------------
@@ -713,6 +1488,156 @@ def _spoken_times(start: datetime, end: datetime) -> str:
     return f"{_spoken_clock(start, True)} to {_spoken_clock(end, True)}"
 
 
+_NOTIFY_WORDS = {"all": "guests notified", "external": "only outside guests notified",
+                 "none": "guests not notified"}
+_RSVP_VERBS = {"yes": "Accept", "no": "Decline", "maybe": "Answer maybe to"}
+_REPLY_PREFIX_RE = re.compile(r"^(?:(?:re|fwd?|aw)\s*:\s*)+", re.IGNORECASE)
+_SAID_CHARS = 140
+
+
+def _due_text(due: date | datetime, *, show_year: bool) -> str:
+    """"Wed Oct 7" or "Wed Oct 7, 11:59 PM"."""
+    text = _short_day(due if not isinstance(due, datetime) else due.date(), show_year)
+    if isinstance(due, datetime):
+        text += f", {_clock_text(due)} {_meridiem(due)}"
+    return text
+
+
+def _due_words(due: date | datetime | None, today: date) -> str:
+    """"due today", "due tomorrow" or "due Wed Oct 7" (+ ", 11:59 PM" when timed); "" without a due."""
+    if due is None:
+        return ""
+    day = due.date() if isinstance(due, datetime) else due
+    if day == today:
+        words = "due today"
+    elif day == today + timedelta(days=1):
+        words = "due tomorrow"
+    else:
+        words = "due " + _short_day(day, day.year != today.year)
+    if isinstance(due, datetime):
+        words += f", {_clock_text(due)} {_meridiem(due)}"
+    return words
+
+
+def _spoken_due(due: date | datetime | None, today: date) -> str:
+    """"due today", "due Wednesday October 7 at 11:59 PM"."""
+    if due is None:
+        return ""
+    day = due.date() if isinstance(due, datetime) else due
+    if day == today:
+        words = "due today"
+    elif day == today + timedelta(days=1):
+        words = "due tomorrow"
+    else:
+        words = "due " + _long_day(day, day.year != today.year)
+    if isinstance(due, datetime):
+        words += f" at {_spoken_clock(due, True)}"
+    return words
+
+
+def _field_when(action: ProposedAction, key: str) -> _When | None:
+    """A "<start>/<end>" range field (at=, when=, block=) as a _When; None when absent."""
+    first, _, last = action.field(key).partition("/")
+    start, end = _iso_value(first), _iso_value(last)
+    if isinstance(start, datetime) and isinstance(end, datetime):
+        return _When(start=start, end=end)
+    if isinstance(start, date) and not isinstance(start, datetime):
+        end_day = end if isinstance(end, date) and not isinstance(end, datetime) else start
+        return _When(all_day_start=start, all_day_end=end_day)
+    return None
+
+
+def _account_words(action: ProposedAction) -> str:
+    return f"{' '.join(re.split(r'[_-]+', action.account))} account" if action.account else ""
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _cut(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit - 3].rstrip() + "..."
+
+
+def _describe_structured(action: ProposedAction, today: date) -> str:
+    """The card detail of a key=value proposal (README: "Other proposals")."""
+    kind, field = action.kind, action.field
+    due = _due_words(action.due(), today)
+    parts: list[str] = []
+    if kind in (REPLY, EMAIL):
+        parts.append("To: " + ", ".join(action.recipients()))
+        if action.cc():
+            parts.append("Cc: " + ", ".join(action.cc()))
+        parts.append(due)
+    elif kind == RSVP:
+        at = _field_when(action, "at")
+        parts += [f"Answer: {field('answer')}", *(_describe_when(at, today) if at else []), due]
+    elif kind == MOVE:
+        new = _describe_when(action, today)
+        if new:
+            parts += [f"New time: {new[0]}", *new[1:]]
+        parts.append(_NOTIFY_WORDS.get(field("notify"), ""))
+        at = _field_when(action, "at")
+        if at is not None:
+            same_day = (at.start is not None and action.start is not None
+                        and at.start.date() == action.start.date() and at.end is not None
+                        and _is_short(at.start, at.end))
+            was = _display_times(at.start, at.end) if same_day else ", ".join(_describe_when(at, today))
+            parts.append(f"was {was}")
+    elif kind == CANCEL:
+        at = _field_when(action, "at")
+        parts += [*(_describe_when(at, today) if at else []), _NOTIFY_WORDS.get(field("notify"), "")]
+    elif kind == SHARE:
+        parts.append(f"{field('who')} asks for {field('role', 'viewer')} access")
+    elif kind == SLACK:
+        said = _flat(field("said"))
+        parts.append(f'"{_cut(said, _SAID_CHARS)}"' if said else (f"From {field('who')}" if field("who") else ""))
+    elif kind == TODO:
+        parts.append(due[:1].upper() + due[1:])
+        block = _describe_when(action, today)
+        if block:
+            parts += [f"block {block[0]}", *block[1:]]
+    elif kind == OPEN:
+        parts.append(link_host(action.link))
+    return _SEPARATOR.join(part for part in parts if part)
+
+
+def _spoken_structured(action: ProposedAction, today: date) -> str:
+    """What "Needs your OK" says about a key=value proposal (no final period)."""
+    kind, field = action.kind, action.field
+    account = _account_words(action)
+    named = field("title")
+    name = _spoken_title(named) if named else ""
+    parts: list[str]
+    if kind in (REPLY, EMAIL):
+        subject = _REPLY_PREFIX_RE.sub("", action.title).strip() or action.title
+        verb = "Reply about" if kind == REPLY else "Email about"
+        parts = [f"{verb} {_spoken_title(subject)}", account, _spoken_due(action.due(), today)]
+    elif kind == RSVP:
+        at = _field_when(action, "at")
+        verb = _RSVP_VERBS.get(field("answer"), "Answer")
+        parts = [f"{verb} {name or 'an invitation'}", account, *(_spoken_when(at, today) if at else [])]
+    elif kind == MOVE:
+        new = _spoken_when(action, today)
+        target = f" to {new[0]}" if new else ""
+        parts = [f"Move {name or 'a meeting'}{target}", *new[1:], account]
+    elif kind == CANCEL:
+        at = _field_when(action, "at")
+        parts = [f"Cancel {name or 'a meeting'}", account, *(_spoken_when(at, today) if at else [])]
+    elif kind == SHARE:
+        parts = [f"Share request for {name or 'a file'}", account]
+    elif kind == SLACK:
+        who = field("who")
+        parts = [f"Slack reply to {_spoken_title(who)}" if who else "Slack reply"]
+    elif kind == TODO:
+        block = _spoken_when(action, today)
+        parts = [_spoken_title(action.title), _spoken_due(action.due(), today),
+                 "with a block " + ", ".join(block) if block else ""]
+    else:   # OPEN
+        parts = [_spoken_title(action.title)]
+    return ", ".join(part for part in parts if part)
+
+
 def _repeat_words(repeat: str, today: date, *, spoken: bool) -> str:
     """"weekly until Dec 11" / "every two weeks, 6 times"; unknown text is shown as written."""
     if not repeat:
@@ -751,7 +1676,8 @@ _TITLE_MAX_WORDS = 6
 
 
 def extract_actions(lines: Sequence[FlatLine],
-                    heading_names: Sequence[str] = DEFAULT_HEADINGS,
+                    heading_names: Sequence[str] = DEFAULT_HEADINGS, *,
+                    link_hosts: Sequence[str] = (),
                     ) -> tuple[list[ProposedAction], list[FlatLine]]:
     """Pull the "Proposed actions" section out of a page.
 
@@ -760,6 +1686,7 @@ def extract_actions(lines: Sequence[FlatLine],
     runs until the next heading of the same or a higher level; deeper
     subheadings belong to it. Returns (the parsed non-empty lines in page
     order, the page without the section). Duplicate ids keep the first.
+    ``link_hosts`` go to parse_action_line ([actions] link_hosts).
     """
     names = (heading_names,) if isinstance(heading_names, str) else tuple(heading_names)
     wanted = {key for key in map(_heading_key, names) if key}
@@ -777,7 +1704,7 @@ def extract_actions(lines: Sequence[FlatLine],
         if open_level is not None:
             if title is None or title[1] > open_level:
                 if title is None and _has_text(line):
-                    action = parse_action_line(line.text)
+                    action = parse_action_line(line.text, link_hosts=link_hosts)
                     if action.id in seen:
                         duplicates += 1
                     else:
@@ -792,9 +1719,25 @@ def extract_actions(lines: Sequence[FlatLine],
         kept.append(line)
 
     if sections:
-        logger.info("Proposed actions: %d line(s), %d actionable, %d duplicate(s) dropped",
-                    len(actions), sum(1 for a in actions if a.actionable), duplicates)
+        logger.info("Proposed actions: %d line(s), %d actionable, %d duplicate(s) dropped; "
+                    "%d to decide (%s)", len(actions), sum(1 for a in actions if a.actionable),
+                    duplicates, sum(1 for a in actions if a.decidable), _kind_counts(actions))
     return actions, kept
+
+
+def _kind_counts(actions: Sequence[ProposedAction]) -> str:
+    """"calendar 2, reply 1, note 1" in order of first appearance; a kind word the
+    briefing made up is counted as "other", so no page text reaches the log."""
+    counts: dict[str, int] = {}
+    for action in actions:
+        if action.kind == UNKNOWN:
+            name = "note"
+        elif action.kind == CALENDAR or action.kind in STRUCTURED_KINDS:
+            name = action.kind
+        else:
+            name = "other"
+        counts[name] = counts.get(name, 0) + 1
+    return ", ".join(f"{name} {count}" for name, count in counts.items()) or "none"
 
 
 def _heading_key(text: str) -> str:
@@ -851,6 +1794,102 @@ def _section_level(line: FlatLine, title: tuple[str, int] | None, wanted: set[st
 
 
 # --------------------------------------------------------------------------
+# Cards (Qt-free: ui.py turns a CardView into a hud.ActionCard)
+# --------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class CardView:
+    """What one NEEDS YOUR OK card shows."""
+
+    kind_label: str          # "reply \u00b7 work" (the HUD upper-cases it), "calendar", "note"
+    title: str
+    detail: str
+    body: str = ""           # body preview (unescaped); "" = no body line
+    open_text: str = ""      # the tools row's Open button ("" = none)
+    copy_text: str = ""      # the tools row's Copy button ("" = none)
+    approve_text: str = ""   # the right-hand decision button: approve_label or "Done"; "" when not decidable
+    decidable: bool = False
+    note: str = ""           # amber note: warnings joined by " \u00b7 " (at most two)
+
+
+INFO_DETAIL = "Information only"
+ALREADY_REPLIED = "The briefing says you already replied"
+DONE_TEXT = "Done"
+_RAW_SHOWN = 160
+_MAX_WARNINGS_SHOWN = 2
+_ACCOUNT_KINDS = frozenset({REPLY, EMAIL, RSVP, MOVE, CANCEL, SHARE})
+_OPEN_TEXTS = {REPLY: "Open thread", EMAIL: "Open", RSVP: "Open event", MOVE: "Open event",
+               CANCEL: "Open event", SHARE: "Open request", SLACK: "Open in Slack", TODO: "Open",
+               OPEN: "Open"}
+_COPY_TEXTS = {REPLY: "Copy reply", SLACK: "Copy reply", EMAIL: "Copy email", RSVP: "Copy note",
+               MOVE: "Copy note", CANCEL: "Copy note"}
+_COPIED_TEXTS = {REPLY: "Copied the reply", SLACK: "Copied the reply", EMAIL: "Copied the email",
+                 RSVP: "Copied the note", MOVE: "Copied the note", CANCEL: "Copied the note"}
+
+
+def kind_label(action: ProposedAction) -> str:
+    """"reply \u00b7 work", "todo", "calendar"; "note" for a line without a kind."""
+    if action.kind == UNKNOWN:
+        return "note"
+    if action.structured and action.account and action.kind in _ACCOUNT_KINDS:
+        return f"{action.kind}{_SEPARATOR}{action.account}"
+    return action.kind
+
+
+def open_text(action: ProposedAction) -> str:
+    """The tools row's Open label ("" when the card has no usable link)."""
+    if action.error or not action.structured or not action.link:
+        return ""
+    if action.kind == TODO and link_host(action.link).endswith(".instructure.com"):
+        return "Open in Canvas"
+    return _OPEN_TEXTS.get(action.kind, "")
+
+
+def copy_text(action: ProposedAction) -> str:
+    """The tools row's Copy label ("" when there is nothing to copy)."""
+    if not action.decidable or not action.body:
+        return ""
+    return _COPY_TEXTS.get(action.kind, "")
+
+
+def copied_text(action: ProposedAction) -> str:
+    """The activity line after a Copy ("Copied the reply")."""
+    return _COPIED_TEXTS.get(action.kind, "Copied the text")
+
+
+def card_view(action: ProposedAction, today: date) -> CardView:
+    """Kind label, texts and buttons of ``action``'s card (README: "Other proposals")."""
+    label = kind_label(action)
+    if action.error:
+        title = _cut(action.raw, _RAW_SHOWN) if action.structured else action.raw
+        return CardView(label, title, f"Can't read this line: {action.error}")
+    title = action.title or action.raw
+    if action.kind == CALENDAR:
+        parts = [action.describe(today)]
+        if action.where and "://" not in action.where:
+            parts.append(action.where)
+        return CardView(label, title, _SEPARATOR.join(part for part in parts if part),
+                        approve_text=approve_label(action), decidable=True)
+    if not action.structured:
+        return CardView(label, title, INFO_DETAIL)
+    if not action.decidable:   # a Reply the briefing says was sent already
+        return CardView(label, title, ALREADY_REPLIED, open_text=open_text(action))
+    note = _SEPARATOR.join(action.warnings[:_MAX_WARNINGS_SHOWN])
+    return CardView(label, title, action.describe(today), body=action.body, open_text=open_text(action),
+                    copy_text=copy_text(action), approve_text=approve_label(action) or DONE_TEXT,
+                    decidable=True, note=note)
+
+
+def result_text(action: ProposedAction, status: str) -> str:
+    """A card's result text when it differs from the HUD's default ("" = the default)."""
+    if action.kind == TODO and status == STATUS_CREATED:
+        return "Block added"
+    if action.decidable and not action.actionable and status == STATUS_DENIED:
+        return "Dismissed"
+    return ""
+
+
+# --------------------------------------------------------------------------
 # ActionStore
 # --------------------------------------------------------------------------
 
@@ -862,14 +1901,29 @@ def _aware(moment: datetime) -> datetime:
     return moment if moment.utcoffset() is not None else moment.astimezone()
 
 
+# acct= is page text, so only these aliases are logged by name; any other is logged as "other"
+# (it could be a name or a number). Phase 2 checks aliases against [accounts].
+_LOGGED_ALIASES = frozenset({"personal", "work"})
+
+
+def _logged_alias(account: str) -> str:
+    """``account`` as written to the log: "-" for none, "other" for an alias outside _LOGGED_ALIASES."""
+    if not account:
+        return "-"
+    return account if account in _LOGGED_ALIASES else "other"
+
+
 class ActionStore:
-    """Persisted decisions: %LOCALAPPDATA%\\briefing-reader\\actions.json  {id: {status, at, link, message}}.
+    """Persisted decisions: %LOCALAPPDATA%\\briefing-reader\\actions.json
+    {id: {status, at, link, message, kind, account}} (``kind`` and ``account`` only when known).
 
     "failed" is remembered (for the card's message) but is not a decision: the
-    proposal stays pending and can be approved again. A corrupt or unreadable
-    file is logged and treated as empty; a failed write is logged and the
-    decision is kept in memory for this run. Writes are atomic (temporary
-    file + os.replace), so a crash never leaves half a file.
+    proposal stays pending and can be approved again; so is "unknown". An
+    entry still "running" when the file is read (Jarvis stopped mid-call)
+    becomes "unknown", and the next ``prune()`` saves that. A corrupt or
+    unreadable file is logged and treated as empty; a failed write is logged
+    and the decision is kept in memory for this run. Writes are atomic
+    (temporary file + os.replace), so a crash never leaves half a file.
     """
 
     def __init__(self, path: Path, clock: Callable[[], datetime] = _local_now) -> None:
@@ -877,35 +1931,45 @@ class ActionStore:
         self._clock = clock
         self._lock = threading.Lock()
         self._entries: dict[str, dict[str, str]] = _load_entries(self.path)
+        self._dirty = _mark_interrupted(self._entries)   # changed since read: prune() saves it
 
     def get(self, action_id: str) -> dict | None:
         with self._lock:
             entry = self._entries.get(action_id)
             return dict(entry) if entry is not None else None
 
-    def set(self, action_id: str, status: str, *, link: str = "", message: str = "") -> None:
+    def set(self, action_id: str, status: str, *, link: str = "", message: str = "",
+            kind: str = "", account: str = "") -> None:
         if status not in STATUSES:
             raise ValueError(f"unknown action status {status!r}")
         entry = {"status": status, "at": self._clock().isoformat(timespec="seconds"),
                  "link": link or "", "message": message or ""}
+        if kind:
+            entry["kind"] = kind
+        if account:
+            entry["account"] = account
         with self._lock:
             self._entries[action_id] = entry
-            _write_entries(self.path, self._entries)
-        logger.info("Action %s: %s", action_id, status)
+            if _write_entries(self.path, self._entries):
+                self._dirty = False
+        logger.info("Action %s (%s, %s): %s", action_id, kind or "-", _logged_alias(account), status)
 
     def is_decided(self, action_id: str) -> bool:
         entry = self.get(action_id)
         return entry is not None and entry["status"] in DECIDED_STATUSES
 
     def prune(self, max_age_days: int = 60) -> None:
-        """Forget decisions older than ``max_age_days`` (and ones without a readable time)."""
+        """Forget decisions older than ``max_age_days`` (and ones without a readable time).
+
+        Also saves what changed when the file was read (interrupted calls marked unknown).
+        """
         cutoff = _aware(self._clock()) - timedelta(days=max_age_days)
         with self._lock:
             old = [key for key, entry in self._entries.items() if not _newer_than(entry, cutoff)]
             for key in old:
                 del self._entries[key]
-            if old:
-                _write_entries(self.path, self._entries)
+            if (old or self._dirty) and _write_entries(self.path, self._entries):
+                self._dirty = False
         if old:
             logger.info("Forgot %d action decision(s) older than %d days", len(old), max_age_days)
 
@@ -948,8 +2012,25 @@ def _load_entries(path: Path) -> dict[str, dict[str, str]]:
 def _clean_entry(value: object) -> dict[str, str] | None:
     if not isinstance(value, dict) or value.get("status") not in STATUSES:
         return None
-    return {name: value[name] if isinstance(value.get(name), str) else ""
-            for name in ("status", "at", "link", "message")}
+    entry = {name: value[name] if isinstance(value.get(name), str) else ""
+             for name in ("status", "at", "link", "message")}
+    for name in ("kind", "account"):   # optional; files from before they existed have neither
+        if isinstance(value.get(name), str) and value[name]:
+            entry[name] = value[name]
+    return entry
+
+
+def _mark_interrupted(entries: dict[str, dict[str, str]]) -> bool:
+    """"running" entries (Jarvis stopped mid-call) become "unknown"; True when any did."""
+    count = 0
+    for entry in entries.values():
+        if entry["status"] == STATUS_RUNNING:
+            entry["status"] = STATUS_UNKNOWN
+            entry["message"] = INTERRUPTED_MESSAGE
+            count += 1
+    if count:
+        logger.warning("%d action(s) were interrupted; marked unknown", count)
+    return bool(count)
 
 
 def _write_entries(path: Path, entries: dict[str, dict[str, str]]) -> bool:

@@ -5,7 +5,7 @@ The flow is:
     strip_markdown(text)     display text: markdown, URLs, HTML and emoji removed
     to_spoken(text)          listening text: short sentences, symbols spelled out
     build_script(briefing)   Script of sections (intro, one per heading, the
-                             pending calendar proposals, outro)
+                             pending proposals, outro)
 
 Everything here is Qt-free and pure (no I/O), so it is easy to unit test.
 Briefing content is personal, so only counts are ever logged, never text.
@@ -59,6 +59,8 @@ NOT_UPDATED_LABEL = "Not updated yet"
 ACTIONS_KEY = "actions"
 ACTIONS_TITLE = "Needs your OK"
 ACTIONS_CLOSING = "Approve or deny them on the right."
+ACTIONS_CLOSING_MIXED = "You can act on them on the right."
+_CALENDAR_KIND = "calendar"   # actions.CALENDAR (actions imports this module, so no import here)
 
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 _WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
@@ -953,9 +955,10 @@ def build_script(
     in the intro and the next level starts the sections. A toggle or callout
     titled like an ignore section is an ignored section holding its children.
 
-    ``actions`` are the calendar proposals still waiting for a decision (the
-    caller filters them); when there are any, a "Needs your OK" section that
-    summarises them comes right before the outro. It is never ignored.
+    ``actions`` are the pending proposals (the caller drops the decided ones;
+    only the ones that take a decision count); when there are any, a "Needs
+    your OK" section that summarises them comes right before the outro. It is
+    never ignored.
     """
     header = briefing.header
     # Name the run the page says it is; the stale note already covers a mismatch.
@@ -1004,7 +1007,7 @@ def build_script(
         if item is not None:
             sections.current.add(item)
     finished = sections.sections()
-    pending = [action for action in actions if action.actionable]
+    pending = [action for action in actions if action.decidable]
     if pending:
         finished.append(_actions_section(pending, now.date()))
     finished.append(Section(key="outro", title="",
@@ -1020,14 +1023,44 @@ _COUNT_WORDS = ("Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "
 
 
 def _actions_section(actions: Sequence[ProposedAction], today: date) -> Section:
-    """The "Needs your OK" summary: a count, one entry per proposal, and where to decide."""
-    items = [ScriptItem(ITEM_HEADING, _actions_count_sentence(len(actions)), ACTIONS_TITLE)]
+    """The "Needs your OK" summary: a count, one entry per proposal, and where to decide.
+
+    Calendar invites alone keep their own wording ("Two calendar invites need
+    your OK."); a mix says what kinds there are ("Four items need your OK: a
+    calendar invite, two replies and a to-do.") and names each Calendar entry.
+    """
+    calendar_only = all(action.kind == _CALENDAR_KIND for action in actions)
+    heading = _actions_count_sentence(len(actions)) if calendar_only else _mixed_count_sentence(actions)
+    items = [ScriptItem(ITEM_HEADING, heading, ACTIONS_TITLE)]
     for action in actions:
         detail = action.describe(today)
         display = f"{action.title} - {detail}" if detail else action.title
-        items.append(ScriptItem(ITEM_ENTRY, action.spoken(today) + ".", display))
-    items.append(ScriptItem(ITEM_TEXT, ACTIONS_CLOSING, ""))
+        spoken = action.spoken(today) + "."
+        if not calendar_only and action.kind == _CALENDAR_KIND:
+            spoken = "Calendar invite: " + spoken
+        items.append(ScriptItem(ITEM_ENTRY, spoken, display))
+    items.append(ScriptItem(ITEM_TEXT, ACTIONS_CLOSING if calendar_only else ACTIONS_CLOSING_MIXED, ""))
     return Section(key=ACTIONS_KEY, title=ACTIONS_TITLE, items=tuple(items))
+
+
+def _count_word(count: int) -> str:
+    return _COUNT_WORDS[count] if count < len(_COUNT_WORDS) else str(count)
+
+
+def _mixed_count_sentence(actions: Sequence[ProposedAction]) -> str:
+    """"One item needs your OK: a reply." / "Four items need your OK: a calendar invite, two replies and a to-do." """
+    counts: dict[str, int] = {}
+    nouns: dict[str, tuple[str, str]] = {}
+    for action in actions:   # kinds in order of first appearance
+        counts[action.kind] = counts.get(action.kind, 0) + 1
+        nouns.setdefault(action.kind, action.speech_noun)
+    phrases = [nouns[kind][0] if count == 1 else f"{_count_word(count).lower()} {nouns[kind][1]}"
+               for kind, count in counts.items()]
+    breakdown = phrases[0] if len(phrases) == 1 else ", ".join(phrases[:-1]) + " and " + phrases[-1]
+    total = len(actions)
+    if total == 1:
+        return f"{_count_word(total)} item needs your OK: {breakdown}."
+    return f"{_count_word(total)} items need your OK: {breakdown}."
 
 
 def _actions_count_sentence(count: int) -> str:

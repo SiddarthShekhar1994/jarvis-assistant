@@ -98,16 +98,27 @@ Widgets
         ChamferPanel); ``open_below(anchor, width, height)``, ``closed``.
     ``StepStrip``: ``set_steps([(label, STEP_DONE|STEP_ACTIVE|STEP_TODO|STEP_DENIED)])``.
     ``LiveMarker``: blinking red dot + LIVE; ``set_live(bool)`` (keeps its space).
-    ``ActionCard(action_id, kind, title, detail, actionable=True)``:
-        ``set_status(CARD_*, message="", link="")``, ``set_note(text)``,
-        ``result_text()``, signals ``approveClicked(str)``,
-        ``denyClicked(str)``, ``openClicked(str)`` (the link). Deny / Approve
+    ``ActionCard(action_id, kind, title, detail, actionable=True, *,
+        approve_text="Approve", body="", title_lines=0, open_text="",
+        copy_text="")``:
+        ``set_status(CARD_*, message="", link="", link_text="")`` (``CARD_DONE``
+        reads DONE in green; ``link_text`` names the result's link, "Open" by
+        default), ``set_note(text)``, ``note()``, ``result_text()``, ``title()``,
+        ``body()``, ``show_copied()``, signals ``approveClicked(str)``,
+        ``denyClicked(str)``, ``openClicked(str)`` (the link),
+        ``sourceClicked(str)`` / ``copyClicked(str)`` (the action id, from the
+        tools row's Open / Copy links). Deny / Approve
         and the result (WORKING..., ADDED + Open, DENIED, ...) share one
         fixed-height slot, so a status change never changes the card's height
         and the cards below never move; the FAILED reason and the note sit
-        under the buttons and may only make a card taller. ``set_locked(bool,
+        under the buttons and may only make a card taller. The body preview
+        (three lines) and the tools row sit above the slot, are built once and
+        never change height. ``set_locked(bool,
         tooltip)`` dims Deny / Approve (a click on them emits
-        ``lockedClicked(str)``). ``ActionList``:
+        ``lockedClicked(str)``); the tools row is never locked. ``COPIED_TEXT``
+        / ``COPIED_MS`` are the Copy feedback; ``plain_tooltip(text)`` makes a
+        tooltip that keeps line breaks and is never read as HTML (the card
+        and speech-line tooltips use it). ``ActionList``:
         scrollable cards ``ActionList.CARD_GAP`` px apart with an empty-state
         line (``add_card``, ``card(id)``, ``cards()``, ``clear()``,
         ``set_empty_text``).
@@ -137,6 +148,7 @@ from __future__ import annotations
 import html
 import logging
 import math
+import re
 import time
 import weakref
 from collections import OrderedDict
@@ -426,6 +438,15 @@ def set_label_color(label: QWidget, color: str | QColor) -> None:
     label.setStyleSheet(f"color: {_qss_color(color)}; background: transparent;")
 
 
+def plain_tooltip(text: str) -> str:
+    """``text`` as a tooltip that keeps its line breaks and is never read as HTML.
+
+    QToolTip guesses the format (Qt.AutoText), so page text with "<img src=...>" given to
+    setToolTip as it is would be rendered, and the image file fetched, on a mere hover.
+    """
+    return f'<p style="white-space:pre-wrap">{html.escape(text)}</p>' if text else ""
+
+
 class SpeechLabel(QLabel):
     """Word-wrapped prose with a CSS-like line height (Sora Light 20 px by default).
 
@@ -474,7 +495,7 @@ class SpeechLabel(QLabel):
 
     def _render(self) -> None:
         shown = self.shown_text()
-        self.setToolTip(self._plain if shown != self._plain else "")
+        self.setToolTip(plain_tooltip(self._plain) if shown != self._plain else "")
         body = html.escape(shown).replace("\n", "<br>")
         super().setText(f'<div style="line-height:{self._line_percent()}%;">{body}</div>')
 
@@ -3224,7 +3245,9 @@ CARD_ADDED = "added"
 CARD_EXISTS = "exists"
 CARD_DENIED = "denied"
 CARD_FAILED = "failed"
-CARD_STATUSES = (CARD_PENDING, CARD_WORKING, CARD_SIGNIN, CARD_ADDED, CARD_EXISTS, CARD_DENIED, CARD_FAILED)
+CARD_DONE = "done"
+CARD_STATUSES = (CARD_PENDING, CARD_WORKING, CARD_SIGNIN, CARD_ADDED, CARD_EXISTS, CARD_DENIED, CARD_FAILED,
+                 CARD_DONE)
 _CARD_RESULTS: dict[str, tuple[str, str]] = {
     CARD_WORKING: ("WORKING...", ACCENT),
     CARD_SIGNIN: ("WAITING FOR GOOGLE SIGN-IN", ACCENT),
@@ -3232,26 +3255,48 @@ _CARD_RESULTS: dict[str, tuple[str, str]] = {
     CARD_EXISTS: ("ALREADY ON CALENDAR", GREEN),
     CARD_DENIED: ("DENIED", RED),
     CARD_FAILED: ("FAILED", RED),
+    CARD_DONE: ("DONE", GREEN),
 }
+COPIED_TEXT = "Copied"
+COPIED_MS = 1500
+
+
+_TIP_CHARS = 1200   # a longer tooltip (a drafted reply can have 5000) would be taller than the screen
+_TIP_LINES = 24
+
+
+def _capped_tip_text(text: str, more: str = "") -> str:
+    """``text`` cut to about 24 lines and 1200 characters for a tooltip, ending "..." and ``more``."""
+    cut = "\n".join(text.split("\n")[:_TIP_LINES])
+    if len(cut) > _TIP_CHARS:
+        cut = cut[:_TIP_CHARS]
+        space = cut.rfind(" ", _TIP_CHARS * 3 // 4)
+        cut = cut[:space] if space > 0 else cut
+    if cut == text:
+        return text
+    return cut.rstrip() + "\u2026" + (f"\n({more})" if more else "")
 
 
 class _ClampedLabel(QLabel):
     """Word-wrapped plain text cut to ``max_lines`` lines at its width (ellipsis, full text as tooltip).
 
-    ``full_text()`` is what was set, ``text()`` what is shown.
+    ``full_text()`` is what was set, ``text()`` what is shown. A ``tooltip``
+    given with the text is shown whether or not the text had to be cut.
     """
 
     def __init__(self, font: QFont, color: str | QColor, max_lines: int = 2) -> None:
         super().__init__()
         self._full = ""
+        self._tip: str | None = None
         self._max_lines = max_lines
         self.setTextFormat(Qt.TextFormat.PlainText)
         self.setWordWrap(True)
         self.setFont(font)
         set_label_color(self, color)
 
-    def set_full_text(self, text: str) -> None:
+    def set_full_text(self, text: str, tooltip: str | None = None) -> None:
         self._full = text
+        self._tip = tooltip
         self._render()
 
     def full_text(self) -> str:
@@ -3259,13 +3304,75 @@ class _ClampedLabel(QLabel):
 
     def _render(self) -> None:
         shown = _elide_to_lines(self._full, self.font(), self.contentsRect().width() - 2, self._max_lines)
-        self.setToolTip(self._full if shown != self._full else "")
+        cut = plain_tooltip(self._full) if shown != self._full else ""
+        self.setToolTip(self._tip if self._tip is not None else cut)
         super().setText(shown)
 
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
         if event.oldSize().width() != event.size().width():
             self._render()
+
+
+_SOFT_BREAK = "\u200b"      # zero-width space: a line may break here, nothing is drawn
+_LONGEST_PIECE = 24         # a card's detail holds about 25 mono characters per line at the narrowest
+_LONG_WORD = _LONGEST_PIECE  # a word that fits on a line even then ("jordan.smith@example.edu") stays whole
+
+
+def _with_soft_breaks(text: str) -> str:
+    """``text`` with zero-width break chances inside long words, so an email address wraps.
+
+    QLabel wraps only at spaces and hyphens, which cuts "firstname.lastname@cs.example.edu" at
+    the card edge on a narrow window. In a word longer than _LONG_WORD characters, break chances
+    go after "@" and "/" and before "."; a piece still longer than _LONGEST_PIECE characters
+    (hyphens count as breaks) gets one every _LONGEST_PIECE characters.
+    """
+    words = re.split(r"(\s+)", text)
+    for index, word in enumerate(words):
+        if len(word.rstrip(",;")) <= _LONG_WORD or word.isspace():   # "ana@example.edu," in a list
+            continue
+        out: list[str] = []
+        run = 0
+        for char in word:
+            if char == "." and out and run:
+                out.append(_SOFT_BREAK)
+                run = 0
+            if run >= _LONGEST_PIECE:
+                out.append(_SOFT_BREAK)
+                run = 0
+            out.append(char)
+            run += 1
+            if char in "@/":
+                out.append(_SOFT_BREAK)
+                run = 0
+            elif char == "-":   # QLabel may already break after a hyphen
+                run = 0
+        words[index] = "".join(out)
+    return "".join(words)
+
+
+class _BreakableLabel(QLabel):
+    """A word-wrapped plain-text label that can also break inside long words (see _with_soft_breaks).
+
+    ``text()`` and the accessible name are the text as set, without the break chances.
+    """
+
+    def __init__(self, text: str, font: QFont, color: str | QColor) -> None:
+        super().__init__()
+        self._plain = ""
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.setWordWrap(True)
+        self.setFont(font)
+        set_label_color(self, color)
+        self.setText(text)
+
+    def setText(self, text: str) -> None:  # noqa: N802 - mirrors QLabel
+        self._plain = text or ""
+        self.setAccessibleName(self._plain)
+        super().setText(_with_soft_breaks(self._plain))
+
+    def text(self) -> str:  # noqa: D102 - mirrors QLabel
+        return self._plain
 
 
 class _GrowOnlyLabel(QLabel):
@@ -3322,7 +3429,7 @@ class _GrowOnlyLabel(QLabel):
 
     def _render(self) -> None:
         shown = self._fit(self._full, self.contentsRect().width())
-        self.setToolTip(self._full if shown != self._full else "")
+        self.setToolTip(plain_tooltip(self._full) if shown != self._full else "")
         self.setText(shown)
 
     def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt override
@@ -3343,6 +3450,36 @@ class _GrowOnlyLabel(QLabel):
         super().resizeEvent(event)
         if self._max_lines and event.oldSize().width() != event.size().width():
             self._render()
+
+
+class _ToolLink(HudButton):
+    """A card's tools-row link: the LINK look, but its text starts flush with the card's texts.
+
+    No side padding, and the text is drawn from the left edge, so "Copied" in
+    a button sized for "Copy reply" stays where the words began.
+    """
+
+    def __init__(self, text: str = "") -> None:
+        super().__init__(text, LINK)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        hint = super().sizeHint()
+        return QSize(max(1, hint.width() - 2 * self._spec.padding), hint.height())
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            _fill, _border, text_color = self._colors()
+            font = QFont(self._font)
+            if (self.isEnabled() and self.underMouse()) or (self.hasFocus() and self._focus_visible):
+                font.setUnderline(True)
+            painter.setFont(font)
+            painter.setPen(text_color)
+            painter.drawText(QRectF(self.rect()), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+                             | Qt.TextFlag.TextShowMnemonic, self.text())
+        finally:
+            painter.end()
 
 
 class _DecisionButton(HudButton):
@@ -3375,6 +3512,15 @@ class ActionCard(QWidget):
     makes an informational card (no buttons, dim kind). ADDED / EXISTS show
     the "Open" link when a link is known (``openClicked(link)``).
 
+    ``approve_text`` names the right-hand button ("Approve", "Add block",
+    "Done"); ``title_lines`` cuts the title to that many lines (0 = never);
+    ``body`` adds a three-line preview of a drafted text (hover for all of
+    it). ``open_text`` / ``copy_text`` add a tools row of links above the
+    slot ("Open thread" -> ``sourceClicked(action_id)``, "Copy reply" ->
+    ``copyClicked(action_id)``; ``show_copied()`` reads "Copied" for 1.5 s).
+    The tools row is there from the start, is never locked or hidden, and
+    its buttons keep their width, so nothing in it moves.
+
     ``set_locked(True, tooltip)`` disables (dims) Deny / Approve without any
     change in size, for example while another card's approval runs; a click
     on a locked button emits ``lockedClicked(action_id)`` instead of
@@ -3385,6 +3531,8 @@ class ActionCard(QWidget):
     denyClicked = Signal(str)
     openClicked = Signal(str)
     lockedClicked = Signal(str)
+    sourceClicked = Signal(str)
+    copyClicked = Signal(str)
 
     _PAD_LEFT = 14
     _PAD_TOP = 10
@@ -3392,9 +3540,15 @@ class ActionCard(QWidget):
     _PAD_BOTTOM = 10
     _SLOT_GAP = 8   # between the texts and the buttons / result
     _FAILURE_LINES = 2
+    _BODY_LINES = 3
+    _BODY_GAP = 4    # above the body preview (on top of the texts' 2 px spacing)
+    _TOOLS_GAP = 4   # above the tools row
+    _TOOLS_SPACING = 18
 
     def __init__(self, action_id: str, kind: str, title: str, detail: str = "", *,
-                 actionable: bool = True, parent: QWidget | None = None) -> None:
+                 actionable: bool = True, approve_text: str = "Approve", body: str = "",
+                 title_lines: int = 0, open_text: str = "", copy_text: str = "",
+                 parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.action_id = action_id
         self._actionable = actionable
@@ -3403,13 +3557,30 @@ class ActionCard(QWidget):
         self._result_text = ""
         self._locked = False
         self._lock_tip = ""
+        self._title = title
+        self._copy_text = copy_text
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
-        self.kind_label = make_label(kind.upper(), mono_font(10, 400, 0.16), AMBER if actionable else TEXT_DIM)
-        self.title_label = make_label(title, body_font(14, 600), AMBER_TEXT, wrap=True)
-        self.detail_label = make_label(detail, mono_font(11), AMBER_SUB, wrap=True)
+        # One line, cut with an ellipsis when an account alias makes it wider than the card.
+        self.kind_label = _ClampedLabel(mono_font(10, 400, 0.16), AMBER if actionable else TEXT_DIM, max_lines=1)
+        self.kind_label.set_full_text(kind.upper())
+        if title_lines > 0:
+            self.title_label: QLabel = _ClampedLabel(body_font(14, 600), AMBER_TEXT, max_lines=title_lines)
+            self.title_label.set_full_text(title)
+        else:
+            self.title_label = make_label(title, body_font(14, 600), AMBER_TEXT, wrap=True)
+        # Wraps inside long email addresses too (QLabel alone would cut them at the card edge).
+        self.detail_label: QLabel = _BreakableLabel(detail, mono_font(11), AMBER_SUB)
         self.detail_label.setVisible(bool(detail))
+        self.body_label = _ClampedLabel(body_font(12), TEXT_SOFT, max_lines=self._BODY_LINES)
+        self.body_label.setContentsMargins(0, self._BODY_GAP, 0, 0)
+        more = f"{copy_text} for the whole text" if copy_text else ""
+        self.body_label.set_full_text(" ".join(body.split()), tooltip=plain_tooltip(_capped_tip_text(body, more)))
+        self.body_label.setVisible(bool(body.strip()))
+        self.source_button: HudButton = _ToolLink(open_text or "Open")
+        self.copy_button: HudButton = _ToolLink(copy_text or "Copy")
+        self._make_tools(kind, title, open_text, copy_text)
         self.deny_button = _DecisionButton("Deny", DENY, compact=True)
-        self.approve_button = _DecisionButton("Approve", APPROVE, compact=True)
+        self.approve_button = _DecisionButton(approve_text or "Approve", APPROVE, compact=True)
         self.result_label = _ClampedLabel(mono_font(11, 400, 0.12), GREEN)
         self.result_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.open_button = HudButton("Open", LINK)
@@ -3425,8 +3596,34 @@ class ActionCard(QWidget):
         self.deny_button.disabledClicked.connect(self._on_locked_click)
         self.approve_button.disabledClicked.connect(self._on_locked_click)
         self.open_button.clicked.connect(self._on_open)
+        self.source_button.clicked.connect(self._on_source)
+        self.copy_button.clicked.connect(self._on_copy)
+        self._copied_timer = QTimer(self)
+        self._copied_timer.setSingleShot(True)
+        self._copied_timer.setInterval(COPIED_MS)
+        self._copied_timer.timeout.connect(self._reset_copy)
         self._build_layout()
         self.set_status(CARD_PENDING)
+
+    def _make_tools(self, kind: str, title: str, open_text: str, copy_text: str) -> None:
+        """The tools row: Open / Copy links, each as wide as its widest text from the start."""
+        self._tools = QWidget()
+        tools = FlowLayout(self._tools, h_spacing=self._TOOLS_SPACING, v_spacing=2)
+        tools.setContentsMargins(0, self._TOOLS_GAP, 0, 0)
+        for button, text, texts in ((self.source_button, open_text, (open_text,)),
+                                    (self.copy_button, copy_text, (copy_text, COPIED_TEXT))):
+            button.set_link_color(ACCENT)
+            fallback = button.text()
+            width = 0
+            for shown in texts:
+                button.setText(shown)
+                width = max(width, button.sizeHint().width())
+            button.setText(text or fallback)
+            button.setMinimumWidth(width)
+            button.setAccessibleName(f"{text} ({kind.upper()}: {title})")
+            button.setVisible(bool(text))
+            tools.addWidget(button)
+        self._tools.setVisible(bool(open_text or copy_text))
 
     # Bound methods, not lambdas: a lambda capturing self keeps the card alive.
     def _on_deny(self) -> None:
@@ -3438,11 +3635,28 @@ class ActionCard(QWidget):
     def _on_open(self) -> None:
         self.openClicked.emit(self._link)
 
+    def _on_source(self) -> None:
+        self.sourceClicked.emit(self.action_id)
+
+    def _on_copy(self) -> None:
+        self.copyClicked.emit(self.action_id)
+
+    def show_copied(self) -> None:
+        """The Copy button reads "Copied" for 1.5 s (its width never changes)."""
+        if not self._copy_text:
+            return
+        self.copy_button.setText(COPIED_TEXT)
+        self._copied_timer.start()
+
+    def _reset_copy(self) -> None:
+        self.copy_button.setText(self._copy_text)
+
     def _build_layout(self) -> None:
         self._texts = QVBoxLayout()
         self._texts.setSpacing(2)
-        for label in (self.kind_label, self.title_label, self.detail_label):
+        for label in (self.kind_label, self.title_label, self.detail_label, self.body_label):
             self._texts.addWidget(label)
+        self._texts.addWidget(self._tools)
         # Both slot pages reach the card's right and bottom edges (their margins
         # are the card padding) so the Approve glow is not clipped.
         self._buttons = QWidget()
@@ -3498,21 +3712,35 @@ class ActionCard(QWidget):
         """The result as set (e.g. "ADDED", "FAILED: <REASON>"), never elided; "" while pending."""
         return self._result_text
 
+    def title(self) -> str:
+        """The whole title (the label may show it cut to ``title_lines``)."""
+        return self._title
+
+    def body(self) -> str:
+        """The body preview as shown before any cut (line breaks folded into spaces)."""
+        return self.body_label.full_text()
+
     def set_texts(self, kind: str, title: str, detail: str) -> None:
-        self.kind_label.setText(kind.upper())
-        self.title_label.setText(title)
+        self._title = title
+        self.kind_label.set_full_text(kind.upper())
+        if isinstance(self.title_label, _ClampedLabel):
+            self.title_label.set_full_text(title)
+        else:
+            self.title_label.setText(title)
         self.detail_label.setText(detail)
         self.detail_label.setVisible(bool(detail))
 
-    def set_status(self, status: str, message: str = "", link: str = "") -> None:
+    def set_status(self, status: str, message: str = "", link: str = "", link_text: str = "") -> None:
         """Show ``status`` (one of CARD_STATUSES); ``message`` is the FAILED reason or a custom result.
 
+        ``link_text`` names the result's link ("Open event"; "Open" by default).
         Only the content of the button slot changes, never the card's height,
         except that a FAILED reason (under the buttons) may add a line or two
         once; the card keeps that room afterwards.
         """
         self._status = status if status in CARD_STATUSES else CARD_PENDING
         self._link = link
+        self.open_button.setText(link_text or "Open")
         text, color = _CARD_RESULTS.get(self._status, ("", TEXT_DIM))
         if self._status == CARD_FAILED and message:
             text = f"FAILED: {message}"
@@ -3541,7 +3769,7 @@ class ActionCard(QWidget):
         if not retry:
             self.set_note("")
         self._sync_extra()
-        name = f"{self.kind_label.text()}: {self.title_label.text()}"
+        name = f"{self.kind_label.full_text()}: {self._title}"
         self.setAccessibleName(f"{name}, {text}" if text else name)
 
     def set_note(self, text: str) -> None:

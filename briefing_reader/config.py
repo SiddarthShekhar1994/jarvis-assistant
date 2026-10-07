@@ -7,7 +7,8 @@ Settings come from three places:
   ``BRIEFING_PAGE_ID`` (both required; there is no default page);
 * the environment itself;
 * ``config.toml`` in the project root for voice, prompt, polling, section,
-  Google Calendar, proposed-action, schedule, hotkey, agenda and display options.
+  Google Calendar, proposed-action (heading names and the extra hosts a
+  card's Open may open), schedule, hotkey, agenda and display options.
 
 A bad setting never stops the app: invalid values are logged as warnings and
 replaced by their defaults. The Notion token is never logged. As soon as it is
@@ -133,10 +134,15 @@ class CalendarConfig:
 @dataclass(frozen=True)
 class ActionsConfig:
     headings: tuple[str, ...] = (DEFAULT_ACTIONS_HEADING,)   # "Proposed actions" heading names
+    # Extra https hosts a card's Open may open, besides actions.BUILTIN_LINK_HOSTS:
+    # "name.tld" exactly or "*.name.tld" for every subdomain (casefolded).
+    link_hosts: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.headings, tuple):
-            object.__setattr__(self, "headings", tuple(self.headings))
+        for name in ("headings", "link_hosts"):
+            value = getattr(self, name)
+            if not isinstance(value, tuple):
+                object.__setattr__(self, name, tuple(value))
 
 
 @dataclass(frozen=True)
@@ -624,8 +630,27 @@ def _parse_calendar(doc: Mapping[str, Any], root: Path) -> CalendarConfig:
 
 def _parse_actions(doc: Mapping[str, Any]) -> ActionsConfig:
     d = ActionsConfig()
-    r = _TableReader(doc, "actions", ("heading",))
-    return ActionsConfig(headings=r.names("heading", d.headings, allow_empty=False))
+    r = _TableReader(doc, "actions", ("heading", "link_hosts"))
+    return ActionsConfig(headings=r.names("heading", d.headings, allow_empty=False),
+                         link_hosts=_link_hosts(r.names("link_hosts", d.link_hosts)))
+
+
+_LINK_HOST_RE = re.compile(
+    r"(?:\*\.)?[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+")
+
+
+def _link_hosts(names: Sequence[str]) -> tuple[str, ...]:
+    """[actions] link_hosts: "name.tld" or "*.name.tld", casefolded; bad entries skipped, repeats dropped."""
+    hosts: list[str] = []
+    for name in names:
+        host = name.strip().casefold()
+        if not _LINK_HOST_RE.fullmatch(host):
+            logger.warning('config.toml: actions.link_hosts entry %s is not a host name like '
+                           '"example.edu" or "*.example.edu"; skipped', _short_repr(name))
+            continue
+        if host not in hosts:
+            hosts.append(host)
+    return tuple(hosts)
 
 
 def _parse_schedule(doc: Mapping[str, Any]) -> ScheduleConfig:
