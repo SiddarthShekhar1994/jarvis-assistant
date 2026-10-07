@@ -29,6 +29,7 @@ from briefing_reader.config import (
     LOG_FORMAT,
     REDACTED,
     DEFAULT_DEADLINE_KEYWORDS,
+    AccountConfig,
     ActionsConfig,
     AgendaConfig,
     CalendarConfig,
@@ -349,7 +350,8 @@ class ConfigFileTests(ProjectTestCase):
             "sections": {f.name for f in dataclasses.fields(SectionsConfig)},
             "notion": {"version"},
             "calendar": {"enabled", "client_secret", "calendar_id"},
-            "actions": {"heading", "link_hosts"},
+            "actions": {"heading", "link_hosts", "undo_seconds"},
+            "accounts": {"personal", "work"},
             "schedule": {f.name for f in dataclasses.fields(ScheduleConfig)},
             "hotkey": {f.name for f in dataclasses.fields(HotkeyConfig)},
             "agenda": {f.name for f in dataclasses.fields(AgendaConfig)},
@@ -374,6 +376,11 @@ class ConfigFileTests(ProjectTestCase):
             client_secret_path=config.PROJECT_ROOT / "google_client_secret.json",
             calendar_id="primary"))
         self.assertEqual(cfg.actions, ActionsConfig(headings=("Proposed actions",)))
+        self.assertEqual(cfg.actions.undo_seconds, 10)
+        # Generic aliases only: which Google account each one is never goes into config.toml.
+        self.assertEqual(dict(cfg.accounts), {"personal": AccountConfig("personal"),
+                                              "work": AccountConfig("work")})
+        self.assertNotIn("@", raw.decode("ascii").split("[accounts", 1)[1].split("[schedule]", 1)[0])
         self.assertEqual(cfg.schedule, ScheduleConfig())
         self.assertEqual(cfg.hotkey, HotkeyConfig())
         self.assertEqual(cfg.agenda, AgendaConfig())
@@ -582,6 +589,98 @@ class CalendarAndActionsConfigTests(ProjectTestCase):
         self.write_config('[actions]\nlink_host = ["forms.example.edu"]\n')
         cfg = self.load_warning("actions.link_host")
         self.assertEqual(cfg.actions, ActionsConfig())
+
+    # ---- [actions] undo_seconds: the countdown before a change goes to Google ----
+
+    def test_undo_seconds_default_and_range(self) -> None:
+        self.assertEqual(ActionsConfig().undo_seconds, 10)
+        self.assertEqual(config.UNDO_SECONDS_RANGE, (3, 60))
+        self.assertEqual(self.load_quietly().actions.undo_seconds, 10)
+        for value, expected in (("3", 3), ("25", 25), ("60", 60), ("12.4", 12)):
+            with self.subTest(value=value):
+                self.write_config(f"[actions]\nundo_seconds = {value}\n")
+                self.assertEqual(self.load_quietly().actions.undo_seconds, expected)
+
+    def test_undo_seconds_outside_the_range_is_clamped_with_a_warning(self) -> None:
+        for value, expected in (("1", 3), ("0", 3), ("61", 60), ("3600", 60)):
+            with self.subTest(value=value):
+                self.write_config(f"[actions]\nundo_seconds = {value}\n")
+                self.assertEqual(self.load_warning("actions.undo_seconds").actions.undo_seconds, expected)
+
+    def test_bad_undo_seconds_falls_back(self) -> None:
+        for value in ('"ten"', "true", "-5", "nan"):
+            with self.subTest(value=value):
+                self.write_config(f"[actions]\nundo_seconds = {value}\n")
+                self.assertEqual(self.load_warning("actions.undo_seconds").actions.undo_seconds, 10)
+
+
+class AccountsConfigTests(ProjectTestCase):
+    """[accounts.<alias>]: which service acts for an alias and what it may do."""
+
+    def test_default_is_the_personal_account_only(self) -> None:
+        cfg = self.load_quietly()
+        self.assertEqual(dict(cfg.accounts), {"personal": AccountConfig("personal")})
+        self.assertEqual(AccountConfig("personal"),
+                         AccountConfig("personal", backend="google", features=("calendar",)))
+        self.assertEqual(AccountConfig("x", features=["calendar"]).features, ("calendar",))
+        hash(cfg)   # the frozen Config stays hashable
+
+    def test_two_accounts(self) -> None:
+        self.write_config('[accounts.personal]\nbackend = "google"\nfeatures = ["calendar"]\n'
+                          '[accounts.work]\nbackend = "google"\nfeatures = ["calendar"]\n')
+        cfg = self.load_quietly()
+        self.assertEqual(list(cfg.accounts), ["personal", "work"])
+        self.assertEqual(cfg.accounts["work"], AccountConfig("work"))
+        with self.assertRaises(TypeError):
+            cfg.accounts["school"] = AccountConfig("school")   # type: ignore[index]
+
+    def test_missing_keys_take_the_defaults(self) -> None:
+        self.write_config("[accounts.work]\n")
+        self.assertEqual(dict(self.load_quietly().accounts), {"work": AccountConfig("work")})
+
+    def test_composio_backend_is_accepted(self) -> None:
+        self.write_config('[accounts.work]\nbackend = "Composio"\n')
+        self.assertEqual(self.load_quietly().accounts["work"].backend, "composio")
+
+    def test_unknown_backend_falls_back_to_google(self) -> None:
+        self.write_config('[accounts.work]\nbackend = "zapier"\n')
+        self.assertEqual(self.load_warning("accounts.work.backend").accounts["work"].backend, "google")
+
+    def test_unknown_feature_is_skipped_and_duplicates_dropped(self) -> None:
+        self.write_config('[accounts.work]\nfeatures = ["calendar", "gmail_send", "Calendar", "telepathy"]\n')
+        cfg = self.load_warning("accounts.work.features", "gmail_send", "telepathy")
+        self.assertEqual(cfg.accounts["work"].features, ("calendar",))
+
+    def test_no_features(self) -> None:
+        self.write_config("[accounts.work]\nfeatures = []\n")
+        self.assertEqual(self.load_quietly().accounts["work"].features, ())
+
+    def test_bad_alias_is_skipped(self) -> None:
+        self.write_config('[accounts."Work Mail"]\nbackend = "google"\n[accounts.work]\n')
+        cfg = self.load_warning("Work Mail", "not an account name")
+        self.assertEqual(list(cfg.accounts), ["work"])
+
+    def test_alias_is_casefolded_and_a_repeat_skipped(self) -> None:
+        self.write_config('[accounts.Work]\n[accounts.work]\nbackend = "composio"\n')
+        cfg = self.load_warning("repeats the account name work")
+        self.assertEqual(dict(cfg.accounts), {"work": AccountConfig("work")})
+
+    def test_unknown_account_keys_are_reported(self) -> None:
+        self.write_config('[accounts.work]\nemail = "someone@example.edu"\n')
+        cfg = self.load_warning("accounts.work.email")
+        self.assertEqual(cfg.accounts["work"], AccountConfig("work"))
+
+    def test_an_account_that_is_not_a_table_is_skipped(self) -> None:
+        self.write_config('[accounts]\nwork = "google"\npersonal = {}\n')
+        cfg = self.load_warning("accounts.work should be a table")
+        self.assertEqual(list(cfg.accounts), ["personal"])
+
+    def test_no_usable_account_falls_back_to_personal(self) -> None:
+        for text in ('accounts = "work"\n', "[accounts]\n", '[accounts."!"]\n'):
+            with self.subTest(text=text):
+                self.write_config(text)
+                cfg = self.load_warning("accounts")
+                self.assertEqual(dict(cfg.accounts), {"personal": AccountConfig("personal")})
 
 
 class ScheduleHotkeyAgendaConfigTests(ProjectTestCase):
@@ -896,7 +995,8 @@ class RedactingFilterTests(unittest.TestCase):
 
 def _snapshot_logging() -> tuple[Any, ...]:
     root = logging.getLogger()
-    levels = {name: logging.getLogger(name).level for name in config._QUIET_LOGGERS}
+    levels = {name: logging.getLogger(name).level
+              for name in (*config._QUIET_LOGGERS, *config._SILENT_LOGGERS)}
     return (list(root.handlers), root.level, sys.excepthook, threading.excepthook, levels)
 
 
@@ -1038,6 +1138,29 @@ class SetupLoggingTests(unittest.TestCase):
             self.assertEqual(logging.getLogger(name).level, logging.WARNING)
         setup_logging(self.log_dir, debug=True)
         self.assertEqual(logging.getLogger().level, logging.DEBUG)
+
+    def test_google_sign_in_secrets_never_logged_under_debug(self) -> None:
+        # requests_oauthlib logs the token request body (the authorization code) and the
+        # obtained token at DEBUG, before Jarvis could register them for redaction.
+        code, access, refresh = "4/0FAKE-AUTH-CODE-1234", "ya29.FAKE-ACCESS-5678", "1//FAKE-REFRESH-9012"
+        path = setup_logging(self.log_dir, debug=True)
+        logging.getLogger("requests_oauthlib.oauth2_session").debug("Supplying data code=%s", code)
+        logging.getLogger("requests_oauthlib.oauth2_session").debug(
+            "Obtained token {'access_token': '%s', 'refresh_token': '%s'}", access, refresh)
+        logging.getLogger("oauthlib.oauth2.rfc6749").debug("Prepared %s", code)
+        logging.getLogger("google_auth_oauthlib.flow").debug("token %s", access)
+        logging.getLogger("google.auth.transport.requests").debug("refresh %s", refresh)
+        logging.getLogger("googleapiclient.http").warning(
+            "Sleeping 1 seconds before retry 1 of 2 for request: GET "
+            "https://www.googleapis.com/calendar/v3/calendars/ana%%40example.edu/events")
+        logging.getLogger("briefing_reader.test").debug("still debugging")
+        text = self.read_log(path) + self.stderr.getvalue()
+        for secret in (code, access, refresh, "ana%40example.edu"):
+            self.assertNotIn(secret, text)
+        self.assertIn("still debugging", text)
+        for name in ("requests_oauthlib", "oauthlib", "google_auth_oauthlib", "google.auth"):
+            self.assertEqual(logging.getLogger(name).getEffectiveLevel(), logging.WARNING, name)
+        self.assertEqual(logging.getLogger("googleapiclient.discovery").getEffectiveLevel(), logging.CRITICAL)
 
     def test_secrets_redacted_in_file_for_library_loggers(self) -> None:
         register_secret(PLAIN_SECRET)

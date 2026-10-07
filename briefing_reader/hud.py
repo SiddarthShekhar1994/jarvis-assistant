@@ -100,25 +100,43 @@ Widgets
     ``LiveMarker``: blinking red dot + LIVE; ``set_live(bool)`` (keeps its space).
     ``ActionCard(action_id, kind, title, detail, actionable=True, *,
         approve_text="Approve", body="", title_lines=0, open_text="",
-        copy_text="")``:
+        copy_text="", edit_text="", sign_in_text="", check_line=False)``:
         ``set_status(CARD_*, message="", link="", link_text="")`` (``CARD_DONE``
-        reads DONE in green; ``link_text`` names the result's link, "Open" by
-        default), ``set_note(text)``, ``note()``, ``result_text()``, ``title()``,
+        reads DONE and ``CARD_SENT`` its message ("ACCEPTED") in green;
+        ``CARD_COUNTDOWN`` shows Undo on the left and the message ("SENDING IN
+        9 S") on the right; ``CARD_UNKNOWN`` keeps Deny / the right button and
+        shows the reason under them in amber; ``link_text`` names the result's
+        link, "Open" by default), ``set_approve_text(text)`` ("Retry",
+        "Sign in", "Done": a card built with ``check_line=True`` is as wide
+        as any of them from the start; on a narrow card Deny / Approve may
+        lose some side padding, never their text), ``set_check_line(text,
+        tooltip="", warn=False)`` (a two-line line under the detail, reserved
+        when the card is built with ``check_line=True``; ``warn`` draws it in
+        amber; ``check_warns()``), ``set_texts`` and ``set_body`` (they may
+        make the card taller, never shorter), ``set_copy_text(text)`` (show,
+        rename or hide Copy after an edit), ``set_edit_enabled(bool)``,
+        ``set_sign_in_visible(bool)`` (a card built with ``sign_in_text``),
+        ``set_note(text)``, ``note()``, ``result_text()``, ``title()``,
         ``body()``, ``show_copied()``, signals ``approveClicked(str)``,
         ``denyClicked(str)``, ``openClicked(str)`` (the link),
-        ``sourceClicked(str)`` / ``copyClicked(str)`` (the action id, from the
-        tools row's Open / Copy links). Deny / Approve
+        ``undoClicked(str)``, and ``sourceClicked(str)`` / ``copyClicked(str)``
+        / ``editClicked(str)`` / ``signInClicked(str)`` (the action id, from the
+        tools row's Open / Copy / Edit / Sign in links). Deny / Approve
         and the result (WORKING..., ADDED + Open, DENIED, ...) share one
         fixed-height slot, so a status change never changes the card's height
-        and the cards below never move; the FAILED reason and the note sit
-        under the buttons and may only make a card taller. The body preview
-        (three lines) and the tools row sit above the slot, are built once and
-        never change height. ``set_locked(bool,
+        and the cards below never move; the FAILED / UNKNOWN reason and the
+        note sit under the buttons and may only make a card taller. The body
+        preview (three lines), the check line and the tools row sit above the
+        slot and never change height by themselves (the Sign in link keeps its
+        place while hidden). ``set_locked(bool,
         tooltip)`` dims Deny / Approve (a click on them emits
         ``lockedClicked(str)``); the tools row is never locked. ``COPIED_TEXT``
         / ``COPIED_MS`` are the Copy feedback; ``plain_tooltip(text)`` makes a
-        tooltip that keeps line breaks and is never read as HTML (the card
-        and speech-line tooltips use it). ``ActionList``:
+        tooltip that keeps line breaks and is never read as HTML (every
+        tooltip that can hold page or calendar text uses it).
+        ``EditDialog(action_id, kind, kind_label, title, ...)``: the window-modal
+        Edit dialog of an RSVP / Move / Cancel card (``open()``; ``saved(id,
+        values)``, ``show_error(text)``, ``values()``). ``ActionList``:
         scrollable cards ``ActionList.CARD_GAP`` px apart with an empty-state
         line (``add_card``, ``card(id)``, ``cards()``, ``clear()``,
         ``set_empty_text``).
@@ -196,6 +214,8 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractButton,
     QApplication,
+    QCheckBox,
+    QDialog,
     QFrame,
     QGraphicsBlurEffect,
     QGraphicsDropShadowEffect,
@@ -204,6 +224,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QLayout,
     QLayoutItem,
+    QLineEdit,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -2441,7 +2463,7 @@ class SectionRow(QAbstractButton):
         self.setCursor(Qt.CursorShape.PointingHandCursor if info.clickable else Qt.CursorShape.ArrowCursor)
         self.setText(info.title)
         self.setAccessibleName(f"{info.title}, {info.state}" + (f", {info.meta}" if info.meta else ""))
-        self.setToolTip(info.title)
+        self.setToolTip(plain_tooltip(info.title))   # page text: never read as HTML
         self.update()
 
     def enterEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
@@ -2702,7 +2724,8 @@ class AgendaRow(QWidget):
         self._info = info
         text = f"{info.time} {info.title}" + (f", {info.meta}" if info.meta else "")
         self.setAccessibleName(f"{text}, {info.state}")
-        self.setToolTip(info.title + (f"\n{info.meta}" if info.meta else ""))
+        # An event's title is anyone's text (an invitation), so it is never read as HTML.
+        self.setToolTip(plain_tooltip(info.title + (f"\n{info.meta}" if info.meta else "")))
         self.update()
 
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
@@ -2812,8 +2835,8 @@ class DeadlineRow(QWidget):
         self._info = info
         parts = [info.title, info.source, info.due]
         self.setAccessibleName(", ".join(part for part in parts if part))
-        self.setToolTip(info.title + (f"\n{info.source}" if info.source else "")
-                        + (f"\nDue: {info.due}" if info.due else ""))
+        self.setToolTip(plain_tooltip(info.title + (f"\n{info.source}" if info.source else "")
+                                      + (f"\nDue: {info.due}" if info.due else "")))
         self.update()
 
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
@@ -3246,8 +3269,11 @@ CARD_EXISTS = "exists"
 CARD_DENIED = "denied"
 CARD_FAILED = "failed"
 CARD_DONE = "done"
+CARD_COUNTDOWN = "countdown"   # Undo + "SENDING IN 9 S": nothing has been sent yet
+CARD_SENT = "sent"             # Jarvis carried it out ("ACCEPTED", "MOVED", ...)
+CARD_UNKNOWN = "unknown"       # may have happened: the reason in amber, Deny / Retry kept
 CARD_STATUSES = (CARD_PENDING, CARD_WORKING, CARD_SIGNIN, CARD_ADDED, CARD_EXISTS, CARD_DENIED, CARD_FAILED,
-                 CARD_DONE)
+                 CARD_DONE, CARD_COUNTDOWN, CARD_SENT, CARD_UNKNOWN)
 _CARD_RESULTS: dict[str, tuple[str, str]] = {
     CARD_WORKING: ("WORKING...", ACCENT),
     CARD_SIGNIN: ("WAITING FOR GOOGLE SIGN-IN", ACCENT),
@@ -3256,9 +3282,25 @@ _CARD_RESULTS: dict[str, tuple[str, str]] = {
     CARD_DENIED: ("DENIED", RED),
     CARD_FAILED: ("FAILED", RED),
     CARD_DONE: ("DONE", GREEN),
+    CARD_COUNTDOWN: ("SENDING...", AMBER),
+    CARD_SENT: ("DONE", GREEN),
+    CARD_UNKNOWN: ("UNKNOWN", AMBER),
 }
+# Statuses that keep Deny and the right-hand button (to decide, or to try again).
+_DECIDING_STATUSES = (CARD_PENDING, CARD_FAILED, CARD_UNKNOWN)
+# Statuses whose result may have an Open link.
+_LINK_STATUSES = (CARD_ADDED, CARD_EXISTS, CARD_SENT)
 COPIED_TEXT = "Copied"
 COPIED_MS = 1500
+UNDO_TEXT = "Undo"
+RETRY_TEXT = "Retry"
+EDIT_TEXT = "Edit"
+SIGN_IN_TEXT = "Sign in"
+OPEN_EVENT_TEXT = "Open event"
+# What the last place of an RSVP / Move / Cancel card's tools row shows (ActionCard.set_tool_slot).
+TOOL_EDIT = "edit"          # Edit (the Edit dialog)
+TOOL_SIGN_IN = "signin"     # Sign in (the account must sign in again; the right-hand button is Done)
+TOOL_OPEN = "open"          # Open event (Google's own page of the event, when the line has no link)
 
 
 _TIP_CHARS = 1200   # a longer tooltip (a drafted reply can have 5000) would be taller than the screen
@@ -3277,14 +3319,64 @@ def _capped_tip_text(text: str, more: str = "") -> str:
     return cut.rstrip() + "\u2026" + (f"\n({more})" if more else "")
 
 
+def _keep_last_words(text: str) -> str:
+    """``text`` with its last space unbreakable when the last word is one or two characters, so a
+    wrapped result never leaves "S" alone on a line ("SENDING IN" / "10 S", not "SENDING IN 10" / "S")."""
+    head, space, tail = text.rpartition(" ")
+    return f"{head}\u00a0{tail}" if space and head and len(tail) <= 2 else text
+
+
+class _TextMemory:
+    """The texts a label has shown, so its height for a width never drops below what any of
+    them needed at that width: a card can grow downward but never shrinks under the mouse.
+
+    ``fit(text, width)`` is what the label would show of ``text`` at ``width`` (a cut label
+    shows at most its lines). A hidden meter label of the same font measures them.
+    """
+
+    _REMEMBER = 4
+    _CACHE_LIMIT = 256
+
+    def __init__(self, label: QLabel, fit: Callable[[str, int], str]) -> None:
+        self._fit = fit
+        self._meter = QLabel(label)
+        self._meter.hide()
+        self._meter.setTextFormat(Qt.TextFormat.PlainText)
+        self._meter.setWordWrap(True)
+        self._meter.setFont(label.font())
+        self._texts: list[str] = []
+        self._heights: dict[tuple[str, int], int] = {}
+
+    def remember(self, text: str) -> None:
+        if text and text not in self._texts:
+            self._texts.append(text)
+            self._texts.sort(key=len, reverse=True)
+            del self._texts[self._REMEMBER:]
+
+    def height(self, width: int) -> int:
+        if len(self._heights) > self._CACHE_LIMIT:
+            self._heights.clear()
+        height = 0
+        for text in self._texts:
+            key = (text, width)
+            if key not in self._heights:
+                self._meter.setText(self._fit(text, width))
+                self._heights[key] = self._meter.heightForWidth(width)
+            height = max(height, self._heights[key])
+        return height
+
+
 class _ClampedLabel(QLabel):
     """Word-wrapped plain text cut to ``max_lines`` lines at its width (ellipsis, full text as tooltip).
 
     ``full_text()`` is what was set, ``text()`` what is shown. A ``tooltip``
-    given with the text is shown whether or not the text had to be cut.
+    given with the text is shown whether or not the text had to be cut. With
+    ``grow_only`` the label never needs less height than a text it showed
+    before (see _TextMemory).
     """
 
-    def __init__(self, font: QFont, color: str | QColor, max_lines: int = 2) -> None:
+    def __init__(self, font: QFont, color: str | QColor, max_lines: int = 2, *,
+                 grow_only: bool = False) -> None:
         super().__init__()
         self._full = ""
         self._tip: str | None = None
@@ -3293,11 +3385,22 @@ class _ClampedLabel(QLabel):
         self.setWordWrap(True)
         self.setFont(font)
         set_label_color(self, color)
+        self._memory = _TextMemory(self, self._fit) if grow_only else None
 
     def set_full_text(self, text: str, tooltip: str | None = None) -> None:
+        if self._memory is not None and self.isVisibleTo(self.parentWidget() or self):
+            self._memory.remember(self._full)
         self._full = text
         self._tip = tooltip
         self._render()
+        self.updateGeometry()
+
+    def _fit(self, text: str, width: int) -> str:
+        return _elide_to_lines(text, self.font(), width - 2, self._max_lines)
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt override
+        height = super().heightForWidth(width)
+        return max(height, self._memory.height(width)) if self._memory is not None else height
 
     def full_text(self) -> str:
         return self._full
@@ -3354,7 +3457,9 @@ def _with_soft_breaks(text: str) -> str:
 class _BreakableLabel(QLabel):
     """A word-wrapped plain-text label that can also break inside long words (see _with_soft_breaks).
 
-    ``text()`` and the accessible name are the text as set, without the break chances.
+    ``text()`` and the accessible name are the text as set, without the break chances. Once
+    a second text is set, the label never needs less height than an earlier one did at the
+    same width (a card's detail may grow after an edit, never shrink).
     """
 
     def __init__(self, text: str, font: QFont, color: str | QColor) -> None:
@@ -3364,12 +3469,19 @@ class _BreakableLabel(QLabel):
         self.setWordWrap(True)
         self.setFont(font)
         set_label_color(self, color)
+        self._memory = _TextMemory(self, lambda shown, _width: _with_soft_breaks(shown))
         self.setText(text)
 
     def setText(self, text: str) -> None:  # noqa: N802 - mirrors QLabel
+        if self._plain and (text or "") != self._plain:
+            self._memory.remember(self._plain)
         self._plain = text or ""
         self.setAccessibleName(self._plain)
         super().setText(_with_soft_breaks(self._plain))
+        self.updateGeometry()
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt override
+        return max(super().heightForWidth(width), self._memory.height(width))
 
     def text(self) -> str:  # noqa: D102 - mirrors QLabel
         return self._plain
@@ -3412,6 +3524,10 @@ class _GrowOnlyLabel(QLabel):
 
     def full_text(self) -> str:
         return self._full
+
+    def set_color(self, color: str | QColor) -> None:
+        for label in (self, self._meter):
+            set_label_color(label, color)
 
     def set_line(self, text: str) -> None:
         self._full = text
@@ -3487,9 +3603,48 @@ class _DecisionButton(HudButton):
 
     A disabled QAbstractButton takes the mouse events itself (so they never
     reach a widget below), which is the only place such a click can be seen.
+
+    ``set_width_hints(hint, tight)``: the width it asks for (that of its widest
+    text, so a new text never moves the button beside it) and the least it may
+    get on a narrow card (that text with only ``_TIGHT_PADDING`` on each side),
+    so "Cancel event" still fits a 760 px window. Both depend on the texts it
+    may show, never on the one it shows, so Deny never moves.
     """
 
     disabledClicked = Signal()
+    _TIGHT_PADDING = 7   # the chamfer cut is 6 px
+
+    def __init__(self, text: str = "", variant: str = SECONDARY, *, compact: bool = False) -> None:
+        super().__init__(text, variant, compact=compact)
+        self._hint_width = 0
+        self._tight_width = 0
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+
+    def natural_width(self, text: str | None = None) -> int:
+        """The width ``text`` (default: the shown text) asks for with the full padding."""
+        shown = self.text() if text is None else text
+        plain = shown.replace("&&", "\0").replace("&", "").replace("\0", "&")
+        return max(math.ceil(_text_advance(self._font, plain)) + 2 * self._spec.padding, self._spec.height)
+
+    def tight_width(self, text: str | None = None) -> int:
+        shown = self.text() if text is None else text
+        return self.natural_width(shown) - 2 * max(0, self._spec.padding - self._TIGHT_PADDING)
+
+    def width_hints(self) -> tuple[int, int]:
+        return self._hint_width, self._tight_width
+
+    def set_width_hints(self, hint: int, tight: int) -> None:
+        if (hint, tight) != (self._hint_width, self._tight_width):
+            self._hint_width, self._tight_width = hint, min(tight, hint)
+            self.updateGeometry()
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        hint = super().sizeHint()
+        return QSize(max(hint.width(), self._hint_width), hint.height())
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        tight = self._tight_width or self.tight_width()
+        return QSize(tight, super().sizeHint().height())
 
     def event(self, event: QEvent) -> bool:
         if (event.type() == QEvent.Type.MouseButtonRelease and not self.isEnabled()
@@ -3501,6 +3656,21 @@ class _DecisionButton(HudButton):
 
 class ActionCard(QWidget):
     """An approval card: kind, title, detail, then one fixed-height slot with Deny / Approve or the result.
+
+    Phase 2 additions: ``check_line=True`` reserves three lines under the detail for
+    Google's own view of the event (``set_check_line``; whatever arrives by itself
+    goes there, so it never moves the cards) and lets the kind label wrap once (an
+    edited card's " \u00b7 EDITED"); ``edit_text`` adds an Edit link (``editClicked``,
+    ``set_edit_enabled``) as the tools row's last place, which can show a Sign in link
+    instead (``sign_in_text``, ``signInClicked``) or an "Open event" link to Google's
+    own page of the event (``event_text``, ``sourceClicked``): ``set_tool_slot``; the
+    three are equally wide, so switching never moves anything. ``set_copy_text``
+    shows Copy once an edit adds a note; CARD_COUNTDOWN puts an Undo button on the
+    left of the slot, away from Approve (``undoClicked``); CARD_UNKNOWN keeps the
+    buttons like FAILED, with the reason in amber; ``set_approve_text`` renames the
+    right-hand button ("Retry", "Sign in", "Done") without moving the left-hand one
+    (the button is as wide as its widest text from the start); ``deny_text`` names
+    the left-hand one ("Skip").
 
     The slot swaps its content (the buttons, or a result such as ADDED with an
     "Open" link) but never its height, so a click never moves this card or the
@@ -3533,6 +3703,9 @@ class ActionCard(QWidget):
     lockedClicked = Signal(str)
     sourceClicked = Signal(str)
     copyClicked = Signal(str)
+    undoClicked = Signal(str)
+    editClicked = Signal(str)
+    signInClicked = Signal(str)
 
     _PAD_LEFT = 14
     _PAD_TOP = 10
@@ -3544,11 +3717,14 @@ class ActionCard(QWidget):
     _BODY_GAP = 4    # above the body preview (on top of the texts' 2 px spacing)
     _TOOLS_GAP = 4   # above the tools row
     _TOOLS_SPACING = 18
+    _CHECK_LINES = 3   # Google's title and time, then who organizes it and your answer
+    _CHECK_GAP = 4   # above the check line
 
     def __init__(self, action_id: str, kind: str, title: str, detail: str = "", *,
                  actionable: bool = True, approve_text: str = "Approve", body: str = "",
                  title_lines: int = 0, open_text: str = "", copy_text: str = "",
-                 parent: QWidget | None = None) -> None:
+                 edit_text: str = "", sign_in_text: str = "", check_line: bool = False,
+                 deny_text: str = "Deny", event_text: str = "", parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.action_id = action_id
         self._actionable = actionable
@@ -3560,8 +3736,11 @@ class ActionCard(QWidget):
         self._title = title
         self._copy_text = copy_text
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
-        # One line, cut with an ellipsis when an account alias makes it wider than the card.
-        self.kind_label = _ClampedLabel(mono_font(10, 400, 0.16), AMBER if actionable else TEXT_DIM, max_lines=1)
+        # One line, cut with an ellipsis when an account alias makes it wider than the card; an
+        # RSVP / Move / Cancel card's may wrap once, so " \u00b7 EDITED" is never cut (it never
+        # gets shorter again).
+        self.kind_label = _ClampedLabel(mono_font(10, 400, 0.16), AMBER if actionable else TEXT_DIM,
+                                        max_lines=2 if check_line else 1, grow_only=check_line)
         self.kind_label.set_full_text(kind.upper())
         if title_lines > 0:
             self.title_label: QLabel = _ClampedLabel(body_font(14, 600), AMBER_TEXT, max_lines=title_lines)
@@ -3571,20 +3750,39 @@ class ActionCard(QWidget):
         # Wraps inside long email addresses too (QLabel alone would cut them at the card edge).
         self.detail_label: QLabel = _BreakableLabel(detail, mono_font(11), AMBER_SUB)
         self.detail_label.setVisible(bool(detail))
-        self.body_label = _ClampedLabel(body_font(12), TEXT_SOFT, max_lines=self._BODY_LINES)
+        # Google's own view of the event (RSVP / Move / Cancel): three lines, reserved from the
+        # start so filling it never moves the cards.
+        self.check_label = _ClampedLabel(mono_font(11), TEXT_SOFT, max_lines=self._CHECK_LINES)
+        self.check_label.setContentsMargins(0, self._CHECK_GAP, 0, 0)
+        self.check_label.setFixedHeight(
+            self._CHECK_GAP + math.ceil(self._CHECK_LINES * QFontMetricsF(self.check_label.font()).lineSpacing()) + 2)
+        self.check_label.setVisible(check_line)
+        self._check_tip = ""
+        self._check_warn = False
+        self._copy_more = f"{copy_text} for the whole text" if copy_text else ""
+        self.body_label = _ClampedLabel(body_font(12), TEXT_SOFT, max_lines=self._BODY_LINES, grow_only=True)
         self.body_label.setContentsMargins(0, self._BODY_GAP, 0, 0)
-        more = f"{copy_text} for the whole text" if copy_text else ""
-        self.body_label.set_full_text(" ".join(body.split()), tooltip=plain_tooltip(_capped_tip_text(body, more)))
+        self.body_label.set_full_text(" ".join(body.split()),
+                                      tooltip=plain_tooltip(_capped_tip_text(body, self._copy_more)))
         self.body_label.setVisible(bool(body.strip()))
         self.source_button: HudButton = _ToolLink(open_text or "Open")
         self.copy_button: HudButton = _ToolLink(copy_text or "Copy")
-        self._make_tools(kind, title, open_text, copy_text)
-        self.deny_button = _DecisionButton("Deny", DENY, compact=True)
+        self.edit_button: HudButton = _ToolLink(edit_text or EDIT_TEXT)
+        self.sign_in_button: HudButton = _ToolLink(sign_in_text or SIGN_IN_TEXT)
+        self.event_button: HudButton = _ToolLink(event_text or OPEN_EVENT_TEXT)
+        self._make_tools(kind, title, open_text, copy_text, edit_text, sign_in_text, event_text)
+        self.deny_button = _DecisionButton(deny_text or "Deny", DENY, compact=True)
         self.approve_button = _DecisionButton(approve_text or "Approve", APPROVE, compact=True)
+        # Every text the button may show later, so a new one never moves Deny (an RSVP, Move or
+        # Cancel card may also read Sign in or Done).
+        self._fit_approve_width((approve_text or "Approve", RETRY_TEXT)
+                                + ((SIGN_IN_TEXT, "Done") if check_line else ()))
         self.result_label = _ClampedLabel(mono_font(11, 400, 0.12), GREEN)
         self.result_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.open_button = HudButton("Open", LINK)
         self.open_button.set_link_color(ACCENT)
+        self.undo_button = HudButton(UNDO_TEXT, SECONDARY, compact=True)
+        self.undo_button.setAccessibleName(f"{UNDO_TEXT} ({kind.upper()}: {title})")
         # Two lines at most (hover for the whole reason): a 200-character Google
         # error would otherwise push the cards below down by about a card's
         # height and slide another card's Approve under the mouse.
@@ -3598,6 +3796,10 @@ class ActionCard(QWidget):
         self.open_button.clicked.connect(self._on_open)
         self.source_button.clicked.connect(self._on_source)
         self.copy_button.clicked.connect(self._on_copy)
+        self.edit_button.clicked.connect(self._on_edit)
+        self.sign_in_button.clicked.connect(self._on_sign_in)
+        self.event_button.clicked.connect(self._on_source)
+        self.undo_button.clicked.connect(self._on_undo)
         self._copied_timer = QTimer(self)
         self._copied_timer.setSingleShot(True)
         self._copied_timer.setInterval(COPIED_MS)
@@ -3605,13 +3807,28 @@ class ActionCard(QWidget):
         self._build_layout()
         self.set_status(CARD_PENDING)
 
-    def _make_tools(self, kind: str, title: str, open_text: str, copy_text: str) -> None:
-        """The tools row: Open / Copy links, each as wide as its widest text from the start."""
+    def _make_tools(self, kind: str, title: str, open_text: str, copy_text: str, edit_text: str = "",
+                    sign_in_text: str = "", event_text: str = "") -> None:
+        """The tools row: Open / Copy links, each as wide as its widest text from the start, then
+        one place for Edit, Sign in or Open event (set_tool_slot); those are all as wide as the
+        widest of them, so switching never moves anything. Edit shows first."""
         self._tools = QWidget()
         tools = FlowLayout(self._tools, h_spacing=self._TOOLS_SPACING, v_spacing=2)
         tools.setContentsMargins(0, self._TOOLS_GAP, 0, 0)
+        self._slot_buttons = {TOOL_EDIT: self.edit_button, TOOL_SIGN_IN: self.sign_in_button,
+                              TOOL_OPEN: self.event_button}
+        self._slot_texts = {mode: text for mode, text in ((TOOL_EDIT, edit_text), (TOOL_SIGN_IN, sign_in_text),
+                                                          (TOOL_OPEN, event_text)) if text}
+        slot_width = 0
+        for mode, text in self._slot_texts.items():
+            self._slot_buttons[mode].setText(text)
+            slot_width = max(slot_width, self._slot_buttons[mode].sizeHint().width())
+        self._tool_slot = TOOL_EDIT if edit_text else ""
         for button, text, texts in ((self.source_button, open_text, (open_text,)),
-                                    (self.copy_button, copy_text, (copy_text, COPIED_TEXT))):
+                                    (self.copy_button, copy_text, (copy_text, COPIED_TEXT)),
+                                    (self.edit_button, edit_text, (edit_text,)),
+                                    (self.sign_in_button, sign_in_text, (sign_in_text,)),
+                                    (self.event_button, event_text, (event_text,))):
             button.set_link_color(ACCENT)
             fallback = button.text()
             width = 0
@@ -3619,11 +3836,30 @@ class ActionCard(QWidget):
                 button.setText(shown)
                 width = max(width, button.sizeHint().width())
             button.setText(text or fallback)
-            button.setMinimumWidth(width)
+            in_slot = text and any(button is self._slot_buttons[mode] for mode in self._slot_texts)
+            button.setMinimumWidth(slot_width if in_slot else width)
             button.setAccessibleName(f"{text} ({kind.upper()}: {title})")
-            button.setVisible(bool(text))
+            button.setVisible(bool(text) and button is not self.sign_in_button and button is not self.event_button)
             tools.addWidget(button)
-        self._tools.setVisible(bool(open_text or copy_text))
+        self._tools.setVisible(bool(open_text or copy_text or edit_text or sign_in_text or event_text))
+
+    def set_tool_slot(self, mode: str) -> None:
+        """What the tools row's last place shows: TOOL_EDIT ("Edit"), TOOL_SIGN_IN ("Sign in": the
+        card's account must sign in again) or TOOL_OPEN ("Open event": Google's own page of the
+        event). A mode the card was built without shows Edit. Nothing moves."""
+        if mode not in self._slot_texts:
+            mode = TOOL_EDIT if TOOL_EDIT in self._slot_texts else ""
+        if mode == self._tool_slot:
+            return
+        focus = QApplication.focusWidget()
+        if focus is not None and focus is self._slot_buttons.get(self._tool_slot):
+            self.setFocus(Qt.FocusReason.OtherFocusReason)   # never to the next card's link
+        self._tool_slot = mode
+        for name, button in self._slot_buttons.items():
+            button.setVisible(name == mode)
+
+    def tool_slot(self) -> str:
+        return self._tool_slot
 
     # Bound methods, not lambdas: a lambda capturing self keeps the card alive.
     def _on_deny(self) -> None:
@@ -3641,6 +3877,91 @@ class ActionCard(QWidget):
     def _on_copy(self) -> None:
         self.copyClicked.emit(self.action_id)
 
+    def _on_edit(self) -> None:
+        self.editClicked.emit(self.action_id)
+
+    def _on_sign_in(self) -> None:
+        self.signInClicked.emit(self.action_id)
+
+    def _on_undo(self) -> None:
+        self.undoClicked.emit(self.action_id)
+
+    def _fit_approve_width(self, texts: Sequence[str]) -> None:
+        """The right-hand button as wide as the widest of ``texts`` ("Accept" / "Retry"), so a new
+        text never moves Deny (on a narrow card both buttons may lose some side padding)."""
+        button = self.approve_button
+        hint, tight = button.width_hints()
+        for text in texts:
+            hint = max(hint, button.natural_width(text))
+            tight = max(tight, button.tight_width(text))
+        button.set_width_hints(hint, tight)
+
+    def set_approve_text(self, text: str) -> None:
+        """Rename the right-hand button ("Accept" -> "Retry"); Deny never moves."""
+        self._fit_approve_width((text,))
+        self.approve_button.setText(text)
+
+    def approve_text(self) -> str:
+        return self.approve_button.text()
+
+    def set_check_line(self, text: str, tooltip: str = "", *, warn: bool = False) -> None:
+        """Google's own view of the event, under the detail (two lines at most; hover for all,
+        or for ``tooltip`` when given). ``warn`` draws it in amber (Jarvis won't act on it, or
+        the account needs a sign-in). Its height was reserved, so nothing ever moves."""
+        if (text, tooltip, warn) == (self.check_label.full_text(), self._check_tip, self._check_warn):
+            return
+        self._check_tip = tooltip
+        self.check_label.set_full_text(text, tooltip=plain_tooltip(tooltip or text))
+        if warn != self._check_warn:
+            self._check_warn = warn
+            set_label_color(self.check_label, AMBER if warn else TEXT_SOFT)
+
+    def check_warns(self) -> bool:
+        """The check line is drawn in amber (set_check_line(warn=True))."""
+        return self._check_warn
+
+    def check_line(self) -> str:
+        return self.check_label.full_text()
+
+    def set_edit_enabled(self, enabled: bool) -> None:
+        """Enable Edit and Sign in (both open something that must not run beside another card's
+        countdown or job); Open event stays usable."""
+        for button in (self.edit_button, self.sign_in_button):
+            button.setEnabled(bool(enabled))
+
+    def set_sign_in_visible(self, visible: bool) -> None:
+        """Show Sign in in the tools row's last place, or Edit again (set_tool_slot)."""
+        self.set_tool_slot(TOOL_SIGN_IN if visible else TOOL_EDIT)
+
+    def set_body(self, body: str) -> None:
+        """A new body preview (after an edit): the card may grow, never shrink."""
+        self.body_label.set_full_text(" ".join(body.split()),
+                                      tooltip=plain_tooltip(_capped_tip_text(body, self._copy_more)))
+        if body.strip():
+            self.body_label.setVisible(True)
+
+    def set_copy_text(self, text: str) -> None:
+        """Show the tools row's Copy link as ``text`` ("Copy note"), or hide it with "" (after an
+        edit added or removed the note). Its width only ever grows, so it never moves Edit."""
+        if text == self._copy_text:
+            return
+        self._copy_text = text
+        self._copy_more = f"{text} for the whole text" if text else ""
+        self._copied_timer.stop()
+        if text:
+            width = self.copy_button.minimumWidth()
+            for shown in (text, COPIED_TEXT):
+                self.copy_button.setText(shown)
+                width = max(width, self.copy_button.sizeHint().width())
+            self.copy_button.setMinimumWidth(width)
+            self.copy_button.setText(text)
+            self.copy_button.setAccessibleName(f"{text} ({self.kind_label.full_text()}: {self._title})")
+            self._tools.setVisible(True)
+        self.copy_button.setVisible(bool(text))
+
+    def copy_text(self) -> str:
+        return self._copy_text
+
     def show_copied(self) -> None:
         """The Copy button reads "Copied" for 1.5 s (its width never changes)."""
         if not self._copy_text:
@@ -3654,7 +3975,7 @@ class ActionCard(QWidget):
     def _build_layout(self) -> None:
         self._texts = QVBoxLayout()
         self._texts.setSpacing(2)
-        for label in (self.kind_label, self.title_label, self.detail_label, self.body_label):
+        for label in (self.kind_label, self.title_label, self.detail_label, self.check_label, self.body_label):
             self._texts.addWidget(label)
         self._texts.addWidget(self._tools)
         # Both slot pages reach the card's right and bottom edges (their margins
@@ -3670,8 +3991,10 @@ class ActionCard(QWidget):
         result = QHBoxLayout(self._result)
         result.setContentsMargins(0, self._SLOT_GAP, self._PAD_RIGHT, self._PAD_BOTTOM)
         result.setSpacing(10)
+        result.addWidget(self.undo_button, 0, Qt.AlignmentFlag.AlignVCenter)   # left: far from Approve
         result.addWidget(self.result_label, 1)
         result.addWidget(self.open_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.undo_button.hide()
         # One slot, one height: the result takes the buttons' place (up to two lines).
         self._slot = QWidget()
         self._stack = QStackedLayout(self._slot)
@@ -3742,25 +4065,28 @@ class ActionCard(QWidget):
         self._link = link
         self.open_button.setText(link_text or "Open")
         text, color = _CARD_RESULTS.get(self._status, ("", TEXT_DIM))
-        if self._status == CARD_FAILED and message:
-            text = f"FAILED: {message}"
+        if self._status in (CARD_FAILED, CARD_UNKNOWN) and message:
+            text = f"{text}: {message}"
         elif message and self._status != CARD_PENDING:
             text = message
         text = text.upper()
         self._result_text = text
-        failed = self._status == CARD_FAILED
-        retry = self._status in (CARD_PENDING, CARD_FAILED)
+        failed = self._status in (CARD_FAILED, CARD_UNKNOWN)
+        retry = self._status in _DECIDING_STATUSES
         show_buttons = self._actionable and retry
-        self.result_label.set_full_text("" if failed else text)
-        set_label_color(self.result_label, color)
-        self.open_button.setVisible(self._status in (CARD_ADDED, CARD_EXISTS) and bool(link))
-        self.failure_label.set_line(text if failed else "")
-        # A Tab-focused Deny / Approve that goes away would hand the keyboard
-        # focus to the next card's Deny (and scroll the list to it), so a second
-        # Space would decide that card: keep the focus on this card instead.
+        # A Tab-focused Deny / Approve (or Undo) that goes away would hand the
+        # keyboard focus to the next card's button or link (and scroll the list to
+        # it), so a second Space would act on that card: keep the focus on this card.
         focus = QApplication.focusWidget()
-        if not show_buttons and focus is not None and self._buttons.isAncestorOf(focus):
+        if focus is not None and ((not show_buttons and self._buttons.isAncestorOf(focus))
+                                  or (self._status != CARD_COUNTDOWN and focus is self.undo_button)):
             self.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.result_label.set_full_text("" if failed else _keep_last_words(text))
+        set_label_color(self.result_label, color)
+        self.open_button.setVisible(self._status in _LINK_STATUSES and bool(link))
+        self.undo_button.setVisible(self._status == CARD_COUNTDOWN)
+        self.failure_label.set_color(AMBER if self._status == CARD_UNKNOWN else RED)
+        self.failure_label.set_line(text if failed else "")
         self._stack.setCurrentWidget(self._buttons if show_buttons else self._result)
         self._sync_buttons()
         slot = self._actionable or bool(text)
@@ -3792,7 +4118,7 @@ class ActionCard(QWidget):
         return self._locked
 
     def _buttons_shown(self) -> bool:
-        return self._actionable and self._status in (CARD_PENDING, CARD_FAILED)
+        return self._actionable and self._status in _DECIDING_STATUSES
 
     def _sync_buttons(self) -> None:
         enabled = self._buttons_shown() and not self._locked
@@ -3903,6 +4229,204 @@ class ActionList(QScrollArea):
         super().resizeEvent(event)
         if old_width != event.size().width():
             self.updateGeometry()
+
+
+EDIT_RSVP = "rsvp"
+EDIT_MOVE = "move"
+EDIT_CANCEL = "cancel"
+EDIT_KINDS = (EDIT_RSVP, EDIT_MOVE, EDIT_CANCEL)
+_EDIT_ANSWERS = (("yes", "Yes"), ("no", "No"), ("maybe", "Maybe"))
+_EDIT_STYLE = """
+QLineEdit, QPlainTextEdit {
+    color: @TEXT; background: #030a10; border: 1px solid @BORDER; padding: 4px 6px;
+    selection-background-color: @SELECTION; selection-color: @BRIGHT;
+}
+QLineEdit:focus, QPlainTextEdit:focus { border: 1px solid @AMBER; }
+QCheckBox { color: @TEXT; spacing: 8px; }
+QCheckBox::indicator { width: 13px; height: 13px; border: 1px solid @BORDER; background: #030a10; }
+QCheckBox::indicator:checked { background: @AMBER; border: 1px solid @AMBER; }
+QCheckBox:focus { color: @BRIGHT; }
+"""
+
+
+class EditDialog(QDialog):
+    """The Edit dialog of an RSVP / Move / Cancel card: window-modal, opened with ``open()``.
+
+    It shows exactly what Jarvis will carry out and lets you change it: an
+    invitation's answer, a move's new date and times, whether guests are told,
+    and the note (an RSVP's note goes to the organizer with the answer; a move's
+    or cancel's note is not sent by Google Calendar, which the dialog says).
+    Save emits ``saved(action_id, values)`` with the fields as typed (``values()``:
+    answer, notify ("all" / "external" / "none"), date, start, end, note); the
+    caller checks them and either closes the dialog (``accept()``) or keeps it
+    open with ``show_error(text)``. Save never sends anything. Every text is
+    plain text; nothing is read as HTML.
+    """
+
+    saved = Signal(str, object)
+    WIDTH = 420
+
+    def __init__(self, action_id: str, kind: str, kind_label: str, title: str, *, answer: str = "yes",
+                 notify: str = "all", date_text: str = "", start_text: str = "", end_text: str = "",
+                 note: str = "", check_text: str = "", hour24: bool = False,
+                 parent: QWidget | None = None) -> None:
+        flags = Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint
+        super().__init__(parent, flags)
+        if kind not in EDIT_KINDS:
+            raise ValueError(f"no Edit dialog for {kind!r}")
+        self.action_id = action_id
+        self.kind = kind
+        self._notify = notify
+        self._answer = answer if answer in dict(_EDIT_ANSWERS) else "yes"
+        self.setWindowModality(Qt.WindowModality.WindowModal)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setWindowTitle(f"Edit {kind_label}")
+        self.setAccessibleName(f"Edit {kind_label}: {title}")
+        tokens = {"TEXT": TEXT_BODY, "BRIGHT": TEXT_BRIGHT, "AMBER": AMBER,
+                  "BORDER": _qss_color(rgba(AMBER, 0.35)), "SELECTION": _qss_color(rgba(ACCENT, 0.32))}
+        style = _EDIT_STYLE
+        for name in sorted(tokens, key=len, reverse=True):
+            style = style.replace("@" + name, tokens[name])
+        self.setStyleSheet(style)
+        self.panel = ChamferPanel("Edit", kind_label.upper(), variant=PANEL_AMBER, border_alpha=0.5,
+                                  padding=(18, 14, 18, 16), spacing=8)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self.panel)
+        body = self.panel.body_layout
+        self.title_label = make_label(title, body_font(14, 600), AMBER_TEXT, wrap=True)
+        body.addWidget(self.title_label)
+        self.check_label = make_label(check_text, mono_font(11), TEXT_SOFT, wrap=True)
+        self.check_label.setVisible(bool(check_text))
+        body.addWidget(self.check_label)
+        self.answer_buttons: dict[str, HudButton] = {}
+        if kind == EDIT_RSVP:
+            body.addWidget(self._caption("Answer"))
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            for value, text in _EDIT_ANSWERS:
+                button = HudButton(text, SECONDARY, compact=True)
+                button.setCheckable(True)
+                button.setAccessibleName(f"Answer {text}")
+                button.clicked.connect(self._on_answer)
+                self.answer_buttons[value] = button
+                row.addWidget(button)
+            row.addStretch(1)
+            body.addLayout(row)
+            self._select_answer(self._answer)
+        self.date_edit = QLineEdit(date_text)
+        self.start_edit = QLineEdit(start_text)
+        self.end_edit = QLineEdit(end_text)
+        if kind == EDIT_MOVE:
+            body.addWidget(self._caption("New time"))
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            time_hint = "14:00" if hour24 else "2:00 PM"
+            for edit, hint, width, name in ((self.date_edit, "YYYY-MM-DD", 112, "Date"),
+                                            (self.start_edit, time_hint, 92, "Start"),
+                                            (self.end_edit, time_hint, 92, "End")):
+                edit.setFont(mono_font(12))
+                edit.setPlaceholderText(hint)
+                edit.setFixedWidth(width)
+                edit.setAccessibleName(name)
+                row.addWidget(edit)
+                if edit is self.start_edit:
+                    row.addWidget(make_label("-", mono_font(12), TEXT_SOFT))
+            row.addStretch(1)
+            body.addLayout(row)
+            body.addWidget(make_label("Times like 2:00 PM or 14:00, in your calendar's time zone",
+                                      mono_font(10), TEXT_DIM, wrap=True))
+        else:
+            for edit in (self.date_edit, self.start_edit, self.end_edit):
+                edit.hide()
+        outside = notify == "external"
+        self.notify_box = QCheckBox("Notify guests outside your organization" if outside else "Notify guests")
+        self.notify_box.setFont(body_font(13))
+        self.notify_box.setChecked(notify != "none")
+        if kind == EDIT_RSVP:   # sendUpdates: an email about the answer; the event shows it either way
+            self.notify_box.setText("Email the organizer only if outside your organization" if outside
+                                    else "Email the organizer about my answer")
+        body.addWidget(self.notify_box)
+        if kind == EDIT_RSVP:
+            body.addWidget(make_label("Without the email, the organizer still sees your answer and note "
+                                      "on the event", mono_font(10), TEXT_DIM, wrap=True))
+        if kind == EDIT_RSVP:
+            caption = "Note to the organizer (sent with your answer)"
+        else:
+            caption = "Note (not sent: Google Calendar has no message - Copy it)"
+        body.addWidget(self._caption(caption))
+        self.note_edit = QPlainTextEdit()
+        self.note_edit.setPlainText(note)
+        self.note_edit.setFont(body_font(13))
+        self.note_edit.setTabChangesFocus(True)
+        self.note_edit.setFixedHeight(84)
+        self.note_edit.setAccessibleName(caption)
+        body.addWidget(self.note_edit)
+        self.error_label = make_label("", mono_font(11), RED, wrap=True)
+        self.error_label.hide()
+        body.addWidget(self.error_label)
+        buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 6, 0, 0)
+        buttons.setSpacing(8)
+        buttons.addStretch(1)
+        self.cancel_button = HudButton("Cancel", SECONDARY, compact=True)
+        self.save_button = HudButton("Save", PRIMARY, compact=True)
+        self.save_button.setAccessibleDescription("Keeps the changes on the card; nothing is sent")
+        self.save_button.setDefault(True)   # Enter in a field saves (never sends anything)
+        buttons.addWidget(self.cancel_button)
+        buttons.addWidget(self.save_button)
+        body.addLayout(buttons)
+        self.cancel_button.clicked.connect(self.reject)
+        self.save_button.clicked.connect(self._on_save)
+        self.setFixedWidth(self.WIDTH)
+
+    @staticmethod
+    def _caption(text: str) -> QLabel:
+        return make_label(text.upper(), mono_font(10, 400, 0.14), AMBER_META, wrap=True)
+
+    def _select_answer(self, value: str) -> None:
+        self._answer = value
+        for name, button in self.answer_buttons.items():
+            button.setChecked(name == value)
+            button.set_selected(name == value)
+
+    def _on_answer(self) -> None:
+        sender = self.sender()
+        for value, button in self.answer_buttons.items():
+            if button is sender:
+                self._select_answer(value)
+
+    def values(self) -> dict[str, str]:
+        """The fields as typed: answer, notify, date, start, end, note."""
+        if self.notify_box.isChecked():
+            notify = "external" if self._notify == "external" else "all"
+        else:
+            notify = "none"
+        return {"answer": self._answer, "notify": notify, "date": self.date_edit.text().strip(),
+                "start": self.start_edit.text().strip(), "end": self.end_edit.text().strip(),
+                "note": self.note_edit.toPlainText()}
+
+    def show_error(self, text: str) -> None:
+        """Keep the dialog open and say what is wrong (plain text)."""
+        self.error_label.setText(text)
+        self.error_label.setVisible(bool(text))
+        self.adjustSize()
+
+    def error(self) -> str:
+        """The error shown under the fields ("" when none)."""
+        return self.error_label.text() if not self.error_label.isHidden() else ""
+
+    def _on_save(self) -> None:
+        self.saved.emit(self.action_id, self.values())
+
+    def open(self) -> None:  # noqa: D102 - QDialog.open, centred over the parent window first
+        self.adjustSize()
+        parent = self.parentWidget()
+        if parent is not None:
+            window = parent.window()
+            center = window.mapToGlobal(QPoint(window.width() // 2, window.height() // 2))
+            self.move(center.x() - self.width() // 2, max(0, center.y() - self.height() // 2))
+        super().open()
 
 
 # --------------------------------------------------------------------------

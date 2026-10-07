@@ -17,16 +17,20 @@ goes through the Calendar / free-text path exactly as before.
     extract_actions(lines)     pull that section out of a page's FlatLines
     link_allowed(url)          the https hosts a card's Open may open
     card_view(action, today)   what a card shows (kind label, texts, buttons)
-    ActionStore(path)          persisted decisions (created / exists / denied /
-                               done / failed, plus the later sent / running / unknown)
+    edit_action(action, ...)   the Edit dialog's changes, checked like a line (same id)
+    parse_time_range(d, s, e)  the Edit dialog's new time for a Move, read like when=
+    ActionStore(path)          persisted decisions (created / exists / denied / done /
+                               failed / sent / running / unknown)
 
 A Calendar line is approved by creating the event; a Todo with a block= time
-by adding that block through the same calendar flow. The other kinds are
-hand-offs in this version: their cards open the source link, copy the drafted
-text and record Done or Deny, and nothing is sent. Free-text lines and lines
-that cannot be read stay informational; ``error`` says why a line could not be
-read. Nothing here talks to Google: gcal.py does that, and only after an
-explicit Approve.
+by adding that block through the same calendar flow. An RSVP, Move or Cancel
+is carried out by Jarvis (answer the invitation, move or cancel the event)
+after Accept / Move / Cancel event and an undo countdown (executor.py, ui.py).
+The other kinds are hand-offs: their cards open the source link, copy the
+drafted text and record Done or Deny, and nothing is sent. Free-text lines and
+lines that cannot be read stay informational; ``error`` says why a line could
+not be read. Nothing here talks to Google: gcal.py does that, and only after an
+explicit click on that card.
 
 Qt-free. Briefing content is personal, so only counts, action ids, kinds,
 account aliases and statuses are logged, never text, addresses or links.
@@ -66,6 +70,9 @@ TODO = "todo"         # something due, optionally with a calendar block to work 
 OPEN = "open"         # a page to look at
 UNKNOWN = "unknown"
 STRUCTURED_KINDS = frozenset({REPLY, EMAIL, RSVP, MOVE, CANCEL, SHARE, SLACK, TODO, OPEN})
+# Kinds Jarvis carries out after an undo countdown, writing "running" before the call
+# (a later version adds REPLY and EMAIL). Calendar and a Todo's block are added at once.
+COUNTDOWN_KINDS = frozenset({RSVP, MOVE, CANCEL})
 MAX_RECIPIENTS = 5    # to= plus cc= of a Reply or Email (not configurable)
 # The https hosts a card's Open may open, besides [actions] link_hosts. Calendar's own
 # "https://www.google.com/calendar/..." links are a separate, path-checked rule.
@@ -79,8 +86,8 @@ STATUS_EXISTS = "exists"     # Approve found it already on the calendar
 STATUS_DENIED = "denied"     # Deny (shown as "dismissed" on cards without an Approve)
 STATUS_FAILED = "failed"     # not final: the proposal stays pending and can be retried
 STATUS_DONE = "done"         # you handled it yourself (a card without an Approve)
-STATUS_SENT = "sent"         # Jarvis carried it out (later versions)
-STATUS_RUNNING = "running"   # written right before a call that is not repeatable (later versions)
+STATUS_SENT = "sent"         # Jarvis carried it out (an invitation answered, an event moved or cancelled)
+STATUS_RUNNING = "running"   # written right before the call to Google of a countdown kind
 STATUS_UNKNOWN = "unknown"   # stopped or timed out mid-call; never retried by itself
 STATUSES = (STATUS_CREATED, STATUS_EXISTS, STATUS_DENIED, STATUS_FAILED, STATUS_DONE, STATUS_SENT,
             STATUS_RUNNING, STATUS_UNKNOWN)
@@ -168,8 +175,14 @@ class ProposedAction:
 
     @property
     def actionable(self) -> bool:
-        """Approve makes Jarvis carry it out (a Calendar event, a Todo's block)."""
+        """Approve makes Jarvis carry it out (a Calendar event, a Todo's block, an RSVP, Move or
+        Cancel)."""
         return self.decidable and bool(approve_label(self))
+
+    @property
+    def countdown(self) -> bool:
+        """Approve starts the undo countdown first (COUNTDOWN_KINDS)."""
+        return self.kind in COUNTDOWN_KINDS and self.actionable
 
     @property
     def all_day(self) -> bool:
@@ -248,7 +261,9 @@ def approve_label(action: ProposedAction) -> str:
     """The text of the card's Approve button ("" = no Approve in this version: the card gets Done).
 
     The one place later versions extend: Calendar lines are approved by
-    creating the event, a Todo with a block= time by adding that block.
+    creating the event, a Todo with a block= time by adding that block, an
+    RSVP by answering it (Accept / Decline / Maybe), a Move or Cancel by
+    moving or cancelling the event.
     """
     if not action.decidable:
         return ""
@@ -256,7 +271,16 @@ def approve_label(action: ProposedAction) -> str:
         return "Approve"
     if action.kind == TODO and action.start is not None:
         return "Add block"
+    if action.kind == RSVP:
+        return _RSVP_BUTTONS.get(action.field("answer"), "")
+    if action.kind == MOVE and action.start is not None:
+        return "Move"
+    if action.kind == CANCEL:
+        return "Cancel event"
     return ""
+
+
+_RSVP_BUTTONS = {"yes": "Accept", "no": "Decline", "maybe": "Maybe"}
 
 
 _SPEECH_NOUNS = {
@@ -1490,6 +1514,10 @@ def _spoken_times(start: datetime, end: datetime) -> str:
 
 _NOTIFY_WORDS = {"all": "guests notified", "external": "only outside guests notified",
                  "none": "guests not notified"}
+# An RSVP's notify= decides whether Google emails the organizer about the answer (sendUpdates);
+# the organizer sees the answer and its note on the event either way.
+_RSVP_NOTIFY_WORDS = {"all": "organizer emailed", "external": "organizer emailed only if external",
+                      "none": "organizer not emailed"}
 _RSVP_VERBS = {"yes": "Accept", "no": "Decline", "maybe": "Answer maybe to"}
 _REPLY_PREFIX_RE = re.compile(r"^(?:(?:re|fwd?|aw)\s*:\s*)+", re.IGNORECASE)
 _SAID_CHARS = 140
@@ -1571,7 +1599,8 @@ def _describe_structured(action: ProposedAction, today: date) -> str:
         parts.append(due)
     elif kind == RSVP:
         at = _field_when(action, "at")
-        parts += [f"Answer: {field('answer')}", *(_describe_when(at, today) if at else []), due]
+        parts += [f"Answer: {field('answer')}", *(_describe_when(at, today) if at else []),
+                  _RSVP_NOTIFY_WORDS.get(field("notify"), ""), due]
     elif kind == MOVE:
         new = _describe_when(action, today)
         if new:
@@ -1810,19 +1839,38 @@ class CardView:
     approve_text: str = ""   # the right-hand decision button: approve_label or "Done"; "" when not decidable
     decidable: bool = False
     note: str = ""           # amber note: warnings joined by " \u00b7 " (at most two)
+    editable: bool = False   # the tools row has Edit (a countdown kind)
+    check: bool = False      # a reserved line for Google's own view of the event (a countdown kind)
+    deny_text: str = "Deny"  # the left-hand decision button ("Skip" on a countdown kind)
 
 
 INFO_DETAIL = "Information only"
 ALREADY_REPLIED = "The briefing says you already replied"
 DONE_TEXT = "Done"
+RETRY_TEXT = "Retry"
+# The left-hand button of an RSVP, Move or Cancel: "Deny" next to "Decline" read like the same
+# thing, but it only drops the card (nothing is sent); the card then reads SKIPPED.
+SKIP_TEXT = "Skip"
+SKIPPED_TEXT = "Skipped"
+# An RSVP's note goes to the organizer with the answer: its preview says so.
+RSVP_NOTE_PREFIX = "Note to the organizer: "
+NOTE_NOT_SENT = "The note is not sent with the change (Google Calendar has no message) - Copy it"
+UNKNOWN_CALENDAR = "Unknown: check the calendar before retrying"
+_SENT_TEXTS = {(RSVP, "yes"): "Accepted", (RSVP, "no"): "Declined", (RSVP, "maybe"): "Answered maybe",
+               (MOVE, ""): "Moved", (CANCEL, ""): "Cancelled"}
+_ALREADY_TEXTS = {(RSVP, "yes"): "Already accepted", (RSVP, "no"): "Already declined",
+                  (RSVP, "maybe"): "Already answered maybe", (MOVE, ""): "Already at that time",
+                  (CANCEL, ""): "Already cancelled"}
 _RAW_SHOWN = 160
 _MAX_WARNINGS_SHOWN = 2
 _ACCOUNT_KINDS = frozenset({REPLY, EMAIL, RSVP, MOVE, CANCEL, SHARE})
 _OPEN_TEXTS = {REPLY: "Open thread", EMAIL: "Open", RSVP: "Open event", MOVE: "Open event",
                CANCEL: "Open event", SHARE: "Open request", SLACK: "Open in Slack", TODO: "Open",
                OPEN: "Open"}
-_COPY_TEXTS = {REPLY: "Copy reply", SLACK: "Copy reply", EMAIL: "Copy email", RSVP: "Copy note",
-               MOVE: "Copy note", CANCEL: "Copy note"}
+# An RSVP's note goes to the organizer with the answer, so it has no Copy; a Move's or Cancel's
+# note is not sent (the Calendar API has no message), so it does.
+_COPY_TEXTS = {REPLY: "Copy reply", SLACK: "Copy reply", EMAIL: "Copy email", MOVE: "Copy note",
+               CANCEL: "Copy note"}
 _COPIED_TEXTS = {REPLY: "Copied the reply", SLACK: "Copied the reply", EMAIL: "Copied the email",
                  RSVP: "Copied the note", MOVE: "Copied the note", CANCEL: "Copied the note"}
 
@@ -1874,10 +1922,16 @@ def card_view(action: ProposedAction, today: date) -> CardView:
         return CardView(label, title, INFO_DETAIL)
     if not action.decidable:   # a Reply the briefing says was sent already
         return CardView(label, title, ALREADY_REPLIED, open_text=open_text(action))
-    note = _SEPARATOR.join(action.warnings[:_MAX_WARNINGS_SHOWN])
-    return CardView(label, title, action.describe(today), body=action.body, open_text=open_text(action),
+    notes = list(action.warnings[:_MAX_WARNINGS_SHOWN])
+    if action.kind in (MOVE, CANCEL) and action.body and action.countdown:
+        notes.append(NOTE_NOT_SENT)
+    body = action.body
+    if action.kind == RSVP and body and action.countdown:
+        body = RSVP_NOTE_PREFIX + body
+    return CardView(label, title, action.describe(today), body=body, open_text=open_text(action),
                     copy_text=copy_text(action), approve_text=approve_label(action) or DONE_TEXT,
-                    decidable=True, note=note)
+                    decidable=True, note=_SEPARATOR.join(notes), editable=action.countdown,
+                    check=action.countdown, deny_text=SKIP_TEXT if action.countdown else "Deny")
 
 
 def result_text(action: ProposedAction, status: str) -> str:
@@ -1886,7 +1940,118 @@ def result_text(action: ProposedAction, status: str) -> str:
         return "Block added"
     if action.decidable and not action.actionable and status == STATUS_DENIED:
         return "Dismissed"
+    if action.countdown and status == STATUS_DENIED:
+        return SKIPPED_TEXT
+    if status == STATUS_SENT:
+        return sent_text(action)
+    if status == STATUS_UNKNOWN and action.kind in COUNTDOWN_KINDS:
+        return UNKNOWN_CALENDAR
     return ""
+
+
+def sent_text(action: ProposedAction, *, already: bool = False) -> str:
+    """"Accepted", "Moved", "Cancelled" ("Already accepted" ... with ``already``); "" for other kinds."""
+    key = (action.kind, action.field("answer") if action.kind == RSVP else "")
+    return (_ALREADY_TEXTS if already else _SENT_TEXTS).get(key, "")
+
+
+def stated_when(action: ProposedAction) -> Any | None:
+    """The event's time as the line states it (an RSVP's, Move's or Cancel's at=), with start /
+    end or all_day_start / all_day_end like a ProposedAction; None when the line gives none."""
+    return _field_when(action, "at")
+
+
+def when_text(item: Any, today: date) -> str:
+    """"Thu Oct 8 \u00b7 12:00-1:00 PM" for anything with start / end / all_day_start / all_day_end
+    (an aware start is shown as the wall time it carries)."""
+    start, end = getattr(item, "start", None), getattr(item, "end", None)
+    when = _When(start=start.replace(tzinfo=None) if start is not None else None,
+                 end=end.replace(tzinfo=None) if end is not None else None,
+                 all_day_start=getattr(item, "all_day_start", None),
+                 all_day_end=getattr(item, "all_day_end", None))
+    return _SEPARATOR.join(_describe_when(when, today))
+
+
+class EditInvalid(ValueError):
+    """Why an edit cannot be used (shown in the Edit dialog)."""
+
+
+def edit_action(action: ProposedAction, *, answer: str | None = None, notify: str | None = None,
+                start: datetime | None = None, end: datetime | None = None,
+                body: str | None = None) -> ProposedAction:
+    """``action`` with the Edit dialog's changes, checked like a line (same id; README: "Edit").
+
+    RSVP: ``answer`` (yes / no / maybe), ``notify``, ``body`` (the note sent with the answer).
+    Move: ``start`` / ``end`` (5 minutes to 12 hours), ``notify``, ``body`` (Copy only).
+    Cancel: ``notify``, ``body`` (Copy only). Raises EditInvalid with a short reason. The id
+    never changes: the card and the saved decision stay the same proposal.
+    """
+    if not action.countdown:
+        raise EditInvalid("This card cannot be edited")
+    pairs = dict(action.fields)
+    changes: dict[str, Any] = {}
+    try:
+        if answer is not None:
+            if action.kind != RSVP:
+                raise _LineError("only an invitation has an answer")
+            pairs["answer"] = _choice("answer", _edit_text(answer), _ANSWERS, "use yes, no or maybe")
+        if notify is not None:
+            pairs["notify"] = _choice("notify", _edit_text(notify), _NOTIFY, "use all, external or none")
+        if start is not None or end is not None:
+            if action.kind != MOVE or start is None or end is None:
+                raise _LineError("only a move has a new time (start and end)")
+            if not isinstance(start, datetime) or not isinstance(end, datetime):
+                raise _LineError("the new time needs a start and an end")
+            start = start.replace(tzinfo=None, second=0, microsecond=0)
+            end = end.replace(tzinfo=None, second=0, microsecond=0)
+            if not _MIN_RANGE <= end - start <= _MAX_RANGE:
+                raise _LineError("the new time must end 5 minutes to 12 hours after it starts")
+            pairs["when"] = f"{_iso(start)}/{_iso(end)}"
+            changes.update(start=start, end=end)
+        if body is not None:
+            if not isinstance(body, str):
+                raise _LineError("the note must be text")
+            text = _BODY_CONTROL_RE.sub("", body.replace("\r\n", "\n").replace("\r", "\n")).strip()
+            cap = _BODY_CAPS.get(action.kind, _LONG_BODY_CAP)
+            if len(text) > cap:
+                raise _LineError(f"the note is too long ({len(text)} characters, at most {cap})")
+            changes["body"] = text
+    except _LineError as exc:
+        raise EditInvalid(str(exc)) from None
+    known = [name for name, _ in action.fields]
+    order = known + [name for name in pairs if name not in known]
+    return replace(action, fields=tuple((name, pairs[name]) for name in order), **changes)
+
+
+def _edit_text(value: Any) -> str:
+    if not isinstance(value, str):
+        raise _LineError("the value must be text")
+    return value.strip()
+
+
+_EDIT_FIELD_CAP = 40   # one field of the Edit dialog's new time ("2026-10-08", "2:00 PM")
+
+
+def parse_time_range(date_text: str, start_text: str, end_text: str) -> tuple[datetime, datetime]:
+    """The Edit dialog's new time for a Move ("2026-10-08", "14:00", "15:00"), read like a when=
+    value: naive local wall times, 5 minutes to 12 hours (an end before the start is the next
+    day). Raises EditInvalid with a short reason."""
+    parts = []
+    for name, value in (("date", date_text), ("start", start_text), ("end", end_text)):
+        if not isinstance(value, str) or not value.strip():
+            raise EditInvalid(f"give the new {name}")
+        value = " ".join(value.split())
+        if len(value) > _EDIT_FIELD_CAP or "|" in value or _CONTROL_RE.search(value):
+            raise EditInvalid(f"the new {name} can't be read")
+        parts.append(value)
+    if not _ISO_DATE_RE.fullmatch(parts[0]):
+        raise EditInvalid("give the date as YYYY-MM-DD")
+    if "-" in parts[1] or "-" in parts[2]:
+        raise EditInvalid("give the start and the end as times, like 14:00 or 2:00 PM")
+    try:
+        return _read_range("when", f"{parts[0]} {parts[1]}-{parts[2]}")
+    except _LineError as exc:
+        raise EditInvalid(str(exc).removeprefix("when=: ")) from None
 
 
 # --------------------------------------------------------------------------
@@ -1939,7 +2104,9 @@ class ActionStore:
             return dict(entry) if entry is not None else None
 
     def set(self, action_id: str, status: str, *, link: str = "", message: str = "",
-            kind: str = "", account: str = "") -> None:
+            kind: str = "", account: str = "") -> bool:
+        """Remember ``status`` for ``action_id``; True when it was written to the file (False:
+        logged, and kept in memory for this run only)."""
         if status not in STATUSES:
             raise ValueError(f"unknown action status {status!r}")
         entry = {"status": status, "at": self._clock().isoformat(timespec="seconds"),
@@ -1950,9 +2117,11 @@ class ActionStore:
             entry["account"] = account
         with self._lock:
             self._entries[action_id] = entry
-            if _write_entries(self.path, self._entries):
+            saved = _write_entries(self.path, self._entries)
+            if saved:
                 self._dirty = False
         logger.info("Action %s (%s, %s): %s", action_id, kind or "-", _logged_alias(account), status)
+        return saved
 
     def is_decided(self, action_id: str) -> bool:
         entry = self.get(action_id)

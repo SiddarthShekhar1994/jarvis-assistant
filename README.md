@@ -12,11 +12,14 @@ shown with the current line highlighted.
 The briefing can also propose calendar events, email replies, answers to
 invitations, to-dos and links to look at. They appear in an amber
 **NEEDS YOUR OK** column: **Approve** adds a calendar event (or a to-do's work
-block) to your Google Calendar, and the other cards hand the item over to you
-with **Open** and **Copy**. Nothing is ever added without your Approve, and
-this version never sends, answers or changes anything else (see
-[Calendar actions](#calendar-actions) and
-[Other proposals](#other-proposals-replies-invites-to-dos-and-links)).
+block) to your Google Calendar; **Accept** / **Decline** / **Maybe**, **Move**
+and **Cancel event** answer an invitation or move or cancel an event you
+organize, for your personal or your work Google account, after a 10-second
+countdown you can undo; the other cards hand the item over to you with
+**Open** and **Copy**. Nothing happens without your click on that card, and
+this version never sends an email (see [Calendar actions](#calendar-actions),
+[Invitations, moves and cancellations](#invitations-moves-and-cancellations)
+and [Other proposals](#other-proposals-replies-invites-to-dos-and-links)).
 Next to the reading, a **TODAY** panel lists the day's calendar events (from
 18:00 on: tomorrow's) and **DEADLINES** lists what is due in the next 14 days
 (see [TODAY and DEADLINES](#today-and-deadlines)).
@@ -46,11 +49,11 @@ own scheduled task (see [Instructions for the Claude briefing task](#instruction
   and a Notion integration that may read it (setup steps 2 and 3).
 - Internet access for Notion and for the online voice (edge-tts). If the online
   voice cannot be reached, the app falls back to the Windows built-in voices.
-- For calendar actions and the TODAY panel only: a Google account and a free
-  Google Cloud project with your own OAuth client (setup step 8). Without it,
-  everything else works: proposals are still shown (Approve just says that
-  Google Calendar is not set up yet), and DEADLINES still lists the
-  briefing's own deadlines.
+- For calendar actions and the TODAY panel only: a Google account (or two: a
+  personal and a work or school one) and a free Google Cloud project with your
+  own OAuth client (setup step 8). Without it, everything else works:
+  proposals are still shown (Approve just says that Google Calendar is not set
+  up yet), and DEADLINES still lists the briefing's own deadlines.
 
 ## Setup
 
@@ -273,28 +276,67 @@ cd "<project folder>"
    7. That's all. The first time you click **Approve**, or **Connect** in the
       TODAY panel, your browser opens the
       Google sign-in: pick your account and allow both permissions. The page
-      then says "briefing-reader is connected to Google Calendar. You can close
-      this tab." The sign-in must be finished within 5 minutes; the app stays
-      usable meanwhile. It is saved in
-      `%LOCALAPPDATA%\briefing-reader\google_token.json` (on this PC only, outside
-      the project folder) and refreshed automatically, so later approvals do not
-      ask again.
-      The app never opens the sign-in by itself: only those two clicks do.
+      then says "briefing-reader is connected to Google Calendar for the
+      personal account. You can close this tab." The sign-in must be finished
+      within 5 minutes; the app stays usable meanwhile. It is saved in
+      `%LOCALAPPDATA%\briefing-reader\google_token_personal.json` (on this PC
+      only, outside the project folder) and refreshed automatically, so later
+      approvals do not ask again.
+      The app never opens the sign-in by itself: only a click does.
 
-   **Permissions the app asks for**
+   **One sign-in per account.** The briefing names the account each invitation,
+   move or cancel belongs to (`acct=work`, `acct=personal`), and config.toml
+   lists the accounts Jarvis may act for (`[accounts.personal]` and
+   `[accounts.work]`; see [Configuration](#configuration)). Each account signs
+   in separately, with the same OAuth client, and has its own saved sign-in,
+   `google_token_<account>.json`. The personal account is the one Calendar
+   proposals, to-do blocks and TODAY use. Another account signs in when you click
+   **Sign in** on one of its cards (the card's right-hand button reads Sign in
+   while that account is not signed in): Google's account chooser opens, and
+   you pick that account there. Which Google account is "work" is decided only
+   by that choice and kept only in its token file on this PC, never in
+   config.toml. A work or school account may also have to be added as a test
+   user (step 4) while the app is in Testing.
+
+   Jarvis cannot check that you picked the right Google account: if you pick
+   your personal account when signing in for "work", the work cards act as your
+   personal account wherever it can see the event (for example an invitation
+   sent to both of your addresses). Each card's check line therefore ends with
+   the address Google answered as ("as ana@example.edu"). If that is not the
+   account you meant, do not go ahead: delete `google_token_work.json` (see
+   "Disconnecting" below) and click **Sign in** again.
+
+   If you used an older version, its single `google_token.json` is renamed to
+   `google_token_personal.json` the first time this version starts, so you do
+   not have to sign in again.
+
+   A work or school account's administrator may not allow apps they have not
+   approved. Google then shows "Access blocked" or "admin_policy_enforced"
+   (sometimes the browser page just stays open), and the card says "Sign-in
+   blocked by the work account's administrator". That account cannot be used
+   with your own OAuth client; its cards stay usable as hand-offs, as in earlier
+   versions: Open, **Done** (the right-hand button) and **Skip**, and **Copy
+   note** for an invitation's note. The tools row shows **Sign in** in place of
+   Edit, to try again later (for example after the administrator approved the
+   app).
+
+   **Permissions the app asks for** (the same for every account)
 
    | Scope | Why |
    |---|---|
-   | `https://www.googleapis.com/auth/calendar.events` | Add the event you approved, and first look for the same event (same title and start) so it is not added twice; read your events of today (or tomorrow) and the next 14 days for TODAY and DEADLINES. The app only reads and inserts events; it never changes or deletes one. |
+   | `https://www.googleapis.com/auth/calendar.events` | Add the event you approved, and first look for the same event (same title and start) so it is not added twice; read your events of today (or tomorrow) and the next 14 days for TODAY and DEADLINES; read one event by its id for an invitation, move or cancel card. Only after your click on that card and its undo countdown: answer an invitation (only your own answer is sent), move an event you organize (or may change as a guest) or cancel an event you organize, always telling the guests as the card says ("guests notified" by default). It never changes or deletes anything else. |
    | `https://www.googleapis.com/auth/calendar.settings.readonly` | Read your calendar's time zone, so that "15:00" means 15:00 where your calendar is. |
 
    No access to Gmail, Drive, contacts or anything else.
 
-   **Disconnecting.** Delete `%LOCALAPPDATA%\briefing-reader\google_token.json`
-   (the next Approve signs in again), and remove the app's access at
+   **Disconnecting.** Delete `%LOCALAPPDATA%\briefing-reader\google_token_personal.json`
+   (or `google_token_work.json` for the work account; the next click on that
+   account's card signs in again), and remove the app's access at
    <https://myaccount.google.com/permissions> (pick briefing-reader and remove
-   its access). To stop using calendar actions without disconnecting, set
-   `[calendar] enabled = false` in `config.toml`.
+   its access), in each Google account you signed in with. To stop using calendar
+   actions without disconnecting, set `[calendar] enabled = false` in
+   `config.toml`; to stop acting for one account, remove its `[accounts.<name>]`
+   table or its `"calendar"` feature.
 
 9. **Uninstall**
 
@@ -513,6 +555,11 @@ decide in briefing-reader:
 - **Approve** adds the event to Google Calendar. **Deny** dismisses it. Nothing is
   ever created without Approve; Deny, or not deciding at all, never contacts
   Google.
+- Approve (and a to-do's **Add block**) adds the event right away, without the
+  undo countdown of invitations, moves and cancellations: it only adds an event
+  to your own calendar, and an event that is already there is never added
+  twice. To undo it, delete the event in Google Calendar (the card's **Open**
+  link opens it).
 - A card keeps its size when you click: the result (WORKING..., ADDED, DENIED,
   ...) takes the place of the buttons, so the cards below never slide under
   your mouse. A second Approve or Deny click within 1 second of the previous
@@ -575,9 +622,11 @@ need you: an email to answer, a new email to write, an invitation to answer, a
 meeting you organize to move or cancel, a request for access to a file, a Slack
 message to answer, something due soon, or a page to look at. Each one is a line
 in the key=value format (see [the format](#other-proposals-keyvalue-lines)) and
-a card in NEEDS YOUR OK. In this version Jarvis carries none of them out: the
-card hands the item over to you, and nothing is sent, answered, shared, moved or
-cancelled for you.
+a card in NEEDS YOUR OK. Invitations, moves and cancellations Jarvis can carry
+out itself, after your click and an undo countdown (see
+[Invitations, moves and cancellations](#invitations-moves-and-cancellations)).
+The other cards hand the item over to you: nothing is sent, shared or posted
+for you.
 
 A card shows, from the top:
 
@@ -586,16 +635,18 @@ A card shows, from the top:
 - the title: the subject, the event or file name, "Slack message from Sam" or
   the to-do, at most two lines (point at it for the rest);
 - the details, for example "To: ana@example.edu, ben@example.edu · due today",
-  "Answer: yes · Tue Oct 6 · 5:00-6:00 PM", "New time: Thu Oct 8 · 2:00-3:00 PM
-  · guests notified · was 12:00-1:00 PM", "sam@example.com asks for viewer
-  access" or "Due Wed Oct 7, 11:59 PM · block Tue Oct 6 · 7:00-9:00 PM";
+  "Answer: yes · Tue Oct 6 · 5:00-6:00 PM · organizer emailed", "New time: Thu
+  Oct 8 · 2:00-3:00 PM · guests notified · was 12:00-1:00 PM", "sam@example.com
+  asks for viewer access" or "Due Wed Oct 7, 11:59 PM · block Tue Oct 6 ·
+  7:00-9:00 PM";
 - the drafted text, if there is one, at most three lines (point at it to read
   more of it; Copy always takes all of it);
 - links: **Open thread**, **Open event**, **Open request**, **Open in Slack**,
   **Open in Canvas** or **Open**, and **Copy reply**, **Copy email** or **Copy
-  note**;
+  note** (and **Edit** on an invitation, move or cancel);
 - **Deny** and **Done**, or **Deny** and **Add block** for a to-do with a block
-  time;
+  time (an invitation, move or cancel has **Skip** and **Accept**, **Decline**,
+  **Maybe**, **Move** or **Cancel event** instead);
 - an amber note when the app was unsure of something, such as "Couldn't tell if
   you already replied - check the thread first" or "Link hidden: ...".
 
@@ -618,7 +669,9 @@ What they do:
 - **Done** says you handled it yourself: the card shows DONE, and the item is
   no longer counted or read out.
 - **Deny** dismisses it: the card shows DISMISSED (DENIED for a to-do with a
-  block), and nobody is contacted.
+  block), and nobody is contacted. On an invitation, move or cancel the same
+  button reads **Skip** (next to "Decline", "Deny" read like the same thing)
+  and the card shows SKIPPED.
 - **Add block** adds a to-do's `block=` time to your Google Calendar as an event
   named after the to-do, with the due time and the link in its description. It
   is Approve's flow exactly: the same Google sign-in, the same ALREADY ON
@@ -628,8 +681,9 @@ What they do:
 - Open and Copy are never locked and still work after you decided, so you can
   look at what you did. They never decide a card.
 
-Only Approve and Add block contact Google; Deny, Done, Open and Copy work
-without Google Calendar. "Needs your OK" counts these cards too, for example
+Only Approve, Add block, Accept / Decline / Maybe, Move and Cancel event change
+anything at Google; Deny, Skip, Done, Open, Copy and Edit work without Google
+Calendar. "Needs your OK" counts these cards too, for example
 "Four items need your OK: a calendar invite, two replies and a to-do.", then one
 line per item (a calendar entry starts with "Calendar invite:") and "You can act
 on them on the right." When only calendar invites are waiting, it says what it
@@ -650,6 +704,126 @@ buttons, marked "Information only". A key=value line that cannot be read shows
 the line and the reason, without buttons, Open or Copy. A reply the briefing
 marks as already sent (`replied=yes`) says "The briefing says you already
 replied" and needs no decision.
+
+### Invitations, moves and cancellations
+
+An `RSVP:`, `Move:` or `Cancel:` card is carried out by Jarvis itself, for the
+account the line names (`acct=work` or `acct=personal`), through Google
+Calendar. Nothing happens before your click on that card, and even then only
+after a countdown you can undo.
+
+**Google's own view first.** Under the details, the card has a line (up to
+three lines) for what Google itself has for that event, read by its id when the
+card appears (and again after a sign-in or an unclear result), without ever
+opening a sign-in. It starts with Google's own title and time, so you can see
+that the line's event id is the event the card means, then who organizes it,
+your answer and the address Google answered as: for example "Google: Speaker
+Series: Dr. Example · Tue Oct 6 · 5:00-6:00 PM · organized by Ana Example ·
+you haven't answered · as ana@example.edu" or "Google: Project sync · Thu Oct 8
+· 12:00-1:00 PM · you organize · as ana@example.edu". A long title is
+shortened; point at the line for all of it. The room for this line is kept from
+the start, so filling it never moves the cards.
+
+When Google's title or time is not the one the briefing gave (`title=`, `at=`),
+the line is amber and starts "Google (other title):", "Google (other time):"
+or "Google (other title and time):"; point at it to compare with what the
+briefing says. The event may have been moved or renamed since the briefing, or
+the briefing may name the wrong event. The first click on Accept, Move or
+Cancel event then only says so ("Google's event has another time than the
+briefing - check the line above, then click Move again"); a second click goes
+ahead. The line may also say:
+
+- "Not signed in to the work account - Sign in to check this event": the
+  card's right-hand button reads **Sign in** until that account is signed in
+  (see "One sign-in per account" in setup step 8). After the sign-in the card
+  says "Signed in - check the event above, then click Accept again".
+- "You don't organize this event, so Jarvis can't move it - open it to answer
+  instead", "You don't organize this event, so Jarvis can't cancel it - open it
+  to decline instead", "You are not on this event's guest list...", "This is a
+  whole repeating series...", "All-day events can't be moved from here" or
+  "Google can't find this event, so Jarvis won't act on it" (in amber; point at
+  it for Google's view). Jarvis then does not offer the change: the right-hand
+  button reads **Done**, for when you handled it yourself (Open event opens it
+  in Google Calendar; when the line has no link, the tools row shows Google's
+  own **Open event** in place of Edit). A guest may move an event only when its
+  organizer lets guests change it.
+- a setup problem, such as 'No account named "school" in config.toml
+  [accounts]' or "Google Calendar is not set up yet - see README step 8", or
+  "Sign-in blocked by the work account's administrator". Jarvis can't act for
+  that account here, so the card is a hand-off, as in earlier versions: **Done**
+  and **Skip**, Open, and **Copy note** for an invitation's note (after a block
+  by the administrator, the tools row shows **Sign in** to try again).
+
+**The buttons.** **Accept**, **Decline** or **Maybe** (an invitation, as the
+line's `answer=` says), **Move** (to the card's new time) or **Cancel event**;
+**Skip** on the left drops the card without sending anything (the card shows
+SKIPPED). A click, when the card shows Google's view and that view allows it,
+starts the countdown: the card shows **Undo** on the left and "SENDING IN 10 S"
+on the right, and the other cards are locked meanwhile (their buttons, Edit and
+Sign in, so no dialog or browser sign-in can open over Undo). **Undo** stops it: nothing is
+sent and nothing is saved, and the card waits for your decision again (a click
+on Undo right after the click that started it, as from a double click, is
+ignored). Only when the countdown runs out does Jarvis make the one call to
+Google. The length is `[actions] undo_seconds` (10 by default, 3 to 60).
+Quitting the app, closing the reading screen, or a newer briefing that drops or
+changes the proposal also stops a countdown, and nothing is sent. The 1-second
+rule and the lock of [Calendar actions](#calendar-actions) apply as well.
+
+What is sent:
+
+- **Accept / Decline / Maybe** sends only your own answer, with the card's note
+  (`body=`, shown as "Note to the organizer: ...") as your comment to the
+  organizer; nobody else's answer is touched. "organizer emailed" (the default)
+  or "organizer not emailed" (`notify=none`) says whether Google emails the
+  organizer about it; the organizer sees your answer and note on the event
+  either way.
+- **Move** gives the event the card's new start and end, in your calendar's time
+  zone.
+- **Cancel event** deletes the event you organize.
+- For a move or a cancel, guests are told as the card says: "guests notified"
+  (the default), "only outside guests notified" or "guests not notified"
+  (`notify=`).
+- A move's or cancel's note is **not** sent: Google Calendar has no field for a
+  message with these changes. The card says so and offers **Copy note**, so you
+  can send it yourself.
+
+**Edit** (in the tools row) opens a small dialog with exactly what the card will
+do: the answer (Yes / No / Maybe), the new date and times of a move (such as
+2:00 PM or 14:00, 5 minutes to 12 hours), whether the organizer is emailed (an
+invitation) or the guests are told (a move or cancel), and the note. **Save**
+(or Enter in a field) checks it like a line from the briefing and shows any
+problem in the dialog; the card then shows the changes and "EDITED" after its
+kind. The edit is kept in memory only (until the app closes, also when the page
+is read again) and never sends anything. What the card shows is what Accept,
+Move or Cancel event sends. Edit is off while any card counts down or runs, or
+a sign-in is open.
+
+**After the call** the card shows ACCEPTED, DECLINED, ANSWERED MAYBE, MOVED or
+CANCELLED in green (with an **Open event** link), or "ALREADY ACCEPTED" and the
+like when Google had it that way already, and its line says what Google has
+now, such as "Google now: Project sync · Thu Oct 8 · 3:00-4:00 PM". The card
+keeps showing what was sent, even when a newer briefing changes the proposal
+meanwhile. When something goes wrong:
+
+- **FAILED** with the reason (in red, under the buttons): nothing changed at
+  Google. The right-hand button reads **Retry** (or **Sign in** when the
+  account's sign-in expired or was revoked).
+- **UNKNOWN: CHECK THE CALENDAR BEFORE RETRYING** (in amber): the request went
+  out but no clear answer came back (Google did not answer in time, the
+  connection broke, or Jarvis stopped while it was running), so the change may
+  or may not have happened. Jarvis never tries again by itself. Look at the event
+  (the line above is read again from Google; when the line has no link, the
+  tools row's **Open event** opens Google's page of it), then click **Retry**
+  or **Skip**.
+  A Retry is safe: Jarvis reads the event first and reports "Already ..." when
+  the change is there.
+
+Before the call, Jarvis saves "running" for the card in `actions.json`; the
+result (sent, failed or unknown) replaces it. If the app quits while a call is
+on its way, it waits up to 5 seconds (the window is already gone) so the result
+is saved; if it is still not back, or the PC turned off, the card shows UNKNOWN
+the next time. One call at a time, and a change is never sent twice: the
+connection never repeats a change request by itself.
 
 ## "Proposed actions" format
 
@@ -1020,6 +1194,10 @@ log. Changes apply the next time the app starts.
 | `[calendar] calendar_id` | `"primary"` | The calendar new events go to. `"primary"` is your main calendar; another calendar's id is in Google Calendar under that calendar's Settings > Integrate calendar. |
 | `[actions] heading` | `"Proposed actions"` | The heading the proposals are under: one name, or a list such as `["Proposed actions", "Actions"]`. Matching ignores case and a trailing count. |
 | `[actions] link_hosts` | `[]` | Extra web hosts a card's **Open** may open, besides the built-in Google (mail, docs, drive, calendar, meet), Slack (`*.slack.com`) and Canvas (`*.instructure.com`) hosts: an exact name such as `"forms.example.edu"`, or `"*.example.edu"` for every subdomain. https only; an entry that is not a host name is skipped with a warning. |
+| `[actions] undo_seconds` | `10` | Seconds between a click on Accept / Decline / Maybe / Move / Cancel event and the call to Google (3-60). Undo works until then and sends nothing. |
+| `[accounts.<name>]` | `personal` and `work` | The Google accounts Jarvis may act for, one table each; the name is what the briefing writes as `acct=` (lowercase letters, digits, `-`, `_`). Without any `[accounts]` table only `personal` exists. Which Google account a name is never goes here: you pick it in Google's sign-in (setup step 8). Calendar proposals, to-do blocks and TODAY always use `personal`. |
+| `[accounts.<name>] backend` | `"google"` | Who carries out the account's actions. Only `"google"` (your own OAuth client) works in this version; `"composio"` is accepted but its cards say "Composio is not built into this version". |
+| `[accounts.<name>] features` | `["calendar"]` | What Jarvis may do for the account: `"calendar"` answers invitations and moves or cancels events. `[]` makes the account's cards hand-off only (Open, Done, Deny). |
 | `[schedule] am` | `"10:12"` | Time of the AM task (24-hour `HH:MM`); the default is only an example, set it a few minutes after your own briefing task runs. `install-schedule.ps1` uses it unless you pass `-AmTime`; the app uses it to tell which briefing an answer belongs to when it was started without `--slots`. Rerun the script after a change. |
 | `[schedule] pm` | `"23:42"` | Time of the PM task, the same way (`-PmTime`). |
 | `[hotkey] enabled` | `true` | `false`: `install-schedule.ps1` does not install the hotkey task (and removes an existing one); an agent that is started anyway exits at once. |
@@ -1131,19 +1309,27 @@ so it never keeps the app from rotating it). Run with `py` instead of
 Notion token is never logged; as a safeguard, the token and anything shaped like
 a Notion secret are also replaced with `[REDACTED]` before a line is written. The
 same applies to the Google client secret and the Google access and refresh
-tokens: they are registered for redaction as soon as they are read. The briefing
+tokens: they are registered for redaction as soon as they are read. During a
+Google sign-in the sign-in libraries would write the one-time code and the new
+tokens into a `--debug` log before the app has them, so those libraries are
+kept at warnings only, also with `--debug`, and the Google API library's own
+messages (which carry request addresses) are not logged at all. The briefing
 text itself is not logged at the normal level; calendar entries in the log name
 only action ids and Google event ids, proposals are logged by their id, kind
 (reply, todo, ...), account name (work or personal; any other `acct=` name is
-logged as "other"), counts and status, never subjects, drafted text, addresses
+logged as "other", also inside error messages), counts and status, never subjects, drafted text, addresses
 or links, and the TODAY / DEADLINES panels log only counts, never titles.
+Answering, moving and cancelling events log the action id, kind, account name,
+status (running, sent, failed, unknown) and an HTTP status code; Google's view
+of an event (its title, organizer, your address) and the cards' notes are never
+logged, and an account is never named by its address.
 
 Other files in `%LOCALAPPDATA%\briefing-reader`:
 
 | File | What it is |
 |---|---|
-| `actions.json` | Your decisions on the proposals: Approve (`created`, or `exists` when it was already on the calendar), Deny (`denied`) and Done (`done`), each with the proposal's kind and account name and the last failure message, kept for 60 days. Delete it to forget them. |
-| `google_token.json` | The Google sign-in (access and refresh token). Private: never share it. Delete it to sign out on this PC. |
+| `actions.json` | Your decisions on the proposals: Approve (`created`, or `exists` when it was already on the calendar), Deny (`denied`) and Done (`done`); for an invitation, move or cancel also `running` (saved right before the call to Google), `sent` (with the result, such as "Accepted", and the event link), `failed` and `unknown` (the call may or may not have happened; a `running` left by a crash becomes `unknown` at the next start). Each entry has the proposal's kind and account name and the last failure message, kept for 60 days. Delete it to forget them. |
+| `google_token_personal.json`, `google_token_work.json` | The Google sign-in of each account (access and refresh token, and the permissions Google granted). Private: never share them. Delete one to sign that account out on this PC. Older versions kept a single `google_token.json`; it becomes `google_token_personal.json` at the first start. |
 | `runstate.json` | Per scheduled briefing: when its prompt was first shown and when and how it was answered (read, dismissed, done), kept for 14 days. The catch-up task uses it; see [Catch-up and the hotkey](#catch-up-and-the-hotkey). Safe to delete. |
 
 Generated audio goes to `%TEMP%\briefing-reader\session-<process id>` and is
@@ -1158,11 +1344,16 @@ The app talks to three services, all free:
 - the Notion API: it only reads the one page, with a read-only integration;
 - Microsoft's Edge read-aloud service, which receives the briefing text to turn
   it into speech;
-- the Google Calendar API, and only once you have signed in with **Approve**
-  or **Connect**: an Approve reads your calendar's time zone, searches your
-  calendar for the same event around its start, and sends the event (title,
-  times, repeat, place, notes). Nothing is sent to Google before you sign in,
-  and events are only read, never changed.
+- the Google Calendar API, and only for an account you signed in with a click
+  (**Approve**, **Connect** or a card's **Sign in**): an Approve reads your
+  calendar's time zone, searches your calendar for the same event around its
+  start, and sends the event (title, times, repeat, place, notes). An
+  invitation, move or cancel card reads that one event by its id to show
+  Google's view of it; only after your **Accept** / **Decline** / **Maybe**,
+  **Move** or **Cancel event** and its undo countdown does Jarvis send your
+  answer (and its note), the new times, or the cancellation. Nothing is sent to
+  Google before you sign in, and no event is changed or deleted without that
+  click on its own card.
 
 **Reading your calendar.** Once Google Calendar is connected on this PC, every
 time the reading screen opens the app reads your calendar events from the start
@@ -1172,12 +1363,14 @@ again every 10 minutes while the reading screen is visible. The events (titles,
 times, places) are only shown in that window on this PC; they are not saved,
 and the log gets only their number. To stop it, set `[calendar] enabled =
 false` in `config.toml` (this also turns off Approve) or sign out by deleting
-`%LOCALAPPDATA%\briefing-reader\google_token.json` (see "Disconnecting" in
-setup step 8).
+`%LOCALAPPDATA%\briefing-reader\google_token_personal.json` (see
+"Disconnecting" in setup step 8). The cards' check lines read only the events
+the briefing names, for accounts that are signed in, and are shown, not saved
+(also the address Google answered as, at the end of the line).
 
-**Other proposals.** Replies, invitation answers, share requests, Slack replies
-and links are only shown: the app has no access to Gmail, Drive or Slack and
-sends nothing. **Open** hands a link to your browser only when you click it.
+**Other proposals.** Replies, emails, share requests, Slack replies and links
+are only shown: the app has no access to Gmail, Drive or Slack and sends
+nothing. **Open** hands a link to your browser only when you click it.
 **Copy** puts the drafted text on the Windows clipboard, where any program can
 read it and, if Windows clipboard history (Win+V) is turned on, Windows keeps a
 copy until you clear it (Win+V > Clear all).
@@ -1210,8 +1403,9 @@ py -3.13 -m unittest discover -v
 
 The tests use saved fake Notion responses (`tests\fixtures`, with an invented
 page and invented people, places and courses) and fake Google Calendar
-services, and never call Notion or Google; they need no `.env`. The clock display
-tests run Qt offscreen, so no window appears. The live speech tests are
+services and sign-ins (temporary token files, never yours), and never call
+Notion or Google; they need no `.env`. The clock display and card tests run Qt
+offscreen, so no window appears. The live speech tests are
 skipped unless you opt in; they synthesize a short text with edge-tts (needs
 internet) and with the Windows voice into a temporary folder, and play nothing:
 
@@ -1307,33 +1501,71 @@ they are quoted here in normal case, and the log has the same text)
   process" (Error 403: access_denied)**: the app is still in **Testing** and the
   account you picked is not a test user. Add it under **Audience > Test users**,
   or set the publishing status to **In production** (step 8.4).
-- **Access blocked with a school or work account**: the organisation may block
-  apps it has not approved. Sign in with your personal Google account instead.
-- **Asked to sign in again every week, or "FAILED: Google Calendar sign-in
-  expired or was revoked. Approve again to sign in."**: an app in **Testing**
-  gets sign-ins that expire after 7 days. Set the publishing status to **In
-  production** (step 8.4) and click Approve again: it signs in once more, and
-  that sign-in does not expire. The same message appears after you removed the
-  app's access in your Google account; the app then deletes its saved sign-in
-  by itself.
-- **"FAILED: Google sign-in timed out"**: the sign-in in the browser was not
-  finished within 5 minutes. Click Approve again. If no browser tab opened,
-  look for it behind other windows or in another browser window.
-- **"FAILED: Google sign-in was cancelled or access was denied"**: you clicked
-  Cancel on Google's page. Click Approve again to retry.
-- **"FAILED: Google sign-in did not grant every permission"**: Google's page
-  may show a checkbox per permission; tick both, then click Approve again.
+- **Access blocked with a school or work account**, or a card's line says
+  "Sign-in blocked by the work account's administrator" (the note under the
+  buttons has Google's code, such as `admin_policy_enforced`): the organisation
+  blocks apps it has not approved. That account cannot be used with your own
+  OAuth client: its cards are hand-offs (Open event, **Done** or **Skip**, and
+  Copy note for an invitation's note), and **Sign in** in their tools row tries
+  again. If Google's page
+  says "Access blocked" and never comes back to the app, the sign-in ends after
+  5 minutes with "...was not finished in time".
+- **"Google sign-in for the work account was cancelled or denied"**: you
+  clicked Cancel on Google's page, or the account does not allow it. Click
+  **Sign in** on the card to try again.
+- **"The work account's Google sign-in expired - Sign in again"**: Google
+  rejected the saved sign-in (expired or access removed), and the app deleted
+  it. Click **Sign in** on the card. An answer, move or cancel that hit this
+  shows FAILED: nothing was changed.
+- **The right-hand button reads Done instead of Accept, Move or Cancel event**:
+  Google says Jarvis may not do it (you don't organize the event, you are not
+  a guest, a repeating series, an all-day event, or the event is gone); the line
+  above the button says which. Open event opens it in Google Calendar. The
+  button also reads Done while Jarvis can't act for the card's account (not in
+  config.toml, no `"calendar"` feature, or blocked by its administrator).
+- **The line reads "Google (other time): ..." or "(other title)"**: the event
+  Google has under the line's id does not match what the briefing said. Point at
+  the line to compare. If it is the right event (it was moved or renamed), click
+  the button twice; if not, Skip the card.
+- **The line ends with an address that is not that account's**: you picked
+  another Google account when signing in. Delete that account's
+  `google_token_<account>.json` and click Sign in again.
+- **'No account named "school" in config.toml [accounts]'**: the briefing wrote
+  an `acct=` name that config.toml does not list. Add an `[accounts.school]`
+  table, or have the briefing use `work` or `personal`.
+- **"UNKNOWN: CHECK THE CALENDAR BEFORE RETRYING"**: the request reached Google
+  but no clear answer came back, or the app stopped while it was running. Check
+  the event in Google Calendar (Open event), then click Retry or Skip. Nothing
+  is ever retried by itself.
+- **Asked to sign in again every week, or "FAILED: Google sign-in for the
+  personal account expired or was revoked; sign in again"**: an app in
+  **Testing** gets sign-ins that expire after 7 days. Set the publishing status
+  to **In production** (step 8.4) and click Approve again: it signs in once
+  more, and that sign-in does not expire. The same message appears after you
+  removed the app's access in your Google account; the app then deletes its
+  saved sign-in by itself.
+- **"FAILED: Google sign-in for the personal account was not finished in
+  time..."**: the sign-in in the browser was not finished within 5 minutes.
+  Click Approve again. If no browser tab opened, look for it behind other
+  windows or in another browser window.
+- **"FAILED: Google sign-in for the personal account was cancelled or access
+  was denied"**: you clicked Cancel on Google's page. Click Approve again to
+  retry.
+- **"Google did not allow Calendar access for the personal account; sign in
+  again and tick every box"**: Google's page may show a checkbox per
+  permission; tick both, then click Approve (or Sign in) again.
 - **"FAILED: Google Calendar error while ... (404: Not Found)"**: check
   `[calendar] calendar_id` in `config.toml` (`"primary"` always works).
 - **The event is at the wrong time**: times are read as wall-clock times in your
   Google Calendar's time zone (Google Calendar > Settings > Time zone). If it
   cannot be read, the app uses this PC's time zone (Windows Settings > Time &
   language; UTC if Windows does not name one) and logs a warning.
-- **Revoking access**: open <https://myaccount.google.com/permissions>, pick
-  briefing-reader, remove its access, and delete
-  `%LOCALAPPDATA%\briefing-reader\google_token.json`.
-  If you only revoke on Google's side, the next Approve fails once with the
-  "expired or was revoked" message and the app deletes the file itself.
+- **Revoking access**: open <https://myaccount.google.com/permissions> in each
+  Google account, pick briefing-reader, remove its access, and delete
+  `%LOCALAPPDATA%\briefing-reader\google_token_personal.json` (and
+  `google_token_work.json`).
+  If you only revoke on Google's side, the next use of that account fails once
+  with the "expired or was revoked" message and the app deletes the file itself.
 
 ## Project layout
 
@@ -1347,9 +1579,11 @@ briefing_reader/config.py     .env, environment and config.toml loading, paths, 
 briefing_reader/models.py     shared data types (flattened lines, script, audio)
 briefing_reader/notion_client.py  Notion REST client, block flattener, header parsing, freshness, polling, fixtures
 briefing_reader/text_prep.py  markdown stripping, text for listening, script with sections, stale note and Needs your OK part
-briefing_reader/actions.py    "Proposed actions" parsing (Calendar: lines), saved Approve/Deny decisions
+briefing_reader/actions.py    "Proposed actions" parsing (Calendar: and key=value lines), card texts, edits, saved decisions
 briefing_reader/agenda.py     TODAY / TOMORROW rows, the "Deadlines" section, calendar deadlines, due labels
-briefing_reader/gcal.py       Google Calendar: OAuth sign-in, duplicate check, event creation, reading events
+briefing_reader/google_auth.py  Google sign-in per account (one token per account), sign-in problems, single-send HTTP
+briefing_reader/gcal.py       Google Calendar: duplicate check, event creation, reading events, answer / move / cancel
+briefing_reader/executor.py   carrying out an approved proposal per account ("running" first), the cards' check lines
 briefing_reader/tts.py        edge-tts synthesis, Windows SAPI fallback, highlight timing, background worker
 briefing_reader/player.py     QtMultimedia player that plays sections in order with pauses
 briefing_reader/hud.py        Jarvis HUD widget kit: colours, fonts, chamfered panels, orb, buttons, cards, agenda

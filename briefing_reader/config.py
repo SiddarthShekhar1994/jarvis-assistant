@@ -7,8 +7,11 @@ Settings come from three places:
   ``BRIEFING_PAGE_ID`` (both required; there is no default page);
 * the environment itself;
 * ``config.toml`` in the project root for voice, prompt, polling, section,
-  Google Calendar, proposed-action (heading names and the extra hosts a
-  card's Open may open), schedule, hotkey, agenda and display options.
+  Google Calendar, proposed-action (heading names, the extra hosts a card's
+  Open may open, the undo countdown), account (``[accounts.<alias>]``: which
+  service acts for "work" / "personal" and what it may do), schedule, hotkey,
+  agenda and display options. Which Google account an alias is never goes
+  here: the sign-ins live in %LOCALAPPDATA%\\briefing-reader.
 
 A bad setting never stops the app: invalid values are logged as warnings and
 replaced by their defaults. The Notion token is never logged. As soon as it is
@@ -68,11 +71,28 @@ DEFAULT_DEADLINE_KEYWORDS = ("due", "deadline", "exam", "midterm", "final", "qui
                              "submission", "assignment", "lab report", "application")
 CLOCK_12H = "12h"
 CLOCK_24H = "24h"
+# What an account may do (google_auth.FEATURE_SCOPES has the scopes of each). A later version
+# adds "gmail_send".
+ACCOUNT_FEATURES = ("calendar",)
+BACKEND_GOOGLE = "google"
+BACKEND_COMPOSIO = "composio"     # accepted, but not built into this version
+ACCOUNT_BACKENDS = (BACKEND_GOOGLE, BACKEND_COMPOSIO)
+DEFAULT_ACCOUNT = "personal"
+UNDO_SECONDS_RANGE = (3, 60)
 
 _MISSING = object()
 _KNOWN_TABLES = ("voice", "prompt", "polling", "sections", "notion", "calendar", "actions",
-                 "schedule", "hotkey", "agenda", "display")
-_QUIET_LOGGERS = ("urllib3", "asyncio", "aiohttp", "comtypes", "charset_normalizer")
+                 "accounts", "schedule", "hotkey", "agenda", "display")
+# Library loggers kept at WARNING, also under --debug. The Google sign-in libraries log the
+# authorization code, the access token and the refresh token at DEBUG (requests_oauthlib),
+# before Jarvis could register them for redaction, so they never get DEBUG here.
+_QUIET_LOGGERS = ("urllib3", "asyncio", "aiohttp", "comtypes", "charset_normalizer",
+                  "requests_oauthlib", "oauthlib", "google_auth_oauthlib", "google.auth",
+                  "google_auth_httplib2", "google.oauth2", "httplib2")
+# Silenced (only CRITICAL): googleapiclient logs request URLs (calendar ids, which can be an
+# address, and event ids) in its retry warnings and response bodies in its errors; gcal.py
+# logs its own safe line for every failure.
+_SILENT_LOGGERS = ("googleapiclient",)
 _HANDLER_TAG = "_briefing_reader_handler"
 _MIN_SECRET_LEN = 8
 
@@ -137,12 +157,31 @@ class ActionsConfig:
     # Extra https hosts a card's Open may open, besides actions.BUILTIN_LINK_HOSTS:
     # "name.tld" exactly or "*.name.tld" for every subdomain (casefolded).
     link_hosts: tuple[str, ...] = ()
+    # Seconds between a click on Accept / Move / Cancel event and the call to Google (Undo until then).
+    undo_seconds: int = 10
 
     def __post_init__(self) -> None:
         for name in ("headings", "link_hosts"):
             value = getattr(self, name)
             if not isinstance(value, tuple):
                 object.__setattr__(self, name, tuple(value))
+
+
+@dataclass(frozen=True)
+class AccountConfig:
+    """One ``[accounts.<alias>]`` table: which service acts for the alias and what it may do."""
+
+    alias: str
+    backend: str = BACKEND_GOOGLE                     # "google"; "composio" is not built yet
+    features: tuple[str, ...] = ("calendar",)         # ACCOUNT_FEATURES
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.features, tuple):
+            object.__setattr__(self, "features", tuple(self.features))
+
+
+def _default_accounts() -> Mapping[str, AccountConfig]:
+    return MappingProxyType({DEFAULT_ACCOUNT: AccountConfig(DEFAULT_ACCOUNT)})
 
 
 @dataclass(frozen=True)
@@ -203,6 +242,9 @@ class Config:
     audio_root: Path
     calendar: CalendarConfig = field(default_factory=CalendarConfig)
     actions: ActionsConfig = field(default_factory=ActionsConfig)
+    # alias -> AccountConfig; without an [accounts] table just "personal". hash=False keeps the
+    # frozen dataclass hashable.
+    accounts: Mapping[str, AccountConfig] = field(default_factory=_default_accounts, hash=False)
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     hotkey: HotkeyConfig = field(default_factory=HotkeyConfig)
     agenda: AgendaConfig = field(default_factory=AgendaConfig)
@@ -320,6 +362,7 @@ def load_config(project_root: Path | None = None, *,
         audio_root=Path(tempfile.gettempdir()) / APP_NAME,
         calendar=_parse_calendar(doc, root),
         actions=_parse_actions(doc),
+        accounts=_parse_accounts(doc),
         schedule=_parse_schedule(doc),
         hotkey=_parse_hotkey(doc),
         agenda=_parse_agenda(doc),
@@ -630,9 +673,58 @@ def _parse_calendar(doc: Mapping[str, Any], root: Path) -> CalendarConfig:
 
 def _parse_actions(doc: Mapping[str, Any]) -> ActionsConfig:
     d = ActionsConfig()
-    r = _TableReader(doc, "actions", ("heading", "link_hosts"))
+    r = _TableReader(doc, "actions", ("heading", "link_hosts", "undo_seconds"))
     return ActionsConfig(headings=r.names("heading", d.headings, allow_empty=False),
-                         link_hosts=_link_hosts(r.names("link_hosts", d.link_hosts)))
+                         link_hosts=_link_hosts(r.names("link_hosts", d.link_hosts)),
+                         undo_seconds=r.integer("undo_seconds", d.undo_seconds, *UNDO_SECONDS_RANGE))
+
+
+_ALIAS_RE = re.compile(r"[a-z][a-z0-9_-]{0,23}")
+
+
+def _parse_accounts(doc: Mapping[str, Any]) -> Mapping[str, AccountConfig]:
+    """[accounts.<alias>] tables; without an [accounts] table just "personal" (Google, calendar).
+
+    An alias is lowercase letters, digits, - or _ (24 at most); a bad alias, backend or feature
+    is skipped with a warning. A table that names no usable account falls back to the default.
+    """
+    table = doc.get("accounts", _MISSING)
+    if table is _MISSING:
+        return _default_accounts()
+    if not isinstance(table, dict):
+        logger.warning("config.toml: accounts = %s should be a table of [accounts.<name>] tables; "
+                       "using the personal account", _short_repr(table))
+        return _default_accounts()
+    accounts: dict[str, AccountConfig] = {}
+    for name, value in table.items():
+        alias = name.strip().casefold() if isinstance(name, str) else ""
+        if not _ALIAS_RE.fullmatch(alias):
+            logger.warning("config.toml: [accounts.%s] is not an account name (lowercase letters, digits, "
+                           "- or _); skipped", _short_repr(name, 30))
+            continue
+        if alias in accounts:
+            logger.warning("config.toml: [accounts.%s] repeats the account name %s; skipped",
+                           _short_repr(name, 30), alias)
+            continue
+        if not isinstance(value, dict):
+            logger.warning("config.toml: accounts.%s should be a table; skipped", alias)
+            continue
+        d = AccountConfig(alias)
+        key = f"accounts.{alias}"
+        r = _TableReader({key: value}, key, ("backend", "features"))
+        backend = r.choice("backend", d.backend, ACCOUNT_BACKENDS)
+        features = []
+        for feature in r.names("features", d.features):
+            if feature.casefold() not in ACCOUNT_FEATURES:
+                logger.warning("config.toml: accounts.%s.features entry %s is not one of %s; skipped",
+                               alias, _short_repr(feature), ", ".join(ACCOUNT_FEATURES))
+            elif feature.casefold() not in features:
+                features.append(feature.casefold())
+        accounts[alias] = AccountConfig(alias, backend=backend, features=tuple(features))
+    if not accounts:
+        logger.warning("config.toml: [accounts] names no usable account; using the personal account")
+        return _default_accounts()
+    return MappingProxyType(accounts)
 
 
 _LINK_HOST_RE = re.compile(
@@ -800,6 +892,8 @@ def setup_logging(log_dir: Path | None = None, *, debug: bool = False,
     root.setLevel(logging.DEBUG if debug else logging.INFO)
     for name in _QUIET_LOGGERS:
         logging.getLogger(name).setLevel(logging.WARNING)
+    for name in _SILENT_LOGGERS:
+        logging.getLogger(name).setLevel(logging.CRITICAL)
     _install_excepthooks()
 
     if file_handler is None:

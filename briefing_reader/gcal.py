@@ -1,35 +1,56 @@
-"""Google Calendar access for approved calendar proposals and the day's agenda.
+"""Google Calendar access for approved proposals and the day's agenda.
 
 :class:`GoogleCalendar` turns an approved
-:class:`~briefing_reader.actions.ProposedAction` into a calendar event and
-reads the events the reading window shows:
+:class:`~briefing_reader.actions.ProposedAction` into a calendar event, answers
+invitations, moves and cancels events you organize, and reads the events the
+reading window shows:
 
-    sign_in()          OAuth installed-app flow in the user's browser; the token
-                       is saved to %LOCALAPPDATA%\\briefing-reader\\google_token.json
+    sign_in()          OAuth installed-app flow in the user's browser (google_auth.GoogleAccount);
+                       the token is saved in %LOCALAPPDATA%\\briefing-reader
     timezone()         the calendar's time zone setting (cached)
     find_existing(a)   an event with the same title and start, if there is one
     create_event(a)    find_existing first, else events.insert
     list_events(s, e)  CalendarEvents between two times; never signs in (raises
                        CalendarNotSignedIn instead)
+    get_event(id)      Google's own view of one event (EventDetails)
+    respond(id, ...)   answer an invitation: events.patch with attendeesOmitted and only
+                       your own attendee entry
+    move(id, s, e)     new start and end for an event you organize (or may modify)
+    cancel(id)         events.delete of an event you organize
 
-Every call is blocking and may wait on the network or, for sign-in, on the
-user's browser for up to ``open_timeout_s`` seconds, so callers run them on a
-worker thread. The Google client libraries are imported lazily: importing this
-module stays cheap, needs no Google package and never imports Qt.
+``respond``, ``move`` and ``cancel`` always pass ``sendUpdates`` explicitly
+(the REST default is "none"), fetch the event first and refuse what you may
+not do (NotAllowed), and are never retried: a 5xx answer or a timeout after
+the request went out raises CalendarUnknownOutcome (it may or may not have
+happened), and the HTTP client never sends a change twice
+(google_auth.single_send_http). They are idempotent (a second answer, move or
+cancel finds it done and says ``already``), so a retry the user asks for
+after an unknown outcome is safe. With ``interactive=False`` they never open
+the browser sign-in (CalendarNotSignedIn instead).
+
+A GoogleCalendar acts for one account (``account=``, see google_auth.py); the
+old constructor (``client_secret_path`` + ``token_path``) builds a private
+one, the single sign-in of older versions. Every call is blocking and may wait
+on the network or, for sign-in, on the user's browser for up to
+``open_timeout_s`` seconds, so callers run them on a worker thread. The Google
+client libraries are imported lazily: importing this module stays cheap, needs
+no Google package and never imports Qt.
 
 The OAuth client secret and the access and refresh tokens are registered with
 :func:`config.register_secret` as soon as they are read, so the log redacts
 them. Exception messages carry only HTTP statuses, Google's error message
-(redacted) and exception type names.
+(redacted) and exception type names, never an event's title or guests; the log
+names events by id only.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import logging
 import os
 import re
+import socket
+import ssl
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -38,15 +59,35 @@ from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .config import default_data_dir, redact, register_secret
+from .config import default_data_dir, redact
+from .google_auth import (
+    CALENDAR_FEATURE,
+    PROBLEM_EXPIRED,
+    PROBLEM_FAILED,
+    PROBLEM_SETUP,
+    PROBLEM_SIGNED_OUT,
+    AccountAuthError,
+    AccountError,
+    AccountNotSignedIn,
+    AccountSetupError,
+    GoogleAccount,
+    blocked_code,
+    logged_alias,
+    scrub_alias,
+    scopes_for,
+    single_send_http,
+)
+from .google_auth import _installed_app_flow as _installed_app_flow  # noqa: PLC0414 - patched in tests
+from .google_auth import _refresh_credentials as _account_refresh
+from .google_auth import _register_credentials as _register_credentials  # noqa: PLC0414
+from .google_auth import google_libraries_available as _account_libraries
 
 if TYPE_CHECKING:
     from .actions import ProposedAction
 
 logger = logging.getLogger(__name__)
 
-SCOPES = ["https://www.googleapis.com/auth/calendar.events",
-          "https://www.googleapis.com/auth/calendar.settings.readonly"]
+SCOPES = scopes_for((CALENDAR_FEATURE,))
 TOKEN_FILE_NAME = "google_token.json"
 # Used when neither the calendar's setting nor Windows names a time zone.
 LAST_RESORT_TIMEZONE = "UTC"
@@ -56,8 +97,13 @@ EVENT_FOOTER = "Added by briefing-reader from your Daily Briefing."
 DEFAULT_EVENT_MINUTES = 60
 NO_TITLE = "(No title)"
 NOT_SIGNED_IN_MESSAGE = "Not signed in to Google Calendar"
+# sendUpdates values (always passed; the REST default would be "none").
+SEND_UPDATES = ("all", "externalOnly", "none")
+# RSVP answers (actions.py's normalized answer=) -> attendee responseStatus.
+RESPONSES = {"yes": "accepted", "no": "declined", "maybe": "tentative"}
+HTTP_TIMEOUT_S = 30        # per request; a mutation that times out is an unknown outcome
 
-_READ_RETRIES = 2          # list/settings are safe to retry; insert is not retried
+_READ_RETRIES = 2          # reads are safe to retry; insert, patch and delete are not retried
 _MAX_LIST_PAGES = 5
 _LIST_PAGE_SIZE = 50
 _MAX_MESSAGE_LEN = 200
@@ -65,12 +111,16 @@ _MAX_MESSAGE_LEN = 200
 _RATE_LIMIT_REASONS = frozenset({"rateLimitExceeded", "userRateLimitExceeded", "quotaExceeded",
                                  "dailyLimitExceeded", "RATE_LIMIT_EXCEEDED"})
 _SETUP_REASONS = frozenset({"accessNotConfigured", "SERVICE_DISABLED"})
+# 403s on one event that only mean "not this event" (no sign-in problem; the token stays).
+_EVENT_REFUSED_REASONS = frozenset({"forbidden", "forbiddenForNonOrganizer", "requiredAccessLevel"})
+# Failures that certainly happened before a request reached Google (a mutation that failed this
+# way did not happen). Anything else after a mutation was sent is an unknown outcome.
+_NOT_SENT_ERRORS: tuple[type[BaseException], ...] = (socket.gaierror, ConnectionRefusedError,
+                                                     ssl.SSLCertVerificationError)
+_NOT_SENT_NAMES = frozenset({"ServerNotFoundError", "TransportError"})
 # actions.py writes "until <date>" on a timed event as the end of that day in UTC.
 _END_OF_DAY_UNTIL_RE = re.compile(r"UNTIL=(\d{8})T235959Z")
 _RULE_PREFIXES = ("RRULE:", "EXRULE:", "RDATE", "EXDATE")
-_GOOGLE_MODULES = ("googleapiclient", "google_auth_oauthlib", "google_auth_httplib2",
-                   "google.oauth2")
-_libraries_available: bool | None = None
 # "Europe/Berlin", "America/Argentina/Buenos_Aires", "Etc/GMT+5", "UTC"
 _IANA_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_+\-]*(?:/[A-Za-z0-9_+\-]+)*")
 _local_timezone: str | None = None
@@ -81,11 +131,15 @@ _local_timezone: str | None = None
 # --------------------------------------------------------------------------
 
 class CalendarError(Exception):
-    """A Calendar failure whose message is safe to show and log (no tokens, no client secret)."""
+    """A Calendar failure whose message is safe to show and log (no tokens, no client secret).
 
-    def __init__(self, message: str = "", *, status: int | None = None) -> None:
+    ``problem`` is the google_auth PROBLEM_* of a sign-in failure ("" for anything else).
+    """
+
+    def __init__(self, message: str = "", *, status: int | None = None, problem: str = "") -> None:
         super().__init__(message)
         self.status = status
+        self.problem = problem
 
 
 class CalendarSetupError(CalendarError):
@@ -93,7 +147,7 @@ class CalendarSetupError(CalendarError):
 
 
 class CalendarAuthError(CalendarError):
-    """Sign-in was cancelled, denied or timed out, or the saved sign-in was revoked.
+    """Sign-in was cancelled, denied, blocked or timed out, or the saved sign-in was revoked.
 
     When Google rejects the saved sign-in, the token file is deleted first, so
     the next call signs in again.
@@ -103,9 +157,22 @@ class CalendarAuthError(CalendarError):
 class CalendarNotSignedIn(CalendarAuthError):
     """There is no usable saved sign-in and the call may not open the browser to get one.
 
-    Raised by :meth:`GoogleCalendar.list_events`, which only an explicit
-    Connect or Approve click may turn into a sign-in.
+    Raised by :meth:`GoogleCalendar.list_events` and by ``get_event(interactive=False)``,
+    which only an explicit click may turn into a sign-in.
     """
+
+
+class EventGone(CalendarError):
+    """Google has no such event (404 / 410), or it was cancelled."""
+
+
+class NotAllowed(CalendarError):
+    """You may not do this to the event (not a guest, not the organizer, all-day, in the past...)."""
+
+
+class CalendarUnknownOutcome(CalendarError):
+    """A change was sent but no clear answer came back (5xx, timeout, connection lost):
+    it may or may not have happened. Never retried by itself."""
 
 
 @dataclass(frozen=True)
@@ -140,8 +207,57 @@ class CalendarEvent:
         return self.all_day_start is not None
 
 
+@dataclass(frozen=True)
+class EventDetails:
+    """Google's own view of one event (:meth:`GoogleCalendar.get_event`).
+
+    ``start``/``end`` are aware, in the calendar's time zone (None for all-day events, which
+    have ``all_day_start`` and an inclusive ``all_day_end``). ``self_email`` is your attendee
+    address ("" when you are not a guest); it, ``organizer`` and ``title`` are shown on the
+    card only, never logged.
+    """
+
+    event_id: str
+    calendar_id: str
+    title: str
+    start: datetime | None
+    end: datetime | None
+    all_day_start: date | None
+    all_day_end: date | None
+    status: str                    # "confirmed" | "tentative" | "cancelled"
+    organizer_self: bool
+    guests_can_modify: bool
+    self_email: str
+    self_response: str             # needsAction | accepted | declined | tentative | ""
+    attendee_count: int
+    recurring_instance: bool       # one occurrence of a repeating event
+    series: bool                   # the repeating event itself (every occurrence)
+    time_zone: str
+    link: str
+    organizer: str = ""            # the organizer's name or address ("" when unknown)
+    self_comment: str = ""         # your note on your answer, if any
+    organizer_email: str = ""      # the organizer's address ("" when unknown)
+
+    @property
+    def account_email(self) -> str:
+        """The address Google answered as: your attendee address, or the organizer's when you
+        organize it ("" when unknown). Shown on the card only, never logged."""
+        return self.self_email or (self.organizer_email if self.organizer_self else "")
+
+    @property
+    def all_day(self) -> bool:
+        return self.start is None
+
+
+@dataclass(frozen=True)
+class ChangeResult:
+    event_id: str
+    link: str
+    already: bool        # nothing needed changing (already answered / at that time / cancelled)
+
+
 def default_token_path() -> Path:
-    """%LOCALAPPDATA%\\briefing-reader\\google_token.json"""
+    """%LOCALAPPDATA%\\briefing-reader\\google_token.json (the single sign-in of older versions)."""
     return default_data_dir() / TOKEN_FILE_NAME
 
 
@@ -187,27 +303,38 @@ def _icu_host_timezone() -> str | None:
 # --------------------------------------------------------------------------
 
 class GoogleCalendar:
-    """Creates Calendar events for approved proposals. Blocking: use a worker thread.
+    """Google Calendar calls for one account. Blocking: use a worker thread.
 
     Calls that talk to Google are serialised by an internal lock.
     :meth:`is_configured` and :meth:`is_signed_in` never take that lock or
     touch the network, so the UI thread may call them while a sign-in waits.
     """
 
-    def __init__(self, *, client_secret_path: Path, token_path: Path, calendar_id: str = "primary",
+    def __init__(self, *, client_secret_path: Path | None = None, token_path: Path | None = None,
+                 calendar_id: str = "primary",
                  service_factory: Callable[[Any], Any] | None = None,
                  flow_factory: Callable[[Path, list[str]], Any] | None = None,
-                 open_timeout_s: int = 300) -> None:
-        self._client_secret_path = Path(client_secret_path)
-        self._token_path = Path(token_path)
+                 open_timeout_s: int = 300, account: GoogleAccount | None = None) -> None:
+        if account is None:
+            if client_secret_path is None or token_path is None:
+                raise ValueError("GoogleCalendar needs an account, or client_secret_path and token_path")
+            # The one-account setup of older versions: its log lines and messages are kept, and
+            # tests patch this module's _refresh_credentials / google_libraries_available.
+            account = GoogleAccount(
+                "", client_secret_path=Path(client_secret_path), token_path=Path(token_path),
+                features=(CALENDAR_FEATURE,), flow_factory=flow_factory or _installed_app_flow,
+                open_timeout_s=open_timeout_s, setup_hint=SETUP_HINT,
+                success_message=SIGN_IN_SUCCESS_MESSAGE, log=logger,
+                refresh=lambda creds: _refresh_credentials(creds),
+                libraries_available=lambda: google_libraries_available())
+        self._account = account
         self._calendar_id = calendar_id
         self._service_factory = service_factory or _build_service
-        self._flow_factory = flow_factory or _installed_app_flow
-        self._open_timeout_s = open_timeout_s
         self._lock = threading.RLock()
         self._depth = 0   # nesting of public calls, so a failure is logged once
         self._creds: Any = None
         self._service: Any = None
+        self._service_generation = -1
         self._timezone: str | None = None
 
     @property
@@ -216,14 +343,24 @@ class GoogleCalendar:
 
     @property
     def token_path(self) -> Path:
-        return self._token_path
+        return self._account.token_path
+
+    @property
+    def account(self) -> GoogleAccount:
+        return self._account
+
+    @property
+    def alias(self) -> str:
+        """The account alias ("" for the one-account setup of older versions)."""
+        return self._account.alias
 
     @contextmanager
     def _guarded(self) -> Iterator[None]:
         """Hold the lock; log a CalendarError once, at the outermost public call.
 
         CalendarNotSignedIn is the normal state before the first sign-in (the
-        agenda asks every few minutes), so it is logged at INFO.
+        agenda asks every few minutes), and EventGone / NotAllowed are answers
+        about one event, not failures of the app, so those are logged at INFO.
         """
         with self._lock:
             self._depth += 1
@@ -231,22 +368,49 @@ class GoogleCalendar:
                 yield
             except CalendarError as exc:
                 if self._depth == 1:
-                    log = logger.info if isinstance(exc, CalendarNotSignedIn) else logger.warning
-                    log("Google Calendar call failed (%s): %s", type(exc).__name__, exc)
+                    quiet = isinstance(exc, (CalendarNotSignedIn, EventGone, NotAllowed))
+                    log = logger.info if quiet else logger.warning
+                    # The message names the account (shown on the card); the log writes an
+                    # alias other than work / personal as "other".
+                    log("%s call failed (%s): %s", self._log_name(), type(exc).__name__,
+                        scrub_alias(str(exc), self.alias))
                 raise
             finally:
                 self._depth -= 1
 
+    def _log_name(self) -> str:
+        return f"Google Calendar ({logged_alias(self.alias)})" if self.alias else "Google Calendar"
+
+    @contextmanager
+    def _account_errors(self) -> Iterator[None]:
+        """google_auth's AccountErrors as the matching CalendarErrors (same message and problem)."""
+        try:
+            yield
+        except AccountSetupError as exc:
+            raise CalendarSetupError(str(exc), status=exc.status, problem=PROBLEM_SETUP) from None
+        except AccountNotSignedIn:
+            raise CalendarNotSignedIn(self._not_signed_in_message(), problem=PROBLEM_SIGNED_OUT) from None
+        except AccountAuthError as exc:
+            raise CalendarAuthError(str(exc), status=exc.status, problem=exc.problem) from None
+        except AccountError as exc:
+            raise CalendarError(str(exc), status=exc.status, problem=exc.problem) from None
+
+    def _not_signed_in_message(self) -> str:
+        if self.alias:
+            return f"{NOT_SIGNED_IN_MESSAGE} ({self.alias} account)"
+        return NOT_SIGNED_IN_MESSAGE
+
     def is_configured(self) -> bool:
         """True when the OAuth client secret file exists."""
-        return self._client_secret_path.is_file()
+        return self._account.is_configured()
 
     def is_signed_in(self) -> bool:
-        """True when a saved sign-in exists that is valid or can be refreshed."""
-        if not google_libraries_available():
-            return False
-        creds = _read_token(self._token_path, quiet=True)
-        return creds is not None and bool(creds.valid or creds.refresh_token)
+        """True when a saved sign-in exists that is valid or can be refreshed and allows Calendar."""
+        return self._account.is_signed_in(CALENDAR_FEATURE)
+
+    def sign_in_problem(self) -> tuple[str, str]:
+        """(google_auth PROBLEM_*, message) of the last failed sign-in or rejected token, or ("", "")."""
+        return self._account.problem()
 
     # ---- sign-in -----------------------------------------------------------
 
@@ -255,150 +419,65 @@ class GoogleCalendar:
 
         Blocks until the user finishes or ``open_timeout_s`` passes. Raises
         CalendarSetupError (no usable client secret), CalendarAuthError
-        (cancelled, denied, timed out) or CalendarError.
+        (cancelled, denied, blocked, timed out, a permission unticked) or
+        CalendarError.
         """
         with self._guarded():
             _require_libraries()
-            self._read_client_config()
-            try:
-                flow = self._flow_factory(self._client_secret_path, list(SCOPES))
-            except Exception as exc:  # noqa: BLE001 - any failure here is a setup problem
-                raise CalendarSetupError(
-                    f"{SETUP_HINT} (could not use {self._client_secret_path.name}: "
-                    f"{type(exc).__name__})") from None
-            logger.info("Google Calendar: waiting for sign-in in the browser (up to %d s)",
-                        self._open_timeout_s)
-            try:
-                creds = flow.run_local_server(
-                    port=0, open_browser=True, timeout_seconds=self._open_timeout_s,
-                    authorization_prompt_message="", success_message=SIGN_IN_SUCCESS_MESSAGE,
-                    prompt="consent")   # consent every time so Google returns a refresh token
-            except Exception as exc:  # noqa: BLE001 - mapped to a safe message
-                raise _sign_in_error(exc) from None
-            _register_credentials(creds)
-            self._save_token(creds)
-            self._creds = creds
+            with self._account_errors():
+                self._account.sign_in()
+            self._creds = None
             self._service = None
             self._timezone = None
-            logger.info("Google Calendar: signed in")
-
-    def _read_client_config(self) -> dict[str, Any]:
-        """Validate the client secret file and register its secret for redaction."""
-        name = self._client_secret_path.name
-        try:
-            data = json.loads(self._client_secret_path.read_text(encoding="utf-8-sig"))
-        except FileNotFoundError:
-            raise CalendarSetupError(f"{SETUP_HINT} ({name} was not found)") from None
-        except OSError as exc:
-            problem = exc.strerror or type(exc).__name__
-            raise CalendarSetupError(f"{SETUP_HINT} (could not read {name}: {problem})") from None
-        except ValueError:
-            raise CalendarSetupError(f"{SETUP_HINT} ({name} is not valid JSON)") from None
-        installed = data.get("installed") if isinstance(data, dict) else None
-        if not isinstance(installed, dict) or not all(
-                isinstance(installed.get(key), str) and installed[key].strip()
-                for key in ("client_id", "client_secret")):
-            raise CalendarSetupError(
-                f"{SETUP_HINT} ({name} is not an OAuth client of type Desktop app)")
-        register_secret(installed["client_secret"])
-        return data
-
-    def _save_token(self, creds: Any) -> None:
-        """Write the token JSON atomically. A failure is logged, not raised."""
-        path = self._token_path
-        part = path.with_name(path.name + ".part")
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            part.write_text(creds.to_json(), encoding="utf-8")
-            os.replace(part, path)
-        except OSError as exc:
-            _unlink_quietly(part)
-            logger.warning("Google Calendar: could not save the sign-in to %s (%s); "
-                           "you will be asked to sign in again next time",
-                           path, exc.strerror or type(exc).__name__)
-
-    def _forget_token(self, reason: str) -> None:
-        self._creds = None
-        self._service = None
-        try:
-            self._token_path.unlink()
-        except FileNotFoundError:
-            return
-        except OSError as exc:
-            logger.warning("Google Calendar: could not delete the saved sign-in %s (%s)",
-                           self._token_path, exc.strerror or type(exc).__name__)
-            return
-        logger.warning("Google Calendar: removed the saved sign-in (%s); "
-                       "the next Approve signs in again", reason)
+            if CALENDAR_FEATURE not in self._account.granted_features():
+                problem, message = self._account.problem()
+                raise CalendarAuthError(message or self._account.missing_message(CALENDAR_FEATURE),
+                                        problem=problem or PROBLEM_FAILED)
 
     # ---- credentials and service -------------------------------------------
-
-    def _ensure_credentials(self, *, interactive: bool = True) -> Any:
-        """Usable credentials: the saved sign-in (refreshed when needed), else a new sign-in.
-
-        Without ``interactive`` a missing or unrefreshable sign-in raises
-        CalendarNotSignedIn instead of opening the browser.
-        """
-        creds = self._creds
-        if creds is None:
-            creds = _read_token(self._token_path)
-            if creds is None:
-                return self._sign_in_or_raise(interactive)
-            self._creds = creds
-            self._service = None
-        if not creds.valid:
-            if creds.refresh_token:
-                self._refresh(creds)
-            else:
-                self._forget_token("it cannot be refreshed")
-                return self._sign_in_or_raise(interactive)
-        return self._creds
-
-    def _sign_in_or_raise(self, interactive: bool) -> Any:
-        if not interactive:
-            raise CalendarNotSignedIn(NOT_SIGNED_IN_MESSAGE)
-        self.sign_in()
-        return self._creds
-
-    def _refresh(self, creds: Any) -> None:
-        try:
-            _refresh_credentials(creds)
-        except Exception as exc:  # noqa: BLE001 - mapped to a safe message
-            raise self._transport_error(exc, "refreshing the sign-in") from None
-        _register_credentials(creds)
-        self._save_token(creds)
-        self._service = None
 
     def _get_service(self, *, interactive: bool = True) -> Any:
         if not self.is_configured():
             raise CalendarSetupError(
-                f"{SETUP_HINT} ({self._client_secret_path.name} was not found)")
+                f"{SETUP_HINT} ({self._account.client_secret_path.name} was not found)",
+                problem=PROBLEM_SETUP)
         _require_libraries()
-        creds = self._ensure_credentials(interactive=interactive)
-        if self._service is None:
+        with self._account_errors():
+            creds = self._account.credentials(interactive=interactive, need=CALENDAR_FEATURE)
+        if self._service is None or creds is not self._creds \
+                or self._service_generation != self._account.generation:
             try:
                 self._service = self._service_factory(creds)
             except Exception as exc:  # noqa: BLE001 - mapped to a safe message
                 raise CalendarError(
                     f"Could not start the Google Calendar client ({type(exc).__name__})") from None
+            self._creds = creds
+            self._service_generation = self._account.generation
         return self._service
 
-    def _execute(self, request: Any, what: str, *, retries: int = 0,
-                 forgiving: bool = False) -> Any:
-        """Run one API request, mapping every failure to a CalendarError."""
+    def _execute(self, request: Any, what: str, *, retries: int = 0, forgiving: bool = False,
+                 mutation: bool = False, event_call: bool = False) -> Any:
+        """Run one API request, mapping every failure to a CalendarError.
+
+        ``mutation``: the request changes something (never retried; a 5xx or a lost answer is
+        CalendarUnknownOutcome). ``event_call``: it names one event, so 404 / 410 mean
+        EventGone and a 403 about that event means NotAllowed (the token stays).
+        """
         from googleapiclient.errors import HttpError
 
         try:
             result = request.execute(num_retries=retries)
         except HttpError as exc:
-            raise self._http_error(exc, what, forgiving=forgiving) from None
+            raise self._http_error(exc, what, forgiving=forgiving, mutation=mutation,
+                                   event_call=event_call) from None
         except Exception as exc:  # noqa: BLE001 - socket/ssl/httplib2 errors share no base
-            raise self._transport_error(exc, what) from None
+            raise self._transport_error(exc, what, mutation=mutation) from None
         if self._creds is not None:
             _register_credentials(self._creds)   # the library may have refreshed the token
         return result
 
-    def _http_error(self, exc: Any, what: str, *, forgiving: bool) -> CalendarError:
+    def _http_error(self, exc: Any, what: str, *, forgiving: bool, mutation: bool = False,
+                    event_call: bool = False) -> CalendarError:
         """401/403 -> CalendarAuthError (token deleted); other statuses -> CalendarError.
 
         403s about quota stay CalendarError and a disabled Calendar API is a
@@ -409,33 +488,54 @@ class GoogleCalendar:
         message = _google_message(exc)
         detail = f"{status}: {message}" if message else str(status)
         reasons = _error_reasons(exc)
+        if event_call and status in (404, 410):
+            return EventGone(f"Google Calendar has no such event ({status})", status=status)
         if status == 403 and reasons & _SETUP_REASONS:
             return CalendarSetupError(
-                f"{SETUP_HINT}: the Google Calendar API is not enabled ({detail})", status=status)
+                f"{SETUP_HINT}: the Google Calendar API is not enabled ({detail})", status=status,
+                problem=PROBLEM_SETUP)
+        if event_call and status == 403 and reasons & _EVENT_REFUSED_REASONS:
+            return NotAllowed(f"Google Calendar refused to change this event ({detail})", status=status)
+        blocked = blocked_code(f"{message} {' '.join(sorted(reasons))}")
+        if blocked and status in (401, 403):
+            error = self._account.rejected(blocked)
+            return CalendarAuthError(str(error), status=status, problem=error.problem)
         auth_problem = status == 401 or (
             status == 403 and not forgiving and not reasons & _RATE_LIMIT_REASONS)
         if auth_problem:
-            self._forget_token(f"Google answered {status}")
-            return CalendarAuthError(
-                f"Google Calendar refused access while {what} ({detail}). "
-                "Approve again to sign in.", status=status)
+            if self.alias:
+                text = (f"Google Calendar refused access to the {self.alias} account while {what} "
+                        f"({detail}); sign in again")
+            else:
+                text = (f"Google Calendar refused access while {what} ({detail}). "
+                        "Approve again to sign in.")
+            self._account.forget(f"Google answered {status}", problem=PROBLEM_EXPIRED, message=text)
+            return CalendarAuthError(text, status=status, problem=PROBLEM_EXPIRED)
+        if mutation and status >= 500:
+            return CalendarUnknownOutcome(
+                f"Google Calendar answered {status} while {what}; it may or may not have "
+                "happened - check the calendar before retrying", status=status)
         return CalendarError(f"Google Calendar error while {what} ({detail})", status=status)
 
-    def _transport_error(self, exc: Exception, what: str) -> CalendarError:
+    def _transport_error(self, exc: Exception, what: str, *, mutation: bool = False) -> CalendarError:
         """A non-HTTP failure: a rejected token refresh (token deleted) or the network."""
         from google.auth.exceptions import RefreshError
 
         if isinstance(exc, RefreshError):
             if exc.retryable:
                 return CalendarError("Google could not refresh the sign-in just now; try again")
-            self._forget_token("Google rejected it")
-            return CalendarAuthError(
-                "Google Calendar sign-in expired or was revoked. Approve again to sign in.")
-        return CalendarError(f"Could not reach Google Calendar while {what} ({type(exc).__name__})")
+            error = self._account.rejected(str(exc))
+            return CalendarAuthError(str(error), problem=error.problem)
+        name = type(exc).__name__
+        if mutation and not (isinstance(exc, _NOT_SENT_ERRORS) or name in _NOT_SENT_NAMES):
+            return CalendarUnknownOutcome(
+                f"No answer from Google Calendar while {what} ({name}); it may or may not have "
+                "happened - check the calendar before retrying")
+        return CalendarError(f"Could not reach Google Calendar while {what} ({name})")
 
     # ---- calendar ------------------------------------------------------------
 
-    def timezone(self) -> str:
+    def timezone(self, *, interactive: bool = True) -> str:
         """The calendar's time zone setting (cached), else this PC's zone with a warning.
 
         The fallback (:func:`local_timezone`) is not cached here, so the next
@@ -443,14 +543,14 @@ class GoogleCalendar:
         """
         with self._guarded():
             if self._timezone is None:
-                value = self._read_timezone()
+                value = self._read_timezone(interactive=interactive)
                 if value is None:
                     return local_timezone()
                 self._timezone = value
             return self._timezone
 
-    def _read_timezone(self) -> str | None:
-        service = self._get_service()
+    def _read_timezone(self, *, interactive: bool = True) -> str | None:
+        service = self._get_service(interactive=interactive)
         try:
             setting = self._execute(service.settings().get(setting="timezone"),
                                     "reading your time zone", retries=_READ_RETRIES,
@@ -459,7 +559,7 @@ class GoogleCalendar:
             raise
         except CalendarError as exc:
             logger.warning("Google Calendar: could not read your time zone (%s); using this "
-                           "PC's time zone, %s", exc, local_timezone())
+                           "PC's time zone, %s", scrub_alias(str(exc), self.alias), local_timezone())
             return None
         value = setting.get("value") if isinstance(setting, dict) else None
         if not isinstance(value, str) or not value.strip():
@@ -584,6 +684,178 @@ class GoogleCalendar:
                 break
         return items
 
+    # ---- one event: read, answer, move, cancel ---------------------------------------------
+
+    def get_event(self, event_id: str, *, calendar_id: str | None = None,
+                  interactive: bool = True) -> EventDetails:
+        """Google's own view of one event (events.get; a read, retried like the others).
+
+        Raises EventGone when Google has no such event or it was cancelled. Without
+        ``interactive`` a missing sign-in raises CalendarNotSignedIn and opens nothing.
+        """
+        calendar = calendar_id or self._calendar_id
+        with self._guarded():
+            service = self._get_service(interactive=interactive)
+            item = self._execute(service.events().get(calendarId=calendar, eventId=event_id),
+                                 "reading the event", retries=_READ_RETRIES, event_call=True)
+            details = _event_details(item if isinstance(item, dict) else {}, event_id, calendar)
+            if details.status == "cancelled":
+                raise EventGone("The event was cancelled")
+            return details
+
+    def respond(self, event_id: str, answer: str, *, comment: str = "", send_updates: str = "all",
+                calendar_id: str | None = None, interactive: bool = True) -> ChangeResult:
+        """Answer an invitation ("yes" / "no" / "maybe"), with an optional note to the organizer.
+
+        events.patch with ``attendeesOmitted`` and only your own attendee entry, so nobody
+        else's answer is touched. ``already`` when Google has that answer (and note) already.
+        """
+        status = RESPONSES.get(answer)
+        if status is None:
+            raise CalendarError("The answer must be yes, no or maybe")
+        updates = _send_updates(send_updates)
+        calendar = calendar_id or self._calendar_id
+        with self._guarded():
+            details = self.get_event(event_id, calendar_id=calendar, interactive=interactive)
+            if not details.self_email:
+                raise NotAllowed("You are not on this event's guest list")
+            if details.self_response == status and (not comment or comment == details.self_comment):
+                logger.info("%s: invitation already answered (event %s)", self._log_name(), event_id)
+                return ChangeResult(event_id=event_id, link=details.link, already=True)
+            attendee: dict[str, Any] = {"email": details.self_email, "responseStatus": status}
+            if comment:
+                attendee["comment"] = comment
+            service = self._get_service(interactive=interactive)
+            request = service.events().patch(
+                calendarId=calendar, eventId=event_id, sendUpdates=updates,
+                body={"attendeesOmitted": True, "attendees": [attendee]})
+            result = self._execute(request, "answering the invitation", mutation=True, event_call=True)
+            result = result if isinstance(result, dict) else {}
+            logger.info("%s: answered the invitation (event %s)", self._log_name(), event_id)
+            return ChangeResult(event_id=event_id, link=str(result.get("htmlLink") or details.link),
+                                already=False)
+
+    def move(self, event_id: str, start: datetime, end: datetime, *, send_updates: str = "all",
+             calendar_id: str | None = None, now: datetime | None = None,
+             interactive: bool = True) -> ChangeResult:
+        """Give an event you organize (or may modify) a new start and end.
+
+        ``start``/``end`` are naive wall times in the calendar's time zone (as the briefing
+        writes them and the card shows them); the new start and end are sent as those wall
+        times in that zone, so an event kept in another zone moves to the calendar's zone
+        (Python has no time zone database here to convert). Refused for events you neither
+        organize nor may modify, all-day events, a whole repeating series and a new start in
+        the past. ``already`` when the event is at that time already.
+        """
+        start, end = start.replace(tzinfo=None), end.replace(tzinfo=None)
+        if end <= start:
+            raise CalendarError("The new end is not after the new start")
+        updates = _send_updates(send_updates)
+        calendar = calendar_id or self._calendar_id
+        with self._guarded():
+            details = self.get_event(event_id, calendar_id=calendar, interactive=interactive)
+            if details.series:
+                raise NotAllowed("This is a whole repeating series; Jarvis moves single events or "
+                                 "occurrences only - open it in Google Calendar")
+            if not (details.organizer_self or details.guests_can_modify):
+                raise NotAllowed("You don't organize this event, so it can't be moved - "
+                                 "answer the invitation instead")
+            if details.start is None or details.end is None:
+                raise NotAllowed("All-day events can't be moved from here")
+            current = (_wall(details.start), _wall(details.end))
+            if current == (start.replace(second=0, microsecond=0), end.replace(second=0, microsecond=0)):
+                logger.info("%s: the event is at that time already (event %s)", self._log_name(), event_id)
+                return ChangeResult(event_id=event_id, link=details.link, already=True)
+            if _as_aware(start) <= (now or datetime.now().astimezone()):
+                raise NotAllowed("The new time has already begun")
+            tz = self.timezone(interactive=interactive)
+            service = self._get_service(interactive=interactive)
+            request = service.events().patch(
+                calendarId=calendar, eventId=event_id, sendUpdates=updates,
+                body={"start": {"dateTime": _wall_time(start), "timeZone": tz},
+                      "end": {"dateTime": _wall_time(end), "timeZone": tz}})
+            result = self._execute(request, "moving the event", mutation=True, event_call=True)
+            result = result if isinstance(result, dict) else {}
+            logger.info("%s: moved event %s", self._log_name(), event_id)
+            return ChangeResult(event_id=event_id, link=str(result.get("htmlLink") or details.link),
+                                already=False)
+
+    def cancel(self, event_id: str, *, send_updates: str = "all",
+               calendar_id: str | None = None, interactive: bool = True) -> ChangeResult:
+        """Cancel (delete) an event you organize; guests are told as ``send_updates`` says.
+
+        ``already`` when Google has no such event any more. Refused for events you do not
+        organize (decline those instead) and for a whole repeating series.
+        """
+        updates = _send_updates(send_updates)
+        calendar = calendar_id or self._calendar_id
+        with self._guarded():
+            try:
+                details = self.get_event(event_id, calendar_id=calendar, interactive=interactive)
+            except EventGone:
+                logger.info("%s: the event is gone already (event %s)", self._log_name(), event_id)
+                return ChangeResult(event_id=event_id, link="", already=True)
+            if details.series:
+                raise NotAllowed("This is a whole repeating series; Jarvis cancels single events or "
+                                 "occurrences only - open it in Google Calendar")
+            if not details.organizer_self:
+                raise NotAllowed("You don't organize this event - decline it instead")
+            service = self._get_service(interactive=interactive)
+            request = service.events().delete(calendarId=calendar, eventId=event_id,
+                                              sendUpdates=updates)
+            try:
+                self._execute(request, "cancelling the event", mutation=True, event_call=True)
+            except EventGone:
+                return ChangeResult(event_id=event_id, link="", already=True)
+            logger.info("%s: cancelled event %s", self._log_name(), event_id)
+            return ChangeResult(event_id=event_id, link="", already=False)
+
+
+def _send_updates(value: str) -> str:
+    """sendUpdates for a change: "all", "externalOnly" or "none" (a line's "external" works too)."""
+    value = {"external": "externalOnly"}.get(value, value)
+    if value not in SEND_UPDATES:
+        raise CalendarError("Who to notify must be all, external or none")
+    return value
+
+
+def _wall(moment: datetime) -> datetime:
+    return moment.replace(tzinfo=None, second=0, microsecond=0)
+
+
+def _event_details(item: dict, event_id: str, calendar_id: str) -> EventDetails:
+    """One events.get answer -> EventDetails (missing parts read as empty or False)."""
+    start = item.get("start") if isinstance(item.get("start"), dict) else {}
+    end = item.get("end") if isinstance(item.get("end"), dict) else {}
+    organizer = item.get("organizer") if isinstance(item.get("organizer"), dict) else {}
+    attendees = [entry for entry in item.get("attendees") or () if isinstance(entry, dict)]
+    me = next((entry for entry in attendees if entry.get("self") is True), {})
+    begin = finish = None
+    first = last = None
+    if start.get("dateTime"):
+        begin = _parse_instant(start.get("dateTime"))
+        finish = _parse_instant(end.get("dateTime"))
+        if begin is not None and (finish is None or finish < begin):
+            finish = begin
+    else:
+        first = _parse_day(start.get("date"))
+        after = _parse_day(end.get("date"))   # exclusive
+        if first is not None:
+            last = after - timedelta(days=1) if after is not None and after > first else first
+    name = organizer.get("displayName") or organizer.get("email") or ""
+    return EventDetails(
+        event_id=str(item.get("id") or event_id), calendar_id=calendar_id,
+        title=" ".join(str(item.get("summary") or "").split()) or NO_TITLE,
+        start=begin, end=finish, all_day_start=first, all_day_end=last,
+        status=str(item.get("status") or "confirmed"),
+        organizer_self=organizer.get("self") is True,
+        guests_can_modify=item.get("guestsCanModify") is True,
+        self_email=str(me.get("email") or ""), self_response=str(me.get("responseStatus") or ""),
+        attendee_count=len(attendees), recurring_instance=bool(item.get("recurringEventId")),
+        series=bool(item.get("recurrence")), time_zone=str(start.get("timeZone") or ""),
+        link=str(item.get("htmlLink") or ""), organizer=" ".join(str(name).split()),
+        self_comment=str(me.get("comment") or ""), organizer_email=str(organizer.get("email") or ""))
+
 
 # --------------------------------------------------------------------------
 # Event bodies
@@ -657,7 +929,8 @@ def _local_end_of_day_utc(day: date) -> datetime:
 # --------------------------------------------------------------------------
 
 def _require_actionable(action: ProposedAction) -> None:
-    if not getattr(action, "actionable", False):
+    """Only a Calendar proposal (or a Todo's block, which is one) becomes a new event."""
+    if not getattr(action, "actionable", False) or getattr(action, "kind", "") != "calendar":
         reason = getattr(action, "error", "")
         raise CalendarError("This proposal cannot be added to the calendar"
                             + (f": {reason}" if reason else ""))
@@ -816,94 +1089,31 @@ def _event_sort_key(event: CalendarEvent) -> tuple[datetime, int, str]:
 # --------------------------------------------------------------------------
 
 def _build_service(creds: Any) -> Any:
+    import google_auth_httplib2
     from googleapiclient.discovery import build
 
-    # static_discovery uses the API description bundled with the library: no extra request.
-    return build("calendar", "v3", credentials=creds, cache_discovery=False, static_discovery=True)
-
-
-def _installed_app_flow(client_secret_path: Path, scopes: list[str]) -> Any:
-    from google_auth_oauthlib.flow import InstalledAppFlow
-
-    # Same as InstalledAppFlow.from_client_secrets_file, but tolerates a UTF-8 BOM.
-    with open(client_secret_path, encoding="utf-8-sig") as fh:
-        client_config = json.load(fh)
-    return InstalledAppFlow.from_client_config(client_config, scopes)
+    # An explicit timeout: a change that gets no answer in HTTP_TIMEOUT_S is an unknown outcome
+    # (never retried) rather than a wait without end; and a change is never sent twice by the
+    # HTTP library itself (single_send_http). static_discovery uses the API description
+    # bundled with the library: no extra request.
+    http = google_auth_httplib2.AuthorizedHttp(creds, http=single_send_http(HTTP_TIMEOUT_S))
+    return build("calendar", "v3", http=http, cache_discovery=False, static_discovery=True)
 
 
 def _refresh_credentials(creds: Any) -> None:
-    from google.auth.transport.requests import Request
-
-    creds.refresh(Request())
+    _account_refresh(creds)
 
 
 def google_libraries_available() -> bool:
     """True when the Google client packages from requirements.txt are installed."""
-    global _libraries_available
-    if _libraries_available is None:
-        try:
-            _libraries_available = all(importlib.util.find_spec(name) is not None
-                                       for name in _GOOGLE_MODULES)
-        except (ImportError, ValueError):
-            _libraries_available = False
-    return _libraries_available
+    return _account_libraries()
 
 
 def _require_libraries() -> None:
     if not google_libraries_available():
         raise CalendarSetupError(
             f"{SETUP_HINT} (the Google packages are missing: "
-            "py -3.13 -m pip install -r requirements.txt)")
-
-
-def _read_token(path: Path, *, quiet: bool = False) -> Any | None:
-    """Saved credentials, or None when missing or unusable (logged unless quiet; never raised)."""
-    log = logger.debug if quiet else logger.warning
-    try:
-        text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        log("Google Calendar: could not read the saved sign-in (%s)",
-            exc.strerror or type(exc).__name__)
-        return None
-    from google.oauth2.credentials import Credentials
-
-    try:
-        info = json.loads(text)
-        if not isinstance(info, dict):
-            raise ValueError("not a JSON object")
-        creds = Credentials.from_authorized_user_info(info, SCOPES)
-    except (ValueError, TypeError) as exc:
-        log("Google Calendar: the saved sign-in is unusable (%s); "
-            "the next Approve signs in again", type(exc).__name__)
-        return None
-    _register_credentials(creds)
-    return creds
-
-
-def _register_credentials(creds: Any) -> None:
-    for name in ("token", "refresh_token", "client_secret"):
-        value = getattr(creds, name, None)
-        if isinstance(value, str):
-            register_secret(value)
-
-
-def _sign_in_error(exc: Exception) -> CalendarError:
-    from google_auth_oauthlib.flow import WSGITimeoutError
-    from oauthlib.oauth2.rfc6749.errors import OAuth2Error
-
-    if isinstance(exc, (WSGITimeoutError, TimeoutError)):
-        return CalendarAuthError("Google sign-in timed out")
-    if isinstance(exc, OAuth2Error):
-        if exc.error == "access_denied":
-            return CalendarAuthError("Google sign-in was cancelled or access was denied")
-        return CalendarAuthError(f"Google sign-in failed ({exc.error or type(exc).__name__})")
-    if isinstance(exc, Warning) and "scope" in str(exc).casefold():
-        # oauthlib raises Warning("Scope has changed ...") when a box was unticked.
-        return CalendarAuthError("Google sign-in did not grant every permission; "
-                                 "approve again and allow all of them")
-    return CalendarError(f"Google sign-in failed ({type(exc).__name__})")
+            "py -3.13 -m pip install -r requirements.txt)", problem=PROBLEM_SETUP)
 
 
 def _status_of(exc: Any) -> int:
@@ -939,10 +1149,3 @@ def _error_reasons(exc: Any) -> set[str]:
             if isinstance(item, dict) and isinstance(item.get("reason"), str):
                 reasons.add(item["reason"])
     return reasons
-
-
-def _unlink_quietly(path: Path) -> None:
-    try:
-        path.unlink()
-    except OSError:
-        pass

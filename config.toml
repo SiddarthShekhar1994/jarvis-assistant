@@ -86,6 +86,26 @@ heading = "Proposed actions"
 # (*.instructure.com) hosts. An exact name, or "*.example.edu" for every
 # subdomain. https only.
 link_hosts = []
+# Seconds between a click on Accept / Decline / Maybe / Move / Cancel event and
+# the call to Google (3 to 60). Undo works until then and sends nothing.
+undo_seconds = 10
+
+# The Google accounts Jarvis may act for, one [accounts.<name>] table each. The
+# name is what the briefing writes as acct= ("work", "personal"). Which Google
+# account a name is never goes here: you pick it in Google's own sign-in when
+# you click Sign in on a card of that account (the sign-ins are kept in
+# %LOCALAPPDATA%\briefing-reader). Calendar proposals and to-do blocks always
+# use the personal account. backend: the service that carries out the
+# account's actions; only "google" works in this version. features: what Jarvis
+# may do for the account; "calendar" answers invitations and moves or cancels
+# events you organize.
+[accounts.personal]
+backend = "google"
+features = ["calendar"]
+
+[accounts.work]
+backend = "google"
+features = ["calendar"]
 
 [schedule]
 # When the "Briefing AM" and "Briefing PM" tasks run (24-hour HH:MM).

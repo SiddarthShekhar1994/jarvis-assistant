@@ -12,14 +12,16 @@ The module is organised in three parts:
   frameless HUD window that stacks the two;
 * ``AppController``: the state machine ("prompt", "snoozed", "reading",
   "quitting") that owns the window, tray icon, fetch thread, TTS worker,
-  player and the calendar worker (approved proposals, the agenda, sign-in).
+  player and the action worker (approved proposals, the agenda, the cards'
+  event checks and the Google sign-in of each account).
 
 Threading: Qt objects are only touched on the GUI thread. The fetch thread,
-the TTS worker and the calendar worker only emit ``_Bridge`` signals, which
+the TTS worker and the action worker only emit ``_Bridge`` signals, which
 are queued to the GUI thread where all state lives. Every worker is a daemon
-thread, so a stuck network call or a browser sign-in can never block exit.
-The calendar worker runs one call at a time, so reading the agenda never
-overlaps a sign-in; while an approval (or a Connect sign-in) runs, the other
+thread, so a stuck network call or a browser sign-in can never block exit
+(only a change already on its way to Google is waited for, at most 5 s). The
+action worker runs one call at a time, so reading the agenda never overlaps a
+sign-in; while an approval, its undo countdown or a sign-in runs, the other
 cards' Deny / Approve are locked.
 """
 
@@ -93,15 +95,23 @@ from PySide6.QtWidgets import (
 from . import hud
 from .actions import (
     CALENDAR,
+    CANCEL,
+    DONE_TEXT,
+    MOVE,
+    RETRY_TEXT,
+    RSVP,
     STATUS_CREATED,
     STATUS_DENIED,
     STATUS_DONE,
     STATUS_EXISTS,
     STATUS_FAILED,
+    STATUS_RUNNING,
     STATUS_SENT,
+    STATUS_UNKNOWN,
     TODO,
     ActionStore,
     CardView,
+    EditInvalid,
     ProposedAction,
     card_view,
     copied_text,
@@ -110,7 +120,9 @@ from .actions import (
     kind_label,
     link_allowed,
     link_host,
+    parse_time_range,
     result_text,
+    when_text,
 )
 from .agenda import (
     Deadline,
@@ -122,15 +134,43 @@ from .agenda import (
     extract_deadlines,
     merge_deadlines,
 )
-from .config import AgendaConfig, Config
+from .config import DEFAULT_ACCOUNT, AgendaConfig, Config
+from .executor import (
+    STAGE_SIGNED_IN,
+    STAGE_SIGNIN,
+    STAGE_WORKING,
+    ActionEdit,
+    CalendarBackend,
+    EditError,
+    EventCheck,
+    ExecError,
+    ExecResult,
+    Executor,
+    account_of,
+    apply_edit,
+    build_calendars,
+    check_event,
+    check_failure,
+    run_action,
+    sign_in_note,
+)
 from .gcal import (
-    TOKEN_FILE_NAME,
     CalendarAuthError,
     CalendarError,
     CalendarEvent,
+    CalendarNotSignedIn,
     CalendarSetupError,
-    EventResult,
     GoogleCalendar,
+)
+from .google_auth import (
+    PROBLEM_BLOCKED,
+    PROBLEM_DENIED,
+    PROBLEM_EXPIRED,
+    PROBLEM_FAILED,
+    PROBLEM_SCOPE,
+    PROBLEM_SIGNED_OUT,
+    PROBLEM_TIMEOUT,
+    logged_alias,
 )
 from .models import (
     ITEM_ENTRY,
@@ -618,6 +658,9 @@ class ReadingView(QWidget):
     openLink = Signal(str)
     openSource = Signal(str)     # a card's Open (tools row): the action id, never the URL
     copyText = Signal(str)       # a card's Copy (tools row): the action id
+    undoAction = Signal(str)     # a card's Undo during its countdown: the action id
+    editAction = Signal(str)     # a card's Edit (tools row): the action id
+    signInAccount = Signal(str)  # a card's Sign in (tools row): the action id
     connectCalendar = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -946,7 +989,8 @@ class ReadingView(QWidget):
     def add_action_card(self, action_id: str, kind: str, title: str, detail: str,
                         actionable: bool, **options: Any) -> hud.ActionCard:
         """A NEEDS YOUR OK card; ``options`` are ActionCard's keyword arguments
-        (approve_text, body, title_lines, open_text, copy_text)."""
+        (approve_text, body, title_lines, open_text, copy_text, edit_text, sign_in_text,
+        check_line)."""
         card = hud.ActionCard(action_id, kind, title, detail, actionable=actionable, **options)
         card.approveClicked.connect(self.approveClicked)
         card.denyClicked.connect(self.denyClicked)
@@ -954,6 +998,9 @@ class ReadingView(QWidget):
         card.openClicked.connect(self.openLink)
         card.sourceClicked.connect(self.openSource)
         card.copyClicked.connect(self.copyText)
+        card.undoClicked.connect(self.undoAction)
+        card.editClicked.connect(self.editAction)
+        card.signInClicked.connect(self.signInAccount)
         return self.approvals.add_card(card)
 
     def action_card(self, action_id: str) -> hud.ActionCard | None:
@@ -1357,15 +1404,54 @@ _STEP_WINDOW = 5                         # section chips shown above the transcr
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 _WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
-# Calendar worker stages (card shows WORKING / WAITING FOR GOOGLE SIGN-IN).
-_STAGE_WORKING = "working"
-_STAGE_SIGNIN = "signin"
-_STAGE_SIGNED_IN = "signedin"
-_SIGN_IN_CHECK = "sign-in check"         # calendar worker job: report whether a sign-in is saved
+# Action worker stages (the card shows WORKING / WAITING FOR GOOGLE SIGN-IN), and the undo
+# countdown before an RSVP, Move or Cancel goes to Google.
+_STAGE_WORKING = STAGE_WORKING
+_STAGE_SIGNIN = STAGE_SIGNIN
+_STAGE_SIGNED_IN = STAGE_SIGNED_IN
+_STAGE_COUNTDOWN = "countdown"           # "SENDING IN 9 S" + Undo: nothing has been sent yet
+_SIGN_IN_CHECK = "sign-in check"         # action worker job: report which accounts are signed in
 _CARD_FOR_STATUS = {STATUS_CREATED: hud.CARD_ADDED, STATUS_EXISTS: hud.CARD_EXISTS,
                     STATUS_DENIED: hud.CARD_DENIED, STATUS_FAILED: hud.CARD_FAILED,
-                    STATUS_DONE: hud.CARD_DONE,
-                    STATUS_SENT: hud.CARD_DONE}   # written by later versions; shown as DONE here
+                    STATUS_DONE: hud.CARD_DONE, STATUS_SENT: hud.CARD_SENT,
+                    STATUS_UNKNOWN: hud.CARD_UNKNOWN, STATUS_RUNNING: hud.CARD_WORKING}
+# The undo countdown ([actions] undo_seconds): how often the card's "SENDING IN n S" is updated.
+_COUNTDOWN_TICK_MS = 200
+# At exit, a change already on its way to Google is waited for this long (the window is hidden).
+_QUIT_SEND_WAIT_S = 5.0
+SIGN_IN_LINK_TEXT = "Sign in"
+EDIT_LINK_TEXT = "Edit"
+EDITED_MARK = f" {DOT} edited"
+_EVENT_LINK_TEXT = "Open event"          # the result link of an answered, moved or cancelled event
+UNKNOWN_CARD_TEXT = "check the calendar before retrying"   # after "UNKNOWN: " on the card
+CHECK_SOON_TEXT = "Checking the event with Google..."
+CHECK_LATER_TEXT = "Not checked with Google yet"
+CHECK_FIRST_NOTE = "Checking the event with Google first - click {button} again once it shows above"
+SIGN_IN_FIRST_NOTE = "Finish the Google sign-in in your browser, then check the event above"
+SIGNED_IN_NOTE = "Signed in - check the event above, then click {button} again"
+NOT_READY_NOTE = "Nothing was sent - see the line above"
+# The first Approve on a card whose event Google shows with another title or time than the line
+# only says so (the line above shows Google's); the next click goes ahead.
+MISMATCH_NOTE = "Google's event has {what} than the briefing - check the line above, then click {button} again"
+_MISMATCH_WHAT = {"title": "another title", "time": "another time", "title+time": "another title and time"}
+# After a change Google's view is what the change made (not the check from before it).
+AFTER_PREFIX = "Google now: "
+_ANSWERED = {"yes": "you accepted", "no": "you declined", "maybe": "you said maybe"}
+# The end of gcal's unknown-outcome message: the card's UNKNOWN line already says it.
+_CHECK_BEFORE_RETRY_RE = re.compile(r"\s*[-;:,]\s*check (?:the calendar )?before retrying\.?\s*$", re.IGNORECASE)
+# The check line's short form of an account's sign-in problem (the whole message is its tooltip).
+_PROBLEM_LINES = {
+    PROBLEM_BLOCKED: "Sign-in blocked by the {alias} account's administrator",
+    PROBLEM_EXPIRED: "The {alias} account's Google sign-in expired - Sign in again",
+    PROBLEM_DENIED: "Google sign-in for the {alias} account was cancelled or denied",
+    PROBLEM_SCOPE: "The {alias} account did not allow Calendar access - Sign in again",
+    PROBLEM_TIMEOUT: "Google sign-in for the {alias} account was not finished",
+}
+_PROBLEM_LINE_OTHER = "Google sign-in for the {alias} account failed - Sign in to try again"
+_VERBS = {RSVP: "answer", MOVE: "move", CANCEL: "cancel"}
+# Sign-in problems of an account (google_auth PROBLEM_*): the card offers Sign in again.
+_SIGN_IN_PROBLEMS = (PROBLEM_SIGNED_OUT, PROBLEM_EXPIRED, PROBLEM_BLOCKED, PROBLEM_DENIED, PROBLEM_SCOPE,
+                     PROBLEM_TIMEOUT)
 # A second click on the same card's Open this soon after the first opens nothing (no double tabs).
 _SOURCE_OPEN_GUARD_S = 1.0
 # The link next to BLOCK ADDED: the tools row may already have an "Open" (the Todo's own link).
@@ -1415,12 +1501,37 @@ _CONNECT_FAILED = "failed"
 
 @dataclasses.dataclass(frozen=True)
 class _AgendaJob:
-    """One list_events call on the calendar worker (the range covers the agenda and the deadlines)."""
+    """One list_events call on the action worker (the range covers the agenda and the deadlines)."""
 
     request_id: int
     start: datetime
     end: datetime
     calendar_ids: tuple[str, ...]
+
+
+@dataclasses.dataclass(frozen=True)
+class _ExecJob:
+    """Carry out one approved proposal (executor.run_action). ``writes_running``: an RSVP, Move or
+    Cancel whose undo countdown ran out; "running" is saved right before its call to Google and
+    the result right after, by the worker."""
+
+    action: ProposedAction
+    writes_running: bool
+
+
+@dataclasses.dataclass(frozen=True)
+class _PeekJob:
+    """Read the events of these cards for their check lines (never signs in)."""
+
+    request_id: int
+    actions: tuple[ProposedAction, ...]
+
+
+@dataclasses.dataclass(frozen=True)
+class _ConnectJob:
+    """The browser sign-in of one account (the agenda's Connect, a card's Sign in or Approve)."""
+
+    alias: str
 
 
 class _Bridge(QObject):
@@ -1429,11 +1540,13 @@ class _Bridge(QObject):
     fetchAttempt = Signal(int, object, object, int)   # fetch_id, Briefing | None, NotionError | None, attempt
     fetchDone = Signal(int, object)                   # fetch_id, PollResult
     ttsResult = Signal(int, int, object, object)      # generation, section index, SectionAudio | None, str | None
-    calendarStatus = Signal(bool)                     # signed in to Google Calendar
-    calendarProgress = Signal(str, str)               # action id, _STAGE_*
-    calendarResult = Signal(str, object, object, str)  # action id, EventResult | None, error | None, status
+    calendarStatus = Signal(bool)                     # the personal account is signed in to Google Calendar
+    accountStatus = Signal(object)                    # {alias: (signed in, PROBLEM_* or "", message)}
+    actionProgress = Signal(str, str)                 # action id, _STAGE_*
+    actionResult = Signal(str, object, object, str)   # action id, ExecResult | None, ExecError | None, status
+    eventPeek = Signal(int, object)                   # request id, {action id: (EventDetails | None, error | None)}
     agendaResult = Signal(int, object, str, str)      # request id, events | None, _PROBLEM_* or "", message
-    calendarConnect = Signal(str, str)                # _CONNECT_* stage, failure message
+    accountConnect = Signal(str, str, str, str)       # alias, _CONNECT_* stage, failure message, PROBLEM_*
 
 
 def _local_now() -> datetime:
@@ -1467,21 +1580,31 @@ def _run_fetch(bridge: _Bridge, fetch_id: int, stop: threading.Event,
     _emit_from_worker(bridge, "fetchDone", stop, fetch_id, result)
 
 
-class _CalendarWorker:
-    """Runs Google Calendar calls one at a time on a daemon thread named "calendar".
+class _ActionWorker:
+    """Runs Google calls one at a time on a daemon thread named "calendar".
 
-    Jobs are a sign-in check (for the header chip), approved proposals (sign
-    in first when needed, then create the event), reading the agenda (never
-    signs in) and the agenda's Connect (sign in only). One at a time, so the
-    agenda is never read while a sign-in runs. Results only go through the
-    bridge; nothing waits for this thread at exit.
+    Jobs: a sign-in check (the header chip and the cards' Sign in links), an
+    approved proposal (``_ExecJob`` through executor.run_action: a Calendar
+    event or a Todo's block signs in first when needed, as before; an RSVP,
+    Move or Cancel has "running" saved right before its one call and the
+    result right after, on this thread, so the result is kept even when the
+    app quits meanwhile), reading the agenda and the cards' events (never a
+    sign-in), and the browser sign-in of one account. One at a time, so
+    nothing is read while a sign-in runs. Results only go through the bridge.
     """
 
-    def __init__(self, calendar: Any, bridge: _Bridge, stop: threading.Event) -> None:
-        self._calendar = calendar
+    def __init__(self, executor: Executor, calendars: Mapping[str, Any], store: ActionStore,
+                 bridge: _Bridge, stop: threading.Event) -> None:
+        self._executor = executor
+        self._calendars = dict(calendars)
+        self._calendar = self._calendars.get(DEFAULT_ACCOUNT)
+        self._store = store
         self._bridge = bridge
         self._stop = stop
-        self._jobs: queue.SimpleQueue[ProposedAction | _AgendaJob | str | None] = queue.SimpleQueue()
+        self._idle = threading.Event()
+        self._idle.set()
+        self._taking = threading.Lock()   # taking a job and marking the worker busy happen together
+        self._jobs: queue.SimpleQueue[Any] = queue.SimpleQueue()
         self._thread = threading.Thread(target=self._run, name="calendar", daemon=True)
         self._thread.start()
 
@@ -1489,35 +1612,84 @@ class _CalendarWorker:
         self._jobs.put(_SIGN_IN_CHECK)
 
     def approve(self, action: ProposedAction) -> None:
-        self._jobs.put(action)
+        """A Calendar event or a Todo's block: no countdown, nothing saved before the call."""
+        self._jobs.put(_ExecJob(action, writes_running=False))
+
+    def execute(self, action: ProposedAction) -> None:
+        """An RSVP, Move or Cancel whose countdown ran out: "running", the one call, the result."""
+        self._jobs.put(_ExecJob(action, writes_running=True))
 
     def list_agenda(self, job: _AgendaJob) -> None:
         self._jobs.put(job)
 
-    def connect(self) -> None:
-        self._jobs.put(_CONNECT_JOB)
+    def peek(self, job: _PeekJob) -> None:
+        self._jobs.put(job)
+
+    def connect(self, alias: str = DEFAULT_ACCOUNT) -> None:
+        self._jobs.put(_ConnectJob(alias))
 
     def stop(self) -> None:
         self._jobs.put(None)
 
+    def wait_idle(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` seconds for the job that is running (if any) to finish.
+
+        Call it after ``stop`` was set: a job taken from the queue before that is then
+        either running (and waited for) or never started.
+        """
+        with self._taking:
+            pass
+        return self._idle.wait(timeout)
+
     def _run(self) -> None:
         while True:
             job = self._jobs.get()
-            if job is None or self._stop.is_set():
-                return
-            if isinstance(job, _AgendaJob):
-                self._list(job)
-            elif job == _SIGN_IN_CHECK:
-                self._emit("calendarStatus", self._signed_in())
-            elif job == _CONNECT_JOB:
-                self._connect()
-            else:
-                self._create(job)
+            with self._taking:
+                if job is None or self._stop.is_set():
+                    return
+                self._idle.clear()
+            try:
+                self._dispatch(job)
+            except Exception as exc:  # noqa: BLE001 - a bug must not end the worker
+                logger.error("The action worker failed unexpectedly (%s)", type(exc).__name__)
+                logger.debug("Where:\n%s", "".join(traceback.format_tb(exc.__traceback__)))
+            finally:
+                self._idle.set()
+
+    def _dispatch(self, job: Any) -> None:
+        if isinstance(job, _AgendaJob):
+            self._list(job)
+        elif isinstance(job, _ExecJob):
+            self._exec(job)
+        elif isinstance(job, _PeekJob):
+            self._peek(job)
+        elif isinstance(job, _ConnectJob):
+            self._connect(job.alias)
+        elif job == _SIGN_IN_CHECK:
+            self._check_sign_ins()
+
+    def _check_sign_ins(self) -> None:
+        """Which accounts have a usable saved sign-in, and why not (files only, no network)."""
+        statuses: dict[str, tuple[bool, str, str]] = {}
+        for alias, calendar in self._calendars.items():
+            problem, message = "", ""
+            getter = getattr(calendar, "sign_in_problem", None)
+            if callable(getter):
+                try:
+                    problem, message = getter()
+                except Exception as exc:  # noqa: BLE001 - only decides what a card says
+                    logger.debug("Could not read the sign-in problem (%s)", type(exc).__name__)
+            statuses[alias] = (self._signed_in(calendar), problem or "", message or "")
+        self._emit("accountStatus", statuses)
+        if self._calendar is not None:
+            self._emit("calendarStatus", statuses[DEFAULT_ACCOUNT][0])
 
     def _list(self, job: _AgendaJob) -> None:
         """Read the events for the agenda; a missing sign-in is reported, never started."""
         problem, message, events = "", "", None
         try:
+            if self._calendar is None:
+                raise CalendarSetupError("Google Calendar is not set up")
             events = list(self._calendar.list_events(job.start, job.end, job.calendar_ids))
         except CalendarSetupError as exc:
             problem, message = _PROBLEM_SETUP, str(exc)
@@ -1531,59 +1703,80 @@ class _CalendarWorker:
             problem, message = _PROBLEM_ERROR, f"unexpected error ({type(exc).__name__})"
         self._emit("agendaResult", job.request_id, events, problem, message)
 
-    def _connect(self) -> None:
-        """The agenda's Connect link: the browser sign-in, unless a sign-in is saved already."""
-        if self._signed_in():
-            self._emit("calendarConnect", _CONNECT_READY, "")
+    def _peek(self, job: _PeekJob) -> None:
+        """Google's own view of each card's event, for its check line (never signs in)."""
+        results: dict[str, tuple[Any, BaseException | None]] = {}
+        for action in job.actions:
+            if self._stop.is_set():
+                return
+            try:
+                results[action.id] = (self._executor.peek(action), None)
+            except (CalendarError, ExecError) as exc:   # a safe message (gcal logged a failure)
+                results[action.id] = (None, exc)
+            except Exception as exc:  # noqa: BLE001 - a bug must not end the worker
+                logger.warning("Checking an event failed unexpectedly (%s)", type(exc).__name__)
+                logger.debug("Where:\n%s", "".join(traceback.format_tb(exc.__traceback__)))
+                results[action.id] = (None, CalendarError(f"unexpected error ({type(exc).__name__})"))
+        self._emit("eventPeek", job.request_id, results)
+
+    def _connect(self, alias: str) -> None:
+        """One account's browser sign-in, unless a usable sign-in is saved already."""
+        calendar = self._calendars.get(alias)
+        if calendar is None:
+            self._emit("accountConnect", alias, _CONNECT_FAILED, CALENDAR_SETUP_NOTE, "")
             return
-        self._emit("calendarConnect", _CONNECT_SIGN_IN, "")
+        if self._signed_in(calendar):
+            self._emit("accountConnect", alias, _CONNECT_READY, "", "")
+            return
+        self._emit("accountConnect", alias, _CONNECT_SIGN_IN, "", "")
         try:
-            self._calendar.sign_in()
+            calendar.sign_in()
         except CalendarError as exc:   # gcal already logged it, with a safe message
-            self._emit("calendarConnect", _CONNECT_FAILED, str(exc) or type(exc).__name__)
+            self._emit("accountConnect", alias, _CONNECT_FAILED, str(exc) or type(exc).__name__,
+                       getattr(exc, "problem", "") or "")
             return
         except Exception as exc:  # noqa: BLE001 - a bug must not end the worker
             logger.error("Google sign-in failed unexpectedly (%s)", type(exc).__name__)
             logger.debug("Where:\n%s", "".join(traceback.format_tb(exc.__traceback__)))
-            self._emit("calendarConnect", _CONNECT_FAILED, f"unexpected error ({type(exc).__name__})")
+            self._emit("accountConnect", alias, _CONNECT_FAILED, f"unexpected error ({type(exc).__name__})", "")
             return
-        self._emit("calendarConnect", _CONNECT_SIGNED_IN, "")
+        self._emit("accountConnect", alias, _CONNECT_SIGNED_IN, "", "")
 
-    def _signed_in(self) -> bool:
+    @staticmethod
+    def _signed_in(calendar: Any) -> bool:
         try:
-            return bool(self._calendar.is_signed_in())
+            return bool(calendar.is_signed_in())
         except Exception as exc:  # noqa: BLE001 - only decides whether to sign in first
             logger.debug("Could not check the Google sign-in (%s)", type(exc).__name__)
             return False
 
-    def _create(self, action: ProposedAction) -> None:
-        try:
-            if not self._signed_in():
-                self._emit("calendarProgress", action.id, _STAGE_SIGNIN)
-                self._calendar.sign_in()
-                self._emit("calendarProgress", action.id, _STAGE_SIGNED_IN)
-            result = self._calendar.create_event(action)
-        except CalendarError as exc:   # gcal already logged it, with a safe message
-            self._emit("calendarResult", action.id, None, str(exc) or type(exc).__name__, STATUS_FAILED)
-            return
-        except Exception as exc:  # noqa: BLE001 - a bug must not end the worker
-            # Type and frames only: an unexpected message could carry a token.
-            logger.error("Google Calendar call failed unexpectedly (%s)", type(exc).__name__)
-            logger.debug("Where:\n%s", "".join(traceback.format_tb(exc.__traceback__)))
-            self._emit("calendarResult", action.id, None, f"unexpected error ({type(exc).__name__})",
-                       STATUS_FAILED)
-            return
-        status = STATUS_EXISTS if result.existed else STATUS_CREATED
-        self._emit("calendarResult", action.id, result, None, status)
+    def _exec(self, job: _ExecJob) -> None:
+        action = job.action
+
+        def on_stage(stage: str) -> None:
+            self._emit("actionProgress", action.id, stage)
+
+        outcome = run_action(self._executor, action, store=self._store if job.writes_running else None,
+                             writes_running=job.writes_running, on_stage=on_stage)
+        self._emit("actionResult", action.id, outcome.result, outcome.error, outcome.status)
 
     def _emit(self, signal_name: str, *args: Any) -> None:
         _emit_from_worker(self._bridge, signal_name, self._stop, *args)
 
 
+_CalendarWorker = _ActionWorker   # its name before it also answered, moved and cancelled events
+
+
+def _default_calendars(config: Config) -> dict[str, GoogleCalendar]:
+    """One GoogleCalendar per account (executor.build_calendars): "personal" (the agenda,
+    Calendar proposals, to-do blocks) and every [accounts.<alias>] with the calendar feature.
+    The single google_token.json of older versions becomes the personal account's sign-in."""
+    return build_calendars(config)
+
+
 def _default_calendar(config: Config) -> GoogleCalendar:
-    return GoogleCalendar(client_secret_path=config.calendar.client_secret_path,
-                          token_path=config.data_dir / TOKEN_FILE_NAME,
-                          calendar_id=config.calendar.calendar_id)
+    """The personal account's calendar."""
+    return _default_calendars(config)[DEFAULT_ACCOUNT]
 
 
 def _agenda_fetch_range(now: datetime, agenda: AgendaConfig) -> tuple[datetime, datetime]:
@@ -1690,9 +1883,57 @@ def _activity_title(action: ProposedAction) -> str:
 
 def _card_options(action: ProposedAction, view: CardView) -> dict[str, Any]:
     """ActionCard keyword arguments for ``view`` (a CardView of ``action``)."""
-    return {"approve_text": view.approve_text or "Approve", "body": view.body,
-            "open_text": view.open_text, "copy_text": view.copy_text,
-            "title_lines": 2 if action.structured else 0}
+    options: dict[str, Any] = {"approve_text": view.approve_text or "Approve", "body": view.body,
+                               "open_text": view.open_text, "copy_text": view.copy_text,
+                               "title_lines": 2 if action.structured else 0, "deny_text": view.deny_text}
+    if view.editable:
+        # An RSVP, Move or Cancel: the check line, and Edit in a place that shows Sign in instead
+        # while its account is blocked, or Google's own "Open event" when the line has no link.
+        options.update(edit_text=EDIT_LINK_TEXT, check_line=view.check, sign_in_text=SIGN_IN_LINK_TEXT,
+                       event_text="" if view.open_text else hud.OPEN_EVENT_TEXT)
+    return options
+
+
+@dataclasses.dataclass
+class _Countdown:
+    """The undo countdown of one approved card; nothing is sent before it runs out."""
+
+    action: ProposedAction       # exactly what will be carried out (the Edit dialog's changes included)
+    deadline: float              # time.monotonic() when it runs out
+    started: float               # time.monotonic() of the click that started it (Undo's double-click guard)
+    shown: int = -1              # the seconds the card shows
+
+
+def _action_phrase(action: ProposedAction) -> str:
+    """"Accept Speaker series", "Move Project sync", "Cancel Study group" (activity rows)."""
+    title = _activity_title(action)
+    if action.kind == RSVP:
+        verb = {"yes": "Accept", "no": "Decline", "maybe": "Answer maybe to"}.get(action.field("answer"), "Answer")
+        return f"{verb} {title or 'an invitation'}"
+    verb = "Move" if action.kind == MOVE else "Cancel"
+    return f"{verb} {title or 'a meeting'}"
+
+
+def _kind_title(action: ProposedAction) -> str:
+    """``action``'s title for an ACTIVITY row, or what it is when the line has no title."""
+    title = _activity_title(action)
+    if title:
+        return title
+    return {RSVP: "an invitation", MOVE: "a meeting", CANCEL: "a meeting"}.get(action.kind, action.kind)
+
+
+def _time_texts(action: ProposedAction, hour24: bool = False) -> tuple[str, str, str]:
+    """A Move's new time for the Edit dialog, on the app's clock: ("2026-10-08", "2:00 PM",
+    "3:00 PM"), or "14:00" / "15:00" with ``hour24``; empty otherwise."""
+    if action.kind != MOVE or action.start is None or action.end is None:
+        return "", "", ""
+
+    def clock(moment: datetime) -> str:
+        if hour24:
+            return moment.strftime("%H:%M")
+        return f"{(moment.hour % 12) or 12}:{moment.minute:02d} {'AM' if moment.hour < 12 else 'PM'}"
+
+    return action.start.date().isoformat(), clock(action.start), clock(action.end)
 
 
 def _remove_audio_dir_after(worker: threading.Thread | None, audio_dir: Path) -> None:
@@ -1737,11 +1978,21 @@ class AppController(QObject):
     A launch for a newer run takes the reading screen back to the prompt once
     nothing is playing there. Proposed actions are shown as cards; only an
     explicit Approve creates an event, or Add block a Todo's block (on the
-    calendar worker). The other proposals are hand-offs: Open (an
-    allowlisted link, only on a click), Copy (the drafted text to the
-    clipboard), Done and Deny; nothing is sent.
-    ``calendar_factory(config)`` builds the calendar client (tests inject a
-    fake); it is only called when ``[calendar] enabled`` is true. An Approve
+    action worker). Accept / Decline / Maybe, Move and Cancel event answer an
+    invitation, move or cancel an event, and only after the card shows
+    Google's own view of that event (its check line, read by id) and that view
+    allows it; then an undo countdown runs (``[actions] undo_seconds``; Undo
+    sends nothing) and only its end queues the one call. "running" is saved
+    before that call; a call that may or may not have happened shows UNKNOWN
+    with Retry and is never retried by itself. Each account signs in only on a
+    click (a card's Sign in or Approve, the agenda's Connect). Edit changes
+    such a card in memory, and what the card shows is what is carried out.
+    The other proposals are hand-offs: Open (an allowlisted link, only on a
+    click), Copy (the drafted text to the clipboard), Done and Deny; nothing
+    is sent.
+    ``calendar_factory(config)`` builds the calendar clients (tests inject a
+    fake): one calendar (the personal account's) or a mapping alias ->
+    calendar; it is only called when ``[calendar] enabled`` is true. An Approve
     or Deny within ``_DECISION_CLICK_GUARD_S`` of the previous one is ignored;
     ``click_clock`` (seconds, monotonic; default ``time.monotonic``, looked up
     at each click so tests may also patch it) times that. While an approval
@@ -1793,8 +2044,10 @@ class AppController(QObject):
         if action_store is None:
             action_store = ActionStore(config.data_dir / ACTIONS_FILE)
         self._store = action_store
-        self.calendar = self._create_calendar(calendar_factory)
-        self._calendar_worker: _CalendarWorker | None = None
+        self._calendars: dict[str, Any] = self._create_calendars(calendar_factory)
+        self.calendar = self._calendars.get(DEFAULT_ACCOUNT)   # the agenda's and Calendar proposals'
+        self._executor = Executor([CalendarBackend(self._calendars, now=now_func)], config.accounts)
+        self._calendar_worker: _ActionWorker | None = None
         self._init_fetch_state()
         self._init_script_state()
         self._init_action_state()
@@ -1838,13 +2091,35 @@ class AppController(QObject):
         self._actions: list[ProposedAction] = []
         self._actions_key = ""                   # content key of the page the actions came from
         self._actions_lines: tuple = ()
-        self._calendar_jobs: dict[str, str] = {}   # action id -> _STAGE_* while queued or running
+        self._jobs: dict[str, str] = {}            # action id -> _STAGE_* while counting down, queued or running
+        self._running: dict[str, tuple[ProposedAction, bool]] = {}   # id -> (what was sent, writes_running)
+        self._countdown: _Countdown | None = None  # at most one: the other cards are locked meanwhile
         self._calendar_signed_in = False
         self._decision_clicked_at = -math.inf      # click clock of the last Approve / Deny click
         self._source_opened_at: dict[str, float] = {}   # action id -> click clock of its last Open
-        self._connect_running = False              # the agenda's Connect sign-in is queued or running
-        self._connect_note = ""                    # why the last Connect failed (shown until the next one)
+        self._connect_alias: str | None = None     # the account whose sign-in is queued or running
+        self._connect_card = ""                    # the card whose Sign in / Approve started it
+        self._connect_note = ""                    # why the last personal sign-in failed (the agenda line)
+        self._accounts_state: dict[str, tuple[bool, str, str]] = {}   # alias -> (signed in, PROBLEM_*, message)
+        self._checks: dict[str, EventCheck] = {}   # action id -> Google's view of its event (the check line)
+        self._peek_seq = 0
+        self._peeking: set[str] = set()            # action ids whose check is on its way
+        self._hints: dict[str, str] = {}           # action id -> what its last Approve click needs next
+        self._edits: dict[str, ActionEdit] = {}    # action id -> the Edit dialog's changes (memory only)
+        self._carried: dict[str, ProposedAction] = {}   # action id -> what Jarvis carried out (this run)
+        self._mismatch_seen: dict[str, EventCheck] = {}   # action id -> the check whose mismatch was shown
+        self._dialog: hud.EditDialog | None = None
         self._read_slot: str | None = None         # the scheduled slot this reading settled
+
+    @property
+    def _calendar_jobs(self) -> dict[str, str]:
+        """The older name of ``_jobs``."""
+        return self._jobs
+
+    @property
+    def _connect_running(self) -> bool:
+        """A sign-in (the agenda's Connect, a card's Sign in or Approve) is queued or running."""
+        return self._connect_alias is not None
 
     def _init_agenda_state(self) -> None:
         self._agenda_status = _AGENDA_INIT
@@ -1866,6 +2141,9 @@ class AppController(QObject):
         # Only while the reading screen is visible (no timer at all while hidden).
         self._agenda_timer = self._make_timer(self._on_agenda_tick, single_shot=False,
                                               interval_ms=_AGENDA_TICK_MS)
+        # Only while a card counts down to its call to Google.
+        self._countdown_timer = self._make_timer(self._on_countdown_tick, single_shot=False,
+                                                 interval_ms=_COUNTDOWN_TICK_MS)
 
     def _make_timer(self, slot: Callable[[], None], *, single_shot: bool, interval_ms: int = 0) -> QTimer:
         timer = QTimer(self)
@@ -1883,10 +2161,12 @@ class AppController(QObject):
         bridge.fetchDone.connect(self._on_fetch_done, queued)
         bridge.ttsResult.connect(self._on_tts_result, queued)
         bridge.calendarStatus.connect(self._on_calendar_status, queued)
-        bridge.calendarProgress.connect(self._on_calendar_progress, queued)
-        bridge.calendarResult.connect(self._on_calendar_result, queued)
+        bridge.accountStatus.connect(self._on_account_status, queued)
+        bridge.actionProgress.connect(self._on_action_progress, queued)
+        bridge.actionResult.connect(self._on_action_result, queued)
+        bridge.eventPeek.connect(self._on_event_peek, queued)
         bridge.agendaResult.connect(self._on_agenda_result, queued)
-        bridge.calendarConnect.connect(self._on_calendar_connect, queued)
+        bridge.accountConnect.connect(self._on_account_connect, queued)
         prompt, reading = self.window.prompt, self.window.reading
         prompt.readNow.connect(self.read_now)
         prompt.later.connect(self.later)
@@ -1903,6 +2183,9 @@ class AppController(QObject):
         reading.openLink.connect(self.open_action_link)
         reading.openSource.connect(self.open_action_source)
         reading.copyText.connect(self.copy_action_text)
+        reading.undoAction.connect(self.undo_action)
+        reading.editAction.connect(self.edit_action)
+        reading.signInAccount.connect(self.sign_in_account)
         reading.connectCalendar.connect(self.connect_calendar)
         self.window.closeRequested.connect(self._on_close_requested)
         self.window.visibilityChanged.connect(self._sync_agenda_timer)
@@ -1924,14 +2207,25 @@ class AppController(QObject):
         old.deleteLater()
         self.player = self._create_player()
 
-    def _create_calendar(self, factory: Callable[[Config], Any] | None) -> Any:
+    def _create_calendars(self, factory: Callable[[Config], Any] | None) -> dict[str, Any]:
+        """alias -> calendar ({} when [calendar] enabled = false or it could not be set up).
+
+        ``factory`` may return one calendar (the personal account's) or a mapping. Building
+        them opens nothing and talks to no one; the single sign-in of older versions becomes
+        the personal account's here (executor.build_calendars).
+        """
         if not self.config.calendar.enabled:
-            return None
+            return {}
         try:
-            return (factory or _default_calendar)(self.config)
+            built = (factory or _default_calendars)(self.config)
         except Exception as exc:  # noqa: BLE001 - the briefing works without a calendar
             logger.warning("Could not set up Google Calendar (%s)", type(exc).__name__)
-            return None
+            return {}
+        if built is None:
+            return {}
+        if isinstance(built, Mapping):
+            return {str(alias): calendar for alias, calendar in built.items() if calendar is not None}
+        return {DEFAULT_ACCOUNT: built}
 
     # ---- startup ------------------------------------------------------------------
 
@@ -1978,16 +2272,25 @@ class AppController(QObject):
         self._tts = TtsWorker(factory, on_result)
         self._tts.start()
 
-    def _start_calendar(self) -> _CalendarWorker | None:
-        """The calendar worker, started once Google Calendar is set up (it checks the sign-in first)."""
-        if self._calendar_worker is None and self._calendar_configured() and not self._closing.is_set():
-            self._calendar_worker = _CalendarWorker(self.calendar, self._bridge, self._closing)
+    def _start_calendar(self) -> _ActionWorker | None:
+        """The action worker, started once Google Calendar is set up (it checks the sign-ins first)."""
+        if self._calendar_worker is None and self._any_calendar_configured() and not self._closing.is_set():
+            self._calendar_worker = _ActionWorker(self._executor, self._calendars, self._store, self._bridge,
+                                                  self._closing)
             self._calendar_worker.check_sign_in()
         return self._calendar_worker
 
     def _calendar_configured(self) -> bool:
+        """The personal account's calendar (the agenda, Calendar proposals) is set up."""
+        return self._configured(self.calendar)
+
+    def _any_calendar_configured(self) -> bool:
+        return any(self._configured(calendar) for calendar in self._calendars.values())
+
+    @staticmethod
+    def _configured(calendar: Any) -> bool:
         try:
-            return self.calendar is not None and bool(self.calendar.is_configured())
+            return calendar is not None and bool(calendar.is_configured())
         except Exception as exc:  # noqa: BLE001 - treated as not set up
             logger.debug("Could not check the Google Calendar setup (%s)", type(exc).__name__)
             return False
@@ -2071,9 +2374,31 @@ class AppController(QObject):
             return hud.STATUS_OFF, "Google Calendar: turned off in config.toml" + waiting
         if not self._calendar_configured():
             return hud.STATUS_OFF, "Google Calendar: not set up (README step 8)" + waiting
+        others = self._other_accounts_text()
         if self._calendar_signed_in:
-            return hud.STATUS_OK, "Google Calendar: signed in" + waiting
-        return hud.STATUS_WARN, "Google Calendar: not signed in (Approve opens the sign-in)" + waiting
+            return hud.STATUS_OK, "Google Calendar: signed in" + others + waiting
+        return (hud.STATUS_WARN, "Google Calendar: not signed in (Approve opens the sign-in)" + others
+                + waiting)
+
+    def _other_accounts_text(self) -> str:
+        """"; work account: not signed in" for each account besides the personal one."""
+        parts = []
+        for alias in self._calendars:
+            if alias == DEFAULT_ACCOUNT:
+                continue
+            signed_in, problem, _message = self._accounts_state.get(alias, (False, "", ""))
+            if signed_in:
+                state = "signed in"
+            elif self._connect_alias == alias:
+                state = "signing in"
+            elif problem == PROBLEM_BLOCKED:
+                state = "blocked by its administrator"
+            elif problem in (PROBLEM_EXPIRED, PROBLEM_DENIED, PROBLEM_SCOPE, PROBLEM_TIMEOUT, PROBLEM_FAILED):
+                state = "sign in again"
+            else:
+                state = "not signed in"
+            parts.append(f"; {alias} account: {state}")
+        return "".join(parts)
 
     # ---- fetching ----------------------------------------------------------------------
 
@@ -2225,56 +2550,275 @@ class AppController(QObject):
         return dataclasses.replace(briefing, lines=self._actions_lines)
 
     def _pending_actions(self) -> list[ProposedAction]:
-        """Proposals that take a decision and have not been decided yet."""
-        return [action for action in self._actions
+        """Proposals that take a decision and have not been decided yet (as their cards show
+        them: with the Edit dialog's changes)."""
+        return [self._effective(action) for action in self._actions
                 if action.decidable and not self._store.is_decided(action.id)]
 
     def _action(self, action_id: str) -> ProposedAction | None:
+        """The proposal as the page has it."""
         return next((action for action in self._actions if action.id == action_id), None)
+
+    def _current(self, action_id: str) -> ProposedAction | None:
+        """The proposal as its card shows it (and as Approve carries it out): the page's line
+        with the Edit dialog's changes."""
+        action = self._action(action_id)
+        return self._effective(action) if action is not None else None
+
+    def _shown(self, action_id: str) -> ProposedAction | None:
+        """The proposal as its card shows it: while its countdown ran out and the call is queued or
+        on its way, and after Jarvis carried it out, exactly what was sent (a newer page with the
+        same id never changes that card); otherwise as _current."""
+        running = self._running.get(action_id)
+        if running is not None and running[1]:
+            return running[0]
+        if action_id in self._carried and self._store.get(action_id):
+            return self._carried[action_id]
+        return self._current(action_id)
+
+    def _effective(self, action: ProposedAction) -> ProposedAction:
+        edit = self._edits.get(action.id)
+        if edit is None:
+            return action
+        try:
+            return apply_edit(action, edit)
+        except EditError:
+            # The page changed under the edit (same id, other content): the card shows the page.
+            logger.info("Dropped the edit of action %s: it no longer fits the briefing's line", action.id)
+            self._edits.pop(action.id, None)
+            return action
 
     def _set_actions(self, actions: list[ProposedAction]) -> None:
         if actions == self._actions:
             return
         self._actions = list(actions)
+        ids = {action.id for action in self._actions}
+        for kept in (self._edits, self._checks, self._hints, self._carried, self._mismatch_seen):
+            for action_id in [key for key in kept if key not in ids]:
+                del kept[action_id]
+        countdown = self._countdown
+        if countdown is not None and self._current(countdown.action.id) != countdown.action:
+            self._cancel_countdown("the briefing changed")   # never send what the card no longer shows
+        if self._dialog is not None and self._dialog.action_id not in ids:
+            self._dialog.reject()
         reading = self.window.reading
         reading.clear_action_cards()
         today = self._now().date()
-        for action in self._actions:
+        for page_action in self._actions:
+            action = self._shown(page_action.id) or self._effective(page_action)
             view = card_view(action, today)
-            reading.add_action_card(action.id, view.kind_label, view.title, view.detail,
+            label = view.kind_label + (EDITED_MARK if action.id in self._edits else "")
+            reading.add_action_card(action.id, label, view.title, view.detail,
                                     view.decidable, **_card_options(action, view))
             self._show_card_state(action.id)   # also sets the note (warnings) while it waits
         self._sync_card_locks()
         self._refresh_actions_ui()
+        self._request_peeks()
 
     def _show_card_state(self, action_id: str) -> None:
-        """The card's status from the running job or the saved decision.
+        """The card's status from the countdown, the running job or the saved decision.
 
-        While the card waits for a decision (pending, or failed and kept for a
-        retry) its warnings are its note again: WORKING... clears the note.
+        While the card waits for a decision (pending, or failed / unknown and kept for
+        a retry) its note is shown again: WORKING... clears the note. An RSVP, Move or
+        Cancel card also gets its check line, its Edit / Copy links and the text of its
+        right-hand button (Accept, Sign in, Retry, or Done when Jarvis may not change
+        the event) here.
         """
         card = self.window.reading.action_card(action_id)
         if card is None or not card.actionable:
             return
-        stage = self._calendar_jobs.get(action_id)
-        if stage is not None:
-            card.set_status(hud.CARD_SIGNIN if stage == _STAGE_SIGNIN else hud.CARD_WORKING)
-            return
+        action = self._shown(action_id)
+        stage = self._jobs.get(action_id)
         entry = self._store.get(action_id) or {}
         status = entry.get("status", "")
-        action = self._action(action_id)
+        countdown = action is not None and action.countdown
+        if countdown:
+            self._sync_countdown_card(card, action, status, stage)
+        if stage == _STAGE_COUNTDOWN:
+            card.set_status(hud.CARD_COUNTDOWN, self._countdown_text())
+            return
+        if stage is not None:
+            if stage == _STAGE_SIGNIN:
+                card.set_status(hud.CARD_SIGNIN,
+                                f"Waiting for Google sign-in ({action.account})" if countdown else "")
+            else:
+                card.set_status(hud.CARD_WORKING)
+            return
         if status == STATUS_FAILED:
             message = entry.get("message", "")
+        elif status == STATUS_UNKNOWN and countdown:
+            message = UNKNOWN_CARD_TEXT
+        elif status == STATUS_SENT:
+            message = entry.get("message", "") or (result_text(action, status) if action is not None else "")
         else:
             message = result_text(action, status) if action is not None else ""
         shown = _CARD_FOR_STATUS.get(status, hud.CARD_PENDING)
         block = action is not None and action.kind == TODO
-        card.set_status(shown, message, entry.get("link", ""), _BLOCK_LINK_TEXT if block else "")
-        if (action is not None and shown in (hud.CARD_PENDING, hud.CARD_FAILED)
-                and card.note() != CALENDAR_SETUP_NOTE):
+        link_text = _BLOCK_LINK_TEXT if block else (_EVENT_LINK_TEXT if countdown else "")
+        card.set_status(shown, message, entry.get("link", ""), link_text)
+        if action is None or shown not in (hud.CARD_PENDING, hud.CARD_FAILED, hud.CARD_UNKNOWN):
+            return
+        if countdown:
+            card.set_note(self._countdown_note(action, status, entry))
+        elif card.note() != CALENDAR_SETUP_NOTE:
             note = card_view(action, self._now().date()).note
             if note:
                 card.set_note(note)
+
+    def _sync_countdown_card(self, card: hud.ActionCard, action: ProposedAction, status: str,
+                             stage: str | None) -> None:
+        """An RSVP, Move or Cancel card's check line, tools row (Edit / Sign in / Open event,
+        Copy) and button text."""
+        decided = self._store.is_decided(action.id)
+        idle = stage is None and not decided and self.state != STATE_QUITTING
+        text, tooltip, warn = self._check_view(action, status)
+        card.set_check_line(text, tooltip, warn=warn)
+        card.set_tool_slot(self._tool_slot(action, status))
+        card.set_edit_enabled(self._tools_enabled(action.id))
+        card.set_copy_text(self._copy_label(action))
+        if idle:
+            card.set_approve_text(self._approve_text(action, status))
+
+    def _approve_text(self, action: ProposedAction, status: str) -> str:
+        """Done while Jarvis can't act for the card's account (not set up for it, or its
+        administrator blocks the app: the card is a hand-off, as in earlier versions); Sign in
+        while the account is signed out (that click opens Google's sign-in); Done when Google's
+        view of the event does not let Jarvis carry the card out; Retry after a failure or an
+        unknown outcome; else Accept / Decline / Maybe, Move or Cancel event. A click does what
+        the button says (approve_action asks this same function)."""
+        if self._hand_off(action):
+            return DONE_TEXT
+        if self._needs_sign_in(action):
+            return SIGN_IN_LINK_TEXT
+        if self._blocked(action.id):
+            return DONE_TEXT
+        if status in (STATUS_FAILED, STATUS_UNKNOWN):
+            return RETRY_TEXT
+        return card_view(action, self._now().date()).approve_text or "Approve"
+
+    def _hand_off(self, action: ProposedAction) -> bool:
+        """Jarvis can't carry out cards of this account here: it is not set up for them
+        (executor.readiness) or its administrator blocks the app (until a new Sign in works)."""
+        if self._executor.readiness(action):
+            return True
+        state = self._accounts_state.get(action.account)
+        return (state is not None and not state[0] and state[1] == PROBLEM_BLOCKED
+                and self._connect_alias != action.account)
+
+    def _tool_slot(self, action: ProposedAction, status: str) -> str:
+        """The tools row's last place: Sign in while the account's administrator blocks the app
+        (its right-hand button is Done), Google's own "Open event" when the line has no link and
+        Jarvis won't act on the event or its outcome is unknown (to check it), else Edit."""
+        if not self._executor.readiness(action) and self._hand_off(action):
+            return hud.TOOL_SIGN_IN
+        if (not action.link and self._google_link(action.id)
+                and (self._blocked(action.id) or status == STATUS_UNKNOWN)):
+            return hud.TOOL_OPEN
+        return hud.TOOL_EDIT
+
+    def _tools_enabled(self, action_id: str) -> bool:
+        """Edit and Sign in open a dialog or the browser: only while nothing else runs (no
+        countdown, job or sign-in on any card), so nothing ever covers a running card's Undo."""
+        return (self.state != STATE_QUITTING and not self._jobs and self._countdown is None
+                and not self._connect_running and not self._store.is_decided(action_id))
+
+    def _copy_label(self, action: ProposedAction) -> str:
+        """The tools row's Copy: a Move's or Cancel's note (never sent); an RSVP's note too when
+        Jarvis won't send the answer (the card is a hand-off or Done)."""
+        label = copy_text(action)
+        if not label and action.kind == RSVP and action.body and (self._hand_off(action) or self._blocked(action.id)):
+            return "Copy note"
+        return label
+
+    def _google_link(self, action_id: str) -> str:
+        """Google's own page of the card's event (from the check), when it is an allowed https link."""
+        check = self._checks.get(action_id)
+        link = check.link if check is not None else ""
+        return link if link.startswith("https://") and link_allowed(link, self.config.actions.link_hosts) else ""
+
+    def _blocked(self, action_id: str) -> bool:
+        """Google's view of the card's event says Jarvis may not carry it out (not the
+        organizer, not a guest, a series, all-day, not found)."""
+        check = self._checks.get(action_id)
+        return check is not None and not check.allowed and bool(check.reason)
+
+    def _account_signed_in(self, alias: str) -> bool:
+        state = self._accounts_state.get(alias)
+        return state is not None and state[0]
+
+    def _needs_sign_in(self, action: ProposedAction) -> bool:
+        """The card's account is known to be signed out (its right-hand button reads Sign in)."""
+        if self._executor.readiness(action):
+            return False
+        state = self._accounts_state.get(action.account)
+        return state is not None and not state[0] and self._connect_alias != action.account
+
+    def _check_view(self, action: ProposedAction, status: str = "") -> tuple[str, str, bool]:
+        """The check line (text, tooltip, amber): Google's own view of the event (in amber when
+        its title or time is not the line's), why Jarvis won't act on it, or why it is not
+        shown (setup, sign-in); after Jarvis carried the card out, what Google has now.
+        Everything that arrives by itself (a check, a sign-in state) goes here, in the room the
+        card reserved for it, so it never moves a card; the amber note below the buttons only
+        changes after a click on that card."""
+        if status == STATUS_SENT:
+            return self._after_view(action)
+        reason = self._executor.readiness(action)
+        if reason:
+            return reason, "", True
+        alias = action.account
+        if self._connect_alias == alias:
+            return f"Waiting for the Google sign-in of the {alias} account...", "", False
+        signed_in, problem, message = self._accounts_state.get(alias, (True, "", ""))
+        if not signed_in and problem and problem != PROBLEM_SIGNED_OUT:
+            line = _PROBLEM_LINES.get(problem, _PROBLEM_LINE_OTHER).format(alias=alias)
+            return line, sign_in_note(alias, problem=problem, message=message), True
+        check = self._checks.get(action.id)
+        if check is not None:
+            if check.reason:   # Jarvis won't act on this event: the reason, Google's view on hover
+                return check.reason, f"{check.reason}\n{check.tooltip or check.text}", True
+            return check.text, check.tooltip, not check.allowed or bool(check.mismatch)
+        if action.id in self._peeking:
+            return CHECK_SOON_TEXT, "", False
+        if alias in self._accounts_state and not signed_in:
+            return check_failure(action, CalendarNotSignedIn(problem=PROBLEM_SIGNED_OUT)).text, "", False
+        return CHECK_LATER_TEXT, "", False
+
+    def _after_view(self, action: ProposedAction) -> tuple[str, str, bool]:
+        """The check line once Jarvis carried the card out: what Google has now, by the answer
+        Google gave ("Google now: Speaker series \u00b7 you accepted")."""
+        check = self._checks.get(action.id)
+        title = check.title if check is not None else ""
+        if action.kind == RSVP:
+            what = _ANSWERED.get(action.field("answer"), "answered")
+        elif action.kind == MOVE:
+            what = when_text(action, self._now().date())
+        else:
+            what = "cancelled"
+        text = AFTER_PREFIX + f" {DOT} ".join(part for part in (title, what) if part)
+        return text, "", False
+
+    def _countdown_note(self, action: ProposedAction, status: str, entry: Mapping[str, Any]) -> str:
+        """The amber note of an RSVP, Move or Cancel card: what the last click on it needs next,
+        why its outcome is unknown, then the line's own warnings."""
+        parts = [self._hints.get(action.id, "")]
+        if status == STATUS_UNKNOWN:   # why (the line above the note already says to check first)
+            parts.append(_CHECK_BEFORE_RETRY_RE.sub("", entry.get("message", "")))
+        parts.append(card_view(action, self._now().date()).note)
+        return f" {DOT} ".join(dict.fromkeys(part for part in parts if part))
+
+    def _hint(self, action_id: str, text: str) -> None:
+        """What the card's last Approve click needs next (its amber note until the next click)."""
+        if text:
+            self._hints[action_id] = text
+        else:
+            self._hints.pop(action_id, None)
+        self._show_card_state(action_id)
+
+    def _refresh_countdown_cards(self) -> None:
+        """Check lines, links, buttons and notes of every RSVP, Move and Cancel card."""
+        for action in self._actions:
+            if action.countdown:
+                self._show_card_state(action.id)
 
     def _refresh_actions_ui(self) -> None:
         """Pending count on the prompt chip, the STATUS bar, the panel meta and the calendar chip."""
@@ -2306,20 +2850,24 @@ class AppController(QObject):
         """Why the cards are locked ("" when they are not)."""
         if self._connect_running:
             return SIGN_IN_LOCK_TIP
-        return LOCK_TIP if self._calendar_jobs else ""
+        return LOCK_TIP if self._jobs else ""
 
     def _sync_card_locks(self) -> None:
-        """Lock every card but the one being approved while an approval or a Connect sign-in runs."""
+        """Lock every card but the one being approved while an approval (its countdown included)
+        or a sign-in runs."""
         tip = self._lock_tip()
         for card in self.window.reading.approvals.cards():
-            card.set_locked(bool(tip) and card.action_id not in self._calendar_jobs, tip)
+            card.set_locked(bool(tip) and card.action_id not in self._jobs, tip)
+            action = self._action(card.action_id)
+            if card.actionable and action is not None and action.countdown:
+                card.set_edit_enabled(self._tools_enabled(card.action_id))   # never a dialog beside Undo
 
     def _locked_out(self, action_id: str) -> bool:
         """True (and logged, without titles) for an Approve / Deny on a locked card."""
         if self._connect_running:
             logger.info(_SIGN_IN_LOCKED_MESSAGE)
             return True
-        if self._calendar_jobs and action_id not in self._calendar_jobs:
+        if self._jobs and action_id not in self._jobs:
             logger.info(_LOCKED_MESSAGE)
             return True
         return False
@@ -2330,20 +2878,34 @@ class AppController(QObject):
             logger.info(_LOCKED_MESSAGE)
 
     def approve_action(self, action_id: str) -> None:
-        """The card's right-hand button: Approve creates the event on the calendar worker
-        (signing in first when needed), Add block adds a Todo's block the same way, and
-        Done (cards Jarvis does not carry out) records that you handled it."""
+        """The card's right-hand button.
+
+        Approve creates the event on the action worker (signing in first when
+        needed) and Add block adds a Todo's block the same way. Accept /
+        Decline / Maybe, Move and Cancel event (and Retry) start the undo
+        countdown once the card shows Google's own view of its event and that
+        view allows it; before that the click signs the account in or checks
+        the event, and the card says to click again. Done (cards Jarvis does
+        not carry out, or whose event Jarvis may not change) records that you
+        handled it.
+        """
         if self._decision_click_too_soon() or self._locked_out(action_id):
             return
-        action = self._action(action_id)
+        action = self._current(action_id)
         if (action is None or not action.decidable or self.state == STATE_QUITTING
-                or action_id in self._calendar_jobs or self._store.is_decided(action_id)):
+                or action_id in self._jobs or self._store.is_decided(action_id)):
             return
         if not action.actionable:
             self._mark_done(action)
             return
-        event = action.block_event() if action.kind == TODO else action
-        if event is None:
+        if action.countdown:
+            status = (self._store.get(action_id) or {}).get("status", "")
+            if self._approve_text(action, status) == DONE_TEXT:   # what the button says
+                self._mark_done(action)
+                return
+            self._approve_countdown(action)
+            return
+        if action.kind == TODO and action.block_event() is None:
             return
         card = self.window.reading.action_card(action_id)
         worker = self._start_calendar()
@@ -2354,16 +2916,143 @@ class AppController(QObject):
             self._activity(hud.TAG_WAIT, "Google Calendar is not set up", "README step 8")
             return
         logger.info("Approved action %s", action_id)
-        self._calendar_jobs[action_id] = _STAGE_WORKING
+        self._jobs[action_id] = _STAGE_WORKING
+        self._running[action_id] = (action, False)
         self._show_card_state(action_id)
         self._sync_card_locks()
         adding = f"Adding a block for {_activity_title(action)}" if action.kind == TODO else f"Adding {action.title}"
         self._activity(hud.TAG_RUN, adding, "Google Calendar")
-        worker.approve(event)   # a Todo's block keeps the Todo's id, so the result lands on its card
+        worker.approve(action)   # a Todo's block keeps the Todo's id, so the result lands on its card
+
+    def _approve_countdown(self, action: ProposedAction) -> None:
+        """Accept / Move / Cancel event / Retry: sign in or check first when needed, else count down."""
+        action_id = action.id
+        card = self.window.reading.action_card(action_id)
+        button = card.approve_text() if card is not None else "Approve"
+        reason = self._executor.readiness(action)
+        if not reason and self._start_calendar() is None:
+            reason = CALENDAR_SETUP_NOTE
+        if reason:
+            logger.info("Approve %s: Jarvis can't carry it out here (%s, %s)", action_id, action.kind,
+                        logged_alias(action.account))
+            self._hint(action_id, NOT_READY_NOTE if reason == self._check_view(action)[0] else reason)
+            self._activity(hud.TAG_WAIT, f"Can't {_VERBS.get(action.kind, 'do')} this yet: {_kind_title(action)}",
+                           _short(reason))
+            return
+        if not self._account_signed_in(action.account):
+            logger.info("Approve %s: signing in to the %s account first", action_id, logged_alias(action.account))
+            self._hint(action_id, SIGN_IN_FIRST_NOTE)
+            self._start_sign_in(action.account, card_id=action_id)
+            return
+        check = self._checks.get(action_id)
+        if check is None or not check.allowed:
+            logger.info("Approve %s: checking the event with Google first", action_id)
+            self._hint(action_id, CHECK_FIRST_NOTE.format(button=button))
+            self._request_peeks([action], force=True)
+            return
+        if check.mismatch and self._mismatch_seen.get(action_id) != check:
+            # Google's title or time is not the line's: say so once; the next click goes ahead.
+            logger.info("Approve %s: Google's event differs from the line (%s); asking again", action_id,
+                        check.mismatch)
+            self._mismatch_seen[action_id] = check
+            self._hint(action_id, MISMATCH_NOTE.format(what=_MISMATCH_WHAT.get(check.mismatch, "other details"),
+                                                       button=button))
+            return
+        self._start_countdown(action)
+
+    # ---- the undo countdown --------------------------------------------------------------
+
+    def _start_countdown(self, action: ProposedAction) -> None:
+        seconds = int(self.config.actions.undo_seconds)
+        now = time.monotonic()
+        self._hints.pop(action.id, None)
+        self._countdown = _Countdown(action, deadline=now + seconds, started=now)
+        self._jobs[action.id] = _STAGE_COUNTDOWN
+        logger.info("Approved action %s (%s, %s): sending in %d s unless undone", action.id, action.kind,
+                    logged_alias(action.account), seconds)
+        self._show_card_state(action.id)
+        self._sync_card_locks()
+        self._activity(hud.TAG_RUN, f"Sending in {seconds} s: {_action_phrase(action)}", kind_label(action).upper())
+        self._countdown_timer.start()
+
+    def _countdown_text(self) -> str:
+        countdown = self._countdown
+        if countdown is None:
+            return ""
+        seconds = max(0, math.ceil(countdown.deadline - time.monotonic()))
+        countdown.shown = seconds
+        return f"Sending in {seconds} s"
+
+    def _on_countdown_tick(self) -> None:
+        countdown = self._countdown
+        if countdown is None:
+            self._countdown_timer.stop()
+            return
+        remaining = countdown.deadline - time.monotonic()
+        if remaining <= 0:
+            self._finish_countdown()
+            return
+        if math.ceil(remaining) != countdown.shown:
+            card = self.window.reading.action_card(countdown.action.id)
+            if card is not None:
+                card.set_status(hud.CARD_COUNTDOWN, self._countdown_text())
+
+    def _finish_countdown(self) -> None:
+        """The countdown ran out: queue the one call (the worker saves "running" right before it)."""
+        countdown, self._countdown = self._countdown, None
+        self._countdown_timer.stop()
+        if countdown is None:
+            return
+        action = countdown.action
+        worker = self._calendar_worker
+        if self.state == STATE_QUITTING or worker is None:
+            self._jobs.pop(action.id, None)
+            return
+        self._jobs[action.id] = _STAGE_WORKING
+        self._running[action.id] = (action, True)
+        self._show_card_state(action.id)
+        self._activity(hud.TAG_RUN, f"Sending: {_action_phrase(action)}", kind_label(action).upper())
+        worker.execute(action)
+
+    def undo_action(self, action_id: str) -> None:
+        """Undo during the countdown: nothing is sent and nothing is saved; the card waits again.
+
+        A click in the first double-click interval after the approval is
+        ignored, so a double click on Accept never undoes it at once.
+        """
+        countdown = self._countdown
+        if countdown is None or countdown.action.id != action_id or self.state == STATE_QUITTING:
+            return
+        if (time.monotonic() - countdown.started) * 1000 < QApplication.doubleClickInterval():
+            logger.info("Ignored an Undo click right after the approval")
+            return
+        action = countdown.action
+        self._cancel_countdown("undone")
+        self._activity(hud.TAG_STOP, f"Undone: {_action_phrase(action)}",
+                       f"{kind_label(action).upper()} {DOT} nothing was sent")
+        self._refresh_actions_ui()
+
+    def _cancel_countdown(self, reason: str) -> None:
+        countdown, self._countdown = self._countdown, None
+        self._countdown_timer.stop()
+        if countdown is None:
+            return
+        action_id = countdown.action.id
+        self._jobs.pop(action_id, None)
+        logger.info("Action %s undone (%s); nothing was sent", action_id, reason)
+        self._show_card_state(action_id)
+        self._sync_card_locks()
+
+    def _send_in_flight(self) -> bool:
+        """An RSVP, Move or Cancel call is queued or on its way to Google."""
+        return any(writes and action_id in self._jobs for action_id, (_action, writes) in self._running.items())
+
+    # ---- other decisions and the tools row -----------------------------------------------------
 
     def _mark_done(self, action: ProposedAction) -> None:
         """Done on a card Jarvis does not carry out: you handled it yourself."""
         logger.info("Marked action %s done", action.id)
+        self._hints.pop(action.id, None)
         self._store.set(action.id, STATUS_DONE, kind=action.kind, account=action.account)
         self._show_card_state(action.id)
         self._activity(hud.TAG_DONE, f"Done: {_activity_title(action)}", kind_label(action).upper())
@@ -2372,46 +3061,53 @@ class AppController(QObject):
     def deny_action(self, action_id: str) -> None:
         if self._decision_click_too_soon() or self._locked_out(action_id):
             return
-        action = self._action(action_id)
-        if (action is None or not action.decidable or action_id in self._calendar_jobs
+        action = self._current(action_id)
+        if (action is None or not action.decidable or action_id in self._jobs
                 or self._store.is_decided(action_id)):
             return
         logger.info("Denied action %s", action_id)
+        self._hints.pop(action_id, None)
         self._store.set(action_id, STATUS_DENIED, kind=action.kind, account=action.account)
         self._show_card_state(action_id)
         if action.kind == CALENDAR:
             self._activity(hud.TAG_STOP, f"Denied {action.title}", "nothing was created")
         elif action.kind == TODO:
             self._activity(hud.TAG_STOP, f"Dismissed {_activity_title(action)}", "nothing was created")
+        elif action.countdown:   # Skip: its card reads SKIPPED
+            self._activity(hud.TAG_STOP, f"Skipped {_kind_title(action)}", "nothing was sent")
         else:
-            self._activity(hud.TAG_STOP, f"Dismissed {_activity_title(action)}", "nothing was sent")
+            self._activity(hud.TAG_STOP, f"Dismissed {_kind_title(action)}", "nothing was sent")
         self._refresh_actions_ui()
 
     def open_action_source(self, action_id: str) -> None:
         """A card's Open (tools row): its own link, checked again, in the browser; never by itself."""
         action = self._action(action_id)
-        if action is None or not action.link or self.state == STATE_QUITTING:
+        if action is None or self.state == STATE_QUITTING:
+            return
+        link = action.link or (self._google_link(action_id) if action.countdown else "")
+        if not link:
             return
         now = self._click_now()
         previous, self._source_opened_at[action_id] = self._source_opened_at.get(action_id, -math.inf), now
         if now - previous < _SOURCE_OPEN_GUARD_S:
             logger.info("Ignored a second Open of action %s within 1 s", action_id)
             return
-        url = QUrl(action.link, QUrl.ParsingMode.StrictMode)
+        url = QUrl(link, QUrl.ParsingMode.StrictMode)
         host = url.host(QUrl.ComponentFormattingOption.FullyEncoded).rstrip(".").casefold()
-        if (not link_allowed(action.link, self.config.actions.link_hosts) or not url.isValid()
-                or url.scheme() != "https" or host != link_host(action.link)):
+        if (not link_allowed(link, self.config.actions.link_hosts) or not url.isValid()
+                or url.scheme() != "https" or host != link_host(link)):
             logger.info("Not opening the link of action %s: not an allowed https link", action_id)
             return
         logger.info("Open the link of action %s (%s)", action_id, action.kind)
         QDesktopServices.openUrl(url)
 
     def copy_action_text(self, action_id: str) -> None:
-        """A card's Copy (tools row): the drafted text on the clipboard; decides nothing."""
-        action = self._action(action_id)
+        """A card's Copy (tools row): the drafted text as the card shows it on the clipboard;
+        decides nothing."""
+        action = self._current(action_id)
         if action is None or not action.body or self.state == STATE_QUITTING:
             return
-        if not copy_text(action):
+        if not (self._copy_label(action) if action.countdown else copy_text(action)):
             return
         QGuiApplication.clipboard().setText(action.body)
         card = self.window.reading.action_card(action_id)
@@ -2428,34 +3124,209 @@ class AppController(QObject):
         logger.info("Open the calendar event")
         QDesktopServices.openUrl(QUrl(link))
 
+    # ---- the Edit dialog --------------------------------------------------------------------------
+
+    def edit_action(self, action_id: str) -> None:
+        """A card's Edit: the window-modal Edit dialog of an RSVP, Move or Cancel. Save keeps
+        the changes on the card (memory only, same id); nothing is sent."""
+        if self.state == STATE_QUITTING or self._dialog is not None:
+            return
+        if self._countdown is not None or self._jobs or self._connect_running:
+            # The dialog is window-modal: beside another card's countdown it would cover that
+            # card's Undo while the countdown runs out.
+            logger.info("Ignored Edit of action %s: another card's approval or sign-in is running", action_id)
+            return
+        action = self._current(action_id)
+        if action is None or not action.countdown or self._store.is_decided(action_id):
+            return
+        hour24 = self.config.display.hour24
+        date_text, start_text, end_text = _time_texts(action, hour24)
+        view = card_view(action, self._now().date())
+        check_text, check_tip, _warn = self._check_view(action)
+        dialog = hud.EditDialog(action_id, action.kind, kind_label(action), view.title,
+                                answer=action.field("answer", "yes"), notify=action.field("notify", "all"),
+                                date_text=date_text, start_text=start_text, end_text=end_text,
+                                note=action.body, check_text=check_tip or check_text, hour24=hour24,
+                                parent=self.window)
+        dialog.saved.connect(self._on_edit_saved)
+        dialog.finished.connect(self._on_edit_closed)
+        self._dialog = dialog
+        logger.info("Edit action %s (%s)", action_id, action.kind)
+        dialog.open()
+        self._sync_card_locks()
+
+    def _on_edit_saved(self, action_id: str, values: Any) -> None:
+        """Save in the Edit dialog: checked like a line; a problem keeps the dialog open."""
+        dialog = self._dialog
+        if dialog is None or dialog.action_id != action_id:
+            return
+        page = self._action(action_id)
+        if page is None or self.state == STATE_QUITTING:
+            dialog.reject()
+            return
+        if action_id in self._jobs or self._store.is_decided(action_id):
+            dialog.show_error("This card is already being carried out or decided; nothing was changed")
+            return
+        values = dict(values) if isinstance(values, Mapping) else {}
+        try:
+            start = end = None
+            if page.kind == MOVE:
+                start, end = parse_time_range(values.get("date", ""), values.get("start", ""), values.get("end", ""))
+            edit = ActionEdit(answer=values.get("answer") if page.kind == RSVP else None,
+                              notify=values.get("notify"), start=start, end=end, body=values.get("note", ""))
+            edited = apply_edit(page, edit)
+        except (EditInvalid, EditError) as exc:
+            dialog.show_error(str(exc))
+            return
+        if edited == page:
+            self._edits.pop(action_id, None)
+        else:
+            self._edits[action_id] = edit
+        dialog.accept()
+        self._hints.pop(action_id, None)
+        card = self.window.reading.action_card(action_id)
+        if card is not None:
+            view = card_view(edited, self._now().date())
+            card.set_texts(view.kind_label + (EDITED_MARK if action_id in self._edits else ""), view.title,
+                           view.detail)
+            card.set_body(view.body)
+        self._show_card_state(action_id)
+        logger.info("Edited action %s (%s)", action_id, edited.kind)
+        self._activity(hud.TAG_DONE, f"Edited: {_kind_title(edited)}",
+                       f"{kind_label(edited).upper()} {DOT} nothing was sent")
+        self._refresh_actions_ui()
+
+    def _on_edit_closed(self, _result: int = 0) -> None:
+        dialog, self._dialog = self._dialog, None
+        if dialog is not None:
+            dialog.deleteLater()
+        if self.state != STATE_QUITTING:
+            self._sync_card_locks()
+
+    # ---- results from the action worker ------------------------------------------------------------
+
     def _on_calendar_status(self, signed_in: bool) -> None:
         if self.state == STATE_QUITTING:
             return
         self._calendar_signed_in = bool(signed_in)
         self._update_service_chips()
 
-    def _on_calendar_progress(self, action_id: str, stage: str) -> None:
-        if self.state == STATE_QUITTING or action_id not in self._calendar_jobs:
+    def _on_account_status(self, statuses: Any) -> None:
+        """Which accounts are signed in (and why not): the cards' check lines and buttons."""
+        if self.state == STATE_QUITTING or not isinstance(statuses, Mapping):
             return
-        if stage == _STAGE_SIGNIN:
-            self._calendar_jobs[action_id] = _STAGE_SIGNIN
-            self._activity(hud.TAG_WAIT, "Google sign-in", "finish in your browser")
-        else:
-            self._calendar_jobs[action_id] = _STAGE_WORKING
-            self._calendar_signed_in = True
-            self._connect_note = ""
-            self._activity(hud.TAG_DONE, "Signed in to Google Calendar")
+        for alias, (signed_in, problem, message) in statuses.items():
+            previous = self._accounts_state.get(alias)
+            if not signed_in and not problem and previous is not None and not previous[0]:
+                problem, message = previous[1], previous[2]   # keep why the last sign-in failed
+            self._accounts_state[alias] = (bool(signed_in), problem or "", message or "")
+        self._refresh_countdown_cards()
+        self._update_service_chips()
+        self._request_peeks()
+
+    def _request_peeks(self, actions: Sequence[ProposedAction] | None = None, *, force: bool = False) -> None:
+        """Read the events of RSVP / Move / Cancel cards for their check lines: only signed-in
+        accounts (never a sign-in), only cards still waiting, one read job at a time per card."""
+        worker = self._calendar_worker
+        if worker is None or self.state == STATE_QUITTING:
+            return
+        if actions is None:
+            actions = [self._effective(action) for action in self._actions]
+        todo = []
+        for action in actions:
+            if (not action.countdown or action.id in self._peeking or action.id in self._jobs
+                    or self._store.is_decided(action.id) or (action.id in self._checks and not force)):
+                continue
+            if self._executor.readiness(action) or not self._account_signed_in(action.account):
+                continue
+            todo.append(action)
+        if not todo:
+            return
+        self._peek_seq += 1
+        self._peeking.update(action.id for action in todo)
+        worker.peek(_PeekJob(self._peek_seq, tuple(todo)))
+        for action in todo:
+            self._show_card_state(action.id)
+
+    def _on_event_peek(self, _request_id: int, results: Any) -> None:
+        """Google's view of the cards' events came back: their check lines and buttons."""
+        if self.state == STATE_QUITTING or not isinstance(results, Mapping):
+            return
+        today = self._now().date()
+        accounts_changed = False
+        for action_id, (details, error) in results.items():
+            self._peeking.discard(action_id)
+            action = self._current(action_id)
+            if action is None:
+                continue
+            if details is not None:
+                self._checks[action_id] = check_event(action, details, today)
+                logger.info("Checked the event of action %s with Google", action_id)
+                continue
+            problem = getattr(error, "problem", "") or ""
+            if isinstance(error, CalendarNotSignedIn) or problem in _SIGN_IN_PROBLEMS:
+                # The account's saved sign-in is missing or was rejected: Sign in again.
+                self._checks.pop(action_id, None)
+                text = "" if problem in ("", PROBLEM_SIGNED_OUT) else str(error)
+                previous = self._accounts_state.get(action.account)
+                if not text and previous is not None and not previous[0] and previous[1]:
+                    problem, text = previous[1], previous[2]   # keep why it was rejected (expired, ...)
+                self._accounts_state[action.account] = (False, "" if problem == PROBLEM_SIGNED_OUT else problem,
+                                                        text)
+                accounts_changed = True
+            else:
+                self._checks[action_id] = check_failure(action, error)
+            logger.info("Could not check the event of action %s (%s)", action_id, type(error).__name__)
+        self._refresh_countdown_cards()
+        if accounts_changed:
             self._update_service_chips()
-            self._request_agenda()   # queued behind this approval
+
+    def _on_action_progress(self, action_id: str, stage: str) -> None:
+        if self.state == STATE_QUITTING or action_id not in self._jobs:
+            return
+        running = self._running.get(action_id)
+        alias = account_of(running[0]) if running is not None else DEFAULT_ACCOUNT
+        if stage == _STAGE_SIGNIN:
+            self._jobs[action_id] = _STAGE_SIGNIN
+            self._activity(hud.TAG_WAIT, "Google sign-in", "finish in your browser")
+        elif stage == _STAGE_SIGNED_IN:
+            self._jobs[action_id] = _STAGE_WORKING
+            self._accounts_state[alias] = (True, "", "")
+            if alias == DEFAULT_ACCOUNT:
+                self._calendar_signed_in = True
+                self._connect_note = ""
+                self._activity(hud.TAG_DONE, "Signed in to Google Calendar")
+                self._request_agenda()   # queued behind this approval
+            else:
+                self._activity(hud.TAG_DONE, f"Signed in to Google ({alias} account)")
+            self._update_service_chips()
+        else:
+            return   # the call itself is on its way: the card already reads WORKING...
         self._show_card_state(action_id)
         self._render_agenda()
 
-    def _on_calendar_result(self, action_id: str, result: EventResult | None, error: str | None,
-                            status: str) -> None:
+    def _on_action_result(self, action_id: str, result: ExecResult | None, error: ExecError | None,
+                          status: str) -> None:
         if self.state == STATE_QUITTING:
             return
-        self._calendar_jobs.pop(action_id, None)
-        action = self._action(action_id)
+        self._jobs.pop(action_id, None)
+        running = self._running.pop(action_id, None)
+        action = running[0] if running is not None else self._current(action_id)
+        writes_running = running[1] if running is not None else bool(action is not None and action.countdown)
+        if writes_running and action is not None:
+            self._countdown_result(action, result, error, status)
+        else:
+            self._calendar_result(action_id, action, result, error, status)
+        self._show_card_state(action_id)
+        self._sync_card_locks()
+        if self._calendar_worker is not None:
+            self._calendar_worker.check_sign_in()   # a revoked sign-in turns the chip amber again
+        self._refresh_actions_ui()
+        self._render_agenda()   # a sign-in that waited may be over
+
+    def _calendar_result(self, action_id: str, action: ProposedAction | None, result: ExecResult | None,
+                         error: ExecError | None, status: str) -> None:
+        """A Calendar event or a Todo's block: saved here (created / exists / failed), as before."""
         title = _activity_title(action) if action is not None else "the event"
         today = self._now().date()
         block = action is not None and action.kind == TODO
@@ -2465,7 +3336,7 @@ class AppController(QObject):
         account = action.account if action is not None else ""
         if result is not None and error is None:
             self._store.set(action_id, status, link=result.link, kind=kind, account=account)
-            if result.existed:
+            if status == STATUS_EXISTS:
                 self._activity(hud.TAG_DONE, f"Already on the calendar: {title}", detail)
             elif block:
                 self._activity(hud.TAG_DONE, f"Added a block for {title}", detail)
@@ -2473,59 +3344,133 @@ class AppController(QObject):
                 self._activity(hud.TAG_DONE, f"Added {title}", detail)
             self._request_agenda()   # the new event may be on today's agenda
         else:
-            message = error or "unknown error"
+            message = (str(error) if error is not None else "") or "unknown error"
             self._store.set(action_id, STATUS_FAILED, message=message, kind=kind, account=account)
             failed = f"Couldn't add a block for {title}" if block else f"Couldn't add {title}"
             self._activity(hud.TAG_STOP, failed, _short(message))
-        self._show_card_state(action_id)
-        self._sync_card_locks()
-        if self._calendar_worker is not None:
-            self._calendar_worker.check_sign_in()   # a revoked sign-in turns the chip amber again
-        self._refresh_actions_ui()
-        self._render_agenda()   # a sign-in that waited may be over
+
+    def _countdown_result(self, action: ProposedAction, result: ExecResult | None, error: ExecError | None,
+                          status: str) -> None:
+        """An RSVP, Move or Cancel: the worker saved sent / failed / unknown over "running"."""
+        self._hints.pop(action.id, None)
+        label = kind_label(action).upper()
+        if result is not None and error is None:
+            self._carried[action.id] = action   # the card keeps showing what was sent
+            text = result.result_text or result_text(action, STATUS_SENT) or "Done"
+            self._activity(hud.TAG_DONE, f"{text}: {_kind_title(action)}", label)
+            if account_of(action) == DEFAULT_ACCOUNT:
+                self._request_agenda()   # the agenda may show the change
+            return
+        message = (str(error) if error is not None else "") or "unknown error"
+        problem = getattr(error, "problem", "") or ""
+        if problem in _SIGN_IN_PROBLEMS:
+            self._accounts_state[action.account] = (False, "" if problem == PROBLEM_SIGNED_OUT else problem,
+                                                    "" if problem == PROBLEM_SIGNED_OUT else message)
+            self._update_service_chips()
+            self._refresh_countdown_cards()   # every card of that account: Sign in, and why
+        if status == STATUS_UNKNOWN:
+            self._activity(hud.TAG_WAIT, f"Unknown: {_action_phrase(action)}", UNKNOWN_CARD_TEXT)
+        else:
+            self._activity(hud.TAG_STOP, f"Couldn't {_VERBS.get(action.kind, 'do')} {_kind_title(action)}",
+                           _short(message))
+        self._request_peeks([action], force=True)   # Google's view now, before any Retry
+
+    # ---- sign-in per account ---------------------------------------------------------------------
+
+    def _signing_in(self, alias: str | None = None) -> bool:
+        """A browser sign-in is queued or open (``alias``: that account's)."""
+        if self._connect_alias is not None and alias in (None, self._connect_alias):
+            return True
+        for action_id, stage in self._jobs.items():
+            if stage != _STAGE_SIGNIN:
+                continue
+            running = self._running.get(action_id)
+            if alias is None or running is None or account_of(running[0]) == alias:
+                return True
+        return False
 
     def _set_signed_in(self, signed_in: bool) -> None:
         if signed_in != self._calendar_signed_in:
             self._calendar_signed_in = signed_in
             self._update_service_chips()
 
-    def _signing_in(self) -> bool:
-        """A browser sign-in is queued or open (the agenda's Connect, or an Approve that needs one)."""
-        return self._connect_running or _STAGE_SIGNIN in self._calendar_jobs.values()
-
     def connect_calendar(self) -> None:
-        """The agenda's Connect link: the same Google sign-in as an Approve, only on this click."""
-        if self.state != STATE_READING or self._signing_in():
+        """The agenda's Connect link: the personal account's Google sign-in, only on this click."""
+        if self.state != STATE_READING or self._signing_in() or self._countdown is not None:
             return
-        worker = self._start_calendar()
-        if worker is None:
+        if self._start_calendar() is None:
             self._render_agenda()
             return
         logger.info("Connect Google Calendar")
-        self._connect_running = True
-        self._connect_note = ""
+        self._start_sign_in(DEFAULT_ACCOUNT)
+
+    def sign_in_account(self, action_id: str) -> None:
+        """A card's Sign in link: that account's Google sign-in in the browser, only on this click."""
+        if self.state == STATE_QUITTING or self._signing_in() or self._countdown is not None or self._jobs:
+            return
+        action = self._current(action_id)
+        if action is None or not action.countdown or self._store.is_decided(action_id):
+            return
+        reason = self._executor.readiness(action)
+        if not reason and self._start_calendar() is None:
+            reason = CALENDAR_SETUP_NOTE
+        if reason:
+            self._hint(action_id, NOT_READY_NOTE if reason == self._check_view(action)[0] else reason)
+            return
+        logger.info("Sign in to Google for action %s (%s account)", action_id, logged_alias(action.account))
+        self._start_sign_in(action.account, card_id=action_id)
+
+    def _start_sign_in(self, alias: str, *, card_id: str = "") -> None:
+        worker = self._start_calendar()
+        if worker is None:
+            return
+        self._connect_alias = alias
+        self._connect_card = card_id
+        if alias == DEFAULT_ACCOUNT:
+            self._connect_note = ""
         self._sync_card_locks()
-        worker.connect()
+        self._refresh_countdown_cards()
+        self._update_service_chips()
+        worker.connect(alias)
         self._render_agenda()
 
-    def _on_calendar_connect(self, stage: str, message: str) -> None:
-        if self.state == STATE_QUITTING or not self._connect_running:
+    def _on_account_connect(self, alias: str, stage: str, message: str, problem: str) -> None:
+        if self.state == STATE_QUITTING or self._connect_alias != alias:
             return
+        personal = alias == DEFAULT_ACCOUNT
         if stage == _CONNECT_SIGN_IN:
-            self._activity(hud.TAG_WAIT, "Google sign-in", "finish in your browser")
+            self._activity(hud.TAG_WAIT, "Google sign-in",
+                           "finish in your browser" if personal else f"{alias} account {DOT} finish in your browser")
             return
-        self._connect_running = False
-        self._sync_card_locks()
+        card_id = self._connect_card
+        self._connect_alias, self._connect_card = None, ""
         if stage == _CONNECT_FAILED:
-            self._connect_note = message or "the sign-in did not finish"
-            self._activity(hud.TAG_STOP, "Google sign-in did not finish", _short(self._connect_note))
+            note = message or "the sign-in did not finish"
+            self._accounts_state[alias] = (False, problem or PROBLEM_FAILED, note)
+            if personal:
+                self._connect_note = note
+            if card_id:   # the card whose click started it says why, in full
+                self._hints[card_id] = sign_in_note(alias, problem=problem or PROBLEM_FAILED, message=note)
+            self._activity(hud.TAG_STOP, "Google sign-in did not finish" if personal
+                           else f"Google sign-in did not finish ({alias} account)", _short(note))
             if self._calendar_worker is not None:
                 self._calendar_worker.check_sign_in()
         else:
+            self._accounts_state[alias] = (True, "", "")
             if stage == _CONNECT_SIGNED_IN:
-                self._activity(hud.TAG_DONE, "Signed in to Google Calendar")
-            self._set_signed_in(True)
-            self._request_agenda()
+                self._activity(hud.TAG_DONE, "Signed in to Google Calendar" if personal
+                               else f"Signed in to Google ({alias} account)")
+            if personal:
+                self._set_signed_in(True)
+                self._request_agenda()
+            card = self.window.reading.action_card(card_id) if card_id else None
+            if card is not None:
+                self._hints[card_id] = SIGNED_IN_NOTE.format(button=card.approve_text())
+            self._request_peeks([self._effective(action) for action in self._actions
+                                 if action.account == alias], force=True)
+        self._sync_card_locks()
+        self._refresh_countdown_cards()
+        self._update_service_chips()
         self._render_agenda()
 
     # ---- agenda: TODAY / TOMORROW and DEADLINES -----------------------------------------------
@@ -2591,7 +3536,7 @@ class AppController(QObject):
             self._agenda_events = self._agenda_range = None
             self._agenda_status = _AGENDA_SETUP if problem == _PROBLEM_SETUP else _AGENDA_SIGNED_OUT
             self._agenda_problem = message
-            if problem == _PROBLEM_SIGNED_OUT and not self._signing_in():
+            if problem == _PROBLEM_SIGNED_OUT and not self._signing_in(DEFAULT_ACCOUNT):
                 self._set_signed_in(False)
         if self._agenda_again:
             self._agenda_again = False
@@ -2623,7 +3568,8 @@ class AppController(QObject):
         if events is None:
             text, color, link, tip = self._agenda_line()
             panel.set_meta("")
-            panel.set_message(text, color, link=link, tooltip=tip)
+            # Google's error text and sign-in messages: never read as HTML.
+            panel.set_message(text, color, link=link, tooltip=hud.plain_tooltip(tip))
         else:
             self._show_agenda_rows(panel, _agenda_rows(events, now, start, end, self.config.display.hour24))
         self._show_deadlines(panel, now)
@@ -2635,7 +3581,7 @@ class AppController(QObject):
             return AGENDA_OFF_TEXT, hud.TEXT_DIM, "", ""
         if status == _AGENDA_SETUP or not self._calendar_configured():
             return AGENDA_SETUP_TEXT, hud.TEXT_DIM, "", self._agenda_problem
-        if self._signing_in():
+        if self._signing_in(DEFAULT_ACCOUNT):
             return AGENDA_SIGN_IN_TEXT, hud.TEXT_SOFT, "", "Finish the Google sign-in in your browser"
         if status == _AGENDA_SIGNED_OUT:
             if self._connect_note:
@@ -2652,7 +3598,7 @@ class AppController(QObject):
             panel.set_meta("not updated", hud.AMBER)
         else:
             panel.set_meta(_plural(len(rows), "block") if rows else "", hud.TEXT_DIM)
-        panel.meta_label.setToolTip(self._agenda_problem if stale else "")
+        panel.meta_label.setToolTip(hud.plain_tooltip(self._agenda_problem) if stale else "")
         if rows:
             panel.set_events(rows)
         else:
@@ -3484,6 +4430,9 @@ class AppController(QObject):
     def _back_to_prompt(self, run: str, *, take_focus: bool) -> None:
         """Close the reading screen (nothing is playing) and ask about ``run``'s briefing."""
         logger.info("Leaving the reading screen to ask about the %s briefing", run)
+        self._cancel_countdown("the reading screen closed")   # never send from a hidden card
+        if self._dialog is not None:
+            self._dialog.reject()
         self._recheck_timer.stop()
         self._note_timer.stop()
         self._replace_player()
@@ -3511,7 +4460,11 @@ class AppController(QObject):
         """Stop everything and quit the event loop. Safe to call more than once.
 
         A running Google sign-in or event insert is not waited for: its thread
-        is a daemon and its result is dropped.
+        is a daemon and its result is dropped. An undo countdown is cancelled
+        (nothing is sent). An answer, move or cancel already on its way to
+        Google is waited for at most 5 s, with the window already hidden, so
+        its result is saved; after that the app exits regardless and the next
+        start shows that card as UNKNOWN.
         """
         if self._shut_down:
             return
@@ -3522,8 +4475,14 @@ class AppController(QObject):
         self.state = STATE_QUITTING
         self._closing.set()
         for timer in (self._ignore_timer, self._tick_timer, self._snooze_timer, self._note_timer,
-                      self._recheck_timer, self._agenda_timer):
+                      self._recheck_timer, self._agenda_timer, self._countdown_timer):
             timer.stop()
+        countdown, self._countdown = self._countdown, None
+        if countdown is not None:
+            self._jobs.pop(countdown.action.id, None)
+            logger.info("Action %s undone (app closed); nothing was sent", countdown.action.id)
+        if self._dialog is not None:
+            self._dialog.reject()
         # Hide first: the media player has (rarely) hung in stop(), and the window
         # should be gone either way.
         self.window.hide()
@@ -3532,6 +4491,11 @@ class AppController(QObject):
         if self._tts is not None:
             self._tts.stop()
         if self._calendar_worker is not None:
+            if self._send_in_flight():
+                logger.info("Waiting up to %d s for a change on its way to Google", int(_QUIT_SEND_WAIT_S))
+                finished = self._calendar_worker.wait_idle(_QUIT_SEND_WAIT_S)
+                logger.info("The change on its way to Google %s", "finished" if finished
+                            else "did not finish in time; it shows as unknown at the next start")
             self._calendar_worker.stop()
         if self.tray is not None:
             self.tray.hide()

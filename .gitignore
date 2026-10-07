@@ -14,10 +14,13 @@ credentials*.json
 service_account*.json
 # A place for a client file with another name ([calendar] client_secret)
 secrets/
-# The Google sign-in, if a copy is ever kept here (the app saves it in
-# %LOCALAPPDATA%\briefing-reader\google_token.json)
+# The Google sign-ins, if a copy is ever kept here (the app saves them in
+# %LOCALAPPDATA%\briefing-reader as google_token_<account>.json; older
+# versions used google_token.json)
 google_token.json
 google_token.json.*
+google_token_*.json
+google_token_*.json.*
 token.json
 
 # App state and logs live in %LOCALAPPDATA%\briefing-reader and %TEMP%\briefing-reader.
@@ -26,6 +29,8 @@ token.json
 /logs/
 /actions.json
 /runstate.json
+/accounts.json
+/recipients.json
 *.log
 *.log.*
 *.bak

@@ -1895,9 +1895,11 @@ class DecidableTests(unittest.TestCase):
         rows = [
             (example("Reply"), True, False, ""),
             (example("Email"), True, False, ""),
-            (example("RSVP"), True, False, ""),
-            (example("Move"), True, False, ""),
-            (example("Cancel"), True, False, ""),
+            (example("RSVP"), True, True, "Accept"),
+            (example("RSVP", answer="no"), True, True, "Decline"),
+            (example("RSVP", answer="maybe"), True, True, "Maybe"),
+            (example("Move"), True, True, "Move"),
+            (example("Cancel"), True, True, "Cancel event"),
             (example("Share"), True, False, ""),
             (example("Slack"), True, False, ""),
             (example("Todo"), True, True, "Add block"),
@@ -1944,7 +1946,7 @@ class StructuredWordingTests(unittest.TestCase):
         cases = {
             "Reply": ("To: ana@example.edu, ben@example.edu", "Reply about Thursday noon meeting, work account"),
             "Email": ("To: office@example.edu", "Email about Question about the lab schedule, personal account"),
-            "RSVP": (f"Answer: yes{DOT}Tue Oct 6{DOT}5:00-6:00 PM{DOT}due Tue Oct 6",
+            "RSVP": (f"Answer: yes{DOT}Tue Oct 6{DOT}5:00-6:00 PM{DOT}organizer emailed{DOT}due Tue Oct 6",
                      "Accept Speaker series, work account, Tuesday October 6, 5 to 6 PM"),
             "Move": (f"New time: Thu Oct 8{DOT}2:00-3:00 PM{DOT}guests notified{DOT}was 12:00-1:00 PM",
                      "Move Project sync to Thursday October 8, 2 to 3 PM, work account"),
@@ -1981,7 +1983,12 @@ class StructuredWordingTests(unittest.TestCase):
         self.assertTrue(example("RSVP", answer="no").spoken(TODAY).startswith("Decline Speaker series, work account"))
         self.assertTrue(example("RSVP", answer="maybe").spoken(TODAY).startswith("Answer maybe to Speaker series"))
         self.assertEqual(example("RSVP", title="", at="", due="").spoken(TODAY), "Accept an invitation, work account")
-        self.assertEqual(example("RSVP", at="", due="").describe(TODAY), "Answer: yes")
+        self.assertEqual(example("RSVP", at="", due="").describe(TODAY), f"Answer: yes{DOT}organizer emailed")
+        # Who Google emails about the answer is on the card, as it will be sent (sendUpdates).
+        self.assertEqual(example("RSVP", at="", due="", notify="none").describe(TODAY),
+                         f"Answer: yes{DOT}organizer not emailed")
+        self.assertEqual(example("RSVP", at="", due="", notify="external").describe(TODAY),
+                         f"Answer: yes{DOT}organizer emailed only if external")
         self.assertEqual(example("Move", title="").spoken(TODAY),
                          "Move a meeting to Thursday October 8, 2 to 3 PM, work account")
         self.assertEqual(example("Move", at="2026-10-07 12:00-13:00", notify="external").describe(TODAY),
@@ -2060,13 +2067,16 @@ class CardViewTests(unittest.TestCase):
                               body="Hello,\nIs the lab open on Saturday?\nThanks", copy_text="Copy email",
                               approve_text="Done", decidable=True),
             "RSVP": CardView("rsvp \u00b7 work", "Speaker series", example("RSVP").describe(TODAY),
-                             open_text="Open event", approve_text="Done", decidable=True),
+                             open_text="Open event", approve_text="Accept", decidable=True, editable=True,
+                             check=True, deny_text="Skip"),
             "Move": CardView("move \u00b7 work", "Project sync", example("Move").describe(TODAY),
-                             body="Moving to 2 PM so everyone can join.", copy_text="Copy note", approve_text="Done",
-                             decidable=True),
+                             body="Moving to 2 PM so everyone can join.", copy_text="Copy note", approve_text="Move",
+                             decidable=True, note=actions.NOTE_NOT_SENT, editable=True, check=True,
+                             deny_text="Skip"),
             "Cancel": CardView("cancel \u00b7 personal", "Study group", example("Cancel").describe(TODAY),
-                               approve_text="Done", decidable=True),
-            "Share": CardView("share \u00b7 personal", "Trip budget", "sam@example.com asks for viewer access",
+                               approve_text="Cancel event", decidable=True, editable=True, check=True,
+                               deny_text="Skip"),
+            "Share":CardView("share \u00b7 personal", "Trip budget", "sam@example.com asks for viewer access",
                               open_text="Open request", approve_text="Done", decidable=True),
             "Slack": CardView("slack", "Slack message from Sam", '"are you free friday?"',
                               body="Yes! Friday after 4 works.", open_text="Open in Slack", copy_text="Copy reply",
@@ -2083,7 +2093,13 @@ class CardViewTests(unittest.TestCase):
     def test_variants(self) -> None:
         self.assertEqual(card_view(example("Todo", link="https://docs.google.com/x"), TODAY).open_text, "Open")
         self.assertEqual(card_view(example("Todo", block=""), TODAY).approve_text, "Done")
-        self.assertEqual(card_view(example("RSVP", body="Running late"), TODAY).copy_text, "Copy note")
+        # An RSVP's note goes to the organizer with the answer: no Copy. A Move's or Cancel's note is
+        # not sent (Google Calendar has no message): Copy, and the card says so.
+        rsvp = card_view(example("RSVP", body="Running late"), TODAY)
+        self.assertEqual((rsvp.copy_text, rsvp.body, rsvp.note), ("", "Note to the organizer: Running late", ""))
+        cancel = card_view(example("Cancel", body="Sorry, something came up"), TODAY)
+        self.assertEqual((cancel.copy_text, cancel.note), ("Copy note", actions.NOTE_NOT_SENT))
+        self.assertEqual(card_view(example("Move", body=""), TODAY).note, "")
         self.assertEqual(card_view(example("Email", link="https://mail.google.com/mail/#all/1"), TODAY).open_text,
                          "Open")
         replied = card_view(example("Reply", replied="yes"), TODAY)
@@ -2140,6 +2156,67 @@ class CardViewTests(unittest.TestCase):
         self.assertEqual(result_text(parse_action_line(CHESS), "denied"), "")
         self.assertEqual(result_text(parse_action_line(CHESS), "created"), "")
         self.assertEqual(result_text(example("Todo"), "exists"), "")
+
+
+class CarriedOutKindsTests(unittest.TestCase):
+    """RSVP, Move and Cancel: carried out by Jarvis after the undo countdown."""
+
+    def test_countdown_kinds(self) -> None:
+        self.assertEqual(actions.COUNTDOWN_KINDS, frozenset({RSVP, MOVE, CANCEL}))
+        for label in ("RSVP", "Move", "Cancel"):
+            with self.subTest(label=label):
+                self.assertTrue(example(label).countdown)
+        for action in (example("Reply"), example("Todo"), parse_action_line(CHESS), example("Todo", block=""),
+                       parse_action_line("Move: the dentist to Friday"), example("Move", when="2026-10-08")):
+            with self.subTest(kind=action.kind, raw=action.raw[:30]):
+                self.assertFalse(action.countdown)
+
+    def test_sent_and_unknown_texts(self) -> None:
+        self.assertEqual([result_text(example("RSVP", answer=a), "sent") for a in ("yes", "no", "maybe")],
+                         ["Accepted", "Declined", "Answered maybe"])
+        self.assertEqual(result_text(example("Move"), "sent"), "Moved")
+        self.assertEqual(result_text(example("Cancel"), "sent"), "Cancelled")
+        self.assertEqual([actions.sent_text(example("RSVP", answer=a), already=True) for a in ("yes", "no", "maybe")],
+                         ["Already accepted", "Already declined", "Already answered maybe"])
+        self.assertEqual(actions.sent_text(example("Move"), already=True), "Already at that time")
+        self.assertEqual(actions.sent_text(example("Cancel"), already=True), "Already cancelled")
+        self.assertEqual(actions.sent_text(example("Reply")), "")
+        for label in ("RSVP", "Move", "Cancel"):
+            with self.subTest(label=label):
+                self.assertEqual(result_text(example(label), "unknown"), actions.UNKNOWN_CALENDAR)
+                # Skip: the card reads SKIPPED (nothing was sent), not DENIED next to a "Decline".
+                self.assertEqual(result_text(example(label), "denied"), "Skipped")
+        self.assertEqual(result_text(parse_action_line(CHESS), "denied"), "")   # DENIED, as before
+        self.assertEqual(actions.UNKNOWN_CALENDAR, "Unknown: check the calendar before retrying")
+        self.assertEqual(result_text(parse_action_line(CHESS), "unknown"), "")
+
+    def test_when_text_shows_the_wall_time_an_event_carries(self) -> None:
+        item = dataclasses.make_dataclass("Item", ["start", "end", "all_day_start", "all_day_end"])
+        self.assertEqual(actions.when_text(item(datetime(2026, 10, 8, 12, 0, tzinfo=PDT),
+                                                datetime(2026, 10, 8, 13, 0, tzinfo=PDT), None, None), TODAY),
+                         f"Thu Oct 8{DOT}12:00-1:00 PM")
+        self.assertEqual(actions.when_text(item(None, None, date(2026, 10, 9), date(2026, 10, 10)), TODAY),
+                         f"Fri Oct 9 - Sat Oct 10{DOT}all day")
+
+    def test_edit_is_checked_and_keeps_the_id(self) -> None:
+        move = example("Move")
+        edited = actions.edit_action(move, start=dt(9, 9), end=dt(9, 10), notify="none", body="New note")
+        self.assertEqual((edited.id, edited.start, edited.end, edited.body, edited.field("notify")),
+                         (move.id, dt(9, 9), dt(9, 10), "New note", "none"))
+        self.assertTrue(edited.countdown)
+        with self.assertRaises(actions.EditInvalid):
+            actions.edit_action(move, notify="loud")
+        with self.assertRaises(actions.EditInvalid):
+            actions.edit_action(example("Open"), body="x")
+
+    def test_store_set_says_whether_it_was_saved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ActionStore(Path(tmp) / "actions.json")
+            self.assertTrue(store.set("a" * 16, "running", kind=RSVP, account="work"))
+            blocked = ActionStore(Path(tmp) / "actions.json" / "not-a-folder" / "actions.json")
+            with self.assertLogs(ACTIONS_LOGGER, level="WARNING"):
+                self.assertFalse(blocked.set("b" * 16, "sent", kind=RSVP, account="work"))
+            self.assertEqual(blocked.get("b" * 16)["status"], "sent")   # kept for this run
 
 
 # --------------------------------------------------------------------------

@@ -9,6 +9,7 @@ and unique per test.
 
 from __future__ import annotations
 
+import http.client as http_client
 import json
 import logging
 import os
@@ -31,7 +32,7 @@ from google_auth_oauthlib.flow import WSGITimeoutError
 from googleapiclient.errors import HttpError
 from oauthlib.oauth2.rfc6749.errors import AccessDeniedError
 
-from briefing_reader import config, gcal
+from briefing_reader import config, gcal, google_auth
 from briefing_reader.actions import CALENDAR, ProposedAction
 from briefing_reader.config import REDACTED, RedactingFilter
 from briefing_reader.gcal import (
@@ -140,7 +141,10 @@ class FakeService:
 
     def events(self) -> Any:
         return SimpleNamespace(list=lambda **kw: FakeRequest(self, "events.list", kw),
-                               insert=lambda **kw: FakeRequest(self, "events.insert", kw))
+                               insert=lambda **kw: FakeRequest(self, "events.insert", kw),
+                               get=lambda **kw: FakeRequest(self, "events.get", kw),
+                               patch=lambda **kw: FakeRequest(self, "events.patch", kw),
+                               delete=lambda **kw: FakeRequest(self, "events.delete", kw))
 
 
 class FakeCreds:
@@ -1345,6 +1349,437 @@ class ListEventsTests(GcalTestCase):
         with self.fails_with(CalendarAuthError):
             cal.list_events(DAY_START, DAY_END, calendar_ids=("primary", TEAM))
         self.assertFalse(self.token_path.exists())
+
+
+# --------------------------------------------------------------------------
+# One event: get_event, respond, move, cancel
+# --------------------------------------------------------------------------
+
+YOU = "you@example.edu"
+EVENT_ID = "abc123def456ghi789"
+EDT = timezone(timedelta(hours=-4), "EDT")
+BEFORE = datetime(2026, 10, 1, 9, 0, tzinfo=EDT)   # "now" for moves: before every test event
+COMMENT = "Running late, sorry"
+
+
+def _event_item(*, organizer_self: bool = True, me: str | None = "needsAction", comment: str = "",
+                guests: int = 2, start: str = "2026-10-08T12:00:00-04:00",
+                end: str = "2026-10-08T13:00:00-04:00", all_day: tuple[str, str] | None = None,
+                status: str = "confirmed", guests_can_modify: bool = False, recurrence: bool = False,
+                instance: bool = False, summary: str | None = "Project sync") -> dict[str, Any]:
+    """An events.get answer shaped like Google's (invented people and ids)."""
+    attendees: list[dict[str, Any]] = [{"email": f"guest{n}@example.edu", "responseStatus": "accepted"}
+                                       for n in range(guests)]
+    if me is not None:
+        entry: dict[str, Any] = {"email": YOU, "self": True, "responseStatus": me}
+        if comment:
+            entry["comment"] = comment
+        attendees.insert(min(1, len(attendees)), entry)
+    organizer: dict[str, Any] = ({"email": YOU, "self": True} if organizer_self
+                                 else {"email": "ana@example.edu", "displayName": "Ana Example"})
+    item: dict[str, Any] = {"id": EVENT_ID, "status": status, "htmlLink": EVENT_LINK,
+                            "organizer": organizer, "attendees": attendees}
+    if summary is not None:
+        item["summary"] = summary
+    if all_day is not None:
+        item["start"], item["end"] = {"date": all_day[0]}, {"date": all_day[1]}
+    else:
+        item["start"] = {"dateTime": start, "timeZone": TZ}
+        item["end"] = {"dateTime": end, "timeZone": TZ}
+    if guests_can_modify:
+        item["guestsCanModify"] = True
+    if recurrence:
+        item["recurrence"] = ["RRULE:FREQ=WEEKLY"]
+    if instance:
+        item["recurringEventId"] = "abc123series"
+    return item
+
+
+class EventCallTestCase(GcalTestCase):
+    def event_calendar(self, item: dict[str, Any] | BaseException | None = None, **outcomes: Any) -> GoogleCalendar:
+        """A signed-in calendar whose events.get answers ``item``; ``outcomes`` for patch / delete."""
+        self.service.outcomes["events.get"] = [_event_item() if item is None else item]
+        self.service.outcomes["events.patch"] = [outcomes.get("patch", {"id": EVENT_ID, "htmlLink": EVENT_LINK})]
+        self.service.outcomes["events.delete"] = [outcomes.get("delete", "")]
+        return self.signed_in_calendar()
+
+    @contextmanager
+    def refused(self, error_type: type[CalendarError] = gcal.NotAllowed) -> Iterator[Any]:
+        """assertRaises(error_type), logged once at INFO (an answer about one event, not a failure)."""
+        with self.assertLogs(GCAL_LOGGER, level="INFO") as logs:
+            with self.assertRaises(error_type) as ctx:
+                yield ctx
+        failures = [line for line in logs.output if "call failed" in line]
+        self.assertEqual(len(failures), 1, logs.output)
+        self.assertTrue(failures[0].startswith("INFO:"), failures)
+
+    def assert_no_change_sent(self) -> None:
+        self.assertEqual(self.service.calls_to("events.patch"), [])
+        self.assertEqual(self.service.calls_to("events.delete"), [])
+
+    def change_calls(self) -> list[tuple[dict[str, Any], int]]:
+        return self.service.calls_to("events.patch") + self.service.calls_to("events.delete")
+
+
+class GetEventTests(EventCallTestCase):
+    def test_log_names_only_known_aliases(self) -> None:
+        # The card's message names the account; the log writes any alias but work / personal
+        # as "other".
+        self.write_client_secret()   # no saved sign-in
+        for alias, logged in (("school", "other"), ("work", "work")):
+            with self.subTest(alias=alias):
+                account = google_auth.GoogleAccount(alias, client_secret_path=self.secret_path,
+                                                    data_dir=self.root / "aliases", flow_factory=self.flow_factory)
+                cal = GoogleCalendar(account=account, service_factory=self.service_factory)
+                with self.assertLogs(GCAL_LOGGER, level="INFO") as logs, \
+                        self.assertRaises(CalendarNotSignedIn) as ctx:
+                    cal.get_event(EVENT_ID, interactive=False)
+                self.assertIn(f"({alias} account)", str(ctx.exception))
+                text = "\n".join(logs.output)
+                self.assertIn(f"Google Calendar ({logged}) call failed", text)
+                self.assertIn(f"({logged} account)", text)
+                if alias != logged:
+                    self.assertNotIn(alias, text)
+
+    def test_maps_googles_view_of_the_event(self) -> None:
+        cal = self.event_calendar(_event_item(organizer_self=False, comment=COMMENT, instance=True))
+        details = cal.get_event(EVENT_ID)
+        self.assertEqual(details, gcal.EventDetails(
+            event_id=EVENT_ID, calendar_id="primary", title="Project sync",
+            start=datetime(2026, 10, 8, 12, 0, tzinfo=EDT), end=datetime(2026, 10, 8, 13, 0, tzinfo=EDT),
+            all_day_start=None, all_day_end=None, status="confirmed", organizer_self=False,
+            guests_can_modify=False, self_email=YOU, self_response="needsAction", attendee_count=3,
+            recurring_instance=True, series=False, time_zone=TZ, link=EVENT_LINK, organizer="Ana Example",
+            self_comment=COMMENT, organizer_email="ana@example.edu"))
+        self.assertFalse(details.all_day)
+        self.assertEqual(details.account_email, YOU)   # the address Google answered as
+        self.assertEqual(self.service.calls_to("events.get"),
+                         [({"calendarId": "primary", "eventId": EVENT_ID}, gcal._READ_RETRIES)])
+        self.assertEqual(self.event_calendar(_event_item(me=None)).get_event(EVENT_ID).account_email, YOU)
+
+    def test_all_day_event_and_missing_parts(self) -> None:
+        item = _event_item(all_day=("2026-10-09", "2026-10-11"), me=None, guests=0, summary=None,
+                           recurrence=True)
+        del item["organizer"]
+        details = self.event_calendar(item).get_event(EVENT_ID, calendar_id=TEAM)
+        self.assertEqual((details.start, details.end), (None, None))
+        self.assertEqual((details.all_day_start, details.all_day_end), (date(2026, 10, 9), date(2026, 10, 10)))
+        self.assertTrue(details.all_day)
+        self.assertEqual((details.title, details.self_email, details.self_response, details.organizer),
+                         (NO_TITLE, "", "", ""))
+        self.assertEqual((details.organizer_self, details.series, details.attendee_count, details.calendar_id),
+                         (False, True, 0, TEAM))
+        self.assertEqual(self.service.calls_to("events.get")[0][0]["calendarId"], TEAM)
+
+    def test_cancelled_or_missing_event_is_gone_and_the_token_stays(self) -> None:
+        for outcome in (_event_item(status="cancelled"), http_error(404, "Not Found", "notFound"),
+                        http_error(410, "Resource has been deleted", "deleted")):
+            with self.subTest(outcome=outcome if isinstance(outcome, dict) else outcome.status_code):
+                cal = self.event_calendar(outcome)
+                with self.refused(gcal.EventGone):
+                    cal.get_event(EVENT_ID)
+                self.assertTrue(self.token_path.exists())
+
+    def test_not_interactive_never_opens_the_sign_in(self) -> None:
+        self.write_client_secret()   # no saved sign-in
+        cal = self.make_calendar()
+        with self.assertLogs(GCAL_LOGGER, level="INFO"), self.assertRaises(CalendarNotSignedIn):
+            cal.get_event(EVENT_ID, interactive=False)
+        self.assertEqual(self.flow.calls, [])
+        self.assertEqual(self.service.calls, [])
+
+    def test_interactive_signs_in_first_when_needed(self) -> None:
+        self.write_client_secret()
+        self.service.outcomes["events.get"] = [_event_item()]
+        self.make_calendar().get_event(EVENT_ID)
+        self.assertEqual(len(self.flow.calls), 1)
+
+
+class RespondTests(EventCallTestCase):
+    def test_patch_names_only_your_attendee_entry_with_explicit_send_updates(self) -> None:
+        for answer, status in (("yes", "accepted"), ("no", "declined"), ("maybe", "tentative")):
+            for notify, send_updates in (("all", "all"), ("externalOnly", "externalOnly"),
+                                         ("external", "externalOnly"), ("none", "none")):
+                with self.subTest(answer=answer, notify=notify):
+                    self.service = FakeService()
+                    cal = self.event_calendar(_event_item(organizer_self=False, guests=4))
+                    result = cal.respond(EVENT_ID, answer, send_updates=notify)
+                    self.assertEqual(result, gcal.ChangeResult(event_id=EVENT_ID, link=EVENT_LINK, already=False))
+                    self.assertEqual(self.service.calls_to("events.patch"), [(
+                        {"calendarId": "primary", "eventId": EVENT_ID, "sendUpdates": send_updates,
+                         "body": {"attendeesOmitted": True,
+                                  "attendees": [{"email": YOU, "responseStatus": status}]}}, 0)])
+
+    def test_default_notifies_everyone_and_the_comment_goes_with_the_answer(self) -> None:
+        cal = self.event_calendar(_event_item(organizer_self=False))
+        cal.respond(EVENT_ID, "no", comment=COMMENT, calendar_id=TEAM)
+        ((kwargs, retries),) = self.service.calls_to("events.patch")
+        self.assertEqual((kwargs["sendUpdates"], kwargs["calendarId"], retries), ("all", TEAM, 0))
+        self.assertEqual(kwargs["body"]["attendees"],
+                         [{"email": YOU, "responseStatus": "declined", "comment": COMMENT}])
+
+    def test_already_answered_sends_nothing(self) -> None:
+        cases = ((_event_item(me="accepted"), "yes", "", True),
+                 (_event_item(me="tentative", comment=COMMENT), "maybe", COMMENT, True),
+                 (_event_item(me="tentative", comment=COMMENT), "maybe", "", True),
+                 (_event_item(me="tentative"), "maybe", COMMENT, False),
+                 (_event_item(me="accepted"), "no", "", False))
+        for item, answer, comment, already in cases:
+            with self.subTest(answer=answer, comment=comment, already=already):
+                self.service = FakeService()
+                result = self.event_calendar(item).respond(EVENT_ID, answer, comment=comment)
+                self.assertEqual(result.already, already)
+                self.assertEqual(len(self.service.calls_to("events.patch")), 0 if already else 1)
+
+    def test_not_on_the_guest_list_is_refused(self) -> None:
+        cal = self.event_calendar(_event_item(me=None))
+        with self.refused() as ctx:
+            cal.respond(EVENT_ID, "yes")
+        self.assertIn("guest list", str(ctx.exception))
+        self.assert_no_change_sent()
+        self.assertTrue(self.token_path.exists())
+
+    def test_bad_answer_or_notify_is_refused_before_any_request(self) -> None:
+        cal = self.event_calendar()
+        for call in (lambda: cal.respond(EVENT_ID, "accepted"), lambda: cal.respond(EVENT_ID, "yes", send_updates=""),
+                     lambda: cal.respond(EVENT_ID, "yes", send_updates="everyone")):
+            with self.subTest(call=call), self.assertRaises(CalendarError):
+                call()
+        self.assertEqual(self.service.calls, [])
+
+    def test_an_answer_that_may_have_happened_is_an_unknown_outcome_and_never_retried(self) -> None:
+        for error in (http_error(500, "Backend Error", "backendError"), http_error(503, "Service Unavailable"),
+                      socket.timeout("timed out"), ConnectionResetError("reset"),
+                      google_auth.RequestNotResent("not sent twice")):
+            with self.subTest(error=type(error).__name__):
+                self.service = FakeService()
+                cal = self.event_calendar(patch=error)
+                with self.fails_with(gcal.CalendarUnknownOutcome) as ctx:
+                    cal.respond(EVENT_ID, "yes")
+                self.assertIn("check the calendar before retrying", str(ctx.exception))
+                self.assertEqual(len(self.service.calls_to("events.patch")), 1)
+                self.assertEqual(self.service.calls_to("events.patch")[0][1], 0)
+                self.assertTrue(self.token_path.exists())
+
+    def test_failures_before_or_refused_by_google_are_not_unknown(self) -> None:
+        cases = ((ConnectionRefusedError("refused"), CalendarError), (socket.gaierror("no dns"), CalendarError),
+                 (http_error(400, "Bad Request", "badRequest"), CalendarError),
+                 (http_error(409, "Conflict", "conflict"), CalendarError))
+        for error, error_type in cases:
+            with self.subTest(error=type(error).__name__):
+                self.service = FakeService()
+                cal = self.event_calendar(patch=error)
+                with self.fails_with(error_type) as ctx:
+                    cal.respond(EVENT_ID, "yes")
+                self.assertNotIsInstance(ctx.exception, gcal.CalendarUnknownOutcome)
+                self.assertTrue(self.token_path.exists())
+
+    def test_event_level_403_is_not_allowed_and_keeps_the_token(self) -> None:
+        cal = self.event_calendar(patch=http_error(403, "Forbidden", "forbiddenForNonOrganizer"))
+        with self.refused() as ctx:
+            cal.respond(EVENT_ID, "yes")
+        self.assertEqual(ctx.exception.status, 403)
+        self.assertTrue(self.token_path.exists())
+
+    def test_401_on_the_change_is_a_sign_in_problem_not_unknown(self) -> None:
+        cal = self.event_calendar(patch=http_error(401, "Invalid Credentials", "authError"))
+        with self.fails_with(CalendarAuthError) as ctx:
+            cal.respond(EVENT_ID, "yes")
+        self.assertNotIsInstance(ctx.exception, gcal.CalendarUnknownOutcome)
+        self.assertFalse(self.token_path.exists())
+
+    def test_not_interactive_without_a_sign_in_sends_nothing(self) -> None:
+        self.write_client_secret()
+        cal = self.make_calendar()
+        with self.assertLogs(GCAL_LOGGER, level="INFO"), self.assertRaises(CalendarNotSignedIn):
+            cal.respond(EVENT_ID, "yes", interactive=False)
+        self.assertEqual((self.flow.calls, self.service.calls), ([], []))
+
+    def test_logs_name_the_event_by_id_only(self) -> None:
+        cal = self.event_calendar(_event_item(organizer_self=False))
+        with self.assertLogs(level="DEBUG") as logs:
+            cal.respond(EVENT_ID, "yes", comment=COMMENT)
+        text = "\n".join(logs.output)
+        self.assertIn(EVENT_ID, text)
+        for private in (YOU, "Project sync", COMMENT, "Ana Example", "guest0@example.edu"):
+            self.assertNotIn(private, text)
+
+
+class MoveTests(EventCallTestCase):
+    NEW_START = datetime(2026, 10, 8, 14, 0)
+    NEW_END = datetime(2026, 10, 8, 15, 0)
+
+    def move(self, cal: GoogleCalendar, **kwargs: Any) -> gcal.ChangeResult:
+        kwargs.setdefault("now", BEFORE)
+        return cal.move(EVENT_ID, kwargs.pop("start", self.NEW_START), kwargs.pop("end", self.NEW_END), **kwargs)
+
+    def test_patch_sends_the_new_wall_time_in_the_calendar_zone(self) -> None:
+        result = self.move(self.event_calendar())
+        self.assertEqual(result, gcal.ChangeResult(event_id=EVENT_ID, link=EVENT_LINK, already=False))
+        self.assertEqual(self.service.calls_to("events.patch"), [(
+            {"calendarId": "primary", "eventId": EVENT_ID, "sendUpdates": "all",
+             "body": {"start": {"dateTime": "2026-10-08T14:00:00", "timeZone": TZ},
+                      "end": {"dateTime": "2026-10-08T15:00:00", "timeZone": TZ}}}, 0)])
+
+    def test_send_updates_is_always_explicit(self) -> None:
+        for notify, send_updates in (("all", "all"), ("external", "externalOnly"), ("none", "none")):
+            with self.subTest(notify=notify):
+                self.service = FakeService()
+                self.move(self.event_calendar(), send_updates=notify)
+                self.assertEqual(self.service.calls_to("events.patch")[0][0]["sendUpdates"], send_updates)
+
+    def test_a_guest_may_move_it_when_guests_can_modify(self) -> None:
+        self.move(self.event_calendar(_event_item(organizer_self=False, guests_can_modify=True)))
+        self.assertEqual(len(self.service.calls_to("events.patch")), 1)
+
+    def test_one_occurrence_of_a_repeating_event_moves(self) -> None:
+        self.move(self.event_calendar(_event_item(instance=True)))
+        self.assertEqual(self.service.calls_to("events.patch")[0][0]["eventId"], EVENT_ID)
+
+    def test_refusals_send_nothing(self) -> None:
+        cases = {
+            "not yours": (_event_item(organizer_self=False), {}, "don't organize"),
+            "all day": (_event_item(all_day=("2026-10-08", "2026-10-09")), {}, "All-day"),
+            "series": (_event_item(recurrence=True), {}, "repeating series"),
+            "past": (_event_item(), {"now": datetime(2026, 10, 9, 9, 0, tzinfo=EDT)}, "already begun"),
+        }
+        for name, (item, kwargs, words) in cases.items():
+            with self.subTest(name=name):
+                self.service = FakeService()
+                cal = self.event_calendar(item)
+                with self.refused() as ctx:
+                    self.move(cal, **kwargs)
+                self.assertIn(words, str(ctx.exception))
+                self.assert_no_change_sent()
+
+    def test_already_at_that_time_sends_nothing(self) -> None:
+        result = self.move(self.event_calendar(), start=datetime(2026, 10, 8, 12, 0),
+                           end=datetime(2026, 10, 8, 13, 0, tzinfo=EDT))
+        self.assertTrue(result.already)
+        self.assert_no_change_sent()
+
+    def test_end_not_after_start_is_refused_before_any_request(self) -> None:
+        cal = self.event_calendar()
+        with self.assertRaises(CalendarError):
+            self.move(cal, end=self.NEW_START)
+        self.assertEqual(self.service.calls, [])
+
+    def test_server_error_is_unknown_and_sent_once(self) -> None:
+        cal = self.event_calendar(patch=http_error(502, "Bad Gateway"))
+        with self.fails_with(gcal.CalendarUnknownOutcome):
+            self.move(cal)
+        self.assertEqual([retries for _, retries in self.change_calls()], [0])
+
+
+class CancelTests(EventCallTestCase):
+    def test_delete_with_explicit_send_updates(self) -> None:
+        for notify, send_updates in (("all", "all"), ("external", "externalOnly"), ("none", "none")):
+            with self.subTest(notify=notify):
+                self.service = FakeService()
+                result = self.event_calendar().cancel(EVENT_ID, send_updates=notify)
+                self.assertEqual(result, gcal.ChangeResult(event_id=EVENT_ID, link="", already=False))
+                self.assertEqual(self.service.calls_to("events.delete"), [
+                    ({"calendarId": "primary", "eventId": EVENT_ID, "sendUpdates": send_updates}, 0)])
+
+    def test_only_the_organizer_cancels_and_never_a_whole_series(self) -> None:
+        for item, words in ((_event_item(organizer_self=False, guests_can_modify=True), "decline it instead"),
+                            (_event_item(recurrence=True), "repeating series")):
+            with self.subTest(words=words):
+                self.service = FakeService()
+                cal = self.event_calendar(item)
+                with self.refused() as ctx:
+                    cal.cancel(EVENT_ID)
+                self.assertIn(words, str(ctx.exception))
+                self.assert_no_change_sent()
+
+    def test_an_event_that_is_gone_is_already_cancelled(self) -> None:
+        for item in (_event_item(status="cancelled"), http_error(404, "Not Found", "notFound"),
+                     http_error(410, "Resource has been deleted", "deleted")):
+            with self.subTest(item=item if isinstance(item, dict) else item.status_code):
+                self.service = FakeService()
+                result = self.event_calendar(item).cancel(EVENT_ID)
+                self.assertEqual(result, gcal.ChangeResult(event_id=EVENT_ID, link="", already=True))
+                self.assert_no_change_sent()
+        self.service = FakeService()
+        result = self.event_calendar(delete=http_error(410, "Resource has been deleted", "deleted")).cancel(EVENT_ID)
+        self.assertTrue(result.already)
+
+    def test_delete_without_an_answer_is_unknown_and_sent_once(self) -> None:
+        for error in (http_error(500, "Backend Error"), socket.timeout("timed out")):
+            with self.subTest(error=type(error).__name__):
+                self.service = FakeService()
+                cal = self.event_calendar(delete=error)
+                with self.fails_with(gcal.CalendarUnknownOutcome):
+                    cal.cancel(EVENT_ID)
+                self.assertEqual([retries for _, retries in self.change_calls()], [0])
+
+
+class _StaleConnection:
+    """A connection whose first answer is lost (a broken status line), then answers 200."""
+
+    def __init__(self) -> None:
+        self.sock: Any = object()
+        self.host = "www.googleapis.com"
+        self.requests: list[str] = []
+        self.answers: list[Any] = [http_client.BadStatusLine(""), _JsonAnswer()]
+
+    def connect(self) -> None:
+        self.sock = object()
+
+    def close(self) -> None:
+        self.sock = None
+
+    def request(self, method: str, uri: str, body: Any = None, headers: Any = None) -> None:
+        self.requests.append(method)
+
+    def getresponse(self) -> Any:
+        answer = self.answers.pop(0)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+
+class _JsonAnswer(dict):
+    def __init__(self) -> None:
+        super().__init__({"status": "200", "content-type": "application/json; charset=UTF-8"})
+
+    def read(self) -> bytes:
+        return json.dumps({"id": EVENT_ID, "htmlLink": EVENT_LINK}).encode("utf-8")
+
+
+class BuildServiceTests(GcalTestCase):
+    def test_the_service_never_sends_a_change_twice_and_has_a_timeout(self) -> None:
+        service = gcal._build_service(SimpleNamespace(token="fake"))
+        http = service._http.http
+        self.assertEqual(type(http).__name__, "SingleSendHttp")
+        self.assertEqual(http.timeout, gcal.HTTP_TIMEOUT_S)
+        self.assertEqual(gcal.HTTP_TIMEOUT_S, 30)
+
+    def stale_service(self) -> tuple[Any, _StaleConnection]:
+        from google.oauth2.credentials import Credentials
+
+        creds = Credentials(token=self.access_token, expiry=utc_naive(timedelta(hours=1)))
+        service = gcal._build_service(creds)
+        conn = _StaleConnection()
+        service._http.http.connections["https:www.googleapis.com"] = conn
+        return service, conn
+
+    def test_through_the_real_client_stack_a_lost_answer_to_a_change_is_not_sent_again(self) -> None:
+        for name, request in (
+                ("patch", lambda s: s.events().patch(calendarId="primary", eventId=EVENT_ID, sendUpdates="all",
+                                                     body={"attendeesOmitted": True, "attendees": []})),
+                ("delete", lambda s: s.events().delete(calendarId="primary", eventId=EVENT_ID, sendUpdates="all"))):
+            with self.subTest(name=name):
+                service, conn = self.stale_service()
+                with self.assertRaises(google_auth.RequestNotResent):
+                    request(service).execute(num_retries=0)
+                self.assertEqual(len(conn.requests), 1)
+
+    def test_through_the_real_client_stack_a_read_is_sent_again_on_a_stale_connection(self) -> None:
+        service, conn = self.stale_service()
+        item = service.events().get(calendarId="primary", eventId=EVENT_ID).execute(num_retries=0)
+        self.assertEqual(item["id"], EVENT_ID)
+        self.assertEqual(conn.requests, ["GET", "GET"])
 
 
 if __name__ == "__main__":
