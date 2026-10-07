@@ -6,11 +6,18 @@
                                    a Calendar event or a Todo's block (always the "personal"
                                    calendar, as before), and an RSVP, Move or Cancel (the line's
                                    ``acct=``)
-    run_action(executor, action)   one job of the action worker: for an RSVP, Move or Cancel,
-                                   "running" is saved before the call and the result after it
+    GmailBackend(senders, ...)     Gmail (gmail.send), one gmail.GmailSender per alias: a Reply or
+                                   an Email from the line's ``acct=``, after the recipient check
+    run_action(executor, action)   one job of the action worker: with ``writes_running`` (the
+                                   undo countdown ran out) "running" is saved before the call and
+                                   the result after it; a Reply or Email is sent only that way
+    mail_status(action)            Executor: what a Reply / Email card shows (From, recipients,
+                                   why it can't send yet) and what its Send click does
     build_accounts(config)         one google_auth.GoogleAccount per alias (the single sign-in
-                                   of older versions becomes "personal")
+                                   of older versions becomes "personal"), bound via accounts.json
     build_calendars(config)        one gcal.GoogleCalendar per alias that has the calendar feature
+    build_senders(config)          one gmail.GmailSender per alias that has the gmail_send feature
+    build_executor(config, ...)    the Executor of both backends (recipients.json for the history)
     apply_edit(action, edit)       the Edit dialog's changes (memory only; same id)
     check_event(action, details)   the card's check line: Google's own title, time and organizer,
                                    and whether Jarvis may act on that event
@@ -18,11 +25,14 @@
 
 ``readiness`` answers without the network or a sign-in why a proposal cannot be
 carried out ("" when it can). ``prepare`` signs the account in when needed (a
-browser sign-in, only ever after a click); ``execute`` makes the one call and
-returns an ExecResult or raises ExecError, whose ``outcome`` says whether the
-change certainly did not happen ("failed") or may have happened ("unknown":
-never retried by itself). ``peek`` reads the event without ever signing in.
-Nothing here retries a change: a Retry is a new click on the card.
+browser sign-in, only ever after a click; never for email: the card's Send
+signs in first, so its From line shows the account before any countdown);
+``execute`` makes the one call and returns an ExecResult or raises ExecError,
+whose ``outcome`` says whether the change certainly did not happen ("failed")
+or may have happened ("unknown": never retried by itself). ``peek`` reads the
+event without ever signing in. Nothing here retries a change: a Retry is a new
+click on the card, and one approval sends at most one email
+(google_auth.single_send_http).
 
 Composio is a seam only: ``backend = "composio"`` is accepted by config.py and
 answered here with "Composio is not built into this version"; a later backend
@@ -46,8 +56,10 @@ from typing import TYPE_CHECKING, Any, Protocol
 from .actions import (
     CALENDAR,
     CANCEL,
-    COUNTDOWN_KINDS,
+    EVENT_KINDS,
+    MAIL_KINDS,
     MOVE,
+    REPLY,
     RSVP,
     STATUS_CREATED,
     STATUS_EXISTS,
@@ -59,6 +71,9 @@ from .actions import (
     EditInvalid,
     ProposedAction,
     edit_action,
+    edit_mail,
+    mail_problem,
+    open_text,
     sent_text,
     stated_when,
     when_text,
@@ -74,21 +89,27 @@ from .gcal import (
     GoogleCalendar,
     NotAllowed,
 )
+from .gmail import GmailError, GmailSender, GmailUnknownOutcome, OutgoingMail
 from .google_auth import (
+    ACCOUNTS_FILE,
     CALENDAR_FEATURE,
     FEATURE_SCOPES,
+    GMAIL_FEATURE,
     PROBLEM_BLOCKED,
     PROBLEM_DENIED,
     PROBLEM_EXPIRED,
     PROBLEM_FAILED,
+    PROBLEM_IDENTITY,
     PROBLEM_SCOPE,
     PROBLEM_SETUP,
     PROBLEM_SIGNED_OUT,
     PROBLEM_TIMEOUT,
+    AccountBindings,
     GoogleAccount,
     logged_alias,
     migrate_legacy_token,
 )
+from .recipients import RECIPIENTS_FILE, RecipientHistory, RecipientReview, review
 
 if TYPE_CHECKING:
     from .actions import ActionStore
@@ -104,7 +125,15 @@ OUTCOME_UNKNOWN = "unknown"      # may have happened: check before retrying, nev
 CALENDAR_SETUP_NOTE = "Google Calendar is not set up yet - see README step 8"
 COMPOSIO_NOTE = "Composio is not built into this version"
 NOT_SAVED_MESSAGE = "Could not save the decision before sending, so nothing was sent"
+CLOSING_MESSAGE = "Jarvis was closing when the sign-in finished, so nothing was sent - click again"
 NOTHING_TO_DO = "There is nothing for Jarvis to carry out on this card"
+MAIL_SETUP_NOTE = "Sending email is not set up yet - see README step 8b"
+# A Reply or Email goes out only through run_action(writes_running=True): after the undo
+# countdown, with "running" saved first.
+COUNTDOWN_ONLY_MESSAGE = "Email is only sent when the Send countdown runs out; nothing was sent"
+NEW_RECIPIENTS_MESSAGE = "Tick the new recipients in Edit first; nothing was sent"
+NO_EVENT_MESSAGE = "There is no event to check on this card"
+UNCONFIRMED_FROM = "account not confirmed yet"
 _NOTIFY = {"all": "all", "external": "externalOnly", "none": "none"}
 _SEPARATOR = " \u00b7 "   # middle dot, as on the cards
 _RESPONSE_WORDS = {"accepted": "you accepted", "declined": "you declined", "tentative": "you said maybe",
@@ -117,10 +146,15 @@ def _no_stage(_stage: str) -> None:
     pass
 
 
+# Carried out for the line's acct= (a Calendar event and a Todo's block use the personal calendar).
+ACCOUNT_KINDS = EVENT_KINDS | MAIL_KINDS
+
+
 def account_of(action: ProposedAction) -> str:
-    """The alias that acts for ``action``: its ``acct=`` for an RSVP, Move or Cancel; a Calendar
-    event and a Todo's block always go to the personal calendar (as in earlier versions)."""
-    if action.kind in COUNTDOWN_KINDS:
+    """The alias that acts for ``action``: its ``acct=`` for an RSVP, Move, Cancel, Reply or Email;
+    a Calendar event and a Todo's block always go to the personal calendar (as in earlier
+    versions)."""
+    if action.kind in ACCOUNT_KINDS:
         return action.account
     return DEFAULT_ACCOUNT
 
@@ -133,8 +167,10 @@ def account_of(action: ProposedAction) -> str:
 class ActionEdit:
     """The Edit dialog's changes to one card, kept in memory only (keyed by action id).
 
-    ``None`` = unchanged. ``to``, ``cc``, ``subject`` and ``confirmed_new`` are for the
-    replies of a later version and are refused here.
+    ``None`` = unchanged. RSVP / Move / Cancel: ``answer``, ``notify``, ``start`` / ``end``,
+    ``body`` (the note). Reply / Email: ``to``, ``cc`` (the chips), ``subject`` (an Email's),
+    ``body`` (the text as sent) and ``confirmed_new``: every NEW RECIPIENT address ticked in the
+    dialog (the whole set each time the dialog is saved; empty = none ticked).
     """
 
     answer: str | None = None          # RSVP: yes / no / maybe
@@ -157,9 +193,15 @@ def apply_edit(action: ProposedAction, edit: ActionEdit) -> ProposedAction:
 
     Exactly what this returns is what the card shows and what Approve carries out.
     """
-    if edit.to is not None or edit.cc is not None or edit.subject is not None or edit.confirmed_new:
-        raise EditError("Recipients and subjects can't be edited in this version")
     try:
+        if action.kind in MAIL_KINDS:
+            if edit.answer is not None or edit.notify is not None or edit.start is not None \
+                    or edit.end is not None:
+                raise EditError("A reply or an email has no answer, time or guest notice to edit")
+            return edit_mail(action, to=edit.to, cc=edit.cc, subject=edit.subject, body=edit.body,
+                             confirmed=tuple(edit.confirmed_new))
+        if edit.to is not None or edit.cc is not None or edit.subject is not None or edit.confirmed_new:
+            raise EditError("Recipients and subjects can only be edited on a reply or an email")
         return edit_action(action, answer=edit.answer, notify=edit.notify, start=edit.start,
                            end=edit.end, body=edit.body)
     except EditInvalid as exc:
@@ -210,6 +252,36 @@ class EventCheck:
 
 
 @dataclass(frozen=True)
+class MailStatus:
+    """What a Reply / Email card shows about sending, and what its Send click does (no network).
+
+    ``sender`` / ``from_text`` are shown on the card only, never logged. ``review`` names every
+    recipient as OWN / TRUSTED / KNOWN / NEW (recipients.py) for the chips; None only when the
+    card is not a Reply / Email Jarvis sends.
+    """
+
+    alias: str
+    sender: str                 # the bound account's address ("" while Jarvis doesn't know it)
+    from_text: str              # "From: work (ana@example.edu)" / "From: work (account not confirmed yet)"
+    problem: str = ""           # google_auth PROBLEM_* why it can't send now ("" = it can)
+    note: str = ""              # the card's amber note for that problem ("" when there is none)
+    sign_in: bool = False       # a Send click opens the Google sign-in first (no countdown)
+    hand_off: bool = False      # Jarvis won't send from here: Copy / Open, and Done instead of Send
+    review: RecipientReview | None = None
+
+    @property
+    def needs_edit(self) -> bool:
+        """A Send click opens the Edit dialog: a NEW RECIPIENT is not ticked yet, or nobody is left
+        in To once the account's own address is taken out."""
+        return self.review is not None and (bool(self.review.unconfirmed) or bool(self.review.problem))
+
+    @property
+    def ready(self) -> bool:
+        """A Send click may start the countdown (still subject to a long body's review)."""
+        return not self.problem and not self.hand_off and self.review is not None and self.review.ready
+
+
+@dataclass(frozen=True)
 class RunOutcome:
     """What one run_action call ended with."""
 
@@ -232,6 +304,7 @@ class Backend(Protocol):
     def execute(self, action: ProposedAction, *, on_stage: OnStage,
                 interactive: bool = True) -> ExecResult: ...
     def peek(self, action: ProposedAction) -> EventDetails: ...
+    def sign_in(self, alias: str, *, on_stage: OnStage) -> None: ...
 
 
 class CalendarBackend:
@@ -293,7 +366,9 @@ class CalendarBackend:
                 event = action.block_event() if action.kind == TODO else action
                 if event is None:
                     raise ExecError("This to-do has no block time")
-                created = calendar.create_event(event)
+                # Without interactive ("running" is saved) nothing may open the browser any more.
+                created = (calendar.create_event(event) if interactive
+                           else calendar.create_event(event, interactive=False))
                 return ExecResult(STATUS_EXISTS if created.existed else STATUS_CREATED, created.link)
             send_updates = _NOTIFY.get(field("notify", "all"), "all")
             calendar_id = field("cal", "primary")
@@ -315,15 +390,232 @@ class CalendarBackend:
 
     def peek(self, action: ProposedAction) -> EventDetails:
         """Google's own view of the card's event; never signs in (CalendarNotSignedIn instead)."""
+        if action.kind not in EVENT_KINDS:
+            raise ExecError(NO_EVENT_MESSAGE)
         calendar = self._require(action)
         return calendar.get_event(action.field("event"), calendar_id=action.field("cal", "primary"),
                                   interactive=False)
+
+    def sign_in(self, alias: str, *, on_stage: OnStage = _no_stage) -> None:
+        """The browser sign-in of ``alias``'s account (a click on Sign in)."""
+        calendar = self._calendars.get(alias)
+        if calendar is None:
+            raise ExecError(CALENDAR_SETUP_NOTE, problem=PROBLEM_SETUP)
+        on_stage(STAGE_SIGNIN)
+        try:
+            calendar.sign_in()
+        except CalendarError as exc:
+            raise _exec_error(exc) from None
+        on_stage(STAGE_SIGNED_IN)
 
     def _require(self, action: ProposedAction) -> Any:
         calendar = self._calendars.get(account_of(action))
         if calendar is None:
             raise ExecError(CALENDAR_SETUP_NOTE, problem=PROBLEM_SETUP)
         return calendar
+
+
+class GmailBackend:
+    """Gmail for every alias in ``senders`` (alias -> gmail.GmailSender or a fake): a Reply or an
+    Email from the line's ``acct=``.
+
+    Nothing here opens the browser except ``sign_in`` (a click). A message goes out only from
+    ``execute(..., interactive=False)`` - run_action's "running" path after the undo countdown -
+    and only when the saved sign-in is the bound Google account, the card's text is sendable
+    (actions.mail_problem) and every NEW RECIPIENT was ticked in the Edit dialog. After a send
+    the recipients are remembered (recipients.json), so they need no tick next time.
+    """
+
+    name = BACKEND_GOOGLE
+    KINDS = MAIL_KINDS
+
+    def __init__(self, senders: Mapping[str, Any], *, history: RecipientHistory | None = None,
+                 trusted_domains: Sequence[str] = ()) -> None:
+        self._senders = dict(senders)
+        self._history = history
+        self._trusted = tuple(trusted_domains)
+
+    def handles(self, action: ProposedAction) -> bool:
+        return action.kind in self.KINDS
+
+    def sender(self, alias: str) -> Any | None:
+        return self._senders.get(alias)
+
+    def aliases(self) -> list[str]:
+        return list(self._senders)
+
+    def readiness(self, action: ProposedAction) -> str:
+        """"" when the account's sending is set up and the card's text is sendable; no network."""
+        sender = self._senders.get(action.account)
+        if sender is None or not _call_bool(sender, "is_configured"):
+            return MAIL_SETUP_NOTE
+        return mail_problem(action)
+
+    def signed_in(self, action: ProposedAction) -> bool:
+        sender = self._senders.get(action.account)
+        return sender is not None and _call_bool(sender, "is_signed_in")
+
+    def review(self, action: ProposedAction) -> RecipientReview:
+        """The card's recipients: the account's own address taken out, each one OWN / TRUSTED /
+        KNOWN / NEW, the new ones not yet ticked in Edit."""
+        sender = self._senders.get(action.account)
+        own = _call_text(sender, "from_address") if sender is not None else ""
+        return review(action.recipients(), action.cc(), own=own, confirmed=action.confirmed,
+                      trusted_domains=self._trusted, history=self._history)
+
+    def status(self, action: ProposedAction, reason: str = "") -> MailStatus:
+        """See MailStatus; ``reason`` is the Executor's readiness answer (not set up: a hand-off)."""
+        alias = action.account
+        sender = self._senders.get(alias)
+        address = _call_text(sender, "from_address") if sender is not None else ""
+        from_text = f"From: {alias} ({address or UNCONFIRMED_FROM})"
+        recipients = self.review(action)
+        if reason:
+            return MailStatus(alias, address, from_text, PROBLEM_SETUP, reason, hand_off=True, review=recipients)
+        problem, message = _sender_ready(sender)
+        tools = hand_off_tools(action)
+        if problem in (PROBLEM_SETUP, PROBLEM_BLOCKED):
+            note = mail_note(alias, problem, message, tools=tools)
+            return MailStatus(alias, address, from_text, problem, note, hand_off=True, review=recipients)
+        if problem:
+            return MailStatus(alias, address, from_text, problem, mail_note(alias, problem, message, tools=tools),
+                              sign_in=True, review=recipients)
+        note = recipients.problem or (NEW_RECIPIENT_NOTE if recipients.unconfirmed else "")
+        return MailStatus(alias, address, from_text, "", note, review=recipients)
+
+    def prepare(self, action: ProposedAction, *, on_stage: OnStage = _no_stage) -> None:
+        """Check that the message may go out now. Never opens the browser: a card's Send signs in
+        first, so its From line shows the account before any countdown."""
+        self._message(action)
+
+    def execute(self, action: ProposedAction, *, on_stage: OnStage = _no_stage,
+                interactive: bool = True) -> ExecResult:
+        """The one send (run_action's "running" path only: ``interactive`` must be False)."""
+        if interactive:
+            raise ExecError(COUNTDOWN_ONLY_MESSAGE)
+        mail = self._message(action)
+        sender = self._senders[action.account]
+        logger.info("Sending action %s (%s, %s) to %d recipient(s)", action.id, action.kind,
+                    logged_alias(action.account), mail.recipient_count)
+        on_stage(STAGE_WORKING)
+        try:
+            sent = sender.send(mail)
+        except GmailUnknownOutcome as exc:
+            raise ExecError(str(exc), outcome=OUTCOME_UNKNOWN, problem=exc.problem, status=exc.status) from None
+        except GmailError as exc:
+            raise ExecError(str(exc), problem=exc.problem, status=exc.status) from None
+        if self._history is not None:
+            try:
+                self._history.add(mail.to + mail.cc)
+            except Exception as exc:  # noqa: BLE001 - the message went out; only the memory failed
+                logger.warning("Could not remember the recipients of action %s (%s)", action.id,
+                               type(exc).__name__)
+        return ExecResult(STATUS_SENT, getattr(sent, "link", "") or "", sent_text(action))
+
+    def peek(self, action: ProposedAction) -> EventDetails:
+        raise ExecError(NO_EVENT_MESSAGE)
+
+    def sign_in(self, alias: str, *, on_stage: OnStage = _no_stage) -> None:
+        """The browser sign-in of ``alias`` for sending (a click on the card's Send or Sign in)."""
+        sender = self._senders.get(alias)
+        if sender is None:
+            raise ExecError(MAIL_SETUP_NOTE, problem=PROBLEM_SETUP)
+        on_stage(STAGE_SIGNIN)
+        try:
+            sender.sign_in()
+        except GmailError as exc:
+            raise ExecError(str(exc) or type(exc).__name__, problem=exc.problem or PROBLEM_FAILED,
+                            status=exc.status) from None
+        on_stage(STAGE_SIGNED_IN)
+
+    def _message(self, action: ProposedAction) -> OutgoingMail:
+        """The message exactly as the card shows it, or ExecError (failed: nothing was sent)."""
+        sender = self._senders.get(action.account)
+        if sender is None:
+            raise ExecError(MAIL_SETUP_NOTE, problem=PROBLEM_SETUP)
+        problem = mail_problem(action)
+        if problem:
+            raise ExecError(problem)
+        state, message = _sender_ready(sender)
+        if state:
+            raise ExecError(mail_note(action.account, state, message), problem=state)
+        recipients = self.review(action)
+        if recipients.problem:
+            raise ExecError(f"{recipients.problem}; nothing was sent")
+        if recipients.unconfirmed:
+            raise ExecError(NEW_RECIPIENTS_MESSAGE)
+        reply = action.kind == REPLY
+        return OutgoingMail(account=action.account, from_addr=_call_text(sender, "from_address"),
+                            to=recipients.to, cc=recipients.cc, subject=action.field("subject") or action.title,
+                            body=action.body, thread_id=action.field("thread") if reply else "",
+                            in_reply_to=action.field("msgid") if reply else "")
+
+
+NEW_RECIPIENT_NOTE = "New recipient: tick it in Edit before Send"
+
+
+def _sender_ready(sender: Any) -> tuple[str, str]:
+    """(PROBLEM_*, message) from the sender's ready(); a failing check counts as not set up."""
+    if sender is None:
+        return PROBLEM_SETUP, MAIL_SETUP_NOTE
+    try:
+        problem, message = sender.ready()
+    except Exception as exc:  # noqa: BLE001 - only decides what the card offers
+        logger.debug("Could not check the sending account (%s)", type(exc).__name__)
+        return PROBLEM_SETUP, MAIL_SETUP_NOTE
+    return str(problem or ""), str(message or "")
+
+
+def _call_text(target: Any, name: str) -> str:
+    try:
+        value = getattr(target, name)()
+    except Exception as exc:  # noqa: BLE001 - only decides what a card shows
+        logger.debug("Could not read %s (%s)", name, type(exc).__name__)
+        return ""
+    return value if isinstance(value, str) else ""
+
+
+def hand_off_tools(action: ProposedAction) -> str:
+    """What a card offers instead when Jarvis can't send it: "Copy and Open" ("Copy" without a
+    link)."""
+    return "Copy and Open" if open_text(action) else "Copy"
+
+
+def keep_calendar_hint(alias: str) -> str:
+    """How to keep an account's Calendar actions when its administrator blocks sending email."""
+    return f'remove "gmail_send" from config.toml [accounts.{alias}] features and sign in again'
+
+
+_BLOCK_CODE_RE = re.compile(r"\((admin_policy_enforced|org_internal|domainPolicy)\)")
+
+
+def mail_note(alias: str, problem: str, message: str = "", *, tools: str = "Copy and Open") -> str:
+    """What a Reply / Email card of ``alias`` says while it can't send (no address in it).
+    ``tools``: what the card offers instead ("Copy and Open", or "Copy" on a card without a link)."""
+    if problem == PROBLEM_BLOCKED:
+        match = _BLOCK_CODE_RE.search(message)
+        code = match.group(1) if match else "admin_policy_enforced"
+        return (f"The {alias} account's administrator does not allow this app to send email "
+                f"({code}) - use {tools} instead. To keep Calendar actions for {alias}, "
+                f"{keep_calendar_hint(alias)}")
+    if problem == PROBLEM_SETUP:
+        return message or MAIL_SETUP_NOTE
+    if problem == PROBLEM_SCOPE:
+        return f"Google did not allow sending email for {alias} - click Send to sign in again and tick that box"
+    if problem == PROBLEM_EXPIRED:
+        return f"The {alias} account's Google sign-in expired or was revoked - click Send to sign in again"
+    if problem == PROBLEM_DENIED:
+        return f"Google sign-in for the {alias} account was cancelled or access was denied - click Send to try again"
+    if problem == PROBLEM_TIMEOUT:
+        return (f"Google sign-in for the {alias} account was not finished in time - click Send to try again "
+                "(if Google said \"Access blocked\", its administrator does not allow this app)")
+    if problem == PROBLEM_IDENTITY:
+        if message.startswith(("This is not", "That Google account", "Google did not say")):
+            return f"{message} - click Send to sign in with the right account"
+        return f"Jarvis doesn't know yet which Google account {alias} is - click Send to sign in and confirm it"
+    if problem == PROBLEM_FAILED and message:
+        return f"{message} - click Send to try again"
+    return f"Send signs in to Google for the {alias} account first - then check From and click Send again"
 
 
 def _exec_error(exc: CalendarError) -> ExecError:
@@ -367,7 +659,7 @@ class Executor:
         earlier versions); an RSVP, Move or Cancel uses its account's ``backend``.
         """
         name = BACKEND_GOOGLE
-        if action.kind in COUNTDOWN_KINDS:
+        if action.kind in ACCOUNT_KINDS:
             account = self._accounts.get(action.account)
             if account is None:
                 return None
@@ -379,14 +671,18 @@ class Executor:
         """"" when ``action`` can be carried out now, else why not (no network, no sign-in)."""
         if not action.actionable:
             return NOTHING_TO_DO
-        if action.kind in COUNTDOWN_KINDS:
+        if action.kind in ACCOUNT_KINDS:
             alias = action.account
             account = self._accounts.get(alias)
             if account is None:
                 return f'No account named "{alias}" in config.toml [accounts]'
             if account.backend == BACKEND_COMPOSIO:
                 return COMPOSIO_NOTE
-            if CALENDAR_FEATURE not in account.features:
+            if action.kind in MAIL_KINDS:
+                if GMAIL_FEATURE not in account.features:
+                    return (f"The {alias} account is not set up for sending email "
+                            f"(config.toml [accounts.{alias}] features)")
+            elif CALENDAR_FEATURE not in account.features:
                 return (f"The {alias} account is not set up for calendar actions "
                         f"(config.toml [accounts.{alias}] features)")
         backend = self.backend_for(action)
@@ -413,7 +709,30 @@ class Executor:
 
     def peek(self, action: ProposedAction) -> EventDetails:
         """Google's own view of the card's event (never signs in)."""
+        if action.kind not in EVENT_KINDS:
+            raise ExecError(NO_EVENT_MESSAGE)
         return self._backend(action).peek(action)
+
+    def mail_status(self, action: ProposedAction) -> MailStatus:
+        """What a Reply / Email card shows about sending and what its Send click does (no network);
+        see MailStatus. Any other card: a hand-off with Executor.readiness as the note."""
+        reason = self.readiness(action)
+        backend = self.backend_for(action) if action.sends_mail else None
+        status = getattr(backend, "status", None)
+        if status is None:
+            alias = action.account
+            return MailStatus(alias, "", f"From: {alias} ({UNCONFIRMED_FROM})", PROBLEM_SETUP,
+                              reason or NOTHING_TO_DO, hand_off=True)
+        return status(action, reason)
+
+    def sign_in(self, action: ProposedAction, *, on_stage: OnStage = _no_stage) -> None:
+        """The browser sign-in of the account that acts for ``action`` (only after a click on
+        Sign in, or on a Send whose account is not ready). Raises ExecError with the problem."""
+        reason = self.readiness(action)
+        backend = self.backend_for(action)
+        if reason or backend is None:
+            raise ExecError(reason or NOTHING_TO_DO, problem=PROBLEM_SETUP)
+        backend.sign_in(account_of(action), on_stage=on_stage)
 
     def _backend(self, action: ProposedAction) -> Backend:
         reason = self.readiness(action)
@@ -429,30 +748,41 @@ class Executor:
 # --------------------------------------------------------------------------
 
 def run_action(executor: Executor, action: ProposedAction, *, store: ActionStore | None = None,
-               writes_running: bool = False, on_stage: OnStage = _no_stage) -> RunOutcome:
+               writes_running: bool = False, on_stage: OnStage = _no_stage,
+               proceed: Callable[[], bool] | None = None) -> RunOutcome:
     """Carry out one approved proposal, exactly once (never retried here or anywhere else).
 
-    ``writes_running`` (an RSVP, Move or Cancel whose undo countdown ran out): sign the account
-    in first when needed, save "running" (with kind and account) to ``store`` right before the
-    call - nothing is sent when that could not be saved -, make the one call without any
-    further sign-in, and save the result over "running": "sent", "failed" (certainly not
-    done) or "unknown" (it may have happened: the call was sent but no clear answer came
-    back, or something unexpected broke after "running" was saved). The result is saved here,
-    on the worker thread, so it is kept even when the app quits meanwhile; a crash leaves
-    "running", which the next start turns into "unknown".
+    ``writes_running`` (any kind whose undo countdown ran out: a Calendar event, a Todo's
+    block, an RSVP, Move, Cancel, Reply or Email): sign the account in first when needed (never
+    for email: its card signs in before the countdown), save "running" (with kind and account)
+    to ``store`` right before the call - nothing is sent when that could not be saved -, make
+    the one call without any further sign-in, and save the result over "running": "created" /
+    "exists" / "sent", "failed" (certainly not done) or "unknown" (it may have happened: the
+    call was sent but no clear answer came back, or something unexpected broke after
+    "running" was saved). The result is saved here, on the worker thread, so it is kept even
+    when the app quits meanwhile; a crash leaves "running", which the next start turns into
+    "unknown". ``proceed`` (the worker's "the app is not closing") is asked right after the
+    sign-in, before "running" is saved: False means nothing is sent (failed, CLOSING_MESSAGE),
+    so a browser sign-in that finishes after Quit starts no call.
 
-    Otherwise (a Calendar event, a Todo's block) nothing is saved here: the caller saves the
-    result (created / exists / failed) as before. Never raises for an ExecError or a bug in a
-    backend (a bug is logged by type only: its message could carry a token).
+    Without ``writes_running`` (a Calendar event or a Todo's block approved the older way, with
+    no countdown) nothing is saved here: the caller saves the result (created / exists /
+    failed). A Reply or Email is never sent that way (failed: nothing was sent). Never raises
+    for an ExecError or a bug in a backend (a bug is logged by type only: its message could
+    carry a token).
     """
     running = False
     result: ExecResult | None = None
     error: ExecError | None = None
     try:
+        if action.kind in MAIL_KINDS and not writes_running:
+            raise ExecError(COUNTDOWN_ONLY_MESSAGE)
         if writes_running:
             if store is None:
                 raise ExecError(NOT_SAVED_MESSAGE)
             executor.prepare(action, on_stage=on_stage)
+            if proceed is not None and not proceed():
+                raise ExecError(CLOSING_MESSAGE)
             if not store.set(action.id, STATUS_RUNNING, kind=action.kind, account=action.account):
                 raise ExecError(NOT_SAVED_MESSAGE)
             running = True
@@ -516,11 +846,13 @@ def build_accounts(config: Config, *, flow_factory: Callable[[Any, list[str]], A
     browser or talks to Google.
     """
     migrate_legacy_token(config.data_dir)
+    bindings = AccountBindings(config.data_dir / ACCOUNTS_FILE)   # read on use; nothing is written here
     accounts: dict[str, GoogleAccount] = {}
     for alias in google_aliases(config):
         accounts[alias] = GoogleAccount(
             alias, client_secret_path=config.calendar.client_secret_path, data_dir=config.data_dir,
-            features=account_features(config, alias), flow_factory=flow_factory, refresh=refresh)
+            features=account_features(config, alias), flow_factory=flow_factory, refresh=refresh,
+            bindings=bindings)
     return accounts
 
 
@@ -539,6 +871,34 @@ def build_calendars(config: Config, accounts: Mapping[str, GoogleAccount] | None
         calendars[alias] = GoogleCalendar(account=account, calendar_id=calendar_id,
                                           service_factory=service_factory)
     return calendars
+
+
+def build_senders(config: Config, accounts: Mapping[str, GoogleAccount] | None = None, *,
+                  service_factory: Callable[[Any], Any] | None = None) -> dict[str, GmailSender]:
+    """One GmailSender per alias with the gmail_send feature, sharing the account (and token) of
+    its calendar. ``accounts`` defaults to build_accounts(config); pass the same mapping as to
+    build_calendars so each alias has one sign-in."""
+    if accounts is None:
+        accounts = build_accounts(config)
+    return {alias: GmailSender(account, service_factory=service_factory)
+            for alias, account in accounts.items() if GMAIL_FEATURE in account.features}
+
+
+def recipient_history(config: Config) -> RecipientHistory:
+    """The addresses Jarvis sent to before (%LOCALAPPDATA%\\briefing-reader\\recipients.json)."""
+    return RecipientHistory(config.data_dir / RECIPIENTS_FILE)
+
+
+def build_executor(config: Config, calendars: Mapping[str, Any], senders: Mapping[str, Any] | None = None, *,
+                   history: RecipientHistory | None = None,
+                   now: Callable[[], datetime] | None = None) -> Executor:
+    """The Executor of the app: Google Calendar for ``calendars`` and Gmail for ``senders``,
+    ``[actions] trusted_domains`` and the recipient history (default: recipient_history(config))."""
+    if history is None:
+        history = recipient_history(config)
+    backends: list[Any] = [CalendarBackend(calendars, now=now)]
+    backends.append(GmailBackend(senders or {}, history=history, trusted_domains=config.actions.trusted_domains))
+    return Executor(backends, config.accounts)
 
 
 # --------------------------------------------------------------------------
@@ -668,19 +1028,26 @@ def check_failure(action: ProposedAction, error: BaseException) -> EventCheck:
     return EventCheck(f"Couldn't check the event with Google: {text}", allowed=False)
 
 
-def sign_in_note(alias: str, *, signed_in: bool = False, problem: str = "", message: str = "") -> str:
+def sign_in_note(alias: str, *, signed_in: bool = False, problem: str = "", message: str = "",
+                 sends_mail: bool = False) -> str:
     """What a card of ``alias`` says while that account cannot be used ("" when it can).
 
     ``problem`` / ``message`` are the account's last sign-in problem (GoogleCalendar
     .sign_in_problem()); the messages are google_auth's, which never name an address.
+    ``sends_mail``: the account also has the gmail_send feature, so every sign-in asks for
+    sending email too; a block then says how to keep Calendar actions without it.
     """
     if signed_in:
         return ""
     if problem == PROBLEM_EXPIRED:
         return f"The {alias} account's Google sign-in expired or was revoked - click Sign in to sign in again"
     if problem == PROBLEM_BLOCKED:
-        return message or (f"Google blocked the sign-in: the {alias} account's administrator does not "
+        note = message or (f"Google blocked the sign-in: the {alias} account's administrator does not "
                            "allow this app")
+        if sends_mail:
+            note += (f". Every {alias} sign-in also asks to send email; if the administrator only blocks "
+                     f"that, {keep_calendar_hint(alias)} to keep Calendar actions")
+        return note
     if problem == PROBLEM_DENIED:
         return f"Google sign-in for the {alias} account was cancelled or access was denied - click Sign in to try again"
     if problem == PROBLEM_SCOPE:
@@ -689,6 +1056,9 @@ def sign_in_note(alias: str, *, signed_in: bool = False, problem: str = "", mess
         return message or f"Google sign-in for the {alias} account was not finished in time - click Sign in to try again"
     if problem == PROBLEM_SETUP:
         return message or CALENDAR_SETUP_NOTE
+    if problem == PROBLEM_IDENTITY:
+        return (f"{message} - click Sign in" if message
+                else f"This is not the Google account set up as the {alias} account - click Sign in with that one")
     if problem == PROBLEM_FAILED and message:
         return f"{message} - click Sign in to try again"
     return f"Not signed in to the {alias} account - click Sign in"

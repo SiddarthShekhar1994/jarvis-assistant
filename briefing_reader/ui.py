@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import ctypes
 import dataclasses
+import hashlib
 import logging
 import math
 import os
@@ -97,9 +98,13 @@ from .actions import (
     CALENDAR,
     CANCEL,
     DONE_TEXT,
+    EMAIL,
+    MAX_RECIPIENTS,
     MOVE,
+    REPLY,
     RETRY_TEXT,
     RSVP,
+    SEND_TEXT,
     STATUS_CREATED,
     STATUS_DENIED,
     STATUS_DONE,
@@ -113,9 +118,13 @@ from .actions import (
     CardView,
     EditInvalid,
     ProposedAction,
+    body_links,
+    body_needs_review,
     card_view,
     copied_text,
     copy_text,
+    due_words,
+    email_address,
     extract_actions,
     kind_label,
     link_allowed,
@@ -140,17 +149,23 @@ from .executor import (
     STAGE_SIGNIN,
     STAGE_WORKING,
     ActionEdit,
-    CalendarBackend,
     EditError,
     EventCheck,
     ExecError,
     ExecResult,
     Executor,
+    MailStatus,
     account_of,
     apply_edit,
+    build_accounts,
     build_calendars,
+    build_executor,
+    build_senders,
     check_event,
     check_failure,
+    hand_off_tools,
+    mail_note,
+    recipient_history,
     run_action,
     sign_in_note,
 )
@@ -163,11 +178,14 @@ from .gcal import (
     GoogleCalendar,
 )
 from .google_auth import (
+    GMAIL_FEATURE,
     PROBLEM_BLOCKED,
     PROBLEM_DENIED,
     PROBLEM_EXPIRED,
     PROBLEM_FAILED,
+    PROBLEM_IDENTITY,
     PROBLEM_SCOPE,
+    PROBLEM_SETUP,
     PROBLEM_SIGNED_OUT,
     PROBLEM_TIMEOUT,
     logged_alias,
@@ -196,6 +214,9 @@ from .notion_client import (
     poll_for_briefing,
 )
 from .player import FINISHED, IDLE, PAUSED, PLAYING, WAITING, BriefingPlayer
+from .recipients import NEW as RECIPIENT_NEW_KIND
+from .recipients import OWN as RECIPIENT_OWN_KIND
+from .recipients import classify
 from .runstate import RunState, handled_slot_key, slot_for
 from .text_prep import ACTIONS_KEY, build_script, describe_updated, format_time, updated_label
 from .tts import SAPI, SpeechSynthesizer, TtsWorker
@@ -1424,6 +1445,7 @@ EDIT_LINK_TEXT = "Edit"
 EDITED_MARK = f" {DOT} edited"
 _EVENT_LINK_TEXT = "Open event"          # the result link of an answered, moved or cancelled event
 UNKNOWN_CARD_TEXT = "check the calendar before retrying"   # after "UNKNOWN: " on the card
+UNKNOWN_MAIL_CARD_TEXT = "check Sent mail before retrying"   # a Reply / Email's
 CHECK_SOON_TEXT = "Checking the event with Google..."
 CHECK_LATER_TEXT = "Not checked with Google yet"
 CHECK_FIRST_NOTE = "Checking the event with Google first - click {button} again once it shows above"
@@ -1438,7 +1460,8 @@ _MISMATCH_WHAT = {"title": "another title", "time": "another time", "title+time"
 AFTER_PREFIX = "Google now: "
 _ANSWERED = {"yes": "you accepted", "no": "you declined", "maybe": "you said maybe"}
 # The end of gcal's unknown-outcome message: the card's UNKNOWN line already says it.
-_CHECK_BEFORE_RETRY_RE = re.compile(r"\s*[-;:,]\s*check (?:the calendar )?before retrying\.?\s*$", re.IGNORECASE)
+_CHECK_BEFORE_RETRY_RE = re.compile(r"\s*[-;:,]\s*check (?:the calendar |sent mail )?before retrying\.?\s*$",
+                                    re.IGNORECASE)
 # The check line's short form of an account's sign-in problem (the whole message is its tooltip).
 _PROBLEM_LINES = {
     PROBLEM_BLOCKED: "Sign-in blocked by the {alias} account's administrator",
@@ -1446,12 +1469,33 @@ _PROBLEM_LINES = {
     PROBLEM_DENIED: "Google sign-in for the {alias} account was cancelled or denied",
     PROBLEM_SCOPE: "The {alias} account did not allow Calendar access - Sign in again",
     PROBLEM_TIMEOUT: "Google sign-in for the {alias} account was not finished",
+    PROBLEM_IDENTITY: "Not the {alias} account's Google account - Sign in with that one",
 }
 _PROBLEM_LINE_OTHER = "Google sign-in for the {alias} account failed - Sign in to try again"
 _VERBS = {RSVP: "answer", MOVE: "move", CANCEL: "cancel"}
 # Sign-in problems of an account (google_auth PROBLEM_*): the card offers Sign in again.
 _SIGN_IN_PROBLEMS = (PROBLEM_SIGNED_OUT, PROBLEM_EXPIRED, PROBLEM_BLOCKED, PROBLEM_DENIED, PROBLEM_SCOPE,
-                     PROBLEM_TIMEOUT)
+                     PROBLEM_TIMEOUT, PROBLEM_IDENTITY)
+# A Reply / Email card: its Send signs the account in first (no countdown), opens Edit to confirm
+# new recipients or to read a long message, and only then counts down. The card's amber note
+# says what the last click on Send needs next.
+# The notes never say "above": on a short window the card's FROM line may be scrolled out of view.
+MAIL_SIGN_IN_NOTE = "Finish the Google sign-in in your browser; nothing is sent - then check From and click Send again"
+MAIL_SIGNED_IN_NOTE = "Signed in - this card sends from {sender}; nothing is sent until you click Send"
+CONFIRM_NOTE = "Tick each new recipient in Edit (or remove it), then click Send again"
+CONFIRM_BANNER = ("Jarvis has not sent to the red addresses before. Tick \"Send to ...\" for each one you mean "
+                  "(or remove it), Save, then click Send again.")
+# Added to CONFIRM_BANNER when the card does not show all of the message either.
+CONFIRM_READ_TOO = "The card doesn't show all of the message: read it here to its end too."
+REVIEW_NOTE = "Read the whole message in Edit, then click Send again"
+REVIEW_BANNER = ("The card doesn't show all of this message. Read all of it here, to its end; Save keeps any "
+                 "change. Nothing is sent until you click Send again.")
+FROM_CHANGED_NOTE = ("The sending account changed during the countdown; nothing was sent - check From and click "
+                     "Send again")
+MAIL_OFF_NOTE = "Google is turned off in config.toml ([calendar] enabled = false) - use {tools} instead"
+# A Reply / Email that failed was certainly not sent: the result line says so; the reason is the note.
+MAIL_FAILED_TEXT = "Nothing was sent"
+_NOTHING_SENT_RE = re.compile(r"\s*;\s*nothing was sent\b.*$", re.IGNORECASE | re.DOTALL)
 # A second click on the same card's Open this soon after the first opens nothing (no double tabs).
 _SOURCE_OPEN_GUARD_S = 1.0
 # The link next to BLOCK ADDED: the tools row may already have an "Open" (the Todo's own link).
@@ -1511,12 +1555,14 @@ class _AgendaJob:
 
 @dataclasses.dataclass(frozen=True)
 class _ExecJob:
-    """Carry out one approved proposal (executor.run_action). ``writes_running``: an RSVP, Move or
-    Cancel whose undo countdown ran out; "running" is saved right before its call to Google and
-    the result right after, by the worker."""
+    """Carry out one approved proposal (executor.run_action). ``writes_running``: its undo
+    countdown ran out; "running" is saved right before its call to Google and the result right
+    after, by the worker. ``expected_from``: a Reply / Email goes out only from this address (the
+    one its card showed when the countdown started)."""
 
     action: ProposedAction
     writes_running: bool
+    expected_from: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1529,9 +1575,12 @@ class _PeekJob:
 
 @dataclasses.dataclass(frozen=True)
 class _ConnectJob:
-    """The browser sign-in of one account (the agenda's Connect, a card's Sign in or Approve)."""
+    """The browser sign-in of one account (the agenda's Connect, a card's Sign in or Approve).
+    ``action``: a Reply / Email whose Send signs its account in (executor.sign_in: sending must
+    be allowed and the Google account known afterwards)."""
 
     alias: str
+    action: ProposedAction | None = None
 
 
 class _Bridge(QObject):
@@ -1584,13 +1633,16 @@ class _ActionWorker:
     """Runs Google calls one at a time on a daemon thread named "calendar".
 
     Jobs: a sign-in check (the header chip and the cards' Sign in links), an
-    approved proposal (``_ExecJob`` through executor.run_action: a Calendar
-    event or a Todo's block signs in first when needed, as before; an RSVP,
-    Move or Cancel has "running" saved right before its one call and the
-    result right after, on this thread, so the result is kept even when the
-    app quits meanwhile), reading the agenda and the cards' events (never a
-    sign-in), and the browser sign-in of one account. One at a time, so
-    nothing is read while a sign-in runs. Results only go through the bridge.
+    approved proposal whose undo countdown ran out (``_ExecJob`` through
+    executor.run_action: a Calendar event, a Todo's block, an RSVP, Move or
+    Cancel signs its account in first when needed; then "running" is saved
+    right before the one call and the result right after, on this thread, so
+    the result is kept even when the app quits meanwhile; a Reply or Email
+    goes out only when its account still is the one its card showed), reading
+    the agenda and the cards' events (never a sign-in), and the browser
+    sign-in of one account (a Reply / Email's through executor.sign_in). One
+    at a time, so nothing is read while a sign-in runs. Results only go
+    through the bridge.
     """
 
     def __init__(self, executor: Executor, calendars: Mapping[str, Any], store: ActionStore,
@@ -1612,12 +1664,14 @@ class _ActionWorker:
         self._jobs.put(_SIGN_IN_CHECK)
 
     def approve(self, action: ProposedAction) -> None:
-        """A Calendar event or a Todo's block: no countdown, nothing saved before the call."""
+        """A Calendar event or a Todo's block the older way (no countdown, nothing saved before
+        the call). The app itself always uses execute."""
         self._jobs.put(_ExecJob(action, writes_running=False))
 
-    def execute(self, action: ProposedAction) -> None:
-        """An RSVP, Move or Cancel whose countdown ran out: "running", the one call, the result."""
-        self._jobs.put(_ExecJob(action, writes_running=True))
+    def execute(self, action: ProposedAction, expected_from: str = "") -> None:
+        """A proposal whose countdown ran out: "running", the one call, the result. A Reply /
+        Email goes out only from ``expected_from``."""
+        self._jobs.put(_ExecJob(action, writes_running=True, expected_from=expected_from))
 
     def list_agenda(self, job: _AgendaJob) -> None:
         self._jobs.put(job)
@@ -1625,8 +1679,8 @@ class _ActionWorker:
     def peek(self, job: _PeekJob) -> None:
         self._jobs.put(job)
 
-    def connect(self, alias: str = DEFAULT_ACCOUNT) -> None:
-        self._jobs.put(_ConnectJob(alias))
+    def connect(self, alias: str = DEFAULT_ACCOUNT, action: ProposedAction | None = None) -> None:
+        self._jobs.put(_ConnectJob(alias, action))
 
     def stop(self) -> None:
         self._jobs.put(None)
@@ -1664,7 +1718,10 @@ class _ActionWorker:
         elif isinstance(job, _PeekJob):
             self._peek(job)
         elif isinstance(job, _ConnectJob):
-            self._connect(job.alias)
+            if job.action is not None:
+                self._connect_mail(job.alias, job.action)
+            else:
+                self._connect(job.alias)
         elif job == _SIGN_IN_CHECK:
             self._check_sign_ins()
 
@@ -1742,6 +1799,24 @@ class _ActionWorker:
             return
         self._emit("accountConnect", alias, _CONNECT_SIGNED_IN, "", "")
 
+    def _connect_mail(self, alias: str, action: ProposedAction) -> None:
+        """A Reply / Email's Send on an account that can't send yet: its browser sign-in (every
+        feature of the account, and which Google account it is)."""
+        self._emit("accountConnect", alias, _CONNECT_SIGN_IN, "", "")
+        try:
+            self._executor.sign_in(action)
+        except ExecError as exc:   # a safe message (google_auth / gmail logged the failure)
+            self._emit("accountConnect", alias, _CONNECT_FAILED, str(exc) or type(exc).__name__,
+                       exc.problem or PROBLEM_FAILED)
+            return
+        except Exception as exc:  # noqa: BLE001 - a bug must not end the worker
+            logger.error("Google sign-in failed unexpectedly (%s)", type(exc).__name__)
+            logger.debug("Where:\n%s", "".join(traceback.format_tb(exc.__traceback__)))
+            self._emit("accountConnect", alias, _CONNECT_FAILED, f"unexpected error ({type(exc).__name__})",
+                       PROBLEM_FAILED)
+            return
+        self._emit("accountConnect", alias, _CONNECT_SIGNED_IN, "", "")
+
     @staticmethod
     def _signed_in(calendar: Any) -> bool:
         try:
@@ -1756,8 +1831,17 @@ class _ActionWorker:
         def on_stage(stage: str) -> None:
             self._emit("actionProgress", action.id, stage)
 
+        if job.writes_running and action.sends_mail:
+            problem = _mail_from_problem(self._executor, action, job.expected_from)
+            if problem:   # never from another account than the card showed: nothing is sent
+                logger.info("Action %s (%s, %s) not sent: the sending account is not the one the card showed",
+                            action.id, action.kind, logged_alias(action.account))
+                self._store.set(action.id, STATUS_FAILED, message=problem, kind=action.kind, account=action.account)
+                self._emit("actionResult", action.id, None, ExecError(problem), STATUS_FAILED)
+                return
         outcome = run_action(self._executor, action, store=self._store if job.writes_running else None,
-                             writes_running=job.writes_running, on_stage=on_stage)
+                             writes_running=job.writes_running, on_stage=on_stage,
+                             proceed=lambda: not self._stop.is_set())
         self._emit("actionResult", action.id, outcome.result, outcome.error, outcome.status)
 
     def _emit(self, signal_name: str, *args: Any) -> None:
@@ -1765,6 +1849,21 @@ class _ActionWorker:
 
 
 _CalendarWorker = _ActionWorker   # its name before it also answered, moved and cancelled events
+
+
+def _mail_from_problem(executor: Executor, action: ProposedAction, expected: str) -> str:
+    """Why a Reply / Email may not go out now from ``expected`` (the address its card showed when
+    the countdown started): "" when the account is ready and still that address."""
+    try:
+        status = executor.mail_status(action)
+    except Exception as exc:  # noqa: BLE001 - treated as not ready: nothing is sent
+        logger.debug("Could not check the sending account (%s)", type(exc).__name__)
+        return FROM_CHANGED_NOTE
+    if not expected or status.sender.casefold() != expected.casefold():
+        return FROM_CHANGED_NOTE
+    if not status.ready:
+        return status.note or FROM_CHANGED_NOTE
+    return ""
 
 
 def _default_calendars(config: Config) -> dict[str, GoogleCalendar]:
@@ -1886,12 +1985,31 @@ def _card_options(action: ProposedAction, view: CardView) -> dict[str, Any]:
     options: dict[str, Any] = {"approve_text": view.approve_text or "Approve", "body": view.body,
                                "open_text": view.open_text, "copy_text": view.copy_text,
                                "title_lines": 2 if action.structured else 0, "deny_text": view.deny_text}
+    if action.sends_mail:
+        # A Reply / Email: FROM and the recipients' chips, the text as sent (line breaks kept,
+        # links highlighted, 10 lines), Edit; the right-hand button reads Send, Retry or Done.
+        options.update(edit_text=EDIT_LINK_TEXT, mail=True, body_lines=view.body_lines,
+                       body_links=body_links(action.body), approve_alternatives=(SEND_TEXT, DONE_TEXT))
+        return options
     if view.editable:
         # An RSVP, Move or Cancel: the check line, and Edit in a place that shows Sign in instead
         # while its account is blocked, or Google's own "Open event" when the line has no link.
         options.update(edit_text=EDIT_LINK_TEXT, check_line=view.check, sign_in_text=SIGN_IN_LINK_TEXT,
                        event_text="" if view.open_text else hud.OPEN_EVENT_TEXT)
     return options
+
+
+def _review_digest(subject: str, body: str) -> str:
+    """What a review in the Edit dialog covered: the subject and the message as the card has them
+    (whitespace as an edit keeps it). A digest, in memory only."""
+    subject = " ".join(str(subject or "").split())
+    body = str(body or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    return hashlib.sha256(f"{subject}\0{body}".encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def _for_button(note: str, button: str) -> str:
+    """A Reply / Email note's "click Send ..." in the words of the button the card shows (Retry)."""
+    return re.sub(r"\bclick Send\b", f"click {button}", note) if button and button != SEND_TEXT else note
 
 
 @dataclasses.dataclass
@@ -1902,11 +2020,19 @@ class _Countdown:
     deadline: float              # time.monotonic() when it runs out
     started: float               # time.monotonic() of the click that started it (Undo's double-click guard)
     shown: int = -1              # the seconds the card shows
+    sender: str = ""             # a Reply / Email: the From address its card showed (it goes out only from it)
 
 
 def _action_phrase(action: ProposedAction) -> str:
-    """"Accept Speaker series", "Move Project sync", "Cancel Study group" (activity rows)."""
+    """"Accept Speaker series", "Move Project sync", "Cancel Study group", "Add Project sync",
+    "Add a block for Problem set 3", or a Reply's / Email's subject (activity rows)."""
     title = _activity_title(action)
+    if action.kind == CALENDAR:
+        return f"Add {title}"
+    if action.kind == TODO:
+        return f"Add a block for {title}"
+    if action.kind in (REPLY, EMAIL):
+        return _kind_title(action)
     if action.kind == RSVP:
         verb = {"yes": "Accept", "no": "Decline", "maybe": "Answer maybe to"}.get(action.field("answer"), "Answer")
         return f"{verb} {title or 'an invitation'}"
@@ -1919,7 +2045,26 @@ def _kind_title(action: ProposedAction) -> str:
     title = _activity_title(action)
     if title:
         return title
-    return {RSVP: "an invitation", MOVE: "a meeting", CANCEL: "a meeting"}.get(action.kind, action.kind)
+    return {RSVP: "an invitation", MOVE: "a meeting", CANCEL: "a meeting", REPLY: "a reply",
+            EMAIL: "an email"}.get(action.kind, action.kind)
+
+
+def _card_detail(action: ProposedAction, view: CardView, today: Any) -> str:
+    """The card's detail line: a Reply / Email shows only when it is due ("Due tomorrow"), since
+    its recipients are chips; every other card its CardView detail."""
+    if not action.sends_mail:
+        return view.detail
+    words = due_words(action, today)
+    return words[:1].upper() + words[1:]
+
+
+def _adds_event(action: ProposedAction) -> bool:
+    """A Calendar event or a Todo's block (added to the personal calendar after the countdown)."""
+    return action.kind in (CALENDAR, TODO)
+
+
+def _recipient_count(count: int) -> str:
+    return f"{count} recipient" + ("" if count == 1 else "s")
 
 
 def _time_texts(action: ProposedAction, hour24: bool = False) -> tuple[str, str, str]:
@@ -1976,23 +2121,29 @@ class AppController(QObject):
     """State machine behind the window: prompt -> (snoozed ->) reading -> quit.
 
     A launch for a newer run takes the reading screen back to the prompt once
-    nothing is playing there. Proposed actions are shown as cards; only an
-    explicit Approve creates an event, or Add block a Todo's block (on the
-    action worker). Accept / Decline / Maybe, Move and Cancel event answer an
-    invitation, move or cancel an event, and only after the card shows
-    Google's own view of that event (its check line, read by id) and that view
-    allows it; then an undo countdown runs (``[actions] undo_seconds``; Undo
-    sends nothing) and only its end queues the one call. "running" is saved
-    before that call; a call that may or may not have happened shows UNKNOWN
-    with Retry and is never retried by itself. Each account signs in only on a
-    click (a card's Sign in or Approve, the agenda's Connect). Edit changes
-    such a card in memory, and what the card shows is what is carried out.
-    The other proposals are hand-offs: Open (an allowlisted link, only on a
-    click), Copy (the drafted text to the clipboard), Done and Deny; nothing
-    is sent.
+    nothing is playing there. Proposed actions are shown as cards. Every card
+    Jarvis carries out starts an undo countdown first (``[actions]
+    undo_seconds``; Undo sends nothing) and only its end queues the one call:
+    Approve creates an event, Add block a Todo's block, Accept / Decline /
+    Maybe, Move and Cancel event answer an invitation, move or cancel an event
+    (only after the card shows Google's own view of that event, its check
+    line read by id, and that view allows it), and Send sends a Reply or Email
+    through Gmail (only once its account is signed in and its card shows From,
+    every new recipient was ticked in Edit and a long message was read in
+    Edit). "running" is saved before that call; a call that may or may not
+    have happened shows UNKNOWN with Retry and is never retried by itself.
+    Each account signs in only on a click (a card's Sign in, Approve or Send,
+    the agenda's Connect). Edit changes such a card in memory, and what the
+    card shows is what is carried out. The other proposals are hand-offs:
+    Open (an allowlisted link, only on a click), Copy (the drafted text to the
+    clipboard), Done and Deny; nothing is sent.
     ``calendar_factory(config)`` builds the calendar clients (tests inject a
     fake): one calendar (the personal account's) or a mapping alias ->
-    calendar; it is only called when ``[calendar] enabled`` is true. An Approve
+    calendar; ``sender_factory(config)`` the Gmail senders (a mapping alias ->
+    sender). Without either, both are built from one Google account per alias
+    (one sign-in each); with only one of them injected, the other is empty
+    (tests never reach a real account). Neither is called when ``[calendar]
+    enabled`` is false (Google is off). An Approve
     or Deny within ``_DECISION_CLICK_GUARD_S`` of the previous one is ignored;
     ``click_clock`` (seconds, monotonic; default ``time.monotonic``, looked up
     at each click so tests may also patch it) times that. While an approval
@@ -2009,6 +2160,7 @@ class AppController(QObject):
                  now_mode: bool, startup_error: str | None = None, volume: float = 1.0,
                  now_func: Callable[[], datetime] = _local_now,
                  calendar_factory: Callable[[Config], Any] | None = None,
+                 sender_factory: Callable[[Config], Any] | None = None,
                  action_store: ActionStore | None = None,
                  click_clock: Callable[[], float] | None = None,
                  slots: Mapping[str, str] | None = None,
@@ -2044,9 +2196,13 @@ class AppController(QObject):
         if action_store is None:
             action_store = ActionStore(config.data_dir / ACTIONS_FILE)
         self._store = action_store
-        self._calendars: dict[str, Any] = self._create_calendars(calendar_factory)
+        self._calendars: dict[str, Any]
+        self._senders: dict[str, Any]
+        self._calendars, self._senders = self._create_google(calendar_factory, sender_factory)
         self.calendar = self._calendars.get(DEFAULT_ACCOUNT)   # the agenda's and Calendar proposals'
-        self._executor = Executor([CalendarBackend(self._calendars, now=now_func)], config.accounts)
+        self._history = recipient_history(config)   # whom Jarvis sent to (recipients.json; read on use)
+        self._executor = build_executor(config, self._calendars, self._senders, history=self._history,
+                                        now=now_func)
         self._calendar_worker: _ActionWorker | None = None
         self._init_fetch_state()
         self._init_script_state()
@@ -2109,6 +2265,10 @@ class AppController(QObject):
         self._carried: dict[str, ProposedAction] = {}   # action id -> what Jarvis carried out (this run)
         self._mismatch_seen: dict[str, EventCheck] = {}   # action id -> the check whose mismatch was shown
         self._dialog: hud.EditDialog | None = None
+        # Reply / Email id -> _review_digest of the subject and message the Edit dialog showed whole
+        # (this run, memory only): Send skips the review only while the card still says exactly that.
+        self._reviewed: dict[str, str] = {}
+        self._connect_mail = False                 # the queued / running sign-in is a Reply / Email's Send
         self._read_slot: str | None = None         # the scheduled slot this reading settled
 
     @property
@@ -2207,6 +2367,35 @@ class AppController(QObject):
         old.deleteLater()
         self.player = self._create_player()
 
+    def _create_google(self, calendar_factory: Callable[[Config], Any] | None,
+                       sender_factory: Callable[[Config], Any] | None) -> tuple[dict[str, Any], dict[str, Any]]:
+        """(calendars, senders) by alias; both empty when [calendar] enabled = false.
+
+        Without factories one GoogleAccount per alias is shared by its calendar and its sender
+        (one sign-in and one accounts.json binding per alias); nothing here opens the browser or
+        talks to Google. An injected factory replaces its half; the other half is then empty.
+        """
+        if not self.config.calendar.enabled:
+            return {}, {}
+        if calendar_factory is None and sender_factory is None:
+            try:
+                accounts = build_accounts(self.config)
+                return build_calendars(self.config, accounts), build_senders(self.config, accounts)
+            except Exception as exc:  # noqa: BLE001 - the briefing works without Google
+                logger.warning("Could not set up the Google accounts (%s)", type(exc).__name__)
+                return {}, {}
+        calendars = self._create_calendars(calendar_factory) if calendar_factory is not None else {}
+        senders: dict[str, Any] = {}
+        if sender_factory is not None:
+            try:
+                built = sender_factory(self.config)
+            except Exception as exc:  # noqa: BLE001 - the cards stay Copy / Open hand-offs
+                logger.warning("Could not set up sending email (%s)", type(exc).__name__)
+                built = None
+            if isinstance(built, Mapping):
+                senders = {str(alias): sender for alias, sender in built.items() if sender is not None}
+        return calendars, senders
+
     def _create_calendars(self, factory: Callable[[Config], Any] | None) -> dict[str, Any]:
         """alias -> calendar ({} when [calendar] enabled = false or it could not be set up).
 
@@ -2273,8 +2462,9 @@ class AppController(QObject):
         self._tts.start()
 
     def _start_calendar(self) -> _ActionWorker | None:
-        """The action worker, started once Google Calendar is set up (it checks the sign-ins first)."""
-        if self._calendar_worker is None and self._any_calendar_configured() and not self._closing.is_set():
+        """The action worker, started once Google Calendar or sending email is set up (it checks
+        the sign-ins first)."""
+        if self._calendar_worker is None and self._any_google_configured() and not self._closing.is_set():
             self._calendar_worker = _ActionWorker(self._executor, self._calendars, self._store, self._bridge,
                                                   self._closing)
             self._calendar_worker.check_sign_in()
@@ -2286,6 +2476,9 @@ class AppController(QObject):
 
     def _any_calendar_configured(self) -> bool:
         return any(self._configured(calendar) for calendar in self._calendars.values())
+
+    def _any_google_configured(self) -> bool:
+        return self._any_calendar_configured() or any(self._configured(sender) for sender in self._senders.values())
 
     @staticmethod
     def _configured(calendar: Any) -> bool:
@@ -2393,7 +2586,8 @@ class AppController(QObject):
                 state = "signing in"
             elif problem == PROBLEM_BLOCKED:
                 state = "blocked by its administrator"
-            elif problem in (PROBLEM_EXPIRED, PROBLEM_DENIED, PROBLEM_SCOPE, PROBLEM_TIMEOUT, PROBLEM_FAILED):
+            elif problem in (PROBLEM_EXPIRED, PROBLEM_DENIED, PROBLEM_SCOPE, PROBLEM_TIMEOUT, PROBLEM_FAILED,
+                             PROBLEM_IDENTITY):
                 state = "sign in again"
             else:
                 state = "not signed in"
@@ -2576,6 +2770,14 @@ class AppController(QObject):
             return self._carried[action_id]
         return self._current(action_id)
 
+    def _is_edited(self, page: ProposedAction) -> bool:
+        """The Edit dialog changed what the card carries out (ticking new recipients alone does not
+        count: the message is the same)."""
+        if page.id not in self._edits:
+            return False
+        effective = self._effective(page)
+        return dataclasses.replace(effective, confirmed=page.confirmed) != page
+
     def _effective(self, action: ProposedAction) -> ProposedAction:
         edit = self._edits.get(action.id)
         if edit is None:
@@ -2593,7 +2795,7 @@ class AppController(QObject):
             return
         self._actions = list(actions)
         ids = {action.id for action in self._actions}
-        for kept in (self._edits, self._checks, self._hints, self._carried, self._mismatch_seen):
+        for kept in (self._edits, self._checks, self._hints, self._carried, self._mismatch_seen, self._reviewed):
             for action_id in [key for key in kept if key not in ids]:
                 del kept[action_id]
         countdown = self._countdown
@@ -2607,8 +2809,8 @@ class AppController(QObject):
         for page_action in self._actions:
             action = self._shown(page_action.id) or self._effective(page_action)
             view = card_view(action, today)
-            label = view.kind_label + (EDITED_MARK if action.id in self._edits else "")
-            reading.add_action_card(action.id, label, view.title, view.detail,
+            label = view.kind_label + (EDITED_MARK if self._is_edited(page_action) else "")
+            reading.add_action_card(action.id, label, view.title, _card_detail(action, view, today),
                                     view.decidable, **_card_options(action, view))
             self._show_card_state(action.id)   # also sets the note (warnings) while it waits
         self._sync_card_locks()
@@ -2622,7 +2824,8 @@ class AppController(QObject):
         a retry) its note is shown again: WORKING... clears the note. An RSVP, Move or
         Cancel card also gets its check line, its Edit / Copy links and the text of its
         right-hand button (Accept, Sign in, Retry, or Done when Jarvis may not change
-        the event) here.
+        the event) here; a Reply / Email card its FROM line and recipient chips, Edit
+        and Send / Retry (Done when Jarvis can't send it: Copy and Open instead).
         """
         card = self.window.reading.action_card(action_id)
         if card is None or not card.actionable:
@@ -2631,35 +2834,52 @@ class AppController(QObject):
         stage = self._jobs.get(action_id)
         entry = self._store.get(action_id) or {}
         status = entry.get("status", "")
-        countdown = action is not None and action.countdown
-        if countdown:
+        event = action is not None and action.changes_event
+        mail = action is not None and action.sends_mail
+        mail_status = self._mail_status(action) if mail else None
+        if event:
             self._sync_countdown_card(card, action, status, stage)
+        elif mail and mail_status is not None:
+            self._sync_mail_card(card, action, status, stage, mail_status)
+        elif action is not None and _adds_event(action) and stage is None:
+            # After an unknown outcome the button says what it does: count down and add again
+            # (Google is asked for the existing event first, so a retry never adds a second one).
+            approve = card_view(action, self._now().date()).approve_text or "Approve"
+            card.set_approve_text(RETRY_TEXT if status == STATUS_UNKNOWN else approve)
         if stage == _STAGE_COUNTDOWN:
             card.set_status(hud.CARD_COUNTDOWN, self._countdown_text())
             return
         if stage is not None:
             if stage == _STAGE_SIGNIN:
                 card.set_status(hud.CARD_SIGNIN,
-                                f"Waiting for Google sign-in ({action.account})" if countdown else "")
+                                f"Waiting for Google sign-in ({action.account})" if event or mail else "")
             else:
                 card.set_status(hud.CARD_WORKING)
             return
         if status == STATUS_FAILED:
-            message = entry.get("message", "")
-        elif status == STATUS_UNKNOWN and countdown:
-            message = UNKNOWN_CARD_TEXT
+            # A Reply / Email that failed was certainly not sent: say that on the result line (two
+            # lines at most); Gmail's reason goes into the note, which shows all of it.
+            message = MAIL_FAILED_TEXT if mail else entry.get("message", "")
+        elif status == STATUS_UNKNOWN and action is not None and action.countdown:
+            message = UNKNOWN_MAIL_CARD_TEXT if mail else UNKNOWN_CARD_TEXT
         elif status == STATUS_SENT:
             message = entry.get("message", "") or (result_text(action, status) if action is not None else "")
         else:
             message = result_text(action, status) if action is not None else ""
         shown = _CARD_FOR_STATUS.get(status, hud.CARD_PENDING)
         block = action is not None and action.kind == TODO
-        link_text = _BLOCK_LINK_TEXT if block else (_EVENT_LINK_TEXT if countdown else "")
+        link_text = _BLOCK_LINK_TEXT if block else (_EVENT_LINK_TEXT if event else "")
         card.set_status(shown, message, entry.get("link", ""), link_text)
         if action is None or shown not in (hud.CARD_PENDING, hud.CARD_FAILED, hud.CARD_UNKNOWN):
             return
-        if countdown:
+        if event:
             card.set_note(self._countdown_note(action, status, entry))
+        elif mail and mail_status is not None:
+            card.set_note(self._mail_card_note(action, status, entry, mail_status))
+        elif status == STATUS_UNKNOWN and _adds_event(action):
+            reason = _CHECK_BEFORE_RETRY_RE.sub("", entry.get("message", ""))
+            card.set_note(f" {DOT} ".join(part for part in (reason, card_view(action, self._now().date()).note)
+                                          if part))
         elif card.note() != CALENDAR_SETUP_NOTE:
             note = card_view(action, self._now().date()).note
             if note:
@@ -2678,6 +2898,88 @@ class AppController(QObject):
         card.set_copy_text(self._copy_label(action))
         if idle:
             card.set_approve_text(self._approve_text(action, status))
+
+    # ---- Reply / Email cards ------------------------------------------------------------------
+
+    def _mail_status(self, action: ProposedAction) -> MailStatus:
+        """What a Reply / Email card shows about sending (executor.mail_status; files only)."""
+        try:
+            status = self._executor.mail_status(action)
+        except Exception as exc:  # noqa: BLE001 - the card becomes a hand-off, nothing is sent
+            logger.warning("Could not check the sending account of action %s (%s)", action.id, type(exc).__name__)
+            return MailStatus(action.account, "", f"From: {action.account}", PROBLEM_SETUP,
+                              f"Couldn't check the {action.account} account - use {hand_off_tools(action)} instead",
+                              hand_off=True)
+        if not self.config.calendar.enabled and status.hand_off:
+            status = dataclasses.replace(status, note=MAIL_OFF_NOTE.format(tools=hand_off_tools(action)))
+        return status
+
+    def _recipient_chips(self, action: ProposedAction, status: MailStatus, *,
+                         badges: bool = True) -> tuple[list[hud.RecipientChip], list[hud.RecipientChip]]:
+        """The card's (or Edit dialog's) To and Cc chips: what is sent (the account's own address
+        taken out), each new one red until it is ticked in Edit."""
+        review = status.review
+        if review is None:
+            return ([hud.RecipientChip(address) for address in action.recipients()],
+                    [hud.RecipientChip(address) for address in action.cc()])
+        ticked = {address.casefold() for address in action.confirmed}
+
+        def chip(address: str) -> hud.RecipientChip:
+            if not badges or review.kind_of(address) != RECIPIENT_NEW_KIND:
+                return hud.RecipientChip(address)
+            confirmed = address.casefold() in ticked
+            return hud.RecipientChip(address, hud.RECIPIENT_CONFIRMED if confirmed else hud.RECIPIENT_NEW)
+
+        return [chip(address) for address in review.to], [chip(address) for address in review.cc]
+
+    def _recipient_state(self, status: MailStatus, address: str) -> str:
+        """An address typed into the Edit dialog: hud.RECIPIENT_OWN / _NEW / _KNOWN."""
+        try:
+            kind = classify([address], own=status.sender, trusted_domains=self.config.actions.trusted_domains,
+                            history=self._history).get(address, RECIPIENT_NEW_KIND)
+        except Exception as exc:  # noqa: BLE001 - unknown counts as new (it needs a tick)
+            logger.debug("Could not classify a recipient (%s)", type(exc).__name__)
+            kind = RECIPIENT_NEW_KIND
+        if kind == RECIPIENT_OWN_KIND:
+            return hud.RECIPIENT_OWN
+        return hud.RECIPIENT_NEW if kind == RECIPIENT_NEW_KIND else hud.RECIPIENT_KNOWN
+
+    def _sync_mail_card(self, card: hud.ActionCard, action: ProposedAction, status: str, stage: str | None,
+                        mail: MailStatus) -> None:
+        """A Reply / Email card's FROM line, chips, Edit and button text."""
+        decided = self._store.is_decided(action.id)
+        idle = stage is None and not decided and self.state != STATE_QUITTING
+        to, cc = self._recipient_chips(action, mail, badges=not mail.hand_off and not decided)
+        card.set_recipients(mail.from_text.removeprefix("From: "), to, cc)
+        card.set_edit_enabled(self._tools_enabled(action.id))
+        if idle:
+            card.set_approve_text(self._mail_button(status, mail))
+
+    @staticmethod
+    def _mail_button(status: str, mail: MailStatus) -> str:
+        """Done while Jarvis can't send from this card (not set up, blocked, empty: Copy / Open
+        instead); Retry after an unknown outcome, and after a failure unless the account must sign
+        in again first (the note then says "click Send to sign in again"); else Send."""
+        if mail.hand_off:
+            return DONE_TEXT
+        if status == STATUS_UNKNOWN or (status == STATUS_FAILED and not mail.sign_in):
+            return RETRY_TEXT
+        return SEND_TEXT
+
+    def _mail_card_note(self, action: ProposedAction, status: str, entry: Mapping[str, Any],
+                        mail: MailStatus) -> str:
+        """A Reply / Email card's amber note: what its last Send click needs next, why its outcome
+        is unknown, why it can't send (sign-in, new recipients), then the line's own notes."""
+        button = self._mail_button(status, mail)   # the notes name the button the card shows
+        parts = [_for_button(self._hints.get(action.id, ""), button)]
+        if status == STATUS_UNKNOWN:
+            parts.append(_CHECK_BEFORE_RETRY_RE.sub("", entry.get("message", "")))
+        elif status == STATUS_FAILED:
+            parts.append(_NOTHING_SENT_RE.sub("", entry.get("message", "")))
+        if not self._signing_in(action.account):   # while it runs, the hint says what to do
+            parts.append(_for_button(mail.note, button))
+        parts.append(card_view(action, self._now().date()).note)
+        return f" {DOT} ".join(dict.fromkeys(part for part in parts if part))
 
     def _approve_text(self, action: ProposedAction, status: str) -> str:
         """Done while Jarvis can't act for the card's account (not set up for it, or its
@@ -2771,7 +3073,8 @@ class AppController(QObject):
         signed_in, problem, message = self._accounts_state.get(alias, (True, "", ""))
         if not signed_in and problem and problem != PROBLEM_SIGNED_OUT:
             line = _PROBLEM_LINES.get(problem, _PROBLEM_LINE_OTHER).format(alias=alias)
-            return line, sign_in_note(alias, problem=problem, message=message), True
+            return line, sign_in_note(alias, problem=problem, message=message,
+                                      sends_mail=self._sends_mail(alias)), True
         check = self._checks.get(action.id)
         if check is not None:
             if check.reason:   # Jarvis won't act on this event: the reason, Google's view on hover
@@ -2806,6 +3109,11 @@ class AppController(QObject):
         parts.append(card_view(action, self._now().date()).note)
         return f" {DOT} ".join(dict.fromkeys(part for part in parts if part))
 
+    def _sends_mail(self, alias: str) -> bool:
+        """The account has the gmail_send feature in config.toml (its sign-ins ask to send email)."""
+        account = self.config.accounts.get(alias)
+        return account is not None and GMAIL_FEATURE in account.features
+
     def _hint(self, action_id: str, text: str) -> None:
         """What the card's last Approve click needs next (its amber note until the next click)."""
         if text:
@@ -2815,9 +3123,10 @@ class AppController(QObject):
         self._show_card_state(action_id)
 
     def _refresh_countdown_cards(self) -> None:
-        """Check lines, links, buttons and notes of every RSVP, Move and Cancel card."""
+        """Check lines, links, buttons and notes of every RSVP, Move and Cancel card, and the FROM
+        line, chips and notes of every Reply / Email card (a sign-in changes them)."""
         for action in self._actions:
-            if action.countdown:
+            if action.editable:
                 self._show_card_state(action.id)
 
     def _refresh_actions_ui(self) -> None:
@@ -2859,7 +3168,7 @@ class AppController(QObject):
         for card in self.window.reading.approvals.cards():
             card.set_locked(bool(tip) and card.action_id not in self._jobs, tip)
             action = self._action(card.action_id)
-            if card.actionable and action is not None and action.countdown:
+            if card.actionable and action is not None and action.editable:
                 card.set_edit_enabled(self._tools_enabled(card.action_id))   # never a dialog beside Undo
 
     def _locked_out(self, action_id: str) -> bool:
@@ -2880,14 +3189,16 @@ class AppController(QObject):
     def approve_action(self, action_id: str) -> None:
         """The card's right-hand button.
 
-        Approve creates the event on the action worker (signing in first when
-        needed) and Add block adds a Todo's block the same way. Accept /
-        Decline / Maybe, Move and Cancel event (and Retry) start the undo
-        countdown once the card shows Google's own view of its event and that
-        view allows it; before that the click signs the account in or checks
-        the event, and the card says to click again. Done (cards Jarvis does
-        not carry out, or whose event Jarvis may not change) records that you
-        handled it.
+        Approve (a Calendar event) and Add block (a Todo's block) start the undo
+        countdown; at its end the action worker signs in when needed and adds
+        the event. Accept / Decline / Maybe, Move and Cancel event (and Retry)
+        start the countdown once the card shows Google's own view of its event
+        and that view allows it; before that the click signs the account in or
+        checks the event, and the card says to click again. Send (a Reply or
+        Email) signs its account in first, opens Edit to confirm new recipients
+        or to read a long message, and otherwise starts the countdown. Done
+        (cards Jarvis does not carry out, or whose event Jarvis may not change,
+        or a message it can't send) records that you handled it.
         """
         if self._decision_click_too_soon() or self._locked_out(action_id):
             return
@@ -2898,31 +3209,73 @@ class AppController(QObject):
         if not action.actionable:
             self._mark_done(action)
             return
-        if action.countdown:
+        if action.changes_event:
             status = (self._store.get(action_id) or {}).get("status", "")
             if self._approve_text(action, status) == DONE_TEXT:   # what the button says
                 self._mark_done(action)
                 return
             self._approve_countdown(action)
             return
+        if action.sends_mail:
+            self._approve_mail(action)
+            return
         if action.kind == TODO and action.block_event() is None:
             return
         card = self.window.reading.action_card(action_id)
         worker = self._start_calendar()
-        if worker is None:
+        if worker is None or self._executor.readiness(action):
             logger.info("Approve %s: Google Calendar is not set up", action_id)
             if card is not None:
                 card.set_note(CALENDAR_SETUP_NOTE)
             self._activity(hud.TAG_WAIT, "Google Calendar is not set up", "README step 8")
             return
-        logger.info("Approved action %s", action_id)
-        self._jobs[action_id] = _STAGE_WORKING
-        self._running[action_id] = (action, False)
-        self._show_card_state(action_id)
-        self._sync_card_locks()
-        adding = f"Adding a block for {_activity_title(action)}" if action.kind == TODO else f"Adding {action.title}"
-        self._activity(hud.TAG_RUN, adding, "Google Calendar")
-        worker.approve(action)   # a Todo's block keeps the Todo's id, so the result lands on its card
+        self._start_countdown(action)   # a Todo's block keeps the Todo's id, so the result lands on its card
+
+    def _approve_mail(self, action: ProposedAction) -> None:
+        """Send / Retry on a Reply or Email: sign in first (no countdown) while its account can't
+        send, open Edit while a new recipient is not ticked or a long message was not read there,
+        else count down. Done (Jarvis can't send it here) records that you handled it."""
+        action_id = action.id
+        mail = self._mail_status(action)
+        if mail.hand_off:
+            self._mark_done(action)
+            return
+        if self._start_calendar() is None:   # no sending account is set up at all
+            self._hint(action_id, mail.note or MAIL_OFF_NOTE.format(tools=hand_off_tools(action)))
+            return
+        if mail.sign_in:
+            logger.info("Send %s: signing in to the %s account first", action_id, logged_alias(action.account))
+            self._hint(action_id, MAIL_SIGN_IN_NOTE)
+            self._start_sign_in(action.account, card_id=action_id, action=action)
+            return
+        if mail.needs_edit:
+            review = mail.review
+            logger.info("Send %s: %d new recipient(s) to confirm in Edit first", action_id,
+                        len(review.unconfirmed) if review is not None else 0)
+            confirm = review is not None and not review.problem
+            banner = CONFIRM_BANNER if confirm else ""
+            if banner and self._unread(action):
+                banner = f"{banner} {CONFIRM_READ_TOO}"
+            self._hint(action_id, CONFIRM_NOTE if confirm else mail.note)
+            self._open_mail_dialog(action, banner)
+            return
+        if self._unread(action):
+            logger.info("Send %s: opening Edit to read the whole message first", action_id)
+            self._hint(action_id, REVIEW_NOTE)
+            self._open_mail_dialog(action, REVIEW_BANNER)
+            return
+        if not mail.ready:
+            self._hint(action_id, mail.note or NOT_READY_NOTE)
+            return
+        self._start_countdown(action, sender=mail.sender)
+
+    def _unread(self, action: ProposedAction) -> bool:
+        """A Reply / Email whose card does not show all of its subject or message (cut at the card's
+        width, or more lines than the card has) and whose Edit dialog has not shown exactly this
+        subject and message whole yet: Send opens the dialog to read it first."""
+        card = self.window.reading.action_card(action.id)
+        cut = body_needs_review(action) or card is None or card.mail_cut()
+        return cut and self._reviewed.get(action.id) != _review_digest(action.title, action.body)
 
     def _approve_countdown(self, action: ProposedAction) -> None:
         """Accept / Move / Cancel event / Retry: sign in or check first when needed, else count down."""
@@ -2962,18 +3315,36 @@ class AppController(QObject):
 
     # ---- the undo countdown --------------------------------------------------------------
 
-    def _start_countdown(self, action: ProposedAction) -> None:
+    def _start_countdown(self, action: ProposedAction, *, sender: str = "") -> None:
+        """Count down to the one call (Undo until then). ``sender``: a Reply / Email's From address
+        as its card shows it; it goes out only from that address."""
         seconds = int(self.config.actions.undo_seconds)
         now = time.monotonic()
         self._hints.pop(action.id, None)
-        self._countdown = _Countdown(action, deadline=now + seconds, started=now)
+        self._countdown = _Countdown(action, deadline=now + seconds, started=now, sender=sender)
         self._jobs[action.id] = _STAGE_COUNTDOWN
-        logger.info("Approved action %s (%s, %s): sending in %d s unless undone", action.id, action.kind,
-                    logged_alias(action.account), seconds)
+        logger.info("Approved action %s (%s, %s): %s in %d s unless undone", action.id, action.kind,
+                    logged_alias(account_of(action)), "adding" if _adds_event(action) else "sending", seconds)
         self._show_card_state(action.id)
         self._sync_card_locks()
-        self._activity(hud.TAG_RUN, f"Sending in {seconds} s: {_action_phrase(action)}", kind_label(action).upper())
+        if action.kind == CALENDAR:
+            self._activity(hud.TAG_RUN, f"Adding in {seconds} s: {action.title}", "Google Calendar")
+        elif action.kind == TODO:
+            self._activity(hud.TAG_RUN, f"Adding in {seconds} s: a block for {_activity_title(action)}",
+                           "Google Calendar")
+        else:
+            self._activity(hud.TAG_RUN, f"Sending in {seconds} s: {_action_phrase(action)}",
+                           self._activity_sub(action))
         self._countdown_timer.start()
+
+    def _activity_sub(self, action: ProposedAction) -> str:
+        """"MOVE \u00b7 WORK"; a Reply / Email adds its recipient count ("REPLY \u00b7 WORK \u00b7 2 recipients")."""
+        label = kind_label(action).upper()
+        if not action.sends_mail:
+            return label
+        review = self._mail_status(action).review
+        count = len(review.recipients) if review is not None else len(action.mail_recipients())
+        return f"{label} {DOT} {_recipient_count(count)}"
 
     def _countdown_text(self) -> str:
         countdown = self._countdown
@@ -2981,7 +3352,9 @@ class AppController(QObject):
             return ""
         seconds = max(0, math.ceil(countdown.deadline - time.monotonic()))
         countdown.shown = seconds
-        return f"Sending in {seconds} s"
+        if countdown.action.sends_mail:   # the FROM line may be scrolled out of view: say which account
+            return f"Sending from {countdown.action.account} in {seconds} s"
+        return f"{'Adding' if _adds_event(countdown.action) else 'Sending'} in {seconds} s"
 
     def _on_countdown_tick(self) -> None:
         countdown = self._countdown
@@ -3008,11 +3381,27 @@ class AppController(QObject):
         if self.state == STATE_QUITTING or worker is None:
             self._jobs.pop(action.id, None)
             return
+        if action.sends_mail:
+            problem = _mail_from_problem(self._executor, action, countdown.sender)
+            if problem:   # the account (or its address) changed under the countdown: nothing is sent
+                self._jobs.pop(action.id, None)
+                logger.info("Action %s (%s, %s) not sent: the sending account changed during the countdown",
+                            action.id, action.kind, logged_alias(action.account))
+                self._activity(hud.TAG_STOP, f"Not sent: {_kind_title(action)}", _short(problem))
+                self._hint(action.id, problem)
+                self._sync_card_locks()
+                self._refresh_actions_ui()
+                return
         self._jobs[action.id] = _STAGE_WORKING
         self._running[action.id] = (action, True)
         self._show_card_state(action.id)
-        self._activity(hud.TAG_RUN, f"Sending: {_action_phrase(action)}", kind_label(action).upper())
-        worker.execute(action)
+        if action.kind == CALENDAR:
+            self._activity(hud.TAG_RUN, f"Adding {action.title}", "Google Calendar")
+        elif action.kind == TODO:
+            self._activity(hud.TAG_RUN, f"Adding a block for {_activity_title(action)}", "Google Calendar")
+        else:
+            self._activity(hud.TAG_RUN, f"Sending: {_action_phrase(action)}", self._activity_sub(action))
+        worker.execute(action, expected_from=countdown.sender)
 
     def undo_action(self, action_id: str) -> None:
         """Undo during the countdown: nothing is sent and nothing is saved; the card waits again.
@@ -3028,8 +3417,9 @@ class AppController(QObject):
             return
         action = countdown.action
         self._cancel_countdown("undone")
+        nothing = "nothing was created" if _adds_event(action) else "nothing was sent"
         self._activity(hud.TAG_STOP, f"Undone: {_action_phrase(action)}",
-                       f"{kind_label(action).upper()} {DOT} nothing was sent")
+                       f"{kind_label(action).upper()} {DOT} {nothing}")
         self._refresh_actions_ui()
 
     def _cancel_countdown(self, reason: str) -> None:
@@ -3044,8 +3434,10 @@ class AppController(QObject):
         self._sync_card_locks()
 
     def _send_in_flight(self) -> bool:
-        """An RSVP, Move or Cancel call is queued or on its way to Google."""
-        return any(writes and action_id in self._jobs for action_id, (_action, writes) in self._running.items())
+        """A call is queued or on its way to Google ("running" is or is about to be saved); not
+        while its account's browser sign-in waits (nothing was sent then)."""
+        return any(writes and self._jobs.get(action_id) == _STAGE_WORKING
+                   for action_id, (_action, writes) in self._running.items())
 
     # ---- other decisions and the tools row -----------------------------------------------------
 
@@ -3073,7 +3465,7 @@ class AppController(QObject):
             self._activity(hud.TAG_STOP, f"Denied {action.title}", "nothing was created")
         elif action.kind == TODO:
             self._activity(hud.TAG_STOP, f"Dismissed {_activity_title(action)}", "nothing was created")
-        elif action.countdown:   # Skip: its card reads SKIPPED
+        elif action.changes_event:   # Skip: its card reads SKIPPED
             self._activity(hud.TAG_STOP, f"Skipped {_kind_title(action)}", "nothing was sent")
         else:
             self._activity(hud.TAG_STOP, f"Dismissed {_kind_title(action)}", "nothing was sent")
@@ -3084,7 +3476,7 @@ class AppController(QObject):
         action = self._action(action_id)
         if action is None or self.state == STATE_QUITTING:
             return
-        link = action.link or (self._google_link(action_id) if action.countdown else "")
+        link = action.link or (self._google_link(action_id) if action.changes_event else "")
         if not link:
             return
         now = self._click_now()
@@ -3107,7 +3499,7 @@ class AppController(QObject):
         action = self._current(action_id)
         if action is None or not action.body or self.state == STATE_QUITTING:
             return
-        if not (self._copy_label(action) if action.countdown else copy_text(action)):
+        if not (self._copy_label(action) if action.changes_event else copy_text(action)):
             return
         QGuiApplication.clipboard().setText(action.body)
         card = self.window.reading.action_card(action_id)
@@ -3118,17 +3510,18 @@ class AppController(QObject):
                     len(action.body))
 
     def open_action_link(self, link: str) -> None:
-        if not link.startswith("https://"):
-            logger.info("Not opening an event link that is not https")
+        """A result's Open (the event, or the sent message's thread): only an allowlisted https link."""
+        if not link.startswith("https://") or not link_allowed(link, self.config.actions.link_hosts):
+            logger.info("Not opening a result link that is not an allowed https link")
             return
-        logger.info("Open the calendar event")
+        logger.info("Open the result of an action")
         QDesktopServices.openUrl(QUrl(link))
 
     # ---- the Edit dialog --------------------------------------------------------------------------
 
     def edit_action(self, action_id: str) -> None:
-        """A card's Edit: the window-modal Edit dialog of an RSVP, Move or Cancel. Save keeps
-        the changes on the card (memory only, same id); nothing is sent."""
+        """A card's Edit: the window-modal Edit dialog of an RSVP, Move, Cancel, Reply or Email.
+        Save keeps the changes on the card (memory only, same id); nothing is sent."""
         if self.state == STATE_QUITTING or self._dialog is not None:
             return
         if self._countdown is not None or self._jobs or self._connect_running:
@@ -3137,7 +3530,10 @@ class AppController(QObject):
             logger.info("Ignored Edit of action %s: another card's approval or sign-in is running", action_id)
             return
         action = self._current(action_id)
-        if action is None or not action.countdown or self._store.is_decided(action_id):
+        if action is None or not action.editable or self._store.is_decided(action_id):
+            return
+        if action.sends_mail:
+            self._open_mail_dialog(action)
             return
         hour24 = self.config.display.hour24
         date_text, start_text, end_text = _time_texts(action, hour24)
@@ -3155,6 +3551,43 @@ class AppController(QObject):
         dialog.open()
         self._sync_card_locks()
 
+    def _open_mail_dialog(self, action: ProposedAction, banner: str = "") -> None:
+        """The Edit dialog of a Reply / Email: FROM, To / Cc (new recipients red, each with a
+        "Send to <address>" tick), the subject and the message exactly as it will be sent."""
+        if self.state == STATE_QUITTING or self._dialog is not None:
+            return
+        mail = self._mail_status(action)
+        to, cc = self._recipient_chips(action, mail)
+        dialog = hud.EditDialog(action.id, action.kind, kind_label(action), action.title,
+                                sender=mail.from_text.removeprefix("From: "), to=to, cc=cc, body=action.body,
+                                classify=lambda address: self._recipient_state(mail, address),
+                                normalize=email_address, find_links=body_links, banner=banner,
+                                max_recipients=MAX_RECIPIENTS, parent=self.window)
+        dialog.saved.connect(self._on_edit_saved)
+        dialog.finished.connect(self._on_edit_closed)
+        self._dialog = dialog
+        logger.info("Edit action %s (%s)", action.id, action.kind)
+        dialog.open()
+        self._sync_card_locks()
+
+    def _mail_edit(self, page: ProposedAction, values: Mapping[str, Any]) -> ActionEdit:
+        """The Edit dialog's Reply / Email values as an edit of the page's line: only what differs from
+        the line is changed (the recipients as the card shows them, without the account's own address,
+        count as unchanged), so ticking new recipients alone is no edit of the message."""
+        shown = self._mail_status(page).review
+
+        def addresses(key: str, before: Sequence[str]) -> tuple[str, ...] | None:
+            typed = tuple(values.get(key) or ())
+            return None if [a.casefold() for a in typed] == [a.casefold() for a in before] else typed
+
+        to = addresses("to", shown.to if shown is not None else page.recipients())
+        cc = addresses("cc", shown.cc if shown is not None else page.cc())
+        subject = values.get("subject") if page.kind == EMAIL else None
+        body = values.get("body", "")
+        return ActionEdit(to=to, cc=cc, subject=None if subject == page.title else subject,
+                          body=None if body == page.body else body,
+                          confirmed_new=frozenset(values.get("confirmed") or ()))
+
     def _on_edit_saved(self, action_id: str, values: Any) -> None:
         """Save in the Edit dialog: checked like a line; a problem keeps the dialog open."""
         dialog = self._dialog
@@ -3168,12 +3601,17 @@ class AppController(QObject):
             dialog.show_error("This card is already being carried out or decided; nothing was changed")
             return
         values = dict(values) if isinstance(values, Mapping) else {}
+        previous = self._effective(page)
         try:
-            start = end = None
-            if page.kind == MOVE:
-                start, end = parse_time_range(values.get("date", ""), values.get("start", ""), values.get("end", ""))
-            edit = ActionEdit(answer=values.get("answer") if page.kind == RSVP else None,
-                              notify=values.get("notify"), start=start, end=end, body=values.get("note", ""))
+            if page.sends_mail:
+                edit = self._mail_edit(page, values)
+            else:
+                start = end = None
+                if page.kind == MOVE:
+                    start, end = parse_time_range(values.get("date", ""), values.get("start", ""),
+                                                  values.get("end", ""))
+                edit = ActionEdit(answer=values.get("answer") if page.kind == RSVP else None,
+                                  notify=values.get("notify"), start=start, end=end, body=values.get("note", ""))
             edited = apply_edit(page, edit)
         except (EditInvalid, EditError) as exc:
             dialog.show_error(str(exc))
@@ -3187,18 +3625,27 @@ class AppController(QObject):
         card = self.window.reading.action_card(action_id)
         if card is not None:
             view = card_view(edited, self._now().date())
-            card.set_texts(view.kind_label + (EDITED_MARK if action_id in self._edits else ""), view.title,
-                           view.detail)
-            card.set_body(view.body)
+            card.set_texts(view.kind_label + (EDITED_MARK if self._is_edited(page) else ""), view.title,
+                           _card_detail(edited, view, self._now().date()))
+            card.set_body(view.body, body_links(edited.body) if edited.sends_mail else ())
         self._show_card_state(action_id)
         logger.info("Edited action %s (%s)", action_id, edited.kind)
-        self._activity(hud.TAG_DONE, f"Edited: {_kind_title(edited)}",
+        # Ticking new recipients alone leaves the message as it was: say what was saved.
+        what = "Edited"
+        if edited.sends_mail and not self._is_edited(page):
+            what = "Recipients confirmed" if edited.confirmed != previous.confirmed else "Saved, unchanged"
+        self._activity(hud.TAG_DONE, f"{what}: {_kind_title(edited)}",
                        f"{kind_label(edited).upper()} {DOT} nothing was sent")
         self._refresh_actions_ui()
 
     def _on_edit_closed(self, _result: int = 0) -> None:
         dialog, self._dialog = self._dialog, None
         if dialog is not None:
+            if dialog.mail and dialog.whole_seen():
+                # What the dialog showed whole (saved or not): Send needs no review while the card
+                # says exactly this. A Cancel after typing leaves the card's text unread.
+                values = dialog.values()
+                self._reviewed[dialog.action_id] = _review_digest(values.get("subject", ""), values.get("body", ""))
             dialog.deleteLater()
         if self.state != STATE_QUITTING:
             self._sync_card_locks()
@@ -3234,7 +3681,7 @@ class AppController(QObject):
             actions = [self._effective(action) for action in self._actions]
         todo = []
         for action in actions:
-            if (not action.countdown or action.id in self._peeking or action.id in self._jobs
+            if (not action.changes_event or action.id in self._peeking or action.id in self._jobs
                     or self._store.is_decided(action.id) or (action.id in self._checks and not force)):
                 continue
             if self._executor.readiness(action) or not self._account_signed_in(action.account):
@@ -3313,10 +3760,10 @@ class AppController(QObject):
         running = self._running.pop(action_id, None)
         action = running[0] if running is not None else self._current(action_id)
         writes_running = running[1] if running is not None else bool(action is not None and action.countdown)
-        if writes_running and action is not None:
+        if writes_running and action is not None and not _adds_event(action):
             self._countdown_result(action, result, error, status)
-        else:
-            self._calendar_result(action_id, action, result, error, status)
+        else:   # the worker saved a countdown's result itself (writes_running)
+            self._calendar_result(action_id, action, result, error, status, saved=writes_running)
         self._show_card_state(action_id)
         self._sync_card_locks()
         if self._calendar_worker is not None:
@@ -3325,8 +3772,9 @@ class AppController(QObject):
         self._render_agenda()   # a sign-in that waited may be over
 
     def _calendar_result(self, action_id: str, action: ProposedAction | None, result: ExecResult | None,
-                         error: ExecError | None, status: str) -> None:
-        """A Calendar event or a Todo's block: saved here (created / exists / failed), as before."""
+                         error: ExecError | None, status: str, *, saved: bool = False) -> None:
+        """A Calendar event or a Todo's block: created / exists / failed / unknown. ``saved``: the
+        worker saved it already (after the countdown); else it is saved here (the older way)."""
         title = _activity_title(action) if action is not None else "the event"
         today = self._now().date()
         block = action is not None and action.kind == TODO
@@ -3335,7 +3783,8 @@ class AppController(QObject):
         kind = action.kind if action is not None else ""
         account = action.account if action is not None else ""
         if result is not None and error is None:
-            self._store.set(action_id, status, link=result.link, kind=kind, account=account)
+            if not saved:
+                self._store.set(action_id, status, link=result.link, kind=kind, account=account)
             if status == STATUS_EXISTS:
                 self._activity(hud.TAG_DONE, f"Already on the calendar: {title}", detail)
             elif block:
@@ -3345,24 +3794,37 @@ class AppController(QObject):
             self._request_agenda()   # the new event may be on today's agenda
         else:
             message = (str(error) if error is not None else "") or "unknown error"
-            self._store.set(action_id, STATUS_FAILED, message=message, kind=kind, account=account)
-            failed = f"Couldn't add a block for {title}" if block else f"Couldn't add {title}"
-            self._activity(hud.TAG_STOP, failed, _short(message))
+            if not saved:
+                self._store.set(action_id, STATUS_FAILED, message=message, kind=kind, account=account)
+            if status == STATUS_UNKNOWN and action is not None:
+                self._activity(hud.TAG_WAIT, f"Unknown: {_action_phrase(action)}", UNKNOWN_CARD_TEXT)
+            else:
+                failed = f"Couldn't add a block for {title}" if block else f"Couldn't add {title}"
+                self._activity(hud.TAG_STOP, failed, _short(message))
 
     def _countdown_result(self, action: ProposedAction, result: ExecResult | None, error: ExecError | None,
                           status: str) -> None:
-        """An RSVP, Move or Cancel: the worker saved sent / failed / unknown over "running"."""
+        """An RSVP, Move, Cancel, Reply or Email: the worker saved sent / failed / unknown over
+        "running"."""
         self._hints.pop(action.id, None)
         label = kind_label(action).upper()
+        mail = action.sends_mail
+        sub = self._activity_sub(action) if mail else label
         if result is not None and error is None:
             self._carried[action.id] = action   # the card keeps showing what was sent
             text = result.result_text or result_text(action, STATUS_SENT) or "Done"
-            self._activity(hud.TAG_DONE, f"{text}: {_kind_title(action)}", label)
-            if account_of(action) == DEFAULT_ACCOUNT:
+            self._activity(hud.TAG_DONE, f"{text}: {_kind_title(action)}", sub)
+            if not mail and account_of(action) == DEFAULT_ACCOUNT:
                 self._request_agenda()   # the agenda may show the change
             return
         message = (str(error) if error is not None else "") or "unknown error"
         problem = getattr(error, "problem", "") or ""
+        if mail:   # the worker's sign-in check refreshes the accounts; the card says why
+            if status == STATUS_UNKNOWN:
+                self._activity(hud.TAG_WAIT, f"Unknown: {_action_phrase(action)}", UNKNOWN_MAIL_CARD_TEXT)
+            else:
+                self._activity(hud.TAG_STOP, f"Couldn't send {_kind_title(action)}", _short(message))
+            return
         if problem in _SIGN_IN_PROBLEMS:
             self._accounts_state[action.account] = (False, "" if problem == PROBLEM_SIGNED_OUT else problem,
                                                     "" if problem == PROBLEM_SIGNED_OUT else message)
@@ -3409,7 +3871,7 @@ class AppController(QObject):
         if self.state == STATE_QUITTING or self._signing_in() or self._countdown is not None or self._jobs:
             return
         action = self._current(action_id)
-        if action is None or not action.countdown or self._store.is_decided(action_id):
+        if action is None or not action.changes_event or self._store.is_decided(action_id):
             return
         reason = self._executor.readiness(action)
         if not reason and self._start_calendar() is None:
@@ -3420,18 +3882,21 @@ class AppController(QObject):
         logger.info("Sign in to Google for action %s (%s account)", action_id, logged_alias(action.account))
         self._start_sign_in(action.account, card_id=action_id)
 
-    def _start_sign_in(self, alias: str, *, card_id: str = "") -> None:
+    def _start_sign_in(self, alias: str, *, card_id: str = "", action: ProposedAction | None = None) -> None:
+        """``alias``'s browser sign-in on the action worker; ``action``: a Reply / Email whose Send
+        started it (sending must be allowed and the Google account known afterwards)."""
         worker = self._start_calendar()
         if worker is None:
             return
         self._connect_alias = alias
         self._connect_card = card_id
-        if alias == DEFAULT_ACCOUNT:
+        self._connect_mail = action is not None
+        if alias == DEFAULT_ACCOUNT and action is None:
             self._connect_note = ""
         self._sync_card_locks()
         self._refresh_countdown_cards()
         self._update_service_chips()
-        worker.connect(alias)
+        worker.connect(alias, action)
         self._render_agenda()
 
     def _on_account_connect(self, alias: str, stage: str, message: str, problem: str) -> None:
@@ -3444,13 +3909,18 @@ class AppController(QObject):
             return
         card_id = self._connect_card
         self._connect_alias, self._connect_card = None, ""
+        if self._connect_mail:
+            self._connect_mail = False
+            self._mail_connected(alias, stage, message, problem, card_id)
+            return
         if stage == _CONNECT_FAILED:
             note = message or "the sign-in did not finish"
             self._accounts_state[alias] = (False, problem or PROBLEM_FAILED, note)
             if personal:
                 self._connect_note = note
             if card_id:   # the card whose click started it says why, in full
-                self._hints[card_id] = sign_in_note(alias, problem=problem or PROBLEM_FAILED, message=note)
+                self._hints[card_id] = sign_in_note(alias, problem=problem or PROBLEM_FAILED, message=note,
+                                                    sends_mail=self._sends_mail(alias))
             self._activity(hud.TAG_STOP, "Google sign-in did not finish" if personal
                            else f"Google sign-in did not finish ({alias} account)", _short(note))
             if self._calendar_worker is not None:
@@ -3468,6 +3938,35 @@ class AppController(QObject):
                 self._hints[card_id] = SIGNED_IN_NOTE.format(button=card.approve_text())
             self._request_peeks([self._effective(action) for action in self._actions
                                  if action.account == alias], force=True)
+        self._sync_card_locks()
+        self._refresh_countdown_cards()
+        self._update_service_chips()
+        self._render_agenda()
+
+    def _mail_connected(self, alias: str, stage: str, message: str, problem: str, card_id: str) -> None:
+        """A Reply / Email's sign-in finished: its card says what is next (check From, click Send
+        again) or why it failed. The calendar's state of that account is read again by the worker
+        (a partial grant may leave Calendar working while sending is not allowed, or the other way)."""
+        card_action = self._current(card_id) if card_id else None
+        if stage == _CONNECT_FAILED:
+            note = message or "the sign-in did not finish"
+            if card_id:
+                tools = hand_off_tools(card_action) if card_action is not None else "Copy and Open"
+                self._hints[card_id] = mail_note(alias, problem or PROBLEM_FAILED, note, tools=tools)
+            self._activity(hud.TAG_STOP, f"Google sign-in did not finish ({alias} account)", _short(note))
+        else:
+            if stage == _CONNECT_SIGNED_IN:
+                self._activity(hud.TAG_DONE, f"Signed in to Google ({alias} account)", "sending email")
+            if card_id:
+                sender = (self._mail_status(card_action).from_text.removeprefix("From: ")
+                          if card_action is not None and card_action.sends_mail else alias)
+                self._hints[card_id] = MAIL_SIGNED_IN_NOTE.format(sender=sender)
+            if alias == DEFAULT_ACCOUNT:
+                self._request_agenda()
+            self._request_peeks([self._effective(action) for action in self._actions
+                                 if action.account == alias], force=True)
+        if self._calendar_worker is not None:
+            self._calendar_worker.check_sign_in()
         self._sync_card_locks()
         self._refresh_countdown_cards()
         self._update_service_chips()

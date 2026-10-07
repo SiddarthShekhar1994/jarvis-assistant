@@ -889,7 +889,7 @@ class ExtractActionsTests(unittest.TestCase):
             found, _ = extract_actions(self.mixed_page())
         output = "\n".join(captured.output)
         self.assertEqual(len(found), 7)
-        self.assertIn("Proposed actions: 7 line(s), 2 actionable, 0 duplicate(s) dropped; "
+        self.assertIn("Proposed actions: 7 line(s), 3 actionable, 0 duplicate(s) dropped; "
                       "3 to decide (calendar 1, reply 2, todo 1, open 1, other 1, note 1)", output)
         for secret in ("Chess", "Thursday", "ana@example.edu", "18c0ffee", "CAExample", "Problem set",
                        "instructure", "forms.example.net", "Carol", "Frobnicate", "widgets", "Shall we"):
@@ -1893,8 +1893,8 @@ class DecidableTests(unittest.TestCase):
 
     def test_matrix(self) -> None:
         rows = [
-            (example("Reply"), True, False, ""),
-            (example("Email"), True, False, ""),
+            (example("Reply"), True, True, "Send"),
+            (example("Email"), True, True, "Send"),
             (example("RSVP"), True, True, "Accept"),
             (example("RSVP", answer="no"), True, True, "Decline"),
             (example("RSVP", answer="maybe"), True, True, "Maybe"),
@@ -2061,11 +2061,11 @@ class CardViewTests(unittest.TestCase):
         reply_body = "Hi both,\nShall we keep it at noon with the two of us, or move it to 2 PM?\nThanks"
         expected = {
             "Reply": CardView("reply \u00b7 work", "Re: Thursday noon meeting", "To: ana@example.edu, ben@example.edu",
-                              body=reply_body, open_text="Open thread", copy_text="Copy reply", approve_text="Done",
-                              decidable=True),
+                              body=reply_body, open_text="Open thread", copy_text="Copy reply", approve_text="Send",
+                              decidable=True, editable=True, body_lines=10),
             "Email": CardView("email \u00b7 personal", "Question about the lab schedule", "To: office@example.edu",
                               body="Hello,\nIs the lab open on Saturday?\nThanks", copy_text="Copy email",
-                              approve_text="Done", decidable=True),
+                              approve_text="Send", decidable=True, editable=True, body_lines=10),
             "RSVP": CardView("rsvp \u00b7 work", "Speaker series", example("RSVP").describe(TODAY),
                              open_text="Open event", approve_text="Accept", decidable=True, editable=True,
                              check=True, deny_text="Skip"),
@@ -2151,7 +2151,9 @@ class CardViewTests(unittest.TestCase):
         self.assertEqual(result_text(example("Todo"), "created"), "Block added")
         self.assertEqual(result_text(example("Todo"), "denied"), "")
         self.assertEqual(result_text(example("Todo", block=""), "denied"), "Dismissed")
-        self.assertEqual(result_text(example("Reply"), "denied"), "Dismissed")
+        self.assertEqual(result_text(example("Reply"), "denied"), "")   # DENIED: Jarvis would have sent it
+        self.assertEqual(result_text(example("Reply", replied="yes"), "denied"), "")
+        self.assertEqual(result_text(example("Share"), "denied"), "Dismissed")
         self.assertEqual(result_text(example("Reply"), "done"), "")
         self.assertEqual(result_text(parse_action_line(CHESS), "denied"), "")
         self.assertEqual(result_text(parse_action_line(CHESS), "created"), "")
@@ -2159,17 +2161,30 @@ class CardViewTests(unittest.TestCase):
 
 
 class CarriedOutKindsTests(unittest.TestCase):
-    """RSVP, Move and Cancel: carried out by Jarvis after the undo countdown."""
+    """Calendar, Todo blocks, RSVP, Move, Cancel, Reply and Email: carried out by Jarvis after the
+    undo countdown."""
 
     def test_countdown_kinds(self) -> None:
-        self.assertEqual(actions.COUNTDOWN_KINDS, frozenset({RSVP, MOVE, CANCEL}))
-        for label in ("RSVP", "Move", "Cancel"):
-            with self.subTest(label=label):
-                self.assertTrue(example(label).countdown)
-        for action in (example("Reply"), example("Todo"), parse_action_line(CHESS), example("Todo", block=""),
-                       parse_action_line("Move: the dentist to Friday"), example("Move", when="2026-10-08")):
+        self.assertEqual(actions.COUNTDOWN_KINDS, frozenset({CALENDAR, TODO, RSVP, MOVE, CANCEL, REPLY, EMAIL}))
+        self.assertEqual(actions.EVENT_KINDS, frozenset({RSVP, MOVE, CANCEL}))
+        self.assertEqual(actions.MAIL_KINDS, frozenset({REPLY, EMAIL}))
+        rows = (  # countdown, changes_event, sends_mail, editable
+            (example("RSVP"), True, True, False, True), (example("Move"), True, True, False, True),
+            (example("Cancel"), True, True, False, True), (example("Reply"), True, False, True, True),
+            (example("Email"), True, False, True, True), (example("Todo"), True, False, False, False),
+            (parse_action_line(CHESS), True, False, False, False),
+            (example("Todo", block=""), False, False, False, False),
+            (example("Reply", replied="yes"), False, False, False, False),
+            (example("Share"), False, False, False, False), (example("Slack"), False, False, False, False),
+            (parse_action_line("Move: the dentist to Friday"), False, False, False, False),
+            (parse_action_line("Reply: Carol about the draft"), False, False, False, False),
+            (example("Move", when="2026-10-08"), False, False, False, False),
+            (example("Reply", to="bob@"), False, False, False, False))
+        for action, countdown, event, mail, editable in rows:
             with self.subTest(kind=action.kind, raw=action.raw[:30]):
-                self.assertFalse(action.countdown)
+                self.assertEqual((action.countdown, action.changes_event, action.sends_mail, action.editable),
+                                 (countdown, event, mail, editable))
+                self.assertEqual(action.countdown, action.actionable)   # every kind Jarvis carries out
 
     def test_sent_and_unknown_texts(self) -> None:
         self.assertEqual([result_text(example("RSVP", answer=a), "sent") for a in ("yes", "no", "maybe")],
@@ -2180,7 +2195,13 @@ class CarriedOutKindsTests(unittest.TestCase):
                          ["Already accepted", "Already declined", "Already answered maybe"])
         self.assertEqual(actions.sent_text(example("Move"), already=True), "Already at that time")
         self.assertEqual(actions.sent_text(example("Cancel"), already=True), "Already cancelled")
-        self.assertEqual(actions.sent_text(example("Reply")), "")
+        self.assertEqual(actions.sent_text(example("Reply")), "Sent")
+        self.assertEqual(result_text(example("Email"), "sent"), "Sent")
+        self.assertEqual(actions.sent_text(example("Share")), "")
+        for label in ("Reply", "Email"):
+            with self.subTest(label=label):
+                self.assertEqual(result_text(example(label), "unknown"), actions.UNKNOWN_MAIL)
+        self.assertEqual(actions.UNKNOWN_MAIL, "Unknown: check Sent mail before retrying")
         for label in ("RSVP", "Move", "Cancel"):
             with self.subTest(label=label):
                 self.assertEqual(result_text(example(label), "unknown"), actions.UNKNOWN_CALENDAR)
@@ -2188,7 +2209,10 @@ class CarriedOutKindsTests(unittest.TestCase):
                 self.assertEqual(result_text(example(label), "denied"), "Skipped")
         self.assertEqual(result_text(parse_action_line(CHESS), "denied"), "")   # DENIED, as before
         self.assertEqual(actions.UNKNOWN_CALENDAR, "Unknown: check the calendar before retrying")
-        self.assertEqual(result_text(parse_action_line(CHESS), "unknown"), "")
+        # Calendar events and to-do blocks have the running / unknown model too now.
+        self.assertEqual(result_text(parse_action_line(CHESS), "unknown"), actions.UNKNOWN_CALENDAR)
+        self.assertEqual(result_text(example("Todo"), "unknown"), actions.UNKNOWN_CALENDAR)
+        self.assertEqual(result_text(example("Todo", block=""), "unknown"), "")
 
     def test_when_text_shows_the_wall_time_an_event_carries(self) -> None:
         item = dataclasses.make_dataclass("Item", ["start", "end", "all_day_start", "all_day_end"])
@@ -2217,6 +2241,180 @@ class CarriedOutKindsTests(unittest.TestCase):
             with self.assertLogs(ACTIONS_LOGGER, level="WARNING"):
                 self.assertFalse(blocked.set("b" * 16, "sent", kind=RSVP, account="work"))
             self.assertEqual(blocked.get("b" * 16)["status"], "sent")   # kept for this run
+
+
+class EmailAddressTests(unittest.TestCase):
+    """email_address: one address as Jarvis sends to it; display names never count."""
+
+    def test_valid_and_normalized(self) -> None:
+        cases = {"ana@example.edu": "ana@example.edu", " Ana@Example.EDU ": "Ana@example.edu",
+                 "Ana Example <ana@example.edu>": "ana@example.edu", "<ana@example.edu>": "ana@example.edu",
+                 '"Ben, from the lab" <ben@lab.example.com>': "ben@lab.example.com",
+                 "o'neil+lists@example.co.uk": "o'neil+lists@example.co.uk"}
+        for text, address in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(actions.email_address(text), address)
+
+    def test_refused(self) -> None:
+        for text in ("", "ana", "ana@", "@example.edu", "ana@example", "ana@example.e", "a b@example.edu",
+                     "ana@exa mple.edu", "ana@example.edu, ben@example.edu", "ana@example.edu;x@example.edu",
+                     "ana..x@example.edu", ".ana@example.edu", "ana.@example.edu", '"ana"@example.edu',
+                     "ana@example.edu\nBcc: x@example.com", "ana@exa\rmple.edu", "ana\u2028@example.edu",
+                     "ana@example.edu\u2028Bcc: x@example.com", "ana@example.edu\x00",
+                     "ana|x@example.edu", "an\u00e1@example.edu", "ana@b\u00fccher.example",
+                     "Bob <ana@example.edu> <eve@example.com>", "x" * 65 + "@example.edu",
+                     "a@" + "b" * 250 + ".edu", None, 5):
+            with self.subTest(text=text):
+                self.assertEqual(actions.email_address(text), "")   # type: ignore[arg-type]
+
+
+class MailCardTests(unittest.TestCase):
+    """Reply / Email cards Jarvis sends: Send, Edit, a longer preview, link and threading notes."""
+
+    def test_notes(self) -> None:
+        linked = example("Reply", body=r"See https://docs.google.com/x and www.example.com/a.\nThanks")
+        self.assertEqual(card_view(linked, TODAY).note, "Contains 2 links")
+        one = example("Email", body="Form: https://forms.example.edu/a, thanks")
+        self.assertEqual(card_view(one, TODAY).note, "Contains 1 link")
+        gmid = example("Reply", msgid="", gmid="18c0ffee00000002")
+        self.assertEqual(card_view(gmid, TODAY).note, actions.NO_MSGID_NOTE)
+        unknown = example("Reply", replied="unknown", msgid="", gmid="18c0ffee00000002")
+        self.assertEqual(card_view(unknown, TODAY).note, f"{REPLIED_WARNING}{DOT}{actions.NO_MSGID_NOTE}")
+
+    def test_encoded_word_subject_is_not_sent(self) -> None:
+        tricky = example("Email", subject="=?utf-8?b?SGVsbG8=?=")
+        self.assertTrue(tricky.sends_mail)
+        self.assertEqual(actions.mail_problem(tricky), actions.ENCODED_WORD_PROBLEM)
+        self.assertIn(actions.ENCODED_WORD_PROBLEM, card_view(tricky, TODAY).note)
+        self.assertEqual(actions.mail_problem(example("Email", subject="Is 2 =? 3")), "")   # no closing ?=
+        self.assertEqual(actions.mail_problem(example("Email")), "")
+        self.assertEqual(actions.mail_problem(example("RSVP")), "")
+        empty = dataclasses.replace(example("Email"), body="  ")
+        self.assertEqual(actions.mail_problem(empty), actions.EMPTY_MAIL_PROBLEM)
+
+    def test_body_links_and_review(self) -> None:
+        text = "a https://x.example.edu/p?q=1). b http://y.example.com c www.z.example.org"
+        spans = actions.body_links(text)
+        self.assertEqual([text[s:e] for s, e in spans],
+                         ["https://x.example.edu/p?q=1", "http://y.example.com", "www.z.example.org"])
+        self.assertEqual(actions.body_links("(see https://x.example.edu/a_(b))"),
+                         ((5, 32),))
+        self.assertEqual(actions.links_note(""), "")
+        self.assertFalse(actions.body_needs_review(example("Reply")))
+        long_body = r"\n".join(f"line {n}" for n in range(11))
+        self.assertTrue(actions.body_needs_review(example("Reply", body=long_body)))
+        self.assertFalse(actions.body_needs_review(example("Slack", body=long_body)))
+        self.assertEqual(card_view(example("Reply", body=long_body), TODAY).body_lines, actions.MAIL_PREVIEW_LINES)
+        self.assertEqual(card_view(example("Slack"), TODAY).body_lines, 3)
+
+    def test_due_words_are_the_mail_cards_detail(self) -> None:
+        self.assertEqual(actions.due_words(example("Reply", due="2026-10-04"), TODAY), "due today")
+        self.assertEqual(actions.due_words(example("Reply", due=str(TODAY + timedelta(days=1))), TODAY),
+                         "due tomorrow")
+        self.assertEqual(actions.due_words(example("Email", due="2026-10-09 15:30"), TODAY), "due Fri Oct 9, 3:30 PM")
+        self.assertEqual(actions.due_words(example("Email", due=""), TODAY), "")
+
+    def test_mail_recipients_and_confirmed_default(self) -> None:
+        action = example("Email", to="b@example.edu, a@example.edu", cc="c@example.edu")
+        self.assertEqual(action.mail_recipients(), ("b@example.edu", "a@example.edu", "c@example.edu"))
+        self.assertEqual(action.confirmed, frozenset())
+        # A line can never confirm anyone: an unknown key is ignored.
+        self.assertEqual(parse_action_line(kv_line("Email", EMAIL_PAIRS) .replace(" | body=",
+                         " | confirmed=office@example.edu | body=")).confirmed, frozenset())
+
+
+class EditMailTests(unittest.TestCase):
+    """edit_mail: what the Edit dialog changes on a Reply or Email is checked like a line."""
+
+    def test_recipients_subject_body_and_the_id(self) -> None:
+        email = example("Email")
+        edited = actions.edit_mail(email, to=["Office <OFFICE@Example.EDU>", "dean@example.edu"],
+                                   cc=("office@example.edu", "cy@example.edu", "CY@example.edu"),
+                                   subject="  Lab   schedule\tquestion ", body="Hi,\r\nIs it open?\rThanks\n\n")
+        self.assertEqual(edited.id, email.id)
+        self.assertEqual(edited.recipients(), ("OFFICE@example.edu", "dean@example.edu"))
+        self.assertEqual(edited.cc(), ("cy@example.edu",))   # office@ stays in To only
+        self.assertEqual((edited.title, edited.field("subject")), ("Lab schedule question",) * 2)
+        self.assertEqual(edited.body, "Hi,\nIs it open?\nThanks")
+        self.assertEqual([name for name, _ in edited.fields], ["acct", "to", "cc", "subject"])
+        self.assertTrue(edited.describe(TODAY).startswith("To: OFFICE@example.edu, dean@example.edu" + DOT +
+                                                          "Cc: cy@example.edu"))
+        dropped = actions.edit_mail(edited, cc=[])
+        self.assertEqual((dropped.cc(), [n for n, _ in dropped.fields]), ((), ["acct", "to", "subject"]))
+        self.assertEqual(actions.edit_mail(email), dataclasses.replace(email, confirmed=frozenset()))
+        self.assertEqual(actions.edit_mail(email, to="a@example.edu; b@example.edu").recipients(),
+                         ("a@example.edu", "b@example.edu"))
+
+    def test_reply_keeps_its_subject_and_thread(self) -> None:
+        reply = example("Reply")
+        same = actions.edit_mail(reply, subject="re: thursday  NOON meeting", body="Works for me")
+        self.assertEqual((same.title, same.body, same.field("thread"), same.field("msgid")),
+                         ("Re: Thursday noon meeting", "Works for me", "18c0ffee00000001",
+                          "<CAExample0001@mail.example.com>"))
+        with self.assertRaises(actions.EditInvalid) as ctx:
+            actions.edit_mail(reply, subject="Something else")
+        self.assertIn("keeps the subject", str(ctx.exception))
+
+    def test_confirmations_follow_the_recipients(self) -> None:
+        email = example("Email", cc="cy@example.edu")
+        ticked = actions.edit_mail(email, confirmed=["Office <Office@Example.edu>", "nobody@example.com", "bad@"])
+        self.assertEqual(ticked.confirmed, frozenset({"office@example.edu"}))
+        self.assertEqual(ticked.id, email.id)
+        kept = actions.edit_mail(ticked, body="New text")
+        self.assertEqual(kept.confirmed, frozenset({"office@example.edu"}))
+        removed = actions.edit_mail(ticked, to=["cy@example.edu"], cc=[])
+        self.assertEqual(removed.confirmed, frozenset())   # office@ is no longer a recipient
+        again = actions.edit_mail(removed, to=["office@example.edu"])
+        self.assertEqual(again.confirmed, frozenset())    # a removed tick does not come back by itself
+        self.assertNotEqual(hash(ticked), hash(email))     # still frozen and hashable
+        with self.assertRaises(actions.EditInvalid):
+            actions.edit_mail(email, confirmed="office@example.edu")   # type: ignore[arg-type]
+
+    def test_bad_edits(self) -> None:
+        email = example("Email")
+        six = [f"p{n}@example.edu" for n in range(6)]
+        cases = (
+            (dict(to=[]), "To needs at least one address"),
+            (dict(to=["bob@"]), 'To: "bob@" is not an email address'),
+            (dict(cc=["ana@example.edu, eve@example.com"]), "Cc: "),
+            (dict(to=["ana@example.edu\r\nBcc: eve@example.com"]), "is not an email address"),
+            (dict(to=[5]), "an address must be text"),
+            (dict(to=six), "To and Cc name 6 addresses (at most 5)"),
+            (dict(to=six[:3], cc=six[3:]), "name 6 addresses"),
+            (dict(subject="Hi\r\nBcc: eve@example.com"), "the subject has a line break"),
+            (dict(subject="Hi\nthere"), "line break"),
+            (dict(subject="Hi\u2028there"), "line break"),
+            (dict(subject="Hi\u0085there"), "line break"),
+            (dict(subject="Hi\x0bthere"), "line break"),
+            (dict(subject="Hi\x00there"), "control character"),
+            (dict(subject="Hi\x1bthere"), "control character"),
+            (dict(subject="=?utf-8?b?SGksDQpCY2M6IGV2ZUBleGFtcGxlLmNvbQ==?="), "encoded word"),
+            (dict(subject="Re: price =?ISO-8859-1?Q?a?= now"), "encoded word"),
+            (dict(subject="x" * 251), "the subject is too long (251 characters, at most 250)"),
+            (dict(subject="  "), "give a subject"),
+            (dict(subject=3), "the subject must be text"),
+            (dict(body=" \n\t "), "the message is empty"),
+            (dict(body="y" * 5001), "the message is too long (5001 characters, at most 5000)"),
+            (dict(body=b"bytes"), "the message must be text"),
+        )
+        for kwargs, words in cases:
+            with self.subTest(kwargs=str(kwargs)[:60]), self.assertRaises(actions.EditInvalid) as ctx:
+                actions.edit_mail(email, **kwargs)   # type: ignore[arg-type]
+            self.assertIn(words, str(ctx.exception))
+        self.assertEqual(len(actions.edit_mail(email, subject="x" * 250).title), 250)
+        self.assertEqual(len(actions.edit_mail(email, body="y" * 5000).body), 5000)
+        self.assertEqual(len(actions.edit_mail(email, to=six[:5]).mail_recipients()), 5)
+        for action in (example("RSVP"), example("Slack"), parse_action_line(CHESS), example("Reply", replied="yes")):
+            with self.subTest(kind=action.kind), self.assertRaises(actions.EditInvalid):
+                actions.edit_mail(action, body="x")
+        with self.assertRaises(actions.EditInvalid):
+            actions.edit_action(example("Reply"), body="x")   # the event edit is for RSVP / Move / Cancel
+
+    def test_invisible_and_control_characters_are_removed(self) -> None:
+        edited = actions.edit_mail(example("Email"), subject="Lab\u202e schedule\u200b",
+                                   body="a\u202eb\x00c\u2028d\te\x07")
+        self.assertEqual(edited.title, "Lab schedule")
+        self.assertEqual(edited.body, "abcd\te")
 
 
 # --------------------------------------------------------------------------

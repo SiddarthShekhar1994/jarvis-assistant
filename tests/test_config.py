@@ -350,7 +350,7 @@ class ConfigFileTests(ProjectTestCase):
             "sections": {f.name for f in dataclasses.fields(SectionsConfig)},
             "notion": {"version"},
             "calendar": {"enabled", "client_secret", "calendar_id"},
-            "actions": {"heading", "link_hosts", "undo_seconds"},
+            "actions": {"heading", "link_hosts", "undo_seconds", "trusted_domains"},
             "accounts": {"personal", "work"},
             "schedule": {f.name for f in dataclasses.fields(ScheduleConfig)},
             "hotkey": {f.name for f in dataclasses.fields(HotkeyConfig)},
@@ -378,8 +378,10 @@ class ConfigFileTests(ProjectTestCase):
         self.assertEqual(cfg.actions, ActionsConfig(headings=("Proposed actions",)))
         self.assertEqual(cfg.actions.undo_seconds, 10)
         # Generic aliases only: which Google account each one is never goes into config.toml.
-        self.assertEqual(dict(cfg.accounts), {"personal": AccountConfig("personal"),
-                                              "work": AccountConfig("work")})
+        self.assertEqual(dict(cfg.accounts), {
+            "personal": AccountConfig("personal", features=("calendar", "gmail_send")),
+            "work": AccountConfig("work", features=("calendar", "gmail_send"))})
+        self.assertEqual(cfg.actions.trusted_domains, ())   # public default: nobody is trusted
         self.assertNotIn("@", raw.decode("ascii").split("[accounts", 1)[1].split("[schedule]", 1)[0])
         self.assertEqual(cfg.schedule, ScheduleConfig())
         self.assertEqual(cfg.hotkey, HotkeyConfig())
@@ -607,6 +609,30 @@ class CalendarAndActionsConfigTests(ProjectTestCase):
                 self.write_config(f"[actions]\nundo_seconds = {value}\n")
                 self.assertEqual(self.load_warning("actions.undo_seconds").actions.undo_seconds, expected)
 
+    # ---- [actions] trusted_domains: recipients that need no NEW RECIPIENT confirmation ----
+
+    def test_trusted_domains_default_is_empty(self) -> None:
+        self.assertEqual(ActionsConfig().trusted_domains, ())
+        self.assertEqual(ActionsConfig(trusted_domains=["example.edu"]).trusted_domains, ("example.edu",))
+        self.assertEqual(self.load_quietly().actions.trusted_domains, ())
+
+    def test_trusted_domains_are_casefolded_and_deduplicated(self) -> None:
+        self.write_config('[actions]\ntrusted_domains = [" Example.EDU ", "@lab.example.com", "example.edu", '
+                          '"mail.example-school.org"]\n')
+        self.assertEqual(self.load_quietly().actions.trusted_domains,
+                         ("example.edu", "lab.example.com", "mail.example-school.org"))
+        self.write_config('[actions]\ntrusted_domains = "example.edu"\n')
+        self.assertEqual(self.load_quietly().actions.trusted_domains, ("example.edu",))
+
+    def test_bad_trusted_domains_are_skipped_with_a_warning(self) -> None:
+        for value in ('"edu"', '"*.example.edu"', '"ana@example.edu"', '"https://example.edu"',
+                      '"example.edu/x"', '"example..edu"', '"-x.example.edu"', '"example.123"',
+                      '"exa mple.edu"', '"b\\u00fccher.example"', "5"):
+            with self.subTest(value=value):
+                self.write_config(f'[actions]\ntrusted_domains = [{value}, "ok.example.edu"]\n')
+                cfg = self.load_warning("actions.trusted_domains")
+                self.assertEqual(cfg.actions.trusted_domains, ("ok.example.edu",))
+
     def test_bad_undo_seconds_falls_back(self) -> None:
         for value in ('"ten"', "true", "-5", "nan"):
             with self.subTest(value=value):
@@ -647,9 +673,15 @@ class AccountsConfigTests(ProjectTestCase):
         self.assertEqual(self.load_warning("accounts.work.backend").accounts["work"].backend, "google")
 
     def test_unknown_feature_is_skipped_and_duplicates_dropped(self) -> None:
-        self.write_config('[accounts.work]\nfeatures = ["calendar", "gmail_send", "Calendar", "telepathy"]\n')
-        cfg = self.load_warning("accounts.work.features", "gmail_send", "telepathy")
-        self.assertEqual(cfg.accounts["work"].features, ("calendar",))
+        self.write_config('[accounts.work]\nfeatures = ["calendar", "gmail_send", "Calendar", "GMAIL_SEND", '
+                          '"telepathy", "gmail_read"]\n')
+        cfg = self.load_warning("accounts.work.features", "telepathy", "gmail_read")
+        self.assertEqual(cfg.accounts["work"].features, ("calendar", "gmail_send"))
+
+    def test_gmail_send_alone(self) -> None:
+        self.write_config('[accounts.work]\nfeatures = ["gmail_send"]\n')
+        self.assertEqual(self.load_quietly().accounts["work"].features, ("gmail_send",))
+        self.assertEqual(config.ACCOUNT_FEATURES, ("calendar", "gmail_send"))
 
     def test_no_features(self) -> None:
         self.write_config("[accounts.work]\nfeatures = []\n")

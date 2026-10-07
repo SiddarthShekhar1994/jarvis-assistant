@@ -9,6 +9,7 @@ per test; nothing reads the owner's data folder.
 
 from __future__ import annotations
 
+import base64
 import http.client
 import json
 import logging
@@ -42,6 +43,7 @@ from briefing_reader.google_auth import (
     PROBLEM_TIMEOUT,
     SIGN_IN_PROMPT,
     AccountAuthError,
+    AccountBindings,
     AccountError,
     AccountNotSignedIn,
     AccountSetupError,
@@ -87,6 +89,7 @@ class FakeCreds:
         self.client_secret = client_secret
         self.scopes = list(requested or CAL_SCOPES)
         self.granted_scopes = granted
+        self.id_token: str | None = None
         self.valid = True
 
     def to_json(self) -> str:
@@ -343,7 +346,9 @@ class SignInTests(AuthTestCase):
         self.assertEqual(scopes_for(()), [])
         self.assertEqual(self.account(features=("calendar", "telepathy")).features, ("calendar",))
         self.assertEqual(self.account().requested_scopes(), CAL_SCOPES)
-        self.assertEqual(set(FEATURE_SCOPES), {CALENDAR_FEATURE})   # gmail_send comes with a later version
+        self.assertEqual(set(FEATURE_SCOPES), {CALENDAR_FEATURE, google_auth.GMAIL_FEATURE})
+        self.assertEqual(FEATURE_SCOPES[google_auth.GMAIL_FEATURE],
+                         ("https://www.googleapis.com/auth/gmail.send",))   # send only: never read
 
 
 class PartialGrantTests(AuthTestCase):
@@ -537,6 +542,291 @@ class RejectedSignInTests(AuthTestCase):
         exc = self.sign_in_fails(RuntimeError(f"boom {self.access_token}"))
         self.assertEqual(str(exc), "Google sign-in failed (RuntimeError)")
         self.assertIsNone(exc.__cause__)
+
+
+
+
+# --------------------------------------------------------------------------
+# Which Google account an alias is (accounts.json)
+# --------------------------------------------------------------------------
+
+GMAIL = "https://www.googleapis.com/auth/gmail.send"
+OPENID = "openid"
+EMAIL_SCOPE = "https://www.googleapis.com/auth/userinfo.email"
+ALL_SCOPES = [OPENID, EMAIL_SCOPE, EVENTS, SETTINGS, GMAIL]
+SUB_A = "100000000000000000001"
+SUB_B = "100000000000000000002"
+
+
+def make_id_token(sub: str = SUB_A, email: str = "ana@example.edu", *, aud: Any = CLIENT_ID,
+                  iss: str = "https://accounts.google.com", verified: Any = True, **extra: Any) -> str:
+    def part(data: dict[str, Any]) -> str:
+        return base64.urlsafe_b64encode(json.dumps(data).encode()).decode().rstrip("=")
+    claims = {"iss": iss, "aud": aud, "sub": sub, "email": email, "email_verified": verified, **extra}
+    return f"{part({'alg': 'RS256'})}.{part(claims)}.fake-signature-{uuid.uuid4().hex}"
+
+
+class IdentityTests(AuthTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.write_client_secret()
+        self.bindings = AccountBindings(self.data_dir / "accounts.json")
+
+    def bound_account(self, alias: str = "work", **kwargs: Any) -> GoogleAccount:
+        kwargs.setdefault("features", ("calendar", "gmail_send"))
+        return self.account(alias, bindings=self.bindings, **kwargs)
+
+    def creds(self, *, sub: str = SUB_A, email: str = "ana@example.edu", granted: list[str] | None = None,
+              id_token: Any = "make") -> FakeCreds:
+        creds = FakeCreds(uuid.uuid4().hex, self.client_secret, granted=granted or ALL_SCOPES,
+                          requested=ALL_SCOPES)
+        creds.id_token = make_id_token(sub, email) if id_token == "make" else id_token
+        return creds
+
+    def saved(self, account: GoogleAccount) -> dict[str, Any]:
+        return json.loads(account.token_path.read_text(encoding="utf-8"))
+
+    def test_identity_scopes_are_asked_for_with_every_feature(self) -> None:
+        self.assertEqual(self.bound_account().requested_scopes(), ALL_SCOPES)
+        self.assertEqual(self.bound_account(features=("gmail_send",)).requested_scopes(), [OPENID, EMAIL_SCOPE, GMAIL])
+        self.assertEqual(self.account("work").requested_scopes(), CAL_SCOPES)   # no bindings: as before
+        legacy = GoogleAccount("", client_secret_path=self.secret_path, token_path=self.root / "t.json",
+                               bindings=self.bindings)
+        self.assertEqual(legacy.requested_scopes(), CAL_SCOPES)   # the one-account setup never binds
+        self.flow.results = [self.creds()]
+        work = self.bound_account()
+        work.sign_in()
+        self.assertEqual(self.flow_args[-1][1], ALL_SCOPES)   # one full consent for every feature
+
+    def test_the_first_sign_in_binds_the_alias_and_marks_the_token(self) -> None:
+        self.flow.results = [self.creds()]
+        work = self.bound_account()
+        self.assertEqual((work.bound_email(), work.identity_confirmed()), ("", False))
+        with self.assertLogs(AUTH_LOGGER, level="INFO") as logs:
+            work.sign_in()
+        self.assertEqual(work.binding().email, "ana@example.edu")
+        self.assertEqual(work.binding().sub, SUB_A)
+        self.assertEqual((work.bound_email(), work.token_sub(), work.identity_confirmed()),
+                         ("ana@example.edu", SUB_A, True))
+        self.assertEqual(self.saved(work)[google_auth.TOKEN_SUB_KEY], SUB_A)
+        self.assertNotIn("id_token", self.saved(work))
+        on_disk = json.loads((self.data_dir / "accounts.json").read_text(encoding="utf-8"))
+        self.assertEqual(set(on_disk), {"work"})
+        self.assertEqual((on_disk["work"]["email"], on_disk["work"]["sub"]), ("ana@example.edu", SUB_A))
+        self.assertEqual(work.granted_features(), frozenset({"calendar", "gmail_send"}))
+        text = "\n".join(logs.output)
+        self.assertIn("Google (work): bound to the account it signed in with", text)
+        self.assertNotIn("ana@example.edu", text)
+        self.assertNotIn(SUB_A, text)
+        # A fresh object (the next start) reads the same from the files.
+        again = self.bound_account()
+        self.assertEqual((again.bound_email(), again.identity_confirmed()), ("ana@example.edu", True))
+
+    def test_the_same_account_again_keeps_the_binding(self) -> None:
+        self.flow.results = [self.creds()]
+        work = self.bound_account()
+        work.sign_in()
+        self.flow.results = [self.creds(email="ana.example@example.edu")]   # same account, new address
+        work.sign_in()
+        self.assertEqual((work.binding().sub, work.bound_email(), work.identity_confirmed()),
+                         (SUB_A, "ana.example@example.edu", True))
+
+    def test_another_google_account_is_refused_and_the_old_sign_in_kept(self) -> None:
+        self.flow.results = [self.creds()]
+        work = self.bound_account()
+        work.sign_in()
+        before = work.token_path.read_bytes()
+        intruder = self.creds(sub=SUB_B, email="eve@example.com")
+        self.flow.results = [intruder]
+        with self.assertLogs(AUTH_LOGGER, level="WARNING") as logs, self.assertRaises(AccountAuthError) as ctx:
+            work.sign_in()
+        self.assertEqual(ctx.exception.problem, google_auth.PROBLEM_IDENTITY)
+        self.assertIn("not the Google account set up as the work account", str(ctx.exception))
+        self.assertEqual(work.token_path.read_bytes(), before)   # the new tokens were dropped
+        self.assertEqual((work.binding().sub, work.bound_email()), (SUB_A, "ana@example.edu"))
+        self.assertEqual(work.problem()[0], google_auth.PROBLEM_IDENTITY)
+        self.assertTrue(work.identity_confirmed())
+        self.assertNotEqual(work.credentials(interactive=False).token, intruder.token)
+        for text in ("\n".join(logs.output), str(ctx.exception)):
+            for private in ("eve@example.com", "ana@example.edu", SUB_A, SUB_B, intruder.token):
+                self.assertNotIn(private, text)
+
+    def test_an_account_bound_to_another_alias_is_refused(self) -> None:
+        self.flow.results = [self.creds()]
+        self.bound_account("personal").sign_in()
+        self.flow.results = [self.creds()]   # the same Google account again, now for "work"
+        work = self.bound_account("work")
+        with self.assertLogs(AUTH_LOGGER, level="WARNING"), self.assertRaises(AccountAuthError) as ctx:
+            work.sign_in()
+        self.assertEqual(ctx.exception.problem, google_auth.PROBLEM_IDENTITY)
+        self.assertIn("already set up as the personal account", str(ctx.exception))
+        self.assertFalse(work.token_path.exists())
+        self.assertIsNone(work.binding())
+        self.bindings.bind("lab-2", "lab@example.edu", SUB_B)
+        self.flow.results = [self.creds(sub=SUB_B, email="lab@example.edu")]
+        with self.assertLogs(AUTH_LOGGER, level="WARNING"), self.assertRaises(AccountAuthError) as ctx:
+            work.sign_in()
+        self.assertIn("already set up as another account", str(ctx.exception))   # other aliases unnamed
+        self.assertNotIn("lab-2", str(ctx.exception))
+
+    def test_a_sign_in_that_does_not_name_the_account(self) -> None:
+        self.flow.results = [self.creds(id_token=None)]
+        work = self.bound_account()
+        work.sign_in()   # not bound yet: kept; the calendar works, sending waits for a binding
+        self.assertTrue(work.is_signed_in("calendar"))
+        self.assertEqual((work.binding(), work.token_sub(), work.identity_confirmed()), (None, "", False))
+        self.assertNotIn(google_auth.TOKEN_SUB_KEY, self.saved(work))
+        self.flow.results = [self.creds()]
+        work.sign_in()
+        self.assertTrue(work.identity_confirmed())
+        before = work.token_path.read_bytes()
+        self.flow.results = [self.creds(id_token=None)]
+        with self.assertLogs(AUTH_LOGGER, level="WARNING"), self.assertRaises(AccountAuthError) as ctx:
+            work.sign_in()   # bound: an unnamed sign-in could be anyone, so it is not kept
+        self.assertEqual(ctx.exception.problem, google_auth.PROBLEM_IDENTITY)
+        self.assertEqual(work.token_path.read_bytes(), before)
+
+    def test_id_tokens_that_do_not_count(self) -> None:
+        read = google_auth.identity_from_id_token
+        self.assertEqual(read(make_id_token(), CLIENT_ID), ("ana@example.edu", SUB_A))
+        self.assertEqual(read(make_id_token(email="Ana@Example.EDU", aud=["x", CLIENT_ID], iss="accounts.google.com",
+                                            verified="true"), CLIENT_ID), ("Ana@example.edu", SUB_A))
+        bad = (make_id_token(aud="someone-else.apps.googleusercontent.com"), make_id_token(iss="https://evil.example"),
+               make_id_token(verified=False), make_id_token(verified="false"), make_id_token(sub=""),
+               make_id_token(sub="1 2"), make_id_token(sub=5), make_id_token(email="not an address"),
+               make_id_token(email="Eve <eve@example.com>"), make_id_token(email="a@example.edu\nBcc: b@example.com"),
+               make_id_token(email=None), "a.b", "a.!!!.c", "a." + base64.urlsafe_b64encode(b"[1]").decode() + ".c",
+               None, 5, "")
+        for token in bad:
+            with self.subTest(token=str(token)[-40:]):
+                self.assertIsNone(read(token, CLIENT_ID))
+        self.assertIsNone(read(make_id_token(), ""))
+
+    def test_a_refresh_keeps_the_account_id(self) -> None:
+        self.flow.results = [self.creds()]
+        work = self.bound_account()
+        work.sign_in()
+        info = self.saved(work)
+        info["expiry"] = f"{_utc_naive(timedelta(hours=-2)).isoformat()}Z"
+        work.token_path.write_text(json.dumps(info), encoding="utf-8")
+        new_token = f"ya29.fake-refreshed-{uuid.uuid4().hex}"
+
+        def refresh(creds: Any) -> None:
+            creds.token = new_token
+            creds.expiry = _utc_naive(timedelta(hours=1))
+
+        fresh = self.bound_account(refresh=refresh)
+        self.assertEqual(fresh.credentials(interactive=False, need="gmail_send").token, new_token)
+        saved = self.saved(fresh)
+        self.assertEqual((saved["token"], saved[google_auth.TOKEN_SUB_KEY]), (new_token, SUB_A))
+        self.assertEqual(saved[google_auth.TOKEN_ASKED_KEY], ALL_SCOPES)   # what the sign-in asked for, too
+        self.assertTrue(fresh.identity_confirmed())
+
+    def test_the_migrated_token_works_for_the_calendar_only(self) -> None:
+        self.write_token(self.data_dir / LEGACY_TOKEN, scopes=None)   # an older version's file: no scopes
+        migrate_legacy_token(self.data_dir)
+        personal = self.bound_account("personal")
+        self.assertEqual(personal.granted_features(), frozenset({"calendar"}))   # not gmail_send
+        self.assertEqual(personal.refused_features(), frozenset())   # never asked for: not refused
+        self.assertTrue(personal.is_signed_in("calendar"))
+        self.assertFalse(personal.is_signed_in("gmail_send"))
+        self.assertEqual((personal.bound_email(), personal.identity_confirmed()), ("", False))
+        creds = personal.credentials(interactive=False, need="calendar")
+        self.assertEqual(list(creds.scopes), CAL_SCOPES)   # refreshes ask only for what was granted
+        with self.assertRaises(AccountAuthError) as ctx:
+            personal.credentials(interactive=False, need="gmail_send")
+        self.assertEqual(ctx.exception.problem, PROBLEM_SCOPE)
+        self.assertIn("sending email for the personal account", str(ctx.exception))
+        self.flow.results = [self.creds()]
+        personal.credentials(interactive=True, need="gmail_send")   # one new sign-in, which binds
+        self.assertEqual(self.flow_args[-1][1], ALL_SCOPES)
+        self.assertTrue(personal.identity_confirmed())
+
+    def test_unticking_send_keeps_the_calendar_and_still_binds(self) -> None:
+        self.flow.results = [self.creds(granted=[OPENID, EMAIL_SCOPE, EVENTS, SETTINGS])]
+        work = self.bound_account()
+        with self.assertLogs(AUTH_LOGGER, level="WARNING") as logs:
+            work.sign_in()
+        self.assertIn("without every permission (gmail_send missing)", "\n".join(logs.output))
+        self.assertEqual(work.granted_features(), frozenset({"calendar"}))
+        self.assertEqual(self.saved(work)["scopes"], [OPENID, EMAIL_SCOPE, EVENTS, SETTINGS])
+        problem, message = work.problem()
+        self.assertEqual(problem, PROBLEM_SCOPE)
+        self.assertIn("Google did not allow sending email for the work account", message)
+        self.assertTrue(work.identity_confirmed())   # which account it is is known all the same
+        self.assertTrue(work.is_signed_in("calendar"))
+        # The token file says sending was asked for and not granted (a refusal), also next run.
+        self.assertEqual(self.saved(work)[google_auth.TOKEN_ASKED_KEY], ALL_SCOPES)
+        self.assertEqual(self.bound_account().refused_features(), frozenset({"gmail_send"}))
+
+    def test_the_id_token_is_registered_for_redaction(self) -> None:
+        creds = self.creds()
+        self.flow.results = [creds]
+        self.bound_account().sign_in()
+        self.assert_redacted(creds.id_token)
+
+    def test_disconnect_forgets_the_sign_in_and_the_account(self) -> None:
+        self.flow.results = [self.creds()]
+        work = self.bound_account()
+        work.sign_in()
+        with self.assertLogs(AUTH_LOGGER, level="INFO"):
+            work.disconnect()
+        self.assertFalse(work.token_path.exists())
+        self.assertIsNone(work.binding())
+        self.flow.results = [self.creds(sub=SUB_B, email="ben@example.edu")]
+        work.sign_in()   # now any account may be picked again
+        self.assertEqual(work.bound_email(), "ben@example.edu")
+
+
+class AccountBindingsTests(AuthTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.path = self.data_dir / "accounts.json"
+        self.bindings = AccountBindings(self.path)
+
+    def test_bind_get_alias_of_unbind(self) -> None:
+        self.assertIsNone(self.bindings.get("work"))
+        with self.assertLogs(AUTH_LOGGER, level="INFO") as logs:
+            self.assertTrue(self.bindings.bind("work", "ana@example.edu", SUB_A))
+            self.assertTrue(self.bindings.bind("lab-2", "lab@example.edu", SUB_B))
+            self.assertTrue(self.bindings.unbind("lab-2"))
+        self.assertFalse(self.bindings.unbind("lab-2"))
+        self.assertEqual((self.bindings.get("work").email, self.bindings.alias_of(SUB_A)), ("ana@example.edu", "work"))
+        self.assertEqual(self.bindings.alias_of(SUB_B), "")
+        text = "\n".join(logs.output)
+        for private in ("ana@example.edu", "lab@example.edu", SUB_A, SUB_B, "lab-2"):
+            self.assertNotIn(private, text)
+        self.assertIn("Google (other)", text)
+        self.assertEqual(self.path.read_bytes().count(b"\r"), 0)
+        for bad in (("Work", "a@example.edu", SUB_A), ("work", "", SUB_A), ("work", "a@example.edu", "")):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.bindings.bind(*bad)
+
+    def test_unreadable_or_malformed_files(self) -> None:
+        self.path.parent.mkdir(parents=True)
+        for text in ("{broken", "[]"):
+            with self.subTest(text=text):
+                self.path.write_text(text, encoding="utf-8")
+                with self.assertLogs(AUTH_LOGGER, level="WARNING") as logs:
+                    self.assertIsNone(self.bindings.get("work"))
+                self.assertNotIn(text, "\n".join(logs.output))
+        self.path.write_text(json.dumps({
+            "work": {"email": "ana@example.edu", "sub": SUB_A}, "Bad Alias": {"email": "b@example.edu", "sub": SUB_B},
+            "personal": {"email": "Eve <eve@example.com>", "sub": SUB_B}, "lab": {"email": "x@example.edu", "sub": 5},
+            "home": "nope"}), encoding="utf-8")
+        with self.assertLogs(AUTH_LOGGER, level="WARNING") as logs:
+            self.assertEqual(self.bindings.get("work"), google_auth.Binding("ana@example.edu", SUB_A, ""))
+        self.assertIn("Ignored 4 malformed account binding(s)", "\n".join(logs.output))
+        self.assertNotIn("eve@example.com", "\n".join(logs.output))
+
+    def test_a_failed_write_keeps_the_binding_for_this_run(self) -> None:
+        blocked = AccountBindings(self.data_dir / "accounts.json" / "not-a-folder" / "accounts.json")
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text("{}", encoding="utf-8")
+        with self.assertLogs(AUTH_LOGGER, level="WARNING"):
+            self.assertFalse(blocked.bind("work", "ana@example.edu", SUB_A))
+        self.assertEqual(blocked.get("work").sub, SUB_A)
+        self.assertEqual(blocked.alias_of(SUB_A), "work")
 
 
 # --------------------------------------------------------------------------

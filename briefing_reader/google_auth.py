@@ -9,17 +9,33 @@ client (README step 8), and keeps one token file per alias:
                                       "personal" account's token (moved once, never copied), so
                                       nobody has to sign in again
     GoogleAccount(alias, ...)         one account's saved sign-in: is_signed_in(), granted_features(),
-                                      credentials(), sign_in(), forget(), problem()
+                                      credentials(), sign_in(), forget(), problem(), bound_email(),
+                                      identity_confirmed()
+    AccountBindings(path)             which Google account each alias is (accounts.json)
 
-What an account may do comes from its ``features`` (FEATURE_SCOPES). This
-version has one feature, "calendar"; a later one adds "gmail_send". Desktop
-apps cannot add a scope to an existing grant, so ``sign_in()`` always asks for
-every scope of the account's features (a new feature means one new, full
-consent). Google's consent screen lets you untick a box: the sign-in still
-succeeds (OAUTHLIB_RELAX_TOKEN_SCOPE is set just for the flow), the token is
-saved with the scopes Google actually granted (so a refresh never asks for
-more), and a feature whose scopes were not all granted is unavailable:
-``granted_features()`` leaves it out and ``credentials(need=...)`` says so.
+What an account may do comes from its ``features`` (FEATURE_SCOPES):
+"calendar" and "gmail_send" (send only). Desktop apps cannot add a scope to an
+existing grant, so ``sign_in()`` always asks for every scope of the account's
+features (a new feature means one new, full consent). Google's consent screen
+lets you untick a box: the sign-in still succeeds (OAUTHLIB_RELAX_TOKEN_SCOPE
+is set just for the flow), the token is saved with the scopes Google actually
+granted (so a refresh never asks for more), and a feature whose scopes were not
+all granted is unavailable: ``granted_features()`` leaves it out and
+``credentials(need=...)`` says so.
+
+Which Google account an alias is: a sign-in of an account with bindings (every
+alias the app builds) also asks for "openid" and "userinfo.email"
+(IDENTITY_SCOPES, non-sensitive) and reads the address and Google's account id
+("sub") from the id_token Google's token endpoint returns with the tokens. The
+first such sign-in binds the alias to that account in
+%LOCALAPPDATA%\\briefing-reader\\accounts.json (never in config.toml, never
+logged); a later sign-in of the alias to another Google account, or to an
+account already bound to another alias, is refused and its tokens are dropped.
+The token file remembers the account id it was issued for, so
+``identity_confirmed()`` (needed before Jarvis sends email) holds only while
+the saved sign-in is the bound account's. A token without that (the migrated
+google_token.json of older versions) still works for the calendar; sending
+needs one new sign-in, which binds.
 
 Sign-in problems are told apart (``AccountError.problem``), so a card can say
 what happened: no sign-in yet, the sign-in expired or was revoked
@@ -40,43 +56,60 @@ never a silent duplicate).
 Everything here is blocking (the browser sign-in waits up to
 ``open_timeout_s``), so callers use a worker thread. Nothing here talks to
 Google except ``sign_in()`` and a token refresh. Qt-free; the Google libraries
-are imported lazily. Tokens and the client secret are registered with
-:func:`config.register_secret` as soon as they are read; the log names an
-account only as "work", "personal" or "other", never by its address.
+are imported lazily. Tokens, the id_token and the client secret are registered
+with :func:`config.register_secret` as soon as they are read; the log names an
+account only as "work", "personal" or "other", never by its address, and
+messages (shown on cards, sometimes logged) never contain an address.
 """
 
 from __future__ import annotations
 
+import base64
 import importlib.util
 import json
 import logging
 import os
 import re
+import tempfile
 import threading
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .actions import email_address
 from .config import ACCOUNT_FEATURES, register_secret
 
 logger = logging.getLogger(__name__)
 
 CALENDAR_FEATURE = "calendar"
+GMAIL_FEATURE = "gmail_send"
 FEATURE_SCOPES: dict[str, tuple[str, ...]] = {
     CALENDAR_FEATURE: ("https://www.googleapis.com/auth/calendar.events",
                        "https://www.googleapis.com/auth/calendar.settings.readonly"),
+    # Send only: Jarvis can neither read nor change mail.
+    GMAIL_FEATURE: ("https://www.googleapis.com/auth/gmail.send",),
 }
 # What each feature lets Jarvis do, for messages ("Google did not allow Calendar access ...").
-FEATURE_WORDS = {CALENDAR_FEATURE: "Calendar access"}
-# Not requested in this version: a later one asks for these together with gmail.send, to learn
-# which Google account an alias is.
+FEATURE_WORDS = {CALENDAR_FEATURE: "Calendar access", GMAIL_FEATURE: "sending email"}
+# Asked for with every alias's sign-in (non-sensitive): the id_token then says which Google account
+# it is, so the alias can be bound to it (accounts.json).
 IDENTITY_SCOPES = ("openid", "https://www.googleapis.com/auth/userinfo.email")
+# What a token file without a "scopes" entry holds: older versions only ever signed in for Calendar.
+LEGACY_SCOPES = FEATURE_SCOPES[CALENDAR_FEATURE]
+ACCOUNTS_FILE = "accounts.json"
+# The token file key that remembers which Google account (id_token "sub") the token was issued for.
+TOKEN_SUB_KEY = "jarvis_account_sub"
+# The token file key that remembers which scopes the sign-in asked for: a feature asked for but not
+# granted was refused (a box unticked); one never asked for just needs a sign-in that asks for it.
+TOKEN_ASKED_KEY = "jarvis_asked_scopes"
 LEGACY_TOKEN = "google_token.json"
 TOKEN_PATTERN = "google_token_{alias}.json"
 LEGACY_ALIAS = "personal"          # the account google_token.json of older versions belongs to
 SETUP_HINT = "Set up Google sign-in: README step 8"
 SIGN_IN_SUCCESS_MESSAGE = "briefing-reader is connected to Google Calendar. You can close this tab."
-ALIAS_SUCCESS_MESSAGE = ("briefing-reader is connected to Google Calendar for the {alias} account. "
+ALIAS_SUCCESS_MESSAGE = ("briefing-reader is connected to Google for the {alias} account. "
                          "You can close this tab.")
 NOT_SIGNED_IN_MESSAGE = "Not signed in to Google"
 # "select_account": Google shows its account chooser, so the right account is picked for each
@@ -92,8 +125,9 @@ PROBLEM_BLOCKED = "blocked"       # the account's administrator does not allow t
 PROBLEM_DENIED = "denied"         # access_denied: cancelled in the browser, or not allowed
 PROBLEM_SCOPE = "scope"           # a box was unticked: a feature's permission is missing
 PROBLEM_TIMEOUT = "timeout"       # the browser sign-in was not finished in time
+PROBLEM_IDENTITY = "identity"     # another Google account than the one bound to the alias (refused)
 PROBLEMS = (PROBLEM_FAILED, PROBLEM_SETUP, PROBLEM_SIGNED_OUT, PROBLEM_EXPIRED, PROBLEM_BLOCKED,
-            PROBLEM_DENIED, PROBLEM_SCOPE, PROBLEM_TIMEOUT)
+            PROBLEM_DENIED, PROBLEM_SCOPE, PROBLEM_TIMEOUT, PROBLEM_IDENTITY)
 
 _GOOGLE_MODULES = ("googleapiclient", "google_auth_oauthlib", "google_auth_httplib2",
                    "google.oauth2")
@@ -101,6 +135,8 @@ BLOCKED_ERRORS = ("admin_policy_enforced", "org_internal")
 _ALIAS_RE = re.compile(r"[a-z][a-z0-9_-]{0,23}")
 _LOGGED_ALIASES = frozenset({"personal", "work"})
 _RELAX_SCOPE = "OAUTHLIB_RELAX_TOKEN_SCOPE"
+_ISSUERS = frozenset({"accounts.google.com", "https://accounts.google.com"})
+_SUB_RE = re.compile(r"[0-9A-Za-z_-]{1,255}")
 _relax_lock = threading.Lock()
 _libraries_available: bool | None = None
 
@@ -231,6 +267,146 @@ def blocked_code(text: str) -> str:
     return next((code for code in BLOCKED_ERRORS if code in (text or "")), "")
 
 
+def identity_from_id_token(id_token: Any, client_id: str) -> tuple[str, str] | None:
+    """(address, account id) from the id_token Google's token endpoint returned with a sign-in.
+
+    The token is not signature-checked: it came straight from Google over TLS in the same answer
+    as the access token. It must be issued by Google for this OAuth client (``aud``), name the
+    account ("sub") and a verified address; None when anything is missing or malformed. Never
+    logged.
+    """
+    if not isinstance(id_token, str) or id_token.count(".") != 2 or not client_id:
+        return None
+    try:
+        part = id_token.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)).decode("utf-8"))
+    except (ValueError, UnicodeError):
+        return None
+    if not isinstance(claims, dict):
+        return None
+    audience = claims.get("aud")
+    audiences = audience if isinstance(audience, list) else [audience]
+    sub, address = claims.get("sub"), claims.get("email")
+    if (claims.get("iss") not in _ISSUERS or client_id not in audiences or not isinstance(sub, str)
+            or not _SUB_RE.fullmatch(sub) or claims.get("email_verified") in (False, "false")):
+        return None
+    address = email_address(address) if isinstance(address, str) and "<" not in address else ""
+    if not address:
+        return None
+    return address, sub
+
+
+@dataclass(frozen=True)
+class Binding:
+    """The Google account an alias is bound to (address and Google's account id)."""
+
+    email: str
+    sub: str
+    bound_at: str = ""
+
+
+class AccountBindings:
+    """Which Google account each alias is: <data_dir>\\accounts.json {alias: {email, sub, bound_at}}.
+
+    Written only after a sign-in whose id_token named the account; never in config.toml and never
+    logged (the log says "bound", with the alias only). An unreadable file is treated as empty
+    (logged without its content); a failed write keeps the binding in memory for this run. Reads
+    and writes are serialised; writes are atomic (temporary file + os.replace).
+    """
+
+    def __init__(self, path: Path, clock: Callable[[], datetime] | None = None) -> None:
+        self.path = Path(path)
+        self._clock = clock or (lambda: datetime.now().astimezone())
+        self._lock = threading.Lock()
+        self._memory: dict[str, Binding] | None = None   # set when a write failed
+
+    def get(self, alias: str) -> Binding | None:
+        with self._lock:
+            return self._entries().get(alias)
+
+    def alias_of(self, sub: str) -> str:
+        """The alias bound to the Google account ``sub`` ("" when none)."""
+        with self._lock:
+            return next((alias for alias, binding in self._entries().items() if binding.sub == sub), "")
+
+    def bind(self, alias: str, email: str, sub: str) -> bool:
+        """Bind ``alias`` to the account (a new binding, or a new address of the same account).
+        True when it was saved to the file."""
+        if not valid_alias(alias) or not email or not _SUB_RE.fullmatch(sub or ""):
+            raise ValueError("not a binding")
+        with self._lock:
+            entries = self._entries()
+            old = entries.get(alias)
+            if old is not None and old.sub == sub and old.email == email:
+                return True
+            entries[alias] = Binding(email, sub, self._clock().isoformat(timespec="seconds"))
+            saved = self._write(entries)
+        logger.info("Google (%s): %s", logged_alias(alias),
+                    "bound to the account it signed in with" if old is None else "account address updated")
+        return saved
+
+    def unbind(self, alias: str) -> bool:
+        """Forget which account ``alias`` is (the next sign-in binds again). True when one was there."""
+        with self._lock:
+            entries = self._entries()
+            if entries.pop(alias, None) is None:
+                return False
+            self._write(entries)
+        logger.info("Google (%s): no longer bound to a Google account", logged_alias(alias))
+        return True
+
+    def _entries(self) -> dict[str, Binding]:
+        if self._memory is not None:
+            return dict(self._memory)
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8-sig"))
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as exc:
+            logger.warning("Could not read the account bindings (%s); treating them as empty",
+                           type(exc).__name__)
+            return {}
+        if not isinstance(data, dict):
+            logger.warning("The account bindings file is not a table; treating it as empty")
+            return {}
+        entries: dict[str, Binding] = {}
+        for alias, value in data.items():
+            if not (valid_alias(alias) and isinstance(value, dict)):
+                continue
+            email, sub = value.get("email"), value.get("sub")
+            if isinstance(email, str) and email_address(email) == email and isinstance(sub, str) \
+                    and _SUB_RE.fullmatch(sub):
+                bound_at = value.get("bound_at")
+                entries[alias] = Binding(email, sub, bound_at if isinstance(bound_at, str) else "")
+        if len(entries) != len(data):
+            logger.warning("Ignored %d malformed account binding(s)", len(data) - len(entries))
+        return entries
+
+    def _write(self, entries: dict[str, Binding]) -> bool:
+        data = {alias: {"email": item.email, "sub": item.sub, "bound_at": item.bound_at}
+                for alias, item in sorted(entries.items())}
+        part: str | None = None
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd, part = tempfile.mkstemp(prefix=f"{self.path.name}.", suffix=".tmp", dir=self.path.parent)
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(part, self.path)
+            part = None
+            self._memory = None
+            return True
+        except OSError as exc:
+            logger.warning("Could not save the account bindings (%s); kept for this run only",
+                           exc.strerror or type(exc).__name__)
+            self._memory = dict(entries)
+            return False
+        finally:
+            if part is not None:
+                _unlink_quietly(Path(part))
+
+
 # --------------------------------------------------------------------------
 # GoogleAccount
 # --------------------------------------------------------------------------
@@ -255,7 +431,8 @@ class GoogleAccount:
                  open_timeout_s: int = 300, setup_hint: str = SETUP_HINT,
                  success_message: str | None = None, log: logging.Logger | None = None,
                  refresh: Callable[[Any], None] | None = None,
-                 libraries_available: Callable[[], bool] | None = None) -> None:
+                 libraries_available: Callable[[], bool] | None = None,
+                 bindings: AccountBindings | None = None) -> None:
         if token_path is None:
             if data_dir is None:
                 raise ValueError("GoogleAccount needs data_dir or token_path")
@@ -274,6 +451,8 @@ class GoogleAccount:
         self._log = log or logger
         self._refresh_hook = refresh or (lambda creds: _refresh_credentials(creds))
         self._libraries_hook = libraries_available or (lambda: google_libraries_available())
+        # Which Google account the alias is (accounts.json); None for the one-account setup "".
+        self._bindings = bindings if alias else None
         self._lock = threading.RLock()
         self._creds: Any = None
         self._granted: list[str] | None = None   # scopes of self._creds (None while not loaded)
@@ -287,8 +466,10 @@ class GoogleAccount:
     # ---- state without the network ------------------------------------------------
 
     def requested_scopes(self) -> list[str]:
-        """What sign_in() asks Google for: every scope of the account's features."""
-        return scopes_for(self.features)
+        """What sign_in() asks Google for: IDENTITY_SCOPES (an account with bindings) and every
+        scope of the account's features."""
+        identity = list(IDENTITY_SCOPES) if self._bindings is not None else []
+        return identity + [scope for scope in scopes_for(self.features) if scope not in identity]
 
     def is_configured(self) -> bool:
         """True when the OAuth client secret file exists."""
@@ -311,8 +492,42 @@ class GoogleAccount:
             info = _token_info(self.token_path)
             if info is None:
                 return frozenset()
-            granted = _info_scopes(info, self.requested_scopes())
+            granted = _info_scopes(info, LEGACY_SCOPES)
         return features_granted(granted, self.features)
+
+    def refused_features(self) -> frozenset[str]:
+        """The configured features whose permissions the saved sign-in asked Google for but did not
+        get (a box was unticked). A feature the sign-in never asked for (a token of an older
+        version, or a feature added to config.toml since) is not refused: it needs one sign-in
+        that asks for it. No network."""
+        info = _token_info(self.token_path)
+        if info is None:
+            return frozenset()
+        asked = _asked_scopes(info)
+        return frozenset(name for name in features_granted(asked, self.features)
+                         if name not in self.granted_features())
+
+    # ---- which Google account (no network) -------------------------------------------------
+
+    def binding(self) -> Binding | None:
+        """The Google account this alias is bound to (None before the first sign-in that named it)."""
+        return self._bindings.get(self.alias) if self._bindings is not None else None
+
+    def bound_email(self) -> str:
+        """The bound account's address ("" when not bound). Shown on cards, never logged."""
+        binding = self.binding()
+        return binding.email if binding is not None else ""
+
+    def token_sub(self) -> str:
+        """The Google account id the saved sign-in was issued for ("" when the file does not say)."""
+        info = _token_info(self.token_path)
+        sub = info.get(TOKEN_SUB_KEY) if info is not None else None
+        return sub if isinstance(sub, str) and _SUB_RE.fullmatch(sub) else ""
+
+    def identity_confirmed(self) -> bool:
+        """The saved sign-in is the bound Google account's (what sending email needs)."""
+        binding = self.binding()
+        return binding is not None and bool(binding.sub) and self.token_sub() == binding.sub
 
     def problem(self) -> tuple[str, str]:
         """(PROBLEM_*, message) of the last failed sign-in or rejected token; ("", "") when none."""
@@ -338,7 +553,7 @@ class GoogleAccount:
                 if creds is None:
                     return self._sign_in_or_raise(interactive, need)
                 self._creds = creds
-                self._granted = list(getattr(creds, "scopes", None) or self.requested_scopes())
+                self._granted = list(getattr(creds, "scopes", None) or LEGACY_SCOPES)
                 self.generation += 1
             if need and need not in self.granted_features():
                 if interactive:
@@ -371,7 +586,9 @@ class GoogleAccount:
         except Exception as exc:  # noqa: BLE001 - mapped to a safe message
             raise self._refresh_error(exc) from None
         _register_credentials(creds)
-        self._save_token(creds, _creds_info(creds, self._granted or self.requested_scopes()))
+        info = _token_info(self.token_path) or {}
+        self._save_token(creds, _creds_info(creds, self._granted or list(LEGACY_SCOPES), sub=self.token_sub(),
+                                            asked=_asked_scopes(info)))
         self.generation += 1
 
     def _refresh_error(self, exc: Exception) -> AccountError:
@@ -417,7 +634,7 @@ class GoogleAccount:
         """
         with self._lock:
             self._require_setup()
-            self._read_client_config()
+            client = self._read_client_config()
             scopes = self.requested_scopes()
             try:
                 flow = self._flow_factory(self.client_secret_path, list(scopes))
@@ -438,11 +655,16 @@ class GoogleAccount:
                 self._set_problem(error.problem, str(error))
                 raise error from None
             _register_credentials(creds)
+            identity = self._check_identity(creds, client)
             granted = _granted_scopes(creds, scopes)
-            info = _creds_info(creds, granted)
+            # An alias's token also says what was asked for (a box unticked vs a feature added since).
+            info = _creds_info(creds, granted, sub=identity[1] if identity else "",
+                               asked=scopes if self._bindings is not None else ())
             if granted != list(scopes) and info is not None:
                 creds = _credentials_from_info(info) or creds   # refreshes ask only for what was granted
                 _register_credentials(creds)
+            if identity is not None and self._bindings is not None:
+                self._bindings.bind(self.alias, *identity)
             self._save_token(creds, info)
             self._creds = creds
             self._granted = list(granted)
@@ -455,6 +677,39 @@ class GoogleAccount:
             else:
                 self._set_problem()
                 self._log.info("%s: signed in", self.log_name)
+
+    def _check_identity(self, creds: Any, client: dict[str, Any]) -> tuple[str, str] | None:
+        """(address, account id) of a sign-in that may be kept for this alias; None when Google
+        did not say and the alias is not bound yet (Calendar works; sending waits for a sign-in
+        that names the account). Raises AccountAuthError(PROBLEM_IDENTITY), dropping the new
+        tokens, for another account than the bound one, an account bound to another alias, or a
+        bound alias whose sign-in does not say which account it is."""
+        if self._bindings is None:
+            return None
+        installed = client.get("installed") if isinstance(client, dict) else None
+        client_id = installed.get("client_id", "") if isinstance(installed, dict) else ""
+        identity = identity_from_id_token(getattr(creds, "id_token", None), str(client_id))
+        binding = self.binding()
+        message = ""
+        if identity is None:
+            if binding is not None:
+                message = (f"Google did not say which account this sign-in is, so it was not kept for "
+                           f"the {self.alias} account; sign in again")
+        else:
+            other = self._bindings.alias_of(identity[1])
+            if other and other != self.alias:
+                whose = f"the {other} account" if logged_alias(other) == other else "another account"
+                message = (f"That Google account is already set up as {whose} in Jarvis; sign in with "
+                           f"the {self.alias} account's own Google account")
+            elif binding is not None and binding.sub != identity[1]:
+                message = (f"This is not the Google account set up as the {self.alias} account; sign in "
+                           "with that one (its address is on the card)")
+        if message:
+            self._set_problem(PROBLEM_IDENTITY, message)
+            self._log.warning("%s: refused a sign-in to another Google account than the one set up for it",
+                              self.log_name)
+            raise AccountAuthError(message, problem=PROBLEM_IDENTITY)
+        return identity
 
     def _sign_in_error(self, exc: Exception) -> AccountError:
         from google_auth_oauthlib.flow import WSGITimeoutError
@@ -486,6 +741,14 @@ class GoogleAccount:
             return AccountAuthError("Google sign-in did not grant every permission; "
                                     "approve again and allow all of them", problem=PROBLEM_SCOPE)
         return AccountError(f"Google sign-in failed ({type(exc).__name__})")
+
+    def disconnect(self) -> None:
+        """Delete the saved sign-in and forget which Google account the alias is (README:
+        "Disconnecting"): the next sign-in may pick any account and binds it."""
+        with self._lock:
+            self.forget("disconnected", problem=PROBLEM_SIGNED_OUT)
+            if self._bindings is not None:
+                self._bindings.unbind(self.alias)
 
     def forget(self, reason: str, *, problem: str = PROBLEM_EXPIRED, message: str = "") -> None:
         """Delete the saved sign-in (the next use signs in again) and remember why."""
@@ -559,7 +822,7 @@ class GoogleAccount:
             info = json.loads(text)
             if not isinstance(info, dict):
                 raise ValueError("not a JSON object")
-            creds = Credentials.from_authorized_user_info(info, _info_scopes(info, self.requested_scopes()))
+            creds = Credentials.from_authorized_user_info(info, _info_scopes(info, LEGACY_SCOPES))
         except (ValueError, TypeError) as exc:
             if self.alias:
                 log("%s: the saved sign-in is unusable (%s); the next sign-in starts fresh", self.log_name,
@@ -622,8 +885,19 @@ def _granted_scopes(creds: Any, requested: Sequence[str]) -> list[str]:
     return ordered + sorted(given - set(ordered))
 
 
-def _creds_info(creds: Any, granted: Sequence[str]) -> dict[str, Any] | None:
-    """The token file content with "scopes" set to what was granted (None if unreadable)."""
+def _asked_scopes(info: dict[str, Any]) -> list[str]:
+    """The scopes the sign-in that wrote a token file asked for ([] when the file does not say)."""
+    asked = info.get(TOKEN_ASKED_KEY)
+    if not isinstance(asked, list) or not all(isinstance(scope, str) for scope in asked):
+        return []
+    return [scope for scope in asked if scope]
+
+
+def _creds_info(creds: Any, granted: Sequence[str], *, sub: str = "",
+                asked: Sequence[str] = ()) -> dict[str, Any] | None:
+    """The token file content with "scopes" set to what was granted and, with ``sub``, the Google
+    account the token was issued for; with ``asked``, the scopes the sign-in asked for (None if
+    unreadable)."""
     try:
         info = json.loads(creds.to_json())
     except (AttributeError, TypeError, ValueError):
@@ -632,6 +906,10 @@ def _creds_info(creds: Any, granted: Sequence[str]) -> dict[str, Any] | None:
         return None
     if list(granted) != _info_scopes(info, granted):
         info["scopes"] = list(granted)
+    if sub:
+        info[TOKEN_SUB_KEY] = sub
+    if asked:
+        info[TOKEN_ASKED_KEY] = list(asked)
     return info
 
 

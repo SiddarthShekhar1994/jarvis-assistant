@@ -1009,6 +1009,46 @@ class ApiErrorTests(GcalTestCase):
         self.assertEqual(ctx.exception.status, 503)
         self.assertEqual(self.service.calls_to("events.insert"), [])
 
+    def test_an_insert_that_may_have_happened_is_unknown_and_never_retried(self) -> None:
+        for error in (http_error(500, "Backend Error", "backendError"), http_error(503, "Service Unavailable"),
+                      socket.timeout("timed out"), ConnectionResetError("reset"),
+                      google_auth.RequestNotResent("not sent twice")):
+            with self.subTest(error=type(error).__name__):
+                self.service = FakeService()
+                self.service.outcomes["events.insert"] = [error]
+                cal = self.signed_in_calendar()
+                with self.fails_with(gcal.CalendarUnknownOutcome) as ctx:
+                    cal.create_event(make_action())
+                self.assertIn("check the calendar before retrying", str(ctx.exception))
+                self.assertEqual([retries for _, retries in self.service.calls_to("events.insert")], [0])
+        refused = self.insert_fails_with(http_error(400, "Bad Request", "badRequest"))
+        self.assertNotIsInstance(refused, gcal.CalendarUnknownOutcome)
+        not_sent = self.insert_fails_with(socket.gaierror("no dns"))
+        self.assertNotIsInstance(not_sent, gcal.CalendarUnknownOutcome)
+
+    def test_a_retry_after_an_unknown_insert_finds_the_event(self) -> None:
+        action = make_action()
+        self.service.outcomes["events.insert"] = [socket.timeout("timed out")]
+        cal = self.signed_in_calendar()
+        with self.fails_with(gcal.CalendarUnknownOutcome):
+            cal.create_event(action)
+        start = action.start.strftime("%Y-%m-%dT%H:%M:%S") + "-07:00"
+        self.service.outcomes["events.list"] = [{"items": [{"id": "evt9", "summary": action.title,
+                                                            "htmlLink": EVENT_LINK, "start": {"dateTime": start}}]}]
+        result = cal.create_event(action)
+        self.assertEqual((result.event_id, result.existed), ("evt9", True))
+        self.assertEqual(len(self.service.calls_to("events.insert")), 1)
+
+    def test_without_interactive_a_missing_sign_in_creates_nothing_and_opens_nothing(self) -> None:
+        self.write_client_secret()
+        cal = self.make_calendar()
+        with self.assertLogs(GCAL_LOGGER, level="INFO"), self.assertRaises(CalendarNotSignedIn):
+            cal.create_event(make_action(), interactive=False)
+        self.assertEqual((self.flow.calls, self.service.calls), ([], []))
+        signed = self.signed_in_calendar()
+        self.assertEqual(signed.create_event(make_action(), interactive=False).event_id, "evt123")
+        self.assertEqual(self.flow.calls, [])
+
 
 # --------------------------------------------------------------------------
 # Listing events (the reading window's agenda)

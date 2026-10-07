@@ -134,9 +134,18 @@ Widgets
         / ``COPIED_MS`` are the Copy feedback; ``plain_tooltip(text)`` makes a
         tooltip that keeps line breaks and is never read as HTML (every
         tooltip that can hold page or calendar text uses it).
+        A Reply / Email card is built with ``mail=True`` (``body_lines``,
+        ``body_links``, ``approve_alternatives``): ``set_recipients(sender, to,
+        cc)`` shows FROM and the TO / CC chips (``RecipientChips`` of
+        ``RecipientChip(address, state)``; ``RECIPIENT_NEW`` is red with a NEW
+        RECIPIENT badge, ``RECIPIENT_CONFIRMED`` reads NEW \u00b7 CONFIRMED),
+        and the drafted text keeps its line breaks, up to ``body_lines`` lines,
+        its links highlighted (``mail_text()``).
         ``EditDialog(action_id, kind, kind_label, title, ...)``: the window-modal
-        Edit dialog of an RSVP / Move / Cancel card (``open()``; ``saved(id,
-        values)``, ``show_error(text)``, ``values()``). ``ActionList``:
+        Edit dialog of an RSVP / Move / Cancel card, or of a Reply / Email
+        (``EDIT_MAIL_KINDS``: FROM, To / Cc rows with Remove, Add and a "Send to"
+        tick per new recipient, the subject and the message) (``open()``;
+        ``saved(id, values)``, ``show_error(text)``, ``values()``). ``ActionList``:
         scrollable cards ``ActionList.CARD_GAP`` px apart with an empty-state
         line (``add_card``, ``card(id)``, ``cards()``, ``clear()``,
         ``set_empty_text``).
@@ -207,6 +216,8 @@ from PySide6.QtGui import (
     QPixmap,
     QPolygonF,
     QRadialGradient,
+    QSyntaxHighlighter,
+    QTextCharFormat,
     QTextLayout,
     QTextOption,
     QTransform,
@@ -3405,6 +3416,10 @@ class _ClampedLabel(QLabel):
     def full_text(self) -> str:
         return self._full
 
+    def is_cut(self) -> bool:
+        """The text does not fit in ``max_lines`` lines at the current width (it ends in an ellipsis)."""
+        return self.text() != self._full
+
     def _render(self) -> None:
         shown = _elide_to_lines(self._full, self.font(), self.contentsRect().width() - 2, self._max_lines)
         cut = plain_tooltip(self._full) if shown != self._full else ""
@@ -3422,17 +3437,18 @@ _LONGEST_PIECE = 24         # a card's detail holds about 25 mono characters per
 _LONG_WORD = _LONGEST_PIECE  # a word that fits on a line even then ("jordan.smith@example.edu") stays whole
 
 
-def _with_soft_breaks(text: str) -> str:
+def _with_soft_breaks(text: str, min_word: int = _LONG_WORD) -> str:
     """``text`` with zero-width break chances inside long words, so an email address wraps.
 
     QLabel wraps only at spaces and hyphens, which cuts "firstname.lastname@cs.example.edu" at
-    the card edge on a narrow window. In a word longer than _LONG_WORD characters, break chances
-    go after "@" and "/" and before "."; a piece still longer than _LONGEST_PIECE characters
-    (hyphens count as breaks) gets one every _LONGEST_PIECE characters.
+    the card edge on a narrow window. In a word longer than ``min_word`` characters (default
+    _LONG_WORD; 0 for a text that is one address, which must never break inside a domain name),
+    break chances go after "@" and "/" and before "."; a piece still longer than _LONGEST_PIECE
+    characters (hyphens count as breaks) gets one every _LONGEST_PIECE characters.
     """
     words = re.split(r"(\s+)", text)
     for index, word in enumerate(words):
-        if len(word.rstrip(",;")) <= _LONG_WORD or word.isspace():   # "ana@example.edu," in a list
+        if len(word.rstrip(",;")) <= min_word or word.isspace():   # "ana@example.edu," in a list
             continue
         out: list[str] = []
         run = 0
@@ -3459,17 +3475,19 @@ class _BreakableLabel(QLabel):
 
     ``text()`` and the accessible name are the text as set, without the break chances. Once
     a second text is set, the label never needs less height than an earlier one did at the
-    same width (a card's detail may grow after an edit, never shrink).
+    same width (a card's detail may grow after an edit, never shrink). ``min_word``: see
+    _with_soft_breaks (0 for an address: it breaks after "@" or before "." when it must).
     """
 
-    def __init__(self, text: str, font: QFont, color: str | QColor) -> None:
+    def __init__(self, text: str, font: QFont, color: str | QColor, *, min_word: int = _LONG_WORD) -> None:
         super().__init__()
         self._plain = ""
+        self._min_word = min_word
         self.setTextFormat(Qt.TextFormat.PlainText)
         self.setWordWrap(True)
         self.setFont(font)
         set_label_color(self, color)
-        self._memory = _TextMemory(self, lambda shown, _width: _with_soft_breaks(shown))
+        self._memory = _TextMemory(self, lambda shown, _width: _with_soft_breaks(shown, min_word))
         self.setText(text)
 
     def setText(self, text: str) -> None:  # noqa: N802 - mirrors QLabel
@@ -3477,7 +3495,7 @@ class _BreakableLabel(QLabel):
             self._memory.remember(self._plain)
         self._plain = text or ""
         self.setAccessibleName(self._plain)
-        super().setText(_with_soft_breaks(self._plain))
+        super().setText(_with_soft_breaks(self._plain, self._min_word))
         self.updateGeometry()
 
     def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt override
@@ -3654,6 +3672,426 @@ class _DecisionButton(HudButton):
         return super().event(event)
 
 
+# A Reply / Email card's recipients (RecipientChips, the Edit dialog's To / Cc lists).
+RECIPIENT_KNOWN = "known"          # the account's trusted domains, or sent to through Jarvis before
+RECIPIENT_NEW = "new"              # red NEW RECIPIENT: Send asks to confirm it in the Edit dialog
+RECIPIENT_CONFIRMED = "confirmed"  # a new recipient ticked in the Edit dialog ("Send to <address>")
+RECIPIENT_OWN = "own"              # the sending account itself (never a recipient)
+NEW_RECIPIENT_TEXT = "NEW RECIPIENT"
+CONFIRMED_RECIPIENT_TEXT = "NEW " + MIDDLE_DOT + " CONFIRMED"
+
+
+def _paint_recipient_badge(painter: QPainter, rect: QRectF, text: str, state: str, font: QFont) -> None:
+    """A NEW RECIPIENT badge: filled red while the address is not confirmed, outlined red once it is
+    ("NEW \u00b7 CONFIRMED"), on a card and in the Edit dialog alike."""
+    if state == RECIPIENT_NEW:
+        painter.fillRect(rect, QColor(RED_LINE))
+        painter.setPen(QColor("#1a0505"))
+    else:
+        painter.setPen(QPen(rgba(RED_LINE, 0.9), 1))
+        painter.drawRect(rect.adjusted(0.5, 0.5, -0.5, -0.5))
+        painter.setPen(QColor(RED))
+    painter.setFont(font)
+    painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+
+
+@dataclass(frozen=True)
+class RecipientChip:
+    """One address on a Reply / Email card: ``state`` is RECIPIENT_KNOWN, _NEW or _CONFIRMED."""
+
+    address: str
+    state: str = RECIPIENT_KNOWN
+
+
+def _wrapped_lines(text: str, font: QFont, width: float) -> list[str]:
+    """``text`` word-wrapped to ``width`` px; a word that does not fit breaks after "@" or "/",
+    before "." or, failing that, anywhere (an address is always shown whole, and a short one
+    never breaks inside a domain name while a break after "@" or before "." will do)."""
+    if not text:
+        return [""]
+    broken = _with_soft_breaks(text, 0)
+    layout = QTextLayout(broken, font)
+    option = QTextOption()
+    option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+    layout.setTextOption(option)
+    lines: list[str] = []
+    layout.beginLayout()
+    while True:
+        line = layout.createLine()
+        if not line.isValid():
+            break
+        line.setLineWidth(max(1.0, width))
+        piece = broken[line.textStart():line.textStart() + line.textLength()]
+        lines.append(piece.replace(_SOFT_BREAK, "").rstrip())
+    layout.endLayout()
+    return lines or [""]
+
+
+class RecipientChips(QWidget):
+    """A Reply / Email card's FROM line and its TO / CC recipients as chips (painted).
+
+    ``set_rows(sender, to, cc)``: ``sender`` is the From text ("work (ana@example.edu)"),
+    ``to`` / ``cc`` RecipientChip items (an empty Cc has no row). A RECIPIENT_NEW chip is red
+    with a NEW RECIPIENT badge (Send asks to confirm it in the Edit dialog first); a
+    RECIPIENT_CONFIRMED one is red with "NEW \u00b7 CONFIRMED". Every address is shown whole: a
+    long one wraps inside its chip. Like the card's other texts it never gets shorter once it
+    has been shown (a later, shorter list keeps the room), so the card never shrinks under the
+    mouse. ``text()`` is what is shown, as plain text (also the accessible name and tooltip).
+    """
+
+    _CAPTION_GAP = 10
+    _ROW_GAP = 4
+    _CHIP_GAP = 6
+    _CHIP_VGAP = 4
+    _PAD_X = 6
+    _PAD_Y = 2
+    _BADGE_GAP = 6
+    _BADGE_PAD = 4
+    _REMEMBER = 4
+    _MIN_VALUE_WIDTH = 60
+
+    def __init__(self, parent: QWidget | None = None, *, top_margin: int = 0) -> None:
+        super().__init__(parent)
+        self._top = top_margin
+        self._caption_font = mono_font(10, 400, 0.14)
+        self._value_font = mono_font(11)
+        self._badge_font = mono_font(9, 600, 0.08)
+        self._sender = ""
+        self._to: tuple[RecipientChip, ...] = ()
+        self._cc: tuple[RecipientChip, ...] = ()
+        self._shown: list[tuple[str, tuple[RecipientChip, ...], tuple[RecipientChip, ...]]] = []
+        self._heights: dict[tuple[Any, int], int] = {}
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        self.hide()
+
+    # ---- content ---------------------------------------------------------------
+
+    def set_rows(self, sender: str, to: Sequence[RecipientChip], cc: Sequence[RecipientChip] = ()) -> None:
+        content = (sender, tuple(to), tuple(cc))
+        if content == (self._sender, self._to, self._cc):
+            return
+        if self.isVisibleTo(self.parentWidget() or self) and (self._sender or self._to or self._cc):
+            previous = (self._sender, self._to, self._cc)
+            if previous not in self._shown:
+                self._shown.append(previous)
+                del self._shown[:-self._REMEMBER]
+        self._sender, self._to, self._cc = content
+        text = self.text()
+        self.setAccessibleName(text)
+        self.setToolTip(plain_tooltip(text))
+        self.setVisible(bool(sender or to or cc))
+        self.updateGeometry()
+        self.update()
+
+    def sender_text(self) -> str:
+        return self._sender
+
+    def chips(self) -> tuple[tuple[RecipientChip, ...], tuple[RecipientChip, ...]]:
+        return self._to, self._cc
+
+    def text(self) -> str:
+        """"From: work (ana@example.edu)\nTo: ana@example.edu, ben@example.edu (new recipient)"."""
+        def names(chips: Sequence[RecipientChip]) -> str:
+            words = {RECIPIENT_NEW: " (new recipient, not confirmed)",
+                     RECIPIENT_CONFIRMED: " (new recipient, confirmed)"}
+            return ", ".join(chip.address + words.get(chip.state, "") for chip in chips)
+
+        lines = [f"From: {self._sender}"] if self._sender else []
+        if self._to:
+            lines.append(f"To: {names(self._to)}")
+        if self._cc:
+            lines.append(f"Cc: {names(self._cc)}")
+        return "\n".join(lines)
+
+    # ---- geometry --------------------------------------------------------------
+
+    def _caption_width(self) -> float:
+        return max(_text_advance(self._caption_font, word) for word in ("FROM", "TO", "CC")) + self._CAPTION_GAP
+
+    def _chip_height(self, lines: int) -> float:
+        return lines * QFontMetricsF(self._value_font).lineSpacing() + 2 * self._PAD_Y
+
+    def _layout(self, sender: str, to: Sequence[RecipientChip], cc: Sequence[RecipientChip],
+                width: int) -> tuple[float, list[tuple]]:
+        """(height, items) at ``width``; items are what paintEvent draws."""
+        items: list[tuple] = []
+        x0 = self._caption_width()
+        avail = max(float(self._MIN_VALUE_WIDTH), width - x0)
+        right = x0 + avail
+        value = QFontMetricsF(self._value_font)
+        line_h = value.lineSpacing()
+        caption_dy = max(0.0, (line_h - QFontMetricsF(self._caption_font).lineSpacing()) / 2)
+        badge_w = {text: _text_advance(self._badge_font, text) + 2 * self._BADGE_PAD
+                   for text in (NEW_RECIPIENT_TEXT, CONFIRMED_RECIPIENT_TEXT)}
+        y = 0.0
+        first = True
+        if sender:
+            items.append(("caption", QPointF(0, y + caption_dy), "FROM"))
+            for line in _wrapped_lines(sender, self._value_font, avail):
+                items.append(("value", QRectF(x0, y, avail, line_h), line))
+                y += line_h
+            first = False
+        for caption, chips in (("TO", to), ("CC", cc)):
+            if not chips:
+                continue
+            if not first:
+                y += self._ROW_GAP
+            first = False
+            items.append(("caption", QPointF(0, y + self._PAD_Y + caption_dy), caption))
+            x, row_h = x0, 0.0
+            for chip in chips:
+                badge = {RECIPIENT_NEW: NEW_RECIPIENT_TEXT,
+                         RECIPIENT_CONFIRMED: CONFIRMED_RECIPIENT_TEXT}.get(chip.state, "")
+                text_w = _text_advance(self._value_font, chip.address)
+                extra = self._BADGE_GAP + badge_w[badge] if badge else 0.0
+                single = 2 * self._PAD_X + text_w + extra
+                if single <= avail:
+                    if x > x0 and x + single > right + 0.5:
+                        x, y, row_h = x0, y + row_h + self._CHIP_VGAP, 0.0
+                    rect = QRectF(x, y, math.ceil(single), self._chip_height(1))
+                    lines = [chip.address]
+                    badge_at = QPointF(x + self._PAD_X + text_w + self._BADGE_GAP, y) if badge else None
+                    x += rect.width() + self._CHIP_GAP
+                else:   # wider than the row: the chip takes the whole row and the address wraps
+                    if x > x0:
+                        x, y, row_h = x0, y + row_h + self._CHIP_VGAP, 0.0
+                    inner = avail - 2 * self._PAD_X
+                    lines = _wrapped_lines(chip.address, self._value_font, inner)
+                    last_w = _text_advance(self._value_font, lines[-1])
+                    count = len(lines)
+                    badge_at = None
+                    if badge:
+                        if last_w + extra <= inner:
+                            badge_at = QPointF(x + self._PAD_X + last_w + self._BADGE_GAP, y + (count - 1) * line_h)
+                        else:
+                            badge_at = QPointF(x + self._PAD_X, y + count * line_h)
+                            count += 1
+                    rect = QRectF(x, y, avail, self._chip_height(count))
+                    x = right + 1   # the next chip starts a new row
+                items.append(("chip", rect, chip.state))
+                for index, line in enumerate(lines):
+                    items.append(("chip_text", QRectF(rect.x() + self._PAD_X, rect.y() + self._PAD_Y + index * line_h,
+                                                      rect.width() - 2 * self._PAD_X, line_h), line, chip.state))
+                if badge and badge_at is not None:
+                    items.append(("badge", QRectF(badge_at.x(), badge_at.y() + self._PAD_Y + 1, badge_w[badge],
+                                                  line_h - 2), badge, chip.state))
+                row_h = max(row_h, rect.height())
+            y += row_h
+        return y, items
+
+    def _height(self, content: tuple, width: int) -> int:
+        key = (content, width)
+        if key not in self._heights:
+            if len(self._heights) > 256:
+                self._heights.clear()
+            self._heights[key] = self._top + math.ceil(self._layout(*content, width)[0]) + 1
+        return self._heights[key]
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 - Qt override
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt override
+        contents = [(self._sender, self._to, self._cc), *self._shown]
+        return max(self._height(content, width) for content in contents)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        width = max(self.width(), 240)
+        return QSize(width, self.heightForWidth(width))
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        width = math.ceil(self._caption_width()) + self._MIN_VALUE_WIDTH
+        return QSize(width, self.heightForWidth(max(self.width(), width)))
+
+    def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        if event.oldSize().width() != event.size().width():
+            self.updateGeometry()
+
+    # ---- painting ----------------------------------------------------------------
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.translate(0, self._top)
+            _height, items = self._layout(self._sender, self._to, self._cc, self.width())
+            for item in items:
+                kind = item[0]
+                if kind == "caption":
+                    painter.setFont(self._caption_font)
+                    painter.setPen(QColor(AMBER_META))
+                    metrics = QFontMetricsF(self._caption_font)
+                    painter.drawText(QPointF(item[1].x(), item[1].y() + metrics.ascent()), item[2])
+                elif kind == "value":
+                    painter.setFont(self._value_font)
+                    painter.setPen(QColor(TEXT_SOFT))
+                    painter.drawText(item[1], Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, item[2])
+                elif kind == "chip":
+                    new = item[2] in (RECIPIENT_NEW, RECIPIENT_CONFIRMED)
+                    rect = item[1].adjusted(0.5, 0.5, -0.5, -0.5)
+                    path = chamfer_path(rect, 4)
+                    painter.fillPath(path, rgba(RED, 0.10) if new else rgba(AMBER, 0.06))
+                    painter.setPen(QPen(rgba(RED_LINE, 0.9) if new else rgba(AMBER, 0.35), 1))
+                    painter.drawPath(path)
+                elif kind == "chip_text":
+                    new = item[3] in (RECIPIENT_NEW, RECIPIENT_CONFIRMED)
+                    painter.setFont(self._value_font)
+                    painter.setPen(QColor(RED if new else AMBER_TEXT))
+                    painter.drawText(item[1], Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, item[2])
+                elif kind == "badge":
+                    _paint_recipient_badge(painter, item[1], item[2], item[3], self._badge_font)
+        finally:
+            painter.end()
+
+
+class _MailBody(QWidget):
+    """A drafted email as a Reply / Email card shows it: its own line breaks, word-wrapped, at most
+    ``max_lines`` lines (the last one ends in an ellipsis when there is more: hover, or Edit, for
+    all of it), and its web links in the accent colour, underlined (never clickable).
+
+    ``set_text(text, links, tooltip)``: ``links`` are (start, end) offsets into ``text``. Like the
+    card's other texts it never needs less height than a text it showed before at the same width.
+    ``shown_lines()`` returns the lines as drawn.
+    """
+
+    _REMEMBER = 4
+
+    def __init__(self, font: QFont, color: str | QColor, link_color: str | QColor, max_lines: int, *,
+                 top_margin: int = 0) -> None:
+        super().__init__()
+        self._font = QFont(font)
+        self._color = QColor(color)
+        self._link_color = QColor(link_color)
+        self._max_lines = max(1, max_lines)
+        self._top = top_margin
+        self._text = ""
+        self._links: tuple[tuple[int, int], ...] = ()
+        self._shown: list[str] = []
+        self._heights: dict[tuple[str, int], int] = {}
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+
+    def set_text(self, text: str, links: Sequence[tuple[int, int]] = (), tooltip: str = "") -> None:
+        if self._text and text != self._text and self.isVisibleTo(self.parentWidget() or self):
+            if self._text not in self._shown:
+                self._shown.append(self._text)
+                del self._shown[:-self._REMEMBER]
+        self._text = text or ""
+        self._links = tuple((int(start), int(end)) for start, end in links if 0 <= start < end <= len(self._text))
+        self.setToolTip(tooltip)
+        self.setAccessibleName(self._text)
+        self.updateGeometry()
+        self.update()
+
+    def text(self) -> str:
+        return self._text
+
+    def links(self) -> tuple[tuple[int, int], ...]:
+        return self._links
+
+    def _lines(self, text: str, width: float) -> tuple[list[tuple[int, str]], bool]:
+        """[(offset of the line in ``text``, the line as drawn)], and whether lines were left out."""
+        spans: list[tuple[int, int]] = []
+        offset = 0
+        for paragraph in text.split("\n"):
+            if not paragraph:
+                spans.append((offset, offset))
+            else:
+                layout = QTextLayout(paragraph, self._font)
+                option = QTextOption()
+                option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+                layout.setTextOption(option)
+                layout.beginLayout()
+                while True:
+                    line = layout.createLine()
+                    if not line.isValid():
+                        break
+                    line.setLineWidth(max(1.0, width))
+                    spans.append((offset + line.textStart(), offset + line.textStart() + line.textLength()))
+                layout.endLayout()
+            offset += len(paragraph) + 1
+            if len(spans) > self._max_lines:
+                break
+        cut = len(spans) > self._max_lines
+        lines = [(start, text[start:end].rstrip("\n")) for start, end in spans[:self._max_lines]]
+        if cut and lines:
+            start, last = lines[-1]
+            metrics = QFontMetricsF(self._font)
+            last = last.rstrip()
+            while last and metrics.horizontalAdvance(last + "\u2026") > width:
+                last = last[:-1].rstrip()
+            lines[-1] = (start, last + "\u2026")
+        return lines, cut
+
+    def shown_lines(self) -> list[str]:
+        return [line for _start, line in self._lines(self._text, self._text_width(self.width()))[0]]
+
+    def is_cut(self) -> bool:
+        return self._lines(self._text, self._text_width(self.width()))[1]
+
+    @staticmethod
+    def _text_width(width: int) -> float:
+        return max(1.0, width - 2.0)   # a little slack, like _ClampedLabel
+
+    def _height(self, text: str, width: int) -> int:
+        key = (text, width)
+        if key not in self._heights:
+            if len(self._heights) > 256:
+                self._heights.clear()
+            count = len(self._lines(text, self._text_width(width))[0]) if text else 0
+            self._heights[key] = self._top + math.ceil(count * QFontMetricsF(self._font).lineSpacing())
+        return self._heights[key]
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 - Qt override
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt override
+        return max(self._height(text, width) for text in (self._text, *self._shown))
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        width = max(self.width(), 240)
+        return QSize(width, self.heightForWidth(width))
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return QSize(60, self.heightForWidth(max(self.width(), 60)))
+
+    def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        if event.oldSize().width() != event.size().width():
+            self.updateGeometry()
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+            painter.setPen(self._color)
+            line_h = QFontMetricsF(self._font).lineSpacing()
+            link_format = QTextCharFormat()
+            link_format.setForeground(self._link_color)
+            link_format.setFontUnderline(True)
+            lines, _cut = self._lines(self._text, self._text_width(self.width()))
+            for index, (start, shown) in enumerate(lines):
+                if not shown:
+                    continue
+                formats = []
+                for link_start, link_end in self._links:
+                    lo, hi = max(link_start, start), min(link_end, start + len(shown))
+                    if lo < hi:
+                        span = QTextLayout.FormatRange()
+                        span.start, span.length, span.format = lo - start, hi - lo, link_format
+                        formats.append(span)
+                layout = QTextLayout(shown, self._font)
+                layout.setFormats(formats)
+                layout.beginLayout()
+                line = layout.createLine()
+                if line.isValid():
+                    line.setLineWidth(max(1.0, self.width() * 4.0))
+                    line.setPosition(QPointF(0, 0))
+                layout.endLayout()
+                layout.draw(painter, QPointF(0, self._top + index * line_h))
+        finally:
+            painter.end()
+
+
 class ActionCard(QWidget):
     """An approval card: kind, title, detail, then one fixed-height slot with Deny / Approve or the result.
 
@@ -3714,7 +4152,9 @@ class ActionCard(QWidget):
     _SLOT_GAP = 8   # between the texts and the buttons / result
     _FAILURE_LINES = 2
     _BODY_LINES = 3
+    _MAIL_BODY_LINES = 10   # a Reply / Email card: what Send sends, line breaks kept
     _BODY_GAP = 4    # above the body preview (on top of the texts' 2 px spacing)
+    _RECIPIENTS_GAP = 4   # above FROM / TO / CC
     _TOOLS_GAP = 4   # above the tools row
     _TOOLS_SPACING = 18
     _CHECK_LINES = 3   # Google's title and time, then who organizes it and your answer
@@ -3724,7 +4164,9 @@ class ActionCard(QWidget):
                  actionable: bool = True, approve_text: str = "Approve", body: str = "",
                  title_lines: int = 0, open_text: str = "", copy_text: str = "",
                  edit_text: str = "", sign_in_text: str = "", check_line: bool = False,
-                 deny_text: str = "Deny", event_text: str = "", parent: QWidget | None = None) -> None:
+                 deny_text: str = "Deny", event_text: str = "", mail: bool = False,
+                 body_lines: int = 0, body_links: Sequence[tuple[int, int]] = (),
+                 approve_alternatives: Sequence[str] = (), parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.action_id = action_id
         self._actionable = actionable
@@ -3760,11 +4202,21 @@ class ActionCard(QWidget):
         self._check_tip = ""
         self._check_warn = False
         self._copy_more = f"{copy_text} for the whole text" if copy_text else ""
-        self.body_label = _ClampedLabel(body_font(12), TEXT_SOFT, max_lines=self._BODY_LINES, grow_only=True)
+        self._mail = mail
+        # A Reply / Email card: FROM and the TO / CC chips (set_recipients), and the drafted text
+        # with its own line breaks and highlighted links (body_lines lines, MAIL_BODY_LINES by default).
+        self.recipients = RecipientChips(top_margin=self._RECIPIENTS_GAP)
+        self.mail_body = _MailBody(body_font(12), TEXT_SOFT, ACCENT, body_lines or self._MAIL_BODY_LINES,
+                                   top_margin=self._BODY_GAP)
+        self.body_label = _ClampedLabel(body_font(12), TEXT_SOFT, max_lines=body_lines or self._BODY_LINES,
+                                        grow_only=True)
         self.body_label.setContentsMargins(0, self._BODY_GAP, 0, 0)
         self.body_label.set_full_text(" ".join(body.split()),
                                       tooltip=plain_tooltip(_capped_tip_text(body, self._copy_more)))
-        self.body_label.setVisible(bool(body.strip()))
+        self.body_label.setVisible(bool(body.strip()) and not mail)
+        if mail:
+            self.mail_body.set_text(body, body_links, plain_tooltip(_capped_tip_text(body, self._copy_more)))
+        self.mail_body.setVisible(mail and bool(body.strip()))
         self.source_button: HudButton = _ToolLink(open_text or "Open")
         self.copy_button: HudButton = _ToolLink(copy_text or "Copy")
         self.edit_button: HudButton = _ToolLink(edit_text or EDIT_TEXT)
@@ -3774,9 +4226,9 @@ class ActionCard(QWidget):
         self.deny_button = _DecisionButton(deny_text or "Deny", DENY, compact=True)
         self.approve_button = _DecisionButton(approve_text or "Approve", APPROVE, compact=True)
         # Every text the button may show later, so a new one never moves Deny (an RSVP, Move or
-        # Cancel card may also read Sign in or Done).
+        # Cancel card may also read Sign in or Done; a Reply / Email card Send or Done).
         self._fit_approve_width((approve_text or "Approve", RETRY_TEXT)
-                                + ((SIGN_IN_TEXT, "Done") if check_line else ()))
+                                + ((SIGN_IN_TEXT, "Done") if check_line else ()) + tuple(approve_alternatives))
         self.result_label = _ClampedLabel(mono_font(11, 400, 0.12), GREEN)
         self.result_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.open_button = HudButton("Open", LINK)
@@ -3933,12 +4385,34 @@ class ActionCard(QWidget):
         """Show Sign in in the tools row's last place, or Edit again (set_tool_slot)."""
         self.set_tool_slot(TOOL_SIGN_IN if visible else TOOL_EDIT)
 
-    def set_body(self, body: str) -> None:
-        """A new body preview (after an edit): the card may grow, never shrink."""
-        self.body_label.set_full_text(" ".join(body.split()),
-                                      tooltip=plain_tooltip(_capped_tip_text(body, self._copy_more)))
-        if body.strip():
+    def set_body(self, body: str, links: Sequence[tuple[int, int]] = ()) -> None:
+        """A new body preview (after an edit): the card may grow, never shrink. ``links``: the web
+        links' (start, end) offsets, highlighted on a Reply / Email card."""
+        tip = plain_tooltip(_capped_tip_text(body, self._copy_more))
+        self.body_label.set_full_text(" ".join(body.split()), tooltip=tip)
+        if self._mail:
+            self.mail_body.set_text(body, links, tip)
+            if body.strip():
+                self.mail_body.setVisible(True)
+        elif body.strip():
             self.body_label.setVisible(True)
+
+    def mail_cut(self) -> bool:
+        """A Reply / Email card that does not show all of its subject or its text at its current
+        width (the title ends in an ellipsis, or the text is cut after its lines)."""
+        if not self._mail:
+            return False
+        title_cut = isinstance(self.title_label, _ClampedLabel) and self.title_label.is_cut()
+        return title_cut or (not self.mail_body.isHidden() and self.mail_body.is_cut())
+
+    def set_recipients(self, sender: str, to: Sequence[RecipientChip], cc: Sequence[RecipientChip] = ()) -> None:
+        """A Reply / Email card's FROM line and TO / CC chips (see RecipientChips): the card may
+        grow, never shrink."""
+        self.recipients.set_rows(sender, to, cc)
+
+    def mail_text(self) -> str:
+        """The drafted text of a Reply / Email card exactly as set (line breaks kept)."""
+        return self.mail_body.text()
 
     def set_copy_text(self, text: str) -> None:
         """Show the tools row's Copy link as ``text`` ("Copy note"), or hide it with "" (after an
@@ -3975,7 +4449,8 @@ class ActionCard(QWidget):
     def _build_layout(self) -> None:
         self._texts = QVBoxLayout()
         self._texts.setSpacing(2)
-        for label in (self.kind_label, self.title_label, self.detail_label, self.check_label, self.body_label):
+        for label in (self.kind_label, self.title_label, self.detail_label, self.check_label, self.recipients,
+                      self.body_label, self.mail_body):
             self._texts.addWidget(label)
         self._texts.addWidget(self._tools)
         # Both slot pages reach the card's right and bottom edges (their margins
@@ -4061,6 +4536,7 @@ class ActionCard(QWidget):
         except that a FAILED reason (under the buttons) may add a line or two
         once; the card keeps that room afterwards.
         """
+        entering_countdown = status == CARD_COUNTDOWN and self._status != CARD_COUNTDOWN
         self._status = status if status in CARD_STATUSES else CARD_PENDING
         self._link = link
         self.open_button.setText(link_text or "Open")
@@ -4078,6 +4554,8 @@ class ActionCard(QWidget):
         # keyboard focus to the next card's button or link (and scroll the list to
         # it), so a second Space would act on that card: keep the focus on this card.
         focus = QApplication.focusWidget()
+        undo_had_focus = focus is not None and focus is self.undo_button
+        focus_here = focus is not None and (focus is self or self.isAncestorOf(focus))
         if focus is not None and ((not show_buttons and self._buttons.isAncestorOf(focus))
                                   or (self._status != CARD_COUNTDOWN and focus is self.undo_button)):
             self.setFocus(Qt.FocusReason.OtherFocusReason)
@@ -4089,6 +4567,13 @@ class ActionCard(QWidget):
         self.failure_label.set_line(text if failed else "")
         self._stack.setCurrentWidget(self._buttons if show_buttons else self._result)
         self._sync_buttons()
+        # The keyboard follows the decision: a Send / Approve pressed with Space hands the focus to
+        # Undo while the countdown runs (only when it starts, so Tab can still move on), and an Undo
+        # back to the right-hand button.
+        if entering_countdown and focus_here:
+            self.undo_button.setFocus(Qt.FocusReason.OtherFocusReason)
+        elif undo_had_focus and show_buttons and self.approve_button.isEnabled():
+            self.approve_button.setFocus(Qt.FocusReason.OtherFocusReason)
         slot = self._actionable or bool(text)
         self._slot.setVisible(slot)
         self._texts.setContentsMargins(0, 0, self._PAD_RIGHT, 0 if slot else self._PAD_BOTTOM)
@@ -4234,7 +4719,11 @@ class ActionList(QScrollArea):
 EDIT_RSVP = "rsvp"
 EDIT_MOVE = "move"
 EDIT_CANCEL = "cancel"
-EDIT_KINDS = (EDIT_RSVP, EDIT_MOVE, EDIT_CANCEL)
+EDIT_REPLY = "reply"
+EDIT_EMAIL = "email"
+EDIT_EVENT_KINDS = (EDIT_RSVP, EDIT_MOVE, EDIT_CANCEL)
+EDIT_MAIL_KINDS = (EDIT_REPLY, EDIT_EMAIL)
+EDIT_KINDS = EDIT_EVENT_KINDS + EDIT_MAIL_KINDS
 _EDIT_ANSWERS = (("yes", "Yes"), ("no", "No"), ("maybe", "Maybe"))
 _EDIT_STYLE = """
 QLineEdit, QPlainTextEdit {
@@ -4242,64 +4731,503 @@ QLineEdit, QPlainTextEdit {
     selection-background-color: @SELECTION; selection-color: @BRIGHT;
 }
 QLineEdit:focus, QPlainTextEdit:focus { border: 1px solid @AMBER; }
+QLineEdit:read-only { color: @SOFT; }
 QCheckBox { color: @TEXT; spacing: 8px; }
 QCheckBox::indicator { width: 13px; height: 13px; border: 1px solid @BORDER; background: #030a10; }
 QCheckBox::indicator:checked { background: @AMBER; border: 1px solid @AMBER; }
 QCheckBox:focus { color: @BRIGHT; }
+QCheckBox::indicator:focus { width: 11px; height: 11px; border: 2px solid @BRIGHT; }
+QPlainTextEdit[readOnly="true"] { color: @SOFT; }
 """
+REMOVE_TEXT = "Remove"
+ADD_TEXT = "Add"
+# The Edit dialog of a Reply / Email: what it says about the recipients and the message.
+OWN_ADDRESS_ERROR = "That is the sending account's own address; it is never a recipient"
+DUPLICATE_ERROR = "{address} is already a recipient"
+NOT_AN_ADDRESS_ERROR = "\"{text}\" is not an email address"
+TOO_MANY_ERROR = "At most {count} recipients in To and Cc together"
+REPLY_SUBJECT_NOTE = "A reply keeps the subject of its thread"
+MESSAGE_CAPTION = "Message (sent exactly as written)"
+NOT_ADDED_ERROR = "\"{text}\" in {name} was not added - click Add (or press Enter in that field), or clear it"
+
+
+class _LinkHighlighter(QSyntaxHighlighter):
+    """Web links in the message editor, in the accent colour and underlined (``find_links(text)``
+    gives their (start, end) offsets in one line)."""
+
+    def __init__(self, document: Any, find_links: Callable[[str], Sequence[tuple[int, int]]]) -> None:
+        super().__init__(document)
+        self._find = find_links
+        self._format = QTextCharFormat()
+        self._format.setForeground(QColor(ACCENT))
+        self._format.setFontUnderline(True)
+
+    def highlightBlock(self, text: str) -> None:  # noqa: N802 - Qt override
+        for start, end in self._find(text):
+            if 0 <= start < end <= len(text):
+                self.setFormat(start, end - start, self._format)
+
+
+class _GrowingTextEdit(QPlainTextEdit):
+    """A plain-text field as tall as its whole text at its width, so none of it is ever hidden in
+    the field (it never scrolls itself; the Edit dialog's fields scroll instead). ``min_height``
+    keeps room to type. ``single_line`` (a subject): Enter is not a line break (it reaches the
+    dialog, whose default button is Save) and pasted line breaks become spaces. ``text()`` /
+    ``setText()`` / ``setCursorPosition()`` work as on a QLineEdit."""
+
+    heightChanged = Signal()
+
+    def __init__(self, *, min_height: int = 0, single_line: bool = False, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._min = min_height
+        self._single = single_line
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.setTabChangesFocus(True)
+        self.textChanged.connect(self.fit_to_text)
+
+    def text(self) -> str:
+        return self.toPlainText()
+
+    def setText(self, text: str) -> None:  # noqa: N802 - mirrors QLineEdit
+        self.setPlainText(text)
+
+    def setCursorPosition(self, position: int) -> None:  # noqa: N802 - mirrors QLineEdit
+        cursor = self.textCursor()
+        cursor.setPosition(max(0, min(position, len(self.toPlainText()))))
+        self.setTextCursor(cursor)
+
+    def lines(self) -> int:
+        """The lines the text takes at the field's width (QPlainTextDocumentLayout counts lines)."""
+        return max(1, round(self.document().size().height()))
+
+    def wanted_height(self) -> int:
+        """Room for every line, measured as QPlainTextEdit measures what fits (block by block,
+        the document margin above and below), plus the frame and padding."""
+        document = self.document()
+        layout = document.documentLayout()
+        text = 0
+        block = document.begin()
+        while block.isValid():
+            if block.isVisible():
+                text += int(layout.blockBoundingRect(block).height())
+            block = block.next()
+        text = max(text, math.ceil(QFontMetricsF(self.font()).lineSpacing()))
+        chrome = self.height() - self.viewport().height() if self.viewport().height() > 0 else 2 * self.frameWidth()
+        return max(self._min, text + math.ceil(2 * document.documentMargin()) + 2 + chrome)
+
+    def fit_to_text(self) -> None:
+        height = self.wanted_height()
+        changed = height != self.minimumHeight() or height != self.maximumHeight()
+        if changed:
+            self.setFixedHeight(height)
+        # Shown: QPlainTextEdit says itself whether a line is still out of view; then one line more.
+        step = math.ceil(QFontMetricsF(self.font()).lineSpacing())
+        for _attempt in range(3):
+            if not self.isVisible() or self.verticalScrollBar().maximum() <= 0:
+                break
+            self.setFixedHeight(self.height() + step)
+            changed = True
+        if changed:
+            self.heightChanged.emit()
+
+    def shows_all(self) -> bool:
+        """Every line is inside the field (nothing scrolled out of it)."""
+        return self.verticalScrollBar().maximum() <= 0
+
+    def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        if self._single and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            event.ignore()   # the dialog's default button (Save) gets it, as from a line edit
+            return
+        super().keyPressEvent(event)
+
+    def insertFromMimeData(self, source: Any) -> None:  # noqa: N802 - Qt override
+        if self._single and source is not None and source.hasText():
+            self.insertPlainText(" ".join(source.text().split()))
+            return
+        super().insertFromMimeData(source)
+
+
+class _RecipientBadge(QWidget):
+    """The NEW RECIPIENT badge of a recipient in the Edit dialog, drawn as on the card: filled red
+    while its "Send to" tick is not set, outlined "NEW \u00b7 CONFIRMED" once it is. As wide as
+    the wider text from the start, so a tick never moves Remove."""
+
+    _PAD = 4
+
+    def __init__(self, state: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._font = mono_font(9, 600, 0.08)
+        self._state = RECIPIENT_NEW
+        width = max(_text_advance(self._font, text) for text in (NEW_RECIPIENT_TEXT, CONFIRMED_RECIPIENT_TEXT))
+        self.setFixedSize(math.ceil(width) + 2 * self._PAD, math.ceil(QFontMetricsF(self._font).lineSpacing()) + 4)
+        self.set_state(state)
+
+    def set_state(self, state: str) -> None:
+        self._state = RECIPIENT_CONFIRMED if state == RECIPIENT_CONFIRMED else RECIPIENT_NEW
+        self.setAccessibleName(self.text())
+        self.update()
+
+    def state(self) -> str:
+        return self._state
+
+    def text(self) -> str:
+        return CONFIRMED_RECIPIENT_TEXT if self._state == RECIPIENT_CONFIRMED else NEW_RECIPIENT_TEXT
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            _paint_recipient_badge(painter, QRectF(0, 1, self.width(), self.height() - 2), self.text(),
+                                   self._state, self._font)
+        finally:
+            painter.end()
+
+
+class _AddressEdit(QLineEdit):
+    """The "Add an address" field: Enter adds the address (it never saves the dialog)."""
+
+    def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.returnPressed.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+class _TickLabel(_BreakableLabel):
+    """The address after a "Send to" tick (it wraps, a checkbox's own text can't): a click on it
+    toggles the tick too."""
+
+    def __init__(self, text: str, font: QFont, color: str | QColor, box: QCheckBox, *,
+                 min_word: int = _LONG_WORD) -> None:
+        super().__init__(text, font, color, min_word=min_word)
+        self._box = box
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        if event.button() == Qt.MouseButton.LeftButton and self._box.isEnabled():
+            self._box.toggle()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
+class _RecipientRow(QWidget):
+    """One recipient in the Edit dialog: the address (red with a NEW RECIPIENT badge when Jarvis
+    has not sent to it before), Remove, and for a new one a "Send to <address>" tick."""
+
+    removeClicked = Signal(str)
+    toggled = Signal()
+
+    def __init__(self, address: str, state: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.address = address
+        self.state = state
+        new = state in (RECIPIENT_NEW, RECIPIENT_CONFIRMED)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(8)
+        self.address_label = _BreakableLabel(address, mono_font(12), RED if new else TEXT_BODY, min_word=0)
+        top.addWidget(self.address_label, 1)
+        self.badge: _RecipientBadge | None = None
+        if new:
+            self.badge = _RecipientBadge(state)
+            top.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignTop)
+        self.remove_button = _ToolLink(REMOVE_TEXT)
+        self.remove_button.set_link_color(ACCENT)
+        self.remove_button.setAccessibleName(f"{REMOVE_TEXT} {address}")
+        self.remove_button.clicked.connect(self._on_remove)
+        top.addWidget(self.remove_button, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(top)
+        self.confirm_box: QCheckBox | None = None
+        self.confirm_label: QLabel | None = None
+        if new:
+            tick = QHBoxLayout()
+            tick.setContentsMargins(0, 0, 0, 0)
+            tick.setSpacing(6)
+            self.confirm_box = QCheckBox("Send to")
+            self.confirm_box.setFont(body_font(13))
+            self.confirm_box.setChecked(state == RECIPIENT_CONFIRMED)
+            self.confirm_box.setAccessibleName(f"Send to {address} (new recipient)")
+            self.confirm_box.toggled.connect(self._on_toggled)
+            self.confirm_label = _TickLabel(address, body_font(13), TEXT_BODY, self.confirm_box, min_word=0)
+            tick.addWidget(self.confirm_box, 0, Qt.AlignmentFlag.AlignTop)
+            tick.addWidget(self.confirm_label, 1)
+            layout.addLayout(tick)
+
+    def confirmed(self) -> bool:
+        return self.confirm_box is not None and self.confirm_box.isChecked()
+
+    def _on_remove(self) -> None:
+        self.removeClicked.emit(self.address)
+
+    def focus_chain(self) -> list[QWidget]:
+        """The row's keyboard stops in reading order: Remove (top line), then the tick."""
+        return [self.remove_button] + ([self.confirm_box] if self.confirm_box is not None else [])
+
+    def _on_toggled(self, checked: bool) -> None:
+        if self.badge is not None:
+            self.badge.set_state(RECIPIENT_CONFIRMED if checked else RECIPIENT_NEW)
+        self.toggled.emit()
+
+
+class _RecipientList(QWidget):
+    """The To or Cc recipients of the Edit dialog: one _RecipientRow each, then an "Add an
+    address" field. ``check(text)`` (the dialog's) turns a typed address into (address, state)
+    or raises ValueError with what is wrong."""
+
+    changed = Signal()
+    resized = Signal()   # a row or the error line came or went: the dialog fits itself again
+
+    def __init__(self, name: str, chips: Sequence[RecipientChip],
+                 check: Callable[[str], tuple[str, str]], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.name = name
+        # The dialog's own method is held weakly: a reference cycle through the dialog would let the
+        # garbage collector free the dialog together with its widgets in one pass, which corrupts
+        # the heap on Windows.
+        self._check: Callable[[], Callable[[str], tuple[str, str]] | None] = (
+            weakref.WeakMethod(check) if hasattr(check, "__self__") else (lambda: check))
+        self.rows: list[_RecipientRow] = []
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        self._rows_layout = QVBoxLayout()
+        self._rows_layout.setContentsMargins(0, 0, 0, 0)
+        self._rows_layout.setSpacing(4)
+        layout.addLayout(self._rows_layout)
+        add = QHBoxLayout()
+        add.setContentsMargins(0, 0, 0, 0)
+        add.setSpacing(6)
+        self.add_edit = _AddressEdit()
+        self.add_edit.setFont(mono_font(12))
+        self.add_edit.setPlaceholderText(f"Add to {name}: name@example.com")
+        self.add_edit.setAccessibleName(f"Add an address to {name}")
+        self.add_edit.returnPressed.connect(self.add_typed)
+        self.add_button = HudButton(ADD_TEXT, SECONDARY, compact=True)
+        self.add_button.setAccessibleName(f"{ADD_TEXT} to {name}")
+        self.add_button.clicked.connect(self.add_typed)
+        add.addWidget(self.add_edit, 1)
+        add.addWidget(self.add_button)
+        layout.addLayout(add)
+        self.error_label = make_label("", mono_font(11), RED, wrap=True)
+        self.error_label.hide()
+        layout.addWidget(self.error_label)
+        for chip in chips:
+            self._add_row(chip.address, chip.state)
+
+    def addresses(self) -> list[str]:
+        return [row.address for row in self.rows]
+
+    def typed(self) -> str:
+        """What the Add field holds but was not added yet ("" when empty)."""
+        return self.add_edit.text().strip()
+
+    def focus_chain(self) -> list[QWidget]:
+        """The list's keyboard stops in reading order: each row, then the Add field and Add."""
+        chain = [widget for row in self.rows for widget in row.focus_chain()]
+        return chain + [self.add_edit, self.add_button]
+
+    def confirmed(self) -> list[str]:
+        return [row.address for row in self.rows if row.confirmed()]
+
+    def row(self, address: str) -> _RecipientRow | None:
+        key = address.casefold()
+        return next((row for row in self.rows if row.address.casefold() == key), None)
+
+    def error(self) -> str:
+        return self.error_label.text() if not self.error_label.isHidden() else ""
+
+    def add_typed(self) -> None:
+        """Add what the field holds (checked by the dialog); a problem shows under the field."""
+        text = self.add_edit.text().strip()
+        if not text:
+            return
+        check = self._check()
+        if check is None:
+            return
+        try:
+            address, state = check(text)
+        except ValueError as exc:
+            self._show_error(str(exc))
+            return
+        self._show_error("")
+        self.add_edit.clear()
+        self._add_row(address, state)
+        self.changed.emit()
+        self.resized.emit()
+
+    def _add_row(self, address: str, state: str) -> None:
+        row = _RecipientRow(address, state)
+        row.removeClicked.connect(self._remove)
+        row.toggled.connect(self.changed)
+        self.rows.append(row)
+        self._rows_layout.addWidget(row)
+
+    def _remove(self, address: str) -> None:
+        row = self.row(address)
+        if row is None:
+            return
+        self.rows.remove(row)
+        self._rows_layout.removeWidget(row)
+        row.hide()
+        row.deleteLater()
+        self._show_error("")
+        self.add_edit.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.changed.emit()
+        self.resized.emit()
+
+    def _show_error(self, text: str) -> None:
+        if text == self.error() and bool(text) == self.error_label.isVisible():
+            return
+        self.error_label.setText(text)
+        self.error_label.setVisible(bool(text))
+        self.resized.emit()
 
 
 class EditDialog(QDialog):
-    """The Edit dialog of an RSVP / Move / Cancel card: window-modal, opened with ``open()``.
+    """The Edit dialog of an RSVP / Move / Cancel or a Reply / Email card: window-modal, opened
+    with ``open()``.
 
     It shows exactly what Jarvis will carry out and lets you change it: an
     invitation's answer, a move's new date and times, whether guests are told,
     and the note (an RSVP's note goes to the organizer with the answer; a move's
     or cancel's note is not sent by Google Calendar, which the dialog says).
+    A Reply / Email (EDIT_MAIL_KINDS) shows FROM (read only), the To and Cc
+    recipients (Remove; Add checks the address with ``normalize`` and
+    ``classify``; a new recipient is red with a NEW RECIPIENT badge and a "Send
+    to <address>" tick), the subject (an Email's can be changed; a reply keeps
+    its thread's) and the message exactly as it will be sent, its links
+    highlighted (``find_links``). ``banner`` is an amber line at the top (why
+    the dialog opened: new recipients to confirm, a long message to read).
+    The subject and the message are shown whole (their fields grow with the
+    text); when that is taller than the screen, the fields between the banner
+    and Save / Cancel scroll, so Save is always on screen. ``whole_seen()``
+    says whether all of the fields have been on screen (the message's end
+    included) while the dialog was open. An address typed into Add but not
+    added keeps the dialog open on Save (it would not be sent).
     Save emits ``saved(action_id, values)`` with the fields as typed (``values()``:
-    answer, notify ("all" / "external" / "none"), date, start, end, note); the
-    caller checks them and either closes the dialog (``accept()``) or keeps it
-    open with ``show_error(text)``. Save never sends anything. Every text is
-    plain text; nothing is read as HTML.
+    answer, notify ("all" / "external" / "none"), date, start, end, note; or for
+    a Reply / Email: to, cc, subject, body, confirmed (the ticked new
+    recipients)); the caller checks them and either closes the dialog
+    (``accept()``) or keeps it open with ``show_error(text)``. Save never sends
+    anything. Every text is plain text; nothing is read as HTML.
     """
 
     saved = Signal(str, object)
     WIDTH = 420
+    MAIL_WIDTH = 480
+    _MESSAGE_HEIGHT = 150   # the message editor: at least this tall, and as tall as the whole message
+    _FIELDS_MIN = 160       # the scrolling fields on a very short screen
+    _SCREEN_MARGIN = 16
 
     def __init__(self, action_id: str, kind: str, kind_label: str, title: str, *, answer: str = "yes",
                  notify: str = "all", date_text: str = "", start_text: str = "", end_text: str = "",
-                 note: str = "", check_text: str = "", hour24: bool = False,
-                 parent: QWidget | None = None) -> None:
+                 note: str = "", check_text: str = "", hour24: bool = False, sender: str = "",
+                 to: Sequence[RecipientChip] = (), cc: Sequence[RecipientChip] = (), body: str = "",
+                 classify: Callable[[str], str] | None = None,
+                 normalize: Callable[[str], str] | None = None,
+                 find_links: Callable[[str], Sequence[tuple[int, int]]] | None = None,
+                 banner: str = "", max_recipients: int = 5, parent: QWidget | None = None) -> None:
         flags = Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint
         super().__init__(parent, flags)
         if kind not in EDIT_KINDS:
             raise ValueError(f"no Edit dialog for {kind!r}")
         self.action_id = action_id
         self.kind = kind
+        self.mail = kind in EDIT_MAIL_KINDS
         self._notify = notify
         self._answer = answer if answer in dict(_EDIT_ANSWERS) else "yes"
+        self._classify = classify or (lambda _address: RECIPIENT_KNOWN)
+        self._normalize = normalize or (lambda text: text.strip())
+        self._find_links = find_links or (lambda _text: ())
+        self._max_recipients = max_recipients
+        self._fitted = False
+        self._seen_all = not self.mail
+        self._follow_cursor = False
+        self.fields_scroll: QScrollArea | None = None
         self.setWindowModality(Qt.WindowModality.WindowModal)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setWindowTitle(f"Edit {kind_label}")
         self.setAccessibleName(f"Edit {kind_label}: {title}")
-        tokens = {"TEXT": TEXT_BODY, "BRIGHT": TEXT_BRIGHT, "AMBER": AMBER,
+        tokens = {"TEXT": TEXT_BODY, "BRIGHT": TEXT_BRIGHT, "AMBER": AMBER, "SOFT": TEXT_SOFT,
                   "BORDER": _qss_color(rgba(AMBER, 0.35)), "SELECTION": _qss_color(rgba(ACCENT, 0.32))}
         style = _EDIT_STYLE
         for name in sorted(tokens, key=len, reverse=True):
             style = style.replace("@" + name, tokens[name])
         self.setStyleSheet(style)
         self.panel = ChamferPanel("Edit", kind_label.upper(), variant=PANEL_AMBER, border_alpha=0.5,
-                                  padding=(18, 14, 18, 16), spacing=8)
+                                  padding=(18, 14, 18, 16), spacing=6 if self.mail else 8)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(self.panel)
-        body = self.panel.body_layout
+        layout = self.panel.body_layout
+        self.banner_label = make_label(banner, mono_font(11), AMBER, wrap=True)
+        self.banner_label.setVisible(bool(banner))
+        layout.addWidget(self.banner_label)
         self.title_label = make_label(title, body_font(14, 600), AMBER_TEXT, wrap=True)
-        body.addWidget(self.title_label)
+        self.title_label.setVisible(not self.mail)   # a Reply / Email shows its subject below
+        layout.addWidget(self.title_label)
         self.check_label = make_label(check_text, mono_font(11), TEXT_SOFT, wrap=True)
         self.check_label.setVisible(bool(check_text))
-        body.addWidget(self.check_label)
+        layout.addWidget(self.check_label)
         self.answer_buttons: dict[str, HudButton] = {}
+        self.date_edit = QLineEdit(date_text, self)
+        self.start_edit = QLineEdit(start_text, self)
+        self.end_edit = QLineEdit(end_text, self)
+        self.notify_box = QCheckBox(self)
+        self.note_edit = QPlainTextEdit(self)
+        self.from_label: QLabel | None = None
+        self.to_list: _RecipientList | None = None
+        self.cc_list: _RecipientList | None = None
+        self.subject_edit = _GrowingTextEdit(single_line=True, parent=self)
+        self.body_edit = _GrowingTextEdit(min_height=self._MESSAGE_HEIGHT, parent=self)
+        self.links_label = make_label("", mono_font(10), TEXT_DIM, wrap=True)
+        for widget in (self.date_edit, self.start_edit, self.end_edit, self.notify_box, self.note_edit,
+                       self.subject_edit, self.body_edit, self.links_label):
+            widget.hide()   # each kind shows its own fields below
+        if self.mail:
+            # FROM to the message scroll between the banner and Save / Cancel when they are taller
+            # than the screen (_fit), so Save is always on screen.
+            self.fields_scroll = QScrollArea(self)
+            content = _transparent_scroll(self.fields_scroll)
+            fields = QVBoxLayout(content)
+            fields.setContentsMargins(0, 0, 0, 0)
+            fields.setSpacing(6)
+            self.fields_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            layout.addWidget(self.fields_scroll)
+            self._build_mail(fields, sender=sender, to=to, cc=cc, subject=title, message=body)
+            self.fields_scroll.verticalScrollBar().valueChanged.connect(self._note_seen)
+        else:
+            self._build_event(layout, notify=notify, hour24=hour24, note=note)
+        self.error_label = make_label("", mono_font(11), RED, wrap=True)
+        self.error_label.hide()
+        layout.addWidget(self.error_label)
+        buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 6, 0, 0)
+        buttons.setSpacing(8)
+        buttons.addStretch(1)
+        self.cancel_button = HudButton("Cancel", SECONDARY, compact=True)
+        self.save_button = HudButton("Save", PRIMARY, compact=True)
+        self.save_button.setAccessibleDescription("Keeps the changes on the card; nothing is sent")
+        self.save_button.setDefault(True)   # Enter in a field saves (never sends anything)
+        buttons.addWidget(self.cancel_button)
+        buttons.addWidget(self.save_button)
+        layout.addLayout(buttons)
+        self.cancel_button.clicked.connect(self.reject)
+        self.save_button.clicked.connect(self._on_save)
+        self.setFixedWidth(self.MAIL_WIDTH if self.mail else self.WIDTH)
+        if self.mail:
+            self._sync_tab_order()
+
+    def _build_event(self, body: QVBoxLayout, *, notify: str, hour24: bool, note: str) -> None:
+        """An RSVP's answer, a Move's new time, Notify guests and the note."""
+        kind = self.kind
         if kind == EDIT_RSVP:
             body.addWidget(self._caption("Answer"))
             row = QHBoxLayout()
@@ -4314,9 +5242,6 @@ class EditDialog(QDialog):
             row.addStretch(1)
             body.addLayout(row)
             self._select_answer(self._answer)
-        self.date_edit = QLineEdit(date_text)
-        self.start_edit = QLineEdit(start_text)
-        self.end_edit = QLineEdit(end_text)
         if kind == EDIT_MOVE:
             body.addWidget(self._caption("New time"))
             row = QHBoxLayout()
@@ -4329,6 +5254,7 @@ class EditDialog(QDialog):
                 edit.setPlaceholderText(hint)
                 edit.setFixedWidth(width)
                 edit.setAccessibleName(name)
+                edit.show()
                 row.addWidget(edit)
                 if edit is self.start_edit:
                     row.addWidget(make_label("-", mono_font(12), TEXT_SOFT))
@@ -4336,16 +5262,14 @@ class EditDialog(QDialog):
             body.addLayout(row)
             body.addWidget(make_label("Times like 2:00 PM or 14:00, in your calendar's time zone",
                                       mono_font(10), TEXT_DIM, wrap=True))
-        else:
-            for edit in (self.date_edit, self.start_edit, self.end_edit):
-                edit.hide()
         outside = notify == "external"
-        self.notify_box = QCheckBox("Notify guests outside your organization" if outside else "Notify guests")
+        self.notify_box.setText("Notify guests outside your organization" if outside else "Notify guests")
         self.notify_box.setFont(body_font(13))
         self.notify_box.setChecked(notify != "none")
         if kind == EDIT_RSVP:   # sendUpdates: an email about the answer; the event shows it either way
             self.notify_box.setText("Email the organizer only if outside your organization" if outside
                                     else "Email the organizer about my answer")
+        self.notify_box.show()
         body.addWidget(self.notify_box)
         if kind == EDIT_RSVP:
             body.addWidget(make_label("Without the email, the organizer still sees your answer and note "
@@ -4355,30 +5279,76 @@ class EditDialog(QDialog):
         else:
             caption = "Note (not sent: Google Calendar has no message - Copy it)"
         body.addWidget(self._caption(caption))
-        self.note_edit = QPlainTextEdit()
         self.note_edit.setPlainText(note)
         self.note_edit.setFont(body_font(13))
         self.note_edit.setTabChangesFocus(True)
         self.note_edit.setFixedHeight(84)
         self.note_edit.setAccessibleName(caption)
+        self.note_edit.show()
         body.addWidget(self.note_edit)
-        self.error_label = make_label("", mono_font(11), RED, wrap=True)
-        self.error_label.hide()
-        body.addWidget(self.error_label)
-        buttons = QHBoxLayout()
-        buttons.setContentsMargins(0, 6, 0, 0)
-        buttons.setSpacing(8)
-        buttons.addStretch(1)
-        self.cancel_button = HudButton("Cancel", SECONDARY, compact=True)
-        self.save_button = HudButton("Save", PRIMARY, compact=True)
-        self.save_button.setAccessibleDescription("Keeps the changes on the card; nothing is sent")
-        self.save_button.setDefault(True)   # Enter in a field saves (never sends anything)
-        buttons.addWidget(self.cancel_button)
-        buttons.addWidget(self.save_button)
-        body.addLayout(buttons)
-        self.cancel_button.clicked.connect(self.reject)
-        self.save_button.clicked.connect(self._on_save)
-        self.setFixedWidth(self.WIDTH)
+
+    def _build_mail(self, body: QVBoxLayout, *, sender: str, to: Sequence[RecipientChip],
+                    cc: Sequence[RecipientChip], subject: str, message: str) -> None:
+        """FROM, To / Cc, the subject and the message of a Reply / Email."""
+        body.addWidget(self._caption("From"))
+        self.from_label = _BreakableLabel(sender, mono_font(12), TEXT_SOFT, min_word=0)
+        body.addWidget(self.from_label)
+        body.addWidget(self._caption("To"))
+        self.to_list = _RecipientList("To", to, self._check_address)
+        body.addWidget(self.to_list)
+        body.addWidget(self._caption("Cc"))
+        self.cc_list = _RecipientList("Cc", cc, self._check_address)
+        body.addWidget(self.cc_list)
+        for recipients in (self.to_list, self.cc_list):
+            recipients.resized.connect(self._relayout)
+            recipients.resized.connect(self._sync_tab_order)
+        body.addWidget(self._caption("Subject"))
+        self.subject_edit.setText(subject)
+        self.subject_edit.setFont(body_font(13))
+        self.subject_edit.setAccessibleName("Subject")
+        self.subject_edit.setCursorPosition(0)
+        self.subject_edit.heightChanged.connect(self._on_field_grew)
+        if self.kind == EDIT_REPLY:
+            self.subject_edit.setReadOnly(True)
+            self.subject_edit.setToolTip(plain_tooltip(REPLY_SUBJECT_NOTE))
+            self.subject_edit.setAccessibleDescription(REPLY_SUBJECT_NOTE)
+        self.subject_edit.show()
+        body.addWidget(self.subject_edit)
+        if self.kind == EDIT_REPLY:
+            body.addWidget(make_label(REPLY_SUBJECT_NOTE, mono_font(10), TEXT_DIM, wrap=True))
+        body.addWidget(self._caption(MESSAGE_CAPTION))
+        self.body_edit.setPlainText(message)
+        self.body_edit.setFont(body_font(13))
+        self.body_edit.setAccessibleName(MESSAGE_CAPTION)
+        self.body_edit.heightChanged.connect(self._on_field_grew)
+        self.body_edit.show()
+        self._highlighter = _LinkHighlighter(self.body_edit.document(), self._find_links)
+        body.addWidget(self.body_edit)
+        body.addWidget(self.links_label)
+        self.body_edit.textChanged.connect(self._update_links)
+        self._update_links()
+
+    def _check_address(self, text: str) -> tuple[str, str]:
+        """(address, RECIPIENT_*) for an address typed into To or Cc, or ValueError with why not."""
+        address = self._normalize(text)
+        if not address:
+            raise ValueError(NOT_AN_ADDRESS_ERROR.format(text=_short_text(text, 40)))
+        for recipients in (self.to_list, self.cc_list):
+            if recipients is not None and recipients.row(address) is not None:
+                raise ValueError(DUPLICATE_ERROR.format(address=address))
+        count = sum(len(recipients.rows) for recipients in (self.to_list, self.cc_list) if recipients is not None)
+        if count >= self._max_recipients:
+            raise ValueError(TOO_MANY_ERROR.format(count=self._max_recipients))
+        state = self._classify(address)
+        if state == RECIPIENT_OWN:
+            raise ValueError(OWN_ADDRESS_ERROR)
+        return address, RECIPIENT_NEW if state in (RECIPIENT_NEW, RECIPIENT_CONFIRMED) else RECIPIENT_KNOWN
+
+    def _update_links(self) -> None:
+        count = len(self._find_links(self.body_edit.toPlainText()))
+        text = f"Contains {count} link{'' if count == 1 else 's'} (highlighted)" if count else ""
+        self.links_label.setText(text)
+        self.links_label.setVisible(bool(text))
 
     @staticmethod
     def _caption(text: str) -> QLabel:
@@ -4396,8 +5366,15 @@ class EditDialog(QDialog):
             if button is sender:
                 self._select_answer(value)
 
-    def values(self) -> dict[str, str]:
-        """The fields as typed: answer, notify, date, start, end, note."""
+    def values(self) -> dict[str, Any]:
+        """The fields as typed: answer, notify, date, start, end, note; or for a Reply / Email:
+        to, cc (lists of addresses), subject, body and confirmed (the ticked new recipients)."""
+        if self.mail:
+            lists = [recipients for recipients in (self.to_list, self.cc_list) if recipients is not None]
+            return {"to": self.to_list.addresses() if self.to_list is not None else [],
+                    "cc": self.cc_list.addresses() if self.cc_list is not None else [],
+                    "subject": self.subject_edit.text(), "body": self.body_edit.toPlainText(),
+                    "confirmed": [address for recipients in lists for address in recipients.confirmed()]}
         if self.notify_box.isChecked():
             notify = "external" if self._notify == "external" else "all"
         else:
@@ -4410,23 +5387,210 @@ class EditDialog(QDialog):
         """Keep the dialog open and say what is wrong (plain text)."""
         self.error_label.setText(text)
         self.error_label.setVisible(bool(text))
-        self.adjustSize()
+        self._relayout()
 
     def error(self) -> str:
         """The error shown under the fields ("" when none)."""
         return self.error_label.text() if not self.error_label.isHidden() else ""
 
     def _on_save(self) -> None:
+        if self.mail:
+            for recipients in (self.to_list, self.cc_list):
+                typed = recipients.typed() if recipients is not None else ""
+                if typed:   # not a recipient: it would not be sent, so say so instead of dropping it
+                    self.show_error(NOT_ADDED_ERROR.format(text=_short_text(typed, 40), name=recipients.name))
+                    recipients.add_edit.setFocus(Qt.FocusReason.OtherFocusReason)
+                    return
         self.saved.emit(self.action_id, self.values())
 
-    def open(self) -> None:  # noqa: D102 - QDialog.open, centred over the parent window first
-        self.adjustSize()
+    def whole_seen(self) -> bool:
+        """Every field of a Reply / Email (the subject and the message to their ends) has been on
+        screen while the dialog was open: it fit, or its fields were scrolled to the end."""
+        return self._seen_all
+
+    def _note_seen(self, *_args: Any) -> None:
+        scroll = self.fields_scroll
+        if self._seen_all or scroll is None or not self.isVisible() or not shiboken6.isValid(scroll):
+            return
+        content = scroll.widget()
+        viewport = scroll.viewport()
+        layout = content.layout() if content is not None else None
+        if content is None or layout is None:
+            return
+        needed = (layout.totalHeightForWidth(content.width()) if layout.hasHeightForWidth()
+                  else layout.totalSizeHint().height())
+        if content.height() + 1 < needed:
+            return   # not laid out yet: decide on the next look
+        # The message's end must be inside the fields' viewport, the dialog and the screen alike.
+        bottom = self.body_edit.mapToGlobal(QPoint(0, self.body_edit.height())).y()
+        limits = [viewport.mapToGlobal(QPoint(0, viewport.height())).y(),
+                  self.mapToGlobal(QPoint(0, self.height())).y()]
+        screen = self._screen()
+        if screen is not None:
+            limits.append(screen.availableGeometry().bottom() + 1)
+        if bottom <= min(limits) + 1:
+            self._seen_all = True
+
+    def _sync_tab_order(self) -> None:
+        """Tab follows the dialog from top to bottom: each recipient list (its rows, then Add), the
+        subject, the message, Cancel, Save."""
+        if not self.mail or self.to_list is None or self.cc_list is None:
+            return
+        chain = (self.to_list.focus_chain() + self.cc_list.focus_chain()
+                 + [self.subject_edit, self.body_edit, self.cancel_button, self.save_button])
+        for first, second in zip(chain, chain[1:]):
+            QWidget.setTabOrder(first, second)
+
+    def _screen(self) -> Any:
         parent = self.parentWidget()
+        return (parent.window().screen() if parent is not None else self.screen()) or QApplication.primaryScreen()
+
+    def _fit(self) -> None:
+        """As tall as the content at the dialog's own (fixed) width. A Reply / Email shows its
+        subject and message whole; when the dialog would be taller than the screen, its fields
+        scroll (with a scroll bar) and the banner and Save / Cancel stay on screen."""
+        scroll = self.fields_scroll
+        if not self.mail or scroll is None:
+            self._fit_height()
+            return
+        screen = self._screen()
+        room = screen.availableGeometry().height() - 2 * self._SCREEN_MARGIN if screen is not None else 1 << 20
+        value = scroll.verticalScrollBar().value()
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setFixedHeight(self._fields_height())
+        self._fit_height()
+        excess = self.height() - room
+        if excess > 0:
+            scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+            self._fit_fields()   # the scroll bar takes some width: the fields wrap again
+            scroll.setFixedHeight(max(self._FIELDS_MIN, scroll.height() - excess))
+            self._fit_height()
+        scroll.verticalScrollBar().setValue(value)
+
+    def _fit_fields(self) -> None:
+        """Lay the fields out at the scroll area's width, the subject and message as tall as their text."""
+        for _attempt in range(2):
+            layout = self.layout()
+            if layout is not None:
+                layout.activate()
+            scroll = self.fields_scroll
+            content = scroll.widget() if scroll is not None else None
+            if content is not None and content.layout() is not None:
+                content.resize(scroll.viewport().width(), content.height())
+                content.layout().activate()
+            for edit in (self.subject_edit, self.body_edit):
+                edit.blockSignals(True)
+                try:
+                    edit.fit_to_text()
+                finally:
+                    edit.blockSignals(False)
+
+    def _fields_height(self) -> int:
+        """The fields' whole height at the scroll area's width (FROM to the links line)."""
+        self._fit_fields()
+        scroll = self.fields_scroll
+        content = scroll.widget() if scroll is not None else None
+        layout = content.layout() if content is not None else None
+        if layout is None:
+            return 0
+        width = scroll.viewport().width()
+        return (layout.totalHeightForWidth(width) if layout.hasHeightForWidth()
+                else layout.totalSizeHint().height())
+
+    def _on_field_grew(self) -> None:
+        """The subject or the message got a line more or less while typing: fit again and keep the
+        text cursor in view."""
+        self._follow_cursor = True
+        self._relayout()
+
+    def _keep_cursor_visible(self) -> None:
+        """While typing in the subject or the message, their text cursor stays in view."""
+        scroll = self.fields_scroll
+        focus = QApplication.focusWidget()
+        follow, self._follow_cursor = self._follow_cursor, False
+        if not follow or scroll is None or focus not in (self.subject_edit, self.body_edit) or not self.isVisible():
+            return
+        rect = focus.cursorRect()
+        content = scroll.widget()
+        point = focus.viewport().mapTo(content, rect.center())
+        scroll.ensureVisible(point.x(), point.y(), 10, rect.height())
+
+    def _fit_height(self) -> None:
+        # adjustSize() measures wrapped labels at the size hint's width, not the fixed width they get.
+        # A field that changed its fixed height may leave the panel's and the dialog's layouts with
+        # their earlier size cached until the event loop runs: measure afresh.
+        if self.panel.layout() is not None:
+            self.panel.layout().invalidate()
+        self.panel.updateGeometry()   # also drops the dialog layout's cached size of the panel
+        layout = self.layout()
+        if layout is not None:
+            layout.invalidate()
+        if layout is not None:
+            layout.activate()
+        width = self.width()
+        height = self.heightForWidth(width) if self.hasHeightForWidth() else self.sizeHint().height()
+        self.resize(width, max(height, self.minimumSizeHint().height(), self.sizeHint().height()
+                               if not self.hasHeightForWidth() else 0))
+
+    def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().showEvent(event)
+        if not self._fitted:   # shown without open(): fit the content once all the same
+            self._fitted = True
+            self._fit()
+        if self.mail:   # is all of it on screen from the start?
+            QTimer.singleShot(0, self._note_seen)
+
+    def _relayout(self) -> None:
+        """A recipient row or an error line came or went: fit again, keeping the bottom on screen
+        (and once more when the new row has been polished)."""
+        self._place_after_fit()
+        QTimer.singleShot(0, self._place_after_fit)
+
+    def _place_after_fit(self) -> None:
+        if not shiboken6.isValid(self):
+            return
+        self._fit()
+        screen = self._screen()
+        if self.isVisible() and screen is not None:
+            area = screen.availableGeometry()
+            if self.frameGeometry().bottom() > area.bottom() - self._SCREEN_MARGIN:
+                self.move(self.x(), max(area.top(), area.bottom() - self._SCREEN_MARGIN - self.height()))
+        self._keep_cursor_visible()
+        self._note_seen()
+
+    def open(self) -> None:  # noqa: D102 - QDialog.open, centred over the parent window first
+        self._fitted = True
+        self._fit()
+        parent = self.parentWidget()
+        screen = self._screen()
         if parent is not None:
             window = parent.window()
             center = window.mapToGlobal(QPoint(window.width() // 2, window.height() // 2))
-            self.move(center.x() - self.width() // 2, max(0, center.y() - self.height() // 2))
+            top = center.y() - self.height() // 2
+            if screen is not None:
+                area = screen.availableGeometry()
+                top = min(top, area.bottom() - self.height() - self._SCREEN_MARGIN)
+                top = max(top, area.top())
+            self.move(center.x() - self.width() // 2, max(0, top))
         super().open()
+        if self.mail:   # a new recipient's tick first (why Send opened the dialog), else the message
+            boxes = [row.confirm_box for recipients in (self.to_list, self.cc_list) if recipients is not None
+                     for row in recipients.rows if row.confirm_box is not None and not row.confirm_box.isChecked()]
+            target = boxes[0] if boxes else self.body_edit
+            target.setFocus(Qt.FocusReason.OtherFocusReason)
+            if self.fields_scroll is not None:
+                self.fields_scroll.verticalScrollBar().setValue(0)   # the dialog opens at its top
+                if boxes:
+                    self.fields_scroll.ensureWidgetVisible(target)
+            self._relayout()   # also looks whether everything is on screen
+
+
+def _short_text(text: str, limit: int) -> str:
+    """``text`` cut in the middle to ``limit`` characters ("abc...xyz")."""
+    if len(text) <= limit:
+        return text
+    half = (limit - 3) // 2
+    return text[:half] + "..." + text[-half:]
 
 
 # --------------------------------------------------------------------------

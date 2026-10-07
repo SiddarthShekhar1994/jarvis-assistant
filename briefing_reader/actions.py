@@ -17,20 +17,26 @@ goes through the Calendar / free-text path exactly as before.
     extract_actions(lines)     pull that section out of a page's FlatLines
     link_allowed(url)          the https hosts a card's Open may open
     card_view(action, today)   what a card shows (kind label, texts, buttons)
-    edit_action(action, ...)   the Edit dialog's changes, checked like a line (same id)
+    edit_action(action, ...)   the Edit dialog's changes to an RSVP, Move or Cancel, checked
+                               like a line (same id)
+    edit_mail(action, ...)     the Edit dialog's changes to a Reply or Email (recipients,
+                               subject, body, confirmed new recipients; same id)
     parse_time_range(d, s, e)  the Edit dialog's new time for a Move, read like when=
+    email_address(text)        one address as Jarvis sends to it ("" when it is not one)
+    due_words(action, today)   "due today" / "due Wed Oct 7, 11:59 PM" (a Reply / Email card's detail)
     ActionStore(path)          persisted decisions (created / exists / denied / done /
                                failed / sent / running / unknown)
 
-A Calendar line is approved by creating the event; a Todo with a block= time
-by adding that block through the same calendar flow. An RSVP, Move or Cancel
-is carried out by Jarvis (answer the invitation, move or cancel the event)
-after Accept / Move / Cancel event and an undo countdown (executor.py, ui.py).
-The other kinds are hand-offs: their cards open the source link, copy the
-drafted text and record Done or Deny, and nothing is sent. Free-text lines and
-lines that cannot be read stay informational; ``error`` says why a line could
-not be read. Nothing here talks to Google: gcal.py does that, and only after an
-explicit click on that card.
+Jarvis carries out these kinds after Approve (COUNTDOWN_KINDS): a Calendar line
+(create the event), a Todo with a block= time (add that block), an RSVP, Move
+or Cancel (answer the invitation, move or cancel the event; EVENT_KINDS), and a
+Reply or Email (send it through Gmail; MAIL_KINDS). Each goes through the undo
+countdown first and has "running" saved right before its one call
+(executor.py, ui.py). The other kinds are hand-offs: their cards open the
+source link, copy the drafted text and record Done or Deny, and nothing is
+sent. Free-text lines and lines that cannot be read stay informational;
+``error`` says why a line could not be read. Nothing here talks to Google:
+gcal.py and gmail.py do that, and only after an explicit click on that card.
 
 Qt-free. Briefing content is personal, so only counts, action ids, kinds,
 account aliases and statuses are logged, never text, addresses or links.
@@ -70,10 +76,16 @@ TODO = "todo"         # something due, optionally with a calendar block to work 
 OPEN = "open"         # a page to look at
 UNKNOWN = "unknown"
 STRUCTURED_KINDS = frozenset({REPLY, EMAIL, RSVP, MOVE, CANCEL, SHARE, SLACK, TODO, OPEN})
-# Kinds Jarvis carries out after an undo countdown, writing "running" before the call
-# (a later version adds REPLY and EMAIL). Calendar and a Todo's block are added at once.
-COUNTDOWN_KINDS = frozenset({RSVP, MOVE, CANCEL})
+# Kinds Jarvis carries out after Approve: the undo countdown ([actions] undo_seconds) first, then
+# "running" is saved right before the one call; never retried by itself (executor.run_action).
+COUNTDOWN_KINDS = frozenset({CALENDAR, TODO, RSVP, MOVE, CANCEL, REPLY, EMAIL})
+# Change an existing event of the line's account: the card checks Google's own view of it first.
+EVENT_KINDS = frozenset({RSVP, MOVE, CANCEL})
+# Sent from the line's account through Gmail (gmail.send only); recipients are checked first.
+MAIL_KINDS = frozenset({REPLY, EMAIL})
 MAX_RECIPIENTS = 5    # to= plus cc= of a Reply or Email (not configurable)
+# Body lines a Reply / Email card shows; a longer body is reviewed in the Edit dialog before Send.
+MAIL_PREVIEW_LINES = 10
 # The https hosts a card's Open may open, besides [actions] link_hosts. Calendar's own
 # "https://www.google.com/calendar/..." links are a separate, path-checked rule.
 BUILTIN_LINK_HOSTS = ("mail.google.com", "docs.google.com", "drive.google.com",
@@ -134,6 +146,9 @@ class ProposedAction:
     alias in ``account``, an allowlisted https link in ``link``, the drafted
     text in ``body`` and soft problems in ``warnings``. ``start``/``end`` are
     a Todo's block or a Move's new time; ``title`` is the card headline.
+    ``confirmed`` holds the NEW RECIPIENT addresses of a Reply / Email that you
+    ticked in the Edit dialog (casefolded; set only by edit_mail, never by a
+    line, kept in memory only).
     """
 
     id: str
@@ -155,6 +170,7 @@ class ProposedAction:
     body: str = ""                             # unescaped body (or Slack reply), "" when none
     warnings: tuple[str, ...] = ()             # soft problems, shown as the card's amber note
     structured: bool = False                   # read by the key=value path (errored lines too)
+    confirmed: frozenset[str] = frozenset()    # new recipients ticked in Edit (casefolded; memory only)
 
     @property
     def decidable(self) -> bool:
@@ -176,13 +192,31 @@ class ProposedAction:
     @property
     def actionable(self) -> bool:
         """Approve makes Jarvis carry it out (a Calendar event, a Todo's block, an RSVP, Move or
-        Cancel)."""
+        Cancel, a Reply or Email)."""
         return self.decidable and bool(approve_label(self))
 
     @property
     def countdown(self) -> bool:
-        """Approve starts the undo countdown first (COUNTDOWN_KINDS)."""
+        """Approve starts the undo countdown first and "running" is saved before the call
+        (COUNTDOWN_KINDS: every kind Jarvis carries out)."""
         return self.kind in COUNTDOWN_KINDS and self.actionable
+
+    @property
+    def changes_event(self) -> bool:
+        """An RSVP, Move or Cancel Jarvis carries out: its card checks Google's own view of the
+        event first (the check line), offers Edit (answer, time, notify, note) and Skip."""
+        return self.kind in EVENT_KINDS and self.actionable
+
+    @property
+    def sends_mail(self) -> bool:
+        """A Reply or Email Jarvis sends through Gmail: its card shows From and the recipients,
+        offers Edit (recipients, subject, body) and asks to confirm new recipients."""
+        return self.kind in MAIL_KINDS and self.actionable
+
+    @property
+    def editable(self) -> bool:
+        """The tools row has Edit (an RSVP, Move, Cancel, Reply or Email Jarvis carries out)."""
+        return self.changes_event or self.sends_mail
 
     @property
     def all_day(self) -> bool:
@@ -209,6 +243,10 @@ class ProposedAction:
 
     def cc(self) -> tuple[str, ...]:
         return _split_list(self.field("cc"))
+
+    def mail_recipients(self) -> tuple[str, ...]:
+        """to= then cc= (normalized, no repeats): everyone a Reply or Email goes to."""
+        return self.recipients() + self.cc()
 
     def due(self) -> date | datetime | None:
         """due= as a date, or a naive datetime when it has a time."""
@@ -263,7 +301,7 @@ def approve_label(action: ProposedAction) -> str:
     The one place later versions extend: Calendar lines are approved by
     creating the event, a Todo with a block= time by adding that block, an
     RSVP by answering it (Accept / Decline / Maybe), a Move or Cancel by
-    moving or cancelling the event.
+    moving or cancelling the event, a Reply or Email by sending it (Send).
     """
     if not action.decidable:
         return ""
@@ -277,9 +315,12 @@ def approve_label(action: ProposedAction) -> str:
         return "Move"
     if action.kind == CANCEL:
         return "Cancel event"
+    if action.kind in MAIL_KINDS:
+        return SEND_TEXT
     return ""
 
 
+SEND_TEXT = "Send"
 _RSVP_BUTTONS = {"yes": "Accept", "no": "Decline", "maybe": "Maybe"}
 
 
@@ -918,12 +959,30 @@ def _address_list(name: str, text: str) -> tuple[str, ...]:
 
 def _address(name: str, item: str) -> str:
     """One "local@domain" or "Display Name <local@domain>"; the domain is casefolded."""
+    address = email_address(item)
+    if not address:
+        raise _LineError(f"{name}=: {_quoted(item)} is not an email address")
+    return address
+
+
+def email_address(text: str) -> str:
+    """``text`` as the address Jarvis sends to, or "" when it is not exactly one address.
+
+    "local@domain" or "Display Name <local@domain>": the display name is dropped (it never
+    decides who an address is) and the domain is casefolded. The local part is 1-64 RFC 5322
+    atext characters (ASCII letters, digits and !#$%&'*+/=?^_`{}~.- ; no quotes, spaces, "|"
+    or line breaks) without leading, trailing or double dots; the domain is ASCII labels ending
+    in a 2-63 letter top-level domain; 254 characters at most.
+    """
+    if not isinstance(text, str):
+        return ""
+    item = text.strip()
     match = _DISPLAY_NAME_RE.fullmatch(item)
     address = match.group("address").strip() if match is not None else item
     local, at, domain = address.rpartition("@")
     if (not at or not _LOCAL_PART_RE.fullmatch(local) or local.startswith(".") or local.endswith(".")
             or ".." in local or not _DOMAIN_RE.fullmatch(domain) or len(address) > _ADDRESS_CAP):
-        raise _LineError(f"{name}=: {_quoted(item)} is not an email address")
+        return ""
     return f"{local}@{domain.casefold()}"
 
 
@@ -1028,6 +1087,31 @@ def link_host(url: str) -> str:
         return (urlsplit(url).hostname or "").rstrip(".")
     except ValueError:
         return ""
+
+
+def body_links(text: str) -> tuple[tuple[int, int], ...]:
+    """(start, end) of every web link in a drafted text, so the card and the Edit dialog can
+    highlight them (trailing punctuation is not part of a link)."""
+    spans: list[tuple[int, int]] = []
+    for match in _URL_RE.finditer(text or ""):
+        core = match.group(0).rstrip(_URL_TRAILING)
+        if core:
+            spans.append((match.start(), match.start() + len(core)))
+    return tuple(spans)
+
+
+def due_words(action: ProposedAction, today: date) -> str:
+    """"due today", "due tomorrow" or "due Wed Oct 7" (+ ", 11:59 PM" when timed); "" without
+    due=. A Reply / Email card shows this as its detail: its recipients are chips."""
+    return _due_words(action.due(), today)
+
+
+def links_note(text: str) -> str:
+    """"Contains 1 link" / "Contains 3 links" ("" without links)."""
+    count = len(body_links(text))
+    if not count:
+        return ""
+    return f"Contains {count} link" + ("" if count == 1 else "s")
 
 
 # ---- markdown cleanup that keeps URLs ------------------------------------
@@ -1839,9 +1923,10 @@ class CardView:
     approve_text: str = ""   # the right-hand decision button: approve_label or "Done"; "" when not decidable
     decidable: bool = False
     note: str = ""           # amber note: warnings joined by " \u00b7 " (at most two)
-    editable: bool = False   # the tools row has Edit (a countdown kind)
-    check: bool = False      # a reserved line for Google's own view of the event (a countdown kind)
-    deny_text: str = "Deny"  # the left-hand decision button ("Skip" on a countdown kind)
+    editable: bool = False   # the tools row has Edit (an RSVP, Move, Cancel, Reply or Email)
+    check: bool = False      # a reserved line for Google's own view of the event (RSVP, Move, Cancel)
+    deny_text: str = "Deny"  # the left-hand decision button ("Skip" on an RSVP, Move or Cancel)
+    body_lines: int = 3      # body preview lines (MAIL_PREVIEW_LINES on a Reply / Email Jarvis sends)
 
 
 INFO_DETAIL = "Information only"
@@ -1856,8 +1941,16 @@ SKIPPED_TEXT = "Skipped"
 RSVP_NOTE_PREFIX = "Note to the organizer: "
 NOTE_NOT_SENT = "The note is not sent with the change (Google Calendar has no message) - Copy it"
 UNKNOWN_CALENDAR = "Unknown: check the calendar before retrying"
+UNKNOWN_MAIL = "Unknown: check Sent mail before retrying"
+SENT_TEXT = "Sent"
+# A Reply with gmid= but no msgid=: without the Message-ID there is no In-Reply-To header.
+NO_MSGID_NOTE = "No Message-ID on this line: the reply joins the thread in Gmail only"
+ENCODED_WORD_PROBLEM = ('The subject contains "=?...?=" (an encoded word that mail apps would show '
+                        "differently), so Jarvis won't send it - Copy it instead")
+EMPTY_MAIL_PROBLEM = "The message is empty - Edit it first"
 _SENT_TEXTS = {(RSVP, "yes"): "Accepted", (RSVP, "no"): "Declined", (RSVP, "maybe"): "Answered maybe",
-               (MOVE, ""): "Moved", (CANCEL, ""): "Cancelled"}
+               (MOVE, ""): "Moved", (CANCEL, ""): "Cancelled", (REPLY, ""): SENT_TEXT,
+               (EMAIL, ""): SENT_TEXT}
 _ALREADY_TEXTS = {(RSVP, "yes"): "Already accepted", (RSVP, "no"): "Already declined",
                   (RSVP, "maybe"): "Already answered maybe", (MOVE, ""): "Already at that time",
                   (CANCEL, ""): "Already cancelled"}
@@ -1923,15 +2016,20 @@ def card_view(action: ProposedAction, today: date) -> CardView:
     if not action.decidable:   # a Reply the briefing says was sent already
         return CardView(label, title, ALREADY_REPLIED, open_text=open_text(action))
     notes = list(action.warnings[:_MAX_WARNINGS_SHOWN])
-    if action.kind in (MOVE, CANCEL) and action.body and action.countdown:
+    if action.kind in (MOVE, CANCEL) and action.body and action.changes_event:
         notes.append(NOTE_NOT_SENT)
+    if action.sends_mail:
+        notes += [mail_problem(action), NO_MSGID_NOTE if action.kind == REPLY and not action.field("msgid") else "",
+                  links_note(action.body)]
     body = action.body
-    if action.kind == RSVP and body and action.countdown:
+    if action.kind == RSVP and body and action.changes_event:
         body = RSVP_NOTE_PREFIX + body
     return CardView(label, title, action.describe(today), body=body, open_text=open_text(action),
                     copy_text=copy_text(action), approve_text=approve_label(action) or DONE_TEXT,
-                    decidable=True, note=_SEPARATOR.join(notes), editable=action.countdown,
-                    check=action.countdown, deny_text=SKIP_TEXT if action.countdown else "Deny")
+                    decidable=True, note=_SEPARATOR.join(note for note in notes if note),
+                    editable=action.editable, check=action.changes_event,
+                    deny_text=SKIP_TEXT if action.changes_event else "Deny",
+                    body_lines=MAIL_PREVIEW_LINES if action.sends_mail else 3)
 
 
 def result_text(action: ProposedAction, status: str) -> str:
@@ -1940,17 +2038,43 @@ def result_text(action: ProposedAction, status: str) -> str:
         return "Block added"
     if action.decidable and not action.actionable and status == STATUS_DENIED:
         return "Dismissed"
-    if action.countdown and status == STATUS_DENIED:
+    if action.changes_event and status == STATUS_DENIED:
         return SKIPPED_TEXT
     if status == STATUS_SENT:
         return sent_text(action)
-    if status == STATUS_UNKNOWN and action.kind in COUNTDOWN_KINDS:
-        return UNKNOWN_CALENDAR
+    if status == STATUS_UNKNOWN and action.countdown:
+        return UNKNOWN_MAIL if action.kind in MAIL_KINDS else UNKNOWN_CALENDAR
     return ""
 
 
+def mail_problem(action: ProposedAction) -> str:
+    """Why Jarvis would not send this Reply / Email as it stands ("" when it would, or when it is
+    not one): a subject with an encoded word ("=?utf-8?b?...?=") would reach the recipients as
+    other text than the card shows; an empty message."""
+    if not action.sends_mail:
+        return ""
+    if _has_encoded_word(action.title):
+        return ENCODED_WORD_PROBLEM
+    if not action.body.strip():
+        return EMPTY_MAIL_PROBLEM
+    return ""
+
+
+def body_needs_review(action: ProposedAction) -> bool:
+    """A Reply / Email whose body has more lines than its card shows (MAIL_PREVIEW_LINES): Send
+    opens the Edit dialog to read all of it first."""
+    return action.sends_mail and len(action.body.split("\n")) > MAIL_PREVIEW_LINES
+
+
+def _has_encoded_word(text: str) -> bool:
+    """True when ``text`` has "=?" followed later by "?=" (what an RFC 2047 encoded word needs)."""
+    start = text.find("=?")
+    return start >= 0 and text.find("?=", start + 2) >= 0
+
+
 def sent_text(action: ProposedAction, *, already: bool = False) -> str:
-    """"Accepted", "Moved", "Cancelled" ("Already accepted" ... with ``already``); "" for other kinds."""
+    """"Accepted", "Moved", "Cancelled", "Sent" ("Already accepted" ... with ``already``); "" for
+    other kinds."""
     key = (action.kind, action.field("answer") if action.kind == RSVP else "")
     return (_ALREADY_TEXTS if already else _SENT_TEXTS).get(key, "")
 
@@ -1986,7 +2110,7 @@ def edit_action(action: ProposedAction, *, answer: str | None = None, notify: st
     Cancel: ``notify``, ``body`` (Copy only). Raises EditInvalid with a short reason. The id
     never changes: the card and the saved decision stay the same proposal.
     """
-    if not action.countdown:
+    if not action.changes_event:
         raise EditInvalid("This card cannot be edited")
     pairs = dict(action.fields)
     changes: dict[str, Any] = {}
@@ -2027,6 +2151,115 @@ def _edit_text(value: Any) -> str:
     if not isinstance(value, str):
         raise _LineError("the value must be text")
     return value.strip()
+
+
+def edit_mail(action: ProposedAction, *, to: Sequence[str] | str | None = None,
+              cc: Sequence[str] | str | None = None, subject: str | None = None, body: str | None = None,
+              confirmed: Sequence[str] | None = None) -> ProposedAction:
+    """``action`` (a Reply or Email) with the Edit dialog's changes, checked like a line (same id).
+
+    ``to`` / ``cc``: the chips, each an address or "Name <address>" (the name is dropped); an
+    address in both stays in To only; at least one in To and at most MAX_RECIPIENTS together.
+    ``subject``: an Email's new subject (one line, 250 characters at most, no encoded word); a
+    Reply keeps the thread's subject. ``body``: the message exactly as it will be sent (line
+    breaks kept; control and invisible format characters removed; not empty). ``confirmed``: the
+    NEW RECIPIENT addresses ticked ("Send to <address>"); only the ones still among the
+    recipients are kept, and without ``confirmed`` the earlier ticks stay for those that remain.
+    ``None`` = unchanged. Raises EditInvalid with a short reason. The id never changes.
+    """
+    if not action.sends_mail:
+        raise EditInvalid("This card cannot be edited")
+    pairs = dict(action.fields)
+    changes: dict[str, Any] = {}
+    try:
+        new_to = action.recipients() if to is None else _edit_addresses("To", to)
+        new_cc = action.cc() if cc is None else _edit_addresses("Cc", cc)
+        in_to = {address.casefold() for address in new_to}
+        new_cc = tuple(address for address in new_cc if address.casefold() not in in_to)
+        if not new_to:
+            raise _LineError("To needs at least one address")
+        count = len(new_to) + len(new_cc)
+        if count > MAX_RECIPIENTS:
+            raise _LineError(f"To and Cc name {count} addresses (at most {MAX_RECIPIENTS})")
+        pairs["to"] = ", ".join(new_to)
+        if new_cc:
+            pairs["cc"] = ", ".join(new_cc)
+        else:
+            pairs.pop("cc", None)
+        if subject is not None:
+            # A reply's subject may be the briefing's whole subject= with "Re: " on top.
+            text = _edit_subject(subject, _SUBJECT_CAP + len("Re: ") if action.kind == REPLY else _SUBJECT_CAP)
+            if action.kind == REPLY:
+                if text.casefold() != action.title.casefold():
+                    raise _LineError("a reply keeps the subject of its thread")
+            else:
+                pairs["subject"] = text
+                changes["title"] = text
+        if body is not None:
+            changes["body"] = _edit_body(body, _BODY_CAPS.get(action.kind, _LONG_BODY_CAP))
+        recipients = {address.casefold() for address in new_to + new_cc}
+        if confirmed is None:
+            ticked = set(action.confirmed)
+        else:
+            if isinstance(confirmed, str):
+                raise _LineError("the confirmed recipients must be a list of addresses")
+            ticked = {email_address(item).casefold() for item in confirmed} - {""}
+        changes["confirmed"] = frozenset(ticked & recipients)
+    except _LineError as exc:
+        raise EditInvalid(str(exc)) from None
+    order = [key.name for key in _SCHEMAS[action.kind] if key.name in pairs]
+    order += [name for name in pairs if name not in order]
+    return replace(action, fields=tuple((name, pairs[name]) for name in order), **changes)
+
+
+def _edit_addresses(name: str, items: Sequence[str] | str) -> tuple[str, ...]:
+    """The chips of To or Cc as normalized addresses (repeats dropped); a text is split at , and ;."""
+    if isinstance(items, str):
+        items = [part for part in _ADDRESS_SPLIT_RE.split(items)]
+    addresses: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, str):
+            raise _LineError(f"{name}: an address must be text")
+        if not item.strip():
+            continue
+        address = email_address(item)
+        if not address:
+            raise _LineError(f"{name}: {_quoted(item)} is not an email address")
+        if address.casefold() not in seen:
+            seen.add(address.casefold())
+            addresses.append(address)
+    return tuple(addresses)
+
+
+def _edit_subject(value: Any, cap: int = _SUBJECT_CAP) -> str:
+    if not isinstance(value, str):
+        raise _LineError("the subject must be text")
+    text = _drop_format_characters(value)
+    if _LINE_BREAK_RE.search(text):
+        raise _LineError("the subject has a line break")
+    if _CONTROL_RE.search(text):
+        raise _LineError("the subject has a control character")
+    text = " ".join(text.split())
+    if not text:
+        raise _LineError("give a subject")
+    if len(text) > cap:
+        raise _LineError(f"the subject is too long ({len(text)} characters, at most {cap})")
+    if _has_encoded_word(text):
+        raise _LineError('the subject can\'t contain "=?...?=" (an encoded word)')
+    return text
+
+
+def _edit_body(value: Any, cap: int) -> str:
+    if not isinstance(value, str):
+        raise _LineError("the message must be text")
+    text = _drop_format_characters(value.replace("\r\n", "\n").replace("\r", "\n"))
+    text = _BODY_CONTROL_RE.sub("", text).strip()
+    if not text:
+        raise _LineError("the message is empty")
+    if len(text) > cap:
+        raise _LineError(f"the message is too long ({len(text)} characters, at most {cap})")
+    return text
 
 
 _EDIT_FIELD_CAP = 40   # one field of the Edit dialog's new time ("2026-10-08", "2:00 PM")

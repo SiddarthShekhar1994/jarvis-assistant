@@ -14,12 +14,13 @@ invitations, to-dos and links to look at. They appear in an amber
 **NEEDS YOUR OK** column: **Approve** adds a calendar event (or a to-do's work
 block) to your Google Calendar; **Accept** / **Decline** / **Maybe**, **Move**
 and **Cancel event** answer an invitation or move or cancel an event you
-organize, for your personal or your work Google account, after a 10-second
-countdown you can undo; the other cards hand the item over to you with
-**Open** and **Copy**. Nothing happens without your click on that card, and
-this version never sends an email (see [Calendar actions](#calendar-actions),
-[Invitations, moves and cancellations](#invitations-moves-and-cancellations)
-and [Other proposals](#other-proposals-replies-invites-to-dos-and-links)).
+organize; **Send** sends a drafted reply or email from your personal or your
+work Google account. Each of them happens only after your click on that card
+and a 10-second countdown you can undo; the other cards hand the item over to
+you with **Open** and **Copy** (see [Calendar actions](#calendar-actions),
+[Invitations, moves and cancellations](#invitations-moves-and-cancellations),
+[Replies and emails](#replies-and-emails) and
+[Other proposals](#other-proposals-replies-invites-to-dos-and-links)).
 Next to the reading, a **TODAY** panel lists the day's calendar events (from
 18:00 on: tomorrow's) and **DEADLINES** lists what is due in the next 14 days
 (see [TODAY and DEADLINES](#today-and-deadlines)).
@@ -49,11 +50,12 @@ own scheduled task (see [Instructions for the Claude briefing task](#instruction
   and a Notion integration that may read it (setup steps 2 and 3).
 - Internet access for Notion and for the online voice (edge-tts). If the online
   voice cannot be reached, the app falls back to the Windows built-in voices.
-- For calendar actions and the TODAY panel only: a Google account (or two: a
-  personal and a work or school one) and a free Google Cloud project with your
-  own OAuth client (setup step 8). Without it, everything else works:
-  proposals are still shown (Approve just says that Google Calendar is not set
-  up yet), and DEADLINES still lists the briefing's own deadlines.
+- For calendar actions, sending replies and the TODAY panel only: a Google
+  account (or two: a personal and a work or school one) and a free Google Cloud
+  project with your own OAuth client (setup step 8, and 8b for email). Without
+  it, everything else works: proposals are still shown (Approve just says that
+  Google Calendar is not set up yet, and replies stay Copy / Open hand-offs),
+  and DEADLINES still lists the briefing's own deadlines.
 
 ## Setup
 
@@ -231,10 +233,11 @@ cd "<project folder>"
    in `config.toml` and rerun it). Run `uninstall-schedule.ps1` on the old PC if
    it should stop asking.
 
-8. **Google Calendar setup (for calendar actions and TODAY)**
+8. **Google setup (for calendar actions, sending replies and TODAY)**
 
-   Only needed if you want **Approve** to add proposed events to Google Calendar
-   and the reading screen to show your day's events.
+   Only needed if you want **Approve** to add proposed events to Google Calendar,
+   the reading screen to show your day's events, and **Send** to send replies and
+   emails (that also needs step 8b below).
    You create your own small OAuth app in Google Cloud, so briefing-reader talks
    to Google only as you. It is free; no billing account is needed.
 
@@ -275,8 +278,8 @@ cd "<project folder>"
       excludes.
    7. That's all. The first time you click **Approve**, or **Connect** in the
       TODAY panel, your browser opens the
-      Google sign-in: pick your account and allow both permissions. The page
-      then says "briefing-reader is connected to Google Calendar for the
+      Google sign-in: pick your account and allow every permission it asks
+      for. The page then says "briefing-reader is connected to Google for the
       personal account. You can close this tab." The sign-in must be finished
       within 5 minutes; the app stays usable meanwhile. It is saved in
       `%LOCALAPPDATA%\briefing-reader\google_token_personal.json` (on this PC
@@ -285,58 +288,117 @@ cd "<project folder>"
       The app never opens the sign-in by itself: only a click does.
 
    **One sign-in per account.** The briefing names the account each invitation,
-   move or cancel belongs to (`acct=work`, `acct=personal`), and config.toml
-   lists the accounts Jarvis may act for (`[accounts.personal]` and
+   move, cancel, reply or email belongs to (`acct=work`, `acct=personal`), and
+   config.toml lists the accounts Jarvis may act for (`[accounts.personal]` and
    `[accounts.work]`; see [Configuration](#configuration)). Each account signs
    in separately, with the same OAuth client, and has its own saved sign-in,
    `google_token_<account>.json`. The personal account is the one Calendar
    proposals, to-do blocks and TODAY use. Another account signs in when you click
-   **Sign in** on one of its cards (the card's right-hand button reads Sign in
-   while that account is not signed in): Google's account chooser opens, and
-   you pick that account there. Which Google account is "work" is decided only
-   by that choice and kept only in its token file on this PC, never in
-   config.toml. A work or school account may also have to be added as a test
-   user (step 4) while the app is in Testing.
+   **Sign in** or **Send** on one of its cards (an invitation card's right-hand
+   button reads Sign in while that account is not signed in): Google's account
+   chooser opens, and you pick that account there. A work or school account may
+   also have to be added as a test user (step 4) while the app is in Testing.
 
-   Jarvis cannot check that you picked the right Google account: if you pick
-   your personal account when signing in for "work", the work cards act as your
-   personal account wherever it can see the event (for example an invitation
-   sent to both of your addresses). Each card's check line therefore ends with
-   the address Google answered as ("as ana@example.edu"). If that is not the
-   account you meant, do not go ahead: delete `google_token_work.json` (see
-   "Disconnecting" below) and click **Sign in** again.
+   **Which Google account an account name is.** Every sign-in also asks Google
+   which account it is (the `openid` and `userinfo.email` permissions below).
+   The first sign-in that says so binds the name to that Google account, in
+   `%LOCALAPPDATA%\briefing-reader\accounts.json` on this PC only, never in
+   config.toml. From then on a sign-in for "work" with any other Google account,
+   or with the account already bound to "personal", is refused and its new
+   sign-in thrown away ("This is not the Google account set up as the work
+   account; sign in with that one"), so a reply never goes out from the wrong
+   account. A reply or email card shows the bound address on its FROM line, and
+   an invitation, move or cancel card's check line ends with the address Google
+   answered as ("as ana@example.edu"). To bind a name to another Google account,
+   see "Disconnecting" below.
 
    If you used an older version, its single `google_token.json` is renamed to
    `google_token_personal.json` the first time this version starts, so you do
-   not have to sign in again.
+   not have to sign in again. That sign-in does not say which Google account it
+   is: the calendar keeps working, a personal reply card's FROM line says
+   "personal (account not confirmed yet)", and the first **Send** on a personal
+   card signs in once more (sending needs a new permission anyway), which binds
+   it.
 
    A work or school account's administrator may not allow apps they have not
    approved. Google then shows "Access blocked" or "admin_policy_enforced"
    (sometimes the browser page just stays open), and the card says "Sign-in
-   blocked by the work account's administrator". That account cannot be used
-   with your own OAuth client; its cards stay usable as hand-offs, as in earlier
-   versions: Open, **Done** (the right-hand button) and **Skip**, and **Copy
-   note** for an invitation's note. The tools row shows **Sign in** in place of
-   Edit, to try again later (for example after the administrator approved the
-   app).
+   blocked by the work account's administrator". Every sign-in asks for all of
+   the account's `features` at once, so for an account with `"gmail_send"` the
+   block may be about sending email only: then remove `"gmail_send"` from that
+   account's features in config.toml and click **Sign in** again, and the
+   calendar works as before (the note on the card you clicked says so too).
+   Otherwise that account cannot be used with your own OAuth client; its cards
+   stay usable as hand-offs, as in earlier versions: Open, **Done** (the
+   right-hand button) and **Skip**, and **Copy note** for an invitation's note.
+   The tools row shows **Sign in** in place of Edit, to try again later (for
+   example after the administrator approved the app).
 
-   **Permissions the app asks for** (the same for every account)
+   **Permissions the app asks for** (every account asks for the permissions of
+   its `features` in config.toml, and always for the two identity ones)
 
    | Scope | Why |
    |---|---|
    | `https://www.googleapis.com/auth/calendar.events` | Add the event you approved, and first look for the same event (same title and start) so it is not added twice; read your events of today (or tomorrow) and the next 14 days for TODAY and DEADLINES; read one event by its id for an invitation, move or cancel card. Only after your click on that card and its undo countdown: answer an invitation (only your own answer is sent), move an event you organize (or may change as a guest) or cancel an event you organize, always telling the guests as the card says ("guests notified" by default). It never changes or deletes anything else. |
    | `https://www.googleapis.com/auth/calendar.settings.readonly` | Read your calendar's time zone, so that "15:00" means 15:00 where your calendar is. |
+   | `https://www.googleapis.com/auth/gmail.send` | Only for an account with `"gmail_send"` in its features (step 8b). Only after your click on **Send** on that card and its undo countdown: send that one reply or email, exactly as the card shows it. It cannot read, search, change or delete any mail. |
+   | `openid`, `https://www.googleapis.com/auth/userinfo.email` | Learn which Google account a sign-in is (its address and account id), to bind the account name to it (see above). Nothing else. |
 
-   No access to Gmail, Drive, contacts or anything else.
+   No other access: Jarvis can't read your mail, and has no access to Drive,
+   contacts or anything else.
 
    **Disconnecting.** Delete `%LOCALAPPDATA%\briefing-reader\google_token_personal.json`
    (or `google_token_work.json` for the work account; the next click on that
    account's card signs in again), and remove the app's access at
    <https://myaccount.google.com/permissions> (pick briefing-reader and remove
-   its access), in each Google account you signed in with. To stop using calendar
-   actions without disconnecting, set `[calendar] enabled = false` in
+   its access), in each Google account you signed in with. To use an account
+   name with another Google account, also delete that name's entry in
+   `%LOCALAPPDATA%\briefing-reader\accounts.json` (or the whole file: every name
+   is then bound again at its next sign-in). To stop using calendar actions and
+   email without disconnecting, set `[calendar] enabled = false` in
    `config.toml`; to stop acting for one account, remove its `[accounts.<name>]`
-   table or its `"calendar"` feature.
+   table, or one of its features (`"calendar"`, `"gmail_send"`).
+
+   **8b. Sending replies and emails.** Only needed if **Send** on a Reply or
+   Email card should send it for you; without it those cards stay hand-offs
+   (Copy and Open, and **Done**). Jarvis asks Google only for `gmail.send`: it
+   can send what you approve on a card, and nothing else (it can't read, search
+   or delete mail).
+
+   1. In the same Cloud project, **APIs & Services > Library**: search for
+      **Gmail API**, open it and click **Enable**.
+   2. **OAuth consent screen > Data access** (older consoles: the **Scopes**
+      step of the consent screen): **Add or remove scopes**, tick
+      `.../auth/gmail.send` (type "gmail.send" in the filter), and `openid` and
+      `.../auth/userinfo.email` if they are not there yet, then **Update** and
+      **Save**. gmail.send is a "sensitive" scope: for an app only you use,
+      Google's verification is not needed, and the sign-in shows the same
+      "Google hasn't verified this app" page as in step 8.4.
+   3. In `config.toml`, an account that may send has `"gmail_send"` in its
+      `features` (both `personal` and `work` do in the shipped file; remove it
+      from an account that should never send).
+   4. Click **Send** on a reply card. The first time for each account your
+      browser opens the Google sign-in, which asks for every permission of the
+      account at once (a desktop app cannot add one permission to an existing
+      sign-in). Pick that account and tick every box. The card then says
+      "Signed in - this card sends from work (ana@example.edu); nothing is sent
+      until you click Send" and shows the address on its FROM line; nothing was
+      sent yet.
+
+   If you untick "Send email on your behalf", the sign-in still works for the
+   calendar, and the card says "Google did not allow sending email for work -
+   click Send to sign in again and tick that box". A sign-in from an older
+   version (Calendar only) never asked for sending, so its cards just say that
+   **Send** signs in first. If a work or school administrator does not allow
+   your app to send email, Google answers `admin_policy_enforced` ("Access
+   blocked" during the sign-in) or, when sending, `admin_policy_enforced` or
+   `domainPolicy`: the card says so and offers Copy (and Open) instead. Then
+   remove `"gmail_send"` from that account's features, so its sign-in asks for
+   the calendar only. An answer of Gmail never signs the account out of its
+   calendar: only a rejected sign-in (expired or access removed) deletes the
+   saved sign-in. Any other refusal by Gmail (403) turns sending off for that
+   account until you sign in again through **Send**. If Gmail says that the API
+   is not enabled, do step 1 and wait a few minutes.
 
 9. **Uninstall**
 
@@ -555,17 +617,19 @@ decide in briefing-reader:
 - **Approve** adds the event to Google Calendar. **Deny** dismisses it. Nothing is
   ever created without Approve; Deny, or not deciding at all, never contacts
   Google.
-- Approve (and a to-do's **Add block**) adds the event right away, without the
-  undo countdown of invitations, moves and cancellations: it only adds an event
-  to your own calendar, and an event that is already there is never added
-  twice. To undo it, delete the event in Google Calendar (the card's **Open**
+- Approve (and a to-do's **Add block**) first starts the same undo countdown as
+  every card Jarvis carries out: the card shows **Undo** on the left and
+  "ADDING IN 10 S" on the right (`[actions] undo_seconds`), and only when it
+  runs out is the event added. **Undo** stops it and nothing is added. After
+  that, to undo it, delete the event in Google Calendar (the card's **Open**
   link opens it).
 - A card keeps its size when you click: the result (WORKING..., ADDED, DENIED,
   ...) takes the place of the buttons, so the cards below never slide under
   your mouse. A second Approve or Deny click within 1 second of the previous
   one, on any card, is ignored, so a double click cannot decide two proposals.
-- One approval at a time: while an Approve is running (also while it waits for
-  the Google sign-in), Deny and Approve on the other cards are dimmed and do
+- One approval at a time: while an Approve is running (also during its
+  countdown and while it waits for the Google sign-in), Deny and Approve on the
+  other cards are dimmed and do
   nothing; pointing at them says "Finishing the previous approval..." (during a
   Connect sign-in from TODAY: "Finishing the Google sign-in..."). They work
   again as soon as it is done, whether it worked or failed. Clicks on dimmed
@@ -575,25 +639,32 @@ decide in briefing-reader:
 
 What Approve does:
 
-1. If you have not signed in to Google on this PC yet, your browser opens the
+1. The countdown runs (see above). Undo, quitting the app or closing the
+   reading screen stops it, and nothing is added.
+2. If you have not signed in to Google on this PC yet, your browser opens the
    Google sign-in and the card shows WAITING FOR GOOGLE SIGN-IN (setup step 8).
-2. The app looks on your calendar for an event with the same title and the same
-   start. If there is one, nothing is added and the card shows ALREADY ON
-   CALENDAR.
-3. Otherwise it creates the event: the title, the start and end in your
+3. The app saves "running" for the card in `actions.json`, then looks on your
+   calendar for an event with the same title and the same start. If there is
+   one, nothing is added and the card shows ALREADY ON CALENDAR.
+4. Otherwise it creates the event: the title, the start and end in your
    calendar's time zone (or all day), the repeat, the place as location, and the
    notes as the description followed by "Added by briefing-reader from your
    Daily Briefing.", with your default reminders. The card shows ADDED and an
    **Open** link to the event in Google Calendar.
-4. If something goes wrong, the card keeps its Approve and Deny buttons, so you
+5. If something goes wrong, the card keeps its Approve and Deny buttons, so you
    can try again, and shows FAILED with the reason under them (at most two
-   lines; point at it to read the whole reason).
+   lines; point at it to read the whole reason). If the request went out but no
+   clear answer came back (or the app stopped while it ran), the card shows
+   UNKNOWN: CHECK THE CALENDAR BEFORE RETRYING and **Retry**. Jarvis never adds
+   it again by itself, and a Retry looks for the event first, so it is never
+   added twice.
 
 Requests run one at a time in the background (the TODAY panel's reads queue
-behind them), so the window stays usable. If you
-close the app while one is running, it does not wait for it; if the event was
-created anyway, the next Approve of that proposal finds it and shows ALREADY ON
-CALENDAR.
+behind them), so the window stays usable. If you close the app while an event
+is on its way to Google, it waits up to 5 seconds for the answer (the window is
+already gone); a card left "running" shows UNKNOWN at the next start. A sign-in
+that is still open in the browser is not waited for, and nothing is added after
+it.
 
 Decisions are remembered in `%LOCALAPPDATA%\briefing-reader\actions.json` for 60
 days. A proposal is recognised by its title (ignoring case), date, times and
@@ -622,11 +693,12 @@ need you: an email to answer, a new email to write, an invitation to answer, a
 meeting you organize to move or cancel, a request for access to a file, a Slack
 message to answer, something due soon, or a page to look at. Each one is a line
 in the key=value format (see [the format](#other-proposals-keyvalue-lines)) and
-a card in NEEDS YOUR OK. Invitations, moves and cancellations Jarvis can carry
-out itself, after your click and an undo countdown (see
-[Invitations, moves and cancellations](#invitations-moves-and-cancellations)).
-The other cards hand the item over to you: nothing is sent, shared or posted
-for you.
+a card in NEEDS YOUR OK. Invitations, moves, cancellations, replies and emails
+Jarvis can carry out itself, after your click and an undo countdown (see
+[Invitations, moves and cancellations](#invitations-moves-and-cancellations)
+and [Replies and emails](#replies-and-emails)). The other cards (share
+requests, Slack messages, to-dos without a block, links) hand the item over to
+you: nothing is shared or posted for you.
 
 A card shows, from the top:
 
@@ -634,19 +706,22 @@ A card shows, from the top:
   MOVE · WORK, CANCEL · PERSONAL, SHARE · PERSONAL, SLACK, TODO or OPEN;
 - the title: the subject, the event or file name, "Slack message from Sam" or
   the to-do, at most two lines (point at it for the rest);
-- the details, for example "To: ana@example.edu, ben@example.edu · due today",
-  "Answer: yes · Tue Oct 6 · 5:00-6:00 PM · organizer emailed", "New time: Thu
+- the details, for example "Answer: yes · Tue Oct 6 · 5:00-6:00 PM · organizer
+  emailed", "New time: Thu
   Oct 8 · 2:00-3:00 PM · guests notified · was 12:00-1:00 PM", "sam@example.com
   asks for viewer access" or "Due Wed Oct 7, 11:59 PM · block Tue Oct 6 ·
-  7:00-9:00 PM";
+  7:00-9:00 PM" (a reply or an email shows FROM, TO and CC instead, see
+  [Replies and emails](#replies-and-emails));
 - the drafted text, if there is one, at most three lines (point at it to read
-  more of it; Copy always takes all of it);
+  more of it; Copy always takes all of it); a reply or an email shows ten
+  lines, with its own line breaks and its links highlighted;
 - links: **Open thread**, **Open event**, **Open request**, **Open in Slack**,
   **Open in Canvas** or **Open**, and **Copy reply**, **Copy email** or **Copy
-  note** (and **Edit** on an invitation, move or cancel);
+  note** (and **Edit** on an invitation, move, cancel, reply or email);
 - **Deny** and **Done**, or **Deny** and **Add block** for a to-do with a block
   time (an invitation, move or cancel has **Skip** and **Accept**, **Decline**,
-  **Maybe**, **Move** or **Cancel event** instead);
+  **Maybe**, **Move** or **Cancel event** instead, a reply or email **Deny**
+  and **Send**);
 - an amber note when the app was unsure of something, such as "Couldn't tell if
   you already replied - check the thread first" or "Link hidden: ...".
 
@@ -669,21 +744,21 @@ What they do:
 - **Done** says you handled it yourself: the card shows DONE, and the item is
   no longer counted or read out.
 - **Deny** dismisses it: the card shows DISMISSED (DENIED for a to-do with a
-  block), and nobody is contacted. On an invitation, move or cancel the same
+  block, a reply or an email), and nobody is contacted. On an invitation, move or cancel the same
   button reads **Skip** (next to "Decline", "Deny" read like the same thing)
   and the card shows SKIPPED.
 - **Add block** adds a to-do's `block=` time to your Google Calendar as an event
   named after the to-do, with the due time and the link in its description. It
-  is Approve's flow exactly: the same Google sign-in, the same ALREADY ON
-  CALENDAR check, one at a time with the other cards locked, and the same
+  is Approve's flow exactly: the same undo countdown, Google sign-in and ALREADY
+  ON CALENDAR check, one at a time with the other cards locked, and the same
   1-second rule. The card then shows BLOCK ADDED and an **Open event** link to
   the event.
 - Open and Copy are never locked and still work after you decided, so you can
   look at what you did. They never decide a card.
 
-Only Approve, Add block, Accept / Decline / Maybe, Move and Cancel event change
-anything at Google; Deny, Skip, Done, Open, Copy and Edit work without Google
-Calendar. "Needs your OK" counts these cards too, for example
+Only Approve, Add block, Accept / Decline / Maybe, Move, Cancel event and Send
+change anything at Google; Deny, Skip, Done, Open, Copy and Edit work without
+Google. "Needs your OK" counts these cards too, for example
 "Four items need your OK: a calendar invite, two replies and a to-do.", then one
 line per item (a calendar entry starts with "Calendar invite:") and "You can act
 on them on the right." When only calendar invites are waiting, it says what it
@@ -825,6 +900,115 @@ is saved; if it is still not back, or the PC turned off, the card shows UNKNOWN
 the next time. One call at a time, and a change is never sent twice: the
 connection never repeats a change request by itself.
 
+### Replies and emails
+
+A `Reply:` or `Email:` card is sent by Jarvis itself through Gmail, from the
+account the line names (`acct=`), once that account is set up for it (setup
+step 8b; otherwise the card is a hand-off with Copy and Open, and its
+right-hand button reads **Done**). Nothing is sent before your click on
+**Send** on that card, and even then only after a countdown you can undo.
+
+The card shows exactly what will be sent:
+
+- **FROM**: the account name and the Google account's address, such as
+  "work (ana@example.edu)" (see "Which Google account an account name is" in
+  setup step 8). Until Jarvis knows it, the line says "account not confirmed
+  yet", and **Send** signs in first.
+- **TO** and **CC**: one chip per address. An address Jarvis has not sent to
+  before, that is not the account's own and not in `[actions]
+  trusted_domains`, is red with a **NEW RECIPIENT** badge (see the rules
+  below). The account's own address is never a recipient: it is left out.
+- the subject (the title, cut to two lines; a reply's starts with "Re: "), and
+  the message with its own line breaks, up to ten lines as they wrap at the
+  card's width (point at it for all of it, or open Edit). Web links in it are
+  blue and underlined but not clickable, and a note says how many there are
+  ("Contains 2 links").
+- **Open thread** (a reply's thread in Gmail), **Copy reply** or **Copy
+  email**, and **Edit**; then **Deny** and **Send**.
+
+**What Send does.** Each click does one step, and the card's amber note says
+what is next:
+
+1. While the account can't send yet (never signed in, the sign-in expired,
+   sending was not allowed, or Jarvis does not know which Google account it
+   is), the click opens the Google sign-in in your browser; no countdown runs.
+   Afterwards the card says "Signed in - this card sends from work
+   (ana@example.edu); nothing is sent until you click Send".
+2. While a red NEW RECIPIENT is not confirmed, the click opens **Edit**, with a
+   "Send to <address>" tick under each new address. Tick the ones you mean (or
+   remove the others) and **Save**; the badge then reads "NEW · CONFIRMED".
+3. When the card does not show all of the message (more than its ten lines,
+   counting a long paragraph as the lines it wraps into, or a subject cut at
+   two lines), the click opens **Edit** first, with the whole subject and
+   message: read it to its end (scroll down when the dialog scrolls). Send
+   counts down only after the dialog has shown exactly this subject and message
+   to its end; a newer briefing with another text for the same card, or a
+   dialog closed before its end (for example after ticking new recipients),
+   asks again.
+4. Otherwise the countdown starts: **Undo** on the left, "SENDING FROM WORK IN
+   10 S" (the account it sends from) on the right, the other cards locked, as
+   for an invitation. A Send pressed with the keyboard (Space) moves the focus
+   to **Undo**. **Undo**, quitting the app or closing the reading screen stops
+   it, and nothing is sent. If the account's address changed meanwhile, nothing
+   is sent either.
+5. When it runs out, Jarvis saves "running", then makes the one Gmail call
+   that sends the message, and the card shows SENT with an **Open** link to the
+   thread in Gmail. The recipients are remembered (see below).
+
+**What is sent.** A plain-text message (UTF-8) with exactly the card's From,
+To, Cc, subject and text; a reply also with `In-Reply-To` and `References`
+(the line's `msgid=`) and Gmail's thread id, so it lands in the thread. Never
+a Bcc, an attachment or a forward, and at most 5 recipients in To and Cc
+together. A line with `gmid=` but no `msgid=` still joins the thread in Gmail,
+but other mail apps may show it apart; the card says so. A subject with an
+encoded word (`=?...?=`) or an empty message is never sent (the card says why
+and offers Copy).
+
+**Edit** shows FROM (fixed), the To and Cc recipients (**Remove**, and a field
+to **Add** an address: one plain address, at most 5 in all, not the account's
+own; a new one gets its own tick), the subject (an email's can be changed; a
+reply keeps its thread's) and the message, its links highlighted. The subject
+and the message are shown whole; when the dialog would be taller than the
+screen, its fields scroll and Save and Cancel stay on screen. **Save**
+checks it like a line from the briefing and shows any problem in the dialog
+(Enter in an Add field adds that address and never saves; an address typed
+into Add but not added keeps the dialog open, as it would not be sent). The
+card then shows
+exactly the edited message, with "EDITED" after its kind (ticking new
+recipients alone is not an edit). The edit is kept in memory only, until the
+app closes, and Save never sends anything.
+
+**Recipient rules ("confirm new people").** Jarvis can send mail but cannot
+read it, so it cannot check that an address really is in the thread; the
+briefing task is told to use only the thread's addresses. An address needs no
+extra confirmation only when it is
+
+- the sending account itself (then it is no recipient at all),
+- in a domain of `[actions] trusted_domains`, or a subdomain of one (empty by
+  default; for example `["example.edu"]`), or
+- an address Jarvis sent to before, from any account.
+
+Every other address needs its tick in Edit before Send. Addresses are compared
+as plain addresses: a display name ("Ana Lima <...>") is dropped and never
+decides who someone is. Jarvis remembers whom it sent to in
+`%LOCALAPPDATA%\briefing-reader\recipients.json`, as a one-way hash of each
+address (never the address itself), at most 5000; deleting the file makes
+every address new again.
+
+**After Send**:
+
+- **SENT** (green) with **Open**: the message went out. The card keeps showing
+  what was sent, even when a newer briefing changes the line.
+- **FAILED: NOTHING WAS SENT** (in red), with the reason in the amber note, for
+  example "Gmail refused the message (400: ...)". The button reads **Retry**
+  (or **Send** when the account must sign in again first), which starts again
+  at step 1; the note names the button the card shows.
+- **UNKNOWN: CHECK SENT MAIL BEFORE RETRYING** (amber): Gmail did not answer in
+  time, the connection broke after the message went out, or Jarvis stopped
+  while it ran, so it may or may not have been sent. Jarvis never sends it
+  again by itself, and one click sends at most one message: look in that
+  account's Sent mail first, then click **Retry** or **Deny**.
+
 ## "Proposed actions" format
 
 The proposals go under a heading named "Proposed actions" (any heading level;
@@ -904,9 +1088,9 @@ line each: the kind, a colon, then `key=value` fields separated by ` | `.
 |---|---|
 | `acct` | The account the item belongs to: letters, digits, `-` or `_`, such as `work` or `personal`. |
 | `thread`, `gmid` | Gmail's thread and message ids (6 to 64 letters, digits, `-`, `_`). |
-| `msgid` | The Message-ID header of the message being answered, with or without `<` `>`. |
+| `msgid` | The Message-ID header of the message being answered, with or without `<` `>`. Send uses it for the reply's `In-Reply-To` and `References`, so every mail app shows the reply in the thread. |
 | `to`, `cc` | Addresses separated by `,` or `;` (`Ana Lima <ana@example.edu>` works). At most 5 in `to` and `cc` together; an address in both counts once. |
-| `subject` | One line, at most 250 characters. A reply gets "Re: " in front unless it already starts with it. |
+| `subject` | One line, at most 250 characters. A reply gets "Re: " in front unless it already starts with it (those 4 characters are on top of the 250). |
 | `title`, `who` | One line, at most 200 (`title`) or 80 (`who`) characters. In `Share:`, `who` is the address of the person asking. |
 | `replied` | `yes`, `no` or `unknown` (the default). `yes` makes an information-only card; `unknown` adds a note. |
 | `due` | `YYYY-MM-DD`, or `YYYY-MM-DD HH:MM` (24-hour; `11:59 PM` works too). |
@@ -1087,15 +1271,28 @@ proposals that the user decides one by one.)
    Open: title=<what to look at> | link=<link>
 
    Rules:
-   - acct is the account the item belongs to: "work" or "personal".
+   - acct is the account the item belongs to: "work" or "personal". A Reply
+     or Email is sent from that account, so pick the account whose inbox the
+     thread is in.
    - Take every id from the tool results; never guess or invent one. If you
      cannot get the ids a format needs, write an "Open:" line with the
      item's link instead.
+   - For a Reply, msgid= is the Message-ID header of the message you answer
+     (needed so the reply joins the thread in every mail app); fill gmid=
+     only when you cannot get that header. Use Email only for a new message
+     that does not answer an existing thread.
    - Before proposing a Reply, search that account's Sent mail for the
      thread and set replied=yes, no or unknown. If it is yes, propose nothing.
    - to= and cc= may only contain addresses that already appear in that
      thread (the sender and the other recipients), at most 5 in total, never
-     the user's own address. Never use bcc.
+     the user's own address. Never use bcc, never forward, never attach
+     anything. The app asks the user to confirm every address it has not
+     sent to before, so never add an address "just in case".
+   - body= is the complete message exactly as it should be sent: plain text,
+     greeting to sign-off, no placeholders such as [Name] or [time], no
+     quoted earlier messages. The user reads it on the card and may edit it;
+     the app sends nothing until the user clicks Send on that card and a
+     short countdown runs out.
    - Propose RSVP only for real calendar invitations, and Move or Cancel only
      for events the user organizes. Times are 24-hour wall-clock times in the
      user's time zone.
@@ -1118,6 +1315,7 @@ proposals that the user decides one by one.)
 
    Examples of the format (not real):
    - Reply: acct=work | thread=18c0ffee00000001 | msgid=CAExample0001@mail.example.com | gmid=18c0ffee00000002 | to=ana@example.edu, ben@example.edu | cc= | subject=Re: Thursday noon meeting | replied=no | due= | link=https://mail.google.com/mail/?authuser=you@example.edu#all/18c0ffee00000001 | body=Hi both,\nShall we keep it at noon with the two of us, or move it to 2 PM?\nThanks
+   - Email: acct=personal | to=office@example.edu | cc= | subject=Question about the lab schedule | due= | link= | body=Hello,\nIs the lab open on Saturday?\nThanks
    - RSVP: acct=work | event=abc123def456ghi789 | cal=primary | answer=yes | notify=all | title=Speaker series | at=2026-10-06 17:00-18:00 | due=2026-10-06 | link=https://calendar.google.com/calendar/event?eid=ZXhhbXBsZQ | body=
    - Todo: title=Work on Problem set 3 | due=2026-10-07 23:59 | block=2026-10-06 19:00-21:00 | acct= | link=https://example.instructure.com/courses/1/assignments/2
    - Slack: team=T00000000 | channel=D00000000 | ts=1700000000.000100 | thread= | who=Sam | said=are you free friday? | link=https://example.slack.com/archives/D00000000/p1700000000000100 | body=Yes! Friday after 4 works.
@@ -1189,15 +1387,16 @@ log. Changes apply the next time the app starts.
 | `[sections] ignore` | `["Ignore"]` | Sections skipped unless you click Read everything. Matching ignores case, emoji and a trailing count, and catches headings that start with the name ("Ignore (14)", "Ignored"). A toggle or callout with such a title (its contents are skipped) and a short paragraph used as a title ("Ignore (2)", "Ignore:") count too. `[]` reads everything. |
 | `[sections.announce]` | the four headings | `"Heading on the page" = "What to say"`. Headings not listed are announced as written. |
 | `[notion] version` | `"2022-06-28"` | Notion API version header. |
-| `[calendar] enabled` | `true` | `false`: proposals are still shown, but Approve never contacts Google. |
-| `[calendar] client_secret` | `"google_client_secret.json"` | The OAuth client file from step 8: a path relative to the project folder, or an absolute path. |
+| `[calendar] enabled` | `true` | `false`: proposals are still shown, but Jarvis never contacts Google: no TODAY, no Approve, Accept, Move, Cancel event or Send (replies stay Copy / Open hand-offs). |
+| `[calendar] client_secret` | `"google_client_secret.json"` | The OAuth client file from step 8 (also used for sending email): a path relative to the project folder, or an absolute path. |
 | `[calendar] calendar_id` | `"primary"` | The calendar new events go to. `"primary"` is your main calendar; another calendar's id is in Google Calendar under that calendar's Settings > Integrate calendar. |
 | `[actions] heading` | `"Proposed actions"` | The heading the proposals are under: one name, or a list such as `["Proposed actions", "Actions"]`. Matching ignores case and a trailing count. |
 | `[actions] link_hosts` | `[]` | Extra web hosts a card's **Open** may open, besides the built-in Google (mail, docs, drive, calendar, meet), Slack (`*.slack.com`) and Canvas (`*.instructure.com`) hosts: an exact name such as `"forms.example.edu"`, or `"*.example.edu"` for every subdomain. https only; an entry that is not a host name is skipped with a warning. |
-| `[actions] undo_seconds` | `10` | Seconds between a click on Accept / Decline / Maybe / Move / Cancel event and the call to Google (3-60). Undo works until then and sends nothing. |
-| `[accounts.<name>]` | `personal` and `work` | The Google accounts Jarvis may act for, one table each; the name is what the briefing writes as `acct=` (lowercase letters, digits, `-`, `_`). Without any `[accounts]` table only `personal` exists. Which Google account a name is never goes here: you pick it in Google's sign-in (setup step 8). Calendar proposals, to-do blocks and TODAY always use `personal`. |
+| `[actions] undo_seconds` | `10` | Seconds between a click on Approve / Add block / Accept / Decline / Maybe / Move / Cancel event / Send and the call to Google (3-60). Undo works until then and sends nothing. |
+| `[actions] trusted_domains` | `[]` | Email recipient domains that never get the red NEW RECIPIENT badge, such as `["example.edu"]` (its subdomains count too; a leading `@` is dropped). Any other address must be the account's own or one Jarvis sent to before, or Send asks you to confirm it in Edit first (see [Replies and emails](#replies-and-emails)). |
+| `[accounts.<name>]` | `personal` and `work` | The Google accounts Jarvis may act for, one table each; the name is what the briefing writes as `acct=` (lowercase letters, digits, `-`, `_`). Without any `[accounts]` table only `personal` exists. Which Google account a name is never goes here: you pick it in Google's sign-in, and its first sign-in binds the name to it in `accounts.json` (setup step 8). Calendar proposals, to-do blocks and TODAY always use `personal`. |
 | `[accounts.<name>] backend` | `"google"` | Who carries out the account's actions. Only `"google"` (your own OAuth client) works in this version; `"composio"` is accepted but its cards say "Composio is not built into this version". |
-| `[accounts.<name>] features` | `["calendar"]` | What Jarvis may do for the account: `"calendar"` answers invitations and moves or cancels events. `[]` makes the account's cards hand-off only (Open, Done, Deny). |
+| `[accounts.<name>] features` | `["calendar"]` (the shipped `config.toml`: `["calendar", "gmail_send"]`) | What Jarvis may do for the account: `"calendar"` answers invitations and moves or cancels events; `"gmail_send"` sends the replies and emails you approve (send only; setup step 8b). Adding a feature means one new Google sign-in for that account. `[]` makes the account's cards hand-off only (Open, Copy, Done, Deny). |
 | `[schedule] am` | `"10:12"` | Time of the AM task (24-hour `HH:MM`); the default is only an example, set it a few minutes after your own briefing task runs. `install-schedule.ps1` uses it unless you pass `-AmTime`; the app uses it to tell which briefing an answer belongs to when it was started without `--slots`. Rerun the script after a change. |
 | `[schedule] pm` | `"23:42"` | Time of the PM task, the same way (`-PmTime`). |
 | `[hotkey] enabled` | `true` | `false`: `install-schedule.ps1` does not install the hotkey task (and removes an existing one); an agent that is started anyway exits at once. |
@@ -1322,14 +1521,20 @@ or links, and the TODAY / DEADLINES panels log only counts, never titles.
 Answering, moving and cancelling events log the action id, kind, account name,
 status (running, sent, failed, unknown) and an HTTP status code; Google's view
 of an event (its title, organizer, your address) and the cards' notes are never
-logged, and an account is never named by its address.
+logged, and an account is never named by its address. Sending a reply or email
+logs the action id, kind, account name, the number of recipients, the status,
+Gmail's message id and an HTTP status code with Gmail's reason code; never an
+address, subject or text (Gmail's error texts are scrubbed of addresses before
+they are shown), and never the identity token Google returns at a sign-in.
 
 Other files in `%LOCALAPPDATA%\briefing-reader`:
 
 | File | What it is |
 |---|---|
-| `actions.json` | Your decisions on the proposals: Approve (`created`, or `exists` when it was already on the calendar), Deny (`denied`) and Done (`done`); for an invitation, move or cancel also `running` (saved right before the call to Google), `sent` (with the result, such as "Accepted", and the event link), `failed` and `unknown` (the call may or may not have happened; a `running` left by a crash becomes `unknown` at the next start). Each entry has the proposal's kind and account name and the last failure message, kept for 60 days. Delete it to forget them. |
-| `google_token_personal.json`, `google_token_work.json` | The Google sign-in of each account (access and refresh token, and the permissions Google granted). Private: never share them. Delete one to sign that account out on this PC. Older versions kept a single `google_token.json`; it becomes `google_token_personal.json` at the first start. |
+| `actions.json` | Your decisions on the proposals: Approve / Add block (`created`, or `exists` when it was already on the calendar), Deny (`denied`) and Done (`done`); for every card Jarvis carries out also `running` (saved right before the call to Google), `sent` (an answer, move, cancel, reply or email, with the result, such as "Accepted" or "Sent", and the link), `failed` and `unknown` (the call may or may not have happened; a `running` left by a crash becomes `unknown` at the next start). Each entry has the proposal's kind and account name and the last failure message, kept for 60 days. Delete it to forget them. |
+| `google_token_personal.json`, `google_token_work.json` | The Google sign-in of each account (access and refresh token, the permissions Google granted, and which Google account it was issued for). Private: never share them. Delete one to sign that account out on this PC. Older versions kept a single `google_token.json`; it becomes `google_token_personal.json` at the first start. |
+| `accounts.json` | Which Google account each account name is (its address and Google's account id), written by the first sign-in that says so. Delete an entry, or the file, to bind a name to another Google account (setup step 8, "Disconnecting"). |
+| `recipients.json` | The addresses Jarvis sent replies and emails to, as one-way hashes (never the addresses), with the time; at most 5000. An address in it needs no NEW RECIPIENT confirmation. Delete it to confirm every address again. |
 | `runstate.json` | Per scheduled briefing: when its prompt was first shown and when and how it was answered (read, dismissed, done), kept for 14 days. The catch-up task uses it; see [Catch-up and the hotkey](#catch-up-and-the-hotkey). Safe to delete. |
 
 Generated audio goes to `%TEMP%\briefing-reader\session-<process id>` and is
@@ -1339,7 +1544,7 @@ deletes the folder; leftovers older than 12 hours are removed at the next start.
 
 ## Privacy and cost
 
-The app talks to three services, all free:
+The app talks to these services, all free:
 
 - the Notion API: it only reads the one page, with a read-only integration;
 - Microsoft's Edge read-aloud service, which receives the briefing text to turn
@@ -1353,7 +1558,14 @@ The app talks to three services, all free:
   **Move** or **Cancel event** and its undo countdown does Jarvis send your
   answer (and its note), the new times, or the cancellation. Nothing is sent to
   Google before you sign in, and no event is changed or deleted without that
-  click on its own card.
+  click on its own card;
+- the Gmail API, only for an account set up for it (step 8b) and only to send:
+  after your **Send** on a card and its undo countdown, the one message that
+  card shows (From, To, Cc, subject, text, and the thread headers of a reply).
+  Jarvis has no permission to read, search or change your mail. Each sign-in
+  also tells Jarvis which Google account it is (`openid`, `userinfo.email`):
+  the address is kept in `accounts.json` on this PC and shown on the cards,
+  never logged.
 
 **Reading your calendar.** Once Google Calendar is connected on this PC, every
 time the reading screen opens the app reads your calendar events from the start
@@ -1368,9 +1580,10 @@ false` in `config.toml` (this also turns off Approve) or sign out by deleting
 the briefing names, for accounts that are signed in, and are shown, not saved
 (also the address Google answered as, at the end of the line).
 
-**Other proposals.** Replies, emails, share requests, Slack replies and links
-are only shown: the app has no access to Gmail, Drive or Slack and sends
-nothing. **Open** hands a link to your browser only when you click it.
+**Other proposals.** Share requests, Slack replies, to-dos without a block and
+links are only shown: the app has no access to Drive or Slack, and Gmail only
+to send what you approved on a card. **Open** hands a link to your browser only
+when you click it.
 **Copy** puts the drafted text on the Windows clipboard, where any program can
 read it and, if Windows clipboard history (Win+V) is turned on, Windows keeps a
 copy until you clear it (Win+V > Clear all).
@@ -1402,9 +1615,9 @@ py -3.13 -m unittest discover -v
 ```
 
 The tests use saved fake Notion responses (`tests\fixtures`, with an invented
-page and invented people, places and courses) and fake Google Calendar
-services and sign-ins (temporary token files, never yours), and never call
-Notion or Google; they need no `.env`. The clock display and card tests run Qt
+page and invented people, places and courses) and fake Google Calendar and
+Gmail services and sign-ins (temporary token files, never yours), and never
+call Notion or Google or send an email; they need no `.env`. The clock display and card tests run Qt
 offscreen, so no window appears. The live speech tests are
 skipped unless you opt in; they synthesize a short text with edge-tts (needs
 internet) and with the Windows voice into a temporary folder, and play nothing:
@@ -1504,10 +1717,13 @@ they are quoted here in normal case, and the log has the same text)
 - **Access blocked with a school or work account**, or a card's line says
   "Sign-in blocked by the work account's administrator" (the note under the
   buttons has Google's code, such as `admin_policy_enforced`): the organisation
-  blocks apps it has not approved. That account cannot be used with your own
-  OAuth client: its cards are hand-offs (Open event, **Done** or **Skip**, and
-  Copy note for an invitation's note), and **Sign in** in their tools row tries
-  again. If Google's page
+  blocks apps it has not approved. If the account has `"gmail_send"` in its
+  features, the block may be about sending email only: remove `"gmail_send"`
+  from that account in config.toml and click **Sign in** again to keep Calendar
+  actions. Otherwise that account cannot be used with your own OAuth client:
+  its cards are hand-offs (Open event, **Done** or **Skip**, and Copy note for
+  an invitation's note), and **Sign in** in their tools row tries again. If
+  Google's page
   says "Access blocked" and never comes back to the app, the sign-in ends after
   5 minutes with "...was not finished in time".
 - **"Google sign-in for the work account was cancelled or denied"**: you
@@ -1528,8 +1744,10 @@ they are quoted here in normal case, and the log has the same text)
   the line to compare. If it is the right event (it was moved or renamed), click
   the button twice; if not, Skip the card.
 - **The line ends with an address that is not that account's**: you picked
-  another Google account when signing in. Delete that account's
-  `google_token_<account>.json` and click Sign in again.
+  another Google account at that account name's first sign-in, so Jarvis bound
+  the name to it. Delete that account's `google_token_<account>.json` and its
+  entry in `accounts.json` (see "Disconnecting" in setup step 8), then click
+  Sign in again and pick the right account.
 - **'No account named "school" in config.toml [accounts]'**: the briefing wrote
   an `acct=` name that config.toml does not list. Add an `[accounts.school]`
   table, or have the briefing use `work` or `personal`.
@@ -1560,7 +1778,49 @@ they are quoted here in normal case, and the log has the same text)
   Google Calendar's time zone (Google Calendar > Settings > Time zone). If it
   cannot be read, the app uses this PC's time zone (Windows Settings > Time &
   language; UTC if Windows does not name one) and logs a warning.
-- **Revoking access**: open <https://myaccount.google.com/permissions> in each
+
+**Replies and emails**
+
+- **"Sending email is not set up yet - see README step 8b"** or **"The work
+  account is not set up for sending email"**: do setup step 8b, and check that
+  the account's `features` in `config.toml` has `"gmail_send"`. The card stays
+  a hand-off (Copy, Open, Done) meanwhile.
+- **"Set up email sending: README step 8b: the Gmail API is not turned on for
+  the OAuth client's project"**: enable the Gmail API (step 8b.1), wait a few
+  minutes, then click Retry. Nothing was sent.
+- **"Google did not allow sending email for work - click Send to sign in again
+  and tick that box"**: the sign-in left out "Send email on your behalf", or
+  Gmail answered that this sign-in may not send (or step 8b.2 was not done).
+  Click Send and tick every box. The calendar keeps its sign-in meanwhile.
+- **"Gmail refused access for the work account (403: ...)"**: nothing was sent,
+  and sending stays off for that account until you sign in again through Send;
+  the calendar keeps working.
+- **"This is not the Google account set up as the work account"** or **"That
+  Google account is already set up as the personal account"**: you picked
+  another Google account than the one that name is bound to. Click Send again
+  and pick the account on the FROM line; to change which Google account a name
+  is, see "Disconnecting" in setup step 8.
+- **FROM says "account not confirmed yet"**: that account's sign-in is from an
+  older version, or Google did not say which account it is. Click Send: it
+  signs in once more (nothing is sent) and binds the name.
+- **"...administrator does not allow this app to send email
+  (admin_policy_enforced)"** (or `domainPolicy`): the organisation blocks sending
+  from your own app. Use Copy (and Open), and remove `"gmail_send"` from that
+  account's features so its sign-in asks for the calendar only.
+- **A red NEW RECIPIENT badge**: Jarvis has not sent to that address before.
+  Check it is right, tick "Send to <address>" in Edit, Save, then click Send. To
+  trust a whole domain, add it to `[actions] trusted_domains`.
+- **Send opens Edit instead of counting down**: a new recipient is not ticked
+  yet, or the card does not show all of the message (or its subject) and the
+  dialog has not shown this text to its end yet; the card's note says which.
+  Scroll the dialog to its end, close it, then click Send again.
+- **"UNKNOWN: CHECK SENT MAIL BEFORE RETRYING"**: the message may or may not
+  have gone out. Look in that account's Sent mail, then click Retry or Deny.
+  Nothing is ever sent again by itself.
+
+**Revoking access**
+
+- Open <https://myaccount.google.com/permissions> in each
   Google account, pick briefing-reader, remove its access, and delete
   `%LOCALAPPDATA%\briefing-reader\google_token_personal.json` (and
   `google_token_work.json`).
@@ -1581,8 +1841,10 @@ briefing_reader/notion_client.py  Notion REST client, block flattener, header pa
 briefing_reader/text_prep.py  markdown stripping, text for listening, script with sections, stale note and Needs your OK part
 briefing_reader/actions.py    "Proposed actions" parsing (Calendar: and key=value lines), card texts, edits, saved decisions
 briefing_reader/agenda.py     TODAY / TOMORROW rows, the "Deadlines" section, calendar deadlines, due labels
-briefing_reader/google_auth.py  Google sign-in per account (one token per account), sign-in problems, single-send HTTP
+briefing_reader/google_auth.py  Google sign-in per account (one token per account, which Google account it is), single-send HTTP
 briefing_reader/gcal.py       Google Calendar: duplicate check, event creation, reading events, answer / move / cancel
+briefing_reader/gmail.py      Gmail (gmail.send only): the message exactly as the card shows it, one send per approval
+briefing_reader/recipients.py the NEW RECIPIENT check: own address, trusted domains, addresses sent to before (hashed)
 briefing_reader/executor.py   carrying out an approved proposal per account ("running" first), the cards' check lines
 briefing_reader/tts.py        edge-tts synthesis, Windows SAPI fallback, highlight timing, background worker
 briefing_reader/player.py     QtMultimedia player that plays sections in order with pauses

@@ -13,7 +13,9 @@ this process with the bundled fonts and shows nothing; every text is invented.
 
 from __future__ import annotations
 
+import gc
 import unittest
+import weakref
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QTextDocument
@@ -355,7 +357,339 @@ class EditDialogTests(unittest.TestCase):
         self.assertFalse(dialog.answer_buttons["yes"].isChecked())
         self.assertTrue(dialog.date_edit.isHidden())
         with self.assertRaises(ValueError):
-            hud.EditDialog("x", "reply", "reply", "Re: Notes")
+            hud.EditDialog("x", "share", "share", "Trip budget")   # Share has no Edit dialog
+        dialog.close()
+
+
+MAIL_BODY = ("Hi both,\nShall we keep it at noon, or move it to 2 PM? The agenda: "
+             "https://docs.google.com/document/d/EXAMPLE/edit\n\nThanks")
+LONG_ADDRESS = "someone.with.a.really.long.address@subdomain.exampleuniversity.edu"
+
+
+def mail_links(text: str) -> list[tuple[int, int]]:
+    start = text.find("https://")
+    return [] if start < 0 else [(start, text.index("edit", start) + 4)]
+
+
+class MailCardTests(unittest.TestCase):
+    """A Reply / Email card: FROM, the recipient chips and the text exactly as it will be sent."""
+
+    def make(self, body: str = MAIL_BODY, width: int = 300):
+        card = hud.ActionCard("m1", "reply \u00b7 work", "Re: Thursday noon meeting", "due today",
+                              approve_text="Send", body=body, title_lines=2, open_text="Open thread",
+                              copy_text="Copy reply", edit_text="Edit", mail=True, body_lines=10,
+                              body_links=mail_links(body), approve_alternatives=("Send", "Done"))
+        card.set_recipients("work (ana@example.edu)",
+                            [hud.RecipientChip("ben@example.edu"), hud.RecipientChip(LONG_ADDRESS, hud.RECIPIENT_NEW)],
+                            [hud.RecipientChip("cy@example.com", hud.RECIPIENT_CONFIRMED)])
+        shown(card, width)
+        card.resize(width, card.heightForWidth(width))   # as tall as the list makes it
+        QApplication.processEvents()
+        return card
+
+    def test_the_text_keeps_its_line_breaks_and_links(self) -> None:
+        card = self.make()
+        self.assertTrue(card.body_label.isHidden())
+        self.assertFalse(card.mail_body.isHidden())
+        self.assertEqual(card.mail_text(), MAIL_BODY)
+        lines = card.mail_body.shown_lines()
+        self.assertEqual(lines[0], "Hi both,")
+        self.assertEqual(lines[-2:], ["", "Thanks"])
+        self.assertFalse(card.mail_body.is_cut())
+        self.assertEqual(card.mail_body.links(), tuple(mail_links(MAIL_BODY)))
+        self.assertEqual(card.body(), " ".join(MAIL_BODY.split()))
+        card.close()
+
+    def test_a_long_text_is_cut_at_ten_lines(self) -> None:
+        body = "\n".join(f"Line {n} of the drafted reply" for n in range(1, 16))
+        card = self.make(body)
+        lines = card.mail_body.shown_lines()
+        self.assertEqual(len(lines), 10)
+        self.assertTrue(lines[-1].endswith("\u2026"), lines[-1])
+        self.assertTrue(card.mail_body.is_cut())
+        self.assertIn("Line 15", as_shown(card.mail_body.toolTip()))
+        card.close()
+
+    def test_the_chips_name_every_recipient_whole(self) -> None:
+        card = self.make(width=260)
+        chips = card.recipients
+        self.assertEqual(chips.text(), "From: work (ana@example.edu)\n"
+                                       f"To: ben@example.edu, {LONG_ADDRESS} (new recipient, not confirmed)\n"
+                                       "Cc: cy@example.com (new recipient, confirmed)")
+        self.assertEqual(as_shown(chips.toolTip()), chips.text())
+        self.assertEqual(chips.accessibleName(), chips.text())
+        self.assertLessEqual(chips.heightForWidth(chips.width()), chips.height() + 1)
+        self.assertLessEqual(chips.minimumSizeHint().width(), chips.width())
+        card.close()
+
+    def test_a_card_knows_when_it_does_not_show_all_of_the_message(self) -> None:
+        """Few line breaks but long paragraphs, or a long subject: the card cuts them, and says so
+        (Send then opens the Edit dialog to read it all first)."""
+        paragraph = "The sampling plan is fine, but the budget table still uses last year's numbers. " * 4
+        card = self.make(f"Hi Ana,\n{paragraph}\n{paragraph}\n{paragraph}\nI can't come on Friday.\nThanks")
+        self.assertTrue(card.mail_body.is_cut())
+        self.assertNotIn("Friday", "\n".join(card.mail_body.shown_lines()))
+        self.assertTrue(card.mail_cut())
+        short = self.make()
+        self.assertFalse(short.mail_cut())
+        short.set_texts("reply \u00b7 work", "Re: " + "a very long subject about the lab schedule " * 6, "")
+        QApplication.processEvents()
+        self.assertTrue(short.title_label.is_cut())
+        self.assertTrue(short.mail_cut())
+        for each in (card, short):
+            each.close()
+
+    def test_a_short_address_never_breaks_inside_a_domain_name(self) -> None:
+        font = hud.mono_font(11)
+        for address in ("pat.lee@example.net", "jordan.smith@example.org"):
+            lines = hud._wrapped_lines(address, font, hud._text_advance(font, address[:-1]))
+            self.assertEqual("".join(lines), address)
+            self.assertGreater(len(lines), 1)
+            for first, second in zip(lines, lines[1:]):   # only after "@" or before ".": never inside a name
+                self.assertTrue(first.endswith("@") or second.startswith("."), lines)
+        self.assertEqual(hud._with_soft_breaks("ana@example.edu"), "ana@example.edu")   # a card detail: as before
+        self.assertEqual(hud._with_soft_breaks("ana@example.edu", 0).split("\u200b"), ["ana@", "example", ".edu"])
+
+    def test_space_on_send_hands_the_focus_to_undo(self) -> None:
+        card = self.make()
+        card.activateWindow()
+        card.approve_button.setFocus(Qt.FocusReason.TabFocusReason)
+        QApplication.processEvents()
+        if QApplication.focusWidget() is not card.approve_button:   # offscreen focus may be unavailable
+            card.close()
+            self.skipTest("no keyboard focus offscreen")
+        card.set_status(hud.CARD_COUNTDOWN, "Sending from work in 9 s")
+        self.assertIs(QApplication.focusWidget(), card.undo_button)
+        card.copy_button.setFocus(Qt.FocusReason.TabFocusReason)   # Tab on during the countdown ...
+        card.set_status(hud.CARD_COUNTDOWN, "Sending from work in 8 s")   # ... is not pulled back each second
+        self.assertIs(QApplication.focusWidget(), card.copy_button)
+        card.undo_button.setFocus(Qt.FocusReason.TabFocusReason)
+        card.set_status(hud.CARD_PENDING)   # Undo: back to the right-hand button
+        self.assertIs(QApplication.focusWidget(), card.approve_button)
+        card.close()
+
+    def test_the_card_never_shrinks_when_the_recipients_change(self) -> None:
+        card = self.make()
+        height = card.heightForWidth(card.width())
+        card.set_recipients("work (ana@example.edu)", [hud.RecipientChip("ben@example.edu")])
+        card.set_body("Thanks")
+        QApplication.processEvents()
+        self.assertGreaterEqual(card.heightForWidth(card.width()), height)
+        self.assertEqual(card.recipients.chips(), ((hud.RecipientChip("ben@example.edu"),), ()))
+        self.assertEqual(card.mail_text(), "Thanks")
+        card.close()
+
+    def test_send_retry_and_done_never_move_deny(self) -> None:
+        card = self.make()
+        deny_x = card.deny_button.mapTo(card, card.deny_button.rect().topLeft()).x()
+        for text in ("Retry", "Done", "Send"):
+            card.set_approve_text(text)
+            QApplication.processEvents()
+            self.assertEqual(card.deny_button.mapTo(card, card.deny_button.rect().topLeft()).x(), deny_x, text)
+        card.close()
+
+
+class MailEditDialogTests(unittest.TestCase):
+    """The Edit dialog of a Reply / Email returns exactly what is shown; adding an address is checked."""
+
+    def make(self, kind: str = hud.EDIT_REPLY, **options):
+        defaults = {"sender": "work (ana@example.edu)",
+                    "to": [hud.RecipientChip("ben@example.edu"), hud.RecipientChip("dee@example.org", hud.RECIPIENT_NEW)],
+                    "cc": [], "body": MAIL_BODY, "find_links": mail_links,
+                    "normalize": lambda text: text.strip().lower() if "@" in text and " " not in text.strip() else "",
+                    "classify": lambda address: (hud.RECIPIENT_OWN if address == "ana@example.edu"
+                                                 else hud.RECIPIENT_NEW if address.endswith(".org")
+                                                 else hud.RECIPIENT_KNOWN),
+                    "max_recipients": 3}
+        defaults.update(options)
+        return hud.EditDialog("m1", kind, "reply \u00b7 work", IMG + " Re: Notes", **defaults)
+
+    def test_values_are_what_is_shown(self) -> None:
+        dialog = self.make()
+        self.assertEqual(dialog.values(), {"to": ["ben@example.edu", "dee@example.org"], "cc": [],
+                                           "subject": IMG + " Re: Notes", "body": MAIL_BODY, "confirmed": []})
+        self.assertTrue(dialog.subject_edit.isReadOnly())        # a reply keeps its thread's subject
+        self.assertTrue(dialog.title_label.isHidden())
+        self.assertEqual(dialog.from_label.text(), "work (ana@example.edu)")
+        new = dialog.to_list.row("dee@example.org")
+        self.assertIsNotNone(new.badge)
+        self.assertIsNone(dialog.to_list.row("ben@example.edu").confirm_box)
+        new.confirm_box.setChecked(True)
+        self.assertEqual(dialog.values()["confirmed"], ["dee@example.org"])
+        self.assertEqual(dialog.links_label.text(), "Contains 1 link (highlighted)")
+        dialog.close()
+
+    def test_adding_an_address_is_checked(self) -> None:
+        dialog = self.make()
+        to = dialog.to_list
+        for typed, error in (("not an address", '"not an address" is not an email address'),
+                             ("BEN@example.edu", "ben@example.edu is already a recipient"),
+                             ("ana@example.edu", hud.OWN_ADDRESS_ERROR)):
+            to.add_edit.setText(typed)
+            to.add_typed()
+            self.assertEqual(to.error(), error)
+        dialog.cc_list.add_edit.setText("eve@example.org")
+        dialog.cc_list.add_typed()
+        self.assertEqual(dialog.values()["cc"], ["eve@example.org"])
+        self.assertIsNotNone(dialog.cc_list.row("eve@example.org").confirm_box)   # new: needs a tick
+        to.add_edit.setText("fay@example.edu")
+        to.add_typed()
+        self.assertEqual(to.error(), "At most 3 recipients in To and Cc together")
+        to.rows[0].remove_button.click()
+        QApplication.processEvents()
+        self.assertEqual(dialog.values()["to"], ["dee@example.org"])
+        dialog.close()
+
+    def test_enter_in_the_add_field_adds_and_never_saves(self) -> None:
+        dialog = self.make()
+        got = []
+        dialog.saved.connect(lambda _id, values: got.append(values))
+        dialog.show()
+        QApplication.processEvents()
+        dialog.cc_list.add_edit.setFocus()
+        dialog.cc_list.add_edit.setText("gil@example.edu")
+        QTest.keyClick(dialog.cc_list.add_edit, Qt.Key.Key_Return)
+        self.assertEqual(got, [])
+        self.assertEqual(dialog.values()["cc"], ["gil@example.edu"])
+        dialog.save_button.click()
+        self.assertEqual([values["cc"] for values in got], [["gil@example.edu"]])
+        dialog.close()
+
+    def test_a_long_new_address_wraps_and_its_text_ticks_too(self) -> None:
+        dialog = self.make(cc=[hud.RecipientChip(LONG_ADDRESS + "x", hud.RECIPIENT_NEW)], max_recipients=5)
+        dialog.show()
+        QApplication.processEvents()
+        row = dialog.cc_list.rows[0]
+        label = row.confirm_label
+        self.assertEqual(label.text(), LONG_ADDRESS + "x")
+        self.assertLessEqual(label.heightForWidth(label.width()), label.height() + 1)   # wrapped, not cut
+        self.assertEqual(row.confirm_box.accessibleName(), f"Send to {LONG_ADDRESS}x (new recipient)")
+        QTest.mouseClick(label, Qt.MouseButton.LeftButton)
+        self.assertTrue(row.confirm_box.isChecked())
+        height = dialog.height()
+        dialog.to_list.add_edit.setText("gil@example.org")
+        dialog.to_list.add_typed()
+        QApplication.processEvents()
+        self.assertGreater(dialog.height(), height)   # the dialog grows with its rows, nothing overlaps
+        body = dialog.body_edit
+        self.assertGreaterEqual(dialog.links_label.y(), body.y() + body.height())
+        dialog.close()
+
+    def test_an_address_typed_but_not_added_keeps_the_dialog_open(self) -> None:
+        dialog = self.make()
+        got = []
+        dialog.saved.connect(lambda _id, values: got.append(values))
+        dialog.show()
+        QApplication.processEvents()
+        dialog.cc_list.add_edit.setText("zoe@example.net")
+        dialog.save_button.click()
+        self.assertEqual(got, [])
+        self.assertEqual(dialog.error(), hud.NOT_ADDED_ERROR.format(text="zoe@example.net", name="Cc"))
+        dialog.cc_list.add_edit.clear()
+        dialog.save_button.click()
+        self.assertEqual([values["cc"] for values in got], [[]])
+        dialog.close()
+
+    def test_tab_follows_the_dialog_from_top_to_bottom(self) -> None:
+        dialog = self.make(cc=[hud.RecipientChip("eve@example.org", hud.RECIPIENT_NEW)], max_recipients=5)
+        to, cc = dialog.to_list, dialog.cc_list
+        expected = [to.row("ben@example.edu").remove_button, to.row("dee@example.org").remove_button,
+                    to.row("dee@example.org").confirm_box, to.add_edit, to.add_button,
+                    cc.row("eve@example.org").remove_button, cc.row("eve@example.org").confirm_box, cc.add_edit,
+                    cc.add_button, dialog.subject_edit, dialog.body_edit, dialog.cancel_button, dialog.save_button]
+        chain = [expected[0]]
+        while len(chain) < len(expected):
+            chain.append(chain[-1].nextInFocusChain())
+            while chain[-1] not in expected and len(chain) < 200:   # labels and layouts in between
+                chain[-1] = chain[-1].nextInFocusChain()
+        self.assertEqual(chain, expected)
+        to.add_edit.setText("gil@example.org")
+        to.add_typed()   # a new row joins the chain where it is shown
+        gil = to.row("gil@example.org")
+        self.assertIs(to.row("dee@example.org").confirm_box.nextInFocusChain(), gil.remove_button)
+        dialog.close()
+
+    def test_the_badge_reads_as_on_the_card(self) -> None:
+        dialog = self.make()
+        row = dialog.to_list.row("dee@example.org")
+        self.assertEqual((row.badge.state(), row.badge.text()), (hud.RECIPIENT_NEW, hud.NEW_RECIPIENT_TEXT))
+        width = row.badge.width()
+        row.confirm_box.setChecked(True)
+        self.assertEqual((row.badge.state(), row.badge.text()), (hud.RECIPIENT_CONFIRMED,
+                                                                 hud.CONFIRMED_RECIPIENT_TEXT))
+        self.assertEqual(row.badge.width(), width)   # a tick never moves Remove
+        dialog.close()
+
+    def test_a_long_message_and_subject_are_shown_whole_and_scroll_on_a_short_screen(self) -> None:
+        paragraph = "The sampling plan is fine, but the budget table still uses last year's numbers. " * 5
+        body = "\n\n".join([paragraph] * 8) + "\n\nI can't come on Friday."
+        subject = "Planning for the shared lab equipment schedule and the booking rules " * 3
+        dialog = self.make(hud.EDIT_EMAIL, body=body, max_recipients=5,
+                           to=[hud.RecipientChip(f"p{n}@example.org", hud.RECIPIENT_NEW) for n in range(5)])
+        dialog.subject_edit.setText(subject.strip())
+        dialog.open()
+        QApplication.processEvents()
+        self.assertTrue(dialog.body_edit.shows_all() and dialog.subject_edit.shows_all())
+        self.assertGreater(dialog.subject_edit.lines(), 1)
+        room = dialog.screen().availableGeometry()
+        self.assertTrue(room.contains(dialog.frameGeometry()), (dialog.frameGeometry(), room))
+        save = dialog.save_button.mapToGlobal(dialog.save_button.rect().bottomRight())
+        self.assertTrue(room.contains(save))   # Save is always on screen
+        bar = dialog.fields_scroll.verticalScrollBar()
+        self.assertGreater(bar.maximum(), 0)   # taller than the screen: the fields scroll
+        self.assertEqual(bar.value(), 0)       # from the top
+        self.assertFalse(dialog.whole_seen())
+        bar.setValue(bar.maximum() // 2)
+        self.assertFalse(dialog.whole_seen())
+        bar.setValue(bar.maximum())
+        self.assertTrue(dialog.whole_seen())
+        dialog.close()
+
+    def test_a_subject_is_one_line_of_text(self) -> None:
+        dialog = self.make(hud.EDIT_EMAIL)
+        dialog.show()
+        QApplication.processEvents()
+        dialog.subject_edit.setFocus()
+        dialog.subject_edit.setText("Lab")
+        cursor = dialog.subject_edit.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        dialog.subject_edit.setTextCursor(cursor)
+        got = []
+        dialog.saved.connect(lambda _id, values: got.append(values["subject"]))
+        QTest.keyClick(dialog.subject_edit, Qt.Key.Key_Return)   # no line break: Enter saves, as in a line edit
+        self.assertEqual(got, ["Lab"])
+        from PySide6.QtCore import QMimeData
+        data = QMimeData()
+        data.setText("hours\nBcc: eve@example.com")
+        dialog.subject_edit.insertFromMimeData(data)
+        self.assertEqual(dialog.subject_edit.text(), "Labhours Bcc: eve@example.com")
+        dialog.close()
+
+    def test_the_dialog_is_freed_without_the_garbage_collector(self) -> None:
+        """No reference cycle runs through the dialog: freeing it in a garbage-collector pass along
+        with its widgets corrupted the heap on Windows."""
+        dialog = self.make(cc=[hud.RecipientChip("eve@example.org", hud.RECIPIENT_NEW)], max_recipients=5)
+        dialog.to_list.add_edit.setText("gil@example.org")
+        dialog.to_list.add_typed()
+        dialog.close()
+        QApplication.processEvents()   # the dialog's pending re-fit has run
+        ref = weakref.ref(dialog)
+        gc.disable()
+        try:
+            del dialog
+            self.assertIsNone(ref())
+        finally:
+            gc.enable()
+
+    def test_an_email_subject_can_be_changed(self) -> None:
+        dialog = self.make(hud.EDIT_EMAIL, banner="Read all of it")
+        self.assertFalse(dialog.subject_edit.isReadOnly())
+        self.assertEqual(dialog.banner_label.text(), "Read all of it")
+        dialog.subject_edit.setText("Question about the lab")
+        dialog.body_edit.setPlainText("Hello,\nIs the lab open?")
+        values = dialog.values()
+        self.assertEqual((values["subject"], values["body"]), ("Question about the lab", "Hello,\nIs the lab open?"))
+        self.assertTrue(dialog.links_label.isHidden())
         dialog.close()
 
 

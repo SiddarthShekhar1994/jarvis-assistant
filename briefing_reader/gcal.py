@@ -9,7 +9,8 @@ reading window shows:
                        the token is saved in %LOCALAPPDATA%\\briefing-reader
     timezone()         the calendar's time zone setting (cached)
     find_existing(a)   an event with the same title and start, if there is one
-    create_event(a)    find_existing first, else events.insert
+    create_event(a)    find_existing first, else events.insert (never retried; a 5xx answer or
+                       a lost answer is CalendarUnknownOutcome, and a retry finds the event)
     list_events(s, e)  CalendarEvents between two times; never signs in (raises
                        CalendarNotSignedIn instead)
     get_event(id)      Google's own view of one event (EventDetails)
@@ -513,7 +514,7 @@ class GoogleCalendar:
             return CalendarAuthError(text, status=status, problem=PROBLEM_EXPIRED)
         if mutation and status >= 500:
             return CalendarUnknownOutcome(
-                f"Google Calendar answered {status} while {what}; it may or may not have "
+                f"Google Calendar answered {detail} while {what}; it may or may not have "
                 "happened - check the calendar before retrying", status=status)
         return CalendarError(f"Google Calendar error while {what} ({detail})", status=status)
 
@@ -574,9 +575,9 @@ class GoogleCalendar:
             _require_actionable(action)
             return self._find_existing(action, self.timezone())
 
-    def _find_existing(self, action: ProposedAction, tz: str) -> dict | None:
+    def _find_existing(self, action: ProposedAction, tz: str, *, interactive: bool = True) -> dict | None:
         """events.list around the first occurrence, rendered in ``tz``; match title + start."""
-        service = self._get_service()
+        service = self._get_service(interactive=interactive)
         title = action.title.strip().casefold()
         start = _start_key(action)
         time_min, time_max = _search_window(action)
@@ -599,25 +600,28 @@ class GoogleCalendar:
                 break
         return None
 
-    def create_event(self, action: ProposedAction) -> EventResult:
+    def create_event(self, action: ProposedAction, *, interactive: bool = True) -> EventResult:
         """Add ``action`` to the calendar unless a matching event is already there.
 
-        Signs in first when there is no saved sign-in. Raises CalendarError
-        (or a subclass) with a message that is safe to show.
+        Signs in first when there is no saved sign-in (without ``interactive``:
+        CalendarNotSignedIn instead, and nothing opens). The insert is never
+        retried: a 5xx answer or no answer after it went out raises
+        CalendarUnknownOutcome (a retry the user asks for finds the event).
+        Raises CalendarError (or a subclass) with a message that is safe to show.
         """
         with self._guarded():
             _require_actionable(action)
-            tz = self.timezone()
-            existing = self._find_existing(action, tz)
+            tz = self.timezone(interactive=interactive)
+            existing = self._find_existing(action, tz, interactive=interactive)
             if existing is not None:
                 event_id = str(existing.get("id") or "")
                 logger.info("Google Calendar: already on the calendar (event %s)", event_id)
                 return EventResult(event_id=event_id, link=str(existing.get("htmlLink") or ""),
                                    existed=True)
-            service = self._get_service()
+            service = self._get_service(interactive=interactive)
             request = service.events().insert(calendarId=self._calendar_id,
                                               body=build_event_body(action, tz))
-            created = self._execute(request, "adding the event")
+            created = self._execute(request, "adding the event", mutation=True)
             created = created if isinstance(created, dict) else {}
             event_id = str(created.get("id") or "")
             logger.info("Google Calendar: created event %s", event_id or "(no id returned)")

@@ -86,9 +86,15 @@ heading = "Proposed actions"
 # (*.instructure.com) hosts. An exact name, or "*.example.edu" for every
 # subdomain. https only.
 link_hosts = []
-# Seconds between a click on Accept / Decline / Maybe / Move / Cancel event and
-# the call to Google (3 to 60). Undo works until then and sends nothing.
+# Seconds between a click on Approve / Add block / Accept / Decline / Maybe /
+# Move / Cancel event / Send and the call to Google (3 to 60). Undo works until
+# then and sends nothing.
 undo_seconds = 10
+# Email recipients in these domains never get the red NEW RECIPIENT badge, e.g.
+# ["example.edu"] (its subdomains count too). Any other address must be the
+# account's own or one you emailed through Jarvis before; otherwise Send asks
+# you to confirm it in Edit first.
+trusted_domains = []
 
 # The Google accounts Jarvis may act for, one [accounts.<name>] table each. The
 # name is what the briefing writes as acct= ("work", "personal"). Which Google
@@ -98,14 +104,17 @@ undo_seconds = 10
 # use the personal account. backend: the service that carries out the
 # account's actions; only "google" works in this version. features: what Jarvis
 # may do for the account; "calendar" answers invitations and moves or cancels
-# events you organize.
+# events you organize; "gmail_send" sends the replies and emails you approve
+# (send only: Jarvis never reads your mail). Adding a feature means one new
+# Google sign-in for that account. If its administrator blocks sending
+# (admin_policy_enforced), remove "gmail_send" from that account.
 [accounts.personal]
 backend = "google"
-features = ["calendar"]
+features = ["calendar", "gmail_send"]
 
 [accounts.work]
 backend = "google"
-features = ["calendar"]
+features = ["calendar", "gmail_send"]
 
 [schedule]
 # When the "Briefing AM" and "Briefing PM" tasks run (24-hour HH:MM).

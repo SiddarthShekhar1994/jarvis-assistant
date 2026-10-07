@@ -8,8 +8,9 @@ Settings come from three places:
 * the environment itself;
 * ``config.toml`` in the project root for voice, prompt, polling, section,
   Google Calendar, proposed-action (heading names, the extra hosts a card's
-  Open may open, the undo countdown), account (``[accounts.<alias>]``: which
-  service acts for "work" / "personal" and what it may do), schedule, hotkey,
+  Open may open, the undo countdown, the recipient domains that need no extra
+  confirmation), account (``[accounts.<alias>]``: which service acts for
+  "work" / "personal" and what it may do), schedule, hotkey,
   agenda and display options. Which Google account an alias is never goes
   here: the sign-ins live in %LOCALAPPDATA%\\briefing-reader.
 
@@ -71,9 +72,9 @@ DEFAULT_DEADLINE_KEYWORDS = ("due", "deadline", "exam", "midterm", "final", "qui
                              "submission", "assignment", "lab report", "application")
 CLOCK_12H = "12h"
 CLOCK_24H = "24h"
-# What an account may do (google_auth.FEATURE_SCOPES has the scopes of each). A later version
-# adds "gmail_send".
-ACCOUNT_FEATURES = ("calendar",)
+# What an account may do (google_auth.FEATURE_SCOPES has the scopes of each): "calendar" answers
+# invitations and moves or cancels events; "gmail_send" sends the replies and emails you approve.
+ACCOUNT_FEATURES = ("calendar", "gmail_send")
 BACKEND_GOOGLE = "google"
 BACKEND_COMPOSIO = "composio"     # accepted, but not built into this version
 ACCOUNT_BACKENDS = (BACKEND_GOOGLE, BACKEND_COMPOSIO)
@@ -157,11 +158,15 @@ class ActionsConfig:
     # Extra https hosts a card's Open may open, besides actions.BUILTIN_LINK_HOSTS:
     # "name.tld" exactly or "*.name.tld" for every subdomain (casefolded).
     link_hosts: tuple[str, ...] = ()
-    # Seconds between a click on Accept / Move / Cancel event and the call to Google (Undo until then).
+    # Seconds between a click on Approve / Add block / Accept / Move / Cancel event / Send and the
+    # call to Google (Undo until then).
     undo_seconds: int = 10
+    # Recipient domains whose addresses never need the NEW RECIPIENT confirmation ("example.edu"
+    # covers its subdomains too); casefolded. Empty by default.
+    trusted_domains: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        for name in ("headings", "link_hosts"):
+        for name in ("headings", "link_hosts", "trusted_domains"):
             value = getattr(self, name)
             if not isinstance(value, tuple):
                 object.__setattr__(self, name, tuple(value))
@@ -673,10 +678,11 @@ def _parse_calendar(doc: Mapping[str, Any], root: Path) -> CalendarConfig:
 
 def _parse_actions(doc: Mapping[str, Any]) -> ActionsConfig:
     d = ActionsConfig()
-    r = _TableReader(doc, "actions", ("heading", "link_hosts", "undo_seconds"))
+    r = _TableReader(doc, "actions", ("heading", "link_hosts", "undo_seconds", "trusted_domains"))
     return ActionsConfig(headings=r.names("heading", d.headings, allow_empty=False),
                          link_hosts=_link_hosts(r.names("link_hosts", d.link_hosts)),
-                         undo_seconds=r.integer("undo_seconds", d.undo_seconds, *UNDO_SECONDS_RANGE))
+                         undo_seconds=r.integer("undo_seconds", d.undo_seconds, *UNDO_SECONDS_RANGE),
+                         trusted_domains=_trusted_domains(r.names("trusted_domains", d.trusted_domains)))
 
 
 _ALIAS_RE = re.compile(r"[a-z][a-z0-9_-]{0,23}")
@@ -743,6 +749,25 @@ def _link_hosts(names: Sequence[str]) -> tuple[str, ...]:
         if host not in hosts:
             hosts.append(host)
     return tuple(hosts)
+
+
+# A mail domain: dot-separated labels ending in a 2-63 letter top-level domain (as in addresses).
+_MAIL_DOMAIN_RE = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}")
+
+
+def _trusted_domains(names: Sequence[str]) -> tuple[str, ...]:
+    """[actions] trusted_domains: "example.edu" (covers its subdomains too), casefolded; a leading
+    "@" is dropped; bad entries (wildcards, addresses, URLs) skipped, repeats dropped."""
+    domains: list[str] = []
+    for name in names:
+        domain = name.strip().casefold().removeprefix("@")
+        if len(domain) > 253 or not _MAIL_DOMAIN_RE.fullmatch(domain):
+            logger.warning('config.toml: actions.trusted_domains entry %s is not a domain like '
+                           '"example.edu"; skipped', _short_repr(name))
+            continue
+        if domain not in domains:
+            domains.append(domain)
+    return tuple(domains)
 
 
 def _parse_schedule(doc: Mapping[str, Any]) -> ScheduleConfig:

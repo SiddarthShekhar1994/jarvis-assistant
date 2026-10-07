@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from briefing_reader import actions, executor, gcal
+from briefing_reader import actions, executor, gcal, gmail, recipients
 from briefing_reader.actions import (
     CALENDAR,
     INTERRUPTED_MESSAGE,
@@ -35,6 +35,9 @@ from briefing_reader.config import AccountConfig, load_config
 from briefing_reader.executor import (
     CALENDAR_SETUP_NOTE,
     COMPOSIO_NOTE,
+    COUNTDOWN_ONLY_MESSAGE,
+    MAIL_SETUP_NOTE,
+    NEW_RECIPIENTS_MESSAGE,
     NOT_SAVED_MESSAGE,
     NOTHING_TO_DO,
     OUTCOME_FAILED,
@@ -49,16 +52,22 @@ from briefing_reader.executor import (
     ExecError,
     ExecResult,
     Executor,
+    GmailBackend,
     RunOutcome,
     account_of,
     apply_edit,
     build_accounts,
     build_calendars,
+    build_executor,
+    build_senders,
     check_event,
     check_failure,
+    recipient_history,
     run_action,
     sign_in_note,
 )
+from briefing_reader.gmail import GmailError, GmailUnknownOutcome, OutgoingMail, SentMail
+from briefing_reader.recipients import KNOWN, TRUSTED, RecipientHistory
 from briefing_reader.gcal import (
     CalendarAuthError,
     CalendarError,
@@ -76,6 +85,7 @@ from briefing_reader.google_auth import (
     PROBLEM_DENIED,
     PROBLEM_EXPIRED,
     PROBLEM_FAILED,
+    PROBLEM_IDENTITY,
     PROBLEM_SCOPE,
     PROBLEM_SETUP,
     PROBLEM_SIGNED_OUT,
@@ -174,8 +184,8 @@ class FakeCalendar:
             raise outcome
         return outcome
 
-    def create_event(self, action: ProposedAction) -> EventResult:
-        return self._call("create_event", EventResult("evt1", EVENT_LINK, existed=False), action)
+    def create_event(self, action: ProposedAction, **kwargs: Any) -> EventResult:
+        return self._call("create_event", EventResult("evt1", EVENT_LINK, existed=False), action, **kwargs)
 
     def respond(self, event_id: str, answer: str, **kwargs: Any) -> ChangeResult:
         return self._call("respond", ChangeResult(event_id, EVENT_LINK, already=False), event_id, answer, **kwargs)
@@ -265,7 +275,9 @@ class SelectionTests(ExecutorTestCase):
         self.assertEqual(run.readiness(example("RSVP", acct="lab")), COMPOSIO_NOTE)
         self.assertEqual(run.readiness(example("Move")),
                          "The work account is not set up for calendar actions (config.toml [accounts.work] features)")
-        self.assertEqual(run.readiness(example("Reply")), NOTHING_TO_DO)
+        self.assertEqual(run.readiness(example("Reply")),
+                         "The work account is not set up for sending email (config.toml [accounts.work] features)")
+        self.assertEqual(run.readiness(example("Reply", replied="yes")), NOTHING_TO_DO)
         self.assertEqual(run.readiness(example("Todo", block="")), NOTHING_TO_DO)
         self.assertEqual(run.readiness(parse_action_line("Calendar: Dentist | sometime")), NOTHING_TO_DO)
 
@@ -474,10 +486,13 @@ class ApplyEditTests(ExecutorTestCase):
             (example("Move"), ActionEdit(start=start, end=start - timedelta(hours=1)), "5 minutes to 12 hours"),
             (example("Move"), ActionEdit(start=start, end=start + timedelta(hours=13)), "5 minutes to 12 hours"),
             (example("Cancel"), ActionEdit(body="x" * 1001), "the note is too long (1001 characters, at most 1000)"),
-            (example("RSVP"), ActionEdit(to=("ana@example.edu",)), "can't be edited in this version"),
-            (example("RSVP"), ActionEdit(subject="Hi"), "can't be edited in this version"),
-            (example("RSVP"), ActionEdit(confirmed_new=frozenset({"ana@example.edu"})), "can't be edited"),
-            (example("Reply"), ActionEdit(body="x"), "This card cannot be edited"),
+            (example("RSVP"), ActionEdit(to=("ana@example.edu",)), "can only be edited on a reply or an email"),
+            (example("RSVP"), ActionEdit(subject="Hi"), "can only be edited on a reply or an email"),
+            (example("RSVP"), ActionEdit(confirmed_new=frozenset({"ana@example.edu"})), "only be edited on a reply"),
+            (example("Reply"), ActionEdit(notify="all"), "no answer, time or guest notice"),
+            (example("Reply"), ActionEdit(subject="Something else"), "keeps the subject of its thread"),
+            (example("Reply"), ActionEdit(to=("bob@",)), 'To: "bob@" is not an email address'),
+            (example("Reply", replied="yes"), ActionEdit(body="x"), "This card cannot be edited"),
             (parse_action_line(CHESS), ActionEdit(notify="all"), "This card cannot be edited"),
         )
         for action, edit, words in cases:
@@ -552,6 +567,18 @@ class RunActionTests(ExecutorTestCase):
         self.assertEqual(sign_in[1], None)   # nothing saved yet while the browser was open
         self.assertEqual(self.work.on_disk_at_change, [STATUS_RUNNING])
         self.assertEqual(self.stages, [STAGE_SIGNIN, STAGE_SIGNED_IN, STAGE_WORKING])
+
+    def test_a_sign_in_that_ends_after_quit_starts_no_call(self) -> None:
+        self.work.signed = False
+        action = example("Move")
+        outcome = self.run_job(action, proceed=lambda: False)   # the app was closing meanwhile
+        self.assertEqual(outcome.status, STATUS_FAILED)
+        self.assertEqual(str(outcome.error), executor.CLOSING_MESSAGE)
+        self.assertEqual(self.work.changes(), [])
+        self.assertTrue(any(call[0] == "sign_in" for call in self.work.calls))
+        self.assertEqual(self.saved(action)["status"], STATUS_FAILED)   # never "running"
+        self.assertNotIn(STATUS_SENT, [stage for stage in self.stages])
+        self.assertEqual(self.run_job(example("RSVP"), proceed=lambda: True).status, STATUS_SENT)
 
     def test_an_unknown_outcome_is_saved_and_never_retried(self) -> None:
         action = example("Cancel")
@@ -846,6 +873,13 @@ class SignInNoteTests(unittest.TestCase):
                          "The work account's Google sign-in expired or was revoked - click Sign in to sign in again")
         blocked = "Google blocked the sign-in: the work account's administrator does not allow this app (x)"
         self.assertEqual(sign_in_note("work", problem=PROBLEM_BLOCKED, message=blocked), blocked)
+        # Every sign-in of an account with gmail_send asks to send email too: a block says how to keep
+        # Calendar actions without it.
+        self.assertEqual(sign_in_note("work", problem=PROBLEM_BLOCKED, message=blocked, sends_mail=True),
+                         blocked + ". Every work sign-in also asks to send email; if the administrator only blocks "
+                         'that, remove "gmail_send" from config.toml [accounts.work] features and sign in again to '
+                         "keep Calendar actions")
+        self.assertNotIn("gmail_send", sign_in_note("work", problem=PROBLEM_EXPIRED, sends_mail=True))
         self.assertIn("administrator", sign_in_note("work", problem=PROBLEM_BLOCKED))
         self.assertIn("cancelled or access was denied", sign_in_note("work", problem=PROBLEM_DENIED))
         self.assertIn("tick every box", sign_in_note("work", problem=PROBLEM_SCOPE))
@@ -853,6 +887,393 @@ class SignInNoteTests(unittest.TestCase):
         self.assertEqual(sign_in_note("work", problem=PROBLEM_SETUP), CALENDAR_SETUP_NOTE)
         self.assertEqual(sign_in_note("work", problem=PROBLEM_FAILED, message="Google sign-in failed (x)"),
                          "Google sign-in failed (x) - click Sign in to try again")
+        self.assertEqual(sign_in_note("work", problem=PROBLEM_IDENTITY),
+                         "This is not the Google account set up as the work account - click Sign in with that one")
+        self.assertEqual(sign_in_note("work", problem=PROBLEM_IDENTITY, message="That Google account is taken"),
+                         "That Google account is taken - click Sign in")
+
+
+
+
+# --------------------------------------------------------------------------
+# Reply and Email: GmailBackend, MailStatus, run_action
+# --------------------------------------------------------------------------
+
+ME = "you@example.edu"
+EMAIL_PAIRS = (("acct", "personal"), ("to", "office@example.edu"), ("cc", ""),
+               ("subject", "Question about the lab schedule"), ("due", ""), ("link", ""),
+               ("body", "Hello,\\nIs the lab open on Saturday?\\nThanks"))
+MAIL_ACCOUNTS = {"personal": AccountConfig("personal", features=("calendar", "gmail_send")),
+                 "work": AccountConfig("work", features=("calendar", "gmail_send"))}
+
+
+def email_line(**changes: str) -> ProposedAction:
+    items = [f"{key}={changes.get(key, value)}" for key, value in EMAIL_PAIRS]
+    action = parse_action_line("Email: " + " | ".join(items))
+    assert not action.error, action.error
+    return action
+
+
+class FakeSender:
+    """gmail.GmailSender's surface as GmailBackend uses it; records calls and, with ``store``,
+    what actions.json said (on disk) when the message went out."""
+
+    def __init__(self, *, address: str = ME, problem: str = "", message: str = "", configured: bool = True,
+                 store: ActionStore | None = None) -> None:
+        self.address = address
+        self.problem = problem
+        self.message = message
+        self.configured = configured
+        self.store = store
+        self.watch = ""
+        self.calls: list[tuple[Any, ...]] = []
+        self.sent: list[OutgoingMail] = []
+        self.outcome: Any = None
+        self.sign_in_error: BaseException | None = None
+
+    def is_configured(self) -> bool:
+        return self.configured
+
+    def is_signed_in(self) -> bool:
+        return not self.problem
+
+    def from_address(self) -> str:
+        return self.address
+
+    def ready(self) -> tuple[str, str]:
+        return self.problem, self.message
+
+    def sign_in(self) -> None:
+        self.calls.append(("sign_in",))
+        if self.sign_in_error is not None:
+            raise self.sign_in_error
+        self.problem = self.message = ""
+
+    def send(self, mail: OutgoingMail) -> SentMail:
+        on_disk = None
+        if self.store is not None and self.store.path.exists():
+            entry = json.loads(self.store.path.read_text(encoding="utf-8")).get(self.watch)
+            on_disk = entry["status"] if entry else None
+        self.calls.append(("send", on_disk))
+        self.sent.append(mail)
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return self.outcome or SentMail("18c0ffee000000aa", "18c0ffee00000001",
+                                        "https://mail.google.com/mail/#all/18c0ffee00000001")
+
+
+class MailTestCase(ExecutorTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.history = RecipientHistory(self.root / "recipients.json")
+        self.senders = {"work": FakeSender(store=self.store), "personal": FakeSender(address="me@example.com",
+                                                                                      store=self.store)}
+
+    def mail_executor(self, *, trusted: tuple[str, ...] = ("example.edu",),
+                      accounts: dict[str, AccountConfig] | None = None) -> Executor:
+        backends = [CalendarBackend({"personal": self.personal, "work": self.work}, now=lambda: self.now),
+                    GmailBackend(self.senders, history=self.history, trusted_domains=trusted)]
+        return Executor(backends, MAIL_ACCOUNTS if accounts is None else accounts)
+
+    def run_mail(self, action: ProposedAction, **kwargs: Any) -> RunOutcome:
+        kwargs.setdefault("store", self.store)
+        kwargs.setdefault("writes_running", True)
+        for sender in self.senders.values():
+            sender.watch = action.id
+        return run_action(kwargs.pop("executor", None) or self.mail_executor(), action,
+                          on_stage=self.stages.append, **kwargs)
+
+
+class MailSelectionTests(MailTestCase):
+    def test_backend_and_readiness(self) -> None:
+        run = self.mail_executor()
+        self.assertIsInstance(run.backend_for(example("Reply")), GmailBackend)
+        self.assertIsInstance(run.backend_for(email_line()), GmailBackend)
+        self.assertEqual(account_of(example("Reply")), "work")
+        self.assertEqual(account_of(email_line()), "personal")
+        self.assertEqual(run.readiness(example("Reply")), "")
+        self.assertEqual(run.readiness(email_line(acct="school")), 'No account named "school" in config.toml [accounts]')
+        self.senders["work"].configured = False
+        self.assertEqual(run.readiness(example("Reply")), MAIL_SETUP_NOTE)
+        del self.senders["work"]
+        self.assertEqual(self.mail_executor().readiness(example("Reply")), MAIL_SETUP_NOTE)
+        tricky = email_line(subject="=?utf-8?b?SGVsbG8=?=")
+        self.assertEqual(run.readiness(tricky), actions.ENCODED_WORD_PROBLEM)
+        lab = {"work": AccountConfig("work", backend="composio")}
+        self.assertEqual(self.mail_executor(accounts=lab).readiness(example("Reply")), COMPOSIO_NOTE)
+        calendar_only = {"work": AccountConfig("work")}
+        self.assertEqual(self.mail_executor(accounts=calendar_only).readiness(example("Reply")),
+                         "The work account is not set up for sending email (config.toml [accounts.work] features)")
+        no_gmail = Executor([CalendarBackend({"work": self.work})], MAIL_ACCOUNTS)   # no GmailBackend at all
+        self.assertIsNone(no_gmail.backend_for(example("Reply")))
+        self.assertEqual(no_gmail.readiness(example("Reply")), "Jarvis can't carry this out in this version")
+        self.assertTrue(no_gmail.mail_status(example("Reply")).hand_off)
+
+    def test_peek_is_for_events_only(self) -> None:
+        for action in (example("Reply"), email_line(), parse_action_line(CHESS)):
+            with self.subTest(kind=action.kind), self.assertRaises(ExecError):
+                self.mail_executor().peek(action)
+
+
+class MailStatusTests(MailTestCase):
+    def test_ready_with_from_and_recipients(self) -> None:
+        status = self.mail_executor().mail_status(example("Reply"))
+        self.assertEqual((status.alias, status.sender, status.from_text), ("work", ME, f"From: work ({ME})"))
+        self.assertEqual((status.problem, status.note, status.sign_in, status.hand_off), ("", "", False, False))
+        self.assertTrue(status.ready)
+        self.assertFalse(status.needs_edit)
+        self.assertEqual(status.review.kinds, (("ana@example.edu", TRUSTED), ("ben@example.edu", TRUSTED)))
+
+    def test_new_recipients_need_a_tick_in_edit(self) -> None:
+        action = email_line(to="office@example.edu, eve@example.com", cc="cy@example.org")
+        status = self.mail_executor().mail_status(action)
+        self.assertEqual(status.review.new, ("eve@example.com", "cy@example.org"))
+        self.assertTrue(status.needs_edit)
+        self.assertFalse(status.ready)
+        self.assertEqual(status.note, executor.NEW_RECIPIENT_NOTE)
+        edited = apply_edit(action, ActionEdit(confirmed_new=frozenset({"EVE@example.com", "cy@example.org"})))
+        self.assertTrue(self.mail_executor().mail_status(edited).ready)
+        nobody_trusted = self.mail_executor(trusted=()).mail_status(example("Reply"))
+        self.assertEqual(nobody_trusted.review.new, ("ana@example.edu", "ben@example.edu"))
+        with self.assertLogs("briefing_reader.recipients", level="INFO"):
+            self.history.add(["ana@example.edu", "ben@example.edu"])
+        known = self.mail_executor(trusted=()).mail_status(example("Reply"))
+        self.assertEqual((known.review.kinds[0][1], known.ready), (KNOWN, True))
+
+    def test_the_own_address_is_taken_out(self) -> None:
+        status = self.mail_executor().mail_status(example("Reply", to=f"ana@example.edu, {ME.upper()}"))
+        self.assertEqual((status.review.to, status.review.own_dropped, status.ready), (("ana@example.edu",), True, True))
+        only_me = self.mail_executor().mail_status(example("Reply", to=ME, cc="ana@example.edu"))
+        self.assertEqual((only_me.ready, only_me.needs_edit, only_me.note),
+                         (False, True, recipients.NO_RECIPIENT_LEFT))
+
+    def test_account_problems(self) -> None:
+        cases = (
+            (PROBLEM_SIGNED_OUT, "Not signed in to the work account", True, False,
+             "Send signs in to Google for the work account first - then check From and click Send again"),
+            (PROBLEM_SCOPE, "x", True, False,
+             "Google did not allow sending email for work - click Send to sign in again and tick that box"),
+            (PROBLEM_EXPIRED, "x", True, False,
+             "The work account's Google sign-in expired or was revoked - click Send to sign in again"),
+            (PROBLEM_IDENTITY, "Jarvis doesn't know yet", True, False,
+             "Jarvis doesn't know yet which Google account work is - click Send to sign in and confirm it"),
+            (PROBLEM_IDENTITY, "This is not the Google account set up as the work account; sign in with that one",
+             True, False, "This is not the Google account set up as the work account; sign in with that one - "
+                          "click Send to sign in with the right account"),
+            (PROBLEM_DENIED, "x", True, False,
+             "Google sign-in for the work account was cancelled or access was denied - click Send to try again"),
+            (PROBLEM_BLOCKED, "x", False, True,
+             "The work account's administrator does not allow this app to send email (admin_policy_enforced) - "
+             'use Copy instead. To keep Calendar actions for work, remove "gmail_send" from config.toml '
+             "[accounts.work] features and sign in again"),
+            (PROBLEM_BLOCKED, "The work account's administrator does not allow this app to send email "
+             "(domainPolicy); nothing was sent", False, True,
+             "The work account's administrator does not allow this app to send email (domainPolicy) - "
+             'use Copy instead. To keep Calendar actions for work, remove "gmail_send" from config.toml '
+             "[accounts.work] features and sign in again"),
+            (PROBLEM_SETUP, "Set up email sending: README step 8b (the Google packages are missing)", False, True,
+             "Set up email sending: README step 8b (the Google packages are missing)"),
+        )
+        for problem, message, sign_in, hand_off, note in cases:
+            with self.subTest(problem=problem, message=message[:20]):
+                self.senders["work"].problem, self.senders["work"].message = problem, message
+                status = self.mail_executor().mail_status(example("Reply"))
+                self.assertEqual((status.problem, status.sign_in, status.hand_off, status.note),
+                                 (problem, sign_in, hand_off, note))
+                self.assertFalse(status.ready)
+                self.assertNotIn("@", status.note)
+        # A card with a link offers Open too.
+        self.senders["work"].problem, self.senders["work"].message = PROBLEM_BLOCKED, ""
+        linked = example("Reply", link="https://mail.google.com/mail/u/0/#inbox/18c0ffee00000001")
+        self.assertIn("use Copy and Open instead", self.mail_executor().mail_status(linked).note)
+
+    def test_not_set_up_is_a_hand_off_and_from_says_so(self) -> None:
+        self.senders["work"].address = ""
+        self.senders["work"].problem = PROBLEM_IDENTITY
+        status = self.mail_executor().mail_status(example("Reply"))
+        self.assertEqual(status.from_text, "From: work (account not confirmed yet)")
+        calendar_only = self.mail_executor(accounts={"work": AccountConfig("work")}).mail_status(example("Reply"))
+        self.assertTrue(calendar_only.hand_off)
+        self.assertIn("not set up for sending email", calendar_only.note)
+        other = self.mail_executor().mail_status(example("RSVP"))
+        self.assertTrue(other.hand_off)
+        self.assertIsNone(other.review)
+
+
+class MailRunTests(MailTestCase):
+    def test_running_is_on_disk_before_the_send_and_sent_after(self) -> None:
+        action = example("Reply", cc="cy@example.edu")
+        with self.assertLogs(EXECUTOR_LOGGER, level="INFO") as logs, \
+                self.assertLogs("briefing_reader.recipients", level="INFO"):
+            outcome = self.run_mail(action)
+        self.assertEqual(outcome.status, STATUS_SENT)
+        self.assertEqual(outcome.result, ExecResult(STATUS_SENT, "https://mail.google.com/mail/#all/18c0ffee00000001",
+                                                    "Sent"))
+        self.assertEqual(self.senders["work"].calls, [("send", STATUS_RUNNING)])
+        (mail,) = self.senders["work"].sent
+        self.assertEqual(mail, OutgoingMail(account="work", from_addr=ME, to=("ana@example.edu", "ben@example.edu"),
+                                            cc=("cy@example.edu",), subject="Re: Thursday noon meeting", body="Hi both",
+                                            thread_id="18c0ffee00000001",
+                                            in_reply_to="<CAExample0001@mail.example.com>"))
+        saved = ActionStore(self.store.path).get(action.id)
+        self.assertEqual({key: saved[key] for key in ("status", "message", "kind", "account")},
+                         {"status": STATUS_SENT, "message": "Sent", "kind": "reply", "account": "work"})
+        self.assertTrue(self.store.is_decided(action.id))
+        self.assertEqual(self.stages, [STAGE_WORKING])
+        self.assertTrue(self.history.knows("cy@example.edu"))   # needs no tick next time
+        text = "\n".join(logs.output)
+        self.assertIn(f"Sending action {action.id} (reply, work) to 3 recipient(s)", text)
+        for private in ("ana@example.edu", "cy@example.edu", "Thursday", "Hi both", ME, "CAExample"):
+            self.assertNotIn(private, text)
+
+    def test_what_the_edit_dialog_shows_is_what_is_sent(self) -> None:
+        action = email_line()
+        edited = apply_edit(action, ActionEdit(to=("Office <office@example.edu>", "eve@example.com"),
+                                               cc=("me@example.com",), subject="Lab hours", body="Is it open?\r\nThanks",
+                                               confirmed_new=frozenset({"eve@example.com"})))
+        self.assertEqual(edited.id, action.id)
+        with self.assertLogs("briefing_reader.recipients", level="INFO"):
+            outcome = self.run_mail(edited)
+        self.assertEqual(outcome.status, STATUS_SENT)
+        (mail,) = self.senders["personal"].sent
+        self.assertEqual((mail.to, mail.cc, mail.subject, mail.body, mail.thread_id, mail.in_reply_to),
+                         (("office@example.edu", "eve@example.com"), (), "Lab hours", "Is it open?\nThanks", "", ""))
+
+    def test_unconfirmed_new_recipients_send_nothing(self) -> None:
+        action = email_line(to="eve@example.com")
+        with self.assertLogs(EXECUTOR_LOGGER, level="INFO"):
+            outcome = self.run_mail(action)
+        self.assertEqual((outcome.status, str(outcome.error)), (STATUS_FAILED, NEW_RECIPIENTS_MESSAGE))
+        self.assertEqual(self.senders["personal"].calls, [])
+        self.assertEqual(self.store.get(action.id)["status"], STATUS_FAILED)   # never "running"
+        self.assertFalse(self.history.knows("eve@example.com"))
+
+    def test_mail_goes_out_only_through_the_running_path(self) -> None:
+        action = example("Reply")
+        with self.assertLogs(EXECUTOR_LOGGER, level="INFO"):
+            outcome = self.run_mail(action, writes_running=False)
+        self.assertEqual((outcome.status, str(outcome.error)), (STATUS_FAILED, COUNTDOWN_ONLY_MESSAGE))
+        for call in (lambda: self.mail_executor().execute(action),
+                     lambda: self.mail_executor().execute(action, interactive=True)):
+            with self.assertRaises(ExecError) as ctx:
+                call()
+            self.assertEqual(str(ctx.exception), COUNTDOWN_ONLY_MESSAGE)
+        self.assertEqual(self.senders["work"].calls, [])
+
+    def test_a_signed_out_account_sends_nothing_and_opens_nothing(self) -> None:
+        for problem in (PROBLEM_SIGNED_OUT, PROBLEM_SCOPE, PROBLEM_IDENTITY, PROBLEM_BLOCKED):
+            with self.subTest(problem=problem):
+                self.senders["work"].problem = problem
+                action = example("Reply")
+                with self.assertLogs(EXECUTOR_LOGGER, level="INFO"):
+                    outcome = self.run_mail(action)
+                self.assertEqual((outcome.status, outcome.error.problem), (STATUS_FAILED, problem))
+                self.assertEqual(self.senders["work"].calls, [])   # no send and no sign-in
+                self.assertEqual(self.stages, [])
+
+    def test_outcomes_after_running(self) -> None:
+        cases = ((GmailUnknownOutcome("Gmail answered 503; check Sent mail", status=503), STATUS_UNKNOWN, OUTCOME_UNKNOWN),
+                 (GmailError("Gmail refused the message (400); nothing was sent", status=400), STATUS_FAILED,
+                  OUTCOME_FAILED),
+                 (gmail.GmailAuthError("expired; nothing was sent", problem=PROBLEM_EXPIRED), STATUS_FAILED,
+                  OUTCOME_FAILED),
+                 (TypeError("ya29.fake-token-in-a-message"), STATUS_UNKNOWN, OUTCOME_UNKNOWN))
+        for error, status, outcome_kind in cases:
+            with self.subTest(error=type(error).__name__):
+                self.senders["work"].calls.clear()
+                self.senders["work"].outcome = error
+                action = example("Reply")
+                with self.assertLogs(EXECUTOR_LOGGER, level="INFO") as logs:
+                    outcome = self.run_mail(action)
+                self.assertEqual((outcome.status, outcome.error.outcome), (status, outcome_kind))
+                self.assertEqual(self.senders["work"].calls, [("send", STATUS_RUNNING)])   # exactly one, no retry
+                self.assertEqual(ActionStore(self.store.path).get(action.id)["status"], status)
+                self.assertFalse(self.history.knows("ana@example.edu"))
+                self.assertNotIn("ya29.fake-token-in-a-message", "\n".join(logs.output))
+
+    def test_sign_in_is_its_own_click(self) -> None:
+        self.senders["work"].problem = PROBLEM_SIGNED_OUT
+        run = self.mail_executor()
+        run.sign_in(example("Reply"), on_stage=self.stages.append)
+        self.assertEqual((self.senders["work"].calls, self.stages), ([("sign_in",)], [STAGE_SIGNIN, STAGE_SIGNED_IN]))
+        self.senders["work"].sign_in_error = gmail.GmailAuthError("blocked", problem=PROBLEM_BLOCKED)
+        with self.assertRaises(ExecError) as ctx:
+            run.sign_in(example("Reply"))
+        self.assertEqual((ctx.exception.problem, ctx.exception.outcome), (PROBLEM_BLOCKED, OUTCOME_FAILED))
+        with self.assertRaises(ExecError) as ctx:
+            self.mail_executor(accounts={"work": AccountConfig("work")}).sign_in(example("Reply"))
+        self.assertEqual(ctx.exception.problem, PROBLEM_SETUP)
+        self.work.signed = False
+        run.sign_in(example("RSVP"))
+        self.assertIn("sign_in", self.work.names())
+
+
+class CountdownForCalendarTests(ExecutorTestCase):
+    """Calendar events and to-do blocks after the undo countdown: "running" first, no browser after."""
+
+    def run_job(self, action: ProposedAction) -> RunOutcome:
+        self.watch(action)
+        return run_action(self.executor(), action, store=self.store, writes_running=True,
+                          on_stage=self.stages.append)
+
+    def test_running_before_the_insert_and_the_result_after(self) -> None:
+        for action, status in ((parse_action_line(CHESS), STATUS_CREATED), (example("Todo"), STATUS_CREATED)):
+            with self.subTest(kind=action.kind):
+                self.personal.calls.clear()
+                self.personal.on_disk_at_change.clear()
+                outcome = self.run_job(action)
+                self.assertEqual(outcome.status, status)
+                self.assertEqual(self.personal.on_disk_at_change, [STATUS_RUNNING])
+                ((_, (event,), kwargs),) = self.personal.changes()
+                self.assertEqual((event.id, kwargs), (action.id, {"interactive": False}))
+                saved = ActionStore(self.store.path).get(action.id)
+                self.assertEqual((saved["status"], saved["link"], saved["kind"]), (status, EVENT_LINK, action.kind))
+        self.personal.outcomes["create_event"] = EventResult("old1", EVENT_LINK, existed=True)
+        self.assertEqual(self.run_job(parse_action_line(CHESS)).status, STATUS_EXISTS)
+
+    def test_the_sign_in_comes_before_running(self) -> None:
+        self.personal.signed = False
+        self.run_job(parse_action_line(CHESS))
+        sign_in = next(call for call in self.personal.calls if call[0] == "sign_in")
+        self.assertIsNone(sign_in[1])
+        self.assertEqual(self.stages, [STAGE_SIGNIN, STAGE_SIGNED_IN, STAGE_WORKING])
+
+    def test_an_unknown_insert_is_saved_and_never_retried(self) -> None:
+        self.personal.outcomes["create_event"] = CalendarUnknownOutcome("Google Calendar answered 503", status=503)
+        action = parse_action_line(CHESS)
+        with self.assertLogs(EXECUTOR_LOGGER, level="INFO"):
+            outcome = self.run_job(action)
+        self.assertEqual(outcome.status, STATUS_UNKNOWN)
+        self.assertEqual(len(self.personal.changes()), 1)
+        self.assertEqual(ActionStore(self.store.path).get(action.id)["status"], STATUS_UNKNOWN)
+        self.assertFalse(self.store.is_decided(action.id))
+
+
+class MailBuildTests(BuildTests):
+    def test_senders_share_the_accounts_and_bindings(self) -> None:
+        cfg = self.config('[accounts.personal]\nfeatures = ["calendar"]\n[accounts.work]\n'
+                          'features = ["calendar", "gmail_send"]\n[accounts.lab]\nfeatures = ["gmail_send"]\n'
+                          '[actions]\ntrusted_domains = ["example.edu"]\n')
+        self.assertEqual(MAIL_SETUP_NOTE, build_executor(cfg, {}, build_senders(cfg)).mail_status(example("Reply")).note)
+        cfg.calendar.client_secret_path.write_text(json.dumps({"installed": {
+            "client_id": "1234567890-fakeclient.apps.googleusercontent.com", "client_secret": "GOCSPX-fake-for-tests",
+            "token_uri": "https://oauth2.googleapis.com/token"}}), encoding="utf-8")
+        accounts = build_accounts(cfg)
+        self.assertEqual(list(accounts), ["personal", "work", "lab"])
+        self.assertIn("openid", accounts["work"].requested_scopes())
+        senders = build_senders(cfg, accounts)
+        self.assertEqual(list(senders), ["work", "lab"])
+        self.assertIs(senders["work"].account, accounts["work"])
+        calendars = build_calendars(cfg, accounts)
+        self.assertEqual(list(calendars), ["personal", "work"])
+        self.assertIs(calendars["work"].account, senders["work"].account)   # one sign-in per alias
+        run = build_executor(cfg, calendars, senders)
+        self.assertIsInstance(run.backend_for(example("Reply")), GmailBackend)
+        self.assertIsInstance(run.backend_for(example("RSVP")), CalendarBackend)
+        self.assertEqual(run.mail_status(example("Reply")).problem, PROBLEM_SIGNED_OUT)
+        self.assertEqual(run.mail_status(example("Reply")).review.kinds[0][1], TRUSTED)
+        self.assertFalse(cfg.data_dir.exists())   # building opens nothing and writes nothing
+        self.assertEqual(recipient_history(cfg).path, cfg.data_dir / "recipients.json")
 
 
 class ImportTests(unittest.TestCase):
@@ -869,7 +1290,7 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(result.stdout.strip(), "[]")
 
     def test_sources_are_ascii(self) -> None:
-        for name in ("executor.py", "google_auth.py", "gcal.py"):
+        for name in ("executor.py", "google_auth.py", "gcal.py", "gmail.py", "recipients.py"):
             with self.subTest(name=name):
                 self.assertTrue((Path(executor.__file__).parent / name).read_bytes().isascii())
 
