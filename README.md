@@ -303,14 +303,46 @@ cd "<project folder>"
    which account it is (the `openid` and `userinfo.email` permissions below).
    The first sign-in that says so binds the name to that Google account, in
    `%LOCALAPPDATA%\briefing-reader\accounts.json` on this PC only, never in
-   config.toml. From then on a sign-in for "work" with any other Google account,
-   or with the account already bound to "personal", is refused and its new
-   sign-in thrown away ("This is not the Google account set up as the work
-   account; sign in with that one"), so a reply never goes out from the wrong
-   account. A reply or email card shows the bound address on its FROM line, and
+   config.toml. Once you have confirmed that binding (see below), a sign-in for
+   "work" with any other Google account, or with the account you confirmed for
+   "personal", is refused and its new sign-in thrown away ("This is not the
+   Google account set up as the work account; sign in with that one"), so a
+   reply never goes out from the wrong account. A binding you have not confirmed
+   yet never locks a name: a new sign-in with another account replaces it (and
+   is asked about), and one Google account is only ever one name, so a sign-in
+   that picks the account another name was bound to, unconfirmed, takes it from
+   that name (which then signs in again at its next Send, Accept or Approve).
+   A reply or email card shows the bound address on its FROM line, and
    an invitation, move or cancel card's check line ends with the address Google
    answered as ("as ana@example.edu"). To bind a name to another Google account,
    see "Disconnecting" below.
+
+   **Confirming the account after its first sign-in.** Google's account chooser
+   makes it easy to pick the wrong account (your work account for "personal",
+   say). So right after a name is bound for the first time, Jarvis asks:
+   'Signed in as ana@example.edu for "personal" - is that right?', with
+   **Yes, that's right** and **No, use another account**. Until you answer Yes,
+   Jarvis sends nothing and changes nothing for that name (no reply or email,
+   no answer, move or cancel, no event or to-do block); reading its calendar
+   (TODAY, DEADLINES, the cards' check lines) goes on. The question always comes
+   before any countdown: a Calendar event's or a to-do block's **Approve** on a
+   name that has no confirmed account asks first, and when that name is not
+   signed in yet it signs in before asking ("Finish the Google sign-in in your
+   browser; nothing is added"); after Yes the card says "Confirmed - click
+   Approve again to add it". **No, use another account** signs
+   that name out of Jarvis (its saved sign-in and its binding are forgotten) and
+   opens Google's sign-in again, so you can pick the right account, which is
+   then asked about the same way. If the saved sign-in can't be deleted (its
+   file is in use), nothing changes: the card says "Could not forget the work
+   account's Google sign-in (its file is in use)", the name stays unconfirmed,
+   and no sign-in opens; click the card's button again to be asked again.
+   Closing the question with Esc answers nothing:
+   the card says so, and its next Send (or Accept, Approve) asks again; if the
+   sign-in has expired meanwhile, that click signs in first, and you may pick
+   any account there (an unconfirmed binding is replaced, and asked about). Your Yes
+   is kept in `accounts.json` on this PC ("confirmed"), so each binding is asked
+   about once; a binding written by the previous version has no such mark and is
+   asked about once, at its next Send or Approve.
 
    If you used an older version, its single `google_token.json` is renamed to
    `google_token_personal.json` the first time this version starts, so you do
@@ -318,7 +350,7 @@ cd "<project folder>"
    is: the calendar keeps working, a personal reply card's FROM line says
    "personal (account not confirmed yet)", and the first **Send** on a personal
    card signs in once more (sending needs a new permission anyway), which binds
-   it.
+   it and asks the question above.
 
    A work or school account's administrator may not allow apps they have not
    approved. Google then shows "Access blocked" or "admin_policy_enforced"
@@ -347,17 +379,30 @@ cd "<project folder>"
    No other access: Jarvis can't read your mail, and has no access to Drive,
    contacts or anything else.
 
-   **Disconnecting.** Delete `%LOCALAPPDATA%\briefing-reader\google_token_personal.json`
+   **Disconnecting.** Right after a name's first sign-in, **No, use another
+   account** in the question above does it for you: that name's saved sign-in
+   and its binding are deleted and Google's sign-in opens again. Otherwise
+   (Jarvis closed, or a binding you confirmed earlier): delete
+   `%LOCALAPPDATA%\briefing-reader\google_token_personal.json`
    (or `google_token_work.json` for the work account; the next click on that
    account's card signs in again), and remove the app's access at
    <https://myaccount.google.com/permissions> (pick briefing-reader and remove
    its access), in each Google account you signed in with. To use an account
    name with another Google account, also delete that name's entry in
    `%LOCALAPPDATA%\briefing-reader\accounts.json` (or the whole file: every name
-   is then bound again at its next sign-in). To stop using calendar actions and
-   email without disconnecting, set `[calendar] enabled = false` in
-   `config.toml`; to stop acting for one account, remove its `[accounts.<name>]`
-   table, or one of its features (`"calendar"`, `"gmail_send"`).
+   is then bound again at its next sign-in, and asked about again). A name whose
+   saved sign-in is still there but whose entry is gone (or whose
+   `accounts.json` Jarvis can't read, say after a typing slip while editing it)
+   is not trusted: Jarvis sends and changes nothing for it, and the next Send,
+   Accept or Approve on one of its cards signs it in again ("Jarvis doesn't
+   know which Google account work is signed in as - pick it in your browser";
+   a reply or email card says "Jarvis doesn't know yet which Google account
+   work is - click Send to sign in and confirm it"), which binds it and asks
+   the question above. To stop
+   using calendar actions and email without disconnecting, set
+   `[calendar] enabled = false` in `config.toml`; to stop acting for one
+   account, remove its `[accounts.<name>]` table, or one of its features
+   (`"calendar"`, `"gmail_send"`).
 
    **8b. Sending replies and emails.** Only needed if **Send** on a Reply or
    Email card should send it for you; without it those cards stay hand-offs
@@ -811,7 +856,11 @@ ahead. The line may also say:
 - "Not signed in to the work account - Sign in to check this event": the
   card's right-hand button reads **Sign in** until that account is signed in
   (see "One sign-in per account" in setup step 8). After the sign-in the card
-  says "Signed in - check the event above, then click Accept again".
+  says "Signed in - check the event above, then click Accept again". After that
+  account's first sign-in, Jarvis first asks whether it is the right Google
+  account (see "Confirming the account after its first sign-in" in setup step
+  8); until you answer Yes, a click on Accept, Move or Cancel event asks again
+  and changes nothing (the check line is still read).
 - "You don't organize this event, so Jarvis can't move it - open it to answer
   instead", "You don't organize this event, so Jarvis can't cancel it - open it
   to decline instead", "You are not on this event's guest list...", "This is a
@@ -915,9 +964,10 @@ The card shows exactly what will be sent:
   setup step 8). Until Jarvis knows it, the line says "account not confirmed
   yet", and **Send** signs in first.
 - **TO** and **CC**: one chip per address. An address Jarvis has not sent to
-  before, that is not the account's own and not in `[actions]
-  trusted_domains`, is red with a **NEW RECIPIENT** badge (see the rules
-  below). The account's own address is never a recipient: it is left out.
+  before and not in `[actions] trusted_domains` is red with a **NEW
+  RECIPIENT** badge (see the rules below). The sending account's own address
+  is red with a **SENDING ACCOUNT** badge: Jarvis never sends a message to the
+  account it sends from (see "Never to itself" below).
 - the subject (the title, cut to two lines; a reply's starts with "Re: "), and
   the message with its own line breaks, up to ten lines as they wrap at the
   card's width (point at it for all of it, or open Edit). Web links in it are
@@ -933,11 +983,18 @@ what is next:
    sending was not allowed, or Jarvis does not know which Google account it
    is), the click opens the Google sign-in in your browser; no countdown runs.
    Afterwards the card says "Signed in - this card sends from work
-   (ana@example.edu); nothing is sent until you click Send".
-2. While a red NEW RECIPIENT is not confirmed, the click opens **Edit**, with a
+   (ana@example.edu); nothing is sent until you click Send". After a name's
+   first sign-in, Jarvis first asks whether it is the right Google account
+   (see "Confirming the account after its first sign-in" in setup step 8);
+   until you answer Yes, the click asks again and nothing is sent.
+2. While To or Cc names the sending account itself, nothing is sent: the card
+   says "This would send to the personal account (ana@example.edu) itself -
+   edit the recipients", and the click only says so again (no dialog, no
+   countdown). Open **Edit** and **Remove** that address.
+3. While a red NEW RECIPIENT is not confirmed, the click opens **Edit**, with a
    "Send to <address>" tick under each new address. Tick the ones you mean (or
    remove the others) and **Save**; the badge then reads "NEW · CONFIRMED".
-3. When the card does not show all of the message (more than its ten lines,
+4. When the card does not show all of the message (more than its ten lines,
    counting a long paragraph as the lines it wraps into, or a subject cut at
    two lines), the click opens **Edit** first, with the whole subject and
    message: read it to its end (scroll down when the dialog scrolls). Send
@@ -945,13 +1002,13 @@ what is next:
    to its end; a newer briefing with another text for the same card, or a
    dialog closed before its end (for example after ticking new recipients),
    asks again.
-4. Otherwise the countdown starts: **Undo** on the left, "SENDING FROM WORK IN
+5. Otherwise the countdown starts: **Undo** on the left, "SENDING FROM WORK IN
    10 S" (the account it sends from) on the right, the other cards locked, as
    for an invitation. A Send pressed with the keyboard (Space) moves the focus
    to **Undo**. **Undo**, quitting the app or closing the reading screen stops
    it, and nothing is sent. If the account's address changed meanwhile, nothing
    is sent either.
-5. When it runs out, Jarvis saves "running", then makes the one Gmail call
+6. When it runs out, Jarvis saves "running", then makes the one Gmail call
    that sends the message, and the card shows SENT with an **Open** link to the
    thread in Gmail. The recipients are remembered (see below).
 
@@ -967,9 +1024,13 @@ and offers Copy).
 **Edit** shows FROM (fixed), the To and Cc recipients (**Remove**, and a field
 to **Add** an address: one plain address, at most 5 in all, not the account's
 own; a new one gets its own tick), the subject (an email's can be changed; a
-reply keeps its thread's) and the message, its links highlighted. The subject
-and the message are shown whole; when the dialog would be taller than the
-screen, its fields scroll and Save and Cancel stay on screen. **Save**
+reply keeps its thread's) and the message, its links highlighted. The sending
+account's own address, when the card names it, is red with SENDING ACCOUNT and
+has no tick: **Save** waits until you remove it. The subject and the message
+are shown whole. The dialog always fits the screen's work area (without the
+taskbar), at any display scale: on a short or high-scaled screen its fields
+scroll and the banner, Save and Cancel stay on screen (an invitation's,
+move's or cancel's Edit too). **Save**
 checks it like a line from the briefing and shows any problem in the dialog
 (Enter in an Add field adds that address and never saves; an address typed
 into Add but not added keeps the dialog open, as it would not be sent). The
@@ -978,12 +1039,23 @@ exactly the edited message, with "EDITED" after its kind (ticking new
 recipients alone is not an edit). The edit is kept in memory only, until the
 app closes, and Save never sends anything.
 
+**Never to itself.** Jarvis never sends a message to the account it sends
+from. A card whose To or Cc names that account, written in any way that
+reaches the same mailbox (other upper / lower case, spaces around it, a
+"+tag" after the name such as `ana+notes@example.edu`, or dots in a gmail.com
+name), is refused as it stands: the address is red with SENDING ACCOUNT, the
+note says "This would send to the work account (ana@example.edu) itself - edit
+the recipients", and Send sends nothing until you remove it in Edit. The
+briefing task is told never to write your own address, so such a card usually
+means the account name is bound to the wrong Google account (check FROM; see
+"Disconnecting" in setup step 8). The same check runs again on the finished
+message right before the one Gmail call.
+
 **Recipient rules ("confirm new people").** Jarvis can send mail but cannot
 read it, so it cannot check that an address really is in the thread; the
 briefing task is told to use only the thread's addresses. An address needs no
 extra confirmation only when it is
 
-- the sending account itself (then it is no recipient at all),
 - in a domain of `[actions] trusted_domains`, or a subdomain of one (empty by
   default; for example `["example.edu"]`), or
 - an address Jarvis sent to before, from any account.
@@ -1533,7 +1605,7 @@ Other files in `%LOCALAPPDATA%\briefing-reader`:
 |---|---|
 | `actions.json` | Your decisions on the proposals: Approve / Add block (`created`, or `exists` when it was already on the calendar), Deny (`denied`) and Done (`done`); for every card Jarvis carries out also `running` (saved right before the call to Google), `sent` (an answer, move, cancel, reply or email, with the result, such as "Accepted" or "Sent", and the link), `failed` and `unknown` (the call may or may not have happened; a `running` left by a crash becomes `unknown` at the next start). Each entry has the proposal's kind and account name and the last failure message, kept for 60 days. Delete it to forget them. |
 | `google_token_personal.json`, `google_token_work.json` | The Google sign-in of each account (access and refresh token, the permissions Google granted, and which Google account it was issued for). Private: never share them. Delete one to sign that account out on this PC. Older versions kept a single `google_token.json`; it becomes `google_token_personal.json` at the first start. |
-| `accounts.json` | Which Google account each account name is (its address and Google's account id), written by the first sign-in that says so. Delete an entry, or the file, to bind a name to another Google account (setup step 8, "Disconnecting"). |
+| `accounts.json` | Which Google account each account name is (its address and Google's account id), written by the first sign-in that says so, and whether you confirmed it ("confirmed", after "Signed in as ... - is that right?"; nothing is sent or changed for a name until then). **No, use another account** removes the entry; or delete an entry, or the file, to bind a name to another Google account (setup step 8, "Disconnecting"). A name with a saved sign-in but no entry Jarvis can read (deleted, or the file is not valid JSON) sends and changes nothing until it signs in again. |
 | `recipients.json` | The addresses Jarvis sent replies and emails to, as one-way hashes (never the addresses), with the time; at most 5000. An address in it needs no NEW RECIPIENT confirmation. Delete it to confirm every address again. |
 | `runstate.json` | Per scheduled briefing: when its prompt was first shown and when and how it was answered (read, dismissed, done), kept for 14 days. The catch-up task uses it; see [Catch-up and the hotkey](#catch-up-and-the-hotkey). Safe to delete. |
 
@@ -1745,9 +1817,15 @@ they are quoted here in normal case, and the log has the same text)
   the button twice; if not, Skip the card.
 - **The line ends with an address that is not that account's**: you picked
   another Google account at that account name's first sign-in, so Jarvis bound
-  the name to it. Delete that account's `google_token_<account>.json` and its
-  entry in `accounts.json` (see "Disconnecting" in setup step 8), then click
-  Sign in again and pick the right account.
+  the name to it. Right after that sign-in, answer **No, use another account**
+  to the question about it; if you already said Yes, delete that account's
+  `google_token_<account>.json` and its entry in `accounts.json` (see
+  "Disconnecting" in setup step 8), then click Sign in again and pick the right
+  account.
+- **'Signed in as ... for "work" - is that right?'**: the work account name was
+  just bound to that Google account. Yes if it is the right one; otherwise **No,
+  use another account** and pick the right one in the browser. Until you answer,
+  Jarvis answers, moves and cancels nothing for that account (the note says so).
 - **'No account named "school" in config.toml [accounts]'**: the briefing wrote
   an `acct=` name that config.toml does not list. Add an `[accounts.school]`
   table, or have the briefing use `work` or `personal`.
@@ -1797,12 +1875,44 @@ they are quoted here in normal case, and the log has the same text)
   the calendar keeps working.
 - **"This is not the Google account set up as the work account"** or **"That
   Google account is already set up as the personal account"**: you picked
-  another Google account than the one that name is bound to. Click Send again
-  and pick the account on the FROM line; to change which Google account a name
-  is, see "Disconnecting" in setup step 8.
+  another Google account than the one you confirmed for that name, or the one
+  you confirmed for the other name. Click Send (or Accept, Approve) again and
+  pick the right account; to change which Google account a name is once you
+  confirmed it, see "Disconnecting" in setup step 8. (A binding you have not
+  confirmed never causes this: another sign-in replaces it.)
+- **Both names were bound to each other's account** (for example "personal" to
+  your work account and "work" to your personal one, neither confirmed): answer
+  **No, use another account** on a personal card and pick your personal account
+  in the browser. It is taken from "work" (you never confirmed it there), and
+  the question asks about it for "personal". Nothing is sent or changed for
+  "work" until it signs in again: the next Send, Accept or Approve on a work
+  card does that; pick the work account and answer Yes.
+- **"Jarvis doesn't know which Google account work is signed in as"** (or
+  "...the work account's sign-in is; sign in again to confirm it", or on a
+  reply or email card "Jarvis doesn't know yet which Google account work is"):
+  that name has a saved sign-in but no entry in `accounts.json` that Jarvis can
+  read (the entry or the file was deleted, the file is not valid JSON, or
+  another name took that Google account), or the sign-in is from an older
+  version. Nothing is sent or changed for it. Click the card's Send, Accept or
+  Approve: it signs in again, binds the name and asks whether it is the right
+  account.
+- **"Could not forget the work account's Google sign-in (its file is in use)"**:
+  after **No, use another account**, Jarvis could not delete
+  `google_token_work.json` (another program, such as a sync or backup tool, had
+  it open). Nothing was sent or changed, the name stays unconfirmed and no
+  sign-in opened. Click the card's button again (the question comes back) and
+  answer No again.
 - **FROM says "account not confirmed yet"**: that account's sign-in is from an
   older version, or Google did not say which account it is. Click Send: it
-  signs in once more (nothing is sent) and binds the name.
+  signs in once more (nothing is sent), binds the name and asks whether it is
+  the right Google account.
+- **"Is From the right Google account for personal? Click Send to confirm it"**:
+  you closed the question after the first sign-in without answering. Click
+  Send: the question opens again (Yes, or No, use another account).
+- **"This would send to the personal account (...) itself - edit the
+  recipients"**: To or Cc names the account the card sends from (see "Never to
+  itself"). Nothing was sent. If FROM shows the wrong Google account, see
+  "Disconnecting" in setup step 8; otherwise open Edit and Remove that address.
 - **"...administrator does not allow this app to send email
   (admin_policy_enforced)"** (or `domainPolicy`): the organisation blocks sending
   from your own app. Use Copy (and Open), and remove `"gmail_send"` from that
@@ -1844,7 +1954,7 @@ briefing_reader/agenda.py     TODAY / TOMORROW rows, the "Deadlines" section, ca
 briefing_reader/google_auth.py  Google sign-in per account (one token per account, which Google account it is), single-send HTTP
 briefing_reader/gcal.py       Google Calendar: duplicate check, event creation, reading events, answer / move / cancel
 briefing_reader/gmail.py      Gmail (gmail.send only): the message exactly as the card shows it, one send per approval
-briefing_reader/recipients.py the NEW RECIPIENT check: own address, trusted domains, addresses sent to before (hashed)
+briefing_reader/recipients.py never to the sending account itself (any spelling); the NEW RECIPIENT check: trusted domains, addresses sent to before (hashed)
 briefing_reader/executor.py   carrying out an approved proposal per account ("running" first), the cards' check lines
 briefing_reader/tts.py        edge-tts synthesis, Windows SAPI fallback, highlight timing, background worker
 briefing_reader/player.py     QtMultimedia player that plays sections in order with pauses

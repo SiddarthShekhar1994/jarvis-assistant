@@ -145,6 +145,7 @@ from .agenda import (
 )
 from .config import DEFAULT_ACCOUNT, AgendaConfig, Config
 from .executor import (
+    DISCONNECT_FAILED_MESSAGE,
     STAGE_SIGNED_IN,
     STAGE_SIGNIN,
     STAGE_WORKING,
@@ -180,6 +181,7 @@ from .gcal import (
 from .google_auth import (
     GMAIL_FEATURE,
     PROBLEM_BLOCKED,
+    PROBLEM_CONFIRM,
     PROBLEM_DENIED,
     PROBLEM_EXPIRED,
     PROBLEM_FAILED,
@@ -1492,6 +1494,33 @@ REVIEW_BANNER = ("The card doesn't show all of this message. Read all of it here
                  "change. Nothing is sent until you click Send again.")
 FROM_CHANGED_NOTE = ("The sending account changed during the countdown; nothing was sent - check From and click "
                      "Send again")
+# A new binding (an alias's first sign-in): is it the right Google account? Nothing is sent or
+# changed for the alias until you answer Yes in the dialog (hud.AccountDialog).
+ACCOUNT_CONFIRM_NOTE = ("Is this the right Google account for {alias}? Answer in the dialog - nothing is sent or "
+                        "changed until you do")
+ACCOUNT_CONFIRMED_MAIL_NOTE = "Confirmed - this card sends from {sender}; nothing is sent until you click Send"
+ACCOUNT_CONFIRMED_NOTE = "Confirmed - check the event above, then click {button} again"
+ACCOUNT_NOT_CONFIRMED_NOTE = ("Not confirmed yet: click {button} to say whether this is the right Google account for "
+                              "{alias} - nothing is sent or changed until then")
+ACCOUNT_CONFIRM_FAILED_NOTE = "Not confirmed: the {alias} account changed meanwhile - click {button} to sign in again"
+ACCOUNT_RECONNECT_NOTE = ("Pick the right Google account for {alias} in your browser; nothing is sent - then check "
+                          "it and click {button} again")
+# The saved sign-in is a Google account Jarvis has no binding for (accounts.json deleted or unreadable):
+# the click signs in again, which binds and asks; nothing is changed until then.
+ACCOUNT_UNKNOWN_NOTE = ("Jarvis doesn't know which Google account {alias} is signed in as - pick it in your browser; "
+                        "nothing is changed until you confirm it")
+# A Calendar event's or Todo block's Approve while its account has no confirmed Google account: the
+# sign-in and the question come before the countdown (nothing is counted down that can't be added).
+ADD_SIGN_IN_FIRST_NOTE = ("Finish the Google sign-in in your browser; nothing is added - then confirm the account "
+                          "and click {button} again")
+ADD_SIGNED_IN_NOTE = "Signed in - click {button} again to add it"
+ACCOUNT_CONFIRMED_ADD_NOTE = "Confirmed - click {button} again to add it"
+# "No, use another account" when the saved sign-in can't be deleted: the account stays as it was.
+DISCONNECT_FAILED_NOTE = "{message} - click {button} to answer again"
+_ACCOUNT_NOTE_PREFIXES = tuple(text.split("{", 1)[0] for text in (
+    ACCOUNT_CONFIRM_NOTE, ACCOUNT_CONFIRMED_NOTE, ACCOUNT_NOT_CONFIRMED_NOTE, ACCOUNT_CONFIRM_FAILED_NOTE,
+    ACCOUNT_RECONNECT_NOTE, ACCOUNT_UNKNOWN_NOTE, ADD_SIGN_IN_FIRST_NOTE, ADD_SIGNED_IN_NOTE,
+    ACCOUNT_CONFIRMED_ADD_NOTE)) + (DISCONNECT_FAILED_MESSAGE.split("{", 1)[0],)
 MAIL_OFF_NOTE = "Google is turned off in config.toml ([calendar] enabled = false) - use {tools} instead"
 # A Reply / Email that failed was certainly not sent: the result line says so; the reason is the note.
 MAIL_FAILED_TEXT = "Nothing was sent"
@@ -1541,6 +1570,7 @@ _CONNECT_SIGN_IN = "signin"         # the browser sign-in is open
 _CONNECT_SIGNED_IN = "signedin"     # signed in just now
 _CONNECT_READY = "ready"            # was signed in already
 _CONNECT_FAILED = "failed"
+_CONNECT_KEPT = "kept"              # "No, use another account" could not forget the old sign-in
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1577,10 +1607,12 @@ class _PeekJob:
 class _ConnectJob:
     """The browser sign-in of one account (the agenda's Connect, a card's Sign in or Approve).
     ``action``: a Reply / Email whose Send signs its account in (executor.sign_in: sending must
-    be allowed and the Google account known afterwards)."""
+    be allowed and the Google account known afterwards). ``disconnect``: forget the account's
+    sign-in and binding first ("No, use another account")."""
 
     alias: str
     action: ProposedAction | None = None
+    disconnect: bool = False
 
 
 class _Bridge(QObject):
@@ -1679,8 +1711,9 @@ class _ActionWorker:
     def peek(self, job: _PeekJob) -> None:
         self._jobs.put(job)
 
-    def connect(self, alias: str = DEFAULT_ACCOUNT, action: ProposedAction | None = None) -> None:
-        self._jobs.put(_ConnectJob(alias, action))
+    def connect(self, alias: str = DEFAULT_ACCOUNT, action: ProposedAction | None = None, *,
+                disconnect: bool = False) -> None:
+        self._jobs.put(_ConnectJob(alias, action, disconnect))
 
     def stop(self) -> None:
         self._jobs.put(None)
@@ -1718,10 +1751,15 @@ class _ActionWorker:
         elif isinstance(job, _PeekJob):
             self._peek(job)
         elif isinstance(job, _ConnectJob):
+            if job.disconnect:
+                failure = self._disconnect(job.alias)
+                if failure:   # the wrong account's sign-in is still there: no new sign-in over it
+                    self._emit("accountConnect", job.alias, _CONNECT_KEPT, failure, PROBLEM_FAILED)
+                    return
             if job.action is not None:
                 self._connect_mail(job.alias, job.action)
             else:
-                self._connect(job.alias)
+                self._connect(job.alias, force=job.disconnect)
         elif job == _SIGN_IN_CHECK:
             self._check_sign_ins()
 
@@ -1776,13 +1814,28 @@ class _ActionWorker:
                 results[action.id] = (None, CalendarError(f"unexpected error ({type(exc).__name__})"))
         self._emit("eventPeek", job.request_id, results)
 
-    def _connect(self, alias: str) -> None:
-        """One account's browser sign-in, unless a usable sign-in is saved already."""
+    def _disconnect(self, alias: str) -> str:
+        """Forget ``alias``'s saved sign-in and which Google account it is (files only), so the sign-in
+        that follows may pick another account. "" when done; else why not (the saved sign-in could
+        not be deleted: the binding stays as it was, unconfirmed, and no sign-in may follow)."""
+        try:
+            self._executor.disconnect(alias)
+        except ExecError as exc:   # executor logged it; a safe message
+            return str(exc) or DISCONNECT_FAILED_MESSAGE.format(alias=alias)
+        except Exception as exc:  # noqa: BLE001 - a bug must not end the worker
+            logger.warning("Could not disconnect the %s account (%s)", logged_alias(alias), type(exc).__name__)
+            return DISCONNECT_FAILED_MESSAGE.format(alias=alias)
+        logger.info("Disconnected the %s account's Google account (it was not the right one)", logged_alias(alias))
+        return ""
+
+    def _connect(self, alias: str, *, force: bool = False) -> None:
+        """One account's browser sign-in, unless a usable sign-in of a Google account Jarvis knows is
+        saved already. ``force``: always (right after "No, use another account")."""
         calendar = self._calendars.get(alias)
         if calendar is None:
             self._emit("accountConnect", alias, _CONNECT_FAILED, CALENDAR_SETUP_NOTE, "")
             return
-        if self._signed_in(calendar):
+        if not force and self._signed_in(calendar) and not self._account_unknown(calendar):
             self._emit("accountConnect", alias, _CONNECT_READY, "", "")
             return
         self._emit("accountConnect", alias, _CONNECT_SIGN_IN, "", "")
@@ -1823,6 +1876,19 @@ class _ActionWorker:
             return bool(calendar.is_signed_in())
         except Exception as exc:  # noqa: BLE001 - only decides whether to sign in first
             logger.debug("Could not check the Google sign-in (%s)", type(exc).__name__)
+            return False
+
+    @staticmethod
+    def _account_unknown(calendar: Any) -> bool:
+        """The saved sign-in is a Google account Jarvis has no binding for (accounts.json deleted,
+        edited or unreadable): a sign-in click signs in again, which binds and asks."""
+        getter = getattr(calendar, "change_problem", None)
+        if not callable(getter):
+            return False
+        try:
+            return getter()[0] == PROBLEM_IDENTITY
+        except Exception as exc:  # noqa: BLE001 - only decides whether to sign in; changes are refused anyway
+            logger.debug("Could not check which Google account the sign-in is (%s)", type(exc).__name__)
             return False
 
     def _exec(self, job: _ExecJob) -> None:
@@ -2265,6 +2331,10 @@ class AppController(QObject):
         self._carried: dict[str, ProposedAction] = {}   # action id -> what Jarvis carried out (this run)
         self._mismatch_seen: dict[str, EventCheck] = {}   # action id -> the check whose mismatch was shown
         self._dialog: hud.EditDialog | None = None
+        # The first sign-in's question (is it the right Google account?) and the card that led to it.
+        self._account_dialog: hud.AccountDialog | None = None
+        self._confirm_card = ""
+        self._confirm_action: ProposedAction | None = None
         # Reply / Email id -> _review_digest of the subject and message the Edit dialog showed whole
         # (this run, memory only): Send skips the review only while the card still says exactly that.
         self._reviewed: dict[str, str] = {}
@@ -2881,8 +2951,10 @@ class AppController(QObject):
             card.set_note(f" {DOT} ".join(part for part in (reason, card_view(action, self._now().date()).note)
                                           if part))
         elif card.note() != CALENDAR_SETUP_NOTE:
-            note = card_view(action, self._now().date()).note
-            if note:
+            # A Calendar event or a Todo's block: the question about its account, if any, first.
+            hint = self._hints.get(action_id, "")
+            note = f" {DOT} ".join(part for part in (hint, card_view(action, self._now().date()).note) if part)
+            if note or card.note().startswith(_ACCOUNT_NOTE_PREFIXES):
                 card.set_note(note)
 
     def _sync_countdown_card(self, card: hud.ActionCard, action: ProposedAction, status: str,
@@ -2916,8 +2988,9 @@ class AppController(QObject):
 
     def _recipient_chips(self, action: ProposedAction, status: MailStatus, *,
                          badges: bool = True) -> tuple[list[hud.RecipientChip], list[hud.RecipientChip]]:
-        """The card's (or Edit dialog's) To and Cc chips: what is sent (the account's own address
-        taken out), each new one red until it is ticked in Edit."""
+        """The card's (or Edit dialog's) To and Cc chips: what is sent, each new one red until it is
+        ticked in Edit; the sending account's own address red with SENDING ACCOUNT (Send refuses
+        until it is removed in Edit)."""
         review = status.review
         if review is None:
             return ([hud.RecipientChip(address) for address in action.recipients()],
@@ -2925,7 +2998,10 @@ class AppController(QObject):
         ticked = {address.casefold() for address in action.confirmed}
 
         def chip(address: str) -> hud.RecipientChip:
-            if not badges or review.kind_of(address) != RECIPIENT_NEW_KIND:
+            kind = review.kind_of(address)
+            if badges and kind == RECIPIENT_OWN_KIND:   # the sending account itself: Send refuses
+                return hud.RecipientChip(address, hud.RECIPIENT_OWN)
+            if not badges or kind != RECIPIENT_NEW_KIND:
                 return hud.RecipientChip(address)
             confirmed = address.casefold() in ticked
             return hud.RecipientChip(address, hud.RECIPIENT_CONFIRMED if confirmed else hud.RECIPIENT_NEW)
@@ -2976,7 +3052,8 @@ class AppController(QObject):
             parts.append(_CHECK_BEFORE_RETRY_RE.sub("", entry.get("message", "")))
         elif status == STATUS_FAILED:
             parts.append(_NOTHING_SENT_RE.sub("", entry.get("message", "")))
-        if not self._signing_in(action.account):   # while it runs, the hint says what to do
+        asking = self._account_dialog is not None and self._account_dialog.alias == action.account
+        if not self._signing_in(action.account) and not asking:   # meanwhile the hint says what to do
             parts.append(_for_button(mail.note, button))
         parts.append(card_view(action, self._now().date()).note)
         return f" {DOT} ".join(dict.fromkeys(part for part in parts if part))
@@ -3204,7 +3281,8 @@ class AppController(QObject):
             return
         action = self._current(action_id)
         if (action is None or not action.decidable or self.state == STATE_QUITTING
-                or action_id in self._jobs or self._store.is_decided(action_id)):
+                or action_id in self._jobs or self._store.is_decided(action_id)
+                or self._account_dialog is not None):
             return
         if not action.actionable:
             self._mark_done(action)
@@ -3229,12 +3307,30 @@ class AppController(QObject):
                 card.set_note(CALENDAR_SETUP_NOTE)
             self._activity(hud.TAG_WAIT, "Google Calendar is not set up", "README step 8")
             return
+        alias = account_of(action)
+        unknown = self._account_unknown(alias)
+        if unknown or (not self._account_signed_in(alias) and self._account_unconfirmed(alias)):
+            # Its sign-in binds a Google account to confirm first: sign in and ask before the
+            # countdown, so a countdown never runs for an event that can't be added.
+            logger.info("Approve %s: signing in to the %s account first (its Google account is confirmed before "
+                        "anything is added)", action_id, logged_alias(alias))
+            button = self._confirm_button(action_id)
+            self._hint(action_id, ACCOUNT_UNKNOWN_NOTE.format(alias=alias) if unknown
+                       else ADD_SIGN_IN_FIRST_NOTE.format(button=button))
+            self._start_sign_in(alias, card_id=action_id)
+            return
+        if self._ask_account(alias, card_id=action_id):
+            logger.info("Approve %s: asking first whether the %s account is the right Google account", action_id,
+                        logged_alias(alias))
+            return
         self._start_countdown(action)   # a Todo's block keeps the Todo's id, so the result lands on its card
 
     def _approve_mail(self, action: ProposedAction) -> None:
         """Send / Retry on a Reply or Email: sign in first (no countdown) while its account can't
-        send, open Edit while a new recipient is not ticked or a long message was not read there,
-        else count down. Done (Jarvis can't send it here) records that you handled it."""
+        send, ask whether a new binding is the right Google account, refuse while a recipient is
+        the sending account itself (the note says so; Edit fixes it), open Edit while a new
+        recipient is not ticked or a long message was not read there, else count down. Done
+        (Jarvis can't send it here) records that you handled it."""
         action_id = action.id
         mail = self._mail_status(action)
         if mail.hand_off:
@@ -3248,15 +3344,30 @@ class AppController(QObject):
             self._hint(action_id, MAIL_SIGN_IN_NOTE)
             self._start_sign_in(action.account, card_id=action_id, action=action)
             return
+        if mail.confirm:
+            logger.info("Send %s: asking first whether the %s account is the right Google account", action_id,
+                        logged_alias(action.account))
+            if not self._ask_account(action.account, card_id=action_id, action=action):
+                self._hint(action_id, mail.note)
+            return
+        if mail.refused:
+            review = mail.review
+            own = bool(review is not None and review.own)
+            logger.info("Send %s: not sent - %s", action_id,
+                        "a recipient is the sending account itself" if own else "nobody is in To")
+            self._hint(action_id, "")   # the note says why (it names the address): edit the recipients
+            self._activity(hud.TAG_STOP, f"Not sent: {_kind_title(action)}",
+                           f"{kind_label(action).upper()} {DOT} "
+                           + ("a recipient is the sending account itself" if own else "nobody in To"))
+            return
         if mail.needs_edit:
             review = mail.review
             logger.info("Send %s: %d new recipient(s) to confirm in Edit first", action_id,
                         len(review.unconfirmed) if review is not None else 0)
-            confirm = review is not None and not review.problem
-            banner = CONFIRM_BANNER if confirm else ""
-            if banner and self._unread(action):
+            banner = CONFIRM_BANNER
+            if self._unread(action):
                 banner = f"{banner} {CONFIRM_READ_TOO}"
-            self._hint(action_id, CONFIRM_NOTE if confirm else mail.note)
+            self._hint(action_id, CONFIRM_NOTE)
             self._open_mail_dialog(action, banner)
             return
         if self._unread(action):
@@ -3292,10 +3403,16 @@ class AppController(QObject):
             self._activity(hud.TAG_WAIT, f"Can't {_VERBS.get(action.kind, 'do')} this yet: {_kind_title(action)}",
                            _short(reason))
             return
-        if not self._account_signed_in(action.account):
-            logger.info("Approve %s: signing in to the %s account first", action_id, logged_alias(action.account))
-            self._hint(action_id, SIGN_IN_FIRST_NOTE)
+        unknown = self._account_unknown(action.account)
+        if unknown or not self._account_signed_in(action.account):
+            logger.info("Approve %s: signing in to the %s account first%s", action_id, logged_alias(action.account),
+                        " (Jarvis has no binding for its saved sign-in)" if unknown else "")
+            self._hint(action_id, ACCOUNT_UNKNOWN_NOTE.format(alias=action.account) if unknown else SIGN_IN_FIRST_NOTE)
             self._start_sign_in(action.account, card_id=action_id)
+            return
+        if self._ask_account(action.account, card_id=action_id):
+            logger.info("Approve %s: asking first whether the %s account is the right Google account", action_id,
+                        logged_alias(action.account))
             return
         check = self._checks.get(action_id)
         if check is None or not check.allowed:
@@ -3522,7 +3639,7 @@ class AppController(QObject):
     def edit_action(self, action_id: str) -> None:
         """A card's Edit: the window-modal Edit dialog of an RSVP, Move, Cancel, Reply or Email.
         Save keeps the changes on the card (memory only, same id); nothing is sent."""
-        if self.state == STATE_QUITTING or self._dialog is not None:
+        if self.state == STATE_QUITTING or self._dialog is not None or self._account_dialog is not None:
             return
         if self._countdown is not None or self._jobs or self._connect_running:
             # The dialog is window-modal: beside another card's countdown it would cover that
@@ -3553,8 +3670,9 @@ class AppController(QObject):
 
     def _open_mail_dialog(self, action: ProposedAction, banner: str = "") -> None:
         """The Edit dialog of a Reply / Email: FROM, To / Cc (new recipients red, each with a
-        "Send to <address>" tick), the subject and the message exactly as it will be sent."""
-        if self.state == STATE_QUITTING or self._dialog is not None:
+        "Send to <address>" tick; the sending account's own address red with SENDING ACCOUNT, to
+        remove), the subject and the message exactly as it will be sent."""
+        if self.state == STATE_QUITTING or self._dialog is not None or self._account_dialog is not None:
             return
         mail = self._mail_status(action)
         to, cc = self._recipient_chips(action, mail)
@@ -3770,6 +3888,11 @@ class AppController(QObject):
             self._calendar_worker.check_sign_in()   # a revoked sign-in turns the chip amber again
         self._refresh_actions_ui()
         self._render_agenda()   # a sign-in that waited may be over
+        if (getattr(error, "problem", "") == PROBLEM_CONFIRM and action is not None
+                and not action.sends_mail):
+            # A sign-in during the run bound an account you have not confirmed (nothing was
+            # changed): ask now, so the next click goes ahead.
+            self._ask_account(account_of(action), card_id=action_id)
 
     def _calendar_result(self, action_id: str, action: ProposedAction | None, result: ExecResult | None,
                          error: ExecError | None, status: str, *, saved: bool = False) -> None:
@@ -3882,9 +4005,12 @@ class AppController(QObject):
         logger.info("Sign in to Google for action %s (%s account)", action_id, logged_alias(action.account))
         self._start_sign_in(action.account, card_id=action_id)
 
-    def _start_sign_in(self, alias: str, *, card_id: str = "", action: ProposedAction | None = None) -> None:
+    def _start_sign_in(self, alias: str, *, card_id: str = "", action: ProposedAction | None = None,
+                       disconnect: bool = False) -> None:
         """``alias``'s browser sign-in on the action worker; ``action``: a Reply / Email whose Send
-        started it (sending must be allowed and the Google account known afterwards)."""
+        started it (sending must be allowed and the Google account known afterwards).
+        ``disconnect``: forget the account's sign-in and binding first ("No, use another
+        account"), so Google's chooser may pick another account."""
         worker = self._start_calendar()
         if worker is None:
             return
@@ -3896,8 +4022,124 @@ class AppController(QObject):
         self._sync_card_locks()
         self._refresh_countdown_cards()
         self._update_service_chips()
-        worker.connect(alias, action)
+        worker.connect(alias, action, disconnect=disconnect)
         self._render_agenda()
+
+    # ---- the first sign-in's question: is it the right Google account? -----------------------
+
+    def _account_unknown(self, alias: str) -> bool:
+        """``alias``'s saved sign-in is a Google account Jarvis has no binding for (accounts.json deleted,
+        edited or unreadable): its next click signs in again, which binds and asks (files only)."""
+        try:
+            return self._executor.change_problem(alias) == PROBLEM_IDENTITY
+        except Exception as exc:  # noqa: BLE001 - the executor still refuses to act
+            logger.debug("Could not check the %s account's binding (%s)", logged_alias(alias), type(exc).__name__)
+            return False
+
+    def _account_unconfirmed(self, alias: str) -> bool:
+        """``alias`` has no Google account you confirmed: its next sign-in leaves one to confirm."""
+        try:
+            return self._executor.needs_confirmation(alias)
+        except Exception as exc:  # noqa: BLE001 - the executor still refuses to act
+            logger.debug("Could not check the %s account's binding (%s)", logged_alias(alias), type(exc).__name__)
+            return False
+
+    def _pending_account(self, alias: str) -> str:
+        """The address ``alias`` was bound to while you have not confirmed it ("" = nothing to ask)."""
+        try:
+            return self._executor.pending_confirmation(alias)
+        except Exception as exc:  # noqa: BLE001 - nothing to ask; the executor still refuses to act
+            logger.debug("Could not read the %s account's binding (%s)", logged_alias(alias), type(exc).__name__)
+            return ""
+
+    def _ask_account(self, alias: str, *, card_id: str = "", action: ProposedAction | None = None) -> bool:
+        """Ask "Signed in as X for "alias" - is that right?" while ``alias``'s binding is not
+        confirmed (hud.AccountDialog): True when there is something to confirm (the dialog is open
+        now), False when there is not. Nothing is sent or changed for the alias until Yes."""
+        address = self._pending_account(alias)
+        if not address or self.state == STATE_QUITTING:
+            return False
+        if self._account_dialog is not None or self._dialog is not None:
+            return True
+        dialog = hud.AccountDialog(alias, address, sends_mail=self._sends_mail(alias), parent=self.window)
+        dialog.answered.connect(self._on_account_answered)
+        dialog.finished.connect(self._on_account_dialog_closed)
+        self._account_dialog = dialog
+        self._confirm_card, self._confirm_action = card_id, action
+        if card_id:
+            self._hints[card_id] = ACCOUNT_CONFIRM_NOTE.format(alias=alias)
+            self._show_card_state(card_id)   # a Calendar event's or Todo's card too
+        self._refresh_countdown_cards()
+        logger.info("Asking whether the %s account's Google account is the right one", logged_alias(alias))
+        self._activity(hud.TAG_WAIT, f"Is this the right Google account? ({alias} account)",
+                       "answer in the dialog - nothing is sent until you do")
+        dialog.open()
+        self._sync_card_locks()
+        return True
+
+    def _confirm_button(self, card_id: str) -> str:
+        card = self.window.reading.action_card(card_id) if card_id else None
+        return card.approve_text() if card is not None else "Send"
+
+    def _on_account_answered(self, alias: str, address: str, yes: bool) -> None:
+        """Yes: the binding is confirmed (accounts.json) and the card says what is next. No: the
+        account is disconnected and its sign-in opens again, to pick another account."""
+        if self.state == STATE_QUITTING:
+            return
+        card_id, action = self._confirm_card, self._confirm_action
+        card_action = self._current(card_id) if card_id else None
+        button = self._confirm_button(card_id)
+        if yes:
+            if self._executor.confirm_account(alias, address):
+                logger.info("The %s account's Google account was confirmed", logged_alias(alias))
+                self._activity(hud.TAG_DONE, f"Google account confirmed ({alias} account)", "nothing was sent")
+                if card_id:
+                    if card_action is not None and card_action.sends_mail:
+                        sender = self._mail_status(card_action).from_text.removeprefix("From: ")
+                        self._hints[card_id] = ACCOUNT_CONFIRMED_MAIL_NOTE.format(sender=sender)
+                    elif card_action is not None and _adds_event(card_action):
+                        self._hints[card_id] = ACCOUNT_CONFIRMED_ADD_NOTE.format(button=button)
+                    else:
+                        self._hints[card_id] = ACCOUNT_CONFIRMED_NOTE.format(button=button)
+            else:
+                logger.info("The %s account's binding changed before it was confirmed", logged_alias(alias))
+                if card_id:
+                    self._hints[card_id] = ACCOUNT_CONFIRM_FAILED_NOTE.format(alias=alias, button=button)
+        else:
+            logger.info("The %s account's Google account was not the right one: signing in again",
+                        logged_alias(alias))
+            self._activity(hud.TAG_STOP, f"Not the right Google account ({alias} account)",
+                           "signing in again - nothing was sent")
+            if card_id:
+                self._hints[card_id] = ACCOUNT_RECONNECT_NOTE.format(alias=alias, button=button)
+            mail = action if action is not None and action.sends_mail else None
+            self._start_sign_in(alias, card_id=card_id, action=mail, disconnect=True)
+        if card_id:   # a Calendar event's or Todo's card is not among the countdown cards
+            self._show_card_state(card_id)
+        self._refresh_countdown_cards()
+        self._update_service_chips()
+        self._render_agenda()
+
+    def _on_account_dialog_closed(self, _result: int = 0) -> None:
+        dialog, self._account_dialog = self._account_dialog, None
+        card_id = self._confirm_card
+        self._confirm_card, self._confirm_action = "", None
+        if dialog is not None:
+            dialog.deleteLater()
+            if card_id and self._hints.get(card_id, "").startswith(ACCOUNT_CONFIRM_NOTE.split("{", 1)[0]):
+                # Closed without an answer: the card says how to answer later (a Reply / Email's
+                # own note says it already).
+                card_action = self._current(card_id)
+                if card_action is not None and card_action.sends_mail:
+                    self._hints.pop(card_id, None)
+                else:
+                    self._hints[card_id] = ACCOUNT_NOT_CONFIRMED_NOTE.format(button=self._confirm_button(card_id),
+                                                                             alias=dialog.alias)
+        if self.state != STATE_QUITTING:
+            if card_id:
+                self._show_card_state(card_id)
+            self._refresh_countdown_cards()
+            self._sync_card_locks()
 
     def _on_account_connect(self, alias: str, stage: str, message: str, problem: str) -> None:
         if self.state == STATE_QUITTING or self._connect_alias != alias:
@@ -3909,6 +4151,10 @@ class AppController(QObject):
             return
         card_id = self._connect_card
         self._connect_alias, self._connect_card = None, ""
+        if stage == _CONNECT_KEPT:
+            self._connect_mail = False
+            self._account_kept(alias, message, card_id)
+            return
         if self._connect_mail:
             self._connect_mail = False
             self._mail_connected(alias, stage, message, problem, card_id)
@@ -3918,7 +4164,10 @@ class AppController(QObject):
             self._accounts_state[alias] = (False, problem or PROBLEM_FAILED, note)
             if personal:
                 self._connect_note = note
-            if card_id:   # the card whose click started it says why, in full
+            failed_action = self._current(card_id) if card_id else None
+            if failed_action is not None and _adds_event(failed_action):   # its button is Approve, not Sign in
+                self._hints[card_id] = f"{note} - click {self._confirm_button(card_id)} to try again"
+            elif card_id:   # the card whose click started it says why, in full
                 self._hints[card_id] = sign_in_note(alias, problem=problem or PROBLEM_FAILED, message=note,
                                                     sends_mail=self._sends_mail(alias))
             self._activity(hud.TAG_STOP, "Google sign-in did not finish" if personal
@@ -3935,9 +4184,33 @@ class AppController(QObject):
                 self._request_agenda()
             card = self.window.reading.action_card(card_id) if card_id else None
             if card is not None:
-                self._hints[card_id] = SIGNED_IN_NOTE.format(button=card.approve_text())
+                card_action = self._current(card_id)
+                adds = card_action is not None and _adds_event(card_action)
+                self._hints[card_id] = (ADD_SIGNED_IN_NOTE if adds else SIGNED_IN_NOTE).format(
+                    button=card.approve_text())
             self._request_peeks([self._effective(action) for action in self._actions
                                  if action.account == alias], force=True)
+        if card_id:   # a Calendar event's or Todo's card is not among the countdown cards
+            self._show_card_state(card_id)
+        self._sync_card_locks()
+        self._refresh_countdown_cards()
+        self._update_service_chips()
+        self._render_agenda()
+        if stage in (_CONNECT_SIGNED_IN, _CONNECT_READY):   # a first sign-in: is it the right Google account?
+            self._ask_account(alias, card_id=card_id)
+
+    def _account_kept(self, alias: str, message: str, card_id: str) -> None:
+        """"No, use another account" could not forget the old sign-in (its file is in use): nothing
+        changed, the account is still signed in and not confirmed, and no sign-in opened. The card
+        says so; its next click asks again."""
+        note = message or DISCONNECT_FAILED_MESSAGE.format(alias=alias)
+        if card_id:
+            self._hints[card_id] = DISCONNECT_FAILED_NOTE.format(message=note, button=self._confirm_button(card_id))
+            self._show_card_state(card_id)
+        self._activity(hud.TAG_STOP, f"Could not forget the Google sign-in ({alias} account)",
+                       "nothing was sent - try again")
+        if self._calendar_worker is not None:
+            self._calendar_worker.check_sign_in()
         self._sync_card_locks()
         self._refresh_countdown_cards()
         self._update_service_chips()
@@ -3971,6 +4244,8 @@ class AppController(QObject):
         self._refresh_countdown_cards()
         self._update_service_chips()
         self._render_agenda()
+        if stage == _CONNECT_SIGNED_IN:   # a first sign-in: is it the right Google account?
+            self._ask_account(alias, card_id=card_id, action=card_action)
 
     # ---- agenda: TODAY / TOMORROW and DEADLINES -----------------------------------------------
 
@@ -4932,6 +5207,8 @@ class AppController(QObject):
         self._cancel_countdown("the reading screen closed")   # never send from a hidden card
         if self._dialog is not None:
             self._dialog.reject()
+        if self._account_dialog is not None:
+            self._account_dialog.reject()   # unanswered: asked again at the next Send or Approve
         self._recheck_timer.stop()
         self._note_timer.stop()
         self._replace_player()
@@ -4982,6 +5259,8 @@ class AppController(QObject):
             logger.info("Action %s undone (app closed); nothing was sent", countdown.action.id)
         if self._dialog is not None:
             self._dialog.reject()
+        if self._account_dialog is not None:
+            self._account_dialog.reject()
         # Hide first: the media player has (rarely) hung in stop(), and the window
         # should be gone either way.
         self.window.hide()

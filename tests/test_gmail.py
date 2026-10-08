@@ -44,6 +44,7 @@ from briefing_reader.gmail import (
 )
 from briefing_reader.google_auth import (
     PROBLEM_BLOCKED,
+    PROBLEM_CONFIRM,
     PROBLEM_EXPIRED,
     PROBLEM_FAILED,
     PROBLEM_IDENTITY,
@@ -216,6 +217,23 @@ class BuildMessageTests(unittest.TestCase):
         no_from = parse(build_message(new_email(from_addr="")))
         self.assertIsNone(no_from["From"])
 
+    def test_never_to_the_senders_own_mailbox(self) -> None:
+        """Case, a "+tag" and (for gmail.com / googlemail.com) dots do not make it another mailbox."""
+        own = (dict(to=("me@example.com",)), dict(to=("ME@example.com",)), dict(to=("me+lab@example.com",)),
+               dict(to=("office@example.edu",), cc=("Me+x@example.com",)),
+               dict(from_addr="ana.lima@gmail.com", to=("analima@gmail.com",), cc=()),
+               dict(from_addr="ana.lima@gmail.com", to=("a.na.li.ma+x@googlemail.com",), cc=()),
+               dict(from_addr="analima@googlemail.com", to=("ana.lima@gmail.com",), cc=()))
+        for changes in own:
+            with self.subTest(changes=changes), self.assertRaises(MessageRefused) as ctx:
+                build_message(new_email(**changes))
+            self.assertEqual(str(ctx.exception), gmail.OWN_ADDRESS_REFUSED)
+        for changes in (dict(to=("me.too@example.com",)), dict(to=("me@example.co",)),
+                        dict(from_addr="ana.lima@gmail.com", to=("ana.lima@example.com",), cc=()),
+                        dict(from_addr="ana.lima@example.com", to=("analima@example.com",), cc=())):
+            with self.subTest(changes=changes):
+                build_message(new_email(**changes))   # another mailbox: fine
+
     def test_thread_headers_must_be_message_ids(self) -> None:
         for changes in (dict(in_reply_to="CAExample0001@mail.example.com"), dict(in_reply_to="<a b@example.com>"),
                         dict(in_reply_to="<a@example.com>\r\nBcc: eve@example.com"), dict(in_reply_to="<a@b><c@d>"),
@@ -361,9 +379,16 @@ class SenderTestCase(unittest.TestCase):
             info[google_auth.TOKEN_ASKED_KEY] = asked
         (self.data_dir / "google_token_work.json").write_text(json.dumps(info), encoding="utf-8")
 
+    def bind(self, *, confirmed: bool = True) -> None:
+        """Bind "work" to ME, as its first sign-in does, and (by default) confirm it as the dialog's
+        Yes does."""
+        self.bindings.bind("work", ME, SUB)
+        if confirmed:
+            self.assertTrue(self.bindings.confirm("work", ME))
+
     def ready_sender(self, **kwargs: Any) -> GmailSender:
         self.write_token()
-        self.bindings.bind("work", ME, SUB)
+        self.bind()
         return self.sender(**kwargs)
 
     def sender(self, *, refresh: Any = None) -> GmailSender:
@@ -411,7 +436,7 @@ class SendTests(SenderTestCase):
 
     def test_a_new_email_has_no_thread_id(self) -> None:
         self.write_token()
-        self.bindings.bind("work", ME, SUB)
+        self.bind()
         sent = self.sender().send(new_email(account="work", from_addr=ME))
         ((kwargs, _),) = self.service.calls
         self.assertEqual(set(kwargs["body"]), {"raw"})
@@ -422,7 +447,7 @@ class SendTests(SenderTestCase):
         self.assertEqual(error.problem, PROBLEM_SIGNED_OUT)
         self.assertIn("nothing was sent", str(error))
         self.write_token(scopes=SCOPES[:4], asked=SCOPES)   # sending was not allowed (a box unticked)
-        self.bindings.bind("work", ME, SUB)
+        self.bind()
         error = self.fails(self.sender(), kind=GmailAuthError)
         self.assertEqual(error.problem, PROBLEM_SCOPE)
         self.assertIn("nothing was sent", str(error))
@@ -430,7 +455,7 @@ class SendTests(SenderTestCase):
 
     def test_the_bound_account_must_be_the_signed_in_one(self) -> None:
         self.write_token(sub=None)   # a sign-in that never said which account it is
-        self.bindings.bind("work", ME, SUB)
+        self.bind()
         self.assertEqual(self.fails(self.sender(), kind=GmailAuthError).problem, PROBLEM_IDENTITY)
         self.write_token(sub="100000000000000000002")   # another Google account's token
         error = self.fails(self.sender(), kind=GmailAuthError)
@@ -438,7 +463,7 @@ class SendTests(SenderTestCase):
         self.write_token()
         self.bindings.unbind("work")   # not bound at all
         self.assertEqual(self.fails(self.sender(), kind=GmailAuthError).problem, PROBLEM_IDENTITY)
-        self.bindings.bind("work", ME, SUB)
+        self.bind()
         error = self.fails(self.sender(), reply(from_addr="other@example.edu"), kind=GmailAuthError)
         self.assertIn("not the one on the card", str(error))
         self.assertNotIn("other@example.edu", str(error))
@@ -453,6 +478,22 @@ class SendTests(SenderTestCase):
         self.assertNotIn("eve@example.com", str(error))
         self.fails(sender, reply(to=(ME,)), kind=MessageRefused)   # its own address
         self.assertEqual(self.service.calls, [])
+
+    def test_never_to_the_sending_account_itself(self) -> None:
+        """The account's own mailbox in any spelling, in To or Cc, alone or with others: refused before
+        anything goes out (the alias bound to the card's only recipient included)."""
+        sender = self.ready_sender()
+        for to, cc in (((ME,), ()), (("YOU@example.edu",), ()), (("you+notes@example.edu",), ()),
+                       (("ana@example.edu",), ("You+x@example.edu",)), (("ana@example.edu", ME), ())):
+            with self.subTest(to=to, cc=cc):
+                error = self.fails(sender, reply(to=to, cc=cc), kind=MessageRefused)
+                self.assertEqual(str(error), gmail.OWN_ADDRESS_REFUSED)
+                self.assertNotIn("@", str(error))
+        self.fails(sender, reply(from_addr="you+x@example.edu", to=(ME,)), kind=MessageRefused)
+        self.assertEqual(self.fails(sender, reply(from_addr="other@example.edu"), kind=GmailAuthError).problem,
+                         PROBLEM_IDENTITY)
+        self.assertEqual(self.service.calls, [])
+        self.assertEqual(sender.send(reply(to=("you.too@example.edu",))).message_id, "18c0ffee000000aa")
 
     def test_http_answers(self) -> None:
         cases = (
@@ -562,7 +603,7 @@ class SendTests(SenderTestCase):
             raise RefreshError("invalid_grant: Token has been expired or revoked.", {"error": "invalid_grant"})
 
         self.write_token(expired=True)
-        self.bindings.bind("work", ME, SUB)
+        self.bind()
         sender = self.sender(refresh=refresh)
         with self.assertLogs("briefing_reader.google_auth", level="WARNING"):
             error = self.fails(sender, kind=GmailAuthError)
@@ -611,27 +652,83 @@ class ReadyAndSignInTests(SenderTestCase):
         self.write_token(scopes=SCOPES[:4], asked=SCOPES)   # asked for sending, a box was unticked
         self.assertEqual(self.sender().ready()[0], PROBLEM_SCOPE)
         self.assertIn("sending email for the work account", self.sender().ready()[1])
-        self.bindings.bind("work", ME, SUB)
+        self.bind()
         self.write_token(scopes=SCOPES[:4], asked=SCOPES[:4])   # "gmail_send" was added since
         self.assertEqual(self.sender().ready(),
                          (PROBLEM_SIGNED_OUT, "Sending email needs one more Google sign-in for the work account"))
         self.bindings.unbind("work")
         self.write_token()
         self.assertEqual(self.sender().ready()[0], PROBLEM_IDENTITY)   # not bound yet
-        self.bindings.bind("work", ME, SUB)
+        self.bind(confirmed=False)   # bound by a first sign-in, not confirmed yet
+        self.assertEqual(self.sender().ready(),
+                         (PROBLEM_CONFIRM, "You haven't confirmed yet that this is the right Google account for the "
+                                           "work account"))
+        self.assertEqual(self.sender().pending_confirmation(), ME)
+        self.bind()
         self.assertEqual(self.sender().ready(), ("", ""))
+        self.assertEqual(self.sender().pending_confirmation(), "")
         self.assertTrue(self.sender().is_signed_in())
         self.assertEqual(self.sender().from_address(), ME)
         self.secret_path.unlink()
         self.assertEqual(self.sender().ready()[0], PROBLEM_SETUP)
 
-    def test_sign_in_binds_and_allows_sending(self) -> None:
+    def test_sign_in_binds_and_allows_sending_once_confirmed(self) -> None:
         token = self.id_token()
         self.flow_results = [self.creds(token)]
         sender = self.sender()
         sender.sign_in()
-        self.assertEqual((sender.ready(), sender.from_address()), (("", ""), ME))
+        # A first sign-in binds, but nothing is sent before you confirm it is the right account.
+        self.assertEqual((sender.ready()[0], sender.from_address(), sender.pending_confirmation()),
+                         (PROBLEM_CONFIRM, ME, ME))
+        error = self.fails(sender, kind=GmailAuthError)
+        self.assertEqual(error.problem, PROBLEM_CONFIRM)
+        self.assertIn("nothing was sent", str(error))
+        self.assertNotIn(ME, str(error))
+        self.assertEqual(self.service.calls, [])
+        self.assertFalse(sender.confirm_account("someone.else@example.edu"))   # not the address it showed
+        self.assertEqual(sender.ready()[0], PROBLEM_CONFIRM)
+        self.assertTrue(sender.confirm_account(" YOU@example.edu "))
+        self.assertEqual((sender.ready(), sender.pending_confirmation()), (("", ""), ""))
+        on_disk = json.loads((self.data_dir / "accounts.json").read_text(encoding="utf-8"))
+        self.assertIs(on_disk["work"]["confirmed"], True)
+        self.assertTrue(on_disk["work"]["confirmed_at"])
+        self.assertEqual(self.sender().ready(), ("", ""))   # the next start: still confirmed
         self.assertEqual(sender.send(reply()).message_id, "18c0ffee000000aa")
+
+    def test_disconnect_forgets_the_sign_in_and_the_binding(self) -> None:
+        sender = self.ready_sender()
+        with self.assertLogs("briefing_reader.google_auth", level="INFO"):
+            sender.disconnect()
+        self.assertFalse((self.data_dir / "google_token_work.json").exists())
+        self.assertEqual((sender.from_address(), sender.pending_confirmation()), ("", ""))
+        self.assertEqual(sender.ready()[0], PROBLEM_SIGNED_OUT)
+        self.assertEqual(self.fails(sender, kind=GmailAuthError).problem, PROBLEM_SIGNED_OUT)
+        self.flow_results = [self.creds(self.id_token())]
+        sender.sign_in()   # the next sign-in binds again, unconfirmed
+        self.assertEqual(sender.ready()[0], PROBLEM_CONFIRM)
+        self.assertEqual((sender.change_problem()[0], sender.needs_confirmation()), (PROBLEM_CONFIRM, True))
+        self.assertEqual(self.service.calls, [])
+
+    def test_a_disconnect_that_cannot_delete_the_sign_in_keeps_the_binding(self) -> None:
+        """"No, use another account" while the token file is locked: the binding stays (unconfirmed,
+        so nothing is sent) and the caller is told; no sign-in may start over the old one."""
+        self.write_token()
+        self.bind(confirmed=False)
+        sender = self.sender()
+        token = self.data_dir / "google_token_work.json"
+        real_unlink = Path.unlink
+
+        def locked(path: Path, *args: Any, **kwargs: Any) -> None:
+            if path == token:
+                raise PermissionError(13, "The process cannot access the file")
+            real_unlink(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "unlink", locked),                 self.assertLogs("briefing_reader.google_auth", level="WARNING"),                 self.assertRaises(google_auth.AccountError):
+            sender.disconnect()
+        self.assertTrue(token.exists())
+        self.assertEqual((sender.pending_confirmation(), sender.ready()[0]), (ME, PROBLEM_CONFIRM))
+        self.assertEqual(self.fails(sender, kind=GmailAuthError).problem, PROBLEM_CONFIRM)
+        self.assertEqual(self.service.calls, [])
 
     def test_a_token_of_the_calendar_only_version_needs_a_first_send_sign_in(self) -> None:
         """Phase 2 tokens (calendar only, no account id, never asked for sending): the calendar works

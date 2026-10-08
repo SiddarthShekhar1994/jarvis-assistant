@@ -34,9 +34,11 @@ from briefing_reader.google_auth import (
     FEATURE_SCOPES,
     LEGACY_TOKEN,
     PROBLEM_BLOCKED,
+    PROBLEM_CONFIRM,
     PROBLEM_DENIED,
     PROBLEM_EXPIRED,
     PROBLEM_FAILED,
+    PROBLEM_IDENTITY,
     PROBLEM_SCOPE,
     PROBLEM_SETUP,
     PROBLEM_SIGNED_OUT,
@@ -635,6 +637,7 @@ class IdentityTests(AuthTestCase):
         self.flow.results = [self.creds()]
         work = self.bound_account()
         work.sign_in()
+        self.assertTrue(work.confirm_binding("ana@example.edu"))   # only a binding you confirmed refuses
         before = work.token_path.read_bytes()
         intruder = self.creds(sub=SUB_B, email="eve@example.com")
         self.flow.results = [intruder]
@@ -653,7 +656,9 @@ class IdentityTests(AuthTestCase):
 
     def test_an_account_bound_to_another_alias_is_refused(self) -> None:
         self.flow.results = [self.creds()]
-        self.bound_account("personal").sign_in()
+        personal = self.bound_account("personal")
+        personal.sign_in()
+        self.assertTrue(personal.confirm_binding("ana@example.edu"))
         self.flow.results = [self.creds()]   # the same Google account again, now for "work"
         work = self.bound_account("work")
         with self.assertLogs(AUTH_LOGGER, level="WARNING"), self.assertRaises(AccountAuthError) as ctx:
@@ -663,6 +668,7 @@ class IdentityTests(AuthTestCase):
         self.assertFalse(work.token_path.exists())
         self.assertIsNone(work.binding())
         self.bindings.bind("lab-2", "lab@example.edu", SUB_B)
+        self.bindings.confirm("lab-2", "lab@example.edu")
         self.flow.results = [self.creds(sub=SUB_B, email="lab@example.edu")]
         with self.assertLogs(AUTH_LOGGER, level="WARNING"), self.assertRaises(AccountAuthError) as ctx:
             work.sign_in()
@@ -765,6 +771,186 @@ class IdentityTests(AuthTestCase):
         self.bound_account().sign_in()
         self.assert_redacted(creds.id_token)
 
+    def test_a_first_binding_waits_for_your_confirmation(self) -> None:
+        """Google's chooser makes it easy to pick the wrong account: a new binding is asked about once
+        ("Signed in as X for 'work' - is that right?") and kept confirmed in accounts.json."""
+        self.flow.results = [self.creds()]
+        work = self.bound_account()
+        self.assertEqual((work.pending_confirmation(), work.binding_confirmed()), ("", False))   # not bound
+        work.sign_in()
+        self.assertEqual((work.pending_confirmation(), work.binding_confirmed(), work.identity_confirmed()),
+                         ("ana@example.edu", False, True))
+        self.assertFalse(work.confirm_binding("eve@example.com"))   # not the address the question showed
+        self.assertEqual(work.pending_confirmation(), "ana@example.edu")
+        with self.assertLogs(AUTH_LOGGER, level="INFO") as logs:
+            self.assertTrue(work.confirm_binding(" Ana@Example.edu "))
+        self.assertIn("Google (work): you confirmed the account it is bound to", "\n".join(logs.output))
+        self.assertNotIn("ana@example.edu", "\n".join(logs.output))
+        self.assertEqual((work.pending_confirmation(), work.binding_confirmed()), ("", True))
+        on_disk = json.loads((self.data_dir / "accounts.json").read_text(encoding="utf-8"))
+        self.assertIs(on_disk["work"]["confirmed"], True)
+        self.assertTrue(on_disk["work"]["confirmed_at"])
+        self.assertEqual(self.bound_account().pending_confirmation(), "")   # the next start
+        self.flow.results = [self.creds()]
+        work.sign_in()   # the same account again: still confirmed
+        self.assertEqual(work.pending_confirmation(), "")
+        self.flow.results = [self.creds(email="ana.lima@example.edu")]   # same account, a new address
+        work.sign_in()
+        self.assertEqual(work.pending_confirmation(), "ana.lima@example.edu")   # asked again
+        with self.assertLogs(AUTH_LOGGER, level="INFO"):
+            work.disconnect()
+        self.assertEqual((work.pending_confirmation(), work.binding_confirmed()), ("", False))
+        self.flow.results = [self.creds(sub=SUB_B, email="ben@example.edu")]
+        work.sign_in()   # "No, use another account": the next sign-in binds, unconfirmed again
+        self.assertEqual(work.pending_confirmation(), "ben@example.edu")
+        unbound = GoogleAccount("", client_secret_path=self.secret_path, token_path=self.root / "t.json")
+        self.assertEqual((unbound.pending_confirmation(), unbound.confirm_binding("ana@example.edu")), ("", False))
+
+    def test_a_binding_of_the_older_version_is_asked_about_once(self) -> None:
+        self.bindings.path.parent.mkdir(parents=True, exist_ok=True)
+        self.bindings.path.write_text(json.dumps({"personal": {"email": "ana@example.edu", "sub": SUB_A,
+                                                               "bound_at": "2026-10-07T19:00:29-07:00"}}),
+                                      encoding="utf-8")
+        personal = self.bound_account("personal")
+        self.assertEqual(personal.pending_confirmation(), "ana@example.edu")
+        self.assertTrue(personal.confirm_binding("ana@example.edu"))
+        on_disk = json.loads(self.bindings.path.read_text(encoding="utf-8"))["personal"]
+        self.assertEqual((on_disk["bound_at"], on_disk["confirmed"]), ("2026-10-07T19:00:29-07:00", True))
+
+    def test_an_unconfirmed_binding_never_locks_the_alias(self) -> None:
+        """The live case: the wrong account was picked, the question closed unanswered, then the
+        sign-in was lost (expired, revoked). Signing in with the RIGHT account must not be refused:
+        it replaces the binding you never confirmed, unconfirmed, and is asked about."""
+        self.flow.results = [self.creds(sub=SUB_B, email="eve@example.com")]   # the wrong account
+        personal = self.bound_account("personal")
+        personal.sign_in()
+        self.assertEqual(personal.pending_confirmation(), "eve@example.com")
+        with self.assertLogs(AUTH_LOGGER, level="WARNING"):
+            personal.forget("Google rejected it", problem=PROBLEM_EXPIRED)
+        self.flow.results = [self.creds()]   # now the right one
+        with self.assertLogs(AUTH_LOGGER, level="INFO") as logs:
+            personal.sign_in()
+        self.assertIn("Google (personal): bound to another Google account (you had not confirmed the earlier one)",
+                      "\n".join(logs.output))
+        for private in ("eve@example.com", "ana@example.edu", SUB_A, SUB_B):
+            self.assertNotIn(private, "\n".join(logs.output))
+        binding = personal.binding()
+        self.assertEqual((binding.sub, binding.email, binding.confirmed), (SUB_A, "ana@example.edu", False))
+        self.assertEqual(personal.pending_confirmation(), "ana@example.edu")   # asked about, not trusted
+        self.assertEqual(personal.change_problem()[0], PROBLEM_CONFIRM)
+        self.assertTrue(personal.identity_confirmed())
+        # A binding you DID confirm still refuses another account (and keeps its own sign-in).
+        self.assertTrue(personal.confirm_binding("ana@example.edu"))
+        self.flow.results = [self.creds(sub=SUB_B, email="eve@example.com")]
+        with self.assertLogs(AUTH_LOGGER, level="WARNING"), self.assertRaises(AccountAuthError) as ctx:
+            personal.sign_in()
+        self.assertEqual(ctx.exception.problem, PROBLEM_IDENTITY)
+        self.assertEqual((personal.binding().sub, personal.binding().confirmed), (SUB_A, True))
+        with self.assertRaises(ValueError):   # the bindings never replace a confirmed one either
+            self.bindings.bind("personal", "eve@example.com", SUB_B)
+
+    def test_swapped_bindings_can_be_fixed_in_the_app(self) -> None:
+        """Both names bound to each other's account, neither confirmed (the live incident's likely
+        state). "No, use another account" on personal, then picking the account work holds, moves it
+        to personal (one Google account is one name); work then knows no account and signs in again."""
+        self.flow.results = [self.creds(sub=SUB_B, email="ben@work.example.edu")]   # personal picked WORK
+        personal = self.bound_account("personal")
+        personal.sign_in()
+        self.flow.results = [self.creds(email="ana@example.com")]   # work picked PERSONAL
+        work = self.bound_account("work")
+        work.sign_in()
+        with self.assertLogs(AUTH_LOGGER, level="INFO"):
+            personal.disconnect()   # "No, use another account"
+        self.flow.results = [self.creds(email="ana@example.com")]   # the right one, held by work
+        with self.assertLogs(AUTH_LOGGER, level="INFO") as logs:
+            personal.sign_in()
+        text = "\n".join(logs.output)
+        self.assertIn("Google (work): no longer bound to a Google account", text)
+        self.assertNotIn("ana@example.com", text)
+        self.assertEqual((personal.binding().sub, personal.pending_confirmation()), (SUB_A, "ana@example.com"))
+        self.assertIsNone(work.binding())
+        # work's saved sign-in still names that account: nothing is sent or changed for it until
+        # it signs in again (and is asked about).
+        self.assertEqual(work.change_problem()[0], PROBLEM_IDENTITY)
+        self.assertFalse(work.identity_confirmed())
+        self.flow.results = [self.creds(sub=SUB_B, email="ben@work.example.edu")]
+        work.sign_in()   # the account personal had (released by the disconnect) is free now
+        self.assertEqual(work.pending_confirmation(), "ben@work.example.edu")
+        # An account you confirmed for another name is never taken.
+        self.assertTrue(work.confirm_binding("ben@work.example.edu"))
+        self.flow.results = [self.creds(sub=SUB_B, email="ben@work.example.edu")]
+        with self.assertLogs(AUTH_LOGGER, level="WARNING"), self.assertRaises(AccountAuthError) as ctx:
+            personal.sign_in()
+        self.assertIn("already set up as the work account", str(ctx.exception))
+        self.assertEqual(personal.binding().sub, SUB_A)
+        with self.assertRaises(ValueError):
+            self.bindings.bind("lab", "ben@work.example.edu", SUB_B, release="work")
+
+    def test_changes_need_a_confirmed_binding_of_the_saved_sign_in(self) -> None:
+        """change_problem fails closed: only the token's own, confirmed account may change things."""
+        work = self.bound_account()
+        self.assertEqual(work.change_problem()[0], PROBLEM_SIGNED_OUT)   # no saved sign-in
+        self.flow.results = [self.creds()]
+        work.sign_in()
+        self.assertEqual(work.change_problem()[0], PROBLEM_CONFIRM)
+        self.assertTrue(work.needs_confirmation())
+        work.confirm_binding("ana@example.edu")
+        self.assertEqual(work.change_problem(), ("", ""))
+        self.assertFalse(work.needs_confirmation())
+        # accounts.json deleted (or one entry): the token still names the account -> unknown.
+        self.bindings.path.unlink()
+        problem, message = work.change_problem()
+        self.assertEqual(problem, PROBLEM_IDENTITY)
+        self.assertIn("sign in again to confirm it", message)
+        self.assertNotIn("@", message)
+        self.assertTrue(work.needs_confirmation())
+        # accounts.json unreadable (a slip while editing it by hand): unknown too, never "empty".
+        self.bindings.path.write_text('{"work": {"email": "ana@example.edu", "sub": "%s",}' % SUB_A,
+                                      encoding="utf-8")
+        with self.assertLogs(AUTH_LOGGER, level="WARNING"):
+            self.assertEqual(work.change_problem()[0], PROBLEM_IDENTITY)
+        # Bound, confirmed, but the saved sign-in is another account's (or names none).
+        self.bindings.path.unlink()
+        self.bindings.bind("work", "ben@example.edu", SUB_B)
+        self.bindings.confirm("work", "ben@example.edu")
+        self.assertEqual(work.change_problem()[0], PROBLEM_IDENTITY)
+        info = self.saved(work)
+        info.pop(google_auth.TOKEN_SUB_KEY)
+        work.token_path.write_text(json.dumps(info), encoding="utf-8")
+        self.assertEqual(work.change_problem()[0], PROBLEM_IDENTITY)
+        # A token that names no account and no binding (older versions): the calendar as before.
+        self.bindings.path.unlink()
+        self.assertEqual(work.change_problem(), ("", ""))
+        # The one-account setup never binds and is never held back.
+        legacy = GoogleAccount("", client_secret_path=self.secret_path, token_path=self.root / "t.json")
+        self.assertEqual((legacy.change_problem(), legacy.needs_confirmation()), (("", ""), False))
+
+    def test_disconnect_keeps_the_binding_when_the_sign_in_cannot_be_deleted(self) -> None:
+        """"No, use another account" while the token file is locked: nothing is unbound (a token left
+        without its binding would be an account nobody confirmed) and the caller is told."""
+        self.flow.results = [self.creds(sub=SUB_B, email="eve@example.com")]
+        work = self.bound_account()
+        work.sign_in()
+        real_unlink = Path.unlink
+
+        def locked(path: Path, *args: Any, **kwargs: Any) -> None:
+            if path == work.token_path:
+                raise PermissionError(13, "The process cannot access the file")
+            real_unlink(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "unlink", locked), self.assertLogs(AUTH_LOGGER, level="WARNING") as logs, \
+                self.assertRaises(AccountError) as ctx:
+            work.disconnect()
+        self.assertIn("Could not delete the work account's saved Google sign-in", str(ctx.exception))
+        self.assertIn("could not delete the saved sign-in", "\n".join(logs.output))
+        self.assertTrue(work.token_path.exists())
+        self.assertEqual((work.binding().sub, work.pending_confirmation()), (SUB_B, "eve@example.com"))
+        self.assertEqual(work.change_problem()[0], PROBLEM_CONFIRM)   # still nothing sent or changed
+        with self.assertLogs(AUTH_LOGGER, level="INFO"):
+            work.disconnect()   # once the file is free it works
+        self.assertFalse(work.token_path.exists())
+        self.assertIsNone(work.binding())
+
     def test_disconnect_forgets_the_sign_in_and_the_account(self) -> None:
         self.flow.results = [self.creds()]
         work = self.bound_account()
@@ -818,6 +1004,25 @@ class AccountBindingsTests(AuthTestCase):
             self.assertEqual(self.bindings.get("work"), google_auth.Binding("ana@example.edu", SUB_A, ""))
         self.assertIn("Ignored 4 malformed account binding(s)", "\n".join(logs.output))
         self.assertNotIn("eve@example.com", "\n".join(logs.output))
+
+    def test_confirm(self) -> None:
+        with self.assertLogs(AUTH_LOGGER, level="INFO"):
+            self.bindings.bind("work", "ana@example.edu", SUB_A)
+        self.assertFalse(self.bindings.get("work").confirmed)
+        self.assertFalse(self.bindings.confirm("personal", "ana@example.edu"))   # not bound
+        self.assertFalse(self.bindings.confirm("work", "eve@example.com"))
+        with self.assertLogs(AUTH_LOGGER, level="INFO"):
+            self.assertTrue(self.bindings.confirm("work", "ANA@example.edu"))
+        self.assertTrue(self.bindings.confirm("work", "ana@example.edu"))   # again: nothing changes
+        binding = self.bindings.get("work")
+        self.assertEqual((binding.confirmed, binding.email, binding.sub), (True, "ana@example.edu", SUB_A))
+        self.assertTrue(binding.confirmed_at)
+        self.assertEqual(self.path.read_bytes().count(b"\r"), 0)
+        data = json.loads(self.path.read_text(encoding="utf-8"))
+        data["work"]["confirmed"] = "true"   # only a JSON true counts
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+        self.assertFalse(AccountBindings(self.path).get("work").confirmed)
+        self.assertFalse(self.bindings.confirm("work", 5))   # type: ignore[arg-type]
 
     def test_a_failed_write_keeps_the_binding_for_this_run(self) -> None:
         blocked = AccountBindings(self.data_dir / "accounts.json" / "not-a-folder" / "accounts.json")

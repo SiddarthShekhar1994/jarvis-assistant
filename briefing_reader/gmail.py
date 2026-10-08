@@ -10,8 +10,9 @@ What build_message refuses (GmailError, before anything goes anywhere):
 
 - recipients: To and Cc together name 1 to MAX_RECIPIENTS addresses, at least one in To, each a
   plain address as actions.email_address writes it (no display name: a name never decides who
-  an address is), no repeats, never the sender's own; there is never a Bcc header and never an
-  attachment (one text/plain part).
+  an address is), no repeats, never the sender's own mailbox (recipients.same_mailbox: case,
+  spaces, a "+tag" or Gmail's dots aside); there is never a Bcc header and never an attachment
+  (one text/plain part).
 - headers: a line break of any kind (CR, LF, U+0085, U+2028, U+2029, VT, FF), a control or
   invisible format character, an RFC 2047 encoded word ("=?...?=") in the subject (Python and
   mail apps decode it, so recipients would see other text than the card shows), a subject over
@@ -28,10 +29,12 @@ In-Reply-To / References when the line gave the Message-ID.
 google_auth.single_send_http, so one approval sends at most one message: a 5xx answer, or no
 answer after the request went out, is GmailUnknownOutcome (it may have been sent; never
 retried). It never opens the browser and refuses unless the saved sign-in is the Google account
-bound to the alias (GoogleAccount.identity_confirmed) and ``from_addr`` is that account's
-address. Logs carry the alias ("work", "personal", else "other"), Gmail's message id, recipient
-counts, HTTP statuses and Google's reason codes only; never addresses, subjects or text, and
-error messages never quote an address.
+bound to the alias (GoogleAccount.identity_confirmed), you confirmed that binding
+(GoogleAccount.pending_confirmation is "": PROBLEM_CONFIRM otherwise), ``from_addr`` is that
+account's address and no recipient is that account's own mailbox. Logs carry the alias
+("work", "personal", else "other"), Gmail's message id, recipient counts, HTTP statuses and
+Google's reason codes only; never addresses, subjects or text, and error messages never quote
+an address.
 
 A Gmail answer never signs the account out of its other features: the saved sign-in is shared
 with the alias's calendar, so only a 401 (or a refresh Google rejects: invalid_grant) deletes it.
@@ -64,6 +67,7 @@ from .config import redact
 from .google_auth import (
     GMAIL_FEATURE,
     PROBLEM_BLOCKED,
+    PROBLEM_CONFIRM,
     PROBLEM_DENIED,
     PROBLEM_EXPIRED,
     PROBLEM_FAILED,
@@ -83,6 +87,7 @@ from .google_auth import (
     single_send_http,
 )
 from .google_auth import _register_credentials as _register_credentials  # noqa: PLC0414
+from .recipients import own_recipients
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +97,7 @@ BODY_CAP = 5000
 SEND_SETUP_HINT = "Set up email sending: README step 8b"
 NOTHING_SENT = "nothing was sent"
 UNKNOWN_SENT = ("the message may or may not have been sent - check Sent mail before retrying")
+OWN_ADDRESS_REFUSED = "The message would go to the sending account's own address"
 GMAIL_THREAD_LINK = "https://mail.google.com/mail/?authuser={user}#all/{thread}"
 GMAIL_DEFAULT_LINK = "https://mail.google.com/mail/#all/{thread}"
 
@@ -195,8 +201,8 @@ def build_message(mail: OutgoingMail) -> EmailMessage:
     from_addr = mail.from_addr
     if from_addr and email_address(from_addr) != from_addr:
         raise MessageRefused("The sender is not a plain email address")
-    if from_addr and from_addr.casefold() in {address.casefold() for address in to + cc}:
-        raise MessageRefused("The sender's own address can't be a recipient")
+    if from_addr and own_recipients(to + cc, from_addr):
+        raise MessageRefused(OWN_ADDRESS_REFUSED)
     thread_id = mail.thread_id
     if thread_id and not _GMAIL_ID_RE.fullmatch(thread_id):
         raise MessageRefused("The Gmail thread id is not valid")
@@ -423,7 +429,9 @@ class GmailSender:
         sign-in (PROBLEM_SIGNED_OUT also while the sign-in never asked for sending: a token of an
         older version, or "gmail_send" added since). PROBLEM_SCOPE: signed in, but sending was not
         allowed (a box was unticked, or Gmail answered so). PROBLEM_IDENTITY: Jarvis does not know
-        (or a sign-in picked another) Google account. PROBLEM_FAILED: Gmail refused access (403).
+        (or a sign-in picked another) Google account. PROBLEM_CONFIRM: signed in and bound, but
+        you have not confirmed yet that it is the right Google account for this alias.
+        PROBLEM_FAILED: Gmail refused access (403).
         """
         if not self.is_configured():
             return PROBLEM_SETUP, f"{SEND_SETUP_HINT} (the OAuth client file was not found)"
@@ -453,11 +461,50 @@ class GmailSender:
             if problem == PROBLEM_IDENTITY and message:
                 return problem, message
             return PROBLEM_IDENTITY, self._unconfirmed_message()
+        if self._account.pending_confirmation():
+            return PROBLEM_CONFIRM, self.confirm_message()
         return "", ""
 
     def _unconfirmed_message(self) -> str:
         return (f"Jarvis doesn't know yet which Google account the {self.alias} account is - sign in again "
                 "to confirm it")
+
+    def confirm_message(self) -> str:
+        """Why nothing is sent while the binding is not confirmed (no address in it)."""
+        return (f"You haven't confirmed yet that this is the right Google account for the {self.alias} "
+                "account")
+
+    # ---- the first sign-in's question: is this the right Google account? ----------------
+
+    def pending_confirmation(self) -> str:
+        """The bound account's address while you have not confirmed it for this alias ("" when
+        confirmed or not bound). Nothing is sent meanwhile. No network, no lock."""
+        return self._account.pending_confirmation()
+
+    def confirm_account(self, address: str) -> bool:
+        """You answered Yes: ``address`` is this alias's Google account (kept in accounts.json).
+        False when the alias is not bound to that address (any more)."""
+        return self._account.confirm_binding(address)
+
+    def change_problem(self) -> tuple[str, str]:
+        """google_auth.GoogleAccount.change_problem (fails closed; no network, no lock)."""
+        return self._account.change_problem()
+
+    def needs_confirmation(self) -> bool:
+        """The alias has no binding you confirmed: its next sign-in leaves one to confirm first."""
+        return self._account.needs_confirmation()
+
+    def disconnect(self) -> None:
+        """You answered "No, use another account": forget the saved sign-in and the binding (the
+        next sign-in may pick any account and asks again). Raises google_auth.AccountError, the
+        binding kept, when the saved sign-in could not be deleted."""
+        with self._lock:
+            try:
+                self._account.disconnect()
+            finally:
+                self._service = None
+                self._blocked = ""
+                self._refused = ("", "")
 
     # ---- the browser ---------------------------------------------------------------------
 
@@ -500,6 +547,8 @@ class GmailSender:
             if not mail.from_addr or mail.from_addr.casefold() != bound.casefold():
                 raise GmailAuthError(f"The {self.alias} account's address is not the one on the card; "
                                      f"{NOTHING_SENT}", problem=PROBLEM_IDENTITY)
+            if own_recipients(mail.to + mail.cc, bound):   # build_message checked from_addr: and the account?
+                raise MessageRefused(OWN_ADDRESS_REFUSED)
             service = self._get_service()
             body: dict[str, Any] = {"raw": raw}
             if mail.thread_id:

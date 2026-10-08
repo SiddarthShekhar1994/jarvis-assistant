@@ -422,6 +422,20 @@ class MailCardTests(unittest.TestCase):
         self.assertLessEqual(chips.minimumSizeHint().width(), chips.width())
         card.close()
 
+    def test_the_sending_account_itself_is_shown_red_with_its_badge(self) -> None:
+        card = self.make(width=300)
+        card.set_recipients("personal (ana.lima@example.edu)",
+                            [hud.RecipientChip("ana.lima@example.edu", hud.RECIPIENT_OWN)])
+        QApplication.processEvents()
+        chips = card.recipients
+        self.assertEqual(chips.text(), "From: personal (ana.lima@example.edu)\n"
+                                       "To: ana.lima@example.edu (the sending account itself, never sent to)")
+        items = chips._layout(chips.sender_text(), *chips.chips(), chips.width())[1]
+        self.assertIn(("badge", hud.OWN_RECIPIENT_TEXT, hud.RECIPIENT_OWN),
+                      [(item[0], item[2], item[3]) for item in items if item[0] == "badge"])
+        self.assertLessEqual(chips.heightForWidth(chips.width()), chips.height() + 1)
+        card.close()
+
     def test_a_card_knows_when_it_does_not_show_all_of_the_message(self) -> None:
         """Few line breaks but long paragraphs, or a long subject: the card cuts them, and says so
         (Send then opens the Edit dialog to read it all first)."""
@@ -681,6 +695,64 @@ class MailEditDialogTests(unittest.TestCase):
         finally:
             gc.enable()
 
+    def test_the_sending_account_itself_must_be_removed_before_save(self) -> None:
+        dialog = self.make(to=[hud.RecipientChip("ana@example.edu", hud.RECIPIENT_OWN),
+                               hud.RecipientChip("ben@example.edu")])
+        got = []
+        dialog.saved.connect(lambda _id, values: got.append(values))
+        dialog.show()
+        QApplication.processEvents()
+        row = dialog.to_list.row("ana@example.edu")
+        self.assertEqual((row.badge.text(), row.badge.state(), row.confirm_box), (hud.OWN_RECIPIENT_TEXT,
+                                                                                hud.RECIPIENT_OWN, None))
+        row.badge.set_state(hud.RECIPIENT_CONFIRMED)   # it has no tick: it stays SENDING ACCOUNT
+        self.assertEqual(row.badge.text(), hud.OWN_RECIPIENT_TEXT)
+        self.assertEqual(dialog.to_list.own(), ["ana@example.edu"])
+        dialog.save_button.click()
+        self.assertEqual(got, [])
+        self.assertEqual(dialog.error(), hud.OWN_ROW_ERROR.format(address="ana@example.edu"))
+        row.remove_button.click()
+        QApplication.processEvents()
+        self.assertEqual(dialog.error(), "")   # the error goes with the row
+        dialog.save_button.click()
+        self.assertEqual([values["to"] for values in got], [["ben@example.edu"]])
+        dialog.close()
+
+    def test_every_kind_fits_a_small_screen_and_scrolls_inside(self) -> None:
+        """At any display scale the dialog stays inside the screen's available area: narrower when
+        the area is, and its fields scroll instead of the dialog outgrowing it."""
+        from unittest import mock
+
+        from PySide6.QtCore import QRect
+
+        paragraph = "The sampling plan is fine, but the budget table still uses last year's numbers. " * 4
+        cases = ((hud.EDIT_REPLY, dict(body="\n\n".join([paragraph] * 6), banner="Read all of it")),
+                 (hud.EDIT_RSVP, {}), (hud.EDIT_MOVE, {}), (hud.EDIT_CANCEL, {}))
+        for area in (QRect(0, 0, 420, 300), QRect(50, 40, 700, 360), QRect(0, 0, 1280, 672)):
+            for kind, options in cases:
+                with self.subTest(area=area.getRect(), kind=kind):
+                    if kind in hud.EDIT_MAIL_KINDS:
+                        dialog = self.make(kind, **options)
+                    else:
+                        dialog = hud.EditDialog("e1", kind, f"{kind} \u00b7 work", "Speaker series",
+                                                date_text="2026-10-08", start_text="2:00 PM", end_text="3:00 PM",
+                                                note="Moving to 2 PM so everyone can join.",
+                                                check_text="Google: Speaker series \u00b7 Thu Oct 8 \u00b7 2:00-3:00 PM")
+                    with mock.patch.object(dialog, "_area", return_value=area):
+                        dialog.open()
+                        QApplication.processEvents()
+                        frame = dialog.frameGeometry()
+                        self.assertTrue(area.contains(frame), (frame.getRect(), area.getRect()))
+                        save = dialog.save_button
+                        corner = save.mapToGlobal(save.rect().bottomRight())
+                        self.assertTrue(area.contains(corner))   # Save is always on screen
+                        bar = dialog.fields_scroll.verticalScrollBar()
+                        content = dialog.fields_scroll.widget()
+                        if content.height() > dialog.fields_scroll.viewport().height() + 1:
+                            self.assertGreater(bar.maximum(), 0)   # taller than the area: the fields scroll
+                        self.assertEqual(dialog.error(), "")
+                        dialog.close()
+
     def test_an_email_subject_can_be_changed(self) -> None:
         dialog = self.make(hud.EDIT_EMAIL, banner="Read all of it")
         self.assertFalse(dialog.subject_edit.isReadOnly())
@@ -691,6 +763,68 @@ class MailEditDialogTests(unittest.TestCase):
         self.assertEqual((values["subject"], values["body"]), ("Question about the lab", "Hello,\nIs the lab open?"))
         self.assertTrue(dialog.links_label.isHidden())
         dialog.close()
+
+
+class AccountDialogTests(unittest.TestCase):
+    """The first sign-in's question: is it the right Google account? Yes / No, use another account."""
+
+    def make(self, address: str = "ana.lima@example.edu", **options):
+        return hud.AccountDialog("personal", address, **options)
+
+    def test_the_question_and_the_answers(self) -> None:
+        dialog = self.make()
+        self.assertEqual(dialog.question_label.text(),
+                         'Signed in as ana.lima@example.edu for "personal" - is that right?')
+        self.assertEqual(dialog.question_label.textFormat(), Qt.TextFormat.PlainText)
+        self.assertIn("sends personal email and changes personal calendar events", dialog.detail_label.text())
+        self.assertIn("Nothing is sent or changed until you answer", dialog.detail_label.text())
+        self.assertEqual((dialog.yes_button.text(), dialog.no_button.text()),
+                         (hud.ACCOUNT_YES_TEXT, hud.ACCOUNT_NO_TEXT))
+        calendar_only = self.make(sends_mail=False)
+        self.assertNotIn("email", calendar_only.detail_label.text())
+        got = []
+        dialog.answered.connect(lambda alias, address, yes: got.append((alias, address, yes)))
+        dialog.open()
+        QApplication.processEvents()
+        self.assertFalse(dialog.yes_button.isDefault() or dialog.no_button.isDefault())
+        QTest.keyClick(dialog, Qt.Key.Key_Return)   # Enter answers nothing
+        self.assertEqual(got, [])
+        dialog.yes_button.click()
+        self.assertEqual(got, [("personal", "ana.lima@example.edu", True)])
+        self.assertFalse(dialog.isVisible())
+        again = self.make()
+        again.answered.connect(lambda alias, address, yes: got.append((alias, address, yes)))
+        again.open()
+        again.no_button.click()
+        self.assertEqual(got[-1], ("personal", "ana.lima@example.edu", False))
+        escaped = self.make()
+        escaped.answered.connect(lambda alias, address, yes: got.append((alias, address, yes)))
+        escaped.open()
+        QApplication.processEvents()
+        QTest.keyClick(escaped, Qt.Key.Key_Escape)   # closed without an answer: asked again later
+        self.assertEqual((len(got), escaped.isVisible()), (2, False))
+        calendar_only.close()
+
+    def test_a_long_address_wraps_and_the_dialog_fits_a_small_screen(self) -> None:
+        from unittest import mock
+
+        from PySide6.QtCore import QRect
+
+        address = "someone.with.a.really.long.address@subdomain.exampleuniversity.edu"
+        for area in (QRect(0, 0, 340, 260), QRect(0, 0, 1280, 672)):
+            with self.subTest(area=area.getRect()):
+                dialog = self.make(address)
+                with mock.patch.object(dialog, "_area", return_value=area):
+                    dialog.open()
+                    QApplication.processEvents()
+                    self.assertTrue(area.contains(dialog.frameGeometry()),
+                                    (dialog.frameGeometry().getRect(), area.getRect()))
+                    label = dialog.question_label
+                    self.assertLessEqual(label.heightForWidth(label.width()), label.height() + 1)   # wrapped, whole
+                    for button in (dialog.yes_button, dialog.no_button):
+                        self.assertTrue(dialog.rect().contains(button.geometry().translated(
+                            button.parentWidget().mapTo(dialog, button.parentWidget().rect().topLeft()))))
+                    dialog.close()
 
 
 class CardTextTests(unittest.TestCase):

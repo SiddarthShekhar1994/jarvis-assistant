@@ -1,5 +1,6 @@
-"""Tests for briefing_reader.recipients: the NEW RECIPIENT check and the hashed history of earlier
-recipients. Addresses are invented; nothing reads the owner's data folder."""
+"""Tests for briefing_reader.recipients: the own-address refusal (any spelling of the sending
+account's mailbox), the NEW RECIPIENT check and the hashed history of earlier recipients.
+Addresses are invented; nothing reads the owner's data folder."""
 
 from __future__ import annotations
 
@@ -15,14 +16,17 @@ from briefing_reader import recipients
 from briefing_reader.recipients import (
     KNOWN,
     NEW,
-    NO_RECIPIENT_LEFT,
+    NO_TO_PROBLEM,
     OWN,
     TRUSTED,
     RecipientHistory,
     address_key,
     classify,
     in_domains,
+    mailbox_key,
+    own_recipients,
     review,
+    same_mailbox,
 )
 
 LOGGER = "briefing_reader.recipients"
@@ -144,17 +148,67 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual((ticked.new, ticked.unconfirmed, ticked.ready),
                          (("eve@example.com", "cy@example.org"), (), True))
 
-    def test_the_own_address_is_not_a_recipient(self) -> None:
-        result = review(("ana@example.edu", "You@example.edu"), ("you@example.edu",), own="you@example.edu",
-                        confirmed={"ana@example.edu"})
-        self.assertEqual((result.to, result.cc, result.own_dropped), (("ana@example.edu",), (), True))
-        self.assertEqual(result.kinds, (("ana@example.edu", NEW), ("You@example.edu", OWN), ("you@example.edu", OWN)))
-        self.assertTrue(result.ready)
-        only_me = review(("you@example.edu",), ("cy@example.org",), own="you@example.edu", confirmed={"cy@example.org"})
-        self.assertEqual((only_me.problem, only_me.ready, only_me.cc), (NO_RECIPIENT_LEFT, False, ("cy@example.org",)))
-        unknown_own = review(("you@example.edu",), (), own="")   # the account is not confirmed yet
-        self.assertEqual((unknown_own.to, unknown_own.new, unknown_own.own_dropped),
-                         (("you@example.edu",), ("you@example.edu",), False))
+    def test_the_own_address_refuses_the_card(self) -> None:
+        """The sending account in To or Cc, written any way, is never quietly left out: the card is
+        refused until it is removed (it names the account and the address)."""
+        result = review(("ana@example.edu", "You@example.edu"), ("you+x@example.edu",), own="you@example.edu",
+                        account="work", confirmed={"ana@example.edu"})
+        self.assertEqual((result.to, result.cc), (("ana@example.edu", "You@example.edu"), ("you+x@example.edu",)))
+        self.assertEqual(result.own, ("You@example.edu", "you+x@example.edu"))
+        self.assertEqual(result.kinds, (("ana@example.edu", NEW), ("You@example.edu", OWN), ("you+x@example.edu", OWN)))
+        self.assertEqual(result.problem, "This would send to the work account (you@example.edu) itself - edit the "
+                                         "recipients")
+        self.assertFalse(result.ready)
+        self.assertEqual(result.unconfirmed, ())   # the own address is no NEW RECIPIENT to tick
+        removed = review(("ana@example.edu",), (), own="you@example.edu", account="work", confirmed={"ana@example.edu"})
+        self.assertEqual((removed.own, removed.problem, removed.ready), ((), "", True))
+        unknown_own = review(("you@example.edu",), (), own="")   # Jarvis doesn't know the account yet
+        self.assertEqual((unknown_own.to, unknown_own.new, unknown_own.own, unknown_own.problem),
+                         (("you@example.edu",), ("you@example.edu",), (), ""))
+        nobody = review((), ("cy@example.org",), own="you@example.edu", confirmed={"cy@example.org"})
+        self.assertEqual((nobody.problem, nobody.ready), (NO_TO_PROBLEM, False))
+
+    def test_an_alias_bound_to_the_cards_only_recipient(self) -> None:
+        """The live case: "personal" was bound to the work address by mistake, and the card's only
+        recipient is that work address. Nothing can be sent: the card says why."""
+        for own in ("ana.lima@example.edu", " Ana.Lima@Example.EDU ", "ana.lima+jarvis@example.edu"):
+            with self.subTest(own=own):
+                result = review(("ana.lima@example.edu",), (), own=own, account="personal",
+                                confirmed={"ana.lima@example.edu"})
+                self.assertEqual(result.own, ("ana.lima@example.edu",))
+                self.assertEqual(result.problem, recipients.OWN_RECIPIENT_NOTE.format(
+                    who=f"the personal account ({own.strip()})"))
+                self.assertFalse(result.ready)
+
+
+class MailboxTests(unittest.TestCase):
+    def test_spellings_of_one_mailbox(self) -> None:
+        same = (("ana@example.edu", "ANA@Example.EDU"), ("ana@example.edu", "  ana@example.edu "),
+                ("ana@example.edu", "ana+notes@example.edu"), ("ana+a@example.edu", "ana+b@example.edu"),
+                ("ana.lima@gmail.com", "analima@gmail.com"), ("ana.lima@gmail.com", "A.Na.Lima+x@googlemail.com"),
+                ("ana@example.edu.", "ana@example.edu"))
+        for first, second in same:
+            with self.subTest(first=first, second=second):
+                self.assertTrue(same_mailbox(first, second))
+                self.assertEqual(mailbox_key(first), mailbox_key(second))
+        other = (("ana.lima@example.edu", "analima@example.edu"),   # dots count outside Gmail
+                 ("ana@example.edu", "ana@example.com"), ("ana@example.edu", "anna@example.edu"),
+                 ("ana@example.edu", ""), ("", ""), ("not an address", "not an address"),
+                 ("+x@example.edu", "@example.edu"))
+        for first, second in other:
+            with self.subTest(first=first, second=second):
+                self.assertFalse(same_mailbox(first, second))
+        self.assertEqual(own_recipients(["ben@example.edu", "Ana+x@example.edu", "ana@example.edu"], "ana@example.edu"),
+                         ("Ana+x@example.edu", "ana@example.edu"))
+        self.assertEqual(own_recipients(["ana@example.edu"], ""), ())
+        self.assertEqual(mailbox_key(None), "")   # type: ignore[arg-type]
+
+    def test_the_own_kind_follows_the_mailbox(self) -> None:
+        kinds = classify(["Ana+lab@Example.edu", "ana.lima@gmail.com"], own="ana@example.edu",
+                         trusted_domains=("example.edu",), history=None)
+        self.assertEqual(kinds, {"Ana+lab@Example.edu": OWN, "ana.lima@gmail.com": NEW})
+        self.assertEqual(classify(["analima@googlemail.com"], own="ana.lima@gmail.com", trusted_domains=(),
+                                  history=None), {"analima@googlemail.com": OWN})
 
 
 if __name__ == "__main__":

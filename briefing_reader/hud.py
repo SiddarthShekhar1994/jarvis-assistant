@@ -3676,15 +3676,20 @@ class _DecisionButton(HudButton):
 RECIPIENT_KNOWN = "known"          # the account's trusted domains, or sent to through Jarvis before
 RECIPIENT_NEW = "new"              # red NEW RECIPIENT: Send asks to confirm it in the Edit dialog
 RECIPIENT_CONFIRMED = "confirmed"  # a new recipient ticked in the Edit dialog ("Send to <address>")
-RECIPIENT_OWN = "own"              # the sending account itself (never a recipient)
+RECIPIENT_OWN = "own"              # the sending account itself: never a recipient (Send refuses)
 NEW_RECIPIENT_TEXT = "NEW RECIPIENT"
 CONFIRMED_RECIPIENT_TEXT = "NEW " + MIDDLE_DOT + " CONFIRMED"
+OWN_RECIPIENT_TEXT = "SENDING ACCOUNT"
+_BADGE_TEXTS = {RECIPIENT_NEW: NEW_RECIPIENT_TEXT, RECIPIENT_CONFIRMED: CONFIRMED_RECIPIENT_TEXT,
+                RECIPIENT_OWN: OWN_RECIPIENT_TEXT}
+_RED_RECIPIENTS = (RECIPIENT_NEW, RECIPIENT_CONFIRMED, RECIPIENT_OWN)
 
 
 def _paint_recipient_badge(painter: QPainter, rect: QRectF, text: str, state: str, font: QFont) -> None:
-    """A NEW RECIPIENT badge: filled red while the address is not confirmed, outlined red once it is
-    ("NEW \u00b7 CONFIRMED"), on a card and in the Edit dialog alike."""
-    if state == RECIPIENT_NEW:
+    """A recipient's badge, on a card and in the Edit dialog alike: NEW RECIPIENT filled red while
+    the address is not confirmed, outlined red once it is ("NEW \u00b7 CONFIRMED"); SENDING ACCOUNT
+    filled red on the account's own address (Send refuses until it is removed)."""
+    if state in (RECIPIENT_NEW, RECIPIENT_OWN):
         painter.fillRect(rect, QColor(RED_LINE))
         painter.setPen(QColor("#1a0505"))
     else:
@@ -3697,7 +3702,7 @@ def _paint_recipient_badge(painter: QPainter, rect: QRectF, text: str, state: st
 
 @dataclass(frozen=True)
 class RecipientChip:
-    """One address on a Reply / Email card: ``state`` is RECIPIENT_KNOWN, _NEW or _CONFIRMED."""
+    """One address on a Reply / Email card: ``state`` is RECIPIENT_KNOWN, _NEW, _CONFIRMED or _OWN."""
 
     address: str
     state: str = RECIPIENT_KNOWN
@@ -3733,7 +3738,8 @@ class RecipientChips(QWidget):
     ``set_rows(sender, to, cc)``: ``sender`` is the From text ("work (ana@example.edu)"),
     ``to`` / ``cc`` RecipientChip items (an empty Cc has no row). A RECIPIENT_NEW chip is red
     with a NEW RECIPIENT badge (Send asks to confirm it in the Edit dialog first); a
-    RECIPIENT_CONFIRMED one is red with "NEW \u00b7 CONFIRMED". Every address is shown whole: a
+    RECIPIENT_CONFIRMED one is red with "NEW \u00b7 CONFIRMED"; a RECIPIENT_OWN one (the sending
+    account itself: Send refuses) is red with SENDING ACCOUNT. Every address is shown whole: a
     long one wraps inside its chip. Like the card's other texts it never gets shorter once it
     has been shown (a later, shorter list keeps the room), so the card never shrinks under the
     mouse. ``text()`` is what is shown, as plain text (also the accessible name and tooltip).
@@ -3793,7 +3799,8 @@ class RecipientChips(QWidget):
         """"From: work (ana@example.edu)\nTo: ana@example.edu, ben@example.edu (new recipient)"."""
         def names(chips: Sequence[RecipientChip]) -> str:
             words = {RECIPIENT_NEW: " (new recipient, not confirmed)",
-                     RECIPIENT_CONFIRMED: " (new recipient, confirmed)"}
+                     RECIPIENT_CONFIRMED: " (new recipient, confirmed)",
+                     RECIPIENT_OWN: " (the sending account itself, never sent to)"}
             return ", ".join(chip.address + words.get(chip.state, "") for chip in chips)
 
         lines = [f"From: {self._sender}"] if self._sender else []
@@ -3822,7 +3829,7 @@ class RecipientChips(QWidget):
         line_h = value.lineSpacing()
         caption_dy = max(0.0, (line_h - QFontMetricsF(self._caption_font).lineSpacing()) / 2)
         badge_w = {text: _text_advance(self._badge_font, text) + 2 * self._BADGE_PAD
-                   for text in (NEW_RECIPIENT_TEXT, CONFIRMED_RECIPIENT_TEXT)}
+                   for text in _BADGE_TEXTS.values()}
         y = 0.0
         first = True
         if sender:
@@ -3840,8 +3847,7 @@ class RecipientChips(QWidget):
             items.append(("caption", QPointF(0, y + self._PAD_Y + caption_dy), caption))
             x, row_h = x0, 0.0
             for chip in chips:
-                badge = {RECIPIENT_NEW: NEW_RECIPIENT_TEXT,
-                         RECIPIENT_CONFIRMED: CONFIRMED_RECIPIENT_TEXT}.get(chip.state, "")
+                badge = _BADGE_TEXTS.get(chip.state, "")
                 text_w = _text_advance(self._value_font, chip.address)
                 extra = self._BADGE_GAP + badge_w[badge] if badge else 0.0
                 single = 2 * self._PAD_X + text_w + extra
@@ -3927,14 +3933,14 @@ class RecipientChips(QWidget):
                     painter.setPen(QColor(TEXT_SOFT))
                     painter.drawText(item[1], Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, item[2])
                 elif kind == "chip":
-                    new = item[2] in (RECIPIENT_NEW, RECIPIENT_CONFIRMED)
+                    new = item[2] in _RED_RECIPIENTS
                     rect = item[1].adjusted(0.5, 0.5, -0.5, -0.5)
                     path = chamfer_path(rect, 4)
                     painter.fillPath(path, rgba(RED, 0.10) if new else rgba(AMBER, 0.06))
                     painter.setPen(QPen(rgba(RED_LINE, 0.9) if new else rgba(AMBER, 0.35), 1))
                     painter.drawPath(path)
                 elif kind == "chip_text":
-                    new = item[3] in (RECIPIENT_NEW, RECIPIENT_CONFIRMED)
+                    new = item[3] in _RED_RECIPIENTS
                     painter.setFont(self._value_font)
                     painter.setPen(QColor(RED if new else AMBER_TEXT))
                     painter.drawText(item[1], Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, item[2])
@@ -4749,6 +4755,7 @@ TOO_MANY_ERROR = "At most {count} recipients in To and Cc together"
 REPLY_SUBJECT_NOTE = "A reply keeps the subject of its thread"
 MESSAGE_CAPTION = "Message (sent exactly as written)"
 NOT_ADDED_ERROR = "\"{text}\" in {name} was not added - click Add (or press Enter in that field), or clear it"
+OWN_ROW_ERROR = "{address} is the sending account itself - Remove it: Jarvis never sends to it"
 
 
 class _LinkHighlighter(QSyntaxHighlighter):
@@ -4850,22 +4857,28 @@ class _GrowingTextEdit(QPlainTextEdit):
 
 
 class _RecipientBadge(QWidget):
-    """The NEW RECIPIENT badge of a recipient in the Edit dialog, drawn as on the card: filled red
-    while its "Send to" tick is not set, outlined "NEW \u00b7 CONFIRMED" once it is. As wide as
-    the wider text from the start, so a tick never moves Remove."""
+    """A recipient's badge in the Edit dialog, drawn as on the card: NEW RECIPIENT filled red while
+    its "Send to" tick is not set, outlined "NEW \u00b7 CONFIRMED" once it is (as wide as the wider
+    text from the start, so a tick never moves Remove); SENDING ACCOUNT on the account's own
+    address (it has no tick: only Remove)."""
 
     _PAD = 4
 
     def __init__(self, state: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._font = mono_font(9, 600, 0.08)
-        self._state = RECIPIENT_NEW
-        width = max(_text_advance(self._font, text) for text in (NEW_RECIPIENT_TEXT, CONFIRMED_RECIPIENT_TEXT))
+        self._own = state == RECIPIENT_OWN
+        self._state = RECIPIENT_OWN if self._own else RECIPIENT_NEW
+        texts = (OWN_RECIPIENT_TEXT,) if self._own else (NEW_RECIPIENT_TEXT, CONFIRMED_RECIPIENT_TEXT)
+        width = max(_text_advance(self._font, text) for text in texts)
         self.setFixedSize(math.ceil(width) + 2 * self._PAD, math.ceil(QFontMetricsF(self._font).lineSpacing()) + 4)
         self.set_state(state)
 
     def set_state(self, state: str) -> None:
-        self._state = RECIPIENT_CONFIRMED if state == RECIPIENT_CONFIRMED else RECIPIENT_NEW
+        if self._own:
+            self._state = RECIPIENT_OWN
+        else:
+            self._state = RECIPIENT_CONFIRMED if state == RECIPIENT_CONFIRMED else RECIPIENT_NEW
         self.setAccessibleName(self.text())
         self.update()
 
@@ -4873,7 +4886,7 @@ class _RecipientBadge(QWidget):
         return self._state
 
     def text(self) -> str:
-        return CONFIRMED_RECIPIENT_TEXT if self._state == RECIPIENT_CONFIRMED else NEW_RECIPIENT_TEXT
+        return _BADGE_TEXTS[self._state]
 
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         painter = QPainter(self)
@@ -4916,7 +4929,8 @@ class _TickLabel(_BreakableLabel):
 
 class _RecipientRow(QWidget):
     """One recipient in the Edit dialog: the address (red with a NEW RECIPIENT badge when Jarvis
-    has not sent to it before), Remove, and for a new one a "Send to <address>" tick."""
+    has not sent to it before, or SENDING ACCOUNT when it is the account itself), Remove, and for
+    a new one a "Send to <address>" tick."""
 
     removeClicked = Signal(str)
     toggled = Signal()
@@ -4932,10 +4946,11 @@ class _RecipientRow(QWidget):
         top = QHBoxLayout()
         top.setContentsMargins(0, 0, 0, 0)
         top.setSpacing(8)
-        self.address_label = _BreakableLabel(address, mono_font(12), RED if new else TEXT_BODY, min_word=0)
+        red = state in _RED_RECIPIENTS
+        self.address_label = _BreakableLabel(address, mono_font(12), RED if red else TEXT_BODY, min_word=0)
         top.addWidget(self.address_label, 1)
         self.badge: _RecipientBadge | None = None
-        if new:
+        if red:
             self.badge = _RecipientBadge(state)
             top.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignTop)
         self.remove_button = _ToolLink(REMOVE_TEXT)
@@ -5036,6 +5051,10 @@ class _RecipientList(QWidget):
     def confirmed(self) -> list[str]:
         return [row.address for row in self.rows if row.confirmed()]
 
+    def own(self) -> list[str]:
+        """The rows that are the sending account itself (Save refuses while one is left)."""
+        return [row.address for row in self.rows if row.state == RECIPIENT_OWN]
+
     def row(self, address: str) -> _RecipientRow | None:
         key = address.casefold()
         return next((row for row in self.rows if row.address.casefold() == key), None)
@@ -5106,11 +5125,15 @@ class EditDialog(QDialog):
     highlighted (``find_links``). ``banner`` is an amber line at the top (why
     the dialog opened: new recipients to confirm, a long message to read).
     The subject and the message are shown whole (their fields grow with the
-    text); when that is taller than the screen, the fields between the banner
-    and Save / Cancel scroll, so Save is always on screen. ``whole_seen()``
+    text). The dialog always fits the screen's available area
+    (QScreen.availableGeometry, at any display scale): when its content is
+    taller, the fields between the banner and Save / Cancel scroll (an
+    invitation's too), so Save is always on screen. ``whole_seen()``
     says whether all of the fields have been on screen (the message's end
     included) while the dialog was open. An address typed into Add but not
-    added keeps the dialog open on Save (it would not be sent).
+    added keeps the dialog open on Save (it would not be sent), and so does
+    the sending account's own address in To or Cc (red, SENDING ACCOUNT:
+    Remove it).
     Save emits ``saved(action_id, values)`` with the fields as typed (``values()``:
     answer, notify ("all" / "external" / "none"), date, start, end, note; or for
     a Reply / Email: to, cc, subject, body, confirmed (the ticked new
@@ -5123,7 +5146,8 @@ class EditDialog(QDialog):
     WIDTH = 420
     MAIL_WIDTH = 480
     _MESSAGE_HEIGHT = 150   # the message editor: at least this tall, and as tall as the whole message
-    _FIELDS_MIN = 160       # the scrolling fields on a very short screen
+    _FIELDS_MIN = 72        # the scrolling fields on a very short screen (about three lines)
+    _MIN_WIDTH = 320        # the narrowest the dialog gets on a narrow screen
     _SCREEN_MARGIN = 16
 
     def __init__(self, action_id: str, kind: str, kind_label: str, title: str, *, answer: str = "yes",
@@ -5165,6 +5189,10 @@ class EditDialog(QDialog):
                                   padding=(18, 14, 18, 16), spacing=6 if self.mail else 8)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
+        # The dialog's size is set by _fit alone, once per change, to what fits the screen: the
+        # layout never raises the window's minimum size by itself (a window grown by its layout in
+        # the middle of a resize made Windows refuse the geometry, and it could outgrow the screen).
+        outer.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         outer.addWidget(self.panel)
         layout = self.panel.body_layout
         self.banner_label = make_label(banner, mono_font(11), AMBER, wrap=True)
@@ -5191,20 +5219,22 @@ class EditDialog(QDialog):
         for widget in (self.date_edit, self.start_edit, self.end_edit, self.notify_box, self.note_edit,
                        self.subject_edit, self.body_edit, self.links_label):
             widget.hide()   # each kind shows its own fields below
+        # The fields (a Reply / Email's FROM to the message, an invitation's answer to the note)
+        # scroll between the banner and Save / Cancel when the dialog would be taller than the
+        # screen (_fit), so Save is always on screen at any display scale.
+        self.fields_scroll = QScrollArea(self)
+        content = _transparent_scroll(self.fields_scroll)
+        fields = QVBoxLayout(content)
+        fields.setContentsMargins(0, 0, 0, 0)
+        fields.setSpacing(6 if self.mail else 8)
+        self.fields_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.fields_scroll.setFixedHeight(0)   # _fit sets the height
+        layout.addWidget(self.fields_scroll)
         if self.mail:
-            # FROM to the message scroll between the banner and Save / Cancel when they are taller
-            # than the screen (_fit), so Save is always on screen.
-            self.fields_scroll = QScrollArea(self)
-            content = _transparent_scroll(self.fields_scroll)
-            fields = QVBoxLayout(content)
-            fields.setContentsMargins(0, 0, 0, 0)
-            fields.setSpacing(6)
-            self.fields_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            layout.addWidget(self.fields_scroll)
             self._build_mail(fields, sender=sender, to=to, cc=cc, subject=title, message=body)
             self.fields_scroll.verticalScrollBar().valueChanged.connect(self._note_seen)
         else:
-            self._build_event(layout, notify=notify, hour24=hour24, note=note)
+            self._build_event(fields, notify=notify, hour24=hour24, note=note)
         self.error_label = make_label("", mono_font(11), RED, wrap=True)
         self.error_label.hide()
         layout.addWidget(self.error_label)
@@ -5302,6 +5332,7 @@ class EditDialog(QDialog):
         for recipients in (self.to_list, self.cc_list):
             recipients.resized.connect(self._relayout)
             recipients.resized.connect(self._sync_tab_order)
+            recipients.changed.connect(self._on_recipients_changed)
         body.addWidget(self._caption("Subject"))
         self.subject_edit.setText(subject)
         self.subject_edit.setFont(body_font(13))
@@ -5401,7 +5432,23 @@ class EditDialog(QDialog):
                     self.show_error(NOT_ADDED_ERROR.format(text=_short_text(typed, 40), name=recipients.name))
                     recipients.add_edit.setFocus(Qt.FocusReason.OtherFocusReason)
                     return
+            for recipients in (self.to_list, self.cc_list):
+                own = recipients.own() if recipients is not None else []
+                if own:   # the sending account itself: Send would refuse it, so Save does first
+                    self.show_error(OWN_ROW_ERROR.format(address=own[0]))
+                    row = recipients.row(own[0])
+                    if row is not None:
+                        row.remove_button.setFocus(Qt.FocusReason.OtherFocusReason)
+                    return
         self.saved.emit(self.action_id, self.values())
+
+    def _on_recipients_changed(self) -> None:
+        """A recipient was added, removed or ticked: the "remove the sending account" error goes once
+        no such row is left."""
+        error = self.error()
+        if error and not any(recipients.own() for recipients in (self.to_list, self.cc_list)
+                             if recipients is not None) and error.endswith(OWN_ROW_ERROR.split("}", 1)[1]):
+            self.show_error("")
 
     def whole_seen(self) -> bool:
         """Every field of a Reply / Email (the subject and the message to their ends) has been on
@@ -5445,27 +5492,47 @@ class EditDialog(QDialog):
         parent = self.parentWidget()
         return (parent.window().screen() if parent is not None else self.screen()) or QApplication.primaryScreen()
 
+    def _area(self) -> QRect | None:
+        """The screen's available area (QScreen.availableGeometry: without the taskbar), in the same
+        device-independent pixels as the dialog at any display scale; None without a screen."""
+        screen = self._screen()
+        return screen.availableGeometry() if screen is not None else None
+
     def _fit(self) -> None:
-        """As tall as the content at the dialog's own (fixed) width. A Reply / Email shows its
-        subject and message whole; when the dialog would be taller than the screen, its fields
-        scroll (with a scroll bar) and the banner and Save / Cancel stay on screen."""
+        """Fit the dialog to the screen's available area at any display scale: its kind's width
+        (narrower when the area is), and as tall as its content at that width. A Reply / Email
+        shows its subject and message whole; when the dialog would be taller than the area, its
+        fields scroll (with a scroll bar) and the banner and Save / Cancel stay on screen.
+
+        The fields' height is set once, to what fits: the dialog's minimum size never exceeds the
+        area, so the window is never asked to be taller than the screen (Windows would refuse:
+        "Unable to set geometry")."""
         scroll = self.fields_scroll
-        if not self.mail or scroll is None:
+        if scroll is None:
             self._fit_height()
             return
-        screen = self._screen()
-        room = screen.availableGeometry().height() - 2 * self._SCREEN_MARGIN if screen is not None else 1 << 20
-        value = scroll.verticalScrollBar().value()
+        self.ensurePolished()   # a row added just now changes its size once styled: measure it styled
+        area = self._area()
+        margin = self._SCREEN_MARGIN
+        base = self.MAIL_WIDTH if self.mail else self.WIDTH
+        width = base if area is None else max(min(base, self._MIN_WIDTH), min(base, area.width() - 2 * margin))
+        if self.minimumWidth() != width or self.maximumWidth() != width:
+            self.setFixedWidth(width)
+        room = area.height() - 2 * margin if area is not None else 1 << 20
+        bar = scroll.verticalScrollBar()
+        value = bar.value()
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setFixedHeight(self._fields_height())
-        self._fit_height()
-        excess = self.height() - room
-        if excess > 0:
+        scroll.setFixedHeight(0)
+        chrome = self._layout_height(width)   # the banner, title, error line, Save / Cancel and margins
+        natural = self._fields_height()
+        fields = natural
+        if chrome + natural > room:
             scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
             self._fit_fields()   # the scroll bar takes some width: the fields wrap again
-            scroll.setFixedHeight(max(self._FIELDS_MIN, scroll.height() - excess))
-            self._fit_height()
-        scroll.verticalScrollBar().setValue(value)
+            fields = min(natural, max(self._FIELDS_MIN, room - chrome))
+        scroll.setFixedHeight(fields)
+        self._fit_height()
+        bar.setValue(value)
 
     def _fit_fields(self) -> None:
         """Lay the fields out at the scroll area's width, the subject and message as tall as their text."""
@@ -5478,12 +5545,31 @@ class EditDialog(QDialog):
             if content is not None and content.layout() is not None:
                 content.resize(scroll.viewport().width(), content.height())
                 content.layout().activate()
+            if not self.mail:
+                continue
             for edit in (self.subject_edit, self.body_edit):
                 edit.blockSignals(True)
                 try:
                     edit.fit_to_text()
                 finally:
                     edit.blockSignals(False)
+
+    def _layout_height(self, width: int) -> int:
+        """The dialog's height at ``width`` as its layout stands, measured afresh."""
+        # adjustSize() measures wrapped labels at the size hint's width, not the fixed width they get.
+        # A field that changed its fixed height may leave the panel's and the dialog's layouts with
+        # their earlier size cached until the event loop runs: measure afresh.
+        if self.panel.layout() is not None:
+            self.panel.layout().invalidate()
+        self.panel.updateGeometry()   # also drops the dialog layout's cached size of the panel
+        layout = self.layout()
+        if layout is None:
+            return self.sizeHint().height()
+        layout.invalidate()
+        layout.activate()
+        if layout.hasHeightForWidth():
+            return max(layout.totalHeightForWidth(width), layout.totalMinimumSize().height())
+        return max(layout.totalSizeHint().height(), layout.totalMinimumSize().height())
 
     def _fields_height(self) -> int:
         """The fields' whole height at the scroll area's width (FROM to the links line)."""
@@ -5516,21 +5602,8 @@ class EditDialog(QDialog):
         scroll.ensureVisible(point.x(), point.y(), 10, rect.height())
 
     def _fit_height(self) -> None:
-        # adjustSize() measures wrapped labels at the size hint's width, not the fixed width they get.
-        # A field that changed its fixed height may leave the panel's and the dialog's layouts with
-        # their earlier size cached until the event loop runs: measure afresh.
-        if self.panel.layout() is not None:
-            self.panel.layout().invalidate()
-        self.panel.updateGeometry()   # also drops the dialog layout's cached size of the panel
-        layout = self.layout()
-        if layout is not None:
-            layout.invalidate()
-        if layout is not None:
-            layout.activate()
         width = self.width()
-        height = self.heightForWidth(width) if self.hasHeightForWidth() else self.sizeHint().height()
-        self.resize(width, max(height, self.minimumSizeHint().height(), self.sizeHint().height()
-                               if not self.hasHeightForWidth() else 0))
+        self.resize(width, self._layout_height(width))
 
     def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().showEvent(event)
@@ -5550,28 +5623,38 @@ class EditDialog(QDialog):
         if not shiboken6.isValid(self):
             return
         self._fit()
-        screen = self._screen()
-        if self.isVisible() and screen is not None:
-            area = screen.availableGeometry()
-            if self.frameGeometry().bottom() > area.bottom() - self._SCREEN_MARGIN:
-                self.move(self.x(), max(area.top(), area.bottom() - self._SCREEN_MARGIN - self.height()))
+        if self.isVisible():
+            self._keep_on_screen()
         self._keep_cursor_visible()
         self._note_seen()
+
+    def _keep_on_screen(self) -> None:
+        """Move the dialog (not resize it) so all of it is inside the screen's available area."""
+        area = self._area()
+        if area is None:
+            return
+        margin = self._SCREEN_MARGIN
+        x, y = self.x(), self.y()
+        if x + self.width() > area.right() + 1 - margin:
+            x = area.right() + 1 - margin - self.width()
+        if y + self.height() > area.bottom() + 1 - margin:
+            y = area.bottom() + 1 - margin - self.height()
+        x, y = max(x, area.left()), max(y, area.top())
+        if (x, y) != (self.x(), self.y()):
+            self.move(x, y)
 
     def open(self) -> None:  # noqa: D102 - QDialog.open, centred over the parent window first
         self._fitted = True
         self._fit()
         parent = self.parentWidget()
-        screen = self._screen()
+        area = self._area()
         if parent is not None:
             window = parent.window()
             center = window.mapToGlobal(QPoint(window.width() // 2, window.height() // 2))
-            top = center.y() - self.height() // 2
-            if screen is not None:
-                area = screen.availableGeometry()
-                top = min(top, area.bottom() - self.height() - self._SCREEN_MARGIN)
-                top = max(top, area.top())
-            self.move(center.x() - self.width() // 2, max(0, top))
+        else:
+            center = area.center() if area is not None else self.geometry().center()
+        self.move(center.x() - self.width() // 2, center.y() - self.height() // 2)
+        self._keep_on_screen()
         super().open()
         if self.mail:   # a new recipient's tick first (why Send opened the dialog), else the message
             boxes = [row.confirm_box for recipients in (self.to_list, self.cc_list) if recipients is not None
@@ -5583,6 +5666,163 @@ class EditDialog(QDialog):
                 if boxes:
                     self.fields_scroll.ensureWidgetVisible(target)
             self._relayout()   # also looks whether everything is on screen
+
+
+ACCOUNT_YES_TEXT = "Yes, that's right"
+ACCOUNT_NO_TEXT = "No, use another account"
+ACCOUNT_QUESTION = "Signed in as {address} for \"{alias}\" - is that right?"
+
+
+class AccountDialog(QDialog):
+    """The first sign-in's question for an account alias: 'Signed in as ana@example.edu for "work"
+    - is that right?', with "Yes, that's right" and "No, use another account".
+
+    Google's account chooser makes it easy to pick the wrong account, and an alias is bound to
+    whichever account its first sign-in picked; until this is answered Yes, Jarvis sends and
+    changes nothing for the alias (reading its calendar goes on). Window-modal, opened with
+    ``open()``, it always fits the screen's available area. A button emits ``answered(alias,
+    address, yes)`` and closes the dialog; Escape closes it without an answer (it is asked again
+    at the next Send or Approve). Neither button is a default button, so Enter answers nothing.
+    Every text is plain text.
+    """
+
+    answered = Signal(str, str, bool)
+    WIDTH = 440
+    _MIN_WIDTH = 300
+    _SCREEN_MARGIN = 16
+
+    def __init__(self, alias: str, address: str, *, sends_mail: bool = True, parent: QWidget | None = None) -> None:
+        flags = Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint
+        super().__init__(parent, flags)
+        self.alias = alias
+        self.address = address
+        self.setWindowModality(Qt.WindowModality.WindowModal)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setWindowTitle(f"Confirm the {alias} account")
+        self.panel = ChamferPanel("Confirm", "GOOGLE ACCOUNT", variant=PANEL_AMBER, border_alpha=0.5,
+                                  padding=(18, 14, 18, 16), spacing=8)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)   # _fit sets the size
+        outer.addWidget(self.panel)
+        layout = self.panel.body_layout
+        # The texts scroll above the buttons on a very small screen, so the buttons stay on screen.
+        self.text_scroll = QScrollArea(self)
+        content = _transparent_scroll(self.text_scroll)
+        texts = QVBoxLayout(content)
+        texts.setContentsMargins(0, 0, 0, 0)
+        texts.setSpacing(8)
+        self.text_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.text_scroll.setFixedHeight(0)   # _fit sets the height
+        layout.addWidget(self.text_scroll)
+        question = ACCOUNT_QUESTION.format(address=address, alias=alias)
+        self.question_label = _BreakableLabel(question, body_font(15, 600), AMBER_TEXT, min_word=0)
+        texts.addWidget(self.question_label)
+        if sends_mail:
+            what = f"Jarvis sends {alias} email and changes {alias} calendar events as this Google account."
+        else:
+            what = f"Jarvis changes {alias} calendar events as this Google account."
+        self.detail_label = make_label(f"{what} Nothing is sent or changed until you answer.", body_font(13),
+                                       TEXT_BODY, wrap=True)
+        texts.addWidget(self.detail_label)
+        self.hint_label = make_label("No signs this account out of Jarvis and opens Google's sign-in again, "
+                                     "so you can pick the right account.", mono_font(10), TEXT_DIM, wrap=True)
+        texts.addWidget(self.hint_label)
+        buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 6, 0, 0)
+        buttons.setSpacing(8)
+        buttons.addStretch(1)
+        self.no_button = HudButton(ACCOUNT_NO_TEXT, SECONDARY, compact=True)
+        self.no_button.setAccessibleDescription("Signs this account out and opens Google's sign-in again")
+        self.yes_button = HudButton(ACCOUNT_YES_TEXT, PRIMARY, compact=True)
+        self.yes_button.setAccessibleDescription(f"Keeps {address} as the {alias} account")
+        buttons.addWidget(self.no_button)
+        buttons.addWidget(self.yes_button)
+        layout.addLayout(buttons)
+        self.no_button.clicked.connect(self._on_no)
+        self.yes_button.clicked.connect(self._on_yes)
+        self.setAccessibleName(question)
+        self.setFixedWidth(self.WIDTH)
+
+    def _on_yes(self) -> None:
+        self.answered.emit(self.alias, self.address, True)
+        self.accept()
+
+    def _on_no(self) -> None:
+        self.answered.emit(self.alias, self.address, False)
+        self.accept()
+
+    def _area(self) -> QRect | None:
+        parent = self.parentWidget()
+        screen = (parent.window().screen() if parent is not None else self.screen()) or QApplication.primaryScreen()
+        return screen.availableGeometry() if screen is not None else None
+
+    def _height(self, width: int) -> int:
+        if self.panel.layout() is not None:
+            self.panel.layout().invalidate()
+        self.panel.updateGeometry()
+        layout = self.layout()
+        layout.invalidate()
+        layout.activate()
+        return max(layout.totalHeightForWidth(width) if layout.hasHeightForWidth()
+                   else layout.totalSizeHint().height(), layout.totalMinimumSize().height())
+
+    def _texts_height(self) -> int:
+        scroll = self.text_scroll
+        content = scroll.widget()
+        content.resize(scroll.viewport().width(), content.height())
+        texts = content.layout()
+        texts.activate()
+        width = scroll.viewport().width()
+        return texts.totalHeightForWidth(width) if texts.hasHeightForWidth() else texts.totalSizeHint().height()
+
+    def _fit(self) -> None:
+        """Its width (narrower on a narrow screen) and the height of its content at that width; on a
+        screen too short for the texts they scroll and the buttons stay on screen."""
+        self.ensurePolished()
+        area = self._area()
+        margin = self._SCREEN_MARGIN
+        width = self.WIDTH
+        if area is not None:
+            width = max(self._MIN_WIDTH, min(self.WIDTH, area.width() - 2 * margin))
+        if self.minimumWidth() != width or self.maximumWidth() != width:
+            self.setFixedWidth(width)
+        room = area.height() - 2 * margin if area is not None else 1 << 20
+        scroll = self.text_scroll
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setFixedHeight(0)
+        chrome = self._height(width)
+        natural = self._texts_height()
+        texts = natural
+        if chrome + natural > room:
+            scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+            self._height(width)
+            natural = self._texts_height()   # the scroll bar takes some width: the texts wrap again
+            texts = min(natural, max(48, room - chrome))
+        scroll.setFixedHeight(texts)
+        self.resize(width, self._height(width))
+
+    def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().showEvent(event)
+        self._fit()
+
+    def open(self) -> None:  # noqa: D102 - QDialog.open, centred over the parent window
+        self._fit()
+        area = self._area()
+        parent = self.parentWidget()
+        if parent is not None:
+            window = parent.window()
+            center = window.mapToGlobal(QPoint(window.width() // 2, window.height() // 2))
+            x, y = center.x() - self.width() // 2, center.y() - self.height() // 2
+        else:
+            x, y = self.x(), self.y()
+        if area is not None:
+            margin = self._SCREEN_MARGIN
+            x = max(area.left(), min(x, area.right() + 1 - margin - self.width()))
+            y = max(area.top(), min(y, area.bottom() + 1 - margin - self.height()))
+        self.move(x, y)
+        super().open()
+        self.setFocus(Qt.FocusReason.OtherFocusReason)   # no button has the focus: Enter answers nothing
 
 
 def _short_text(text: str, limit: int) -> str:

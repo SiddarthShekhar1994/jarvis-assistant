@@ -1822,5 +1822,72 @@ class BuildServiceTests(GcalTestCase):
         self.assertEqual(conn.requests, ["GET", "GET"])
 
 
+class ChangesNeedAConfirmedAccountTests(EventCallTestCase):
+    """The last check right before a change goes to Google (google_auth.GoogleAccount.change_problem,
+    which fails closed): a saved sign-in whose Google account you have not confirmed for the alias,
+    or one Jarvis has no binding for (accounts.json deleted or unreadable), changes nothing; reading
+    the calendar goes on. executor.CalendarBackend checks the same before "running" is saved."""
+
+    SUB = "100000000000000000077"
+
+    def bound_calendar(self, state: str) -> GoogleCalendar:
+        self.write_client_secret()
+        data = self.root / uuid.uuid4().hex
+        bindings = google_auth.AccountBindings(data / "accounts.json")
+        account = google_auth.GoogleAccount("work", client_secret_path=self.secret_path, data_dir=data,
+                                            bindings=bindings, flow_factory=self.flow_factory)
+        self.token_path = account.token_path
+        self.write_token()
+        info = json.loads(self.token_path.read_text(encoding="utf-8"))
+        info[google_auth.TOKEN_SUB_KEY] = self.SUB   # the account the sign-in was issued for
+        self.token_path.write_text(json.dumps(info), encoding="utf-8")
+        if state != "no binding":
+            with self.assertLogs("briefing_reader.google_auth", level="INFO"):
+                bindings.bind("work", YOU, self.SUB)
+                if state == "confirmed":
+                    bindings.confirm("work", YOU)
+        if state == "unreadable":
+            bindings.path.write_text('{"work": {"email": ', encoding="utf-8")   # a slip while editing it
+        self.service.outcomes["events.get"] = [_event_item()]
+        self.service.outcomes["events.patch"] = [{"id": EVENT_ID, "htmlLink": EVENT_LINK}]
+        self.service.outcomes["events.delete"] = [""]
+        return GoogleCalendar(account=account, service_factory=self.service_factory)
+
+    def test_no_change_without_a_confirmed_account(self) -> None:
+        changes = (
+            ("respond", lambda cal: cal.respond(EVENT_ID, "yes", interactive=False)),
+            ("move", lambda cal: cal.move(EVENT_ID, datetime(2026, 10, 8, 14, 0), datetime(2026, 10, 8, 15, 0),
+                                          now=BEFORE, interactive=False)),
+            ("cancel", lambda cal: cal.cancel(EVENT_ID, interactive=False)),
+            ("create", lambda cal: cal.create_event(make_action(), interactive=False)))
+        for state, problem in (("unconfirmed", google_auth.PROBLEM_CONFIRM),
+                               ("no binding", google_auth.PROBLEM_IDENTITY),
+                               ("unreadable", google_auth.PROBLEM_IDENTITY)):
+            for name, change in changes:
+                with self.subTest(state=state, change=name):
+                    cal = self.bound_calendar(state)
+                    with self.assertLogs(level="WARNING") as logs, self.assertRaises(CalendarAuthError) as ctx:
+                        change(cal)
+                    self.assertEqual(ctx.exception.problem, problem)
+                    self.assertIn("nothing was sent or changed", str(ctx.exception))
+                    for text in ("\n".join(logs.output), str(ctx.exception)):
+                        self.assertNotIn(YOU, text)
+                    self.assert_no_change_sent()
+                    self.assertEqual(self.service.calls_to("events.insert"), [])
+                    self.assertTrue(self.token_path.exists())   # the sign-in itself is kept
+            with self.subTest(state=state, change="read"):
+                self.assertEqual(self.bound_calendar(state).get_event(EVENT_ID, interactive=False).title,
+                                 "Project sync")   # reading goes on
+        cal = self.bound_calendar("confirmed")
+        self.assertFalse(cal.respond(EVENT_ID, "yes", interactive=False).already)
+        self.assertEqual(len(self.service.calls_to("events.patch")), 1)
+
+    def test_the_one_account_setup_is_not_held_back(self) -> None:
+        cal = self.event_calendar()   # GoogleCalendar's own constructor: alias "", no bindings
+        self.assertEqual((cal.change_problem(), cal.needs_confirmation()), (("", ""), False))
+        cal.respond(EVENT_ID, "yes", interactive=False)
+        self.assertEqual(len(self.service.calls_to("events.patch")), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

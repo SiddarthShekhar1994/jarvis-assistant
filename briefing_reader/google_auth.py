@@ -10,7 +10,7 @@ client (README step 8), and keeps one token file per alias:
                                       nobody has to sign in again
     GoogleAccount(alias, ...)         one account's saved sign-in: is_signed_in(), granted_features(),
                                       credentials(), sign_in(), forget(), problem(), bound_email(),
-                                      identity_confirmed()
+                                      identity_confirmed(), change_problem()
     AccountBindings(path)             which Google account each alias is (accounts.json)
 
 What an account may do comes from its ``features`` (FEATURE_SCOPES):
@@ -36,6 +36,28 @@ The token file remembers the account id it was issued for, so
 the saved sign-in is the bound account's. A token without that (the migrated
 google_token.json of older versions) still works for the calendar; sending
 needs one new sign-in, which binds.
+
+A new binding is not trusted yet: Google's account chooser makes it easy to
+pick the wrong account. Until you confirm it ("Signed in as ana@example.edu
+for 'work' - is that right?", ``confirm_binding``), ``pending_confirmation()``
+names its address and nothing is sent or changed for the alias (gmail.py,
+gcal.py and executor.py check it; reading the calendar goes on). The
+confirmation is kept in accounts.json ("confirmed"), so it is asked once per
+binding; a binding of an older version, without it, is asked once too.
+``disconnect()`` (the dialog's "No, use another account") forgets the sign-in
+and the binding, and refuses (AccountError, the binding kept) when the saved
+sign-in could not be deleted. An unconfirmed binding never locks the alias: a
+new sign-in with another Google account replaces it, and one that takes an
+account another alias was bound to (unconfirmed) releases it there (a
+confirmed binding refuses both, as above).
+
+``change_problem()`` fails closed: a change (and email) needs a confirmed
+binding whose account the saved sign-in was issued for. A saved sign-in that
+names a Google account with no binding to read (accounts.json deleted, edited
+by hand or unreadable; a disconnect that could not delete the token) is
+PROBLEM_IDENTITY: sign in again, which binds and asks. Only a token that names
+no account at all (older versions, or Google did not say) keeps changing the
+calendar without a binding, as before.
 
 Sign-in problems are told apart (``AccountError.problem``), so a card can say
 what happened: no sign-in yet, the sign-in expired or was revoked
@@ -126,8 +148,9 @@ PROBLEM_DENIED = "denied"         # access_denied: cancelled in the browser, or 
 PROBLEM_SCOPE = "scope"           # a box was unticked: a feature's permission is missing
 PROBLEM_TIMEOUT = "timeout"       # the browser sign-in was not finished in time
 PROBLEM_IDENTITY = "identity"     # another Google account than the one bound to the alias (refused)
+PROBLEM_CONFIRM = "confirm"       # bound, but you have not confirmed yet that it is the right account
 PROBLEMS = (PROBLEM_FAILED, PROBLEM_SETUP, PROBLEM_SIGNED_OUT, PROBLEM_EXPIRED, PROBLEM_BLOCKED,
-            PROBLEM_DENIED, PROBLEM_SCOPE, PROBLEM_TIMEOUT, PROBLEM_IDENTITY)
+            PROBLEM_DENIED, PROBLEM_SCOPE, PROBLEM_TIMEOUT, PROBLEM_IDENTITY, PROBLEM_CONFIRM)
 
 _GOOGLE_MODULES = ("googleapiclient", "google_auth_oauthlib", "google_auth_httplib2",
                    "google.oauth2")
@@ -298,18 +321,24 @@ def identity_from_id_token(id_token: Any, client_id: str) -> tuple[str, str] | N
 
 @dataclass(frozen=True)
 class Binding:
-    """The Google account an alias is bound to (address and Google's account id)."""
+    """The Google account an alias is bound to (address and Google's account id), and whether you
+    confirmed that it is the right one (``confirmed``; False for a new binding)."""
 
     email: str
     sub: str
     bound_at: str = ""
+    confirmed: bool = False
+    confirmed_at: str = ""
 
 
 class AccountBindings:
-    """Which Google account each alias is: <data_dir>\\accounts.json {alias: {email, sub, bound_at}}.
+    """Which Google account each alias is: <data_dir>\\accounts.json {alias: {email, sub, bound_at,
+    confirmed, confirmed_at}}.
 
-    Written only after a sign-in whose id_token named the account; never in config.toml and never
-    logged (the log says "bound", with the alias only). An unreadable file is treated as empty
+    Written only after a sign-in whose id_token named the account, and when you confirm it; never
+    in config.toml and never logged (the log says "bound" / "confirmed", with the alias only). A
+    new binding, or a new address of a bound account, starts unconfirmed; an entry of an older
+    version without "confirmed" counts as unconfirmed. An unreadable file is treated as empty
     (logged without its content); a failed write keeps the binding in memory for this run. Reads
     and writes are serialised; writes are atomic (temporary file + os.replace).
     """
@@ -329,9 +358,14 @@ class AccountBindings:
         with self._lock:
             return next((alias for alias, binding in self._entries().items() if binding.sub == sub), "")
 
-    def bind(self, alias: str, email: str, sub: str) -> bool:
-        """Bind ``alias`` to the account (a new binding, or a new address of the same account).
-        True when it was saved to the file."""
+    def bind(self, alias: str, email: str, sub: str, *, release: str = "") -> bool:
+        """Bind ``alias`` to the account: a new binding, a new address of the same account, or
+        another account in place of a binding you never confirmed (all unconfirmed until
+        confirm()). The same account and address again changes nothing; a confirmed binding to
+        another account is never replaced (ValueError: GoogleAccount refuses such a sign-in
+        first). ``release``: another alias whose unconfirmed binding to this same account is
+        given up in the same write (one Google account is one alias). True when it was saved to
+        the file."""
         if not valid_alias(alias) or not email or not _SUB_RE.fullmatch(sub or ""):
             raise ValueError("not a binding")
         with self._lock:
@@ -339,11 +373,43 @@ class AccountBindings:
             old = entries.get(alias)
             if old is not None and old.sub == sub and old.email == email:
                 return True
+            if old is not None and old.sub != sub and old.confirmed:
+                raise ValueError("bound to another account you confirmed")
+            released = entries.get(release) if release and release != alias else None
+            if released is not None:
+                if released.sub != sub or released.confirmed:
+                    raise ValueError("not an unconfirmed binding of this account")
+                del entries[release]
             entries[alias] = Binding(email, sub, self._clock().isoformat(timespec="seconds"))
             saved = self._write(entries)
-        logger.info("Google (%s): %s", logged_alias(alias),
-                    "bound to the account it signed in with" if old is None else "account address updated")
+        if released is not None:
+            logger.info("Google (%s): no longer bound to a Google account (another account name was signed in "
+                        "with it before you confirmed it here)", logged_alias(release))
+        if old is None:
+            what = "bound to the account it signed in with"
+        elif old.sub == sub:
+            what = "account address updated"
+        else:
+            what = "bound to another Google account (you had not confirmed the earlier one)"
+        logger.info("Google (%s): %s", logged_alias(alias), what)
         return saved
+
+    def confirm(self, alias: str, email: str) -> bool:
+        """You confirmed that ``alias`` is the Google account with address ``email`` (the address
+        the question showed). False, and nothing changes, when the alias is not bound to that
+        address (any more). A failed write keeps the confirmation for this run (logged)."""
+        with self._lock:
+            entries = self._entries()
+            old = entries.get(alias)
+            if old is None or not isinstance(email, str) or old.email.casefold() != email.strip().casefold():
+                return False
+            if old.confirmed:
+                return True
+            entries[alias] = Binding(old.email, old.sub, old.bound_at, True,
+                                     self._clock().isoformat(timespec="seconds"))
+            self._write(entries)
+        logger.info("Google (%s): you confirmed the account it is bound to", logged_alias(alias))
+        return True
 
     def unbind(self, alias: str) -> bool:
         """Forget which account ``alias`` is (the next sign-in binds again). True when one was there."""
@@ -376,14 +442,17 @@ class AccountBindings:
             email, sub = value.get("email"), value.get("sub")
             if isinstance(email, str) and email_address(email) == email and isinstance(sub, str) \
                     and _SUB_RE.fullmatch(sub):
-                bound_at = value.get("bound_at")
-                entries[alias] = Binding(email, sub, bound_at if isinstance(bound_at, str) else "")
+                bound_at, confirmed_at = value.get("bound_at"), value.get("confirmed_at")
+                entries[alias] = Binding(email, sub, bound_at if isinstance(bound_at, str) else "",
+                                         value.get("confirmed") is True,
+                                         confirmed_at if isinstance(confirmed_at, str) else "")
         if len(entries) != len(data):
             logger.warning("Ignored %d malformed account binding(s)", len(data) - len(entries))
         return entries
 
     def _write(self, entries: dict[str, Binding]) -> bool:
-        data = {alias: {"email": item.email, "sub": item.sub, "bound_at": item.bound_at}
+        data = {alias: {"email": item.email, "sub": item.sub, "bound_at": item.bound_at,
+                        "confirmed": item.confirmed, "confirmed_at": item.confirmed_at}
                 for alias, item in sorted(entries.items())}
         part: str | None = None
         try:
@@ -529,6 +598,66 @@ class GoogleAccount:
         binding = self.binding()
         return binding is not None and bool(binding.sub) and self.token_sub() == binding.sub
 
+    def pending_confirmation(self) -> str:
+        """The bound account's address while you have not confirmed yet that it is the right Google
+        account for this alias ("" when confirmed, or not bound). Nothing is sent or changed for
+        the alias meanwhile; reading the calendar goes on. Shown in the question, never logged."""
+        binding = self.binding()
+        return binding.email if binding is not None and not binding.confirmed else ""
+
+    def binding_confirmed(self) -> bool:
+        """You confirmed that the bound Google account is the right one for this alias."""
+        binding = self.binding()
+        return binding is not None and binding.confirmed
+
+    def confirm_binding(self, address: str) -> bool:
+        """You answered Yes to "Signed in as ``address`` for this alias - is that right?". False
+        (nothing confirmed) when the alias is not bound to that address any more."""
+        if self._bindings is None:
+            return False
+        return self._bindings.confirm(self.alias, address)
+
+    def needs_confirmation(self) -> bool:
+        """The alias has no binding you confirmed: its next sign-in leaves one to confirm first
+        (so a click that would sign in asks before any countdown). False for the one-account
+        setup "" (no bindings)."""
+        return self._bindings is not None and not self.binding_confirmed()
+
+    def change_problem(self) -> tuple[str, str]:
+        """Why nothing may be sent or changed for this alias now (PROBLEM_*, a message without
+        any address), or ("", "") when it may. Files only, no lock, fails closed:
+
+        - PROBLEM_SIGNED_OUT: there is no saved sign-in (the sign-in that comes first decides);
+        - PROBLEM_IDENTITY: the saved sign-in is not the bound account's, or it names a Google
+          account but there is no binding to read (accounts.json deleted, edited or unreadable,
+          or a disconnect that could not delete the token): sign in again, which binds and asks;
+        - PROBLEM_CONFIRM: bound to the saved sign-in's account, but you have not confirmed it.
+
+        A saved sign-in that names no account at all (older versions, or Google did not say)
+        without a binding is not held back, as before; the one-account setup "" never is."""
+        if self._bindings is None:
+            return "", ""
+        info = _token_info(self.token_path)
+        if info is None:
+            return PROBLEM_SIGNED_OUT, (f"Not signed in to the {self.alias} account; nothing was sent or "
+                                        "changed")
+        sub = info.get(TOKEN_SUB_KEY)
+        sub = sub if isinstance(sub, str) and _SUB_RE.fullmatch(sub) else ""
+        binding = self.binding()
+        if binding is None and not sub:
+            return "", ""
+        if binding is None or binding.sub != sub:
+            return PROBLEM_IDENTITY, self.unknown_account_message()
+        if not binding.confirmed:
+            return PROBLEM_CONFIRM, (f"You haven't confirmed yet that this is the right Google account for "
+                                     f"the {self.alias} account; nothing was sent or changed")
+        return "", ""
+
+    def unknown_account_message(self) -> str:
+        """The saved sign-in is a Google account Jarvis has no (or another) binding for."""
+        return (f"Jarvis doesn't know which Google account the {self.alias} account's sign-in is; sign in "
+                "again to confirm it - nothing was sent or changed")
+
     def problem(self) -> tuple[str, str]:
         """(PROBLEM_*, message) of the last failed sign-in or rejected token; ("", "") when none."""
         return self._problem, self._problem_message
@@ -655,7 +784,7 @@ class GoogleAccount:
                 self._set_problem(error.problem, str(error))
                 raise error from None
             _register_credentials(creds)
-            identity = self._check_identity(creds, client)
+            identity, release = self._check_identity(creds, client)
             granted = _granted_scopes(creds, scopes)
             # An alias's token also says what was asked for (a box unticked vs a feature added since).
             info = _creds_info(creds, granted, sub=identity[1] if identity else "",
@@ -664,7 +793,7 @@ class GoogleAccount:
                 creds = _credentials_from_info(info) or creds   # refreshes ask only for what was granted
                 _register_credentials(creds)
             if identity is not None and self._bindings is not None:
-                self._bindings.bind(self.alias, *identity)
+                self._bindings.bind(self.alias, *identity, release=release)
             self._save_token(creds, info)
             self._creds = creds
             self._granted = list(granted)
@@ -678,38 +807,45 @@ class GoogleAccount:
                 self._set_problem()
                 self._log.info("%s: signed in", self.log_name)
 
-    def _check_identity(self, creds: Any, client: dict[str, Any]) -> tuple[str, str] | None:
-        """(address, account id) of a sign-in that may be kept for this alias; None when Google
-        did not say and the alias is not bound yet (Calendar works; sending waits for a sign-in
-        that names the account). Raises AccountAuthError(PROBLEM_IDENTITY), dropping the new
-        tokens, for another account than the bound one, an account bound to another alias, or a
-        bound alias whose sign-in does not say which account it is."""
+    def _check_identity(self, creds: Any, client: dict[str, Any]) -> tuple[tuple[str, str] | None, str]:
+        """((address, account id), release) of a sign-in that may be kept for this alias; the
+        identity is None when Google did not say and the alias is not bound yet (Calendar works;
+        sending waits for a sign-in that names the account). ``release``: another alias bound to
+        this account that you never confirmed; it gives the account up (one Google account is one
+        alias, and the new binding is asked about). Raises AccountAuthError(PROBLEM_IDENTITY),
+        dropping the new tokens, for another account than the one you confirmed for this alias,
+        an account you confirmed for another alias, or a bound alias whose sign-in does not say
+        which account it is. A binding you never confirmed does not refuse another account: the
+        new one replaces it, unconfirmed, and is asked about."""
         if self._bindings is None:
-            return None
+            return None, ""
         installed = client.get("installed") if isinstance(client, dict) else None
         client_id = installed.get("client_id", "") if isinstance(installed, dict) else ""
         identity = identity_from_id_token(getattr(creds, "id_token", None), str(client_id))
         binding = self.binding()
-        message = ""
+        message, release = "", ""
         if identity is None:
             if binding is not None:
                 message = (f"Google did not say which account this sign-in is, so it was not kept for "
                            f"the {self.alias} account; sign in again")
         else:
             other = self._bindings.alias_of(identity[1])
-            if other and other != self.alias:
+            held = self._bindings.get(other) if other and other != self.alias else None
+            if held is not None and held.confirmed:
                 whose = f"the {other} account" if logged_alias(other) == other else "another account"
                 message = (f"That Google account is already set up as {whose} in Jarvis; sign in with "
                            f"the {self.alias} account's own Google account")
-            elif binding is not None and binding.sub != identity[1]:
+            elif binding is not None and binding.sub != identity[1] and binding.confirmed:
                 message = (f"This is not the Google account set up as the {self.alias} account; sign in "
                            "with that one (its address is on the card)")
+            elif held is not None:
+                release = other
         if message:
             self._set_problem(PROBLEM_IDENTITY, message)
             self._log.warning("%s: refused a sign-in to another Google account than the one set up for it",
                               self.log_name)
             raise AccountAuthError(message, problem=PROBLEM_IDENTITY)
-        return identity
+        return identity, release
 
     def _sign_in_error(self, exc: Exception) -> AccountError:
         from google_auth_oauthlib.flow import WSGITimeoutError
@@ -744,14 +880,23 @@ class GoogleAccount:
 
     def disconnect(self) -> None:
         """Delete the saved sign-in and forget which Google account the alias is (README:
-        "Disconnecting"): the next sign-in may pick any account and binds it."""
+        "Disconnecting"; the confirmation's "No, use another account"): the next sign-in may pick
+        any account and binds it, unconfirmed. When the saved sign-in can't be deleted (the file
+        is in use), the binding is kept as it is and AccountError says so: a token left behind
+        without its binding would be an account nobody confirmed (change_problem refuses it
+        too, but the sign-in that follows must start fresh)."""
         with self._lock:
-            self.forget("disconnected", problem=PROBLEM_SIGNED_OUT)
+            if not self.forget("disconnected", problem=PROBLEM_SIGNED_OUT):
+                who = f"the {self.alias} account's" if self.alias else "the"
+                raise AccountError(f"Could not delete {who} saved Google sign-in (the file is in use); "
+                                   "nothing was changed - try again")
             if self._bindings is not None:
                 self._bindings.unbind(self.alias)
 
-    def forget(self, reason: str, *, problem: str = PROBLEM_EXPIRED, message: str = "") -> None:
-        """Delete the saved sign-in (the next use signs in again) and remember why."""
+    def forget(self, reason: str, *, problem: str = PROBLEM_EXPIRED, message: str = "") -> bool:
+        """Delete the saved sign-in (the next use signs in again) and remember why. True when no
+        saved sign-in is left (deleted, or there was none); False when the file could not be
+        deleted (logged)."""
         with self._lock:
             self._creds = None
             self._granted = None
@@ -761,17 +906,18 @@ class GoogleAccount:
             try:
                 self.token_path.unlink()
             except FileNotFoundError:
-                return
+                return True
             except OSError as exc:
                 self._log.warning("%s: could not delete the saved sign-in (%s)", self.log_name,
                                   exc.strerror or type(exc).__name__)
-                return
+                return False
             if self.alias:
                 self._log.warning("%s: removed the saved sign-in (%s); the next sign-in starts fresh",
                                   self.log_name, reason)
             else:
                 self._log.warning("Google Calendar: removed the saved sign-in (%s); "
                                   "the next Approve signs in again", reason)
+            return True
 
     # ---- files ----------------------------------------------------------------------------
 

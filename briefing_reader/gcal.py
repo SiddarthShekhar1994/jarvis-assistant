@@ -355,6 +355,47 @@ class GoogleCalendar:
         """The account alias ("" for the one-account setup of older versions)."""
         return self._account.alias
 
+    def pending_confirmation(self) -> str:
+        """The bound Google account's address while you have not confirmed it for this alias ("" when
+        confirmed or not bound; google_auth). Jarvis changes no event meanwhile; reading goes on.
+        No network, no lock."""
+        return self._account.pending_confirmation()
+
+    def confirm_account(self, address: str) -> bool:
+        """You confirmed that ``address`` is this alias's Google account (accounts.json)."""
+        return self._account.confirm_binding(address)
+
+    def change_problem(self) -> tuple[str, str]:
+        """Why Jarvis may not change anything on this alias's calendar now ((PROBLEM_*, message);
+        ("", "") when it may): google_auth.GoogleAccount.change_problem, which fails closed.
+        Reading is never held back. No network, no lock."""
+        return self._account.change_problem()
+
+    def needs_confirmation(self) -> bool:
+        """The alias has no binding you confirmed: its next sign-in leaves one to confirm first."""
+        return self._account.needs_confirmation()
+
+    def disconnect(self) -> None:
+        """Forget the saved sign-in and which Google account the alias is (the next sign-in binds
+        again). Raises google_auth.AccountError, the binding kept, when the saved sign-in could
+        not be deleted."""
+        with self._lock:
+            try:
+                self._account.disconnect()
+            finally:
+                self._creds = None
+                self._service = None
+                self._timezone = None
+
+    def _require_change_allowed(self) -> None:
+        """Right before a change goes to Google (after any sign-in): refused unless the saved
+        sign-in is the alias's confirmed Google account (CalendarAuthError with the problem;
+        executor.CalendarBackend checks this first, before "running" is saved)."""
+        problem, message = self._account.change_problem()
+        if problem:
+            raise CalendarAuthError(message or f"Nothing was changed for the {self.alias} account",
+                                    problem=problem)
+
     @contextmanager
     def _guarded(self) -> Iterator[None]:
         """Hold the lock; log a CalendarError once, at the outermost public call.
@@ -619,6 +660,7 @@ class GoogleCalendar:
                 return EventResult(event_id=event_id, link=str(existing.get("htmlLink") or ""),
                                    existed=True)
             service = self._get_service(interactive=interactive)
+            self._require_change_allowed()
             request = service.events().insert(calendarId=self._calendar_id,
                                               body=build_event_body(action, tz))
             created = self._execute(request, "adding the event", mutation=True)
@@ -730,6 +772,7 @@ class GoogleCalendar:
             if comment:
                 attendee["comment"] = comment
             service = self._get_service(interactive=interactive)
+            self._require_change_allowed()
             request = service.events().patch(
                 calendarId=calendar, eventId=event_id, sendUpdates=updates,
                 body={"attendeesOmitted": True, "attendees": [attendee]})
@@ -774,6 +817,7 @@ class GoogleCalendar:
                 raise NotAllowed("The new time has already begun")
             tz = self.timezone(interactive=interactive)
             service = self._get_service(interactive=interactive)
+            self._require_change_allowed()
             request = service.events().patch(
                 calendarId=calendar, eventId=event_id, sendUpdates=updates,
                 body={"start": {"dateTime": _wall_time(start), "timeZone": tz},
@@ -805,6 +849,7 @@ class GoogleCalendar:
             if not details.organizer_self:
                 raise NotAllowed("You don't organize this event - decline it instead")
             service = self._get_service(interactive=interactive)
+            self._require_change_allowed()
             request = service.events().delete(calendarId=calendar, eventId=event_id,
                                               sendUpdates=updates)
             try:

@@ -13,6 +13,13 @@
                                    the result after it; a Reply or Email is sent only that way
     mail_status(action)            Executor: what a Reply / Email card shows (From, recipients,
                                    why it can't send yet) and what its Send click does
+    pending_confirmation(alias)    Executor: a new binding you have not confirmed yet ("Signed in
+                                   as X for 'personal' - is that right?"); nothing is sent or
+                                   changed for that alias until confirm_account(), and
+                                   disconnect() is "No, use another account"
+    change_problem(alias)          Executor: why nothing may be changed for the alias although it
+                                   is signed in (fails closed: also a saved sign-in Jarvis has no
+                                   binding for, which signs in again)
     build_accounts(config)         one google_auth.GoogleAccount per alias (the single sign-in
                                    of older versions becomes "personal"), bound via accounts.json
     build_calendars(config)        one gcal.GoogleCalendar per alias that has the calendar feature
@@ -96,6 +103,7 @@ from .google_auth import (
     FEATURE_SCOPES,
     GMAIL_FEATURE,
     PROBLEM_BLOCKED,
+    PROBLEM_CONFIRM,
     PROBLEM_DENIED,
     PROBLEM_EXPIRED,
     PROBLEM_FAILED,
@@ -109,7 +117,14 @@ from .google_auth import (
     logged_alias,
     migrate_legacy_token,
 )
-from .recipients import RECIPIENTS_FILE, RecipientHistory, RecipientReview, review
+from .recipients import (
+    OWN_RECIPIENT_MESSAGE,
+    RECIPIENTS_FILE,
+    RecipientHistory,
+    RecipientReview,
+    own_recipients,
+    review,
+)
 
 if TYPE_CHECKING:
     from .actions import ActionStore
@@ -134,6 +149,16 @@ COUNTDOWN_ONLY_MESSAGE = "Email is only sent when the Send countdown runs out; n
 NEW_RECIPIENTS_MESSAGE = "Tick the new recipients in Edit first; nothing was sent"
 NO_EVENT_MESSAGE = "There is no event to check on this card"
 UNCONFIRMED_FROM = "account not confirmed yet"
+# A new binding you have not confirmed yet (google_auth.PROBLEM_CONFIRM): nothing is sent or changed.
+CONFIRM_FIRST_MESSAGE = ("Confirm first that Jarvis signed in to the right Google account for {alias}; "
+                         "nothing was changed")
+# A saved sign-in Jarvis has no binding for (google_auth.PROBLEM_IDENTITY): sign in again.
+UNKNOWN_ACCOUNT_MESSAGE = ("Jarvis doesn't know which Google account the {alias} account's sign-in is; sign in "
+                           "again to confirm it - nothing was sent or changed")
+CHECK_ACCOUNT_FAILED_MESSAGE = "Could not check which Google account this is; nothing was sent or changed"
+# "No, use another account" when the saved sign-in can't be deleted: the binding stays unconfirmed.
+DISCONNECT_FAILED_MESSAGE = ("Could not forget the {alias} account's Google sign-in (its file is in use); nothing "
+                             "was sent or changed")
 _NOTIFY = {"all": "all", "external": "externalOnly", "none": "none"}
 _SEPARATOR = " \u00b7 "   # middle dot, as on the cards
 _RESPONSE_WORDS = {"accepted": "you accepted", "declined": "you declined", "tentative": "you said maybe",
@@ -268,12 +293,18 @@ class MailStatus:
     sign_in: bool = False       # a Send click opens the Google sign-in first (no countdown)
     hand_off: bool = False      # Jarvis won't send from here: Copy / Open, and Done instead of Send
     review: RecipientReview | None = None
+    confirm: bool = False       # a Send click asks first whether the bound Google account is the right one
+
+    @property
+    def refused(self) -> bool:
+        """The recipients as they stand can't be sent to (one is the sending account itself, or To
+        is empty): a Send click only says so; Edit fixes it."""
+        return self.review is not None and bool(self.review.problem or self.review.own)
 
     @property
     def needs_edit(self) -> bool:
-        """A Send click opens the Edit dialog: a NEW RECIPIENT is not ticked yet, or nobody is left
-        in To once the account's own address is taken out."""
-        return self.review is not None and (bool(self.review.unconfirmed) or bool(self.review.problem))
+        """A Send click opens the Edit dialog: a NEW RECIPIENT is not ticked yet."""
+        return self.review is not None and bool(self.review.unconfirmed)
 
     @property
     def ready(self) -> bool:
@@ -339,16 +370,28 @@ class CalendarBackend:
         return calendar is not None and _call_bool(calendar, "is_signed_in")
 
     def prepare(self, action: ProposedAction, *, on_stage: OnStage) -> None:
-        """Sign the account in first when there is no usable sign-in (opens the browser)."""
+        """Sign the account in first when there is no usable sign-in (opens the browser). Nothing is
+        changed unless the saved sign-in is the account's confirmed Google account (ExecError
+        PROBLEM_CONFIRM for a binding you have not confirmed, PROBLEM_IDENTITY for a sign-in
+        Jarvis has no binding for; before "running" is saved)."""
         calendar = self._require(action)
-        if self.signed_in(action):
-            return
-        on_stage(STAGE_SIGNIN)
-        try:
-            calendar.sign_in()
-        except CalendarError as exc:
-            raise _exec_error(exc) from None
-        on_stage(STAGE_SIGNED_IN)
+        if not self.signed_in(action):
+            on_stage(STAGE_SIGNIN)
+            try:
+                calendar.sign_in()
+            except CalendarError as exc:
+                raise _exec_error(exc) from None
+            on_stage(STAGE_SIGNED_IN)
+        self._require_confirmed(action, calendar)
+
+    def _require_confirmed(self, action: ProposedAction, calendar: Any) -> None:
+        """Fails closed (google_auth.GoogleAccount.change_problem): a Google account you did not
+        confirm for the alias, or one Jarvis can't tell, changes nothing."""
+        problem, message = _change_problem(calendar)
+        if problem == PROBLEM_CONFIRM:
+            raise ExecError(CONFIRM_FIRST_MESSAGE.format(alias=account_of(action)), problem=PROBLEM_CONFIRM)
+        if problem:
+            raise ExecError(message or UNKNOWN_ACCOUNT_MESSAGE.format(alias=account_of(action)), problem=problem)
 
     def execute(self, action: ProposedAction, *, on_stage: OnStage,
                 interactive: bool = True) -> ExecResult:
@@ -359,6 +402,7 @@ class CalendarBackend:
             self.prepare(action, on_stage=on_stage)
         elif not self.signed_in(action):
             raise ExecError(_not_signed_in_text(account_of(action)), problem=PROBLEM_SIGNED_OUT)
+        self._require_confirmed(action, calendar)
         on_stage(STAGE_WORKING)
         field = action.field
         try:
@@ -421,9 +465,11 @@ class GmailBackend:
 
     Nothing here opens the browser except ``sign_in`` (a click). A message goes out only from
     ``execute(..., interactive=False)`` - run_action's "running" path after the undo countdown -
-    and only when the saved sign-in is the bound Google account, the card's text is sendable
-    (actions.mail_problem) and every NEW RECIPIENT was ticked in the Edit dialog. After a send
-    the recipients are remembered (recipients.json), so they need no tick next time.
+    and only when the saved sign-in is the bound Google account and you confirmed that binding,
+    the card's text is sendable (actions.mail_problem), no recipient is the sending account itself
+    (checked on the card's recipients, on the message and once more right before the send) and
+    every NEW RECIPIENT was ticked in the Edit dialog. After a send the recipients are remembered
+    (recipients.json), so they need no tick next time.
     """
 
     name = BACKEND_GOOGLE
@@ -456,12 +502,12 @@ class GmailBackend:
         return sender is not None and _call_bool(sender, "is_signed_in")
 
     def review(self, action: ProposedAction) -> RecipientReview:
-        """The card's recipients: the account's own address taken out, each one OWN / TRUSTED /
-        KNOWN / NEW, the new ones not yet ticked in Edit."""
+        """The card's recipients, each one OWN (the sending account itself: the card is refused) /
+        TRUSTED / KNOWN / NEW, the new ones not yet ticked in Edit."""
         sender = self._senders.get(action.account)
         own = _call_text(sender, "from_address") if sender is not None else ""
-        return review(action.recipients(), action.cc(), own=own, confirmed=action.confirmed,
-                      trusted_domains=self._trusted, history=self._history)
+        return review(action.recipients(), action.cc(), own=own, account=action.account,
+                      confirmed=action.confirmed, trusted_domains=self._trusted, history=self._history)
 
     def status(self, action: ProposedAction, reason: str = "") -> MailStatus:
         """See MailStatus; ``reason`` is the Executor's readiness answer (not set up: a hand-off)."""
@@ -477,6 +523,9 @@ class GmailBackend:
         if problem in (PROBLEM_SETUP, PROBLEM_BLOCKED):
             note = mail_note(alias, problem, message, tools=tools)
             return MailStatus(alias, address, from_text, problem, note, hand_off=True, review=recipients)
+        if problem == PROBLEM_CONFIRM:
+            return MailStatus(alias, address, from_text, problem, mail_note(alias, problem, message, tools=tools),
+                              review=recipients, confirm=True)
         if problem:
             return MailStatus(alias, address, from_text, problem, mail_note(alias, problem, message, tools=tools),
                               sign_in=True, review=recipients)
@@ -495,6 +544,15 @@ class GmailBackend:
             raise ExecError(COUNTDOWN_ONLY_MESSAGE)
         mail = self._message(action)
         sender = self._senders[action.account]
+        # Once more right before the send, against the message itself and the account as it is
+        # now: never without a known sender, never to the sending account's own mailbox.
+        if not mail.from_addr:
+            raise ExecError(mail_note(action.account, PROBLEM_IDENTITY), problem=PROBLEM_IDENTITY)
+        if (own_recipients(mail.to + mail.cc, mail.from_addr)
+                or own_recipients(mail.to + mail.cc, _call_text(sender, "from_address"))):
+            logger.info("Action %s (%s, %s) not sent: a recipient is the sending account itself", action.id,
+                        action.kind, logged_alias(action.account))
+            raise ExecError(OWN_RECIPIENT_MESSAGE.format(alias=action.account))
         logger.info("Sending action %s (%s, %s) to %d recipient(s)", action.id, action.kind,
                     logged_alias(action.account), mail.recipient_count)
         on_stage(STAGE_WORKING)
@@ -540,12 +598,17 @@ class GmailBackend:
         if state:
             raise ExecError(mail_note(action.account, state, message), problem=state)
         recipients = self.review(action)
+        if recipients.own:   # the card's note names the address; this message (saved, logged) does not
+            raise ExecError(OWN_RECIPIENT_MESSAGE.format(alias=action.account))
         if recipients.problem:
             raise ExecError(f"{recipients.problem}; nothing was sent")
         if recipients.unconfirmed:
             raise ExecError(NEW_RECIPIENTS_MESSAGE)
         reply = action.kind == REPLY
-        return OutgoingMail(account=action.account, from_addr=_call_text(sender, "from_address"),
+        from_addr = _call_text(sender, "from_address")
+        if not from_addr:   # the account it sends from must be known (gmail.GmailSender refuses too)
+            raise ExecError(mail_note(action.account, PROBLEM_IDENTITY), problem=PROBLEM_IDENTITY)
+        return OutgoingMail(account=action.account, from_addr=from_addr,
                             to=recipients.to, cc=recipients.cc, subject=action.field("subject") or action.title,
                             body=action.body, thread_id=action.field("thread") if reply else "",
                             in_reply_to=action.field("msgid") if reply else "")
@@ -573,6 +636,24 @@ def _call_text(target: Any, name: str) -> str:
         logger.debug("Could not read %s (%s)", name, type(exc).__name__)
         return ""
     return value if isinstance(value, str) else ""
+
+
+def _change_problem(handle: Any) -> tuple[str, str]:
+    """Why nothing may be sent or changed for a calendar's / sender's alias now: its
+    ``change_problem()`` (google_auth.GoogleAccount's, which fails closed), or for an object
+    without one (an older or a test double) only ``pending_confirmation()``. A check that breaks
+    refuses too (PROBLEM_FAILED)."""
+    getter = getattr(handle, "change_problem", None)
+    if not callable(getter):
+        return (PROBLEM_CONFIRM, "") if _call_text(handle, "pending_confirmation") else ("", "")
+    try:
+        problem, message = getter()
+    except Exception as exc:  # noqa: BLE001 - refused: nothing is changed without a known account
+        logger.warning("Could not check which Google account the sign-in is (%s)", type(exc).__name__)
+        return PROBLEM_FAILED, CHECK_ACCOUNT_FAILED_MESSAGE
+    if not isinstance(problem, str) or not isinstance(message, str):
+        return PROBLEM_FAILED, CHECK_ACCOUNT_FAILED_MESSAGE
+    return problem, message
 
 
 def hand_off_tools(action: ProposedAction) -> str:
@@ -613,6 +694,9 @@ def mail_note(alias: str, problem: str, message: str = "", *, tools: str = "Copy
         if message.startswith(("This is not", "That Google account", "Google did not say")):
             return f"{message} - click Send to sign in with the right account"
         return f"Jarvis doesn't know yet which Google account {alias} is - click Send to sign in and confirm it"
+    if problem == PROBLEM_CONFIRM:
+        return (f"Is From the right Google account for {alias}? Click Send to confirm it (or to use another "
+                "account) - nothing is sent until you do")
     if problem == PROBLEM_FAILED and message:
         return f"{message} - click Send to try again"
     return f"Send signs in to Google for the {alias} account first - then check From and click Send again"
@@ -733,6 +817,78 @@ class Executor:
         if reason or backend is None:
             raise ExecError(reason or NOTHING_TO_DO, problem=PROBLEM_SETUP)
         backend.sign_in(account_of(action), on_stage=on_stage)
+
+    # ---- which Google account an alias is: the first sign-in's question ------------------------
+
+    def _account_handles(self, alias: str) -> list[Any]:
+        """The objects that act for ``alias`` (its Gmail sender and its calendar; in the app both
+        share one google_auth.GoogleAccount)."""
+        handles: list[Any] = []
+        for backend in self._backends:
+            for getter in ("sender", "calendar"):
+                get = getattr(backend, getter, None)
+                handle = get(alias) if callable(get) else None
+                if handle is not None and all(handle is not other for other in handles):
+                    handles.append(handle)
+        return handles
+
+    def pending_confirmation(self, alias: str) -> str:
+        """The address of the Google account ``alias`` was bound to while you have not confirmed it
+        ("" when there is nothing to confirm). Nothing is sent or changed for the alias meanwhile;
+        reading its calendar goes on. Files only (no network)."""
+        for handle in self._account_handles(alias):
+            address = _call_text(handle, "pending_confirmation")
+            if address:
+                return address
+        return ""
+
+    def confirm_account(self, alias: str, address: str) -> bool:
+        """You answered Yes to "Signed in as ``address`` for ``alias`` - is that right?" (kept in
+        accounts.json). False when ``alias`` is not bound to that address (any more)."""
+        confirmed = False
+        for handle in self._account_handles(alias):
+            confirm = getattr(handle, "confirm_account", None)
+            if callable(confirm):
+                try:
+                    confirmed = bool(confirm(address)) or confirmed
+                except Exception as exc:  # noqa: BLE001 - not confirmed: it is asked again
+                    logger.warning("Could not confirm the %s account (%s)", logged_alias(alias), type(exc).__name__)
+        return confirmed and not self.pending_confirmation(alias)
+
+    def change_problem(self, alias: str) -> str:
+        """Why nothing may be sent or changed for ``alias`` now although it may be signed in
+        (google_auth PROBLEM_*; "" when it may): PROBLEM_CONFIRM (a binding you have not
+        confirmed: ask), PROBLEM_IDENTITY (a saved sign-in Jarvis has no binding for: sign in
+        again, which binds and asks), PROBLEM_SIGNED_OUT, or PROBLEM_FAILED when it could not be
+        checked. Files only (no network)."""
+        for handle in self._account_handles(alias):
+            problem, _message = _change_problem(handle)
+            if problem:
+                return problem
+        return ""
+
+    def needs_confirmation(self, alias: str) -> bool:
+        """``alias`` has no binding you confirmed, so its next sign-in leaves one to confirm before
+        anything is changed (a Calendar event's or Todo block's Approve signs in before the
+        countdown then). False for objects that do not say (test doubles)."""
+        for handle in self._account_handles(alias):
+            if callable(getattr(handle, "needs_confirmation", None)) and _call_bool(handle, "needs_confirmation"):
+                return True
+        return False
+
+    def disconnect(self, alias: str) -> None:
+        """You answered "No, use another account": forget ``alias``'s saved sign-in and which
+        Google account it is (blocking: deletes files; run it on the action worker). ExecError
+        (DISCONNECT_FAILED_MESSAGE) when the saved sign-in could not be deleted: the binding is
+        kept, unconfirmed, and the sign-in must not start."""
+        for handle in self._account_handles(alias):
+            disconnect = getattr(handle, "disconnect", None)
+            if callable(disconnect):
+                try:
+                    disconnect()
+                except Exception as exc:  # noqa: BLE001 - google_auth logged it; the card says why
+                    logger.warning("Could not disconnect the %s account (%s)", logged_alias(alias), type(exc).__name__)
+                    raise ExecError(DISCONNECT_FAILED_MESSAGE.format(alias=alias), problem=PROBLEM_FAILED) from None
 
     def _backend(self, action: ProposedAction) -> Backend:
         reason = self.readiness(action)

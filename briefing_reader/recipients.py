@@ -1,10 +1,17 @@
-"""Who a Reply or Email goes to: the NEW RECIPIENT check ("confirm new people").
+"""Who a Reply or Email goes to: the own-address refusal and the NEW RECIPIENT check.
+
+Jarvis never sends a message to the account it sends from. An address is that account's own
+mailbox (OWN) also when it is written another way: other upper / lower case, spaces around it,
+a "+tag" after the name (Gmail delivers "ana+notes@example.edu" to "ana@example.edu") or, for
+gmail.com / googlemail.com, dots in the name. A card that names its own account in To or Cc is
+refused as it stands ("This would send to the work account (ana@example.edu) itself - edit the
+recipients"): such a card is a slip of the briefing, or its alias is bound to the wrong Google
+account, so nothing is quietly left out and nothing goes out until the address is removed in
+Edit.
 
 Jarvis holds only gmail.send, so it cannot read a thread to prove that an address belongs in it.
 Instead an address needs no extra confirmation only when it is
 
-- the sending account's own address (then it is not a recipient at all: it is taken out of To
-  and Cc),
 - in a domain of ``[actions] trusted_domains``, or a subdomain of one (empty by default), or
 - an address Jarvis sent to before (RecipientHistory: recipients.json).
 
@@ -12,11 +19,15 @@ Every other address is NEW: its card shows a red NEW RECIPIENT chip and Send wai
 ticked in the Edit dialog ("Send to <address>"; ProposedAction.confirmed, memory only).
 Addresses are compared as plain, casefolded addresses; a display name never counts.
 
+    mailbox_key(address)      the mailbox an address delivers to (only for comparing addresses)
+    same_mailbox(a, b)        both are the same mailbox (case, spaces, +tag, Gmail dots aside)
+    own_recipients(...)       the recipients that are the sending account itself
     RecipientHistory(path)    %LOCALAPPDATA%\\briefing-reader\\recipients.json: the sha256 of each
                               address Jarvis sent to and when (never the address itself)
     classify(addresses, ...)  address -> OWN / TRUSTED / KNOWN / NEW
-    review(to, cc, ...)       what a card shows and Send needs: the recipients without the own
-                              address, which are new, which of those are still unconfirmed
+    review(to, cc, ...)       what a card shows and Send needs: the recipients, which of them are
+                              the account itself (Send refuses), which are new, which of those
+                              are still unconfirmed
 
 Qt-free. Logs carry counts only, never an address or a hash.
 """
@@ -38,14 +49,69 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 RECIPIENTS_FILE = "recipients.json"
-OWN = "own"            # the sending account itself (taken out of To / Cc)
+OWN = "own"            # the sending account itself: Send refuses until it is removed
 TRUSTED = "trusted"    # in [actions] trusted_domains
 KNOWN = "known"        # Jarvis sent to it before
 NEW = "new"            # needs a tick in the Edit dialog before Send
 MAX_REMEMBERED = 5000  # the most recent addresses kept in recipients.json
-NO_RECIPIENT_LEFT = ("Nobody is left in To once your own address is taken out - "
-                     "Edit the recipients")
+NO_TO_PROBLEM = "The message has nobody in To - edit the recipients"
+# The card's refusal (shown on the card only: it names the address, so it is never logged or saved).
+OWN_RECIPIENT_NOTE = "This would send to {who} itself - edit the recipients"
+# The same refusal without the address: what a failed send saves (actions.json) and may log.
+OWN_RECIPIENT_MESSAGE = ("This would send to the {alias} account's own address; nothing was sent - "
+                         "edit the recipients")
 _KEY_RE = re.compile(r"[0-9a-f]{64}")
+# Mail domains whose names ignore dots ("a.na@gmail.com" is "ana@gmail.com").
+_DOTLESS_DOMAINS = {"gmail.com": "gmail.com", "googlemail.com": "gmail.com"}
+
+
+def mailbox_key(address: str) -> str:
+    """The mailbox ``address`` delivers to, for comparing it with the sending account's address.
+
+    Spaces around it and upper / lower case do not count, nor a "+tag" after the name
+    (sub-addressing: Gmail and Google Workspace deliver it to the same mailbox), nor dots in a
+    gmail.com / googlemail.com name. "" for an empty text. Only ever compared, never sent or shown.
+    """
+    if not isinstance(address, str):
+        return ""
+    text = address.strip().casefold()
+    local, at, domain = text.rpartition("@")
+    if not at:
+        return text
+    local, domain = local.strip(), domain.strip().rstrip(".")
+    plain = local.split("+", 1)[0]
+    if plain:
+        local = plain
+    if domain in _DOTLESS_DOMAINS:
+        domain = _DOTLESS_DOMAINS[domain]
+        local = local.replace(".", "") or local
+    return f"{local}@{domain}"
+
+
+def same_mailbox(first: str, second: str) -> bool:
+    """``first`` and ``second`` are the same mailbox (see mailbox_key); False when either one is
+    not an address."""
+    key = mailbox_key(first)
+    return "@" in key and key == mailbox_key(second)
+
+
+def own_recipients(addresses: Iterable[str], own: str) -> tuple[str, ...]:
+    """The addresses that are the sending account ``own`` itself (none while ``own`` is unknown)."""
+    if not isinstance(own, str) or "@" not in own:
+        return ()
+    return tuple(address for address in addresses if same_mailbox(address, own))
+
+
+def own_recipient_note(account: str, address: str) -> str:
+    """The card's refusal: "This would send to the work account (ana@example.edu) itself - edit
+    the recipients". For the card only (it names the address)."""
+    if account and address:
+        who = f"the {account} account ({address})"
+    elif account:
+        who = f"the {account} account"
+    else:
+        who = address or "the sending account"
+    return OWN_RECIPIENT_NOTE.format(who=who)
 
 
 def address_key(address: str) -> str:
@@ -156,11 +222,11 @@ class RecipientHistory:
 
 def classify(addresses: Iterable[str], *, own: str, trusted_domains: Sequence[str],
              history: RecipientHistory | None) -> dict[str, str]:
-    """address -> OWN, TRUSTED, KNOWN or NEW (first match wins, in that order)."""
-    own_key = own.casefold() if own else ""
+    """address -> OWN (the sending account ``own`` itself, written any way same_mailbox allows),
+    TRUSTED, KNOWN or NEW (first match wins, in that order)."""
     kinds: dict[str, str] = {}
     for address in addresses:
-        if own_key and address.casefold() == own_key:
+        if own and same_mailbox(address, own):
             kinds[address] = OWN
         elif in_domains(address, trusted_domains):
             kinds[address] = TRUSTED
@@ -175,14 +241,16 @@ def classify(addresses: Iterable[str], *, own: str, trusted_domains: Sequence[st
 class RecipientReview:
     """What a Reply / Email card shows about its recipients and what Send needs.
 
-    ``to`` / ``cc`` are what is sent (the own address taken out). ``kinds`` names every address
-    of the card (the own one too) with OWN / TRUSTED / KNOWN / NEW, in To-then-Cc order.
+    ``to`` / ``cc`` are the card's recipients as it names them (nothing is left out). ``kinds``
+    names each of them OWN / TRUSTED / KNOWN / NEW, in To-then-Cc order. ``own`` lists the ones
+    that are the sending account itself: then ``problem`` says so and Send refuses until they are
+    removed in Edit.
     """
 
     to: tuple[str, ...]
     cc: tuple[str, ...]
     kinds: tuple[tuple[str, str], ...]
-    own_dropped: bool
+    own: tuple[str, ...]            # the sending account itself: the card is refused as it stands
     new: tuple[str, ...]            # the red NEW RECIPIENT chips
     unconfirmed: tuple[str, ...]    # new and not ticked yet: Send opens the Edit dialog
     problem: str = ""               # why nothing can be sent as it stands ("" = nothing)
@@ -194,23 +262,31 @@ class RecipientReview:
     @property
     def ready(self) -> bool:
         """Send may go ahead as far as the recipients go."""
-        return not self.problem and not self.unconfirmed
+        return not self.problem and not self.own and not self.unconfirmed
 
     def kind_of(self, address: str) -> str:
         key = address.casefold()
         return next((kind for item, kind in self.kinds if item.casefold() == key), "")
 
 
-def review(to: Sequence[str], cc: Sequence[str], *, own: str, confirmed: Collection[str] = (),
+def review(to: Sequence[str], cc: Sequence[str], *, own: str, account: str = "", confirmed: Collection[str] = (),
            trusted_domains: Sequence[str] = (), history: RecipientHistory | None = None) -> RecipientReview:
-    """The recipients of a Reply / Email as a card shows them and Send needs them (no network)."""
-    everyone = tuple(to) + tuple(cc)
-    kinds = classify(everyone, own=own, trusted_domains=trusted_domains, history=history)
-    send_to = tuple(address for address in to if kinds[address] != OWN)
-    send_cc = tuple(address for address in cc if kinds[address] != OWN)
+    """The recipients of a Reply / Email as a card shows them and Send needs them (no network).
+
+    ``own`` is the sending account's address ("" while Jarvis does not know it; Send then signs
+    in first anyway); ``account`` its alias, for the refusal note. Any recipient that is the
+    account itself (same_mailbox) refuses the card: "This would send to the work account
+    (ana@example.edu) itself - edit the recipients"."""
+    to, cc = tuple(to), tuple(cc)
+    kinds = classify(to + cc, own=own, trusted_domains=trusted_domains, history=history)
+    mine = tuple(address for address in to + cc if kinds[address] == OWN)
     ticked = {address.casefold() for address in confirmed}
-    new = tuple(address for address in send_to + send_cc if kinds[address] == NEW)
+    new = tuple(address for address in to + cc if kinds[address] == NEW)
     unconfirmed = tuple(address for address in new if address.casefold() not in ticked)
-    return RecipientReview(to=send_to, cc=send_cc, kinds=tuple(kinds.items()),
-                           own_dropped=len(send_to) + len(send_cc) != len(everyone), new=new,
-                           unconfirmed=unconfirmed, problem="" if send_to else NO_RECIPIENT_LEFT)
+    problem = ""
+    if mine:
+        problem = own_recipient_note(account, own.strip())
+    elif not to:
+        problem = NO_TO_PROBLEM
+    return RecipientReview(to=to, cc=cc, kinds=tuple(kinds.items()), own=mine, new=new,
+                           unconfirmed=unconfirmed, problem=problem)
