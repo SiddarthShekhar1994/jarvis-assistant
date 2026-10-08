@@ -2442,6 +2442,71 @@ class ImportTests(unittest.TestCase):
         self.assertTrue(source.isascii())
 
 
+
+class SourceTests(unittest.TestCase):
+    """ProposedAction.source (briefing / ask), restrict() and with_error()."""
+
+    MOVE_LINE = ("Move: acct=work | event=abc123def456 | cal=primary | when=2026-10-09 14:00-15:00 | "
+                 "notify=all | title=Project sync | at=2026-10-08 14:00-15:00 | link= | body=")
+
+    def test_source_is_not_part_of_the_id(self) -> None:
+        line = parse_action_line(self.MOVE_LINE)
+        self.assertEqual(line.source, actions.SOURCE_BRIEFING)
+        self.assertEqual(line.unverified, frozenset())
+        ask = actions.restrict(line, {MOVE}, actions.SOURCE_ASK)
+        self.assertEqual(ask.source, "ask")
+        self.assertEqual(ask.id, line.id)
+        self.assertTrue(ask.actionable)
+        self.assertEqual(dataclasses.replace(ask, source="briefing"), line)
+
+    def test_a_kind_the_source_may_not_propose_is_information_only(self) -> None:
+        slack = parse_action_line("Slack: channel=C0123ABCD | ts=1696000000.000100 | who=Ana | body=Sure")
+        refused = actions.restrict(slack, {MOVE, EMAIL}, actions.SOURCE_ASK)
+        self.assertEqual(refused.error, "Ask can't propose Slack")
+        self.assertFalse(refused.decidable)
+        self.assertNotEqual(refused.id, slack.id)
+        share = actions.restrict(parse_action_line("Share: acct=work | file=1AbCdEfGhIjKlMnOp | who=a@example.edu"),
+                                 {MOVE}, actions.SOURCE_ASK)
+        self.assertEqual(share.error, "Ask can't propose Share")
+        prose = actions.restrict(parse_action_line("Nothing to do today."), {MOVE}, actions.SOURCE_ASK)
+        self.assertIn("need a kind", prose.error)
+
+    def test_with_error_rebuilds_the_id_per_source(self) -> None:
+        line = parse_action_line(self.MOVE_LINE)
+        briefing_error = actions.with_error(line, "nope")
+        ask_error = actions.with_error(dataclasses.replace(line, source="ask"), "nope")
+        # A briefing card's id is the one an unreadable line with the same text gets.
+        self.assertEqual(briefing_error.id, actions._action_id(dataclasses.replace(line, error="x")))
+        self.assertNotEqual(briefing_error.id, line.id)
+        self.assertNotEqual(ask_error.id, briefing_error.id)
+        self.assertEqual(ask_error.id, actions.with_error(dataclasses.replace(line, source="ask"), "other").id)
+        self.assertFalse(ask_error.decidable)
+        # An unreadable Ask line keeps its reason, under an id of its own.
+        bad = parse_action_line("Move: acct=work | event=! | when=2026-10-09 14:00-15:00")
+        ask_bad = actions.restrict(bad, {MOVE}, actions.SOURCE_ASK)
+        self.assertEqual(ask_bad.error, bad.error)
+        self.assertNotEqual(ask_bad.id, bad.id)
+
+    def test_card_of_a_refused_ask_line_says_why_plainly(self) -> None:
+        line = parse_action_line(self.MOVE_LINE)
+        ask = actions.with_error(dataclasses.replace(line, source="ask"), "Jarvis doesn't know this event - ask again")
+        view = card_view(ask, date(2026, 10, 4))
+        self.assertEqual(view.title, "Project sync")
+        self.assertEqual(view.detail, "Jarvis doesn't know this event - ask again")
+        self.assertFalse(view.decidable)
+        # A briefing line keeps the old wording.
+        briefing = card_view(actions.with_error(line, "bad"), date(2026, 10, 4))
+        self.assertEqual(briefing.detail, "Can't read this line: bad")
+
+    def test_unverified_recipients_survive_an_edit(self) -> None:
+        line = parse_action_line("Email: acct=work | to=Ana <ana@example.edu> | subject=Hi | body=Hello")
+        ask = dataclasses.replace(line, source="ask", unverified=frozenset({"ana@example.edu"}))
+        edited = actions.edit_mail(ask, body="Hello again", confirmed=["ana@example.edu"])
+        self.assertEqual(edited.unverified, frozenset({"ana@example.edu"}))
+        self.assertEqual(edited.source, "ask")
+        self.assertEqual(edited.id, line.id)
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.CRITICAL)
     unittest.main()

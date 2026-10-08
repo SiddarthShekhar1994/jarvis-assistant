@@ -46,6 +46,86 @@ class ArgumentTests(unittest.TestCase):
                 with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
                     parser.parse_args(argv)
 
+    def test_ask_arguments(self) -> None:
+        parser = entry.build_parser()
+        self.assertTrue(parser.parse_args(["--ask-check"]).ask_check)
+        args = parser.parse_args(["--ask-text", "move my sync", "--ask-dry-run"])
+        self.assertEqual((args.ask_text, args.ask_dry_run), ("move my sync", True))
+        for argv in (["--ask-check", "--run", "am"], ["--ask-text", "x", "--hotkey-agent"],
+                     ["--ask-check", "--ask-text", "x"]):
+            with self.subTest(argv=argv):
+                with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+                    parser.parse_args(argv)
+        with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+            entry.main(["--ask-dry-run"])   # needs --ask-text
+
+    def test_ask_modes_run_without_qt_or_the_lock_and_never_log_the_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = load_config(Path(tmp), environ={"LOCALAPPDATA": tmp})
+        for argv in (["--ask-check"], ["--ask-text", "SECRET-REQUEST-TEXT", "--ask-dry-run"],
+                     ["--ask-text", "SECRET-REQUEST-TEXT"]):
+            with self.subTest(argv=argv):
+                with mock.patch("briefing_reader.config.setup_logging", return_value=Path("x.log")), \
+                        mock.patch("briefing_reader.config.load_config", return_value=config), \
+                        mock.patch("briefing_reader.ask.commands.run", return_value=0) as run, \
+                        mock.patch.object(entry, "_claim_single_instance") as claim, \
+                        mock.patch.object(entry, "_run_app") as app, \
+                        self.assertLogs("briefing_reader", level="INFO") as logs:
+                    self.assertEqual(entry.main(argv), 0)
+                (args, passed_config, _out), _ = run.call_args
+                self.assertIs(passed_config, config)
+                self.assertEqual(args.ask_check, argv == ["--ask-check"])
+                claim.assert_not_called()
+                app.assert_not_called()
+                self.assertNotIn("SECRET-REQUEST-TEXT", "\n".join(logs.output))
+
+    def test_ask_start_mode(self) -> None:
+        parser = entry.build_parser()
+        args = parser.parse_args(["--ask"])
+        self.assertTrue(args.ask)
+        self.assertFalse(args.ask_check or args.ask_text)
+        self.assertFalse(parser.parse_args([]).ask)
+        for argv in (["--ask", "--run", "am"], ["--ask", "--catch-up"], ["--ask", "--hotkey-agent"],
+                     ["--ask", "--ask-check"], ["--ask", "--ask-text", "x"]):
+            with self.subTest(argv=argv):
+                with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+                    parser.parse_args(argv)
+
+    def test_ask_with_the_app_running_asks_it_to_open_the_bar(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = load_config(Path(tmp), environ={"LOCALAPPDATA": tmp})
+        with mock.patch("briefing_reader.config.setup_logging", return_value=Path("x.log")), \
+                mock.patch("briefing_reader.config.load_config", return_value=config), \
+                mock.patch.object(entry, "_claim_single_instance", return_value=False), \
+                mock.patch("briefing_reader.activation.forward_to_running_instance", return_value=0) as forward, \
+                mock.patch.object(entry, "_run_app") as app, \
+                self.assertLogs("briefing_reader", level="INFO"):
+            self.assertEqual(entry.main(["--ask"]), 0)
+        app.assert_not_called()
+        forward.assert_called_once_with(entry._instance_name(), None, False, ask=True)
+
+    def test_a_launch_without_ask_forwards_the_old_message(self) -> None:
+        with mock.patch("briefing_reader.activation.forward_to_running_instance", return_value=0) as forward:
+            self.assertEqual(entry._forward_to_running("name", "AM", True), 0)
+        forward.assert_called_once_with("name", "AM", True)
+
+    def test_the_activation_message_carries_ask_only_when_asked(self) -> None:
+        from briefing_reader import activation
+
+        sent: list[bytes] = []
+
+        def fake_send(_name: str, payload: bytes) -> bool:
+            sent.append(payload)
+            return True
+
+        with mock.patch.object(activation, "try_send", side_effect=fake_send), \
+                mock.patch.object(activation, "QCoreApplication"):   # no Qt application for a message
+            self.assertEqual(activation.forward_to_running_instance("name", None, False, ask=True), 0)
+            self.assertEqual(activation.forward_to_running_instance("name", "PM", True), 0)
+        self.assertEqual(json.loads(sent[0]), {"cmd": "activate", "run": None, "now": False, "ask": True})
+        self.assertEqual(json.loads(sent[1]), {"cmd": "activate", "run": "PM", "now": True})
+        self.assertEqual(activation.parse_activation(sent[0])["ask"], True)
+
     def test_resolve_slots(self) -> None:
         self.assertEqual(entry._resolve_slots(None, SLOTS), SLOTS)
         self.assertEqual(entry._resolve_slots("am=7:30", SLOTS), {"AM": "07:30", "PM": "23:42"})

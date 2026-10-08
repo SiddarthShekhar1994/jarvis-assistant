@@ -32,6 +32,7 @@ from briefing_reader.config import (
     AccountConfig,
     ActionsConfig,
     AgendaConfig,
+    AskConfig,
     CalendarConfig,
     Config,
     DisplayConfig,
@@ -150,7 +151,7 @@ class NormalizePageIdTests(unittest.TestCase):
 class DefaultsTests(ProjectTestCase):
     def test_dataclass_defaults_match_contract(self) -> None:
         self.assertEqual(VoiceConfig(), VoiceConfig(
-            voice="en-US-GuyNeural", rate="+0%", volume="+0%", offline_voice="",
+            voice="en-GB-RyanNeural", rate="+0%", volume="+0%", offline_voice="",
             section_gap_ms=600, divider_pause_ms=900))
         self.assertEqual(PromptConfig(), PromptConfig(
             later_short_minutes=10, later_long_minutes=30, ignore_after_seconds=120,
@@ -175,6 +176,11 @@ class DefaultsTests(ProjectTestCase):
         self.assertEqual(AgendaConfig(calendars=lists, deadline_keywords=lists).calendars, ("a", "b"))
         self.assertEqual(AgendaConfig(deadline_keywords=lists).deadline_keywords, ("a", "b"))
         self.assertEqual(DisplayConfig(), DisplayConfig(clock="12h"))
+        self.assertEqual(AskConfig(), AskConfig(
+            enabled=False, model="sonnet", timeout_seconds=90, max_turns=4, max_per_hour=20,
+            max_per_day=60, days_back=1, days_ahead=14, calendars=("primary",), max_cards=8,
+            hardened_flags=True, read_mail=True))
+        self.assertEqual(AskConfig(calendars=lists).calendars, ("a", "b"))
         self.assertFalse(DisplayConfig().hour24)
         self.assertTrue(DisplayConfig(clock="24h").hour24)
 
@@ -201,6 +207,7 @@ class DefaultsTests(ProjectTestCase):
         self.assertEqual(cfg.hotkey, HotkeyConfig())
         self.assertEqual(cfg.agenda, AgendaConfig())
         self.assertEqual(cfg.display, DisplayConfig())
+        self.assertEqual(cfg.ask, AskConfig())
 
     def test_load_config_does_not_create_directories(self) -> None:
         cfg = self.load_quietly()
@@ -238,7 +245,7 @@ class DefaultsTests(ProjectTestCase):
 
 FULL_CONFIG = """
 [voice]
-voice = "en-GB-RyanNeural"
+voice = "en-US-GuyNeural"
 rate = "+15%"
 volume = "-10%"
 offline_voice = "Zira"
@@ -297,7 +304,7 @@ class ConfigFileTests(ProjectTestCase):
         self.write_config(FULL_CONFIG)
         cfg = self.load_quietly()
         self.assertEqual(cfg.voice, VoiceConfig(
-            voice="en-GB-RyanNeural", rate="+15%", volume="-10%", offline_voice="Zira",
+            voice="en-US-GuyNeural", rate="+15%", volume="-10%", offline_voice="Zira",
             section_gap_ms=400, divider_pause_ms=1200))
         self.assertEqual(cfg.prompt, PromptConfig(
             later_short_minutes=5, later_long_minutes=45, ignore_after_seconds=90,
@@ -356,6 +363,7 @@ class ConfigFileTests(ProjectTestCase):
             "hotkey": {f.name for f in dataclasses.fields(HotkeyConfig)},
             "agenda": {f.name for f in dataclasses.fields(AgendaConfig)},
             "display": {f.name for f in dataclasses.fields(DisplayConfig)},
+            "ask": {f.name for f in dataclasses.fields(AskConfig)},
         }
         self.assertEqual(set(doc), set(expected_keys))
         for table, keys in expected_keys.items():
@@ -379,14 +387,20 @@ class ConfigFileTests(ProjectTestCase):
         self.assertEqual(cfg.actions.undo_seconds, 10)
         # Generic aliases only: which Google account each one is never goes into config.toml.
         self.assertEqual(dict(cfg.accounts), {
-            "personal": AccountConfig("personal", features=("calendar", "gmail_send")),
-            "work": AccountConfig("work", features=("calendar", "gmail_send"))})
+            "personal": AccountConfig("personal", features=("calendar", "gmail_send", "gmail_read")),
+            "work": AccountConfig("work", features=("calendar", "gmail_send", "gmail_read"))})
         self.assertEqual(cfg.actions.trusted_domains, ())   # public default: nobody is trusted
         self.assertNotIn("@", raw.decode("ascii").split("[accounts", 1)[1].split("[schedule]", 1)[0])
         self.assertEqual(cfg.schedule, ScheduleConfig())
         self.assertEqual(cfg.hotkey, HotkeyConfig())
         self.assertEqual(cfg.agenda, AgendaConfig())
         self.assertEqual(cfg.display, DisplayConfig(clock="12h"))
+        # Ask Jarvis ships off, with the defaults (no path or address in the public file).
+        self.assertEqual(cfg.ask, AskConfig())
+        self.assertFalse(cfg.ask.enabled)
+        ask_part = raw.decode("ascii").split("[ask]", 1)[1]
+        self.assertNotIn("@", ask_part)
+        self.assertNotIn("claude.exe", ask_part.casefold())
 
     def test_client_secret_is_gitignored(self) -> None:
         lines = (config.PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
@@ -442,7 +456,7 @@ class ConfigFileTests(ProjectTestCase):
     def test_empty_voice_falls_back_but_empty_offline_voice_is_allowed(self) -> None:
         self.write_config('[voice]\nvoice = "  "\noffline_voice = ""\n')
         cfg = self.load_warning("voice.voice")
-        self.assertEqual(cfg.voice.voice, "en-US-GuyNeural")
+        self.assertEqual(cfg.voice.voice, "en-GB-RyanNeural")
         self.assertEqual(cfg.voice.offline_voice, "")
 
     def test_bad_notion_version_falls_back(self) -> None:
@@ -674,14 +688,18 @@ class AccountsConfigTests(ProjectTestCase):
 
     def test_unknown_feature_is_skipped_and_duplicates_dropped(self) -> None:
         self.write_config('[accounts.work]\nfeatures = ["calendar", "gmail_send", "Calendar", "GMAIL_SEND", '
-                          '"telepathy", "gmail_read"]\n')
-        cfg = self.load_warning("accounts.work.features", "telepathy", "gmail_read")
+                          '"telepathy", "gmail_modify"]\n')
+        cfg = self.load_warning("accounts.work.features", "telepathy", "gmail_modify")
         self.assertEqual(cfg.accounts["work"].features, ("calendar", "gmail_send"))
+
+    def test_gmail_read_is_a_feature(self) -> None:
+        self.write_config('[accounts.work]\nfeatures = ["calendar", "GMAIL_READ", "gmail_send", "gmail_read"]\n')
+        self.assertEqual(self.load_quietly().accounts["work"].features, ("calendar", "gmail_read", "gmail_send"))
 
     def test_gmail_send_alone(self) -> None:
         self.write_config('[accounts.work]\nfeatures = ["gmail_send"]\n')
         self.assertEqual(self.load_quietly().accounts["work"].features, ("gmail_send",))
-        self.assertEqual(config.ACCOUNT_FEATURES, ("calendar", "gmail_send"))
+        self.assertEqual(config.ACCOUNT_FEATURES, ("calendar", "gmail_send", "gmail_read"))
 
     def test_no_features(self) -> None:
         self.write_config("[accounts.work]\nfeatures = []\n")
@@ -813,6 +831,48 @@ class ScheduleHotkeyAgendaConfigTests(ProjectTestCase):
         self.write_config('display = "24h"\n')
         cfg = self.load_warning("[display]")
         self.assertEqual(cfg.display, DisplayConfig())
+
+
+class AskConfigTests(ProjectTestCase):
+    def test_full_ask_table(self) -> None:
+        self.write_config('[ask]\nenabled = true\nmodel = "haiku"\ntimeout_seconds = 120\nmax_turns = 3\n'
+                          'max_per_hour = 5\nmax_per_day = 12\ndays_back = 0\ndays_ahead = 30\n'
+                          'calendars = ["primary", "team@group.calendar.google.com"]\nmax_cards = 4\n'
+                          'hardened_flags = false\nread_mail = false\n')
+        self.assertEqual(self.load_quietly().ask, AskConfig(
+            enabled=True, model="haiku", timeout_seconds=120, max_turns=3, max_per_hour=5, max_per_day=12,
+            days_back=0, days_ahead=30, calendars=("primary", "team@group.calendar.google.com"), max_cards=4,
+            hardened_flags=False, read_mail=False))
+
+    def test_out_of_range_numbers_are_clamped(self) -> None:
+        self.write_config('[ask]\ntimeout_seconds = 5\nmax_turns = 50\nmax_per_hour = 0\nmax_per_day = 9999\n'
+                          'days_back = 30\ndays_ahead = 0\nmax_cards = 20\n')
+        cfg = self.load_warning("ask.timeout_seconds", "ask.max_turns", "ask.max_per_hour", "ask.max_cards")
+        self.assertEqual((cfg.ask.timeout_seconds, cfg.ask.max_turns, cfg.ask.max_per_hour, cfg.ask.max_per_day,
+                          cfg.ask.days_back, cfg.ask.days_ahead, cfg.ask.max_cards), (30, 8, 1, 500, 7, 1, 8))
+
+    def test_bad_values_fall_back_to_the_defaults(self) -> None:
+        # A model that could be read as a command-line option, or with spaces, is refused.
+        for model in ('"--bare"', '"-p"', '"son net"', '""', '"sonnet; rm"', "3", '"a\\u0000b"'):
+            with self.subTest(model=model):
+                self.write_config(f"[ask]\nmodel = {model}\n")
+                self.assertEqual(self.load_warning("ask.model").ask.model, "sonnet")
+        self.write_config('[ask]\nenabled = "yes"\nread_mail = 1\nhardened_flags = "no"\n')
+        cfg = self.load_warning("ask.enabled", "ask.read_mail", "ask.hardened_flags")
+        self.assertEqual(cfg.ask, AskConfig())
+        self.write_config('[ask]\ncalendars = ["--settings", "bad id"]\n')
+        self.assertEqual(self.load_warning("ask.calendars").ask.calendars, ("primary",))
+
+    def test_full_model_names_are_accepted(self) -> None:
+        for model in ("opus", "claude-sonnet-4-5", "claude-sonnet-4-5[1m]", "haiku"):
+            with self.subTest(model=model):
+                self.write_config(f'[ask]\nmodel = "{model}"\n')
+                self.assertEqual(self.load_quietly().ask.model, model)
+
+    def test_unknown_ask_key_is_reported(self) -> None:
+        self.write_config('[ask]\nenabled = true\napi_key = "sk-not-used"\n')
+        cfg = self.load_warning("ask.api_key")
+        self.assertTrue(cfg.ask.enabled)
 
 
 # --------------------------------------------------------------------------
@@ -1264,6 +1324,35 @@ class SetupLoggingTests(unittest.TestCase):
         self.assertIn("Uncaught exception in thread worker-crash", text)
         self.assertIn("RuntimeError: boom in worker", text)
         self.assertNotIn("worker-exit", text)
+
+
+
+class AskEnabledEnvTests(ProjectTestCase):
+    """JARVIS_ASK_ENABLED (from the gitignored .env) overrides [ask] enabled."""
+
+    def test_off_by_default(self) -> None:
+        self.assertFalse(self.load_quietly().ask.enabled)
+
+    def test_env_turns_it_on_without_touching_config(self) -> None:
+        self.write_config("[ask]\nenabled = false\n")
+        for value in ("true", "1", "yes", "on", " TRUE ", '"true"'):
+            with self.subTest(value=value):
+                self.assertTrue(self.load_quietly(JARVIS_ASK_ENABLED=value).ask.enabled)
+
+    def test_env_turns_it_off(self) -> None:
+        self.write_config("[ask]\nenabled = true\n")
+        for value in ("false", "0", "no", "off"):
+            with self.subTest(value=value):
+                self.assertFalse(self.load_quietly(JARVIS_ASK_ENABLED=value).ask.enabled)
+
+    def test_empty_env_keeps_the_config_value(self) -> None:
+        self.write_config("[ask]\nenabled = true\n")
+        self.assertTrue(self.load_quietly(JARVIS_ASK_ENABLED="").ask.enabled)
+
+    def test_bad_env_value_warns_and_keeps_the_config_value(self) -> None:
+        self.write_config("[ask]\nenabled = false\n")
+        cfg = self.load_warning("JARVIS_ASK_ENABLED", JARVIS_ASK_ENABLED="maybe")
+        self.assertFalse(cfg.ask.enabled)
 
 
 if __name__ == "__main__":

@@ -1,10 +1,13 @@
-"""Sending the replies and emails you approve, through the Gmail API (gmail.send only).
+"""Sending the replies and emails you approve, through the Gmail API (gmail.send only), and reading
+the threads an Ask is about (gmail.readonly only; GmailReader, a separate client).
 
     OutgoingMail(...)            one message, exactly as it will be sent
     build_message(mail)          the RFC 5322 message (an email.message.EmailMessage), checked
     encode_raw(message)          base64url text for users.messages.send
     thread_link(address, id)     the sent message's thread in Gmail (the card's Open link)
     GmailSender(account)         one account's sending: ready(), sign_in(), send(mail) -> SentMail
+    GmailReader(account)         Ask Jarvis's reading: available(), search(query), thread(id);
+                                 never signs in, never sends, never changes or deletes mail
 
 What build_message refuses (GmailError, before anything goes anywhere):
 
@@ -66,6 +69,7 @@ from .actions import MAX_RECIPIENTS, email_address
 from .config import redact
 from .google_auth import (
     GMAIL_FEATURE,
+    GMAIL_READ_FEATURE,
     PROBLEM_BLOCKED,
     PROBLEM_CONFIRM,
     PROBLEM_DENIED,
@@ -655,6 +659,168 @@ class GmailSender:
         if isinstance(exc, _NOT_SENT_ERRORS) or name in _NOT_SENT_NAMES:
             return GmailError(f"Could not reach Gmail ({name}); {NOTHING_SENT}")
         return GmailUnknownOutcome(f"No answer from Gmail while sending ({name}); {UNKNOWN_SENT}")
+
+
+# --------------------------------------------------------------------------
+# Reading (Ask Jarvis): gmail.readonly only, never the sending path
+# --------------------------------------------------------------------------
+
+READ_RETRIES = 2              # reads are safe to retry
+MAX_SEARCH_THREADS = 3
+
+
+class MailReadError(GmailError):
+    """Reading for Ask failed; nothing was changed (the message names no address or text)."""
+
+
+class GmailReader:
+    """Reading the threads an Ask is about, for one account alias (the "gmail_read" feature:
+    gmail.readonly). It shares the alias's GoogleAccount (one sign-in) but never its Gmail client:
+    GmailSender sends with its own, and nothing here can send, change or delete mail.
+
+    ``available`` reads files only (no network, no lock); ``search`` and ``thread`` never sign in
+    (a missing sign-in or permission is MailReadError with the google_auth PROBLEM_*) and never
+    delete the shared sign-in: a 401 or 403 turns reading off for this alias until the next
+    sign-in. Logs carry the alias, counts and HTTP statuses only: never a query, a subject, an
+    address or a word of a message.
+    """
+
+    def __init__(self, account: GoogleAccount, *, service_factory: Callable[[Any], Any] | None = None) -> None:
+        self._account = account
+        self._service_factory = service_factory or _build_service
+        self._lock = threading.RLock()
+        self._service: Any = None
+        self._service_creds: Any = None
+        self._service_generation = -1
+        self._refused: tuple[str, str] = ("", "")
+        self._refused_generation = -1
+        self.log_name = f"Gmail reading ({logged_alias(account.alias)})"
+
+    @property
+    def alias(self) -> str:
+        return self._account.alias
+
+    def available(self) -> tuple[str, str]:
+        """("", "") when this alias's mail can be read now; else (PROBLEM_*, why). No network."""
+        alias = self.alias
+        if GMAIL_READ_FEATURE not in self._account.features:
+            return PROBLEM_SETUP, f'The {alias} account is not set up for reading mail (config.toml features "gmail_read")'
+        if not self._account.is_configured() or not google_libraries_available():
+            return PROBLEM_SETUP, f"{SEND_SETUP_HINT} (Google sign-in is not set up)"
+        if not self._account.is_signed_in():
+            return PROBLEM_SIGNED_OUT, f"Not signed in to the {alias} account"
+        if self._refused[0] and self._refused_generation == self._account.generation:
+            return self._refused
+        if GMAIL_READ_FEATURE not in self._account.granted_features():
+            if GMAIL_READ_FEATURE in self._account.refused_features():
+                return PROBLEM_SCOPE, (f"Google did not allow reading email for the {alias} account; sign in again "
+                                       "and tick that box")
+            return PROBLEM_SIGNED_OUT, f"Reading email needs one more Google sign-in for the {alias} account"
+        return "", ""
+
+    def search(self, query: str, *, max_threads: int = MAX_SEARCH_THREADS) -> list[str]:
+        """The ids of at most ``max_threads`` threads matching ``query`` (already checked by
+        ask.mail.check_query), newest first; never spam or trash."""
+        with self._lock:
+            service = self._get_service()
+            request = service.users().threads().list(userId="me", q=query, maxResults=max(1, min(max_threads, 10)),
+                                                     includeSpamTrash=False, fields="threads(id)")
+            answer = self._execute(request, "searching")
+        found = []
+        for item in (answer.get("threads") if isinstance(answer, dict) else None) or ():
+            thread_id = item.get("id") if isinstance(item, dict) else None
+            if isinstance(thread_id, str) and _GMAIL_ID_RE.fullmatch(thread_id) and thread_id not in found:
+                found.append(thread_id)
+        logger.info("%s: a search found %d thread(s)", self.log_name, len(found[:max_threads]))
+        return found[:max_threads]
+
+    def thread(self, thread_id: str) -> dict[str, Any]:
+        """users.threads.get (format=full) of one thread: its messages' headers and bodies, as
+        ask.mail.thread_from_api reads them. MailReadError (404) when there is no such thread."""
+        if not isinstance(thread_id, str) or not _GMAIL_ID_RE.fullmatch(thread_id):
+            raise MailReadError("That is not a Gmail thread id")
+        with self._lock:
+            service = self._get_service()
+            request = service.users().threads().get(
+                userId="me", id=thread_id, format="full",
+                fields="id,messages(id,threadId,labelIds,internalDate,payload)")
+            answer = self._execute(request, "reading a thread")
+        return answer if isinstance(answer, dict) else {}
+
+    def _get_service(self) -> Any:
+        problem, message = self.available()
+        if problem:
+            raise MailReadError(message, problem=problem)
+        with _account_errors():
+            creds = self._account.credentials(interactive=False, need=GMAIL_READ_FEATURE)
+        if self._service is None or creds is not self._service_creds \
+                or self._service_generation != self._account.generation:
+            try:
+                self._service = self._service_factory(creds)
+            except Exception as exc:  # noqa: BLE001 - mapped to a safe message
+                raise MailReadError(f"Could not start the Gmail client ({type(exc).__name__})") from None
+            self._service_creds = creds
+            self._service_generation = self._account.generation
+        return self._service
+
+    def _execute(self, request: Any, what: str) -> Any:
+        from googleapiclient.errors import HttpError
+
+        try:
+            result = request.execute(num_retries=READ_RETRIES)
+        except HttpError as exc:
+            raise self._http_error(exc, what) from None
+        except GmailError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - socket/ssl/httplib2/refresh errors share no base
+            from google.auth.exceptions import RefreshError
+
+            logger.info("%s: %s failed (%s)", self.log_name, what, type(exc).__name__)
+            if isinstance(exc, RefreshError):
+                raise MailReadError(f"Google could not refresh the {self.alias} account's sign-in just now",
+                                    problem=PROBLEM_FAILED) from None
+            raise MailReadError(f"Could not reach Gmail while {what} ({type(exc).__name__})") from None
+        if self._service_creds is not None:
+            _register_credentials(self._service_creds)
+        return result
+
+    def _http_error(self, exc: Any, what: str) -> MailReadError:
+        status = _status_of(exc)
+        reasons = _error_reasons(exc)
+        logger.info("%s: Gmail answered HTTP %d while %s (%s)", self.log_name, status, what,
+                    ", ".join(sorted(reason for reason in reasons if re.fullmatch(r"[A-Za-z_]{1,40}", reason)))
+                    or "no reason code")
+        alias = self.alias
+        if status == 404:
+            return MailReadError("Gmail has no such thread", status=status)
+        if status == 401:
+            self._refuse(PROBLEM_EXPIRED, f"Gmail refused the {alias} account's sign-in; sign in again")
+            return MailReadError(self._refused[1], status=status, problem=PROBLEM_EXPIRED)
+        if status == 403:
+            if reasons & _SETUP_REASONS:
+                return MailReadError(f"{SEND_SETUP_HINT}: the Gmail API is not turned on for the OAuth client's "
+                                     "project", status=status, problem=PROBLEM_SETUP)
+            if reasons & _RATE_LIMIT_REASONS:
+                return MailReadError("Gmail is limiting requests right now; try again later", status=status)
+            code = blocked_code(" ".join(sorted(reasons))) or next(
+                (reason for reason in _BLOCKED_REASONS if reason in reasons), "")
+            if code:
+                self._refuse(PROBLEM_BLOCKED, f"The {alias} account's administrator does not allow this app to read "
+                                              f"email ({code})")
+            elif reasons & _SCOPE_REASONS:
+                self._refuse(PROBLEM_SCOPE, f"Google did not allow reading email for the {alias} account; sign in "
+                                            "again and tick that box")
+            else:
+                self._refuse(PROBLEM_FAILED, f"Gmail refused reading for the {alias} account (403)")
+            return MailReadError(self._refused[1], status=status, problem=self._refused[0])
+        if status == 429:
+            return MailReadError("Gmail is limiting requests right now; try again later", status=status)
+        return MailReadError(f"Gmail could not be read just now ({status})", status=status)
+
+    def _refuse(self, problem: str, message: str) -> None:
+        self._refused = (problem, message)
+        self._refused_generation = self._account.generation
+        logger.warning("%s: reading is off until the next sign-in (the sign-in is kept)", self.log_name)
 
 
 class _account_errors:   # noqa: N801 - used as a context manager

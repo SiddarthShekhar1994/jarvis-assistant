@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "JarvisAskPlan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["say", "lines"],
+  "properties": {
+    "say": {
+      "type": "string",
+      "maxLength": 300,
+      "description": "Write this first. One or two short spoken sentences for the owner, with no ids, addresses or URLs. Never claim anything was done: Jarvis acts only after the owner clicks a card."
+    },
+    "question": {
+      "type": "string",
+      "maxLength": 200,
+      "description": "One short clarifying question when the request cannot be planned safely from the context; empty otherwise."
+    },
+    "lines": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {"type": "string", "maxLength": 12000},
+      "description": "Proposal lines in the Jarvis grammar (Calendar:, Email:, Reply:, RSVP:, Move:, Cancel:, Todo:, Open:). Empty when asking a question or reading mail first."
+    },
+    "gmail_search": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account", "query", "why"],
+      "properties": {
+        "account": {"type": "string", "maxLength": 24},
+        "query": {"type": "string", "maxLength": 200},
+        "why": {"type": "string", "maxLength": 200}
+      },
+      "description": "Only when the request is about an email that is not in the context and <accounts> says read_mail=yes for that account: a narrow Gmail search. Jarvis reads at most 3 matching threads and asks you once more. Leave lines empty when you use it."
+    }
+  }
+}

@@ -800,6 +800,159 @@ class ReadyAndSignInTests(SenderTestCase):
         return creds
 
 
+# --------------------------------------------------------------------------
+# Reading (Ask Jarvis): gmail.readonly, never the sending path
+# --------------------------------------------------------------------------
+
+READ_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+
+
+class FakeReadRequest:
+    def __init__(self, service: FakeGmailRead, name: str, kwargs: dict[str, Any]) -> None:
+        self.service, self.name, self.kwargs = service, name, kwargs
+
+    def execute(self, num_retries: int = 0) -> Any:
+        self.service.calls.append((self.name, self.kwargs, num_retries))
+        outcome = self.service.outcomes.pop(0) if self.service.outcomes else {}
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+class FakeGmailRead:
+    """users().threads().list / get only: it has no send, modify, trash or delete at all."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any], int]] = []
+        self.outcomes: list[Any] = []
+
+    def users(self) -> FakeGmailRead:
+        return self
+
+    def threads(self) -> FakeGmailRead:
+        return self
+
+    def list(self, **kwargs: Any) -> FakeReadRequest:
+        return FakeReadRequest(self, "threads.list", kwargs)
+
+    def get(self, **kwargs: Any) -> FakeReadRequest:
+        return FakeReadRequest(self, "threads.get", kwargs)
+
+
+class ReaderTests(SenderTestCase):
+    def reader(self, features: tuple[str, ...] = ("calendar", "gmail_send", "gmail_read")) -> gmail.GmailReader:
+        self.read_service = FakeGmailRead()
+        self.read_built: list[Any] = []
+        account = GoogleAccount("work", client_secret_path=self.secret_path, data_dir=self.data_dir,
+                                features=features, bindings=self.bindings,
+                                flow_factory=lambda path, scopes: self, refresh=lambda creds: None)
+
+        def factory(creds: Any) -> FakeGmailRead:
+            self.read_built.append(creds)
+            return self.read_service
+
+        return gmail.GmailReader(account, service_factory=factory)
+
+    def ready_reader(self) -> gmail.GmailReader:
+        self.write_token(scopes=SCOPES + [READ_SCOPE], asked=SCOPES + [READ_SCOPE])
+        self.bind()
+        return self.reader()
+
+    def test_search_and_thread_are_read_only_calls(self) -> None:
+        reader = self.ready_reader()
+        self.read_service.outcomes = [{"threads": [{"id": "18c0ffee00000001"}, {"id": "bad id!"},
+                                                   {"id": "18c0ffee00000001"}, {"id": "18c0ffee00000002"}]},
+                                      {"id": "18c0ffee00000001", "messages": []}]
+        with self.assertLogs(GMAIL_LOGGER, level="INFO") as logs:
+            found = reader.search("from:ana@example.edu subject:budget")
+        self.assertEqual(found, ["18c0ffee00000001", "18c0ffee00000002"])
+        self.assertEqual(reader.thread("18c0ffee00000001"), {"id": "18c0ffee00000001", "messages": []})
+        (first, query, retries), (second, get, _) = self.read_service.calls
+        self.assertEqual((first, query, retries), ("threads.list", {
+            "userId": "me", "q": "from:ana@example.edu subject:budget", "maxResults": 3,
+            "includeSpamTrash": False, "fields": "threads(id)"}, gmail.READ_RETRIES))
+        self.assertEqual((second, get["id"], get["format"]), ("threads.get", "18c0ffee00000001", "full"))
+        self.assertEqual(self.flow_results, [])   # never a sign-in
+        text = "\n".join(logs.output)
+        self.assertIn("Gmail reading (work): a search found 2 thread(s)", text)
+        for private in ("ana@example.edu", "budget", "18c0ffee"):
+            self.assertNotIn(private, text)
+        with self.assertRaises(gmail.MailReadError):
+            reader.thread("not a thread id")
+        self.assertFalse(hasattr(reader, "send"))
+
+    def test_available_follows_the_sign_in(self) -> None:
+        self.assertEqual(self.reader().available()[0], PROBLEM_SIGNED_OUT)
+        self.write_token(scopes=SCOPES, asked=SCOPES)   # signed in before "gmail_read" was added
+        self.bind()
+        problem, message = self.reader().available()
+        self.assertEqual((problem, message), (PROBLEM_SIGNED_OUT,
+                                              "Reading email needs one more Google sign-in for the work account"))
+        self.write_token(scopes=SCOPES, asked=SCOPES + [READ_SCOPE])   # asked, but the box was unticked
+        problem, message = self.reader().available()
+        self.assertEqual(problem, PROBLEM_SCOPE)
+        self.assertIn("did not allow reading email", message)
+        self.assertEqual(self.reader(features=("calendar", "gmail_send")).available()[0], PROBLEM_SETUP)
+        self.write_token(scopes=SCOPES + [READ_SCOPE], asked=SCOPES + [READ_SCOPE])
+        self.assertEqual(self.reader().available(), ("", ""))
+        # Sending is not affected by reading either way.
+        self.assertEqual(self.sender().ready(), ("", ""))
+
+    def test_reading_never_needs_or_uses_sending(self) -> None:
+        self.write_token(scopes=SCOPES[:4] + [READ_SCOPE], asked=SCOPES[:4] + [READ_SCOPE])   # read, no send
+        self.bind()
+        reader = self.reader()
+        self.assertEqual(reader.available(), ("", ""))
+        self.assertEqual(self.sender().ready()[0], PROBLEM_SIGNED_OUT)   # sending still needs its own permission
+        self.read_service.outcomes = [{"threads": []}]
+        reader.search("subject:budget")
+        self.assertEqual(self.service.calls, [])   # the sending client was never touched
+
+    def test_refusals_turn_reading_off_but_keep_the_sign_in(self) -> None:
+        token = self.data_dir / "google_token_work.json"
+        cases = ((http_error(401, "Invalid Credentials"), PROBLEM_EXPIRED),
+                 (http_error(403, "Insufficient Permission", "insufficientPermissions"), PROBLEM_SCOPE),
+                 (http_error(403, "Denied", "forbidden"), PROBLEM_FAILED),
+                 (http_error(403, "Blocked", "domainPolicy"), PROBLEM_BLOCKED))
+        for error, problem in cases:
+            with self.subTest(problem=problem):
+                reader = self.ready_reader()
+                self.read_service.outcomes = [error]
+                with self.assertLogs(GMAIL_LOGGER, level="INFO"):
+                    with self.assertRaises(gmail.MailReadError) as caught:
+                        reader.search("subject:budget")
+                self.assertEqual(caught.exception.problem, problem)
+                self.assertTrue(token.exists())   # the shared sign-in stays for Calendar and sending
+                self.assertEqual(reader.available()[0], problem)
+                with self.assertRaises(gmail.MailReadError):
+                    reader.search("subject:budget")
+                self.assertEqual(len(self.read_service.calls), 1)   # not asked again this run
+
+    def test_transient_failures(self) -> None:
+        reader = self.ready_reader()
+        self.read_service.outcomes = [http_error(404, "Not Found", "notFound"), http_error(429, "Slow down"),
+                                      http_error(500, "Backend Error"), TransportError("no route")]
+        for expected in ("Gmail has no such thread", "limiting requests", "could not be read just now",
+                         "Could not reach Gmail"):
+            with self.subTest(expected=expected), self.assertLogs(GMAIL_LOGGER, level="INFO"):
+                with self.assertRaises(gmail.MailReadError) as caught:
+                    reader.thread("18c0ffee00000001")
+                self.assertIn(expected, str(caught.exception))
+            if expected == "Could not reach Gmail":
+                break
+        self.assertEqual(reader.available(), ("", ""))   # none of these turned reading off
+
+    def test_reader_and_sender_never_share_a_client(self) -> None:
+        reader = self.ready_reader()
+        self.read_service.outcomes = [{"threads": []}]
+        reader.search("subject:budget")
+        sender = self.sender()
+        sender.send(reply())
+        self.assertIsNot(self.read_service, self.service)
+        self.assertEqual([name for name, _, _ in self.read_service.calls], ["threads.list"])
+        self.assertEqual(len(self.service.calls), 1)
+
+
 class ImportTests(unittest.TestCase):
     def test_qt_free_lazy_and_ascii(self) -> None:
         import subprocess

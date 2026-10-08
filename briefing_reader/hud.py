@@ -48,17 +48,22 @@ Painting helpers
 Widgets
     ``HudWindowFrame(QWidget)``: frameless, translucent, always-on-top window
         with chamfered outer corners, painted ground (``set_glow_anchor``), a
-        ``header`` (HeaderBar; its close button calls ``close()``), ``body`` /
-        ``body_layout`` for the content, optional edge resizing
-        (``set_resizable``).
+        ``header`` (HeaderBar; its close button calls ``close()``, its minimize
+        button ``showMinimized()``), ``body`` / ``body_layout`` for the
+        content, optional edge resizing (``set_resizable``). It has a taskbar
+        button (a top-level window with no owner, never a tool window), which
+        restores it when minimized and minimizes it when it is in front.
     ``HeaderBar``: logo, JARVIS wordmark, subtitle, ServiceChips
         (``set_service(name, status, tooltip)``), date + clock updated each
         minute (``set_clock(callable)``, ``clock_texts()``; "1:52 PM" with a
         small "PM", or "13:52" after ``set_hour24(True)``), drag-to-move,
-        ``close_button`` (accessible name "Close") -> ``closeRequested``.
+        ``minimize_button`` (accessible name "Minimize") ->
+        ``minimizeRequested`` and ``close_button`` (accessible name "Close")
+        -> ``closeRequested``, side by side at the right end.
         Narrow bars drop the subtitle, then the date, then tighten the chips
-        and the room around them (``compact_level()``), so the 560 px prompt
-        still fits.
+        and the room around them (``compact_level()``), so the prompt still
+        fits. ``set_service_visible(name, bool)`` hides a chip without its room
+        (Ask Jarvis's ``claude`` chip on the narrow prompt).
     ``ServiceChip``: statuses ``STATUS_OK`` / ``STATUS_WARN`` / ``STATUS_ERROR``
         / ``STATUS_OFF``.
     ``ChamferPanel(title, meta, variant=PANEL_CYAN|PANEL_AMBER, cut, corners)``:
@@ -148,10 +153,22 @@ Widgets
         ``saved(id, values)``, ``show_error(text)``, ``values()``). ``ActionList``:
         scrollable cards ``ActionList.CARD_GAP`` px apart with an empty-state
         line (``add_card``, ``card(id)``, ``cards()``, ``clear()``,
-        ``set_empty_text``).
+        ``set_empty_text``); ``add_group_header(title, count)`` puts a
+        ``GroupHeader`` ("ASK \u00b7 2") before the cards added after it
+        (``group_headers()``).
+    ``CommandBar``: Ask Jarvis's typed bar: a chamfered field (at most
+        ``COMMAND_MAX_LENGTH`` characters, plain text, ``COMMAND_PLACEHOLDER``)
+        with its Ask button, a status line (``set_status(text, TONE_*)``, two
+        lines, the whole text on hover) and a meta line with an optional link
+        (``set_meta``, ``set_link(text, tooltip)``). Signals ``submitted(str)``
+        (Enter or Ask, whitespace collapsed, never while running or empty),
+        ``cancelRequested`` (Cancel or Esc while ``set_running(True)``),
+        ``linkClicked`` and ``statusDismissed`` (Esc in an empty idle field);
+        ``set_compact(True)`` for narrow or short screens; ``focus_input()``.
+        Its height never changes with its texts.
     ``ActivityLog``: ``add(tag, message, sub="", when=None)`` newest first,
         at most ``ActivityLog.MAX_ENTRIES``; tags ``TAG_RUN``, ``TAG_DONE``,
-        ``TAG_WAIT``, ``TAG_STOP``; ``entries()``; ``set_hour24(bool)``.
+        ``TAG_WAIT``, ``TAG_STOP``, ``TAG_ASK``; ``entries()``; ``set_hour24(bool)``.
     ``HudChip(text, color)``: small chamfered tag (e.g. "2 NEED YOUR OK").
     ``FlowLayout(h_spacing, v_spacing)``: wrapping row for buttons, so a
         narrow column gets two rows instead of a wider window.
@@ -1105,8 +1122,14 @@ class HudButton(QPushButton):
             painter.drawPath(chamfer_path(rect.adjusted(1, 1, -1, -1), self._spec.cut))
 
 
-class _CloseButton(QPushButton):
-    """The header's close button: an X drawn as two strokes."""
+class _HeaderButton(QPushButton):
+    """A 30 px window button of the header: a stroked glyph, a chamfered fill in the button's own
+    colour on hover / press, and the focus ring after Tab. Subclasses set the name, the colour and
+    ``_draw_glyph``."""
+
+    _NAME = ""
+    _LINE = ACCENT        # hover / press fill
+    _ACTIVE = ACCENT      # glyph while hovered or pressed (TEXT_MUTED otherwise)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1115,8 +1138,8 @@ class _CloseButton(QPushButton):
         self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
-        self.setAccessibleName("Close")
-        self.setToolTip("Close")
+        self.setAccessibleName(self._NAME)
+        self.setToolTip(self._NAME)
         self.setFixedSize(30, 30)
         self._focus_visible = False
 
@@ -1137,6 +1160,9 @@ class _CloseButton(QPushButton):
         super().leaveEvent(event)
         self.update()
 
+    def _draw_glyph(self, painter: QPainter, center: QPointF) -> None:
+        raise NotImplementedError
+
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         painter = QPainter(self)
         try:
@@ -1144,19 +1170,41 @@ class _CloseButton(QPushButton):
             rect = QRectF(self.rect())
             active = self.underMouse() or self.isDown()
             if active:
-                painter.fillPath(chamfer_path(rect, 6), rgba(RED_LINE, 0.18 if self.isDown() else 0.12))
-            pen = QPen(QColor(RED if active else TEXT_MUTED), 1.6)
+                painter.fillPath(chamfer_path(rect, 6), rgba(self._LINE, 0.18 if self.isDown() else 0.12))
+            pen = QPen(QColor(self._ACTIVE if active else TEXT_MUTED), 1.6)
             pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             painter.setPen(pen)
-            c, r = rect.center(), 5.0
-            painter.drawLine(QPointF(c.x() - r, c.y() - r), QPointF(c.x() + r, c.y() + r))
-            painter.drawLine(QPointF(c.x() - r, c.y() + r), QPointF(c.x() + r, c.y() - r))
+            self._draw_glyph(painter, rect.center())
             if self.hasFocus() and self._focus_visible:
                 painter.setPen(QPen(QColor(ACCENT), 2))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawPath(chamfer_path(rect.adjusted(1, 1, -1, -1), 6))
         finally:
             painter.end()
+
+
+class _CloseButton(_HeaderButton):
+    """The header's close button: an X drawn as two strokes, red on hover."""
+
+    _NAME = "Close"
+    _LINE = RED_LINE
+    _ACTIVE = RED
+
+    def _draw_glyph(self, painter: QPainter, center: QPointF) -> None:
+        c, r = center, 5.0
+        painter.drawLine(QPointF(c.x() - r, c.y() - r), QPointF(c.x() + r, c.y() + r))
+        painter.drawLine(QPointF(c.x() - r, c.y() + r), QPointF(c.x() + r, c.y() - r))
+
+
+class _MinimizeButton(_HeaderButton):
+    """The header's minimize button, left of the close button: one bar as wide as the X, cyan on
+    hover (red stays the close button's)."""
+
+    _NAME = "Minimize"
+
+    def _draw_glyph(self, painter: QPainter, center: QPointF) -> None:
+        y = math.floor(center.y()) + 0.5   # on a pixel row at 100 %, so the bar stays crisp
+        painter.drawLine(QPointF(center.x() - 5.0, y), QPointF(center.x() + 5.0, y))
 
 
 class FlowLayout(QLayout):
@@ -1899,22 +1947,25 @@ class _Clock(QWidget):
 class HeaderBar(QWidget):
     """The 46 px title bar of a frameless HUD window.
 
-    Dragging anywhere but the close button moves the window (double-click does
-    nothing). The clock updates on each minute boundary while the bar is shown.
+    Dragging anywhere but the minimize and close buttons moves the window
+    (double-click does nothing). The clock updates on each minute boundary while
+    the bar is shown.
     When the bar is narrow it drops detail in steps (``compact_level()``):
     1 hides the subtitle, 2 also the date, 3 also tightens the chips. A
     12-hour clock is wider, so it has a level 4 that also moves the chips up to
-    the wordmark and the close button closer to the clock (the 560 px prompt),
-    and it keeps at least 12 px from the chips, so its digits and their glow
-    never crowd the last one.
+    the wordmark and the window buttons closer to the clock (the prompt), and
+    it keeps at least 12 px from the chips, so its digits and their glow never
+    crowd the last one.
     """
 
     closeRequested = Signal()
+    minimizeRequested = Signal()
 
     _MAX_LEVEL = 4           # 3 on the 24-hour clock
     _RIGHT_MARGIN = 8
     _CHIP_MARGINS = ((16, 16), (16, 16), (16, 16), (8, 8), (0, 8))   # (left, right) of the chips, per level
-    _CLOSE_GAPS = (10, 10, 10, 10, 6)                                  # between the clock and the X, per level
+    _CLOSE_GAPS = (10, 10, 10, 10, 6)                                  # between the clock and the buttons, per level
+    _BUTTON_GAP = 2                                                    # between minimize and close
     _MERIDIEM_ROOM = 12      # at least this much between the chips and a 12-hour clock
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -1929,6 +1980,8 @@ class HeaderBar(QWidget):
         self._chip_row = QHBoxLayout(self._chips_box)
         self._chip_row.setSpacing(4)
         self._chip_row.setContentsMargins(16, 0, 16, 0)
+        self.minimize_button = _MinimizeButton()
+        self.minimize_button.clicked.connect(self._on_minimize_clicked)
         self.close_button = _CloseButton()
         self.close_button.clicked.connect(self._on_close_clicked)
         self._drag_offset: QPoint | None = None
@@ -1945,11 +1998,16 @@ class HeaderBar(QWidget):
         layout.addWidget(self._clock)
         self._close_gap = QSpacerItem(self._CLOSE_GAPS[0], 0, QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
         layout.addSpacerItem(self._close_gap)
+        layout.addWidget(self.minimize_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addSpacing(self._BUTTON_GAP)
         layout.addWidget(self.close_button, 0, Qt.AlignmentFlag.AlignVCenter)
         self._clock.set_now(self._now())
 
     def _on_close_clicked(self) -> None:
         self.closeRequested.emit()
+
+    def _on_minimize_clicked(self) -> None:
+        self.minimizeRequested.emit()
 
     # ---- content ----------------------------------------------------------------
 
@@ -1974,6 +2032,19 @@ class HeaderBar(QWidget):
             chip.set_status(status, tooltip)
         return chip
 
+    def set_service_visible(self, name: str, visible: bool) -> None:
+        """Show or hide the chip called ``name`` (nothing when there is none); a hidden chip takes
+        no room, so the bar fits as if it were not there (e.g. ``claude`` on the narrow prompt)."""
+        chip = self._chips.get(name)
+        if chip is None or chip.isHidden() == (not visible):
+            return
+        chip.setVisible(visible)
+        self.updateGeometry()
+        self._fit(force=True)
+
+    def _shown_chips(self) -> list[ServiceChip]:
+        return [chip for chip in self._chips.values() if not chip.isHidden()]
+
     # ---- narrow widths ---------------------------------------------------------------
 
     def compact_level(self) -> int:
@@ -1988,10 +2059,14 @@ class HeaderBar(QWidget):
 
     def _required_width(self, level: int) -> int:
         tight = level >= 3
-        chips = [chip.width_for(tight) for chip in self._chips.values()]
+        chips = [chip.width_for(tight) for chip in self._shown_chips()]
         chips_width = sum(chips) + 4 * max(0, len(chips) - 1) + (sum(self._chip_margins(level)) if chips else 0)
         return (self._brand.width_for(level == 0) + chips_width + self._clock.width_for(level <= 1)
-                + self._CLOSE_GAPS[level] + self.close_button.width() + self._RIGHT_MARGIN)
+                + self._CLOSE_GAPS[level] + self._buttons_width() + self._RIGHT_MARGIN)
+
+    def _buttons_width(self) -> int:
+        """Minimize, the gap and close."""
+        return self.minimize_button.width() + self._BUTTON_GAP + self.close_button.width()
 
     def _fit(self, force: bool = False) -> None:
         """Pick the least compact level that fits (``force``: re-apply it after the clock changed)."""
@@ -4652,13 +4727,66 @@ class ActionCard(QWidget):
             painter.end()
 
 
+class GroupHeader(QWidget):
+    """A group's title row in an ActionList: "ASK" and its count in mono caps, then a thin rule to
+    the right edge (``title()``, ``count()``)."""
+
+    _GAP = 8
+    _TOP = 6   # more room above than below, so the title sits with the cards it heads
+
+    def __init__(self, title: str, count: int, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._title = title.upper()
+        self._count = int(count)
+        self._font = mono_font(10, 600, 0.16)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.setAccessibleName(f"{title}: {count}")
+
+    def title(self) -> str:
+        return self._title
+
+    def count(self) -> int:
+        return self._count
+
+    def _text(self) -> str:
+        return f"{self._title} {MIDDLE_DOT} {self._count}"
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return QSize(math.ceil(_text_advance(self._font, self._text())) + 40,
+                     math.ceil(_line_height(self._font)) + 4 + self._TOP)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return QSize(math.ceil(_text_advance(self._font, self._text())), self.sizeHint().height())
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        try:
+            rect = QRectF(self.rect()).adjusted(0, self._TOP, 0, 0)
+            painter.setFont(self._font)
+            painter.setPen(QColor(AMBER))
+            title_width = _text_advance(self._font, self._title)
+            painter.drawText(rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self._title)
+            rest = f" {MIDDLE_DOT} {self._count}"
+            painter.setPen(QColor(AMBER_META))
+            painter.drawText(rect.adjusted(title_width, 0, 0, 0), Qt.AlignmentFlag.AlignLeft
+                             | Qt.AlignmentFlag.AlignVCenter, rest)
+            start = title_width + _text_advance(self._font, rest) + self._GAP
+            if start < rect.width():
+                y = math.floor(rect.center().y()) + 0.5
+                painter.setPen(QPen(rgba(AMBER, 0.22), 1))
+                painter.drawLine(QPointF(start, y), QPointF(rect.width(), y))
+        finally:
+            painter.end()
+
+
 class ActionList(QScrollArea):
     """Scrollable column of ActionCards with an empty-state line.
 
     Its size hint follows the cards' height up to ``max_height``, so a panel
     holding it shrinks to its content and scrolls beyond that. ``CARD_GAP``
     px of empty space separate the cards, so a card's buttons never sit
-    right on top of the next card's title.
+    right on top of the next card's title. ``add_group_header(title, count)``
+    puts a GroupHeader ("ASK \u00b7 2") before the cards added after it.
     """
 
     CARD_GAP = 14
@@ -4675,17 +4803,31 @@ class ActionList(QScrollArea):
         self._layout.addWidget(self.empty_label)
         self._layout.addStretch(1)
         self._cards: list[ActionCard] = []
+        self._items: list[QWidget] = []   # the cards and group headers, in order
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
 
     def set_empty_text(self, text: str) -> None:
         self.empty_label.setText(text)
 
     def add_card(self, card: ActionCard) -> ActionCard:
-        self._layout.insertWidget(len(self._cards), card)
+        self._layout.insertWidget(len(self._items), card)
+        self._items.append(card)
         self._cards.append(card)
         self.empty_label.setVisible(False)
         self.updateGeometry()
         return card
+
+    def add_group_header(self, title: str, count: int) -> GroupHeader:
+        """A group title ("ASK \u00b7 2") before the cards added from now on."""
+        header = GroupHeader(title, count)
+        self._layout.insertWidget(len(self._items), header)
+        self._items.append(header)
+        self.updateGeometry()
+        return header
+
+    def group_headers(self) -> list[tuple[str, int]]:
+        """(title, count) of each group header, in order."""
+        return [(item.title(), item.count()) for item in self._items if isinstance(item, GroupHeader)]
 
     def cards(self) -> list[ActionCard]:
         return list(self._cards)
@@ -4694,9 +4836,10 @@ class ActionList(QScrollArea):
         return next((card for card in self._cards if card.action_id == action_id), None)
 
     def clear(self) -> None:
-        for card in self._cards:
-            card.hide()
-            card.deleteLater()
+        for item in self._items:
+            item.hide()
+            item.deleteLater()
+        self._items = []
         self._cards = []
         self.empty_label.setVisible(True)
         self.updateGeometry()
@@ -5834,6 +5977,364 @@ def _short_text(text: str, limit: int) -> str:
 
 
 # --------------------------------------------------------------------------
+# Command bar (Ask Jarvis)
+# --------------------------------------------------------------------------
+
+TONE_IDLE = "idle"          # a hint, or nothing going on (dim)
+TONE_WORKING = "working"    # reading the calendar, planning (cyan)
+TONE_DONE = "done"          # the planner's answer (bright)
+TONE_WARN = "warn"          # a question back, a limit, something to do first (amber)
+TONE_ERROR = "error"        # nothing was proposed (red)
+TONES = (TONE_IDLE, TONE_WORKING, TONE_DONE, TONE_WARN, TONE_ERROR)
+_TONE_COLORS = {TONE_IDLE: TEXT_MUTED, TONE_WORKING: ACCENT, TONE_DONE: TEXT_BODY, TONE_WARN: AMBER,
+                TONE_ERROR: RED}
+COMMAND_MAX_LENGTH = 500
+COMMAND_PLACEHOLDER = "Ask Jarvis - nothing happens without your OK"
+# Shorter placeholders for a narrower field: the longest that fits is shown (never cut).
+COMMAND_PLACEHOLDERS = (COMMAND_PLACEHOLDER, "Ask Jarvis - needs your OK", "Ask - needs your OK", "Ask Jarvis")
+ASK_BUTTON_TEXT = "Ask"
+CANCEL_BUTTON_TEXT = "Cancel"
+_PROMPT_GLYPH = "\u203a"    # single right-pointing angle quotation mark
+
+
+class _CommandInput(QLineEdit):
+    """The bar's text field: frameless (the field around it is painted), plain text. Esc is the
+    bar's (``escapePressed``); Enter submits (``returnPressed``)."""
+
+    escapePressed = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFrame(False)
+        self.setMaxLength(COMMAND_MAX_LENGTH)
+        self.setPlaceholderText(COMMAND_PLACEHOLDER)
+        self.setFont(body_font(13))
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
+        palette = self.palette()
+        for role, color in ((QPalette.ColorRole.Base, rgba(GROUND, 0.0)), (QPalette.ColorRole.Text, QColor(TEXT_BODY)),
+                            (QPalette.ColorRole.PlaceholderText, QColor(TEXT_DIM)),
+                            (QPalette.ColorRole.Highlight, rgba(ACCENT, 0.35)),
+                            (QPalette.ColorRole.HighlightedText, QColor(TEXT_BRIGHT))):
+            palette.setColor(role, color)
+        self.setPalette(palette)
+        self.setStyleSheet("QLineEdit { background: transparent; border: none; padding: 0px; }")
+        self.setAccessibleName("Ask Jarvis")
+
+    def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        if event.key() == Qt.Key.Key_Escape and event.modifiers() == Qt.KeyboardModifier.NoModifier:
+            event.accept()
+            self.escapePressed.emit()
+            return
+        super().keyPressEvent(event)
+
+    def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        self._fit_placeholder()
+
+    def _fit_placeholder(self) -> None:
+        """The longest COMMAND_PLACEHOLDERS text the field shows whole."""
+        room = self.width() - 8   # QLineEdit's own text margins
+        metrics = QFontMetricsF(self.font())
+        text = next((item for item in COMMAND_PLACEHOLDERS if metrics.horizontalAdvance(item) <= room),
+                    COMMAND_PLACEHOLDERS[-1])
+        if text != self.placeholderText():
+            self.setPlaceholderText(text)
+
+
+class _CommandField(QWidget):
+    """The chamfered field around the input: a cyan outline (brighter while the input has the
+    focus) and a leading prompt glyph."""
+
+    HEIGHT = 36
+    _CUT = 8
+
+    def __init__(self, line_edit: _CommandInput, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.line_edit = line_edit
+        self.setFixedHeight(self.HEIGHT)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setCursor(Qt.CursorShape.IBeamCursor)
+        glyph = make_label(_PROMPT_GLYPH, mono_font(15, 600), ACCENT)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 0, 10, 0)
+        layout.setSpacing(8)
+        layout.addWidget(glyph, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(line_edit, 1, Qt.AlignmentFlag.AlignVCenter)
+        line_edit.installEventFilter(self)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt override
+        if watched is self.line_edit and event.type() in (QEvent.Type.FocusIn, QEvent.Type.FocusOut,
+                                                           QEvent.Type.ReadOnlyChange):
+            self.update()
+        return super().eventFilter(watched, event)
+
+    def mousePressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        self.line_edit.setFocus(Qt.FocusReason.MouseFocusReason)   # a click beside the text
+        super().mousePressEvent(event)
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+            focused = self.line_edit.hasFocus()
+            painter.fillPath(chamfer_path(rect, self._CUT), rgba("#030a10", 0.92))
+            if focused:
+                painter.fillPath(chamfer_path(rect, self._CUT), rgba(ACCENT, 0.05))
+            alpha = 0.85 if focused else 0.4 if not self.line_edit.isReadOnly() else 0.25
+            painter.setPen(QPen(rgba(ACCENT, alpha), 1))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(chamfer_path(rect, self._CUT))
+        finally:
+            painter.end()
+
+
+class CommandBar(QWidget):
+    """Ask Jarvis's typed command bar: the field and its Ask button, then a status line (the
+    planner's answer, what Jarvis is doing, or why nothing was proposed) and a meta line with an
+    optional link at its right end.
+
+    Enter (or Ask) emits ``submitted(text)`` with the whitespace collapsed; an empty field or a
+    running request emits nothing. While a request runs (``set_running(True)``) the field is read
+    only and the button reads Cancel: it, and Esc in the field, emit ``cancelRequested``. Esc
+    otherwise clears the field, and in an empty field emits ``statusDismissed`` (the owner puts
+    the last answer away). ``set_status(text, tone)`` (TONE_*) shows at most two lines (the
+    whole text is the tooltip); ``set_meta(text)`` one line; ``set_link(text, tooltip)`` the link
+    (``linkClicked``; "" hides it; never shown while a request runs). ``set_compact(True)`` (a
+    narrow or short reading screen) drops the meta line (its text goes into the status tooltip)
+    and puts the link beside the status while the bar is idle (TONE_IDLE) or the status asks for
+    it (``set_status(..., keep_link=True)``), so the controls below keep their room and an answer
+    keeps the whole width. ``set_hint(text)`` is the status with nothing to report: the status and
+    meta lines fold away (the field's placeholder and tooltip say it) unless a link is to be
+    shown, so the transcript below keeps its room; anything else the bar says brings them back.
+    Otherwise the bar's height changes only with ``set_compact``, never with its texts. The field
+    takes at most COMMAND_MAX_LENGTH characters and never reads its text as HTML. Nothing here
+    plans or runs anything.
+    """
+
+    submitted = Signal(str)
+    cancelRequested = Signal()
+    linkClicked = Signal()
+    statusDismissed = Signal()   # Esc in an empty field while nothing runs: put the last answer away
+
+    _STATUS_LINES = 2
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._running = False
+        self._compact = False
+        self._status_text = ""
+        self._meta_text = ""
+        self._tone = TONE_IDLE
+        self._keep_link = False      # the status asks for the link beside it (compact)
+        self._hint = False           # the status is only the idle hint: it may fold away
+        self.input = _CommandInput()
+        self.field = _CommandField(self.input)
+        self.button = HudButton(ASK_BUTTON_TEXT, SECONDARY, compact=True)
+        width = 0
+        for text in (ASK_BUTTON_TEXT, CANCEL_BUTTON_TEXT):
+            self.button.setText(text)
+            width = max(width, self.button.sizeHint().width())
+        self.button.setText(ASK_BUTTON_TEXT)
+        self.button.setMinimumWidth(width)
+        self.button.setToolTip("Plan this request (Enter)")
+        self.status_label = _ClampedLabel(body_font(12), _TONE_COLORS[TONE_IDLE], max_lines=self._STATUS_LINES)
+        self.status_label.setObjectName("askStatus")
+        self._line = math.ceil(QFontMetricsF(self.status_label.font()).lineSpacing())
+        self.status_label.setFixedHeight(self._line * self._STATUS_LINES + 2)   # never moves the controls below
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.meta_label = _ClampedLabel(mono_font(10, 400, 0.12), TEXT_DIM, max_lines=1)
+        self.meta_label.setObjectName("askMeta")
+        self.link_button = HudButton("", LINK, compact=True)
+        self.link_button.set_link_color(ACCENT)
+        self.link_button.hide()
+        self.input.returnPressed.connect(self._on_return)
+        self.input.escapePressed.connect(self._on_escape)
+        self.button.clicked.connect(self._on_button)
+        self.link_button.clicked.connect(self.linkClicked)
+        self._build_layout()
+
+    def _build_layout(self) -> None:
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        row.addWidget(self.field, 1)
+        row.addWidget(self.button, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._status_row = QHBoxLayout()
+        self._status_row.setContentsMargins(0, 0, 0, 0)
+        self._status_row.setSpacing(10)
+        self._status_row.addWidget(self.status_label, 1)
+        self._meta_row = QHBoxLayout()
+        self._meta_row.setContentsMargins(0, 0, 0, 0)
+        self._meta_row.setSpacing(10)
+        self._meta_row.addWidget(self.meta_label, 1, Qt.AlignmentFlag.AlignVCenter)
+        self._meta_row.addWidget(self.link_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addLayout(row)
+        layout.addLayout(self._status_row)
+        layout.addLayout(self._meta_row)
+
+    def set_compact(self, compact: bool) -> None:
+        """No meta line (its text is in the status tooltip) and the link beside the status while
+        idle: for a narrow or short reading screen."""
+        compact = bool(compact)
+        if compact == self._compact:
+            return
+        self._compact = compact
+        source, target = (self._meta_row, self._status_row) if compact else (self._status_row, self._meta_row)
+        source.removeWidget(self.link_button)
+        target.addWidget(self.link_button, 0, Qt.AlignmentFlag.AlignTop if compact else Qt.AlignmentFlag.AlignVCenter)
+        self._render_status()
+        self._show_link()
+        self.updateGeometry()
+
+    def is_compact(self) -> bool:
+        return self._compact
+
+    def _show_link(self) -> None:
+        # Never while a request runs; compact: beside the status, only while nothing else is said
+        # there (an answer keeps the width) or the status asks for it.
+        shown = (bool(self.link_button.text()) and not self._running
+                 and (not self._compact or self._tone == TONE_IDLE or self._keep_link))
+        self.link_button.setVisible(shown)
+        self._fold()
+
+    def _fold(self) -> None:
+        """The status and meta lines fold away while the status is only the hint and no link shows.
+        Unfolded and not compact, a hidden link keeps its room in the meta line, so the bar's
+        height does not change when the link comes and goes (while a request runs, say)."""
+        folded = self._hint and not self._running and self.link_button.isHidden()
+        self.status_label.setVisible(not folded)
+        self.meta_label.setVisible(not folded and not self._compact)
+        policy = self.link_button.sizePolicy()
+        retain = not folded and not self._compact and bool(self.link_button.text())
+        if policy.retainSizeWhenHidden() != retain:
+            policy.setRetainSizeWhenHidden(retain)
+            self.link_button.setSizePolicy(policy)
+        self.updateGeometry()
+
+    def is_folded(self) -> bool:
+        """Only the field shows (the idle hint folded away)."""
+        return self.status_label.isHidden()
+
+    def _render_status(self) -> None:
+        tooltip = None   # cut: the whole text is the tooltip
+        if self._compact and self._meta_text:
+            tooltip = plain_tooltip("\n".join(part for part in (self._status_text, self._meta_text.upper()) if part))
+        self.status_label.set_full_text(self._status_text, tooltip)
+
+    # ---- input --------------------------------------------------------------------------
+
+    def text(self) -> str:
+        """The field's text with its whitespace collapsed (what Enter submits)."""
+        return " ".join(self.input.text().split())
+
+    def set_text(self, text: str) -> None:
+        self.input.setText(text[:COMMAND_MAX_LENGTH])
+
+    def clear_input(self) -> None:
+        self.input.clear()
+
+    def focus_input(self) -> None:
+        self.input.setFocus(Qt.FocusReason.ShortcutFocusReason)
+
+    def _on_return(self) -> None:
+        text = self.text()
+        if self._running or not text:
+            return
+        self.submitted.emit(text)
+
+    def _on_escape(self) -> None:
+        if self._running:
+            if self.button.isEnabled():
+                self.cancelRequested.emit()
+        elif self.input.text():
+            self.input.clear()
+        else:
+            self.statusDismissed.emit()
+
+    def _on_button(self) -> None:
+        if self._running:
+            self.cancelRequested.emit()
+        else:
+            self._on_return()
+            self.focus_input()
+
+    # ---- state --------------------------------------------------------------------------
+
+    def set_running(self, running: bool) -> None:
+        """A request runs: the field is read only and the button reads Cancel (enabled)."""
+        self._running = bool(running)
+        self.input.setReadOnly(self._running)
+        self.button.setText(CANCEL_BUTTON_TEXT if self._running else ASK_BUTTON_TEXT)
+        self.button.set_variant(DENY if self._running else SECONDARY)
+        self.button.setToolTip("Stop planning; nothing is proposed (Esc)" if self._running
+                               else "Plan this request (Enter)")
+        self.button.setEnabled(True)
+        self.field.update()
+        self._show_link()
+
+    def set_cancel_enabled(self, enabled: bool) -> None:
+        """While running: False after a Cancel click (it is on its way)."""
+        if self._running:
+            self.button.setEnabled(enabled)
+
+    def is_running(self) -> bool:
+        return self._running
+
+    def set_status(self, text: str, tone: str = TONE_IDLE, *, keep_link: bool = False) -> None:
+        """The status line; ``keep_link`` keeps the link beside it in compact mode (it is about it)."""
+        self._hint = False
+        self._show_status(text, tone, keep_link)
+
+    def set_hint(self, text: str) -> None:
+        """Nothing to report: ``text`` is the idle hint (the field's tooltip too); the status and
+        meta lines fold away unless the link shows."""
+        self._hint = True
+        self.input.setToolTip(plain_tooltip(text) if text else "")
+        self._show_status(text, TONE_IDLE, False)
+
+    def _show_status(self, text: str, tone: str, keep_link: bool) -> None:
+        self._tone = tone if tone in _TONE_COLORS else TONE_IDLE
+        self._keep_link = bool(keep_link)
+        set_label_color(self.status_label, _TONE_COLORS[self._tone])
+        self._status_text = " ".join((text or "").split())
+        self._render_status()
+        self._show_link()
+
+    def status(self) -> str:
+        return self.status_label.full_text()
+
+    def tone(self) -> str:
+        return self._tone
+
+    def set_meta(self, text: str) -> None:
+        self._meta_text = text or ""
+        self.meta_label.set_full_text(text.upper() if text else "")
+        if self._compact:
+            self._render_status()
+
+    def meta(self) -> str:
+        return self.meta_label.full_text()
+
+    def set_link(self, text: str, tooltip: str = "") -> None:
+        self.link_button.setText(text)
+        self.link_button.setToolTip(plain_tooltip(tooltip) if tooltip else "")
+        self.link_button.setAccessibleName(tooltip or text)
+        self._show_link()
+
+    def link(self) -> str:
+        """The link's text ("" when there is none; it may be out of sight in compact mode)."""
+        return self.link_button.text()
+
+    def link_shown(self) -> bool:
+        return not self.link_button.isHidden()
+
+
+# --------------------------------------------------------------------------
 # Activity log
 # --------------------------------------------------------------------------
 
@@ -5841,7 +6342,8 @@ TAG_RUN = "run"
 TAG_DONE = "done"
 TAG_WAIT = "wait"
 TAG_STOP = "stop"
-TAG_COLORS = {TAG_RUN: ACCENT, TAG_DONE: GREEN, TAG_WAIT: AMBER, TAG_STOP: RED}
+TAG_ASK = "ask"
+TAG_COLORS = {TAG_RUN: ACCENT, TAG_DONE: GREEN, TAG_WAIT: AMBER, TAG_STOP: RED, TAG_ASK: PINK}
 
 
 class _ActivityRow(QWidget):
@@ -5942,8 +6444,9 @@ class HudWindowFrame(QWidget):
     """Base for frameless HUD windows: chamfered translucent outline, painted ground, header.
 
     ``header`` is a HeaderBar whose close button calls ``close()`` (so a
-    subclass's closeEvent keeps deciding what closing means). Put the content
-    in ``body_layout``. ``set_glow_anchor(widget)`` centres the ground glow on
+    subclass's closeEvent keeps deciding what closing means) and whose minimize
+    button calls ``showMinimized()`` (a subclass sees the WindowStateChange).
+    Put the content in ``body_layout``. ``set_glow_anchor(widget)`` centres the ground glow on
     that widget (e.g. the orb). ``set_resizable(True)`` lets the edges resize
     the window (the frame's margins are the grab zone).
     """
@@ -5951,7 +6454,11 @@ class HudWindowFrame(QWidget):
     def __init__(self, parent: QWidget | None = None, *, cut: int = 14, corners: int = CUT_DIAGONAL,
                  margins: tuple[int, int, int, int] = (10, 4, 10, 10), always_on_top: bool = True,
                  with_header: bool = True) -> None:
-        flags = Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint
+        # A plain top-level window (never Qt.Tool, never owned) keeps its taskbar button, which
+        # restores it after a minimize. The minimize hint adds no visible frame to a frameless
+        # window; on Windows it lets that taskbar button (and Win+Down) minimize it as well.
+        flags = (Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint
+                 | Qt.WindowType.WindowMinimizeButtonHint)
         if always_on_top:
             flags |= Qt.WindowType.WindowStaysOnTopHint
         super().__init__(parent, flags)
@@ -5976,6 +6483,7 @@ class HudWindowFrame(QWidget):
         if self.header is not None:
             layout.addWidget(self.header)
             self.header.closeRequested.connect(self.close)
+            self.header.minimizeRequested.connect(self.showMinimized)
         layout.addWidget(self.body, 1)
 
     # ---- configuration ------------------------------------------------------------

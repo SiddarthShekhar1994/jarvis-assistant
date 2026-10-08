@@ -7,17 +7,20 @@ The module is organised in three parts:
   helpers for focus;
 * views: ``PromptView`` ("Hear it now?" beside the status orb),
   ``ReadingView`` (STATUS and the TODAY / DEADLINES agenda on the left; orb,
-  current line, controls and the transcript, with a SECTIONS popover, in the
-  middle; approvals and activity on the right) and ``BriefingWindow``, the
-  frameless HUD window that stacks the two;
+  current line, Ask Jarvis's command bar when [ask] is on, controls and the
+  transcript, with a SECTIONS popover, in the middle; approvals and activity
+  on the right) and ``BriefingWindow``, the frameless HUD window that stacks
+  the two;
 * ``AppController``: the state machine ("prompt", "snoozed", "reading",
   "quitting") that owns the window, tray icon, fetch thread, TTS worker,
   player and the action worker (approved proposals, the agenda, the cards'
-  event checks and the Google sign-in of each account).
+  event checks and the Google sign-in of each account), and with [ask] on the
+  Ask controller (:mod:`briefing_reader.ask_ui`, its own "ask" thread) whose
+  proposals join the cards under ASK.
 
 Threading: Qt objects are only touched on the GUI thread. The fetch thread,
-the TTS worker and the action worker only emit ``_Bridge`` signals, which
-are queued to the GUI thread where all state lives. Every worker is a daemon
+the TTS worker, the action worker and the ask thread only emit bridge signals,
+which are queued to the GUI thread where all state lives. Every worker is a daemon
 thread, so a stuck network call or a browser sign-in can never block exit
 (only a change already on its way to Google is waited for, at most 5 s). The
 action worker runs one call at a time, so reading the agenda never overlaps a
@@ -85,7 +88,9 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMenu,
+    QPlainTextEdit,
     QSystemTrayIcon,
     QTextBrowser,
     QTextEdit,
@@ -105,6 +110,8 @@ from .actions import (
     RETRY_TEXT,
     RSVP,
     SEND_TEXT,
+    SOURCE_ASK,
+    SOURCE_BRIEFING,
     STATUS_CREATED,
     STATUS_DENIED,
     STATUS_DONE,
@@ -132,6 +139,7 @@ from .actions import (
     parse_time_range,
     result_text,
     when_text,
+    with_error,
 )
 from .agenda import (
     Deadline,
@@ -143,6 +151,7 @@ from .agenda import (
     extract_deadlines,
     merge_deadlines,
 )
+from .ask.validate import ALREADY_LISTED
 from .config import DEFAULT_ACCOUNT, AgendaConfig, Config
 from .executor import (
     DISCONNECT_FAILED_MESSAGE,
@@ -180,6 +189,7 @@ from .gcal import (
 )
 from .google_auth import (
     GMAIL_FEATURE,
+    GMAIL_READ_FEATURE,
     PROBLEM_BLOCKED,
     PROBLEM_CONFIRM,
     PROBLEM_DENIED,
@@ -267,6 +277,7 @@ def app_icon() -> QIcon:
 
 _VK_MENU = 0x12
 _KEYEVENTF_KEYUP = 0x0002
+_SW_SHOWNOACTIVATE = 4
 _user32_dll: Any = None
 
 
@@ -288,6 +299,10 @@ def _user32() -> Any:
         dll.SetForegroundWindow.argtypes = [wintypes.HWND]
         dll.keybd_event.argtypes = [wintypes.BYTE, wintypes.BYTE, wintypes.DWORD, ctypes.c_size_t]
         dll.keybd_event.restype = None
+        dll.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        dll.ShowWindow.restype = wintypes.BOOL
+        dll.IsIconic.argtypes = [wintypes.HWND]
+        dll.IsIconic.restype = wintypes.BOOL
         _user32_dll = dll
     return _user32_dll
 
@@ -345,7 +360,11 @@ def show_without_activating(widget: QWidget) -> None:
     Once the native window exists, Qt's Windows plugin reads the QWindow
     property ``_q_showWithoutActivating`` (during show()), not the widget
     attribute; the attribute covers a first show before the window exists.
+    A minimized window is restored where it was, also without the focus.
     """
+    if widget.isVisible() and widget.isMinimized():
+        _restore_without_activating(widget)
+        return
     handle = widget.windowHandle()
     widget.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
     if handle is not None:
@@ -361,9 +380,37 @@ def show_without_activating(widget: QWidget) -> None:
             handle.setProperty("_q_showWithoutActivating", False)
 
 
+def _restore_without_activating(widget: QWidget) -> None:
+    """Un-minimize ``widget`` without taking the focus.
+
+    Qt restores a minimized window with SW_SHOWNORMAL, which activates it; on
+    Windows this asks for SW_SHOWNOACTIVATE instead (Qt follows the new state
+    from the window's WM_SIZE). Elsewhere, or if that did not work, showNormal().
+    """
+    if _native_windows():
+        try:
+            user32 = _user32()
+            hwnd = int(widget.winId())
+            user32.ShowWindow(hwnd, _SW_SHOWNOACTIVATE)
+            if not user32.IsIconic(hwnd):
+                return
+        except Exception as exc:  # noqa: BLE001 - best effort; showNormal() below still restores
+            logger.debug("Could not restore the window without activating it: %s", exc)
+    widget.showNormal()
+
+
 # --------------------------------------------------------------------------
 # Small widget helpers
 # --------------------------------------------------------------------------
+
+def _keeps_space(widget: QWidget | None) -> bool:
+    """Space belongs to this focus widget, not to the reading view's play / pause shortcut: a
+    button (pressed, then clicked on release) or a text field such as Ask Jarvis's bar (it types a
+    space). The read-only transcript is neither, so Space there still plays and pauses."""
+    if isinstance(widget, (QAbstractButton, QLineEdit, QPlainTextEdit)):
+        return True
+    return isinstance(widget, QTextEdit) and not widget.isReadOnly()
+
 
 def _label(font: QFont, color: str, *, wrap: bool = False, name: str = "") -> QLabel:
     """A plain-text label (page text is never interpreted as HTML)."""
@@ -656,6 +703,7 @@ class _Tier:
 # Wide (artboard), default 1120 px window, minimum 900 px window, and screens too small for that.
 _TIERS = (_Tier(1320, 300, 372, 168), _Tier(1040, 260, 340, 168), _Tier(860, 230, 300, 112),
           _Tier(0, 190, 250, 96))
+_COMPACT_BAR_BELOW = 570   # a reading view shorter than this (a window under ~640 px) gets the compact bar
 
 
 class ReadingView(QWidget):
@@ -698,6 +746,7 @@ class ReadingView(QWidget):
         self._steps: list[tuple[str, str]] = []
         self._shown_section: int | None = None
         self._tier: _Tier | None = None
+        self._state_text: str | None = None   # the state label's own text (PLANNING), None for the state's
         self._make_status_column()
         self._make_center_column()
         self._make_sections_popover()
@@ -761,6 +810,15 @@ class ReadingView(QWidget):
         self.transcript_panel.steps.installEventFilter(self)   # re-fit the chips when it resizes
         self._step_meter = hud.StepStrip(self)                # measures chips, never shown
         self._step_meter.setVisible(False)
+        # Ask Jarvis's command bar (between the orb row and the controls); shown only while
+        # [ask] is enabled (set_ask_available).
+        self.command_bar = hud.CommandBar()
+        self._command_holder = QWidget()
+        holder = QVBoxLayout(self._command_holder)
+        holder.setContentsMargins(14, 10, 14, 0)
+        holder.setSpacing(0)
+        holder.addWidget(self.command_bar)
+        self._command_holder.setVisible(False)
 
     def _make_buttons(self) -> None:
         self.play_button = hud.HudButton("", hud.PRIMARY)
@@ -861,6 +919,7 @@ class ReadingView(QWidget):
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(0)
         column.addWidget(top)
+        column.addWidget(self._command_holder)
         column.addWidget(controls)
         column.addWidget(self.transcript_panel, 1)
         return center
@@ -907,12 +966,21 @@ class ReadingView(QWidget):
         """The line being spoken (Sora Light 20 px); "" shows the briefing title."""
         self.speech.setText(text or self._speech_fallback)
 
-    def set_activity_state(self, state: str, live: bool) -> None:
-        """Orb and state label (SPEAKING, STANDBY, WORKING) and the transcript's LIVE marker."""
+    def set_activity_state(self, state: str, live: bool, label: str | None = None) -> None:
+        """Orb and state label (SPEAKING, STANDBY, WORKING, or ``label`` such as PLANNING) and the
+        transcript's LIVE marker."""
         self.orb.set_state(state)
-        if state != self.state_label.state():
-            self.state_label.set_state(state)
+        if state != self.state_label.state() or (label or None) != self._state_text:
+            self.state_label.set_state(state, label or None)
+            self._state_text = label or None
         self.transcript_panel.live.set_live(live)
+
+    def set_ask_available(self, available: bool) -> None:
+        """Show Ask Jarvis's command bar ([ask] enabled) or keep it out of the layout."""
+        self._command_holder.setVisible(available)
+
+    def ask_available(self) -> bool:
+        return not self._command_holder.isHidden()
 
     def set_sections(self, rows: Sequence[hud.SectionRowInfo], meta: str, current: int | None = None) -> None:
         """Section rows; the list scrolls to ``current`` when it changes (not on every update)."""
@@ -1103,7 +1171,15 @@ class ReadingView(QWidget):
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
         self._apply_tier(event.size().width())
+        self._fit_command_bar(event.size().height())
         self._apply_highlight(scroll_to=False)   # line wrapping changed
+
+    def _fit_command_bar(self, height: int) -> None:
+        """The narrowest tier or a short screen gets the compact bar (one status line), so the
+        controls and the transcript below keep their room."""
+        compact = (self._tier is not None and self._tier.orb < _TIERS[2].orb) or height < _COMPACT_BAR_BELOW
+        self.command_bar.set_compact(compact)
+        self._command_holder.layout().setContentsMargins(14, 6 if compact else 10, 14, 0)
 
     def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().showEvent(event)
@@ -1209,7 +1285,9 @@ def _highlight_selections(block: QTextBlock) -> list[QTextEdit.ExtraSelection]:
 # Window
 # --------------------------------------------------------------------------
 
-PROMPT_SIZE = QSize(560, 300)
+PROMPT_SIZE = QSize(600, 300)   # wide enough for the header's clock, chips, minimize and close
+ASK_CHIP = "claude"             # Ask Jarvis's header chip ([ask] enabled only)
+READING_ONLY_CHIPS = (ASK_CHIP,)   # hidden on the prompt (no room in 600 px)
 READING_SIZE = QSize(1120, 700)
 READING_MIN_SIZE = QSize(900, 600)
 SCREEN_MARGIN = 24
@@ -1270,7 +1348,8 @@ class BriefingWindow(hud.HudWindowFrame):
 
     The header bar is the title bar (drag to move); its close button and
     Alt+F4 go through ``closeRequested`` so the controller decides what
-    closing means.
+    closing means. Its minimize button minimizes the window to its taskbar
+    button; ``visibilityChanged`` tells the controller.
     """
 
     closeRequested = Signal()
@@ -1312,11 +1391,12 @@ class BriefingWindow(hud.HudWindowFrame):
 
     def event(self, event: QEvent) -> bool:
         # A Tab-focused button keeps Space (pressed, then clicked on release, as
-        # everywhere else); the reading view's Space shortcut only acts when no
-        # button has focus.
+        # everywhere else) and a text field types it (Ask Jarvis's bar, even while
+        # it is read only); the reading view's Space shortcut only acts when
+        # neither has focus.
         if (event.type() == QEvent.Type.ShortcutOverride and event.key() == Qt.Key.Key_Space
-                and event.modifiers() == Qt.KeyboardModifier.NoModifier
-                and isinstance(self.focusWidget(), QAbstractButton)):
+                and event.modifiers() in (Qt.KeyboardModifier.NoModifier, Qt.KeyboardModifier.ShiftModifier)
+                and _keeps_space(self.focusWidget())):
             event.accept()
             return True
         return super().event(event)
@@ -1334,10 +1414,17 @@ class BriefingWindow(hud.HudWindowFrame):
 
     def show_prompt_view(self) -> None:
         self._stack.setCurrentWidget(self.prompt)
+        self._show_reading_chips(False)
         self.layout().setContentsMargins(*_PROMPT_MARGINS)
         self.set_resizable(False)
         self.set_glow_anchor(self.prompt.orb)
         self.fit_prompt(force=True)
+
+    def _show_reading_chips(self, shown: bool) -> None:
+        """The header chips of the reading view only (``claude``: the narrow prompt has no room)."""
+        assert self.header is not None
+        for name in READING_ONLY_CHIPS:
+            self.header.set_service_visible(name, shown)
 
     def fit_prompt(self, *, force: bool = False) -> None:
         """Fixed width; tall enough for the current text, at least the nominal height."""
@@ -1353,6 +1440,7 @@ class BriefingWindow(hud.HudWindowFrame):
 
     def show_reading_view(self) -> None:
         self._stack.setCurrentWidget(self.reading)
+        self._show_reading_chips(True)
         self.layout().setContentsMargins(*_READING_MARGINS)
         self.set_resizable(True)
         self.set_glow_anchor(self.reading.orb)
@@ -1440,6 +1528,13 @@ _CARD_FOR_STATUS = {STATUS_CREATED: hud.CARD_ADDED, STATUS_EXISTS: hud.CARD_EXIS
                     STATUS_UNKNOWN: hud.CARD_UNKNOWN, STATUS_RUNNING: hud.CARD_WORKING}
 # The undo countdown ([actions] undo_seconds): how often the card's "SENDING IN n S" is updated.
 _COUNTDOWN_TICK_MS = 200
+_GROUP_TITLES = {SOURCE_ASK: "Ask", SOURCE_BRIEFING: "Briefing"}   # the NEEDS YOUR OK group headers
+_ASK_CARDS_MAX = 16                    # Ask cards kept (this run, memory only); the oldest go first
+ALREADY_LISTED_TEXT = ALREADY_LISTED   # an Ask card the briefing also proposes (information only)
+ASK_PLANNING_LABEL = "PLANNING"        # the reading orb's label while an Ask plans
+ASK_SIGN_IN_FIRST = "Finish the Google sign-in in your browser first, then ask again"
+ASK_MAIL_BUSY = "Finish the approval or sign-in that is running first, then allow reading mail"
+ASK_MAIL_WAIT = "Wait for Ask to finish, then allow reading mail"
 # At exit, a change already on its way to Google is waited for this long (the window is hidden).
 _QUIT_SEND_WAIT_S = 5.0
 SIGN_IN_LINK_TEXT = "Sign in"
@@ -1608,11 +1703,14 @@ class _ConnectJob:
     """The browser sign-in of one account (the agenda's Connect, a card's Sign in or Approve).
     ``action``: a Reply / Email whose Send signs its account in (executor.sign_in: sending must
     be allowed and the Google account known afterwards). ``disconnect``: forget the account's
-    sign-in and binding first ("No, use another account")."""
+    sign-in and binding first ("No, use another account"). ``force``: sign in even when the
+    account is signed in already (Ask Jarvis's "Allow <alias> mail": one more consent that asks
+    for every feature's permission, reading email included)."""
 
     alias: str
     action: ProposedAction | None = None
     disconnect: bool = False
+    force: bool = False
 
 
 class _Bridge(QObject):
@@ -1712,8 +1810,8 @@ class _ActionWorker:
         self._jobs.put(job)
 
     def connect(self, alias: str = DEFAULT_ACCOUNT, action: ProposedAction | None = None, *,
-                disconnect: bool = False) -> None:
-        self._jobs.put(_ConnectJob(alias, action, disconnect))
+                disconnect: bool = False, force: bool = False) -> None:
+        self._jobs.put(_ConnectJob(alias, action, disconnect, force))
 
     def stop(self) -> None:
         self._jobs.put(None)
@@ -1759,7 +1857,7 @@ class _ActionWorker:
             if job.action is not None:
                 self._connect_mail(job.alias, job.action)
             else:
-                self._connect(job.alias, force=job.disconnect)
+                self._connect(job.alias, force=job.disconnect or job.force)
         elif job == _SIGN_IN_CHECK:
             self._check_sign_ins()
 
@@ -2220,6 +2318,16 @@ class AppController(QObject):
     every 10 minutes while it is visible, after a sign-in and after an
     Approve; it never signs in by itself. ``slots`` and ``run_state`` record
     which scheduled briefing was shown and answered (for the catch-up launch).
+
+    Ask Jarvis (``[ask] enabled``; ask_ui.AskController) adds the command bar to
+    the reading screen and a ``claude`` chip to its header. Its proposals are
+    cards like the briefing's (an ASK group above the BRIEFING one; one list
+    per source, merged for the cards), never read out with the briefing, and
+    carried out only through the same click, undo countdown and executor path.
+    ``ask_factory(config, calendars, senders, accounts)`` builds the planner
+    (tests inject a fake; the app's runs the owner's own Claude Code).
+    ``ask_mode`` (``--ask``): open the reading screen with the bar focused,
+    without playing the briefing or settling a scheduled slot.
     """
 
     def __init__(self, config: Config, client: NotionClient, *, expected_run: str | None,
@@ -2231,15 +2339,19 @@ class AppController(QObject):
                  click_clock: Callable[[], float] | None = None,
                  slots: Mapping[str, str] | None = None,
                  run_state: RunState | None = None,
-                 on_shutdown: Callable[[], Any] | None = None) -> None:
+                 on_shutdown: Callable[[], Any] | None = None,
+                 ask_factory: Callable[..., Any] | None = None,
+                 ask_mode: bool = False) -> None:
         super().__init__()
         self.config = config
         self.client = client
         self._on_shutdown = on_shutdown   # e.g. an exit watchdog (the app passes one; tests do not)
         self.expected_run = _normalize_run(expected_run)
         self.now_mode = bool(now_mode)
+        self.ask_mode = bool(ask_mode)
         self.startup_error = startup_error
         self.state = STATE_IDLE
+        self._minimized = False            # the window is minimized (_on_window_state)
         self._now = now_func
         self._click_clock = click_clock
         # Scheduled run times ({"AM": "10:12", "PM": "23:42"}) and where answers are
@@ -2264,6 +2376,7 @@ class AppController(QObject):
         self._store = action_store
         self._calendars: dict[str, Any]
         self._senders: dict[str, Any]
+        self._google_accounts: dict[str, Any] = {}   # build_accounts' (no factories): shared by Ask's readers
         self._calendars, self._senders = self._create_google(calendar_factory, sender_factory)
         self.calendar = self._calendars.get(DEFAULT_ACCOUNT)   # the agenda's and Calendar proposals'
         self._history = recipient_history(config)   # whom Jarvis sent to (recipients.json; read on use)
@@ -2276,6 +2389,7 @@ class AppController(QObject):
         self._init_agenda_state()
         self._init_timers()
         self._connect_signals()
+        self.ask: Any = self._create_ask(ask_factory)   # ask_ui.AskController, or None while [ask] is off
 
     def _init_fetch_state(self) -> None:
         self._fetch_id = 0
@@ -2310,7 +2424,12 @@ class AppController(QObject):
         self._skip_pending = False               # the next section start follows a skip or jump
 
     def _init_action_state(self) -> None:
-        self._actions: list[ProposedAction] = []
+        self._actions: list[ProposedAction] = []   # the cards shown: ASK + BRIEFING (_merged_actions)
+        # One list per source (memory only; the decisions are saved by id like every card's).
+        self._source_lists: dict[str, list[ProposedAction]] = {SOURCE_ASK: [], SOURCE_BRIEFING: []}
+        self._ask_busy = False                     # an Ask is planning (the orb says PLANNING)
+        self._autoplay = True                      # the reading starts playing once it is shown (not --ask)
+        self._reading_settled = False              # this reading answered its scheduled slot (Read now, Play)
         self._actions_key = ""                   # content key of the page the actions came from
         self._actions_lines: tuple = ()
         self._jobs: dict[str, str] = {}            # action id -> _STAGE_* while counting down, queued or running
@@ -2419,6 +2538,7 @@ class AppController(QObject):
         reading.connectCalendar.connect(self.connect_calendar)
         self.window.closeRequested.connect(self._on_close_requested)
         self.window.visibilityChanged.connect(self._sync_agenda_timer)
+        self.window.visibilityChanged.connect(self._on_window_state)
 
     def _create_player(self) -> BriefingPlayer:
         player = BriefingPlayer(self, section_gap_ms=self.config.voice.section_gap_ms,
@@ -2450,10 +2570,12 @@ class AppController(QObject):
         if calendar_factory is None and sender_factory is None:
             try:
                 accounts = build_accounts(self.config)
-                return build_calendars(self.config, accounts), build_senders(self.config, accounts)
+                built = build_calendars(self.config, accounts), build_senders(self.config, accounts)
             except Exception as exc:  # noqa: BLE001 - the briefing works without Google
                 logger.warning("Could not set up the Google accounts (%s)", type(exc).__name__)
                 return {}, {}
+            self._google_accounts = dict(accounts)
+            return built
         calendars = self._create_calendars(calendar_factory) if calendar_factory is not None else {}
         senders: dict[str, Any] = {}
         if sender_factory is not None:
@@ -2498,6 +2620,11 @@ class AppController(QObject):
         self._create_tray()
         self._start_calendar()
         self._update_service_chips()
+        if self.ask is not None:
+            self.ask.start()   # checks Claude Code on the ask thread (no model request)
+        if self.ask_mode:
+            self.open_ask()
+            return
         if self.now_mode:
             self.enter_reading()
             force_foreground(self.window)
@@ -2807,7 +2934,7 @@ class AppController(QObject):
             actions, lines = extract_actions(lines, headings, link_hosts=self.config.actions.link_hosts)
             self._actions_key, self._actions_lines = key, tuple(lines)
             self._page_deadlines = deadlines
-            self._set_actions(actions)
+            self._set_source(SOURCE_BRIEFING, actions)
             self._render_agenda()
         if len(self._actions_lines) == len(briefing.lines):
             return briefing
@@ -2815,9 +2942,53 @@ class AppController(QObject):
 
     def _pending_actions(self) -> list[ProposedAction]:
         """Proposals that take a decision and have not been decided yet (as their cards show
-        them: with the Edit dialog's changes)."""
+        them: with the Edit dialog's changes), Ask's included."""
         return [self._effective(action) for action in self._actions
                 if action.decidable and not self._store.is_decided(action.id)]
+
+    def _pending_page_actions(self) -> list[ProposedAction]:
+        """The briefing's own pending proposals: what the spoken "Needs your OK" reads (never an
+        Ask card) and what Ask sees of the briefing."""
+        return [action for action in self._pending_actions() if action.source != SOURCE_ASK]
+
+    def _set_source(self, source: str, actions: Sequence[ProposedAction]) -> None:
+        """Replace one source's cards (the briefing's on a new page, Ask's after an answer); the
+        cards shown are all sources merged (_merged_actions), so a briefing refresh keeps the Ask
+        cards and an Ask keeps the briefing's."""
+        self._source_lists[source] = list(actions)
+        self._set_actions(self._merged_actions())
+
+    def _merged_actions(self) -> list[ProposedAction]:
+        """ASK first, then BRIEFING. An Ask card whose id the briefing also has is information
+        only ("Already in your list under BRIEFING"): the briefing's card stays the one to decide
+        (the same id is the same proposal and has one decision)."""
+        briefing = self._source_lists[SOURCE_BRIEFING]
+        page_ids = {action.id for action in briefing}
+        merged: list[ProposedAction] = []
+        seen: set[str] = set()
+        for action in self._source_lists[SOURCE_ASK]:
+            if action.id in page_ids and not action.error:
+                action = with_error(action, ALREADY_LISTED_TEXT)
+            if action.id not in seen and action.id not in page_ids:
+                seen.add(action.id)
+                merged.append(action)
+        return merged + briefing
+
+    def _take_ask_cards(self, cards: Sequence[ProposedAction]) -> None:
+        """An Ask's cards, above the earlier Ask cards. A card counting down, queued or on its way
+        keeps its content (the same id from the new answer is left out); at most _ASK_CARDS_MAX
+        stay, the oldest that is not on its way going first."""
+        old = self._source_lists[SOURCE_ASK]
+        old_ids = {action.id for action in old}
+        fresh = [card for card in cards if not (card.id in self._jobs and card.id in old_ids)]
+        fresh_ids = {card.id for card in fresh}
+        merged = fresh + [action for action in old if action.id not in fresh_ids]
+        while len(merged) > _ASK_CARDS_MAX:
+            victim = next((action for action in reversed(merged) if action.id not in self._jobs), None)
+            if victim is None:
+                break
+            merged.remove(victim)
+        self._set_source(SOURCE_ASK, merged)
 
     def _action(self, action_id: str) -> ProposedAction | None:
         """The proposal as the page has it."""
@@ -2861,6 +3032,8 @@ class AppController(QObject):
             return action
 
     def _set_actions(self, actions: list[ProposedAction]) -> None:
+        """Show ``actions`` (all sources, merged) as the cards. With Ask cards among them each
+        source gets a group header (ASK, then BRIEFING) and Ask's labels read "ASK \u00b7 MOVE"."""
         if actions == self._actions:
             return
         self._actions = list(actions)
@@ -2876,10 +3049,18 @@ class AppController(QObject):
         reading = self.window.reading
         reading.clear_action_cards()
         today = self._now().date()
+        grouped = any(action.source == SOURCE_ASK for action in self._actions)
+        group = None
         for page_action in self._actions:
+            if grouped and page_action.source != group:
+                group = page_action.source
+                reading.approvals.add_group_header(_GROUP_TITLES.get(group, group),
+                                                   sum(1 for action in self._actions if action.source == group))
             action = self._shown(page_action.id) or self._effective(page_action)
             view = card_view(action, today)
             label = view.kind_label + (EDITED_MARK if self._is_edited(page_action) else "")
+            if page_action.source == SOURCE_ASK:
+                label = f"{_GROUP_TITLES[SOURCE_ASK]} {DOT} {label}"
             reading.add_action_card(action.id, label, view.title, _card_detail(action, view, today),
                                     view.decidable, **_card_options(action, view))
             self._show_card_state(action.id)   # also sets the note (warnings) while it waits
@@ -3150,8 +3331,8 @@ class AppController(QObject):
         signed_in, problem, message = self._accounts_state.get(alias, (True, "", ""))
         if not signed_in and problem and problem != PROBLEM_SIGNED_OUT:
             line = _PROBLEM_LINES.get(problem, _PROBLEM_LINE_OTHER).format(alias=alias)
-            return line, sign_in_note(alias, problem=problem, message=message,
-                                      sends_mail=self._sends_mail(alias)), True
+            return line, sign_in_note(alias, problem=problem, message=message, sends_mail=self._sends_mail(alias),
+                                      reads_mail=self._reads_mail(alias)), True
         check = self._checks.get(action.id)
         if check is not None:
             if check.reason:   # Jarvis won't act on this event: the reason, Google's view on hover
@@ -3190,6 +3371,11 @@ class AppController(QObject):
         """The account has the gmail_send feature in config.toml (its sign-ins ask to send email)."""
         account = self.config.accounts.get(alias)
         return account is not None and GMAIL_FEATURE in account.features
+
+    def _reads_mail(self, alias: str) -> bool:
+        """The account has the gmail_read feature in config.toml (its sign-ins ask to read email)."""
+        account = self.config.accounts.get(alias)
+        return account is not None and GMAIL_READ_FEATURE in account.features
 
     def _hint(self, action_id: str, text: str) -> None:
         """What the card's last Approve click needs next (its amber note until the next click)."""
@@ -3788,6 +3974,7 @@ class AppController(QObject):
         self._refresh_countdown_cards()
         self._update_service_chips()
         self._request_peeks()
+        self._refresh_ask()   # which accounts' mail Ask may read
 
     def _request_peeks(self, actions: Sequence[ProposedAction] | None = None, *, force: bool = False) -> None:
         """Read the events of RSVP / Move / Cancel cards for their check lines: only signed-in
@@ -4006,11 +4193,12 @@ class AppController(QObject):
         self._start_sign_in(action.account, card_id=action_id)
 
     def _start_sign_in(self, alias: str, *, card_id: str = "", action: ProposedAction | None = None,
-                       disconnect: bool = False) -> None:
+                       disconnect: bool = False, force: bool = False) -> None:
         """``alias``'s browser sign-in on the action worker; ``action``: a Reply / Email whose Send
         started it (sending must be allowed and the Google account known afterwards).
         ``disconnect``: forget the account's sign-in and binding first ("No, use another
-        account"), so Google's chooser may pick another account."""
+        account"), so Google's chooser may pick another account. ``force``: sign in even when
+        signed in already (one more consent, e.g. so Ask may read the account's mail)."""
         worker = self._start_calendar()
         if worker is None:
             return
@@ -4022,7 +4210,7 @@ class AppController(QObject):
         self._sync_card_locks()
         self._refresh_countdown_cards()
         self._update_service_chips()
-        worker.connect(alias, action, disconnect=disconnect)
+        worker.connect(alias, action, disconnect=disconnect, force=force)
         self._render_agenda()
 
     # ---- the first sign-in's question: is it the right Google account? -----------------------
@@ -4151,6 +4339,7 @@ class AppController(QObject):
             return
         card_id = self._connect_card
         self._connect_alias, self._connect_card = None, ""
+        self._refresh_ask()   # a sign-in may have allowed (or not) reading this account's mail
         if stage == _CONNECT_KEPT:
             self._connect_mail = False
             self._account_kept(alias, message, card_id)
@@ -4169,7 +4358,8 @@ class AppController(QObject):
                 self._hints[card_id] = f"{note} - click {self._confirm_button(card_id)} to try again"
             elif card_id:   # the card whose click started it says why, in full
                 self._hints[card_id] = sign_in_note(alias, problem=problem or PROBLEM_FAILED, message=note,
-                                                    sends_mail=self._sends_mail(alias))
+                                                    sends_mail=self._sends_mail(alias),
+                                                    reads_mail=self._reads_mail(alias))
             self._activity(hud.TAG_STOP, "Google sign-in did not finish" if personal
                            else f"Google sign-in did not finish ({alias} account)", _short(note))
             if self._calendar_worker is not None:
@@ -4387,6 +4577,135 @@ class AppController(QObject):
         panel.set_deadlines(_deadline_rows(items, now), f"No deadlines in the {_next_days(agenda.deadline_days)}")
         panel.set_deadlines_meta(_plural(agenda.deadline_days, "day"))   # the horizon: "14 DAYS"
 
+    # ---- Ask Jarvis -------------------------------------------------------------------------
+
+    def _create_ask(self, factory: Callable[..., Any] | None) -> Any:
+        """The command bar's controller while [ask] is enabled; None otherwise, or when the planner
+        could not be set up (the bar stays hidden and nothing else changes)."""
+        if not self.config.ask.enabled:
+            return None
+        from . import ask_ui
+
+        try:
+            planner = (factory or ask_ui.default_planner)(self.config, self._calendars, self._senders,
+                                                          self._google_accounts)
+        except Exception as exc:  # noqa: BLE001 - the briefing works without Ask
+            logger.warning("Could not set up Ask Jarvis (%s)", type(exc).__name__)
+            return None
+        reading = self.window.reading
+        controller = ask_ui.AskController(self.config, planner, reading.command_bar, context=self._ask_context,
+                                          blocked=self._ask_blocked, calendars=self._calendars, parent=self)
+        controller.busyChanged.connect(self._on_ask_busy)
+        controller.outcomeReady.connect(self._on_ask_outcome)
+        controller.chipChanged.connect(self._set_ask_chip)
+        controller.mailSignInRequested.connect(self.sign_in_for_mail)
+        reading.set_ask_available(True)
+        self._set_ask_chip(*controller.chip())
+        return controller
+
+    def _set_ask_chip(self, state: str, tooltip: str) -> None:
+        """The header's ``claude`` chip (reading screen only): OK, SIGN IN, LIMIT, OFF or ERR."""
+        from .ask_ui import CHIP_STATUSES
+
+        header = self.window.header
+        header.set_service(ASK_CHIP, CHIP_STATUSES.get(state, hud.STATUS_OFF), tooltip)
+        header.set_service_visible(ASK_CHIP, self.window.is_reading_view())
+
+    def _ask_context(self) -> tuple[Any, list[str]]:
+        """What an Ask may see of the briefing (its pending cards, sections and deadlines; never the
+        Ask cards) and the ids of the briefing's cards (an Ask card with one of them is information
+        only). GUI thread."""
+        from .ask.planner import briefing_context
+
+        page_cards = [action for action in self._actions if action.source != SOURCE_ASK]
+        try:
+            context = briefing_context(self._briefing, self._pending_page_actions(), self._page_deadlines,
+                                       config=self.config, now=self._now())
+        except Exception as exc:  # noqa: BLE001 - the Ask goes on with the calendar alone
+            logger.warning("Ask: could not prepare the briefing for the request (%s)", type(exc).__name__)
+            context = None
+        return context, [action.id for action in page_cards]
+
+    def _ask_blocked(self) -> str:
+        """Why an Ask may not start now ("" when it may): a Google sign-in is open in the browser
+        (the calendar can't be read meanwhile)."""
+        if self.state == STATE_QUITTING:
+            return "Jarvis is closing"
+        if self._signing_in():
+            return ASK_SIGN_IN_FIRST
+        return ""
+
+    def _on_ask_busy(self, busy: bool) -> None:
+        """An Ask started (the briefing pauses; the orb shows PLANNING) or ended."""
+        self._ask_busy = bool(busy)
+        if busy and self.state == STATE_READING and self.player.state in (PLAYING, WAITING):
+            self.player.pause()
+        self._update_reading_controls()
+
+    def _on_ask_outcome(self, outcome: Any) -> None:
+        """A finished Ask: its cards go under ASK (above the briefing's; a countdown on another
+        card goes on), and ACTIVITY gets one row of counts (never the request or the answer)."""
+        if self.state == STATE_QUITTING:
+            return
+        if outcome.ok:
+            self._take_ask_cards(list(outcome.cards))
+            decidable = sum(1 for card in outcome.cards if not card.error)
+            if decidable:
+                message = _plural(decidable, "proposal")
+            else:
+                message = "A question back" if outcome.question and not outcome.cards else "No proposals"
+            if outcome.refused:
+                message += f", {outcome.refused} not doable"
+            sub = [f"{outcome.duration_ms / 1000:.1f} s", _plural(outcome.runs, "planner run")]
+            if outcome.mail.threads:
+                sub.append(f"read {_plural(outcome.mail.threads, 'mail thread')}")
+            self._activity(hud.TAG_ASK, message, f" {DOT} ".join(sub))
+            logger.info("Ask: %d card(s) shown under ASK (%d not doable)", len(outcome.cards), outcome.refused)
+        elif outcome.kind not in ("empty", "busy"):
+            self._activity(hud.TAG_STOP, "Ask: nothing was proposed", _short(outcome.message or outcome.kind))
+        self._refresh_actions_ui()
+
+    def _refresh_ask(self) -> None:
+        """A Google sign-in changed: which accounts' mail Ask may read (never Claude Code's checks)."""
+        if self.ask is not None:
+            self.ask.refresh(full=False)
+
+    def sign_in_for_mail(self, alias: str) -> None:
+        """The command bar's "Allow <alias> mail": that account's Google sign-in once more, asking
+        for every feature's permission (reading email included), only on this click. Never while
+        an Ask runs: the sign-in holds the account's calendar for the whole browser flow, and the
+        Ask would wait on it (the bar hides the link meanwhile; this is the second guard)."""
+        if self.state == STATE_QUITTING or alias not in self._calendars:
+            return
+        if self.ask is not None and self.ask.busy:
+            logger.info("Ask: the mail sign-in waits for the running Ask")
+            self._flash_note(ASK_MAIL_WAIT)
+            return
+        if self._signing_in() or self._countdown is not None or self._jobs:
+            self.window.reading.command_bar.set_status(ASK_MAIL_BUSY, hud.TONE_WARN)
+            return
+        if self._start_calendar() is None:
+            return
+        logger.info("Google sign-in again for the %s account, so Ask may read its mail", logged_alias(alias))
+        self._start_sign_in(alias, force=True)
+
+    def open_ask(self) -> None:
+        """``--ask``, or an activation with "ask": true: the reading screen with the command bar
+        focused. The briefing does not start playing and no scheduled slot is settled (Play does
+        both); a reading in progress just comes forward."""
+        if self.state == STATE_QUITTING:
+            return
+        logger.info("Opening Ask Jarvis (%s)", "on" if self.ask is not None else "off")
+        if self.state != STATE_READING:
+            self.enter_reading(autoplay=False, settle=False)
+        force_foreground(self.window)
+        if self.ask is not None:
+            self.window.reading.command_bar.focus_input()
+        else:
+            from .ask.planner import DISABLED_MESSAGE
+
+            self._flash_note(DISABLED_MESSAGE)
+
     # ---- scripts and speech -------------------------------------------------------------
 
     def _build_script(self, include_note: bool) -> Script:
@@ -4396,7 +4715,7 @@ class AppController(QObject):
             briefing, now=self._now(), expected_run=self.expected_run,
             freshness=self._freshness(briefing),
             include_note=include_note, ignore_names=self.config.sections.ignore,
-            announce=self.config.sections.announce, actions=self._pending_actions())
+            announce=self.config.sections.announce, actions=self._pending_page_actions())
 
     def _refresh_prefetch(self) -> None:
         """Prepare audio for the briefing while the prompt shows (rebuilt when it changes)."""
@@ -4499,13 +4818,14 @@ class AppController(QObject):
             # until a fresh page arrives (e.g. a briefing that landed after the poll).
             logger.info("Re-checking Notion: the cached briefing is stale")
             self._start_fetch(None)
+        minimized = self.window.isVisible() and self.window.isMinimized()
+        if minimized:   # back where it was minimized, first, so it is laid out as a normal window
+            self._bring_up(take_focus)
         self.window.show_prompt_view()
         self._refresh_prompt()
-        self.window.place()
-        if take_focus:
-            force_foreground(self.window)
-        else:
-            show_without_activating(self.window)
+        if not minimized:
+            self.window.place()
+            self._bring_up(take_focus)
         self.window.keep_on_screen()
         self.window.prompt.setFocus(Qt.FocusReason.OtherFocusReason)
         self._start_prompt_timers()
@@ -4513,6 +4833,12 @@ class AppController(QObject):
         self._sync_agenda_timer()
         logger.info("Prompt shown (%s)", "taking focus" if take_focus else "without taking focus")
         self.record_shown()   # only the first show of a slot is kept
+
+    def _bring_up(self, take_focus: bool) -> None:
+        if take_focus:
+            force_foreground(self.window)
+        else:
+            show_without_activating(self.window)
 
     def _start_prompt_timers(self) -> None:
         if self.startup_error:   # Later is disabled, so there is nothing to count down to
@@ -4556,8 +4882,52 @@ class AppController(QObject):
         self.later(self.config.prompt.later_short_minutes)
 
     def _on_snooze_timeout(self) -> None:
-        if self.state == STATE_SNOOZED:
+        if self.state == STATE_SNOOZED or (self.state == STATE_PROMPT and self._minimized):
             self.show_prompt(take_focus=self.config.prompt.refocus_on_reprompt)
+
+    # ---- minimize ---------------------------------------------------------------------------
+
+    def _on_window_state(self) -> None:
+        """The window was minimized or restored: its minimize button, its taskbar button, Win+Down,
+        the tray icon or the hotkey."""
+        window = self.window
+        minimized = window.isVisible() and window.isMinimized()
+        if minimized == self._minimized:
+            return
+        self._minimized = minimized
+        if minimized:
+            logger.info("Window minimized (%s)", self.state)
+            self._on_minimized()
+        elif window.isVisible():   # not when a minimized window is hidden (Close from the taskbar, quit)
+            logger.info("Window restored (%s)", self.state)
+            self._on_restored()
+
+    def _on_minimized(self) -> None:
+        """Out of sight, nothing is decided for you: an undo countdown stops (its Undo would be out of
+        sight too) and a prompt asks again after the short Later, from its taskbar button. The
+        reading keeps playing."""
+        countdown = self._countdown
+        if countdown is not None and self.state != STATE_QUITTING:
+            action = countdown.action
+            self._cancel_countdown("the window was minimized")
+            nothing = "nothing was created" if _adds_event(action) else "nothing was sent"
+            self._activity(hud.TAG_STOP, f"Undone: {_action_phrase(action)}",
+                           f"{kind_label(action).upper()} {DOT} window minimized, {nothing}")
+            self._refresh_actions_ui()
+        if self.state == STATE_PROMPT and not self.startup_error:
+            minutes = self.config.prompt.later_short_minutes
+            self._stop_prompt_timers()
+            self._snooze_timer.start(minutes * 60_000)
+            at = format_time(self._now() + timedelta(minutes=minutes))
+            self._update_tray(f"Briefing: asking again at {at}")
+            logger.info("Prompt minimized: asking again at %s unless it is restored first", at)
+
+    def _on_restored(self) -> None:
+        """A prompt restored by hand waits for an answer again, with a new countdown."""
+        if self.state == STATE_PROMPT and self.window.isVisible() and self._snooze_timer.isActive():
+            self._snooze_timer.stop()
+            self._start_prompt_timers()
+            self._update_tray()
 
     def read_now(self) -> None:
         if self.state != STATE_PROMPT or self.startup_error:
@@ -4668,16 +5038,22 @@ class AppController(QObject):
 
     # ---- reading -------------------------------------------------------------------------
 
-    def enter_reading(self) -> None:
-        """Switch to the reading screen (Read now, --now, or an activation with now=true)."""
+    def enter_reading(self, *, autoplay: bool = True, settle: bool = True) -> None:
+        """Switch to the reading screen (Read now, --now, or an activation with now=true).
+
+        ``autoplay=False`` (``--ask``): the briefing waits for Play. ``settle=False``: the
+        scheduled slot stays open until the briefing is played (Play), so the catch-up still asks
+        about a briefing that was never heard."""
         if self.state in (STATE_READING, STATE_QUITTING):
             return
         self._stop_prompt_timers()
         self._snooze_timer.stop()
         was_visible = self.window.isVisible()
         self.state = STATE_READING
-        if not self.startup_error:
-            self._read_slot = self.record_answer("read")   # Read now, --now, or the hotkey
+        self._autoplay = autoplay
+        self._reading_settled = False
+        if settle:
+            self._settle_reading()   # Read now, --now, or the hotkey
         self.window.show_reading_view()
         if not was_visible:
             self.window.place()
@@ -4693,6 +5069,15 @@ class AppController(QObject):
             self._recheck_before_reading()
         else:
             self._begin_reading()
+
+    def _settle_reading(self) -> None:
+        """This reading answers its scheduled slot (once): at Read now, or at the first Play of a
+        reading screen opened for Ask."""
+        if self._reading_settled:
+            return
+        self._reading_settled = True
+        if not self.startup_error:
+            self._read_slot = self.record_answer("read")
 
     def _worth_rechecking_first(self) -> bool:
         """The briefing we have is not fresh and Notion may have a newer one by now."""
@@ -4779,10 +5164,11 @@ class AppController(QObject):
         self._sections_started = set()
         self._last_section = None
         self._skip_pending = False
-        logger.info("Reading the briefing: %d section(s)%s", len(script.section_indices(False)),
-                    ", with a stale note" if script.stale else "")
+        logger.info("Reading the briefing: %d section(s)%s%s", len(script.section_indices(False)),
+                    ", with a stale note" if script.stale else "", "" if self._autoplay else " (waiting for Play)")
         self._render_reading()
-        self._start_playback(script.section_indices(False))
+        if self._autoplay:
+            self._start_playback(script.section_indices(False))
 
     def _render_reading(self) -> None:
         script, reading = self._script, self.window.reading
@@ -4829,14 +5215,20 @@ class AppController(QObject):
             return
         reading = self.window.reading
         if self._script is None:
-            reading.set_activity_state(hud.ORB_STANDBY if self._reading_error else hud.ORB_WORKING, False)
+            if self._ask_busy:
+                reading.set_activity_state(hud.ORB_WORKING, False, ASK_PLANNING_LABEL)
+            else:
+                reading.set_activity_state(hud.ORB_STANDBY if self._reading_error else hud.ORB_WORKING, False)
             self._update_sections()
             self._update_telemetry()
             return
         state = self.player.state
         reading.set_controls(_PRIMARY_LABELS.get(state, "Play"), True, state in (PLAYING, PAUSED, WAITING))
         reading.set_status(self._reading_status(state), is_error=bool(self._note))
-        reading.set_activity_state(_ORB_FOR_PLAYER.get(state, hud.ORB_STANDBY), state == PLAYING)
+        if self._ask_busy and state != PLAYING:   # Ask is planning (Play during it speaks again)
+            reading.set_activity_state(hud.ORB_WORKING, False, ASK_PLANNING_LABEL)
+        else:
+            reading.set_activity_state(_ORB_FOR_PLAYER.get(state, hud.ORB_STANDBY), state == PLAYING)
         self._update_sections()
         self._update_telemetry()
 
@@ -5032,7 +5424,9 @@ class AppController(QObject):
                 self.retry()
             return
         if self.player.state in (FINISHED, IDLE):
-            logger.info("Replay")
+            logger.info("Replay" if self._has_played or self.player.state == FINISHED else "Play")
+            self._autoplay = True
+            self._settle_reading()   # a reading screen opened for Ask: the briefing is heard now
             self._start_playback(self._script.section_indices(self._include_ignored))
         else:
             self.player.toggle()
@@ -5107,6 +5501,10 @@ class AppController(QObject):
         meanwhile (its prompt was never shown here) stays open for the catch-up."""
         if self.run_state is None:
             return None
+        if self.state == STATE_READING and not self._reading_settled:
+            logger.info("Done: the briefing was not played on this reading screen (opened for Ask); "
+                        "its slot stays open")
+            return None
         if self.state == STATE_READING and self._read_slot is not None:
             key = handled_slot_key(self._now(), self.slots)
             if key is not None and key != self._read_slot:
@@ -5121,9 +5519,15 @@ class AppController(QObject):
         message = message if isinstance(message, dict) else {}
         run = _normalize_run(message.get("run"))
         now = message.get("now") is True
-        logger.info("Another launch asked this instance to come forward (run=%s, now=%s, state=%s)",
-                    run or "-", now, self.state)
+        ask = message.get("ask") is True
+        logger.info("Another launch asked this instance to come forward (run=%s, now=%s, ask=%s, state=%s)",
+                    run or "-", now, ask, self.state)
         if self.state in (STATE_QUITTING, STATE_IDLE):
+            return
+        if self.window.isVisible() and self.window.isMinimized():
+            self.window.showNormal()   # laid out again as a normal window; brought forward below
+        if ask:
+            self.open_ask()
             return
         if self.state == STATE_READING:
             self._activation_while_reading(run)
@@ -5220,6 +5624,8 @@ class AppController(QObject):
         self._sections_started = set()
         self._last_section = None
         self._read_slot = None
+        self._reading_settled = False
+        self._autoplay = True
         reading = self.window.reading
         reading.show_message("")   # the next briefing renders from the top
         reading.set_sections([], "")
@@ -5257,6 +5663,8 @@ class AppController(QObject):
         if countdown is not None:
             self._jobs.pop(countdown.action.id, None)
             logger.info("Action %s undone (app closed); nothing was sent", countdown.action.id)
+        if self.ask is not None:
+            self.ask.shutdown()   # a running Ask is cancelled: nothing is proposed
         if self._dialog is not None:
             self._dialog.reject()
         if self._account_dialog is not None:

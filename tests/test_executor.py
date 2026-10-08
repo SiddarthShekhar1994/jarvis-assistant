@@ -9,6 +9,7 @@ the owner's data folder. Names, addresses and ids are invented.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import logging
 import socket
@@ -72,7 +73,7 @@ from briefing_reader.executor import (
     sign_in_note,
 )
 from briefing_reader.gmail import GmailError, GmailUnknownOutcome, OutgoingMail, SentMail
-from briefing_reader.recipients import KNOWN, TRUSTED, RecipientHistory
+from briefing_reader.recipients import KNOWN, NEW, TRUSTED, RecipientHistory
 from briefing_reader.gcal import (
     CalendarAuthError,
     CalendarError,
@@ -888,6 +889,16 @@ class SignInNoteTests(unittest.TestCase):
                          'that, remove "gmail_send" from config.toml [accounts.work] features and sign in again to '
                          "keep Calendar actions")
         self.assertNotIn("gmail_send", sign_in_note("work", problem=PROBLEM_EXPIRED, sends_mail=True))
+        # With gmail_read (Ask Jarvis reading mail, a restricted permission administrators block first)
+        # the block says to remove that first, then gmail_send.
+        self.assertEqual(sign_in_note("work", problem=PROBLEM_BLOCKED, message=blocked, sends_mail=True,
+                                      reads_mail=True),
+                         blocked + ". Every work sign-in also asks to read email (Ask Jarvis), which administrators "
+                         'often block: remove "gmail_read" from config.toml [accounts.work] features and sign in '
+                         'again; if it is still blocked, remove "gmail_send" from config.toml [accounts.work] '
+                         "features and sign in again, to keep Calendar actions")
+        self.assertNotIn("gmail_send", sign_in_note("work", problem=PROBLEM_BLOCKED, message=blocked, reads_mail=True))
+        self.assertNotIn("gmail_read", sign_in_note("work", problem=PROBLEM_EXPIRED, reads_mail=True))
         self.assertIn("administrator", sign_in_note("work", problem=PROBLEM_BLOCKED))
         self.assertIn("cancelled or access was denied", sign_in_note("work", problem=PROBLEM_DENIED))
         self.assertIn("tick every box", sign_in_note("work", problem=PROBLEM_SCOPE))
@@ -1047,6 +1058,19 @@ class MailStatusTests(MailTestCase):
             self.history.add(["ana@example.edu", "ben@example.edu"])
         known = self.mail_executor(trusted=()).mail_status(example("Reply"))
         self.assertEqual((known.review.kinds[0][1], known.ready), (KNOWN, True))
+
+    def test_an_ask_recipient_you_did_not_type_needs_a_tick_even_when_trusted(self) -> None:
+        line = example("Reply")
+        ask = dataclasses.replace(line, source="ask", unverified=frozenset({"ana@example.edu"}))
+        status = self.mail_executor().mail_status(ask)
+        self.assertEqual(status.review.kinds, (("ana@example.edu", NEW), ("ben@example.edu", TRUSTED)))
+        self.assertTrue(status.needs_edit)
+        self.assertFalse(status.ready)
+        ticked = apply_edit(ask, ActionEdit(confirmed_new=frozenset({"ana@example.edu"})))
+        self.assertTrue(self.mail_executor().mail_status(ticked).ready)
+        outcome = self.run_mail(ask)   # Send without the tick sends nothing
+        self.assertEqual(self.senders["work"].sent, [])
+        self.assertNotEqual(outcome.status, actions.STATUS_SENT)
 
     def test_the_own_address_refuses_the_card(self) -> None:
         """Any recipient that is the sending account itself (any spelling) refuses the card with a

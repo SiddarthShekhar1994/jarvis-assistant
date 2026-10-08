@@ -52,7 +52,7 @@ import re
 import tempfile
 import threading
 import unicodedata
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -92,6 +92,9 @@ BUILTIN_LINK_HOSTS = ("mail.google.com", "docs.google.com", "drive.google.com",
                       "calendar.google.com", "meet.google.com", "*.slack.com", "*.instructure.com")
 DEFAULT_HEADINGS = ("Proposed actions",)
 DEFAULT_DURATION = timedelta(minutes=60)
+# Who proposed a card (ProposedAction.source): the briefing page, or Ask Jarvis (briefing_reader.ask).
+SOURCE_BRIEFING = "briefing"
+SOURCE_ASK = "ask"
 
 STATUS_CREATED = "created"   # Approve created the event
 STATUS_EXISTS = "exists"     # Approve found it already on the calendar
@@ -149,6 +152,13 @@ class ProposedAction:
     ``confirmed`` holds the NEW RECIPIENT addresses of a Reply / Email that you
     ticked in the Edit dialog (casefolded; set only by edit_mail, never by a
     line, kept in memory only).
+
+    ``source`` says who proposed it: the briefing page (SOURCE_BRIEFING, every
+    line of extract_actions) or Ask Jarvis (SOURCE_ASK). It is not part of the
+    id, so the same proposal from both has one id (and one decision).
+    ``unverified`` holds the recipients of an Ask Reply / Email that you did not
+    type yourself (casefolded; memory only): each counts as NEW, even in a
+    trusted domain, unless Jarvis sent to it before (recipients.review).
     """
 
     id: str
@@ -171,6 +181,8 @@ class ProposedAction:
     warnings: tuple[str, ...] = ()             # soft problems, shown as the card's amber note
     structured: bool = False                   # read by the key=value path (errored lines too)
     confirmed: frozenset[str] = frozenset()    # new recipients ticked in Edit (casefolded; memory only)
+    source: str = "briefing"                   # SOURCE_BRIEFING or SOURCE_ASK; never part of the id
+    unverified: frozenset[str] = frozenset()   # Ask recipients you did not type (casefolded; memory only)
 
     @property
     def decidable(self) -> bool:
@@ -408,6 +420,37 @@ def _iso(value: date | datetime | None) -> str:
 def _make_action(kind: str, raw: str, **fields: Any) -> ProposedAction:
     action = ProposedAction(id="", kind=kind, raw=raw, **fields)
     return replace(action, id=_action_id(action))
+
+
+_KIND_NAMES = {CALENDAR: "Calendar", REPLY: "Reply", EMAIL: "Email", RSVP: "RSVP", MOVE: "Move",
+               CANCEL: "Cancel", SHARE: "Share", SLACK: "Slack", TODO: "Todo", OPEN: "Open"}
+
+
+def with_error(action: ProposedAction, message: str) -> ProposedAction:
+    """``action`` as an information-only card that says ``message`` (no decision, nothing to carry
+    out). Its id is rebuilt the way an unreadable line's is (from the line's text); for a card that
+    another source than the briefing proposed it also depends on that source, so an Ask card never
+    shares an id with a briefing card it was refused next to."""
+    errored = replace(action, id="", error=message or "can't be carried out")
+    action_id = _action_id(errored)
+    if errored.source != SOURCE_BRIEFING:
+        action_id = hashlib.sha1(f"{errored.source}\x1f{action_id}".encode("utf-8")).hexdigest()[:16]
+    return replace(errored, id=action_id)
+
+
+def restrict(action: ProposedAction, kinds: Collection[str], source: str) -> ProposedAction:
+    """``action`` as ``source`` proposes it (``source`` set): a kind ``source`` may not propose
+    becomes an information-only card ("Ask can't propose Slack"), and a line that could not be
+    read keeps its reason (with_error, so its id is the source's own)."""
+    action = replace(action, source=source)
+    name = source.capitalize() if source else "This source"
+    if action.error:
+        return with_error(action, action.error)
+    if action.kind == UNKNOWN:
+        return with_error(action, f"{name} lines need a kind such as Move: or Email:")
+    if action.kind not in kinds:
+        return with_error(action, f"{name} can't propose {_KIND_NAMES.get(action.kind, 'this kind')}")
+    return action
 
 
 # --------------------------------------------------------------------------
@@ -2001,6 +2044,10 @@ def copied_text(action: ProposedAction) -> str:
 def card_view(action: ProposedAction, today: date) -> CardView:
     """Kind label, texts and buttons of ``action``'s card (README: "Other proposals")."""
     label = kind_label(action)
+    if action.error and action.source != SOURCE_BRIEFING:
+        # An Ask card Jarvis refused (or could not read): its headline when it had one, and the
+        # reason as written ("Jarvis doesn't know this event - ask again").
+        return CardView(label, action.title or _cut(action.raw, _RAW_SHOWN), action.error)
     if action.error:
         title = _cut(action.raw, _RAW_SHOWN) if action.structured else action.raw
         return CardView(label, title, f"Can't read this line: {action.error}")

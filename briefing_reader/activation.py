@@ -2,9 +2,10 @@
 
 A later launch finds the single-instance lock taken (see
 :mod:`briefing_reader.__main__`) and sends the running app a one-line JSON
-message such as ``{"cmd": "activate", "run": "PM", "now": false}`` over a
-QLocalServer (a named pipe on Windows); :class:`ActivationServer` receives it
-and hands it to ``AppController.handle_activation``.
+message such as ``{"cmd": "activate", "run": "PM", "now": false}`` (``--ask``
+adds ``"ask": true``) over a QLocalServer (a named pipe on Windows);
+:class:`ActivationServer` receives it and hands it to
+``AppController.handle_activation``.
 
 Kept apart from ``__main__`` so a launch that ends early (``--catch-up`` with
 nothing due, ``--hotkey-agent``) never imports PySide6.
@@ -35,10 +36,13 @@ _MAX_MESSAGE_BYTES = 64 * 1024
 # Sending
 # --------------------------------------------------------------------------
 
-def forward_to_running_instance(name: str, run: str | None, now: bool) -> int:
-    """Ask the running instance to come forward (retrying while it starts); the exit code."""
+def forward_to_running_instance(name: str, run: str | None, now: bool, *, ask: bool = False) -> int:
+    """Ask the running instance to come forward (retrying while it starts); the exit code.
+    ``ask`` (``--ask``) adds ``"ask": true``: open Ask Jarvis's bar there (an older app ignores it)."""
     app = QCoreApplication.instance() or QCoreApplication([sys.argv[0] if sys.argv else APP_NAME])
-    message = {"cmd": "activate", "run": run, "now": bool(now)}
+    message: dict[str, object] = {"cmd": "activate", "run": run, "now": bool(now)}
+    if ask:
+        message["ask"] = True
     payload = (json.dumps(message) + "\n").encode("utf-8")
     deadline = time.monotonic() + ACTIVATION_TIMEOUT_S
     while not try_send(name, payload):

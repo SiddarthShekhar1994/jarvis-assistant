@@ -104,6 +104,18 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--hotkey-agent", action="store_true",
                       help="listen for the global hotkey from [hotkey] in config.toml "
                            "(used by the hotkey task at logon)")
+    mode.add_argument("--ask", action="store_true",
+                      help="Ask Jarvis: open the reading screen with the command bar ready, without playing "
+                           "the briefing ([ask] enabled = true in config.toml); a running app opens it there")
+    mode.add_argument("--ask-check", action="store_true",
+                      help="Ask Jarvis: check that your own Claude Code is installed and signed in to your "
+                           "claude.ai plan, and print what Ask can use (no Claude request)")
+    mode.add_argument("--ask-text", metavar="TEXT",
+                      help="Ask Jarvis once from the command line and print the proposals (one or two "
+                           "requests on your Claude plan); with --ask-dry-run only print what would be sent")
+    parser.add_argument("--ask-dry-run", action="store_true",
+                        help="with --ask-text: print the exact text Jarvis would send to Claude Code "
+                             "(email text shown as counts) and stop; no Claude request")
     parser.add_argument("--slots", metavar="am=HH:MM,pm=HH:MM",
                         help="the times of the scheduled runs (default: [schedule] in config.toml)")
     parser.add_argument("--now", action="store_true",
@@ -118,7 +130,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.ask_dry_run and args.ask_text is None:
+        parser.error("--ask-dry-run needs --ask-text")
     try:
         return _run(args)
     except Exception:  # noqa: BLE001 - logged; no console is required to see it
@@ -133,13 +148,21 @@ def _run(args: argparse.Namespace) -> int:
     log_file = setup_logging(debug=args.debug, keep_open=not args.hotkey_agent)
     logger.info("%s %s starting (Python %s on %s)", APP_NAME, __version__,
                 platform.python_version(), platform.platform())
-    logger.info("Arguments: run=%s now=%s catch_up=%s hotkey_agent=%s slots=%s from_file=%s debug=%s "
+    logger.info("Arguments: run=%s now=%s catch_up=%s hotkey_agent=%s ask=%s slots=%s from_file=%s debug=%s "
                 "detached=%s", args.run or "-", args.now, args.catch_up, args.hotkey_agent,
-                args.slots or "-", args.from_file or "-", args.debug, args.detached)
+                bool(getattr(args, "ask", False)), args.slots or "-", args.from_file or "-", args.debug,
+                args.detached)
     logger.info("Log file: %s", log_file)
 
     config = load_config()
     _log_config(config)
+    if getattr(args, "ask_check", False) or getattr(args, "ask_text", None) is not None:
+        # Ask Jarvis on the command line: no window, no Qt, no single-instance lock. The request
+        # text is never logged.
+        from .ask import commands
+
+        logger.info("Ask from the command line: check=%s dry_run=%s", bool(args.ask_check), bool(args.ask_dry_run))
+        return commands.run(args, config, sys.stdout)
     slots = _resolve_slots(args.slots, config.schedule.slots)
     if args.hotkey_agent:
         return _run_hotkey_agent(config, slots)
@@ -151,7 +174,7 @@ def _run(args: argparse.Namespace) -> int:
             return 0
         args.run = run.lower()   # from here on exactly like --run <run>
     elif not _claim_single_instance(name):
-        return _forward_to_running(name, _run_name(args), args.now)
+        return _forward_to_running(name, _run_name(args), args.now, ask=bool(getattr(args, "ask", False)))
     if _should_detach(args):
         _release_single_instance()   # the detached copy takes the lock
         if _start_detached_copy(args, slots):
@@ -283,8 +306,10 @@ def _release_single_instance() -> None:
         logger.debug("Could not release the single-instance mutex: %s", exc)
 
 
-def _forward_to_running(name: str, run: str | None, now: bool) -> int:
+def _forward_to_running(name: str, run: str | None, now: bool, *, ask: bool = False) -> int:
     from .activation import forward_to_running_instance
+    if ask:
+        return forward_to_running_instance(name, run, now, ask=True)
     return forward_to_running_instance(name, run, now)
 
 
@@ -472,7 +497,7 @@ def _run_controller(args: argparse.Namespace, config: Any, name: str, run: str |
     run_state = None if args.from_file else RunState(config.data_dir / RUNSTATE_FILE)
     controller = ui.AppController(config, client, expected_run=run, now_mode=args.now,
                                   startup_error=startup_error, slots=slots, run_state=run_state,
-                                  on_shutdown=start_exit_watchdog)
+                                  on_shutdown=start_exit_watchdog, ask_mode=bool(getattr(args, "ask", False)))
     server.set_handler(controller.handle_activation)
     controller.start()
     rc = app.exec()

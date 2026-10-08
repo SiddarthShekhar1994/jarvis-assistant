@@ -9,15 +9,17 @@ recipients"): such a card is a slip of the briefing, or its alias is bound to th
 account, so nothing is quietly left out and nothing goes out until the address is removed in
 Edit.
 
-Jarvis holds only gmail.send, so it cannot read a thread to prove that an address belongs in it.
-Instead an address needs no extra confirmation only when it is
+Sending never reads a thread to prove that an address belongs in it. Instead an address needs no
+extra confirmation only when it is
 
 - in a domain of ``[actions] trusted_domains``, or a subdomain of one (empty by default), or
 - an address Jarvis sent to before (RecipientHistory: recipients.json).
 
 Every other address is NEW: its card shows a red NEW RECIPIENT chip and Send waits until it is
 ticked in the Edit dialog ("Send to <address>"; ProposedAction.confirmed, memory only).
-Addresses are compared as plain, casefolded addresses; a display name never counts.
+Addresses are compared as plain, casefolded addresses; a display name never counts. A recipient
+that Ask Jarvis proposed and you did not type (ProposedAction.unverified) skips the trusted
+domains: it is NEW unless Jarvis sent to it before.
 
     mailbox_key(address)      the mailbox an address delivers to (only for comparing addresses)
     same_mailbox(a, b)        both are the same mailbox (case, spaces, +tag, Gmail dots aside)
@@ -221,13 +223,18 @@ class RecipientHistory:
 
 
 def classify(addresses: Iterable[str], *, own: str, trusted_domains: Sequence[str],
-             history: RecipientHistory | None) -> dict[str, str]:
+             history: RecipientHistory | None, unverified: Collection[str] = ()) -> dict[str, str]:
     """address -> OWN (the sending account ``own`` itself, written any way same_mailbox allows),
-    TRUSTED, KNOWN or NEW (first match wins, in that order)."""
+    TRUSTED, KNOWN or NEW (first match wins, in that order). An ``unverified`` address (an Ask
+    proposal's recipient you did not type) skips TRUSTED: KNOWN only when Jarvis sent to it before,
+    else NEW."""
     kinds: dict[str, str] = {}
+    unchecked = {address.strip().casefold() for address in unverified if isinstance(address, str)}
     for address in addresses:
         if own and same_mailbox(address, own):
             kinds[address] = OWN
+        elif address.strip().casefold() in unchecked:
+            kinds[address] = KNOWN if history is not None and history.knows(address) else NEW
         elif in_domains(address, trusted_domains):
             kinds[address] = TRUSTED
         elif history is not None and history.knows(address):
@@ -270,15 +277,18 @@ class RecipientReview:
 
 
 def review(to: Sequence[str], cc: Sequence[str], *, own: str, account: str = "", confirmed: Collection[str] = (),
-           trusted_domains: Sequence[str] = (), history: RecipientHistory | None = None) -> RecipientReview:
+           trusted_domains: Sequence[str] = (), history: RecipientHistory | None = None,
+           unverified: Collection[str] = ()) -> RecipientReview:
     """The recipients of a Reply / Email as a card shows them and Send needs them (no network).
 
     ``own`` is the sending account's address ("" while Jarvis does not know it; Send then signs
     in first anyway); ``account`` its alias, for the refusal note. Any recipient that is the
     account itself (same_mailbox) refuses the card: "This would send to the work account
-    (ana@example.edu) itself - edit the recipients"."""
+    (ana@example.edu) itself - edit the recipients". ``unverified``: recipients an Ask proposed
+    that you did not type (ProposedAction.unverified); each is NEW, even in a trusted domain,
+    unless Jarvis sent to it before, so Send waits for its tick."""
     to, cc = tuple(to), tuple(cc)
-    kinds = classify(to + cc, own=own, trusted_domains=trusted_domains, history=history)
+    kinds = classify(to + cc, own=own, trusted_domains=trusted_domains, history=history, unverified=unverified)
     mine = tuple(address for address in to + cc if kinds[address] == OWN)
     ticked = {address.casefold() for address in confirmed}
     new = tuple(address for address in to + cc if kinds[address] == NEW)

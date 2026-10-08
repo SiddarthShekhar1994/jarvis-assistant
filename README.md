@@ -56,6 +56,8 @@ own scheduled task (see [Instructions for the Claude briefing task](#instruction
   it, everything else works: proposals are still shown (Approve just says that
   Google Calendar is not set up yet, and replies stay Copy / Open hand-offs),
   and DEADLINES still lists the briefing's own deadlines.
+- For [Ask Jarvis](#ask-jarvis-optional) only (off by default): Claude Code,
+  installed and signed in with your own claude.ai plan (Pro or Max).
 
 ## Setup
 
@@ -374,10 +376,11 @@ cd "<project folder>"
    | `https://www.googleapis.com/auth/calendar.events` | Add the event you approved, and first look for the same event (same title and start) so it is not added twice; read your events of today (or tomorrow) and the next 14 days for TODAY and DEADLINES; read one event by its id for an invitation, move or cancel card. Only after your click on that card and its undo countdown: answer an invitation (only your own answer is sent), move an event you organize (or may change as a guest) or cancel an event you organize, always telling the guests as the card says ("guests notified" by default). It never changes or deletes anything else. |
    | `https://www.googleapis.com/auth/calendar.settings.readonly` | Read your calendar's time zone, so that "15:00" means 15:00 where your calendar is. |
    | `https://www.googleapis.com/auth/gmail.send` | Only for an account with `"gmail_send"` in its features (step 8b). Only after your click on **Send** on that card and its undo countdown: send that one reply or email, exactly as the card shows it. It cannot read, search, change or delete any mail. |
+   | `https://www.googleapis.com/auth/gmail.readonly` | Asked for at every sign-in of an account with `"gmail_read"` in its features (the shipped `config.toml` has it on both accounts), **even while Ask Jarvis is off**; remove `"gmail_read"` if you do not use Ask (step 8c). Used only while Ask Jarvis is on: read the Gmail threads one request is about (at most 3, each read only when you ask Jarvis something). Read only: it cannot send, change or delete any mail; the text is used for that one request and never saved or logged. |
    | `openid`, `https://www.googleapis.com/auth/userinfo.email` | Learn which Google account a sign-in is (its address and account id), to bind the account name to it (see above). Nothing else. |
 
-   No other access: Jarvis can't read your mail, and has no access to Drive,
-   contacts or anything else.
+   No other access: Jarvis reads mail only through `gmail.readonly`, for Ask
+   Jarvis (step 8c), and has no access to Drive, contacts or anything else.
 
    **Disconnecting.** Right after a name's first sign-in, **No, use another
    account** in the question above does it for you: that name's saved sign-in
@@ -402,13 +405,14 @@ cd "<project folder>"
    using calendar actions and email without disconnecting, set
    `[calendar] enabled = false` in `config.toml`; to stop acting for one
    account, remove its `[accounts.<name>]` table, or one of its features
-   (`"calendar"`, `"gmail_send"`).
+   (`"calendar"`, `"gmail_send"`, `"gmail_read"`).
 
    **8b. Sending replies and emails.** Only needed if **Send** on a Reply or
    Email card should send it for you; without it those cards stay hand-offs
-   (Copy and Open, and **Done**). Jarvis asks Google only for `gmail.send`: it
-   can send what you approve on a card, and nothing else (it can't read, search
-   or delete mail).
+   (Copy and Open, and **Done**). For sending, Jarvis asks Google only for
+   `gmail.send`: it can send what you approve on a card, and nothing else (it
+   can't read, search or delete mail). Reading for Ask Jarvis is a separate
+   permission (step 8c), never used to send.
 
    1. In the same Cloud project, **APIs & Services > Library**: search for
       **Gmail API**, open it and click **Enable**.
@@ -445,6 +449,38 @@ cd "<project folder>"
    account until you sign in again through **Send**. If Gmail says that the API
    is not enabled, do step 1 and wait a few minutes.
 
+   **8c. Letting Ask Jarvis read the threads you name (optional).** Only
+   needed for [Ask Jarvis](#ask-jarvis-optional) requests about an email
+   ("reply to Ana's budget email"). Without it Ask still plans from your
+   calendar and the briefing, and says when it could not read mail.
+
+   Optional, but **on in the shipped `config.toml`**: both accounts list
+   `"gmail_read"`, so their next Google sign-in (the first one, a sign-in again
+   after you remove the app's access, or the one every 7 days while your
+   Google app is in Testing) asks for "Read your email" together with the
+   calendar, **whether Ask is on or off**. If you do not use Ask, remove
+   `"gmail_read"` from both accounts' `features` before signing in.
+
+   1. The Gmail API is enabled already if you did step 8b (otherwise do 8b.1).
+   2. **OAuth consent screen > Data access**: **Add or remove scopes**, tick
+      `.../auth/gmail.readonly`, then **Update** and **Save**. gmail.readonly is a
+      "restricted" scope: for an app only you use (Testing, with yourself as a
+      test user), no verification or security assessment is needed; the
+      sign-in shows the same "Google hasn't verified this app" page.
+   3. In `config.toml`, an account whose mail Ask may read has `"gmail_read"` in
+      its `features` (both `personal` and `work` do in the shipped file; remove
+      it from an account whose mail Ask should never read).
+   4. The account's next sign-in asks for it together with its other
+      permissions (a desktop app cannot add one permission to an existing
+      sign-in): click **Allow work mail** (the account's name) under Ask
+      Jarvis's bar, or **Sign in** on one of its cards. Until then, and if you
+      untick "Read your email", Ask works without mail for that account
+      (`--ask-check` shows which accounts can be read).
+
+   A work or school administrator may block restricted scopes. If the
+   account's sign-in is then blocked (`admin_policy_enforced`), remove
+   `"gmail_read"` from that account first; Calendar and sending keep working.
+
 9. **Uninstall**
 
    ```powershell
@@ -468,11 +504,15 @@ labels and times.
 
 - **Frameless window.** The header bar is the title bar: drag it to move the
   window. The small **X** at its right end closes it (on the prompt that counts
-  as Later (10 min), on the reading screen it is the same as Done). The window
-  stays on top of other windows.
+  as Later (10 min), on the reading screen it is the same as Done). The
+  **minimize** button (a dash) next to it minimizes the window to its taskbar
+  button; click that button (or the tray icon, or press the hotkey) to bring it
+  back. The window stays on top of other windows.
 - **Header.** The JARVIS wordmark, three service chips and the date and time,
   such as TUE 06 OCT 1:05 PM (`[display] clock = "24h"` shows 13:05; the
-  small prompt window has room for the time only):
+  small prompt window has room for the time only), and, with Ask Jarvis on, a
+  fourth chip on the reading screen, **claude** (see
+  [Ask Jarvis](#ask-jarvis-optional)):
   **notion** (grey: checking, green: loaded, amber: retrying, red: error),
   **voice** (grey: no audio yet, green: online voice, amber: offline Windows
   voice, red: no speech could be generated) and **calendar** (green:
@@ -505,6 +545,11 @@ were typing elsewhere at that moment cannot press one.
 - Closing the window with the X in its header counts as Later (10 min). (When
   the Notion token or page ID is missing, Later is not offered and the X quits
   like Dismiss.)
+- Minimizing the prompt with the minimize button in its header also counts as
+  Later (10 min), but the prompt stays on the taskbar: the 2-minute countdown stops,
+  and after 10 minutes the prompt comes back by itself where it was (on top,
+  without taking focus, like any prompt that comes back). Click its taskbar
+  button before that to answer now; the 2-minute countdown then starts again.
 - **Dismiss** quits for this run.
 - With `--run am|pm`, if the page has not been updated yet, the prompt says
   "Your AM briefing hasn't arrived yet." and checks every minute for up to 15
@@ -554,6 +599,13 @@ Buttons:
 - **Open in Notion** opens the page's notion.so link.
 - **Done** closes the app. Closing the window with the X in its header is the
   same as Done.
+
+Minimizing the reading screen (the minimize button in its header) keeps the
+briefing playing; TODAY waits until the window is visible again. An undo
+countdown on a card stops when the window is minimized, because its **Undo**
+would be out of sight: nothing is sent, the card waits for your decision again
+and the activity log says "Undone". Click the window's taskbar button, the tray
+icon or press the hotkey to bring it back.
 
 If the speech for a section could not be generated, that section is skipped: its
 row in SECTIONS says "no audio", and the STATUS panel and the activity log say
@@ -631,9 +683,10 @@ only means that the next catch-up may ask about a briefing you already heard. A
 `--from-file` test run never writes it.
 
 **The hotkey.** Press **Ctrl+Alt+J** anywhere. If the app is open, it comes
-forward and starts reading (from the prompt, or after Later, it is the same as
-Read now; on the reading screen it only comes forward). If it is not running, it
-starts with `--now` and reads the latest briefing. Presses within 2 seconds of
+forward (restored first when it is minimized) and starts reading (from the
+prompt, or after Later, it is the same as Read now; on the reading screen it only
+comes forward). If it is not running, it starts with `--now` and reads the latest
+briefing. Presses within 2 seconds of
 the previous one are ignored. The "Briefing hotkey" task runs a small agent
 (`--hotkey-agent`) from logon until you log off; it waits inside Windows and
 uses no CPU until the key is pressed, and it never loads the window code.
@@ -684,8 +737,8 @@ decide in briefing-reader:
 
 What Approve does:
 
-1. The countdown runs (see above). Undo, quitting the app or closing the
-   reading screen stops it, and nothing is added.
+1. The countdown runs (see above). Undo, quitting the app, closing the
+   reading screen or minimizing the window stops it, and nothing is added.
 2. If you have not signed in to Google on this PC yet, your browser opens the
    Google sign-in and the card shows WAITING FOR GOOGLE SIGN-IN (setup step 8).
 3. The app saves "running" for the card in `actions.json`, then looks on your
@@ -889,9 +942,10 @@ sent and nothing is saved, and the card waits for your decision again (a click
 on Undo right after the click that started it, as from a double click, is
 ignored). Only when the countdown runs out does Jarvis make the one call to
 Google. The length is `[actions] undo_seconds` (10 by default, 3 to 60).
-Quitting the app, closing the reading screen, or a newer briefing that drops or
-changes the proposal also stops a countdown, and nothing is sent. The 1-second
-rule and the lock of [Calendar actions](#calendar-actions) apply as well.
+Quitting the app, closing or minimizing the reading screen, or a newer briefing
+that drops or changes the proposal also stops a countdown, and nothing is sent.
+The 1-second rule and the lock of [Calendar actions](#calendar-actions) apply as
+well.
 
 What is sent:
 
@@ -1005,9 +1059,9 @@ what is next:
 5. Otherwise the countdown starts: **Undo** on the left, "SENDING FROM WORK IN
    10 S" (the account it sends from) on the right, the other cards locked, as
    for an invitation. A Send pressed with the keyboard (Space) moves the focus
-   to **Undo**. **Undo**, quitting the app or closing the reading screen stops
-   it, and nothing is sent. If the account's address changed meanwhile, nothing
-   is sent either.
+   to **Undo**. **Undo**, quitting the app, closing the reading screen or
+   minimizing the window stops it, and nothing is sent. If the account's address
+   changed meanwhile, nothing is sent either.
 6. When it runs out, Jarvis saves "running", then makes the one Gmail call
    that sends the message, and the card shows SENT with an **Open** link to the
    thread in Gmail. The recipients are remembered (see below).
@@ -1080,6 +1134,177 @@ every address new again.
   while it ran, so it may or may not have been sent. Jarvis never sends it
   again by itself, and one click sends at most one message: look in that
   account's Sent mail first, then click **Retry** or **Deny**.
+
+## Ask Jarvis (optional)
+
+Type a request ("move my project sync to Friday and tell Ana") and Jarvis lines
+up proposals for it under NEEDS YOUR OK. The planner is **your own Claude Code**,
+signed in with **your claude.ai plan**; Jarvis only proposes. Every card goes
+through the same click, undo countdown and checks as the briefing's: nothing is
+moved, answered, cancelled or sent until you click that card. Ask is off until
+you turn it on, and each user of this project installs and signs in to Claude
+Code themselves (Jarvis never handles Claude credentials).
+
+**What it costs.** Each request is one run of `claude -p` (two when it reads
+mail first) on your Claude plan, from the same allowance as Claude chat and
+Claude Code. Jarvis never uses an API key and refuses to run on any sign-in that
+is not a claude.ai subscription (see [Privacy and cost](#privacy-and-cost)).
+Runs are capped: 20 an hour and 60 a day by default (`[ask] max_per_hour`,
+`max_per_day`), counted in `ask_usage.json` for every Jarvis process together
+(the app and `--ask-text` from a terminal share the count).
+
+**Setup (about 45 minutes, once).**
+
+1. Install the standalone Claude Code in PowerShell, as a normal user:
+   `irm https://claude.ai/install.ps1 | iex` (it goes to
+   `%USERPROFILE%\.local\bin\claude.exe`). Jarvis also finds a `claude.exe` on
+   PATH or the copy the Claude desktop app bundles; to use another one, put
+   `JARVIS_CLAUDE_EXE=<path to claude.exe>` in `.env`.
+2. In a new terminal: `claude auth login --claudeai` (never `--console`, which is
+   API billing). `claude auth status` must show a claude.ai login.
+3. At claude.ai, Settings > Usage: keep extra usage (usage credits) **off**, so
+   reaching your plan's limit stops Ask instead of charging. Jarvis cannot read
+   this setting, but Claude Code reports on every run whether the run is
+   billed to extra usage: if it ever says so, Jarvis stops that run at once,
+   proposes nothing and pauses Ask (in every Jarvis window and `--ask-text`)
+   until your plan's limit resets ("Ask is paused until 2:52 PM: turn usage
+   credits off..."). Turn usage credits off; the first request after the reset
+   runs again.
+4. In `config.toml`, set `enabled = true` under `[ask]`.
+5. `py -3.13 -m briefing_reader --ask-check` checks everything without a Claude
+   request: where `claude.exe` is and its version, that it has every flag Ask
+   needs, that it is signed in to a claude.ai plan, that its work folder is
+   empty, how many environment variables it keeps and removes, which accounts'
+   mail Ask can read, today's usage and any extra-usage pause. It ends with
+   `Ready: yes` or says what is missing.
+6. `py -3.13 -m briefing_reader --ask-text "move my test sync to Friday" --ask-dry-run`
+   prints exactly what Jarvis would send to Claude Code (email text as a
+   character count only) and the command line, without a Claude request. Read
+   it once.
+7. Optionally, step 8c (reading the threads you name).
+8. `py -3.13 -m briefing_reader --ask-text "..."` runs one real request from the
+   command line and prints what the planner said, the cards and a summary of
+   how Claude Code started (`apiKeySource=none`, its tools, no MCP servers,
+   tokens and time). Try it on a throwaway event first.
+9. In the app: `py -3.13 -m briefing_reader --ask` (below).
+
+**In the app.** With Ask on, the reading screen has a command bar between the
+orb and the controls. `py -3.13 -m briefing_reader --ask` opens the reading
+screen with the bar ready to type, without playing the briefing; with the app
+already open, the same command brings it forward there.
+
+- While nothing is going on, the bar is just its field ("Ask Jarvis - nothing
+  happens without your OK"; hover it for more), so the transcript keeps its
+  room. If Ask can't run now (Claude Code missing or not signed in, a limit
+  reached, the extra-usage pause), the line under the field says why and what
+  to do, before you type.
+- Type your request and press **Enter** (or click **Ask**). Once Jarvis has
+  checked that Claude Code is ready and no limit is reached, the briefing pauses,
+  the orb reads PLANNING and the line under the bar says what Jarvis is doing:
+  "Reading your calendar...", "Planning... 6 s", "Searching your mail...". A
+  request that can't run (not signed in, a limit) only says why: the briefing
+  keeps playing. **Esc** or **Cancel** stops it within a second, and nothing is
+  proposed. One request runs at a time. Space in the bar types a space;
+  elsewhere it still plays and pauses.
+- When it is done, the planner's answer (or a question back) is under the bar,
+  then Jarvis's own note when there is one ("Jarvis couldn't read your work
+  mail: click "Allow work mail" to let it"). Your request stays in the field
+  after a question back or when nothing was proposed, so you can edit it and
+  press Enter again; it is cleared once there is a card to decide. The
+  proposals are at the top of NEEDS YOUR OK under **ASK**, above the
+  briefing's own (**BRIEFING**), labelled "ASK · MOVE", "ASK · EMAIL" and so on.
+  You decide them exactly like the briefing's: Approve, Move, Send and the
+  others, the undo countdown with Undo, Edit, Deny. A line Jarvis could not
+  check (an event it does not know, an address that is not in your calendar,
+  briefing, mail or words, a Slack reply) is an information card that says why.
+  A proposal the briefing already has says "Already in your list under
+  BRIEFING". Ask cards are never read out with the briefing, a new briefing
+  keeps them, and a new request puts its cards above the earlier ones (at most
+  16 stay). They last until Jarvis closes; your decisions on them are saved by
+  id like every card's.
+- The header's **claude** chip (reading screen) shows OK with the planner runs
+  left this hour, SIGN IN (run `claude auth login --claudeai`), LIMIT (the
+  hourly or daily cap, or your plan's usage limit) or ERR (Claude Code missing,
+  not supported, or its work folder not empty); hover it for the reason.
+  ACTIVITY gets one line per request ("2 proposals · 8.4 s · 1 planner run"),
+  never the request or the answer.
+- **Allow work mail** (the account's name) appears under the bar when that
+  account has `"gmail_read"` but its Google sign-in does not allow reading email
+  yet (step 8c). It opens that account's Google sign-in once more, which asks
+  for all of its permissions; tick the one for reading email. In a small window
+  the link shows while the bar is idle or its note is about that account's mail
+  (Esc in the empty bar clears the last answer). It is hidden while a request
+  runs: finish or cancel the request first.
+- A request can't start while a Google sign-in is open in your browser.
+- Done on a reading screen opened with `--ask` does not count as having heard
+  the briefing: the catch-up still asks about it, unless you played it.
+
+**What Claude Code gets.** Through standard input (never the command line):
+
+- the date, time and time zone, and your accounts (their addresses, whether
+  each one's calendar, sending and mail reading are available);
+- your calendar from yesterday to 14 days ahead (`[ask] days_back`,
+  `days_ahead`, `calendars`), each event as its id, title, times, who organizes
+  it and the guests' names, addresses and answers (at most 10 guests an event,
+  at most 200 events). Never a description, location, meeting link or
+  attachment: Jarvis does not even ask Google for them;
+- today's briefing: the cards still waiting for your decision, the Deadlines
+  lines and the sections you would hear (never the Ignore section);
+- the names and addresses from those (a contacts list);
+- only when the request is about an email and the account has `"gmail_read"`:
+  the text of at most 3 threads, the newest message of each in full (up to
+  6000 characters), older ones cut to a few lines, quoted history, signatures,
+  HTML and attachments left out, 16,000 characters at most;
+- your request, last.
+
+Every piece of data is cleaned first, so none of it can pose as your request or
+start a new part of the input, and the planner is told that the calendar,
+briefing and email text are data, never instructions. Claude Code runs with no
+tools, no MCP servers, no settings files, no slash commands and no saved
+session, in an empty folder of its own (`%LOCALAPPDATA%\briefing-reader\ask`),
+with an environment of its own: only what Windows and Claude Code need to start
+(SystemRoot, PATH, TEMP, your profile folders, the processor and proxy
+variables), never an `ANTHROPIC_*` or `CLAUDE*` variable, an API key, or
+`NOTION_TOKEN` and the rest of Jarvis's `.env`. Right before every run, Jarvis
+asks `claude auth status` again (no Claude request): a sign-in that changed to
+anything but your claude.ai plan since Jarvis started (`claude auth login
+--console`, say) starts nothing. If its first message shows an API key, an MCP
+server or any tool but its answer format, or Claude Code reports that the run
+would use extra usage or that your plan's limit is reached, it is stopped at
+once and nothing is proposed.
+
+**Reading mail.** Jarvis reads a thread in two ways only: a briefing card's
+thread that your request clearly names (its sender or its subject), or a
+search the planner asks for. A search is checked first, and runs only when it
+asks for what **you** typed: every word, phrase and subject in it must be one
+your request uses (another ending is fine: budget, budgets), and every `from:`,
+`to:` and `cc:` must be an address you typed or a person your request names
+(their name as your calendar or briefing gives it). Email text never counts, so
+a message that tells the planner to "search for the code Google sent" gets
+nothing searched. Beyond that: plain words, quoted phrases and a few operators
+(`from:`, `to:`, `cc:`, `subject:`, `after:`, `newer_than:`, `in:inbox`, `in:sent`,
+`is:unread`, ...), never spam or trash (no `in:anywhere`, no `label:`), never a
+web address, never sign-in, security or payment senders, and never about
+passwords, codes, sign-ins, security, banking or account recovery. Jarvis then
+reads at most 3 matching threads (the newest 6 messages of each) and asks the
+planner once more with them. An email header shows at most 10 people ("+N
+more"), and only the people shown can be a card's recipients. The text stays in
+memory for that one request.
+
+**What can be proposed.** Calendar, Todo, RSVP, Move, Cancel, Email, Reply and
+Open cards, labelled ASK. Every event id must be one Jarvis supplied (Move and
+Cancel only for events you organize, RSVP only for ones you don't), a Reply only
+answers a thread from your briefing or the mail Jarvis read, and every recipient
+must be in the calendar, briefing or mail Jarvis supplied or typed by you;
+otherwise the card says why and offers nothing to approve. A recipient you did
+not type yourself is a NEW RECIPIENT until you tick it, even in a trusted domain
+(unless Jarvis sent to it before). Slack and Share lines become information
+cards, and at most 8 cards come from one request (`[ask] max_cards`).
+
+**When it can't.** Not signed in, a usage limit, a run that takes longer than 90
+seconds (`timeout_seconds`), or a Claude Code version Ask does not know: the
+message says so, nothing is proposed, and Jarvis never retries by itself or
+falls back to anything else.
 
 ## "Proposed actions" format
 
@@ -1397,8 +1622,9 @@ proposals that the user decides one by one.)
 ## Command line
 
 ```
-py -3.13 -m briefing_reader [--run {am,pm} | --catch-up | --hotkey-agent] [--slots am=HH:MM,pm=HH:MM]
-                            [--now] [--from-file PATH] [--debug] [--version]
+py -3.13 -m briefing_reader [--run {am,pm} | --catch-up | --hotkey-agent | --ask | --ask-check | --ask-text TEXT]
+                            [--ask-dry-run] [--slots am=HH:MM,pm=HH:MM] [--now] [--from-file PATH]
+                            [--debug] [--version]
 ```
 
 | Option | Meaning |
@@ -1406,6 +1632,10 @@ py -3.13 -m briefing_reader [--run {am,pm} | --catch-up | --hotkey-agent] [--slo
 | `--run am` / `--run pm` | Expect that run (case-insensitive). Polls the page every 60 s for up to 15 min until "Updated" is from today and "Run" matches; if it never does, reads what is there with a spoken note that it may be stale. Within 3 hours after the run's scheduled time (`--slots`), the day of that time also counts, so a PM start at 00:30 accepts the page written at 23:42. This is what the scheduled tasks use. |
 | `--catch-up` | What the catch-up task runs at logon and unlock: if a scheduled briefing passed in the last 3 hours, was not answered and the app is not open, behave exactly like `--run` for that run; otherwise exit at once (see [Catch-up and the hotkey](#catch-up-and-the-hotkey)). |
 | `--hotkey-agent` | What the hotkey task runs at logon: listen for the `[hotkey]` combination until logoff. |
+| `--ask` | [Ask Jarvis](#ask-jarvis-optional) in the app: open the reading screen with the command bar ready to type, without playing the briefing or counting it as heard (Play does both). With the app already open, it comes forward there. Needs `[ask] enabled = true`; otherwise the reading screen says Ask is off. |
+| `--ask-check` | [Ask Jarvis](#ask-jarvis-optional): print whether Ask is ready (Claude Code found, its version and flags, a claude.ai plan sign-in, the work folder, mail reading per account, usage). Runs only `claude --version`, `--help` and `auth status`: no Claude request. Exit code 0 when ready. |
+| `--ask-text TEXT` | Ask Jarvis once from the command line, without a window: prints what the planner said, the proposals and how Claude Code started. One request on your Claude plan (two when it reads mail). With `--from-file`, the briefing comes from that fixture. |
+| `--ask-dry-run` | With `--ask-text`: print the exact text Jarvis would send to Claude Code (email text as character counts) and the command line, and stop. No Claude request, nothing counted. |
 | `--slots am=10:12,pm=23:42` | The scheduled times (24-hour), which tell the app which briefing an answer belongs to. The tasks pass them; without it (or for a run it leaves out) `[schedule]` in `config.toml` applies. A value that cannot be read is logged and ignored. |
 | `--now` | Skip the prompt: fetch and read immediately (no waiting for a fresh page). |
 | `--from-file PATH` | Developer/testing option: load a saved Notion API fixture instead of calling Notion; no token or page id needed, and answers are not recorded for the catch-up. Example: `py -3.13 -m briefing_reader --now --from-file tests\fixtures\fake_page.json` |
@@ -1431,8 +1661,11 @@ the prompt for it comes when the reading ends or you click Done.
 and `BRIEFING_PAGE_ID`, both required. `BRIEFING_PAGE_ID` is the page the app
 reads: the 32-character id, the dashed form, or the page URL (setup step 3).
 There is no default page; when the id is missing or cannot be read, the app
-shows "Notion page ID missing." and fetches nothing. Variables already set in
-the environment win over `.env`.
+shows "Notion page ID missing." and fetches nothing. Optional:
+`JARVIS_CLAUDE_EXE`, the `claude.exe` [Ask Jarvis](#ask-jarvis-optional) runs when
+it is not found by itself (the path holds your Windows user name, so it never
+goes into `config.toml`). Variables already set in the environment win over
+`.env`.
 
 **`google_client_secret.json`** (next to this README, optional): the Google OAuth
 client for calendar actions (setup step 8).
@@ -1444,7 +1677,7 @@ log. Changes apply the next time the app starts.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `[voice] voice` | `"en-US-GuyNeural"` | Online edge-tts voice. List them with `py -3.13 -m edge_tts --list-voices`. |
+| `[voice] voice` | `"en-GB-RyanNeural"` | Online edge-tts voice. List them with `py -3.13 -m edge_tts --list-voices`. |
 | `[voice] rate` | `"+0%"` | Speed, a signed percentage from `"-50%"` to `"+100%"`, e.g. `"+15%"` faster, `"-10%"` slower. |
 | `[voice] volume` | `"+0%"` | Loudness, `"-100%"` to `"+100%"`, e.g. `"-20%"` quieter. |
 | `[voice] offline_voice` | `""` | Part of a Windows voice name for the offline fallback, e.g. `"Zira"` or `"David"`; empty = Windows default. List them with `py -3.13 -c "import pyttsx3; [print(v.name) for v in pyttsx3.init().getProperty('voices')]"`. |
@@ -1468,7 +1701,7 @@ log. Changes apply the next time the app starts.
 | `[actions] trusted_domains` | `[]` | Email recipient domains that never get the red NEW RECIPIENT badge, such as `["example.edu"]` (its subdomains count too; a leading `@` is dropped). Any other address must be the account's own or one Jarvis sent to before, or Send asks you to confirm it in Edit first (see [Replies and emails](#replies-and-emails)). |
 | `[accounts.<name>]` | `personal` and `work` | The Google accounts Jarvis may act for, one table each; the name is what the briefing writes as `acct=` (lowercase letters, digits, `-`, `_`). Without any `[accounts]` table only `personal` exists. Which Google account a name is never goes here: you pick it in Google's sign-in, and its first sign-in binds the name to it in `accounts.json` (setup step 8). Calendar proposals, to-do blocks and TODAY always use `personal`. |
 | `[accounts.<name>] backend` | `"google"` | Who carries out the account's actions. Only `"google"` (your own OAuth client) works in this version; `"composio"` is accepted but its cards say "Composio is not built into this version". |
-| `[accounts.<name>] features` | `["calendar"]` (the shipped `config.toml`: `["calendar", "gmail_send"]`) | What Jarvis may do for the account: `"calendar"` answers invitations and moves or cancels events; `"gmail_send"` sends the replies and emails you approve (send only; setup step 8b). Adding a feature means one new Google sign-in for that account. `[]` makes the account's cards hand-off only (Open, Copy, Done, Deny). |
+| `[accounts.<name>] features` | `["calendar"]` (the shipped `config.toml`: `["calendar", "gmail_send", "gmail_read"]`) | What Jarvis may do for the account: `"calendar"` answers invitations and moves or cancels events; `"gmail_send"` sends the replies and emails you approve (send only; setup step 8b); `"gmail_read"` lets Ask Jarvis read the threads a request is about (read only, never used to send; step 8c). Adding a feature means one new Google sign-in for that account. `[]` makes the account's cards hand-off only (Open, Copy, Done, Deny). |
 | `[schedule] am` | `"10:12"` | Time of the AM task (24-hour `HH:MM`); the default is only an example, set it a few minutes after your own briefing task runs. `install-schedule.ps1` uses it unless you pass `-AmTime`; the app uses it to tell which briefing an answer belongs to when it was started without `--slots`. Rerun the script after a change. |
 | `[schedule] pm` | `"23:42"` | Time of the PM task, the same way (`-PmTime`). |
 | `[hotkey] enabled` | `true` | `false`: `install-schedule.ps1` does not install the hotkey task (and removes an existing one); an agent that is started anyway exits at once. |
@@ -1477,6 +1710,18 @@ log. Changes apply the next time the app starts.
 | `[agenda] deadline_days` | `14` | How many days ahead DEADLINES looks (1-60). |
 | `[agenda] calendars` | `["primary"]` | The Google calendars listed in TODAY: `"primary"` or calendar ids (see `[calendar] calendar_id`). |
 | `[agenda] deadline_keywords` | `["due", "deadline", "exam", "midterm", "final", "quiz", "submit", "submission", "assignment", "lab report", "application"]` | A calendar event in the next `deadline_days` days whose title contains one of these words (whole words, any case) is also listed under DEADLINES. `[]` turns that off. |
+| `[ask] enabled` | `false` | [Ask Jarvis](#ask-jarvis-optional): `true` turns it on (it needs your own Claude Code, signed in to your claude.ai plan). |
+| `[ask] model` | `"sonnet"` | The model Claude Code plans with; `"haiku"` uses less of your plan. A name that starts with `-` or has spaces is refused. |
+| `[ask] timeout_seconds` | `90` | One planner run may take this long (30-300); then it is stopped and nothing is proposed. |
+| `[ask] max_turns` | `4` | Turns one planner run may take (1-8). |
+| `[ask] max_per_hour` | `20` | Planner runs per hour (1-120); a request that reads mail is two. The next one is refused with the time it is allowed again. |
+| `[ask] max_per_day` | `60` | Planner runs per 24 hours (1-500). |
+| `[ask] days_back` | `1` | The calendar Ask sees starts this many days back (0-7) ... |
+| `[ask] days_ahead` | `14` | ... and ends this many days ahead (1-60). |
+| `[ask] calendars` | `["primary"]` | The calendars of each account Ask sees. |
+| `[ask] max_cards` | `8` | Proposals from one request (1-8); more are left out, and the status line says how many. |
+| `[ask] hardened_flags` | `true` | Run Claude Code with `--safe-mode --restricted` when it has them. |
+| `[ask] read_mail` | `true` | `false`: Ask never reads mail, whatever the accounts' features say. |
 | `[display] clock` | `"12h"` | How the header clock, TODAY, ACTIVITY, STATUS and the Intro line of the SECTIONS list show times: `"12h"` (1:05 PM) or `"24h"` (13:05). Times inside sentences ("Updated today at 10:04 AM", "asking again at 1:15 PM", "until 1:20 PM" on the prompt, in the tray and on the reading screen), the proposal cards, the DEADLINES due labels and the spoken briefing always use 12-hour times. |
 
 The offline voice uses the same `rate` and `volume`: the rate scales Windows'
@@ -1598,6 +1843,11 @@ logs the action id, kind, account name, the number of recipients, the status,
 Gmail's message id and an HTTP status code with Gmail's reason code; never an
 address, subject or text (Gmail's error texts are scrubbed of addresses before
 they are shown), and never the identity token Google returns at a sign-in.
+Ask Jarvis logs where `claude.exe` came from (never its path), its version, the
+sign-in method, how long each planner run took, its turns and token counts,
+the outcome (ok, timeout, limit, ...), the size of the context and how many
+cards of each kind it gave; never your request, the context, what the planner
+said, a search, email text, a subject or an address.
 
 Other files in `%LOCALAPPDATA%\briefing-reader`:
 
@@ -1607,6 +1857,8 @@ Other files in `%LOCALAPPDATA%\briefing-reader`:
 | `google_token_personal.json`, `google_token_work.json` | The Google sign-in of each account (access and refresh token, the permissions Google granted, and which Google account it was issued for). Private: never share them. Delete one to sign that account out on this PC. Older versions kept a single `google_token.json`; it becomes `google_token_personal.json` at the first start. |
 | `accounts.json` | Which Google account each account name is (its address and Google's account id), written by the first sign-in that says so, and whether you confirmed it ("confirmed", after "Signed in as ... - is that right?"; nothing is sent or changed for a name until then). **No, use another account** removes the entry; or delete an entry, or the file, to bind a name to another Google account (setup step 8, "Disconnecting"). A name with a saved sign-in but no entry Jarvis can read (deleted, or the file is not valid JSON) sends and changes nothing until it signs in again. |
 | `recipients.json` | The addresses Jarvis sent replies and emails to, as one-way hashes (never the addresses), with the time; at most 5000. An address in it needs no NEW RECIPIENT confirmation. Delete it to confirm every address again. |
+| `ask_usage.json` | Ask Jarvis's planner runs of the last two days, for the hourly and daily caps (shared by every Jarvis process): a random id per run, when it started, how long it took, its turns and token counts and the outcome; and, after Claude Code reported extra usage, until when Ask is paused (`hold_until`). Never a request or anything the planner wrote. Delete it to reset the counts and the pause (`ask_usage.json.lock` next to it only takes turns between processes). |
+| `ask\` | The empty folder Claude Code runs in for Ask. Ask refuses to run while anything is in it (a `CLAUDE.md` or `.mcp.json` there would add instructions or tools). |
 | `runstate.json` | Per scheduled briefing: when its prompt was first shown and when and how it was answered (read, dismissed, done), kept for 14 days. The catch-up task uses it; see [Catch-up and the hotkey](#catch-up-and-the-hotkey). Safe to delete. |
 
 Generated audio goes to `%TEMP%\briefing-reader\session-<process id>` and is
@@ -1634,10 +1886,23 @@ The app talks to these services, all free:
 - the Gmail API, only for an account set up for it (step 8b) and only to send:
   after your **Send** on a card and its undo countdown, the one message that
   card shows (From, To, Cc, subject, text, and the thread headers of a reply).
-  Jarvis has no permission to read, search or change your mail. Each sign-in
-  also tells Jarvis which Google account it is (`openid`, `userinfo.email`):
-  the address is kept in `accounts.json` on this PC and shown on the cards,
-  never logged.
+  Sending has no permission to read, search or change your mail. With Ask Jarvis
+  on and `"gmail_read"` (step 8c), Jarvis also searches and reads the threads one
+  request is about (at most 3), read only, and only when you ask something. Each
+  sign-in also tells Jarvis which Google account it is (`openid`,
+  `userinfo.email`): the address is kept in `accounts.json` on this PC and shown
+  on the cards, never logged;
+- only with [Ask Jarvis](#ask-jarvis-optional) on: your own Claude Code, signed
+  in to your claude.ai plan. Each request sends Anthropic what is listed under
+  "What Claude Code gets" there: event titles, guests' names and addresses,
+  today's briefing and, for a request about an email, that email's text. This
+  is the same kind of data your briefing routine already sends Claude. It runs
+  on your plan's usage, never on an API key (Claude Code gets only the Windows
+  basics of Jarvis's environment, never an `ANTHROPIC_*` or `CLAUDE*` variable
+  or Jarvis's own `.env` values; Jarvis checks before every run that it is
+  signed in to a claude.ai subscription and stops a run that Claude Code says
+  would use extra usage), and nothing is saved by Claude Code
+  (`--no-session-persistence`).
 
 **Reading your calendar.** Once Google Calendar is connected on this PC, every
 time the reading screen opens the app reads your calendar events from the start
@@ -1654,14 +1919,21 @@ the briefing names, for accounts that are signed in, and are shown, not saved
 
 **Other proposals.** Share requests, Slack replies, to-dos without a block and
 links are only shown: the app has no access to Drive or Slack, and Gmail only
-to send what you approved on a card. **Open** hands a link to your browser only
+to send what you approved on a card (and, for Ask Jarvis with `"gmail_read"`,
+to read the threads a request is about). **Open** hands a link to your browser only
 when you click it.
 **Copy** puts the drafted text on the Windows clipboard, where any program can
 read it and, if Windows clipboard history (Win+V) is turned on, Windows keeps a
 copy until you clear it (Win+V > Clear all).
 
-There are no paid API calls of any kind. The offline voice runs entirely on this
-PC.
+There are no paid API calls of any kind. Ask Jarvis uses your Claude plan (keep
+its extra usage off, see Ask's setup step 3), never an API key. The offline voice
+runs entirely on this PC.
+
+Driving your own signed-in Claude Code from your own app is ordinary personal
+use of it; sharing such a feature in a public project is less clear-cut, which
+is why Ask is off by default and every user installs and signs in to Claude Code
+themselves.
 
 ## Fonts
 
@@ -1698,6 +1970,12 @@ internet) and with the Windows voice into a temporary folder, and play nothing:
 $env:BRIEFING_LIVE_TTS = "1"; py -3.13 -m unittest tests.test_tts -v; Remove-Item Env:BRIEFING_LIVE_TTS
 ```
 
+The Ask Jarvis tests never start Claude Code: the planner runs are recorded,
+invented stream-json files (`tests\fixtures\ask`) played by a fake runner, the
+calendars and Gmail are fakes, and the subprocess tests start a few lines of
+Python standing in for the CLI. The command bar, Ask controller and card-source
+tests run the app's window offscreen with those fakes.
+
 The hotkey tests register Ctrl+Alt+Shift+F24 (a key no keyboard has) for a
 moment with a private agent lock, simulate a press without pressing anything,
 and release it within seconds; they never start the app. The catch-up tests run
@@ -1705,6 +1983,41 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
 
 ## Troubleshooting
 
+- **Ask: "Claude Code not found"**: install it (Ask's setup step 1), or put
+  `JARVIS_CLAUDE_EXE=<path to claude.exe>` in `.env`. A `claude.cmd` from npm is
+  not used (only a `claude.exe`). `--ask-check` shows which one Jarvis found.
+- **Ask: "Run: claude auth login --claudeai (Claude Code is not signed in)"** /
+  **"(... is signed in with ..., not your claude.ai plan ...)"**: run
+  `claude auth login --claudeai` in a terminal; Ask never runs on an API key or
+  a console login, and checks the sign-in again before every run. Variables
+  such as `ANTHROPIC_API_KEY` in your environment are removed for Ask and do not
+  count. A `CLAUDE_CONFIG_DIR` is removed too: sign in with the default folder.
+- **Ask: "This Claude Code is not supported by Ask yet"**: a new Claude Code no
+  longer has a flag Ask needs (`--ask-check` names it), or changed its start-up
+  so that Ask's checks fail. Ask stays off until this project is updated; it never
+  falls back to anything else.
+- **Ask: "Claude Code started with something Ask does not allow"**: its first
+  message showed an API key, an MCP server or a tool. Check that nothing in
+  `%LOCALAPPDATA%\briefing-reader\ask` or your Claude Code settings adds them;
+  the log names the reason (for example `tools`).
+- **Ask: "Your Claude plan's usage limit is reached"**: wait for the reset time
+  it names; Ask does not retry by itself.
+- **Ask: "Turn usage credits off at claude.ai/settings/usage ..." / "Ask is
+  paused until ..."**: Claude Code said a request would be billed to extra
+  usage, so Jarvis stopped it and pauses Ask until your plan's limit resets.
+  Turn usage credits off (Ask's setup step 3). To end the pause early, delete
+  `%LOCALAPPDATA%\briefing-reader\ask_usage.json`.
+- **Ask: "Ask limit reached; try again after ..."**: the hourly or daily cap
+  (`[ask] max_per_hour`, `max_per_day`), counted for the app and `--ask-text`
+  together.
+- **Ask: "Jarvis didn't search your mail: the search uses words you didn't
+  type"** (or "names someone you didn't mention"): Jarvis searches mail only
+  for what your request says. Name the sender and a word of the subject
+  ("reply to Ana's budget email"), then press Enter again: your request is
+  still in the field.
+- **Ask can't read mail for an account**: `--ask-check` says why: the account has
+  no `"gmail_read"` feature, needs one more Google sign-in, or the box "Read your
+  email" was unticked (step 8c).
 - **"Notion rejected the token (401)"**: the secret in `.env` is wrong or was
   regenerated. Copy it again from the integration page into `NOTION_TOKEN=`.
 - **"...not found or is not shared with the integration (404)"**: share the page
@@ -1746,7 +2059,8 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
   to themselves while they are in front.
 - **The prompt is hidden**: click the tray icon, or run the command again
   (`py -3.13 -m briefing_reader`), which brings the running instance forward.
-  The hotkey brings it forward too, but starts reading right away.
+  The hotkey brings it forward too, but starts reading right away. A minimized
+  window also has its own taskbar button.
 - **No proposals show up**: the heading must be named "Proposed actions" (or what
   `[actions] heading` says) and each line must start with `Calendar:` or be in
   the key=value format of the other kinds; see
@@ -1953,16 +2267,21 @@ briefing_reader/actions.py    "Proposed actions" parsing (Calendar: and key=valu
 briefing_reader/agenda.py     TODAY / TOMORROW rows, the "Deadlines" section, calendar deadlines, due labels
 briefing_reader/google_auth.py  Google sign-in per account (one token per account, which Google account it is), single-send HTTP
 briefing_reader/gcal.py       Google Calendar: duplicate check, event creation, reading events, answer / move / cancel
-briefing_reader/gmail.py      Gmail (gmail.send only): the message exactly as the card shows it, one send per approval
+briefing_reader/gmail.py      Gmail: sending (gmail.send only; the message exactly as the card shows it, one send per approval) and Ask's read-only thread reader (gmail.readonly)
 briefing_reader/recipients.py never to the sending account itself (any spelling); the NEW RECIPIENT check: trusted domains, addresses sent to before (hashed)
 briefing_reader/executor.py   carrying out an approved proposal per account ("running" first), the cards' check lines
+briefing_reader/ask/          Ask Jarvis (no Qt): Claude Code checks and runs (cli), its output (stream), the planner's
+                              input (context), email text and searches (mail), cards with provenance checks (validate),
+                              the caps (usage), one request end to end (planner), --ask-check / --ask-text (commands);
+                              ask/assets: the planner's instructions, answer format and settings
 briefing_reader/tts.py        edge-tts synthesis, Windows SAPI fallback, highlight timing, background worker
 briefing_reader/player.py     QtMultimedia player that plays sections in order with pauses
-briefing_reader/hud.py        Jarvis HUD widget kit: colours, fonts, chamfered panels, orb, buttons, cards, agenda
+briefing_reader/hud.py        Jarvis HUD widget kit: colours, fonts, chamfered panels, orb, buttons, cards, agenda, command bar
 briefing_reader/ui.py         prompt and reading windows, tray icon, approvals, TODAY / DEADLINES, app controller
+briefing_reader/ask_ui.py     Ask Jarvis in the app: the command bar's controller and its "ask" thread
 fonts/                        Chakra Petch, Sora and JetBrains Mono fonts with their OFL licences
 tests/                        unit tests and saved fake Notion pages (tests/fixtures)
-config.toml                   voice, prompt, polling, section, calendar, actions, schedule, hotkey and agenda settings
+config.toml                   voice, prompt, polling, section, calendar, actions, schedule, hotkey, agenda, display and Ask settings
 .env.example                  template for .env (NOTION_TOKEN, BRIEFING_PAGE_ID)
 requirements.txt              Python dependencies
 install-schedule.ps1          registers the Briefing AM / PM / catch-up / hotkey scheduled tasks

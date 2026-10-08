@@ -1391,6 +1391,72 @@ class ListEventsTests(GcalTestCase):
         self.assertFalse(self.token_path.exists())
 
 
+class EventBriefTests(GcalTestCase):
+    """list_event_briefs: what Ask Jarvis may see (no descriptions, locations or links)."""
+
+    def briefs_item(self) -> dict[str, Any]:
+        return _listed("  Project   sync ", "2026-10-05T14:00:00-04:00", "2026-10-05T15:00:00-04:00",
+                       uid="evt0001aa", recurringEventId="series01",
+                       description="SECRET agenda", location="https://meet.example.edu/x",
+                       hangoutLink="https://meet.google.com/aaa-bbbb-ccc",
+                       organizer={"email": "you@example.edu", "self": True},
+                       attendees=[{"email": "you@example.edu", "self": True, "responseStatus": "accepted"},
+                                  {"email": "ana@example.edu", "displayName": "Ana  Lima",
+                                   "responseStatus": "needsAction"},
+                                  {"email": "room-1@resource.calendar.google.com", "resource": True},
+                                  {"displayName": "No address"}])
+
+    def test_query_asks_only_for_the_brief_fields(self) -> None:
+        cal = self.signed_in_calendar()
+        self.assertEqual(cal.list_event_briefs(DAY_START, DAY_END), [])
+        (query, retries), = self.service.calls_to("events.list")
+        self.assertEqual(query, {
+            "calendarId": "primary", "timeMin": "2026-10-05T00:00:00-07:00",
+            "timeMax": "2026-10-06T00:00:00-07:00", "singleEvents": True, "orderBy": "startTime",
+            "maxResults": 50, "showDeleted": False, "timeZone": TZ, "fields": gcal.BRIEF_FIELDS})
+        self.assertGreater(retries, 0)
+        for never in ("description", "location", "hangoutLink", "conferenceData", "attachments", "htmlLink"):
+            self.assertNotIn(never, gcal.BRIEF_FIELDS)
+        self.assertEqual(self.flow.calls, [])
+
+    def test_brief_of_an_event(self) -> None:
+        self.service.outcomes["events.list"] = [{"items": [
+            self.briefs_item(),
+            _listed_all_day("Fall break", "2026-10-03", "2026-10-08", uid="evt0002bb",
+                            organizer={"email": "dean@example.edu", "displayName": "Dean"}),
+            _listed("Gone", "2026-10-05T10:00:00-04:00", "2026-10-05T11:00:00-04:00", status="cancelled"),
+        ]}]
+        briefs = self.signed_in_calendar().list_event_briefs(DAY_START, DAY_END)
+        self.assertEqual(briefs, [
+            gcal.EventBrief("evt0002bb", "primary", "Fall break", all_day_start=date(2026, 10, 3),
+                            all_day_end=date(2026, 10, 7), organizer_email="dean@example.edu",
+                            organizer_name="Dean"),
+            gcal.EventBrief("evt0001aa", "primary", "Project sync",
+                            start=datetime(2026, 10, 5, 14, 0, tzinfo=timezone(timedelta(hours=-4))),
+                            end=datetime(2026, 10, 5, 15, 0, tzinfo=timezone(timedelta(hours=-4))),
+                            organizer_self=True, organizer_email="you@example.edu",
+                            guests=(gcal.Guest("ana@example.edu", "Ana Lima", "needsAction"),), recurring=True),
+        ])
+        self.assertTrue(briefs[0].all_day)
+        self.assertNotIn("SECRET", repr(briefs))
+        self.assertNotIn("meet", repr(briefs))
+
+    def test_never_signs_in(self) -> None:
+        self.write_client_secret()
+        with self.assertRaises(CalendarNotSignedIn):
+            self.make_calendar().list_event_briefs(DAY_START, DAY_END)
+        self.assertEqual(self.flow.calls, [])
+        self.assertEqual(self.service.calls, [])
+
+    def test_one_failing_calendar_is_skipped(self) -> None:
+        self.service.outcomes["events.list@team"] = [http_error(404, "Not Found", "notFound")]
+        self.service.outcomes["events.list"] = [{"items": [self.briefs_item()]}]
+        with self.assertLogs(GCAL_LOGGER, level="WARNING"):
+            briefs = self.signed_in_calendar().list_event_briefs(DAY_START, DAY_END, ["primary", "team"])
+        self.assertEqual([brief.event_id for brief in briefs], ["evt0001aa"])
+        self.assertEqual(self.signed_in_calendar().list_event_briefs(DAY_END, DAY_START), [])
+
+
 # --------------------------------------------------------------------------
 # One event: get_event, respond, move, cancel
 # --------------------------------------------------------------------------

@@ -14,7 +14,9 @@ client (README step 8), and keeps one token file per alias:
     AccountBindings(path)             which Google account each alias is (accounts.json)
 
 What an account may do comes from its ``features`` (FEATURE_SCOPES):
-"calendar" and "gmail_send" (send only). Desktop apps cannot add a scope to an
+"calendar", "gmail_send" (send only) and "gmail_read" (read only: Ask Jarvis
+reads the threads a request is about; gmail.py's GmailReader, never the
+sending path). Desktop apps cannot add a scope to an
 existing grant, so ``sign_in()`` always asks for every scope of the account's
 features (a new feature means one new, full consent). Google's consent screen
 lets you untick a box: the sign-in still succeeds (OAUTHLIB_RELAX_TOKEN_SCOPE
@@ -107,14 +109,19 @@ logger = logging.getLogger(__name__)
 
 CALENDAR_FEATURE = "calendar"
 GMAIL_FEATURE = "gmail_send"
+GMAIL_READ_FEATURE = "gmail_read"
 FEATURE_SCOPES: dict[str, tuple[str, ...]] = {
     CALENDAR_FEATURE: ("https://www.googleapis.com/auth/calendar.events",
                        "https://www.googleapis.com/auth/calendar.settings.readonly"),
-    # Send only: Jarvis can neither read nor change mail.
+    # Send only: this scope can neither read nor change mail.
     GMAIL_FEATURE: ("https://www.googleapis.com/auth/gmail.send",),
+    # Read only (a restricted scope): Ask Jarvis reads the threads a request is about. It can
+    # neither send nor change mail, and only gmail.GmailReader uses it.
+    GMAIL_READ_FEATURE: ("https://www.googleapis.com/auth/gmail.readonly",),
 }
 # What each feature lets Jarvis do, for messages ("Google did not allow Calendar access ...").
-FEATURE_WORDS = {CALENDAR_FEATURE: "Calendar access", GMAIL_FEATURE: "sending email"}
+FEATURE_WORDS = {CALENDAR_FEATURE: "Calendar access", GMAIL_FEATURE: "sending email",
+                 GMAIL_READ_FEATURE: "reading email"}
 # Asked for with every alias's sign-in (non-sensitive): the id_token then says which Google account
 # it is, so the alias can be bound to it (accounts.json).
 IDENTITY_SCOPES = ("openid", "https://www.googleapis.com/auth/userinfo.email")

@@ -11,7 +11,7 @@ Settings come from three places:
   Open may open, the undo countdown, the recipient domains that need no extra
   confirmation), account (``[accounts.<alias>]``: which service acts for
   "work" / "personal" and what it may do), schedule, hotkey,
-  agenda and display options. Which Google account an alias is never goes
+  agenda, display and Ask Jarvis (``[ask]``, off by default) options. Which Google account an alias is never goes
   here: the sign-ins live in %LOCALAPPDATA%\\briefing-reader.
 
 A bad setting never stops the app: invalid values are logged as warnings and
@@ -73,8 +73,10 @@ DEFAULT_DEADLINE_KEYWORDS = ("due", "deadline", "exam", "midterm", "final", "qui
 CLOCK_12H = "12h"
 CLOCK_24H = "24h"
 # What an account may do (google_auth.FEATURE_SCOPES has the scopes of each): "calendar" answers
-# invitations and moves or cancels events; "gmail_send" sends the replies and emails you approve.
-ACCOUNT_FEATURES = ("calendar", "gmail_send")
+# invitations and moves or cancels events; "gmail_send" sends the replies and emails you approve;
+# "gmail_read" lets Ask Jarvis read the Gmail threads your request is about (read only; never used
+# to send, and nothing it reads is saved or logged).
+ACCOUNT_FEATURES = ("calendar", "gmail_send", "gmail_read")
 BACKEND_GOOGLE = "google"
 BACKEND_COMPOSIO = "composio"     # accepted, but not built into this version
 ACCOUNT_BACKENDS = (BACKEND_GOOGLE, BACKEND_COMPOSIO)
@@ -83,7 +85,7 @@ UNDO_SECONDS_RANGE = (3, 60)
 
 _MISSING = object()
 _KNOWN_TABLES = ("voice", "prompt", "polling", "sections", "notion", "calendar", "actions",
-                 "accounts", "schedule", "hotkey", "agenda", "display")
+                 "accounts", "schedule", "hotkey", "agenda", "display", "ask")
 # Library loggers kept at WARNING, also under --debug. The Google sign-in libraries log the
 # authorization code, the access token and the refresh token at DEBUG (requests_oauthlib),
 # before Jarvis could register them for redaction, so they never get DEBUG here.
@@ -104,7 +106,7 @@ _MIN_SECRET_LEN = 8
 
 @dataclass(frozen=True)
 class VoiceConfig:
-    voice: str = "en-US-GuyNeural"
+    voice: str = "en-GB-RyanNeural"
     rate: str = "+0%"             # validated ^[+-]\d+%$, else default + warning
     volume: str = "+0%"           # same validation
     offline_voice: str = ""       # substring of a SAPI voice name (any case); "" = system default
@@ -231,6 +233,35 @@ class DisplayConfig:
         return self.clock == CLOCK_24H
 
 
+# Ask Jarvis ([ask]): the planner is your own signed-in Claude Code CLI on your claude.ai plan.
+# "sonnet", "haiku", "opus" or a full model name; never anything that starts with "-".
+_MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._\[\]-]{0,79}")
+ASK_RANGES = {"timeout_seconds": (30, 300), "max_turns": (1, 8), "max_per_hour": (1, 120),
+              "max_per_day": (1, 500), "days_back": (0, 7), "days_ahead": (1, 60), "max_cards": (1, 8)}
+
+
+@dataclass(frozen=True)
+class AskConfig:
+    """``[ask]``: Ask Jarvis, off by default. Bad values become the default with a warning."""
+
+    enabled: bool = False          # opt-in; needs your own signed-in Claude Code (claude.ai plan)
+    model: str = "sonnet"          # "haiku" uses less of your plan
+    timeout_seconds: int = 90      # one planner run (30..300)
+    max_turns: int = 4             # 1..8
+    max_per_hour: int = 20         # planner runs (an Ask that reads mail is two runs), 1..120
+    max_per_day: int = 60          # 1..500
+    days_back: int = 1             # calendar context: from this many days back (0..7) ...
+    days_ahead: int = 14           # ... to this many days ahead (1..60)
+    calendars: tuple[str, ...] = ("primary",)   # the calendar ids read for each account
+    max_cards: int = 8             # proposals shown per Ask (1..8)
+    hardened_flags: bool = True    # add --safe-mode --restricted when this Claude Code has them
+    read_mail: bool = True         # read the Gmail threads a request is about (accounts with gmail_read)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.calendars, tuple):
+            object.__setattr__(self, "calendars", tuple(self.calendars))
+
+
 @dataclass(frozen=True)
 class Config:
     notion_token: str = field(repr=False)   # "" when missing; NEVER logged
@@ -254,6 +285,7 @@ class Config:
     hotkey: HotkeyConfig = field(default_factory=HotkeyConfig)
     agenda: AgendaConfig = field(default_factory=AgendaConfig)
     display: DisplayConfig = field(default_factory=DisplayConfig)
+    ask: AskConfig = field(default_factory=AskConfig)
 
     @property
     def notion_url(self) -> str:
@@ -372,6 +404,7 @@ def load_config(project_root: Path | None = None, *,
         hotkey=_parse_hotkey(doc),
         agenda=_parse_agenda(doc),
         display=_parse_display(doc),
+        ask=_parse_ask(doc, environ),
     )
 
 
@@ -807,6 +840,39 @@ def _parse_display(doc: Mapping[str, Any]) -> DisplayConfig:
     d = DisplayConfig()
     r = _TableReader(doc, "display", _field_names(DisplayConfig))
     return DisplayConfig(clock=r.choice("clock", d.clock, (CLOCK_12H, CLOCK_24H)))
+
+
+ASK_ENABLED_ENV = "JARVIS_ASK_ENABLED"
+_ENV_TRUE = frozenset({"1", "true", "yes", "on"})
+_ENV_FALSE = frozenset({"0", "false", "no", "off"})
+
+
+def _parse_ask(doc: Mapping[str, Any], environ: Mapping[str, str] | None = None) -> AskConfig:
+    """``[ask]`` from config.toml; ``JARVIS_ASK_ENABLED`` (e.g. in the gitignored ``.env``)
+    overrides ``enabled`` so a personal setting never has to change the tracked file."""
+    d = AskConfig()
+    r = _TableReader(doc, "ask", _field_names(AskConfig))
+    numbers = {key: r.integer(key, getattr(d, key), low, high) for key, (low, high) in ASK_RANGES.items()}
+    calendars = []
+    for name in r.names("calendars", d.calendars, allow_empty=False):
+        if _CALENDAR_ID_RE.fullmatch(name) and not name.startswith("-"):
+            calendars.append(name)
+        else:
+            logger.warning("config.toml: ask.calendars entry %s is not a calendar id; skipped", _short_repr(name))
+    enabled = r.boolean("enabled", d.enabled)
+    override = _clean_value((environ or {}).get(ASK_ENABLED_ENV)).lower()
+    if override in _ENV_TRUE or override in _ENV_FALSE:
+        enabled = override in _ENV_TRUE
+    elif override:
+        logger.warning("%s should be true or false; using config.toml ask.enabled", ASK_ENABLED_ENV)
+    return AskConfig(
+        enabled=enabled,
+        model=r.string("model", d.model, pattern=_MODEL_RE),
+        calendars=tuple(calendars) or d.calendars,
+        hardened_flags=r.boolean("hardened_flags", d.hardened_flags),
+        read_mail=r.boolean("read_mail", d.read_mail),
+        **numbers,
+    )
 
 
 def _parse_notion_version(doc: Mapping[str, Any]) -> str:

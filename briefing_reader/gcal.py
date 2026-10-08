@@ -13,6 +13,8 @@ reading window shows:
                        a lost answer is CalendarUnknownOutcome, and a retry finds the event)
     list_events(s, e)  CalendarEvents between two times; never signs in (raises
                        CalendarNotSignedIn instead)
+    list_event_briefs(s, e)  what Ask Jarvis may see of those events (EventBrief: ids, title,
+                       times, organizer, guests; never a description, location or link)
     get_event(id)      Google's own view of one event (EventDetails)
     respond(id, ...)   answer an invitation: events.patch with attendeesOmitted and only
                        your own attendee entry
@@ -104,6 +106,10 @@ SEND_UPDATES = ("all", "externalOnly", "none")
 RESPONSES = {"yes": "accepted", "no": "declined", "maybe": "tentative"}
 HTTP_TIMEOUT_S = 30        # per request; a mutation that times out is an unknown outcome
 
+# What list_event_briefs asks Google for (Ask Jarvis): never description, location, hangoutLink,
+# conferenceData or attachments.
+BRIEF_FIELDS = ("items(id,status,summary,start,end,recurringEventId,organizer(email,displayName,self),"
+                "attendees(email,displayName,responseStatus,self,resource,organizer)),nextPageToken")
 _READ_RETRIES = 2          # reads are safe to retry; insert, patch and delete are not retried
 _MAX_LIST_PAGES = 5
 _LIST_PAGE_SIZE = 50
@@ -255,6 +261,44 @@ class ChangeResult:
     event_id: str
     link: str
     already: bool        # nothing needed changing (already answered / at that time / cancelled)
+
+
+@dataclass(frozen=True)
+class Guest:
+    """One guest of an EventBrief (never a room, never you). Shown to Ask Jarvis, never logged."""
+
+    email: str
+    name: str = ""
+    response: str = ""             # needsAction | accepted | declined | tentative | ""
+    organizer: bool = False
+
+
+@dataclass(frozen=True)
+class EventBrief:
+    """What Ask Jarvis may know about one event (:meth:`GoogleCalendar.list_event_briefs`).
+
+    Only the id, calendar, title, times, who organizes it and the guests: never the description,
+    the location, a meeting link or attachments. Timed events have aware ``start`` / ``end`` in
+    the calendar's time zone; all-day events have ``all_day_start`` and an inclusive
+    ``all_day_end``. ``recurring``: one occurrence of a repeating event (its own instance id).
+    """
+
+    event_id: str
+    calendar_id: str
+    title: str
+    start: datetime | None = None
+    end: datetime | None = None
+    all_day_start: date | None = None
+    all_day_end: date | None = None
+    organizer_self: bool = False
+    organizer_email: str = ""
+    organizer_name: str = ""
+    guests: tuple[Guest, ...] = ()
+    recurring: bool = False
+
+    @property
+    def all_day(self) -> bool:
+        return self.all_day_start is not None
 
 
 def default_token_path() -> Path:
@@ -730,6 +774,68 @@ class GoogleCalendar:
                 break
         return items
 
+    def list_event_briefs(self, start: datetime, end: datetime,
+                          calendar_ids: Sequence[str] | str = ("primary",)) -> list[EventBrief]:
+        """What Ask Jarvis may see of the events between ``start`` and ``end`` on each calendar
+        (EventBrief), sorted by start. Read only, and like list_events it never signs in
+        (CalendarNotSignedIn before any request). Each occurrence of a repeating event is its own
+        brief (singleEvents), with times in the calendar's time zone. Google is asked only for the
+        id, status, title, times, organizer, guests and the series id (a ``fields`` mask): never a
+        description, location, meeting link or attachment. Cancelled events, rooms and your own
+        guest entry are left out. A calendar that fails with a plain CalendarError is skipped
+        (with a warning) when another one answered."""
+        ids = _calendar_ids(calendar_ids)
+        with self._guarded():
+            if not ids or _as_aware(end) <= _as_aware(start):
+                return []
+            service = self._get_service(interactive=False)
+            zone = self.timezone(interactive=False)
+            time_min, time_max = _rfc3339(start), _rfc3339(end)
+            briefs: list[EventBrief] = []
+            seen: set[tuple[str, str]] = set()
+            failures: list[CalendarError] = []
+            for calendar_id in ids:
+                try:
+                    items = self._list_briefs(service, calendar_id, time_min, time_max, zone)
+                except (CalendarAuthError, CalendarSetupError):
+                    raise
+                except CalendarError as exc:
+                    failures.append(exc)
+                    continue
+                for item in items:
+                    brief = _brief_from(item, calendar_id)
+                    if brief is not None and (calendar_id, brief.event_id) not in seen:
+                        seen.add((calendar_id, brief.event_id))
+                        briefs.append(brief)
+            if failures and len(failures) == len(ids):
+                raise failures[0]
+            for exc in failures:
+                logger.warning("Google Calendar: skipped a calendar that could not be read (%s)", exc)
+            briefs.sort(key=_brief_sort_key)
+            logger.debug("Google Calendar: %d event brief(s) from %d calendar(s)", len(briefs),
+                         len(ids) - len(failures))
+            return briefs
+
+    def _list_briefs(self, service: Any, calendar_id: str, time_min: str, time_max: str,
+                     zone: str) -> list[dict]:
+        items: list[dict] = []
+        page_token: str | None = None
+        for _ in range(_MAX_LIST_PAGES):
+            query: dict[str, Any] = {
+                "calendarId": calendar_id, "timeMin": time_min, "timeMax": time_max,
+                "singleEvents": True, "orderBy": "startTime", "maxResults": _LIST_PAGE_SIZE,
+                "showDeleted": False, "timeZone": zone, "fields": BRIEF_FIELDS}
+            if page_token:
+                query["pageToken"] = page_token
+            page = self._execute(service.events().list(**query), "reading your calendar",
+                                 retries=_READ_RETRIES)
+            page = page if isinstance(page, dict) else {}
+            items.extend(item for item in page.get("items") or () if isinstance(item, dict))
+            page_token = page.get("nextPageToken")
+            if not page_token:
+                break
+        return items
+
     # ---- one event: read, answer, move, cancel ---------------------------------------------
 
     def get_event(self, event_id: str, *, calendar_id: str | None = None,
@@ -1104,6 +1210,39 @@ def _event_from(item: dict, calendar_id: str) -> CalendarEvent | None:
     after = _parse_day(end.get("date"))   # exclusive
     last = after - timedelta(days=1) if after is not None and after > first else first
     return CalendarEvent(all_day_start=first, all_day_end=last, **fields)
+
+
+def _brief_from(item: dict, calendar_id: str) -> EventBrief | None:
+    """One events.list item -> EventBrief; None when cancelled, without an id or a readable start."""
+    event = _event_from(item, calendar_id)
+    event_id = item.get("id")
+    if event is None or not isinstance(event_id, str) or not event_id.strip():
+        return None
+    organizer = item.get("organizer") if isinstance(item.get("organizer"), dict) else {}
+    guests: list[Guest] = []
+    for entry in item.get("attendees") or ():
+        if not isinstance(entry, dict) or entry.get("self") is True or entry.get("resource") is True:
+            continue
+        address = entry.get("email")
+        if not isinstance(address, str) or "@" not in address:
+            continue
+        guests.append(Guest(email=address.strip(), name=" ".join(str(entry.get("displayName") or "").split()),
+                            response=str(entry.get("responseStatus") or ""),
+                            organizer=entry.get("organizer") is True))
+    organizer_email = organizer.get("email") if isinstance(organizer.get("email"), str) else ""
+    return EventBrief(
+        event_id=event_id.strip(), calendar_id=calendar_id, title=event.title, start=event.start, end=event.end,
+        all_day_start=event.all_day_start, all_day_end=event.all_day_end,
+        organizer_self=organizer.get("self") is True, organizer_email=organizer_email.strip(),
+        organizer_name=" ".join(str(organizer.get("displayName") or "").split()), guests=tuple(guests),
+        recurring=bool(item.get("recurringEventId")))
+
+
+def _brief_sort_key(brief: EventBrief) -> tuple[datetime, int, str]:
+    if brief.start is not None:
+        return brief.start, 1, brief.title.casefold()
+    assert brief.all_day_start is not None
+    return datetime.combine(brief.all_day_start, time()).astimezone(), 0, brief.title.casefold()
 
 
 def _parse_instant(raw: Any) -> datetime | None:

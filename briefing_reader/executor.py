@@ -96,12 +96,13 @@ from .gcal import (
     GoogleCalendar,
     NotAllowed,
 )
-from .gmail import GmailError, GmailSender, GmailUnknownOutcome, OutgoingMail
+from .gmail import GmailError, GmailReader, GmailSender, GmailUnknownOutcome, OutgoingMail
 from .google_auth import (
     ACCOUNTS_FILE,
     CALENDAR_FEATURE,
     FEATURE_SCOPES,
     GMAIL_FEATURE,
+    GMAIL_READ_FEATURE,
     PROBLEM_BLOCKED,
     PROBLEM_CONFIRM,
     PROBLEM_DENIED,
@@ -507,7 +508,8 @@ class GmailBackend:
         sender = self._senders.get(action.account)
         own = _call_text(sender, "from_address") if sender is not None else ""
         return review(action.recipients(), action.cc(), own=own, account=action.account,
-                      confirmed=action.confirmed, trusted_domains=self._trusted, history=self._history)
+                      confirmed=action.confirmed, trusted_domains=self._trusted, history=self._history,
+                      unverified=action.unverified)
 
     def status(self, action: ProposedAction, reason: str = "") -> MailStatus:
         """See MailStatus; ``reason`` is the Executor's readiness answer (not set up: a hand-off)."""
@@ -1040,6 +1042,17 @@ def build_senders(config: Config, accounts: Mapping[str, GoogleAccount] | None =
             for alias, account in accounts.items() if GMAIL_FEATURE in account.features}
 
 
+def build_readers(config: Config, accounts: Mapping[str, GoogleAccount] | None = None, *,
+                  service_factory: Callable[[Any], Any] | None = None) -> dict[str, GmailReader]:
+    """One GmailReader (Ask Jarvis reading threads; gmail.readonly) per alias with the gmail_read
+    feature, sharing the account (and token) of its calendar and sending; never used to send.
+    ``accounts`` defaults to build_accounts(config); pass the same mapping as to build_calendars."""
+    if accounts is None:
+        accounts = build_accounts(config)
+    return {alias: GmailReader(account, service_factory=service_factory)
+            for alias, account in accounts.items() if GMAIL_READ_FEATURE in account.features}
+
+
 def recipient_history(config: Config) -> RecipientHistory:
     """The addresses Jarvis sent to before (%LOCALAPPDATA%\\briefing-reader\\recipients.json)."""
     return RecipientHistory(config.data_dir / RECIPIENTS_FILE)
@@ -1185,13 +1198,15 @@ def check_failure(action: ProposedAction, error: BaseException) -> EventCheck:
 
 
 def sign_in_note(alias: str, *, signed_in: bool = False, problem: str = "", message: str = "",
-                 sends_mail: bool = False) -> str:
+                 sends_mail: bool = False, reads_mail: bool = False) -> str:
     """What a card of ``alias`` says while that account cannot be used ("" when it can).
 
     ``problem`` / ``message`` are the account's last sign-in problem (GoogleCalendar
     .sign_in_problem()); the messages are google_auth's, which never name an address.
     ``sends_mail``: the account also has the gmail_send feature, so every sign-in asks for
     sending email too; a block then says how to keep Calendar actions without it.
+    ``reads_mail``: it has gmail_read (Ask Jarvis reading mail, a restricted permission that
+    administrators block first), so a block says to remove that first.
     """
     if signed_in:
         return ""
@@ -1200,7 +1215,12 @@ def sign_in_note(alias: str, *, signed_in: bool = False, problem: str = "", mess
     if problem == PROBLEM_BLOCKED:
         note = message or (f"Google blocked the sign-in: the {alias} account's administrator does not "
                            "allow this app")
-        if sends_mail:
+        if reads_mail:
+            then = f"; if it is still blocked, {keep_calendar_hint(alias)}," if sends_mail else ""
+            note += (f". Every {alias} sign-in also asks to read email (Ask Jarvis), which administrators often "
+                     f'block: remove "gmail_read" from config.toml [accounts.{alias}] features and sign in again'
+                     f"{then} to keep Calendar actions")
+        elif sends_mail:
             note += (f". Every {alias} sign-in also asks to send email; if the administrator only blocks "
                      f"that, {keep_calendar_hint(alias)} to keep Calendar actions")
         return note

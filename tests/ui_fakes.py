@@ -1,0 +1,376 @@
+"""Fakes for the app-level Ask Jarvis tests (test_ask_controller, test_card_sources): an
+AppController offscreen with a player that only keeps its state, Google calendars and senders
+that never touch the network, and Ask's real planner over tests.ask_fakes' runner (claude.exe is
+never started). Every name, address, id and text is invented.
+"""
+
+from __future__ import annotations
+
+import copy
+import dataclasses
+import json
+import tempfile
+import threading
+from collections.abc import Sequence
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+from unittest import mock
+
+from PySide6.QtCore import QObject, Signal
+from PySide6.QtWidgets import QApplication
+
+from briefing_reader import config as config_module
+from briefing_reader import hud, ui
+from briefing_reader.actions import ActionStore
+from briefing_reader.ask import planner as ask_planner
+from briefing_reader.ask.planner import AskPlanner, ClaudeEngine, GoogleSources
+from briefing_reader.ask.usage import UsageLog
+from briefing_reader.config import ActionsConfig, CalendarConfig, load_config
+from briefing_reader.gcal import ChangeResult, EventBrief, EventDetails, EventGone, EventResult, Guest
+from briefing_reader.gmail import SentMail
+from briefing_reader.notion_client import FixtureSession, NotionClient, fetch_briefing
+from tests.ask_fakes import FakeRunner, plan_stream
+
+PDT = timezone(timedelta(hours=-7))
+NOW = datetime(2026, 10, 4, 13, 52, tzinfo=PDT)     # a Sunday
+FIXTURE = Path(__file__).resolve().parent / "fixtures" / "fake_page.json"
+COMMAND = "move my Jarvis test sync to Friday and tell the guest"
+SAY = "Moved Jarvis test sync to Friday at 2 PM and drafted a note to Sam."
+GUEST = "sam.example@example.com"
+MOVE_LINE = ("Move: acct=work | event=jts0001aa | cal=primary | when=2026-10-09 14:00-15:00 | notify=all | "
+             "title=Jarvis test sync | at=2026-10-05 14:00-15:00 | link= | body=")
+EMAIL_LINE = (f"Email: acct=work | to={GUEST} | cc= | subject=Jarvis test sync moved | due= | link= | "
+              "body=Hi Sam,\\nMoved to Friday at 2 PM.\\nThanks")
+CAL_LINE = "Calendar: Study block | 2026-10-06 19:00-21:00 | | Library |"
+B_CALENDAR = "Calendar: Club general meeting | 2026-10-06 17:00-18:00 | | Student union, room 2 |"
+B_TODO = "Todo: title=Read chapter 4 | due=2026-10-06 | block= | acct= | link="
+CONFIG = """
+[ask]
+enabled = {enabled}
+
+[accounts.personal]
+features = ["calendar", "gmail_send", "gmail_read"]
+
+[accounts.work]
+features = ["calendar", "gmail_send", "gmail_read"]
+"""
+
+
+def settle(rounds: int = 3) -> None:
+    for _ in range(rounds):
+        QApplication.processEvents()
+
+
+def wait_for(predicate, timeout: float = 5.0) -> bool:
+    import time
+
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        QApplication.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.005)
+    QApplication.processEvents()
+    return bool(predicate())
+
+
+class FakePlayer(QObject):
+    """BriefingPlayer's surface without QtMultimedia: it keeps its state and records calls."""
+
+    itemChanged = Signal(int, int)
+    sectionStarted = Signal(int)
+    stateChanged = Signal(str)
+    errorOccurred = Signal(str)
+
+    def __init__(self, parent: QObject | None = None, **_kwargs: Any) -> None:
+        super().__init__(parent)
+        self.state = "idle"
+        self.current_section: int | None = None
+        self.starts: list[list[int]] = []
+        self.pauses = 0
+
+    def _set(self, state: str) -> None:
+        self.state = state
+        self.stateChanged.emit(state)
+
+    def start(self, queue: Sequence[int]) -> None:
+        self.starts.append(list(queue))
+        self._set("playing")
+
+    def pause(self) -> None:
+        if self.state in ("playing", "waiting"):
+            self.pauses += 1
+            self._set("paused")
+
+    def toggle(self) -> None:
+        self._set("paused" if self.state in ("playing", "waiting") else "playing")
+
+    def stop(self) -> None:
+        self.state = "idle"
+
+    def set_audio(self, *_args: Any) -> None:
+        pass
+
+    def mark_failed(self, *_args: Any) -> None:
+        pass
+
+    def skip_section(self) -> None:
+        pass
+
+    def replace_upcoming(self, *_args: Any) -> None:
+        pass
+
+
+def event(event_id: str, title: str, start: datetime, *, organizer_self: bool = True) -> EventDetails:
+    return EventDetails(event_id=event_id, calendar_id="primary", title=title, start=start,
+                        end=start + timedelta(hours=1), all_day_start=None, all_day_end=None, status="confirmed",
+                        organizer_self=organizer_self, guests_can_modify=False, self_email="me@example.edu",
+                        self_response="accepted", attendee_count=2, recurring_instance=False, series=False,
+                        time_zone="America/Los_Angeles", link="https://www.google.com/calendar/event?eid=x",
+                        organizer="")
+
+
+class FakeCalendar:
+    """gcal.GoogleCalendar's surface for one account (never the network). ``calls`` and ``threads``
+    record what happened where."""
+
+    def __init__(self, alias: str, *, signed_in: bool = True, events: dict | None = None,
+                 guests: dict | None = None) -> None:
+        self.alias = alias
+        self.signed_in = signed_in
+        self.events = dict(events or {})
+        self.guests = dict(guests or {})
+        self.calls: list[tuple] = []
+        self.threads: set[str] = set()
+        self.on_sign_in = None
+        self.lock = threading.Lock()
+
+    def _note(self, *call: Any) -> None:
+        with self.lock:
+            self.calls.append(call)
+            self.threads.add(threading.current_thread().name)
+
+    def is_configured(self) -> bool:
+        return True
+
+    def is_signed_in(self) -> bool:
+        return self.signed_in
+
+    def sign_in_problem(self) -> tuple[str, str]:
+        return ("", "")
+
+    def change_problem(self) -> tuple[str, str]:
+        return ("", "")
+
+    def needs_confirmation(self) -> bool:
+        return False
+
+    def pending_confirmation(self) -> str:
+        return ""
+
+    def sign_in(self) -> None:
+        self._note("sign_in")
+        self.signed_in = True
+        if self.on_sign_in is not None:
+            self.on_sign_in()
+
+    def timezone(self, *, interactive: bool = True) -> str:
+        return "America/Los_Angeles"
+
+    def list_events(self, start, end, calendar_ids=("primary",)):
+        self._note("list")
+        return []
+
+    def list_event_briefs(self, start, end, calendar_ids=("primary",)):
+        self._note("briefs")
+        return [EventBrief(e.event_id, "primary", e.title, start=e.start, end=e.end, organizer_self=e.organizer_self,
+                           guests=self.guests.get(e.event_id, ())) for e in self.events.values()]
+
+    def get_event(self, event_id: str, *, calendar_id=None, interactive: bool = True) -> EventDetails:
+        self._note("get", event_id)
+        if event_id not in self.events:
+            raise EventGone("Google has no such event (HTTP 404)", status=404)
+        return self.events[event_id]
+
+    def move(self, event_id, start, end, *, send_updates="all", calendar_id=None, now=None, interactive=True):
+        self._note("move", event_id)
+        return ChangeResult(event_id=event_id, link="", already=False)
+
+    def create_event(self, action, interactive: bool = True) -> EventResult:
+        self._note("create", action.title)
+        return EventResult(event_id="evt-new", link="https://www.google.com/calendar/event?eid=new", existed=False)
+
+
+class FakeSender:
+    def __init__(self, alias: str, address: str) -> None:
+        self.alias = alias
+        self.address = address
+        self.sent: list[Any] = []
+
+    def is_configured(self) -> bool:
+        return True
+
+    def is_signed_in(self) -> bool:
+        return True
+
+    def from_address(self) -> str:
+        return self.address
+
+    def sign_in_problem(self) -> tuple[str, str]:
+        return ("", "")
+
+    def ready(self) -> tuple[str, str]:
+        return ("", "")
+
+    def pending_confirmation(self) -> str:
+        return ""
+
+    def send(self, mail: Any) -> SentMail:
+        self.sent.append(mail)
+        return SentMail("m1", "t1", "")
+
+
+def work_calendar() -> FakeCalendar:
+    return FakeCalendar("work", events={"jts0001aa": event("jts0001aa", "Jarvis test sync",
+                                                           datetime(2026, 10, 5, 14, tzinfo=PDT))},
+                        guests={"jts0001aa": (Guest(GUEST, "Sam Example", "accepted"),)})
+
+
+class AskFactory:
+    """ask_factory for AppController: the real AskPlanner over a FakeRunner (``runs``), the app's own
+    (fake) calendars and senders through GoogleSources, and ``readers``."""
+
+    def __init__(self, root: Path, *runs: Any, auth: str | None = None, readers: dict | None = None,
+                 max_per_hour: int = 20, clock: Any = None) -> None:
+        self.root = root
+        self.runs = list(runs)
+        self.auth = auth
+        self.readers = dict(readers or {})
+        self.max_per_hour = max_per_hour
+        self.clock = clock
+        self.runner: FakeRunner | None = None
+        self.planner: AskPlanner | None = None
+        self.quick_threads: list[str] = []
+
+    def __call__(self, config: Any, calendars: Any, senders: Any, _accounts: Any) -> AskPlanner:
+        kwargs = {} if self.auth is None else {"auth": self.auth}
+        runner = FakeRunner(*self.runs, **kwargs)
+        quick = runner.run
+
+        def run(*args: Any, **kw: Any) -> Any:
+            self.quick_threads.append(threading.current_thread().name)
+            return quick(*args, **kw)
+
+        runner.run = run   # type: ignore[method-assign]
+        self.runner = runner
+        exe = self.root / "bin" / "claude.exe"
+        exe.parent.mkdir(parents=True, exist_ok=True)
+        exe.write_bytes(b"MZ fake")
+        engine_kwargs = {"clock": self.clock} if self.clock is not None else {}
+        engine = ClaudeEngine(config.ask, config.data_dir, runner=runner,
+                              environ={"PATH": "C:/Windows", "ANTHROPIC_API_KEY": "sk-ant-dummy-not-for-the-child",
+                                       "LOCALAPPDATA": str(self.root / "local")},
+                              locate=lambda _env: ask_planner.cli.ClaudeExe(exe, "standalone install"), **engine_kwargs)
+        sources = GoogleSources(config, calendars, senders, self.readers)
+        usage = UsageLog(config.data_dir / "ask_usage.json", max_per_hour=self.max_per_hour,
+                         max_per_day=config.ask.max_per_day, clock=lambda: NOW)
+        self.planner = AskPlanner(config, engine, sources, usage=usage, clock=lambda: NOW)
+        return self.planner
+
+
+def plan(say: str = SAY, question: str = "", lines: Sequence[str] = (MOVE_LINE, EMAIL_LINE)) -> list[str]:
+    return plan_stream({"say": say, "question": question, "lines": list(lines)})
+
+
+def page_fixture(root: Path, lines: Sequence[str]) -> Path:
+    """fake_page.json with a "Proposed actions" section of ``lines``."""
+    data = copy.deepcopy(json.loads(FIXTURE.read_text(encoding="utf-8")))
+    blocks = data["responses"][data["page_id"]][-1]["results"]
+
+    def block(kind: str, text: str, n: int) -> dict:
+        rich = [{"type": "text", "text": {"content": text}, "annotations": {"bold": False}, "plain_text": text}]
+        return {"object": "block", "id": f"uf-{n:04d}-0000-0000-0000-000000000000", "type": kind,
+                kind: {"rich_text": rich}, "has_children": False}
+
+    blocks.append(block("heading_2", "Proposed actions", 0))
+    blocks.extend(block("bulleted_list_item", line, n + 1) for n, line in enumerate(lines))
+    path = root / "page.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
+class AppHarness:
+    """One AppController (offscreen, nothing real reached) and what it was built with."""
+
+    def __init__(self, test: Any, *, ask: bool = True, runs: Sequence[Any] = (), auth: str | None = None,
+                 readers: dict | None = None, ask_mode: bool = False, run_state: Any = None,
+                 lines: Sequence[str] = (B_CALENDAR, B_TODO), engine_clock: Any = None,
+                 max_per_hour: int = 20) -> None:
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        test.addCleanup(tmp.cleanup)
+        self.root = root = Path(tmp.name)
+        (root / "config.toml").write_text(CONFIG.format(enabled="true" if ask else "false"), encoding="utf-8")
+        base = load_config(root, environ={"LOCALAPPDATA": str(root / "local")})
+        self.fixture = page_fixture(root, lines)
+        session = FixtureSession(self.fixture)
+        self.config = dataclasses.replace(
+            base, page_id=session.page_id, audio_root=root / "audio",
+            calendar=CalendarConfig(enabled=True, client_secret_path=root / "absent.json"),
+            actions=ActionsConfig(undo_seconds=3, trusted_domains=("example.edu",)))
+        self.client = NotionClient("", session=session, notion_version=self.config.notion_version)
+        self.calendars = {"personal": FakeCalendar("personal"), "work": work_calendar()}
+        self.senders = {"personal": FakeSender("personal", "me@example.com"),
+                        "work": FakeSender("work", "me@example.edu")}
+        self.factory = AskFactory(root, *runs, auth=auth, readers=readers, clock=engine_clock,
+                                  max_per_hour=max_per_hour)
+        self.store = ActionStore(root / "actions.json")
+        with mock.patch.object(ui, "BriefingPlayer", FakePlayer):
+            self.c = ui.AppController(self.config, self.client, expected_run="AM", now_mode=False, volume=0.0,
+                                      now_func=lambda: NOW, calendar_factory=lambda _cfg: self.calendars,
+                                      sender_factory=lambda _cfg: self.senders, action_store=self.store,
+                                      click_clock=_StepClock(), ask_factory=self.factory, ask_mode=ask_mode,
+                                      run_state=run_state)
+        self.c._start_fetch = lambda *args, **kwargs: None   # never Notion: the page is handed over below
+        test.addCleanup(self.close)
+
+    def briefing(self) -> None:
+        """The fixture page, as a fetch would hand it over (its Proposed actions become the cards)."""
+        self.c._accept_briefing(fetch_briefing(self.client, self.config.page_id))
+
+    def reading(self, *, autoplay: bool = True) -> None:
+        self.briefing()
+        self.c.enter_reading(autoplay=autoplay)
+        self.c.window.resize(1120, 700)
+        self.c.window.show()
+        settle()
+
+    def close(self) -> None:
+        c = self.c
+        if c.ask is not None:
+            c.ask.shutdown()
+            c.ask.join(5)
+        for timer in (c._ignore_timer, c._tick_timer, c._snooze_timer, c._countdown_timer, c._agenda_timer):
+            timer.stop()
+        if c._calendar_worker is not None:
+            c._closing.set()
+            c._calendar_worker.stop()
+        c.state = ui.STATE_QUITTING
+        c.window.hide()
+        c.window.deleteLater()
+        settle()
+
+
+class _StepClock:
+    """Click clock that is 5 s later at every reading (no click is ever "too soon")."""
+
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        self.t += 5.0
+        return self.t
+
+
+def fonts() -> None:
+    hud.load_fonts(config_module.PROJECT_ROOT / "fonts")

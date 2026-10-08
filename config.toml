@@ -10,7 +10,7 @@
 [voice]
 # Online voice used by edge-tts. To list every available voice, run:
 #   py -3.13 -m edge_tts --list-voices
-voice = "en-US-GuyNeural"
+voice = "en-GB-RyanNeural"
 # Speaking speed relative to normal, from "-50%" to "+100%".
 # Examples: "+15%" is faster, "-10%" is slower.
 rate = "+0%"
@@ -105,16 +105,22 @@ trusted_domains = []
 # account's actions; only "google" works in this version. features: what Jarvis
 # may do for the account; "calendar" answers invitations and moves or cancels
 # events you organize; "gmail_send" sends the replies and emails you approve
-# (send only: Jarvis never reads your mail). Adding a feature means one new
-# Google sign-in for that account. If its administrator blocks sending
-# (admin_policy_enforced), remove "gmail_send" from that account.
+# (send only); "gmail_read" lets Ask Jarvis read the Gmail threads a request is
+# about (read only: never used to send, and nothing it reads is saved or
+# logged; it is only used while [ask] is enabled, but the account's sign-in
+# asks Google for it whether Ask is on or off: remove "gmail_read" from both
+# accounts if you do not use Ask). Adding a feature means one
+# new Google sign-in for that account, which asks for all of them; if you
+# untick reading email, the rest still works. If its administrator blocks the
+# sign-in (admin_policy_enforced), remove "gmail_read" first, then
+# "gmail_send", from that account.
 [accounts.personal]
 backend = "google"
-features = ["calendar", "gmail_send"]
+features = ["calendar", "gmail_send", "gmail_read"]
 
 [accounts.work]
 backend = "google"
-features = ["calendar", "gmail_send"]
+features = ["calendar", "gmail_send", "gmail_read"]
 
 [schedule]
 # When the "Briefing AM" and "Briefing PM" tasks run (24-hour HH:MM).
@@ -150,3 +156,36 @@ deadline_keywords = ["due", "deadline", "exam", "midterm", "final", "quiz", "sub
 # shows 1:05 PM, "24h" shows 13:05. Sentences ("Updated today at 10:04 AM"),
 # the cards, DEADLINES and the spoken briefing always use 12-hour times.
 clock = "12h"
+
+[ask]
+# Ask Jarvis: type a request ("move my project sync to Friday and tell Ana")
+# and Jarvis lines up cards under NEEDS YOUR OK; nothing happens until you
+# click one and its undo countdown runs out. The planner is your own Claude
+# Code, signed in with your claude.ai plan (claude auth login --claudeai);
+# Jarvis never uses an API key and refuses to run on any other sign-in. Off
+# until you set true; check with: py -3.13 -m briefing_reader --ask-check
+# In the app the bar sits on the reading screen; py -3.13 -m briefing_reader
+# --ask opens it without playing the briefing.
+enabled = false
+# "sonnet"; "haiku" uses less of your plan.
+model = "sonnet"
+# One planner run may take this many seconds (30 to 300) ...
+timeout_seconds = 90
+# ... and this many turns (1 to 8).
+max_turns = 4
+# Planner runs allowed per hour (1 to 120) and per day (1 to 500). An Ask that
+# reads mail is two runs. Counted in %LOCALAPPDATA%\briefing-reader.
+max_per_hour = 20
+max_per_day = 60
+# The calendar Ask sees: from this many days back (0 to 7) to this many days
+# ahead (1 to 60), on these calendars of each account.
+days_back = 1
+days_ahead = 14
+calendars = ["primary"]
+# At most this many proposals per Ask (1 to 8).
+max_cards = 8
+# Run Claude Code with --safe-mode --restricted when it has them.
+hardened_flags = true
+# Read the Gmail threads a request is about, on accounts with "gmail_read"
+# (read only; the text is used for that one Ask and never saved or logged).
+read_mail = true

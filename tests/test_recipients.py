@@ -211,5 +211,39 @@ class MailboxTests(unittest.TestCase):
                                   history=None), {"analima@googlemail.com": OWN})
 
 
+
+class UnverifiedTests(unittest.TestCase):
+    """Ask Jarvis: a recipient you did not type is NEW even in a trusted domain, unless sent to before."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        self.history = RecipientHistory(Path(tmp.name) / "recipients.json", clock=Clock())
+
+    def test_unverified_skips_the_trusted_domains(self) -> None:
+        self.history.add(["ben@example.edu"])
+        kinds = classify(["ana@example.edu", "Ben@Example.edu", "cy@example.edu", "me@example.edu"],
+                         own="me@example.edu", trusted_domains=("example.edu",), history=self.history,
+                         unverified=("ANA@example.edu", "ben@example.edu", "me@example.edu"))
+        self.assertEqual(kinds, {"ana@example.edu": NEW, "Ben@Example.edu": KNOWN, "cy@example.edu": TRUSTED,
+                                 "me@example.edu": OWN})
+
+    def test_review_needs_a_tick_for_an_unverified_trusted_address(self) -> None:
+        plain = review(["ana@example.edu"], [], own="me@example.org", trusted_domains=("example.edu",))
+        self.assertTrue(plain.ready)
+        ask = review(["ana@example.edu"], [], own="me@example.org", trusted_domains=("example.edu",),
+                     unverified=frozenset({"ana@example.edu"}))
+        self.assertEqual((ask.new, ask.unconfirmed), (("ana@example.edu",), ("ana@example.edu",)))
+        self.assertFalse(ask.ready)
+        ticked = review(["ana@example.edu"], [], own="me@example.org", trusted_domains=("example.edu",),
+                        unverified=frozenset({"ana@example.edu"}), confirmed=("ana@example.edu",))
+        self.assertTrue(ticked.ready)
+        # The own address is still refused first.
+        own = review(["me@example.org"], [], own="me@example.org", account="work",
+                     unverified=frozenset({"me@example.org"}))
+        self.assertEqual(own.own, ("me@example.org",))
+        self.assertFalse(own.ready)
+
+
 if __name__ == "__main__":
     unittest.main()
