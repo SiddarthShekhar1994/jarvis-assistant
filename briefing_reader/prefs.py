@@ -4,7 +4,10 @@
 Jarvis's voice (the header's speaker button) and the ids of the last few
 greetings, so the next one differs; ``"answers_adopted": true`` once the
 answers of an older version in runstate.json were taken as viewed (once, at
-the first start after the update). Ids and booleans only: never any text.
+the first start after the update); ``"live_window": {"x", "y", "w", "h"}`` and
+``"live_popped_out"``: where the LIVE pop-out window was and whether it was open
+when Jarvis quit (written once the pop-out has been used). Ids, numbers and
+booleans only: never any text (the LIVE view's steps are never saved).
 
 The file is written atomically (temporary file + ``os.replace``); a missing,
 corrupt or unwritable file counts as the defaults and never stops the app
@@ -36,7 +39,7 @@ class AssistantPrefs:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self._lock = threading.Lock()
-        self._muted, self._recent, self._adopted = _load(self.path)
+        self._muted, self._recent, self._adopted, self._live_window, self._live_popped = _load(self.path)
 
     @property
     def muted(self) -> bool:
@@ -66,6 +69,25 @@ class AssistantPrefs:
             self._adopted = True
             return self._save_locked()
 
+    @property
+    def live_window(self) -> tuple[int, int, int, int] | None:
+        """The LIVE pop-out's last (x, y, width, height), or None."""
+        with self._lock:
+            return self._live_window
+
+    @property
+    def live_popped_out(self) -> bool:
+        """The LIVE pop-out was open when Jarvis last quit (it comes back at the next start)."""
+        with self._lock:
+            return self._live_popped
+
+    def set_live_window(self, rect: tuple[int, int, int, int] | None, popped_out: bool) -> bool:
+        """Remember the LIVE pop-out's place and size (ints) and whether it is open."""
+        with self._lock:
+            self._live_window = _live_rect(rect)
+            self._live_popped = bool(popped_out)
+            return self._save_locked()
+
     def remember_greeting(self, greeting_id: str) -> bool:
         """Add ``greeting_id`` as the most recent greeting (the oldest beyond 5 is forgotten)."""
         if not isinstance(greeting_id, str) or not _GREETING_ID_RE.fullmatch(greeting_id):
@@ -80,30 +102,54 @@ class AssistantPrefs:
         values: dict[str, object] = {"muted": self._muted, "recent_greetings": self._recent}
         if self._adopted:
             values["answers_adopted"] = True
+        if self._live_window is not None:
+            x, y, width, height = self._live_window
+            values["live_window"] = {"x": x, "y": y, "w": width, "h": height}
+        if self._live_window is not None or self._live_popped:
+            values["live_popped_out"] = self._live_popped
         return _write_atomic(self.path, json.dumps(values, indent=2) + "\n")
 
 
-def _load(path: Path) -> tuple[bool, list[str], bool]:
+_LIVE_RECT_LIMIT = 100_000   # any sane screen coordinate or size is far below this
+
+
+def _live_rect(value: object) -> tuple[int, int, int, int] | None:
+    """(x, y, w, h) as ints from a tuple or a {"x", "y", "w", "h"} table; None when malformed."""
+    if isinstance(value, dict):
+        value = tuple(value.get(key) for key in ("x", "y", "w", "h"))
+    if not isinstance(value, (tuple, list)) or len(value) != 4:
+        return None
+    if not all(isinstance(item, int) and not isinstance(item, bool) and abs(item) < _LIVE_RECT_LIMIT
+               for item in value):
+        return None
+    x, y, width, height = value
+    return (x, y, width, height) if width > 0 and height > 0 else None
+
+
+
+def _load(path: Path) -> tuple[bool, list[str], bool, tuple[int, int, int, int] | None, bool]:
     try:
         text = path.read_text(encoding="utf-8-sig")
     except FileNotFoundError:
-        return False, [], False
+        return False, [], False, None, False
     except (OSError, UnicodeError) as exc:
         logger.warning("Could not read %s (%s); using the defaults", path, type(exc).__name__)
-        return False, [], False
+        return False, [], False, None, False
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
         logger.warning("%s is not valid JSON; using the defaults", path)
-        return False, [], False
+        return False, [], False, None, False
     if not isinstance(data, dict):
         logger.warning("%s is not a table of settings; using the defaults", path)
-        return False, [], False
+        return False, [], False, None, False
     muted = data.get("muted") is True
     raw = data.get("recent_greetings")
     recent = [item for item in raw if isinstance(item, str) and _GREETING_ID_RE.fullmatch(item)] \
         if isinstance(raw, list) else []
-    return muted, recent[-RECENT_GREETINGS_MAX:], data.get("answers_adopted") is True
+    return (muted, recent[-RECENT_GREETINGS_MAX:], data.get("answers_adopted") is True,
+            _live_rect(window) if isinstance(window := data.get("live_window"), dict) else None,
+            data.get("live_popped_out") is True)
 
 
 def _write_atomic(path: Path, data: str) -> bool:

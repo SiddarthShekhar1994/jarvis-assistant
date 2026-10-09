@@ -11,8 +11,9 @@ Settings come from three places:
   Open may open, the undo countdown, the recipient domains that need no extra
   confirmation), account (``[accounts.<alias>]``: which service acts for
   "work" / "personal" and what it may do), schedule, hotkey,
-  agenda, display, Ask Jarvis (``[ask]``, off by default) and assistant (``[assistant]``: how
-  Jarvis speaks on his own) options. Which Google account an alias is never goes
+  agenda, display, Ask Jarvis (``[ask]``, off by default), assistant (``[assistant]``: how
+  Jarvis speaks on his own) and LIVE view (``[live]``: the tab that shows every step Jarvis
+  takes, on screen only) options. Which Google account an alias is never goes
   here: the sign-ins live in %LOCALAPPDATA%\\briefing-reader.
 
 A bad setting never stops the app: invalid values are logged as warnings and
@@ -86,7 +87,7 @@ UNDO_SECONDS_RANGE = (3, 60)
 
 _MISSING = object()
 _KNOWN_TABLES = ("voice", "prompt", "polling", "sections", "notion", "calendar", "actions",
-                 "accounts", "schedule", "hotkey", "agenda", "display", "ask", "assistant")
+                 "accounts", "schedule", "hotkey", "agenda", "display", "ask", "assistant", "live")
 # Library loggers kept at WARNING, also under --debug. The Google sign-in libraries log the
 # authorization code, the access token and the refresh token at DEBUG (requests_oauthlib),
 # before Jarvis could register them for redaction, so they never get DEBUG here.
@@ -280,6 +281,23 @@ class AssistantConfig:
     scheduled_prompt: bool = False   # true: scheduled runs show the classic "Hear it now?" prompt
 
 
+LIVE_OPEN_TAB = "tab"
+LIVE_OPEN_WINDOW = "window"
+LIVE_OPEN_OFF = "off"
+LIVE_OPEN_CHOICES = (LIVE_OPEN_TAB, LIVE_OPEN_WINDOW, LIVE_OPEN_OFF)
+
+
+@dataclass(frozen=True)
+class LiveConfig:
+    """``[live]``: the LIVE tab (every step Jarvis takes, on screen only; never saved or logged).
+    Bad values become the default with a warning."""
+
+    enabled: bool = True           # the LIVE tab and its stream (false: no tab, nothing recorded)
+    auto_open: str = LIVE_OPEN_TAB   # "tab" | "window" | "off" (true -> "tab", false -> "off" accepted)
+    background: bool = True        # the rolling "Background reads" row (agenda, event checks, sign-ins...)
+    text: bool = True              # keep the text blocks (false: only their sizes)
+
+
 @dataclass(frozen=True)
 class Config:
     notion_token: str = field(repr=False)   # "" when missing; NEVER logged
@@ -305,6 +323,7 @@ class Config:
     display: DisplayConfig = field(default_factory=DisplayConfig)
     ask: AskConfig = field(default_factory=AskConfig)
     assistant: AssistantConfig = field(default_factory=AssistantConfig)
+    live: LiveConfig = field(default_factory=LiveConfig)
 
     @property
     def notion_url(self) -> str:
@@ -425,6 +444,7 @@ def load_config(project_root: Path | None = None, *,
         display=_parse_display(doc),
         ask=_parse_ask(doc, environ),
         assistant=_parse_assistant(doc),
+        live=_parse_live(doc),
     )
 
 
@@ -904,6 +924,19 @@ def _parse_assistant(doc: Mapping[str, Any]) -> AssistantConfig:
                          "scheduled_prompt")}
     return AssistantConfig(address=r.string("address", d.address, allow_empty=True, pattern=ADDRESS_RE),
                            **flags)
+
+
+def _parse_live(doc: Mapping[str, Any]) -> LiveConfig:
+    """``[live]``: the LIVE tab. ``auto_open`` also takes true ("tab") and false ("off")."""
+    d = LiveConfig()
+    r = _TableReader(doc, "live", _field_names(LiveConfig))
+    raw = r._get("auto_open")
+    if isinstance(raw, bool):
+        auto_open = LIVE_OPEN_TAB if raw else LIVE_OPEN_OFF
+    else:
+        auto_open = r.choice("auto_open", d.auto_open, LIVE_OPEN_CHOICES)
+    return LiveConfig(enabled=r.boolean("enabled", d.enabled), auto_open=auto_open,
+                      background=r.boolean("background", d.background), text=r.boolean("text", d.text))
 
 
 def _parse_notion_version(doc: Mapping[str, Any]) -> str:

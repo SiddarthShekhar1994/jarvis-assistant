@@ -120,6 +120,32 @@ class RoundTripTests(PrefsTestCase):
         self.write_raw(json.dumps({"answers_adopted": "yes"}))
         self.assertFalse(AssistantPrefs(self.path).answers_adopted)                 # only a real true
 
+    def test_live_window_round_trip(self) -> None:
+        state = AssistantPrefs(self.path)
+        self.assertIsNone(state.live_window)
+        self.assertFalse(state.live_popped_out)
+        state.remember_greeting("m1")
+        self.assertNotIn("live_window", self.saved())                               # absent until used
+        self.assertTrue(state.set_live_window((1930, -12, 520, 680), True))
+        self.assertEqual(self.saved(), {"muted": False, "recent_greetings": ["m1"],
+                                        "live_window": {"x": 1930, "y": -12, "w": 520, "h": 680},
+                                        "live_popped_out": True})
+        again = AssistantPrefs(self.path)
+        self.assertEqual((again.live_window, again.live_popped_out), ((1930, -12, 520, 680), True))
+        again.set_muted(True)
+        self.assertEqual(AssistantPrefs(self.path).live_window, (1930, -12, 520, 680))   # kept by other writes
+        again.set_live_window((10, 20, 400, 500), False)
+        self.assertEqual(self.saved()["live_popped_out"], False)
+
+    def test_bad_live_window_values_are_ignored(self) -> None:
+        for value in ({"x": 1, "y": 2, "w": 0, "h": 5}, {"x": "1", "y": 2, "w": 3, "h": 4}, [1, 2, 3, 4],
+                      {"x": True, "y": 2, "w": 3, "h": 4}, {"x": 10 ** 9, "y": 2, "w": 3, "h": 4}, "big"):
+            with self.subTest(value=value):
+                self.write_raw(json.dumps({"live_window": value, "live_popped_out": "yes"}))
+                state = AssistantPrefs(self.path)
+                self.assertIsNone(state.live_window)
+                self.assertFalse(state.live_popped_out)                           # only a real true
+
     def test_file_is_lf_and_ascii(self) -> None:
         AssistantPrefs(self.path).remember_greeting("n3")
         raw = self.path.read_bytes()

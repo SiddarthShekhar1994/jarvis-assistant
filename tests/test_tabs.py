@@ -139,6 +139,102 @@ class TabStripTests(unittest.TestCase):
         self.assertGreater(bottom.blue(), 150)   # the current tab's accent underline
 
 
+class LiveTabStripTests(unittest.TestCase):
+    def strip(self, width: int = 400) -> hud.TabStrip:
+        strip = hud.TabStrip(live=True)
+        self.addCleanup(strip.deleteLater)
+        strip.resize(width, hud.TabStrip.HEIGHT)
+        strip.show()
+        settle()
+        return strip
+
+    def test_the_default_strip_has_no_live_tab(self) -> None:
+        strip = hud.TabStrip()
+        self.addCleanup(strip.deleteLater)
+        self.assertFalse(strip.has_live())
+        strip.set_current(hud.TAB_LIVE)
+        self.assertEqual(strip.current(), hud.TAB_JARVIS)
+        strip.set_live_visible(True)          # nothing to show
+        strip.set_activity(hud.ACTIVITY_WORKING)
+        self.assertEqual(strip.activity(), "")
+        self.assertEqual(strip.natural_width(), strip.tab(hud.TAB_JARVIS).natural_width()
+                         + strip.tab(hud.TAB_BRIEFING).natural_width())
+
+    def test_three_tabs_and_left_right_over_them(self) -> None:
+        strip = self.strip()
+        live = strip.tab(hud.TAB_LIVE)
+        self.assertEqual((live.text(), live.accessibleName()), ("Live", "Live steps"))
+        seen: list[int] = []
+        strip.currentChanged.connect(seen.append)
+        strip.tab(hud.TAB_JARVIS).setFocus(Qt.FocusReason.TabFocusReason)
+        for _ in range(3):
+            QTest.keyClick(QApplication.focusWidget(), Qt.Key.Key_Right)
+        self.assertEqual(strip.current(), hud.TAB_LIVE)          # it stays at the end
+        QTest.keyClick(QApplication.focusWidget(), Qt.Key.Key_Left)
+        self.assertEqual(seen, [hud.TAB_BRIEFING, hud.TAB_LIVE, hud.TAB_BRIEFING])
+        QTest.mouseClick(live, Qt.MouseButton.LeftButton)
+        self.assertEqual(strip.current(), hud.TAB_LIVE)
+
+    def test_a_hidden_live_tab_is_skipped_and_never_current(self) -> None:
+        strip = self.strip()
+        strip.set_current(hud.TAB_LIVE)
+        strip.set_live_visible(False)
+        self.assertFalse(strip.live_visible())
+        self.assertEqual(strip.current(), hud.TAB_JARVIS)       # it was current: JARVIS instead
+        strip.set_current(hud.TAB_LIVE)
+        self.assertEqual(strip.current(), hud.TAB_JARVIS)
+        strip.set_current(hud.TAB_BRIEFING)
+        strip.step(1)
+        self.assertEqual(strip.current(), hud.TAB_BRIEFING)     # Right skips the hidden tab
+        strip.set_live_visible(True)
+        strip.step(1)
+        self.assertEqual(strip.current(), hud.TAB_LIVE)
+
+    def test_activity_dot_names_tooltips_and_blink(self) -> None:
+        strip = self.strip()
+        live = strip.tab(hud.TAB_LIVE)
+        plain = live.sizeHint().width()
+        strip.set_activity(hud.ACTIVITY_UNREAD)
+        self.assertEqual(strip.activity(), hud.ACTIVITY_UNREAD)
+        self.assertEqual(live.accessibleName(), "Live steps, new steps")
+        self.assertEqual(live.toolTip(), "New steps")
+        self.assertEqual(live.badge_rect().width(), 6.0)
+        self.assertGreater(live.sizeHint().width(), plain)
+        self.assertFalse(hud._blink_clock().active())           # a steady dot
+        strip.set_activity(hud.ACTIVITY_WORKING)
+        self.assertEqual(live.accessibleName(), "Live steps, Jarvis is working")
+        self.assertEqual(live.toolTip(), "Jarvis is working - see every step")
+        self.assertTrue(hud._blink_clock().active())            # the dot blinks
+        strip.set_current(hud.TAB_LIVE)                          # cleared when LIVE becomes current
+        self.assertEqual(strip.activity(), "")
+        self.assertFalse(hud._blink_clock().active())
+        strip.set_activity(hud.ACTIVITY_WORKING)                 # none while LIVE is current
+        self.assertEqual(strip.activity(), "")
+        self.assertEqual(live.accessibleName(), "Live steps")
+        image = strip.grab().toImage()
+        self.assertFalse(image.isNull())
+
+    def test_compact_below_the_natural_width(self) -> None:
+        strip = self.strip(400)
+        natural = strip.natural_width()
+        self.assertGreater(natural, hud.TabStrip.COMPACT_BELOW)
+        strip.resize(natural, hud.TabStrip.HEIGHT)
+        settle()
+        self.assertFalse(strip.is_compact())
+        strip.set_badge(True)
+        strip.set_activity(hud.ACTIVITY_UNREAD)
+        settle()
+        self.assertFalse(strip.is_compact())                    # badges never flip it
+        for index in (hud.TAB_JARVIS, hud.TAB_BRIEFING, hud.TAB_LIVE):
+            tab = strip.tab(index)
+            self.assertGreaterEqual(tab.width(), tab.sizeHint().width())
+        strip.resize(natural - 1, hud.TabStrip.HEIGHT)
+        settle()
+        self.assertTrue(strip.is_compact())
+        strip.set_live_visible(False)                            # two tabs: the old 220 px rule
+        self.assertFalse(strip.is_compact())
+
+
 class ConversationLogTests(unittest.TestCase):
     def log(self, width: int = 320, height: int = 240) -> hud.ConversationLog:
         log = hud.ConversationLog()
@@ -426,7 +522,7 @@ class ReadingViewTabTests(unittest.TestCase):
         reading.conversation.add(hud.ROLE_JARVIS, "Good afternoon, sir.", when=WHEN)
         settle(8)
         rows = {}
-        for index in (hud.TAB_JARVIS, hud.TAB_BRIEFING, hud.TAB_JARVIS):
+        for index in (hud.TAB_JARVIS, hud.TAB_BRIEFING, hud.TAB_LIVE, hud.TAB_JARVIS):
             reading.set_tab(index)
             settle(8)
             top = reading.tabs.mapTo(reading, QPoint(0, 0)).y()
@@ -435,7 +531,7 @@ class ReadingViewTabTests(unittest.TestCase):
                            reading.notion_button, reading.done_button):
                 with self.subTest(tab=index, button=button.text()):
                     self.assertLessEqual(button.mapTo(reading, QPoint(0, button.height())).y(), top)
-        self.assertEqual(len(rows[hud.TAB_JARVIS] | rows[hud.TAB_BRIEFING]), 1, rows)
+        self.assertEqual(len(rows[hud.TAB_JARVIS] | rows[hud.TAB_BRIEFING] | rows[hud.TAB_LIVE]), 1, rows)
         self.assertTrue(reading.doc_header_folded())
         reading.set_tab(hud.TAB_BRIEFING)
         settle(4)
@@ -450,6 +546,114 @@ class ReadingViewTabTests(unittest.TestCase):
         settle(8)
         self.assertFalse(reading.doc_header_folded())
         self.assertTrue(reading.title.isVisible() and reading.subtitle.isVisible())
+        window.hide()
+
+    def test_the_tab_row_stays_put_over_three_tabs_at_900_by_600(self) -> None:
+        window = self.window(False)
+        reading = window.reading
+        reading.set_header("AM briefing", "Updated today at 10:04 AM")
+        reading.conversation.add(hud.ROLE_JARVIS, "Good afternoon, sir.", when=WHEN)
+        settle(6)
+        tops = set()
+        for index in (hud.TAB_JARVIS, hud.TAB_BRIEFING, hud.TAB_LIVE, hud.TAB_JARVIS, hud.TAB_LIVE):
+            reading.set_tab(index)
+            settle(6)
+            tops.add(reading.tabs.mapTo(reading, QPoint(0, 0)).y())
+        self.assertEqual(len(tops), 1, tops)
+        self.assertFalse(reading.tabs.is_compact())
+        for index in (hud.TAB_JARVIS, hud.TAB_BRIEFING, hud.TAB_LIVE):
+            tab = reading.tabs.tab(index)
+            self.assertTrue(tab.isVisible())
+            self.assertGreaterEqual(tab.width(), tab.sizeHint().width())
+            right = tab.mapTo(reading, QPoint(tab.width(), 0)).x()
+            self.assertLessEqual(right, reading.transcript_panel.mapTo(reading, QPoint(
+                reading.transcript_panel.width(), 0)).x())
+        window.hide()
+
+    def test_the_live_page_its_caption_and_status_tag(self) -> None:
+        window = self.window(False)
+        window.resize(ui.READING_SIZE)
+        reading = window.reading
+        reading.set_activity_state(hud.ORB_SPEAKING, True)          # the briefing is live
+        settle(4)
+        marker = reading.transcript_panel.live
+        self.assertTrue(marker.isVisible())
+        self.assertFalse(reading.live_status.isVisible())
+        reading.set_tab(hud.TAB_LIVE)
+        settle(6)
+        self.assertTrue(reading.live_page.isVisible())
+        self.assertTrue(reading.live_log.isVisible())
+        self.assertFalse(reading.conversation.isVisible())
+        self.assertTrue(reading.strip_caption.isVisible())
+        self.assertEqual(reading.strip_caption.text(), ui.LIVE_CAPTION)
+        self.assertFalse(reading.sections_button.isVisible())
+        self.assertFalse(reading.transcript_panel.steps.isVisible())
+        self.assertFalse(marker.isVisible())                         # its slot is the status tag's
+        self.assertTrue(reading.live_status.isVisible())
+        self.assertEqual(reading.live_status.text(), "IDLE")
+        self.assertEqual(reading.live_status.height(), marker.sizeHint().height())
+        self.assertEqual(reading.live_summary_text(), "Nothing running")
+        self.assertEqual(reading.live_status.toolTip(), hud.plain_tooltip("Nothing running"))   # the summary
+        self.assertEqual(reading.live_pop_button.text(), ui.POP_OUT_TEXT)
+        self.assertEqual(reading.live_clear_button.toolTip(), ui.CLEAR_TIP)
+        # Pop out and Clear sit in the strip (no toolbar row): the log starts right under the strip.
+        strip = reading.transcript_panel.strip
+        for button in (reading.live_pop_button, reading.live_clear_button):
+            self.assertTrue(button.isVisible())
+            self.assertTrue(strip.isAncestorOf(button))
+        self.assertEqual(reading.live_log.mapTo(reading, QPoint(0, 0)).y(),
+                         reading.live_page.mapTo(reading, QPoint(0, 0)).y())
+        reading.set_live_popped(True)
+        settle()
+        self.assertTrue(reading.live_away.isVisible())
+        self.assertFalse(reading.live_log.isVisible())
+        self.assertEqual(reading.live_away_label.text(), ui.LIVE_AWAY_TEXT)
+        self.assertFalse(reading.live_pop_button.isEnabled())
+        seen: list[str] = []
+        reading.liveDock.connect(lambda: seen.append("dock"))
+        reading.liveShowWindow.connect(lambda: seen.append("show"))
+        reading.live_show_button.click()
+        reading.live_back_button.click()
+        self.assertEqual(seen, ["show", "dock"])
+        reading.set_live_popped(False)
+        reading.set_tab(hud.TAB_BRIEFING)
+        settle(4)
+        self.assertTrue(marker.isVisible())                          # back on BRIEFING
+        self.assertFalse(reading.live_status.isVisible())
+        self.assertFalse(reading.live_pop_button.isVisible() or reading.live_clear_button.isVisible())
+        window.resize(ui.READING_MIN_SIZE)
+        reading.set_tab(hud.TAB_LIVE)
+        reading.set_live_state(hud.LIVE_COUNTDOWN, "SENDING", deadline=time.monotonic() + 8)
+        settle(6)
+        # A wider tag (counting down) in the 900 px window: no room for the caption beside the tag, Pop
+        # out and Clear; nothing is cut.
+        self.assertIn(reading.strip_caption.text(), ("", ui.LIVE_CAPTION_SHORT))
+        self.assertLessEqual(reading.strip_caption.sizeHint().width(), reading.strip_caption.width() + 1)
+        self.assertGreaterEqual(reading.live_status.width(), reading.live_status.sizeHint().width())
+        for button in (reading.live_pop_button, reading.live_clear_button):
+            self.assertTrue(button.isVisible())
+            self.assertGreaterEqual(button.width(), button.sizeHint().width())
+        right = reading.live_clear_button.mapTo(strip, QPoint(reading.live_clear_button.width(), 0)).x()
+        self.assertLessEqual(right, strip.width())
+        reading.set_live_state(hud.LIVE_IDLE)
+        settle(6)
+        self.assertIn(reading.strip_caption.text(), (ui.LIVE_CAPTION, ui.LIVE_CAPTION_SHORT))
+        self.assertLessEqual(reading.strip_caption.sizeHint().width(), reading.strip_caption.width() + 1)
+        window.hide()
+
+    def test_live_unavailable_hides_its_tab(self) -> None:
+        window = self.window(False)
+        reading = window.reading
+        reading.set_tab(hud.TAB_LIVE)
+        self.assertEqual(reading.current_tab(), hud.TAB_LIVE)
+        reading.set_live_available(False)
+        settle()
+        self.assertFalse(reading.live_available())
+        self.assertFalse(reading.tabs.tab(hud.TAB_LIVE).isVisible())
+        self.assertEqual(reading.current_tab(), hud.TAB_JARVIS)
+        self.assertFalse(reading.live_page.isVisible())
+        QTest.keyClick(window, Qt.Key.Key_3, Qt.KeyboardModifier.ControlModifier)
+        self.assertEqual(reading.current_tab(), hud.TAB_JARVIS)
         window.hide()
 
     def test_ctrl_1_and_ctrl_2(self) -> None:
@@ -467,6 +671,10 @@ class ReadingViewTabTests(unittest.TestCase):
         keys = sorted(shortcut.key().toString() for shortcut in reading.findChildren(ui.QShortcut))
         self.assertIn("Ctrl+1", keys)
         self.assertIn("Ctrl+2", keys)
+        self.assertIn("Ctrl+3", keys)
+        QTest.keyClick(window, Qt.Key.Key_3, Qt.KeyboardModifier.ControlModifier)
+        settle()
+        self.assertEqual(seen[-1], hud.TAB_LIVE)
 
     def test_speech_line_falls_back_to_ready_to_view_while_new(self) -> None:
         window = self.window(False)

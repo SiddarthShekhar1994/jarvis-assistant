@@ -150,6 +150,28 @@ class ToCardsTests(unittest.TestCase):
         self.assertEqual(listed.refused, 1)
         self.assertEqual(listed.kinds(), {"refused": 1})
 
+    def test_report_follows_the_lines_in_order(self) -> None:
+        slack = "Slack: channel=C0123ABCD | ts=1696000000.000100 | who=Ana | body=Sure"
+        todos = [f"Todo: title=Task {n} | due=2026-10-09 | block= | acct= | link=" for n in range(2)]
+        lines = [move(), slack, move(), email("x@evil.example"), *todos]
+        result = self.cards(*lines, max_cards=4)
+        outcomes = [(item.line, item.outcome) for item in result.report]
+        self.assertEqual(outcomes, [(move(), validate.LINE_CARD), (slack, validate.LINE_REFUSED),
+                                    (move(), validate.LINE_REPEAT), (email("x@evil.example"), validate.LINE_REFUSED),
+                                    (todos[0], validate.LINE_CARD), (todos[1], validate.LINE_OVER_CAP)])
+        ids = [card.id for card in result.cards]
+        self.assertEqual([item.card_id for item in result.report], [ids[0], ids[1], ids[0], ids[2], ids[3], ""])
+        self.assertEqual([item.reason for item in result.report],
+                         ["", "Ask can't propose Slack", "", validate.unknown_address("x@evil.example"), "", ""])
+        # cards, dropped and refused are as before the report existed.
+        self.assertEqual((len(result.cards), result.dropped, result.refused), (4, 2, 2))
+        listed = self.cards(move(), page_ids={parse_action_line(move()).id})
+        self.assertEqual((listed.report[0].outcome, listed.report[0].reason),
+                         (validate.LINE_REFUSED, validate.ALREADY_LISTED))
+        self.assertNotIn("report=", repr(result))   # the report is never in a repr (logs)
+        self.assertNotIn("Slack", repr(result.report))
+        self.assertNotIn("evil", repr(result.report))
+
 
 if __name__ == "__main__":
     unittest.main()

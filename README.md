@@ -559,28 +559,31 @@ greeting was more than 2 minutes ago. Without sound (muted, `[assistant]
 speak = false`, no voice available) the same words are shown in the JARVIS
 tab; `[assistant] greet = false` turns the greeting off.
 
-**JARVIS and BRIEFING.** The middle panel has two tabs right above it (click
-them, press **Ctrl+1** / **Ctrl+2**, or Left / Right on a focused tab):
+**JARVIS, BRIEFING and LIVE.** The middle panel has three tabs right above it
+(click them, press **Ctrl+1** / **Ctrl+2** / **Ctrl+3**, or Left / Right on a
+focused tab):
 
 - **JARVIS** is this session's conversation: the greeting, "Your AM briefing is
   ready to view." with a **View briefing** link, your Ask requests and Jarvis's
   whole answers, never cut off. It scrolls and follows the newest entry unless
   you just scrolled yourself; an answer taller than the panel is shown from its
   first line (its "JARVIS" time line at the top), the rest a scroll away. A dot
-  on the tab says something new came while you were on BRIEFING. It is kept in
-  memory only (at most 100 entries).
+  on the tab says something new came while another tab was current. It is kept
+  in memory only (at most 100 entries).
 - **BRIEFING** is the briefing's text, as before: chips for the current section
   and its neighbours, **SECTIONS**, and the line being spoken marked while it
   plays. In a very small window (a screen narrower than 900 px, Ask on) its
   "AM BRIEFING . UPDATED ..." line folds away so the controls keep their room
   (STATUS still shows the time; a "May be stale" warning always shows).
+- **LIVE** shows every step Jarvis takes, as it happens (see
+  [LIVE: watch Jarvis work](#live-watch-jarvis-work)).
 
 **NEW.** A briefing nobody has looked at yet is NEW: an amber **NEW** badge on
 the BRIEFING tab, "Your AM briefing is ready to view" under the orb while
 nothing is spoken, "new" before the Updated time in STATUS (amber) and "Jarvis:
 AM briefing ready to view" on the tray icon. It is viewed once its BRIEFING
 tab is open while the window is active, or as soon as it plays (**Play** on
-the JARVIS tab switches to BRIEFING). A briefing more than 18 hours old, a page
+the JARVIS or LIVE tab switches to BRIEFING). A briefing more than 18 hours old, a page
 without an "Updated:" line and a setup error are never NEW. Each briefing is
 announced at most once, also across restarts (`runstate.json`): open Jarvis at
 10:08, hear "Your AM briefing is ready to view" and close him, and the 10:12
@@ -657,11 +660,13 @@ were typing elsewhere at that moment cannot press one.
   [TODAY and DEADLINES](#today-and-deadlines)); it scrolls when it does not fit.
 - **Middle: Jarvis and the briefing.** The orb and its state, the sentence being
   spoken in large type, the command bar (with Ask Jarvis on), the buttons and
-  the JARVIS / BRIEFING tabs. Below them is the panel: on JARVIS the
+  the JARVIS / BRIEFING / LIVE tabs. Below them is the panel: on JARVIS the
   conversation (its strip says CONVERSATION · THIS SESSION); on BRIEFING chips
   for the current section and its neighbours, a **SECTIONS** button, and the
-  briefing text with the line being spoken marked by a glowing cyan bar. A
-  blinking LIVE marker shows while the briefing plays, on either tab. The text
+  briefing text with the line being spoken marked by a glowing cyan bar; on LIVE
+  every step Jarvis takes. A blinking LIVE marker shows while the briefing
+  plays, on JARVIS and BRIEFING (the LIVE tab shows its own WORKING / SENDING IN
+  tag there instead). The text
   scrolls along unless you just scrolled yourself. **SECTIONS** opens the list
   of the briefing's sections: played ones
   green, the current one cyan, upcoming ones dim, and the Ignore section grey
@@ -679,7 +684,7 @@ Buttons:
   button with Tab: then Space presses that button). It becomes **Replay** at the
   end, and **Retry** if the page could not be loaded (Retry fetches the page
   again right away). Play, Replay, a section and Read everything on the JARVIS
-  tab switch to BRIEFING.
+  or LIVE tab switch to BRIEFING.
 - **Skip section** jumps to the next section.
 - **Read everything** also reads the Ignore section (shown dimmed with "(not read
   aloud)" until then). It is disabled when the page has no Ignore section.
@@ -752,6 +757,81 @@ voice off for good (no speaker button), `speak_replies = false` keeps Ask
 silent, `speak_results = false` keeps the confirmations silent, `greet = false`
 drops the greeting, and `address` changes "sir" (see
 [Configuration](#configuration)).
+
+### LIVE: watch Jarvis work
+
+The third tab over the centre panel, **LIVE** (next to JARVIS and BRIEFING,
+**Ctrl+3**), shows every step Jarvis takes, as it happens, so you can check
+that he does only what he should and has the right context. It only shows: it
+never approves, sends, retries or changes anything. Each piece of work is a
+card, newest at the bottom:
+
+- **An Ask**: your request as typed; the readiness checks (planner runs left,
+  Claude Code's version, the sign-in, the hardened flags); the calendar he read
+  (which calendars, every event); a mail search the planner asked for (the
+  account, the planner's query and the exact Gmail query Jarvis sent, or why
+  Jarvis refused it); each email thread he read (subject, people, how many
+  messages, and the exact text he gave the planner); each planner run (the
+  model, the command line, the exact text sent to Claude Code, its progress,
+  the time and tokens it took, the raw reply and the proposals in it); the
+  check of every proposal (made into a card - with its event, time and
+  recipients - or refused / dropped with the exact reason; a recipient you
+  didn't type is marked in amber); and the answer and cards. An Ask that ended
+  with a refused or dropped proposal, or a recipient you didn't type, shows
+  CHECK (amber) instead of DONE.
+- **A card you approved**: what you approved, **what will be sent or changed,
+  exactly** (an email's From, To, Cc, subject and body as it will go out; an
+  event's id, the change and who Google emails) during the undo countdown
+  ("SENDING IN 7 S") - kept in view while the countdown runs, even if you had
+  scrolled the view -, the last checks, the one call to Google with the exact
+  request (for a calendar change its body, checked against what the countdown
+  showed: a difference is marked CHECK) and what came back (Gmail's message id
+  and a link to the thread, the event's id and link), or FAILED / UNKNOWN.
+  When Google already had the change (the event was already there, at that
+  time, answered, or gone) nothing is sent and the steps say NOTHING SENT and
+  ALREADY ...; Undo shows UNDONE: nothing was sent.
+- **A briefing fetch** from Notion, and one compact **Background reads** row
+  (the agenda, the cards' event checks, sign-ins, Claude Code checks; `[live]
+  background = false` leaves it out).
+
+The panel's strip shows what Jarvis is doing (IDLE, WORKING 0:12, SENDING IN 7
+S), then **Pop out** and **Clear** (in a narrow window Clear is in the pop-out
+window only). Every step has a status (a blinking square while it runs, DONE,
+CHECK, BLOCKED, FAILED, CANCELLED) and its time. Click a step, or press Space or Enter on it, to
+show or hide its details; the steps that need a look (running, a warning, a
+refusal, what will be sent) open by themselves. The texts Jarvis read or sent
+are collapsed under "Show ..." links and, when opened, shown exactly, as plain
+text you can select and copy; text written by other people (email, the planner's
+input) is labelled so and is never followed or opened. The only links are the
+Google result links Jarvis made (they open like a card's Open).
+
+When Jarvis starts on an Ask or on a card you approved, LIVE comes up by itself
+(`[live] auto_open = "tab"`, the default); not while the briefing plays (the
+LIVE tab gets a blinking dot instead), not when the window is minimized or
+hidden, and only once per piece of work: when you go back to another tab, it
+does not pull you back. `auto_open = "window"` shows the pop-out window
+instead (without taking the focus), `"off"` never switches. In a window too
+small for the LIVE tab to show the steps (a small screen), `"tab"` shows the
+pop-out on your other screen instead, when there is one. A dot on the LIVE
+tab says something new arrived there (blinking while Jarvis works); the answer
+to an Ask in the JARVIS tab has a **See every step** link to its card.
+
+**Pop out** (on the LIVE tab) moves the view into a window of its own - not on
+top, with its own taskbar button - to put on a second screen: it opens on
+another screen when there is one, else beside the main window, and later where
+you left it (it is remembered, and comes back at the next start if it was open
+when you quit). Closing it, Alt+F4, **Dock** or **Bring it back here** puts the
+view back into the LIVE tab. A large pop-out keeps the steps in a column of at
+most about 960 px. **Clear** empties the view of finished work, including the
+finished rows of Background reads (what is still running stays); nothing else
+changes.
+
+LIVE is on screen only: it is never saved, never logged, and gone when Jarvis
+closes. `[live] text = false` keeps only the sizes of the long texts (email
+threads, the planner's input and reply, the outgoing message, and the message
+text in the planner's proposal lines); subjects, names, addresses, event titles
+and Jarvis's answer still show. `[live] enabled = false` removes the tab and
+records nothing.
 
 ## TODAY and DEADLINES
 
@@ -1371,9 +1451,12 @@ briefing; with the app already open, the same command brings it forward there.
 - When it is done, the planner's answer (or a question back) is under the bar,
   then Jarvis's own note when there is one ("Jarvis couldn't read your work
   mail: click "Allow work mail" to let it"). The bar shows two lines of it; the
-  **JARVIS** tab below, which comes up when you press Enter, has your request
-  and the whole answer, never cut off, and Jarvis says the answer aloud (see
-  [Jarvis talks](#jarvis-talks)). Your request stays in the field
+  **JARVIS** tab below has your request and the whole answer, never cut off,
+  and Jarvis says the answer aloud (see [Jarvis talks](#jarvis-talks)). When
+  you press Enter the **LIVE** tab comes up and shows every step of the request
+  as it happens (see [LIVE: watch Jarvis work](#live-watch-jarvis-work); with
+  `[live] auto_open = "off"` the JARVIS tab comes up instead), and a dot on
+  JARVIS tells you when the answer is there. Your request stays in the field
   after a question back or when nothing was proposed, so you can edit it and
   press Enter again; it is cleared once there is a card to decide. The
   proposals are at the top of NEEDS YOUR OK under **ASK**, above the
@@ -1901,6 +1984,10 @@ log. Changes apply the next time the app starts.
 | `[assistant] speak_results` | `true` | Speak what happened after an approved card was carried out ("Done, sir - ..."). |
 | `[assistant] scheduled_prompt` | `false` | `true`: the scheduled runs and the catch-up show the classic "Hear it now?" prompt (with Later and Read now) instead of announcing the briefing. |
 | `[display] clock` | `"12h"` | How the header clock, TODAY, ACTIVITY, STATUS and the Intro line of the SECTIONS list show times: `"12h"` (1:05 PM) or `"24h"` (13:05). Times inside sentences ("Updated today at 10:04 AM", "asking again at 1:15 PM", "until 1:20 PM" on the prompt, in the tray and on the reading screen), the proposal cards, the DEADLINES due labels and the spoken briefing always use 12-hour times. |
+| `[live] enabled` | `true` | The LIVE tab ([LIVE: watch Jarvis work](#live-watch-jarvis-work)): every step Jarvis takes for an Ask or a card you approved, on screen only. `false`: no LIVE tab, nothing recorded. |
+| `[live] auto_open` | `"tab"` | When Jarvis starts on an Ask or an approved card: `"tab"` brings up the LIVE tab (not while the briefing plays, not when the window is hidden or minimized), `"window"` shows the LIVE pop-out window without taking the focus, `"off"` never switches. `true` / `false` mean `"tab"` / `"off"`. |
+| `[live] background` | `true` | Also show the reads Jarvis does on his own (agenda, event checks, sign-ins, Claude Code checks) in one compact LIVE row. |
+| `[live] text` | `true` | Show the texts Jarvis read and sent in LIVE (email threads, the planner's input and reply, the outgoing message). `false`: only their sizes (also of the message text in the planner's proposal lines); subjects, names, addresses, event titles and Jarvis's answer still show. |
 
 The offline voice uses the same `rate` and `volume`: the rate scales Windows'
 default 200 words per minute, and a volume above `+0%` cannot get louder than
@@ -2034,6 +2121,10 @@ was, which voice made it and how long that took ("Say: kind=result chars=63
 engine=edge 0.9 s", "Say skipped: muted", "Say dropped: stale (ack)"), and
 counts; never a greeting, an announcement, an answer, a confirmation or
 anything else he says or shows.
+The LIVE tab ([LIVE: watch Jarvis work](#live-watch-jarvis-work)) keeps
+everything it shows in memory only: none of it is logged or written to any
+file, and it is gone when Jarvis closes (its own failures are logged as "Live
+view: <what> failed (<error type>)" and nothing more).
 
 Other files in `%LOCALAPPDATA%\briefing-reader`:
 
@@ -2046,7 +2137,7 @@ Other files in `%LOCALAPPDATA%\briefing-reader`:
 | `ask_usage.json` | Ask Jarvis's planner runs of the last two days, for the hourly and daily caps (shared by every Jarvis process): a random id per run, when it started, how long it took, its turns and token counts and the outcome; and, after Claude Code reported extra usage, until when Ask is paused (`hold_until`). Never a request or anything the planner wrote. Delete it to reset the counts and the pause (`ask_usage.json.lock` next to it only takes turns between processes). |
 | `ask\` | The empty folder Claude Code runs in for Ask. Ask refuses to run while anything is in it (a `CLAUDE.md` or `.mcp.json` there would add instructions or tools). |
 | `runstate.json` | Per scheduled briefing: when it was first shown, when it was announced (`announced_at`) and first viewed (`viewed_at`), and when and how a classic prompt was answered (read, dismissed, done), kept for 14 days. The catch-up task uses it, and it keeps a briefing from being announced twice; see [Catch-up and the hotkey](#catch-up-and-the-hotkey). Safe to delete (a briefing may then be announced once more). |
-| `assistant.json` | Whether Jarvis's voice is muted, the ids of the last 5 greetings (so the next one differs), and whether the briefings an older version read through its prompt were taken as viewed (done once, at the first start after the update, so they are not announced again). Never any text. Safe to delete. |
+| `assistant.json` | Whether Jarvis's voice is muted, the ids of the last 5 greetings (so the next one differs), whether the briefings an older version read through its prompt were taken as viewed (done once, at the first start after the update, so they are not announced again), and, once you used it, where the LIVE pop-out window was and whether it was open. Never any text. Safe to delete. |
 
 Generated audio goes to `%TEMP%\briefing-reader\session-<process id>` (Jarvis's own
 sentences to its `say` folder) and is deleted when the app closes. If a section is still being generated at that
@@ -2127,6 +2218,12 @@ use of it; sharing such a feature in a public project is less clear-cut, which
 is why Ask is off by default and every user installs and signs in to Claude Code
 themselves.
 
+The LIVE tab shows on your screen what Jarvis read and sent - email text, the
+exact input he gave the planner, the message he will send - and keeps none of
+it: nothing is saved, logged or sent anywhere, and it is gone when he closes.
+`[live] text = false` shows only the sizes of those texts (subjects, names and
+addresses still show).
+
 ## Fonts
 
 The HUD uses three open-source fonts, bundled in `fonts\` and loaded by the app
@@ -2166,7 +2263,9 @@ The Ask Jarvis tests never start Claude Code: the planner runs are recorded,
 invented stream-json files (`tests\fixtures\ask`) played by a fake runner, the
 calendars and Gmail are fakes, and the subprocess tests start a few lines of
 Python standing in for the CLI. The command bar, Ask controller and card-source
-tests run the app's window offscreen with those fakes.
+tests run the app's window offscreen with those fakes, and so do the LIVE view's
+tests (the stream, the LIVE tab, the pop-out, auto-open and a burst of steps
+that must never stall the window).
 
 The hotkey tests register Ctrl+Alt+Shift+F24 (a key no keyboard has) for a
 moment with a private agent lock, simulate a press without pressing anything,
@@ -2490,14 +2589,15 @@ briefing_reader/ask/          Ask Jarvis (no Qt): Claude Code checks and runs (c
                               input (context), email text and searches (mail), cards with provenance checks (validate),
                               the caps (usage), one request end to end (planner), --ask-check / --ask-text (commands);
                               ask/assets: the planner's instructions, answer format and settings
+briefing_reader/live.py       the LIVE view's event stream (no Qt): every step Jarvis takes, in memory only, bounded
 briefing_reader/tts.py        edge-tts synthesis, Windows SAPI fallback, highlight timing, background worker
 briefing_reader/player.py     QtMultimedia player that plays sections in order with pauses
-briefing_reader/hud.py        Jarvis HUD widget kit: colours, fonts, chamfered panels, orb, buttons, cards, agenda, command bar, tabs, conversation
-briefing_reader/ui.py         assistant screen (JARVIS / BRIEFING tabs), classic prompt, tray icon, approvals, TODAY / DEADLINES, app controller (launch kinds, NEW, greeting, announcement)
+briefing_reader/hud.py        Jarvis HUD widget kit: colours, fonts, chamfered panels, orb, buttons, cards, agenda, command bar, tabs, conversation, the LIVE log
+briefing_reader/ui.py         assistant screen (JARVIS / BRIEFING / LIVE tabs), the LIVE pop-out window, classic prompt, tray icon, approvals, TODAY / DEADLINES, app controller (launch kinds, NEW, greeting, announcement)
 briefing_reader/ask_ui.py     Ask Jarvis in the app: the command bar's controller and its "ask" thread
 fonts/                        Chakra Petch, Sora and JetBrains Mono fonts with their OFL licences
 tests/                        unit tests and saved fake Notion pages (tests/fixtures)
-config.toml                   voice, prompt, polling, section, calendar, actions, schedule, hotkey, agenda, display, Ask and assistant settings
+config.toml                   voice, prompt, polling, section, calendar, actions, schedule, hotkey, agenda, display, Ask, assistant and LIVE settings
 .env.example                  template for .env (NOTION_TOKEN, BRIEFING_PAGE_ID)
 requirements.txt              Python dependencies
 install-schedule.ps1          registers the Briefing AM / PM / catch-up / hotkey scheduled tasks

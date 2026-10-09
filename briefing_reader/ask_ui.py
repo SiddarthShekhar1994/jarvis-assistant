@@ -1,6 +1,6 @@
 """Ask Jarvis in the app: the command bar's controller and the thread its planner runs on.
 
-    AskController(config, planner, bar, *, context, blocked, calendars, parent)
+    AskController(config, planner, bar, *, context, blocked, calendars, live, parent)
         start()           checks Claude Code (no model request) and which accounts' mail Ask can read,
                           on the "ask" thread; the header chip and the bar follow
         submit(text)      one Ask (the bar's Enter / Ask): planner.plan() on the "ask" thread
@@ -22,7 +22,10 @@
         mailSignInRequested(str)     the bar's link: sign this account in again so Ask may read its mail
 
 The planner only proposes: its cards reach the app through ``outcomeReady`` and then go through the
-same click, undo countdown and executor.run_action path as the briefing's. ``context()`` (GUI thread)
+same click, undo countdown and executor.run_action path as the briefing's. ``live`` (the app's
+live.LiveStream): each accepted Ask is a LIVE view task, from "Your request" (ask.request) through
+the planner's steps to "Answer and cards" (ask.cards), finished when the outcome is handed over
+(or cancelled, or Jarvis closes); ``last_task_id`` is the last finished one. ``context()`` (GUI thread)
 gives the briefing as Ask may see it and the briefing cards' ids; ``blocked()`` a reason not to start
 now (a Google sign-in is open). Nothing here logs the request, the planner's text, the context or an
 address: counts, kinds and durations only. One Ask at a time; a run that is cancelled or ends after
@@ -43,9 +46,30 @@ from PySide6.QtCore import QObject, Qt, QTimer, Signal
 
 from . import hud
 from .ask import planner as ask_planner
+from .ask.context import COMMAND_CAP
 from .ask.stream import CANCELLED, LIMIT
 from .config import Config
 from .google_auth import PROBLEM_EXPIRED, PROBLEM_SCOPE, PROBLEM_SIGNED_OUT, logged_alias
+from .live import (
+    ASK_CARDS,
+    ASK_REQUEST,
+    BACKGROUND_KEY,
+    BACKGROUND_TITLE,
+    CLAUDE_CHECK,
+    NO_STEP,
+    NO_TASK,
+    STATUS_BLOCKED,
+    STATUS_CANCELLED,
+    STATUS_FAILED,
+    STATUS_OK,
+    STATUS_WARN,
+    TASK_ASK,
+    TASK_BACKGROUND,
+    LiveStep,
+    LiveStream,
+    LiveTask,
+    quiet,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +125,7 @@ class _PlanJob:
     briefing: Any
     page_ids: tuple[str, ...]
     cancel: threading.Event
+    live: Any = None                    # the Ask's LiveTask (None: no LIVE view; the planner gets no keyword)
 
 
 @dataclasses.dataclass
@@ -111,6 +136,7 @@ class _Running:
     stage: str = ""                     # "" until the planner's first stage (its checks passed)
     cancel_requested: bool = False
     busy_sent: bool = False             # busyChanged(True) went out (on the first stage)
+    task: LiveTask = NO_TASK            # the Ask's LIVE view task
 
 
 class _AskBridge(QObject):
@@ -125,11 +151,12 @@ class _AskWorker:
     """One daemon thread named "ask": readiness checks and planner runs, one at a time."""
 
     def __init__(self, planner: Any, bridge: _AskBridge, stop: threading.Event,
-                 mail_needs: Callable[[], list[MailNeed]]) -> None:
+                 mail_needs: Callable[[], list[MailNeed]], background: Callable[[], LiveTask] | None = None) -> None:
         self._planner = planner
         self._bridge = bridge
         self._stop = stop
         self._mail_needs = mail_needs
+        self._background = background or (lambda: NO_TASK)   # the LIVE view's "Background reads"
         self._jobs: queue.SimpleQueue[Any] = queue.SimpleQueue()
         self._thread = threading.Thread(target=self._run, name="ask", daemon=True)
         self._thread.start()
@@ -163,16 +190,20 @@ class _AskWorker:
                         False, "error", "Ask stopped because of an unexpected error; nothing was proposed"))
 
     def _check(self, job: _CheckJob) -> None:
+        step = _claude_check_step(self._background()) if job.full else None
         ready = self._planner.engine.readiness() if job.full else None   # None: keep the last answer
         caps = self._planner.usage.check()
+        if step is not None:
+            _claude_checked(step, ready, caps)
         self._emit("checked", job.seq, ready, caps, self._mail_needs())
 
     def _plan(self, job: _PlanJob) -> None:
         def on_stage(stage: str) -> None:
             self._emit("stage", job.seq, stage)
 
+        extra = {"live": job.live} if job.live is not None else {}   # a planner without the keyword keeps working
         outcome = self._planner.plan(job.text, briefing=job.briefing, page_ids=job.page_ids, cancel=job.cancel,
-                                     on_stage=on_stage)
+                                     on_stage=on_stage, **extra)
         self._emit("planned", job.seq, outcome)
 
     def _emit(self, name: str, *args: Any) -> None:
@@ -200,11 +231,14 @@ class AskController(QObject):
                  blocked: Callable[[], str] = lambda: "",
                  calendars: Mapping[str, Any] | None = None,
                  monotonic: Callable[[], float] = time.monotonic,
+                 live: LiveStream | None = None,
                  parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.config = config
         self.planner = planner
         self.bar = bar
+        self.live = live
+        self.last_task_id = 0                  # the LIVE view task of the last finished Ask (0: none)
         self._context = context
         self._blocked = blocked
         self._calendars = dict(calendars or {})
@@ -238,7 +272,8 @@ class AskController(QObject):
     def start(self) -> None:
         """The ask thread, then a readiness check on it (no model request)."""
         if self._worker is None and not self._stop.is_set():
-            self._worker = _AskWorker(self.planner, self._bridge, self._stop, self._read_mail_needs)
+            self._worker = _AskWorker(self.planner, self._bridge, self._stop, self._read_mail_needs,
+                                      background=self._background_task)
             logger.info("Ask Jarvis is on (model %s; at most %d planner runs an hour, %d a day)",
                         self.config.ask.model, self.config.ask.max_per_hour, self.config.ask.max_per_day)
         self.refresh()
@@ -254,6 +289,7 @@ class AskController(QObject):
         if running is not None:
             running.cancel.set()   # the CLI is killed within a second; its Job Object goes with the app
             logger.info("Ask cancelled (app closed); nothing was proposed")
+            running.task.finish(STATUS_CANCELLED, summary="Jarvis closed")
         self._stop.set()
         self._tick.stop()
         if self._worker is not None:
@@ -262,6 +298,11 @@ class AskController(QObject):
     @property
     def busy(self) -> bool:
         return self._running is not None
+
+    @property
+    def task_id(self) -> int:
+        """The running Ask's LIVE view task id (0 when idle or without the LIVE view)."""
+        return self._running.task.id if self._running is not None else 0
 
     def stage(self) -> str:
         """The running Ask's planner.STAGE_* ("" when idle)."""
@@ -294,10 +335,12 @@ class AskController(QObject):
         assert self._worker is not None
         briefing, page_ids = self._context()
         self._seq += 1
-        running = _Running(self._seq, threading.Event(), self._monotonic())
+        task = _request_task(self.live, text, briefing)
+        running = _Running(self._seq, threading.Event(), self._monotonic(), task=task)
         self._running = running
         logger.info("Ask %d started", running.seq)
-        self._worker.put(_PlanJob(running.seq, text, briefing, tuple(page_ids), running.cancel))
+        self._worker.put(_PlanJob(running.seq, text, briefing, tuple(page_ids), running.cancel,
+                                  live=task if task is not NO_TASK else None))
         self.askStarted.emit(running.seq, text)
         self.bar.set_running(True)
         self.bar.set_meta(RUNNING_META)
@@ -313,6 +356,7 @@ class AskController(QObject):
         running.cancel_requested = True
         running.cancel.set()
         logger.info("Ask %d: Cancel clicked", running.seq)
+        running.task.note("Cancel clicked")
         self.bar.set_cancel_enabled(False)
         self._status(CANCELLING_TEXT, hud.TONE_WORKING)
 
@@ -346,6 +390,7 @@ class AskController(QObject):
             self.caps = outcome.caps
         if running.cancel_requested or outcome.kind == CANCELLED:
             logger.info("Ask %d: cancelled; nothing was proposed", seq)
+            self._finish_task(running.task, outcome, cancelled=True)
             self._status(CANCELLED_TEXT, hud.TONE_IDLE)
             self._show_meta()
             if running.busy_sent:
@@ -368,12 +413,31 @@ class AskController(QObject):
         self._show_meta(outcome)
         if running.busy_sent:
             self.busyChanged.emit(False)
+        if outcome.ok:
+            _cards_step(running.task, outcome, bool(getattr(getattr(self.config, "display", None), "hour24", False)))
         self.outcomeReady.emit(outcome)
+        self._finish_task(running.task, outcome)
         self._update_chip()
         if not outcome.ok and outcome.kind not in (ask_planner.EMPTY, "busy"):
             self.refresh()   # a failed run checks Claude Code again (the planner forgot its readiness)
         elif outcome.mail.threads or outcome.search or outcome.message:
             self.refresh(full=False)   # mail was read (or could not be): which accounts may read now
+
+    @quiet(NO_TASK)
+    def _background_task(self) -> LiveTask:
+        """The LIVE view's rolling "Background reads" task ([live] background), else NO_TASK."""
+        live_config = getattr(self.config, "live", None)
+        if self.live is None or not getattr(live_config, "background", True):
+            return NO_TASK
+        return self.live.task(TASK_BACKGROUND, BACKGROUND_TITLE, compact=True, key=BACKGROUND_KEY)
+
+    def _finish_task(self, task: LiveTask, outcome: Any, *, cancelled: bool = False) -> None:
+        """The Ask's LIVE view task ends as its outcome did (the steps still running end with it)."""
+        if task is NO_TASK:
+            return
+        status, summary = _finish_words(outcome, cancelled=cancelled)
+        task.finish(status, summary=summary)
+        self.last_task_id = task.id
 
     @staticmethod
     def _answer(outcome: Any) -> str:
@@ -497,6 +561,126 @@ class AskController(QObject):
         if need is not None:
             logger.info("Ask: sign-in to read the %s account's mail requested", logged_alias(need.alias))
             self.mailSignInRequested.emit(need.alias)
+
+
+# --------------------------------------------------------------------------
+# The LIVE view's first and last steps of an Ask (on screen only; quiet)
+# --------------------------------------------------------------------------
+
+# Refusals before or instead of a planner run: Jarvis's own checks or guards stopped the Ask.
+_BLOCKED_KINDS = frozenset({ask_planner.DISABLED, ask_planner.CAPS, ask_planner.CLI_MISSING, "not_signed_in",
+                            ask_planner.NOT_SUBSCRIPTION, ask_planner.WORKDIR, "guard", LIMIT, "busy",
+                            ask_planner.EMPTY})
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" + ("" if count == 1 else "s")
+
+
+def _briefing_words(briefing: Any) -> str:
+    if briefing is None:
+        return "none loaded"
+    parts = [f"{_plural(len(getattr(briefing, 'pending', ()) or ()), 'card')} waiting",
+             _plural(len(getattr(briefing, "sections", ()) or ()), "section"),
+             _plural(len(getattr(briefing, "deadlines", ()) or ()), "deadline")]
+    return "today's briefing: " + ", ".join(parts)
+
+
+@quiet(NO_TASK)
+def _request_task(live: LiveStream | None, text: str, briefing: Any) -> LiveTask:
+    """A new Ask's LIVE view task and its "Your request" step (NO_TASK without the LIVE view)."""
+    if live is None:
+        return NO_TASK
+    task = live.task(TASK_ASK, text)
+    if task is NO_TASK:
+        return NO_TASK
+    step = task.step(ASK_REQUEST, "Your request", fields=[("You typed", text),
+                                                          ("Briefing given", _briefing_words(briefing))])
+    if len(text) > COMMAND_CAP:
+        step.note(f"Jarvis uses the first {COMMAND_CAP} characters")
+    step.done(STATUS_OK)
+    return task
+
+
+def _card_words(card: Any, hour24: bool = False) -> str:
+    """"ASK MOVE - work - Team sync (event abc123) - to Fri Oct 9 2:00-3:00 PM - notify all"."""
+    kind = {"rsvp": "RSVP"}.get(card.kind, card.kind.upper())
+    return " - ".join([f"ASK {kind}", *ask_planner.card_details(card, hour24)])
+
+
+@quiet()
+def _cards_step(task: LiveTask, outcome: Any, hour24: bool = False) -> None:
+    """Right before the answer is handed over: what Jarvis says and the cards, as returned."""
+    if task is NO_TASK:
+        return
+    step = task.step(ASK_CARDS, "Answer and cards")
+    for label, value in (("Jarvis says", outcome.say), ("Question", outcome.question), ("Note", outcome.message)):
+        if value:
+            step.field(label, value)
+    for card in outcome.cards:
+        if card.error:
+            step.item(_card_words(card, hour24), status=STATUS_BLOCKED, note=f"information only: {card.error}")
+        elif card.unverified:
+            step.item(_card_words(card, hour24), status=STATUS_WARN,
+                      note=f"{_plural(len(card.unverified), 'recipient')} you didn't type - check the card "
+                           "before Send")
+        else:
+            step.item(_card_words(card, hour24), status=STATUS_OK)
+    step.field("Answer", "in the JARVIS tab", link="tab:jarvis")
+    decidable = sum(1 for card in outcome.cards if not card.error)
+    if decidable:
+        summary = f"{_plural(decidable, 'card')} under NEEDS YOUR OK"
+    elif outcome.question:
+        summary = "a question back"
+    else:
+        summary = "no proposals"
+    step.done(STATUS_OK, summary=summary)
+
+
+@quiet(NO_STEP)
+def _claude_check_step(task: LiveTask) -> LiveStep:
+    return task.step(CLAUDE_CHECK, "Checked Claude Code (no model request)", key="claude")
+
+
+@quiet()
+def _claude_checked(step: LiveStep, ready: Any, caps: Any) -> None:
+    if ready is None:
+        return
+    exe = getattr(ready, "exe", None)
+    step.field("Version", f"{ready.version or 'unknown'}, {exe.source}" if exe is not None else "not found")
+    auth = getattr(ready, "auth", None)
+    if auth is not None:
+        step.field("Sign-in", "claude.ai plan (claude auth status)" if auth.ok else
+                   f"{auth.method or 'not signed in'} - not a claude.ai plan sign-in")
+    if caps is not None:
+        step.field("Runs left", f"{caps.left_hour} this hour, {caps.left_day} today")
+    if ready.ok:
+        step.done(STATUS_OK, summary="ready")
+    else:
+        step.done(STATUS_BLOCKED, summary=ready.message or "not ready")
+
+
+def _finish_words(outcome: Any, *, cancelled: bool) -> tuple[str, str]:
+    """The Ask task's end: DONE, or CHECK (amber) when Jarvis refused or dropped a proposal or a card
+    has a recipient you didn't type - the header says so without opening a step."""
+    if cancelled or outcome.kind == CANCELLED:
+        return STATUS_CANCELLED, "Cancelled; nothing was proposed"
+    if outcome.ok:
+        decidable = sum(1 for card in outcome.cards if not card.error)
+        if decidable:
+            words = _plural(decidable, "card")
+        else:
+            words = "a question back" if outcome.question else "no proposals"
+        new = sum(len(card.unverified) for card in outcome.cards if not card.error)
+        problems = [part for part in (f"{outcome.refused} refused" if outcome.refused else "",
+                                      f"{outcome.dropped} dropped" if outcome.dropped else "",
+                                      f"{_plural(new, 'recipient')} you didn't type" if new else "") if part]
+        if problems:
+            return STATUS_WARN, f"{words}, {', '.join(problems)}"
+        return STATUS_OK, words
+    if outcome.kind in _BLOCKED_KINDS:
+        return STATUS_BLOCKED, outcome.message or "Ask was refused; nothing was proposed"
+    return STATUS_FAILED, outcome.message or "Ask failed; nothing was proposed"
 
 
 def _signed_in(calendar: Any) -> bool:

@@ -10,7 +10,11 @@
                                    an Email from the line's ``acct=``, after the recipient check
     run_action(executor, action)   one job of the action worker: with ``writes_running`` (the
                                    undo countdown ran out) "running" is saved before the call and
-                                   the result after it; a Reply or Email is sent only that way
+                                   the result after it; a Reply or Email is sent only that way.
+                                   ``live`` (an approved card's LIVE view task): its last checks,
+                                   sign-in, the exact payload and the call, as they happen
+    preview(action)                Executor: what execute would send or change (live.Payload; no
+                                   network, never a sign-in), for the LIVE view during the countdown
     mail_status(action)            Executor: what a Reply / Email card shows (From, recipients,
                                    why it can't send yet) and what its Send click does
     pending_confirmation(alias)    Executor: a new binding you have not confirmed yet ("Signed in
@@ -47,16 +51,22 @@ implements the same small protocol and nothing else changes.
 
 Qt-free and blocking (callers use the worker thread). Logs name only action
 ids, kinds, account aliases ("work", "personal", else "other"), statuses and
-HTTP status codes.
+HTTP status codes. The LIVE view (``live=``) only shows what happens: with or
+without it every status, store write, exception and log line is the same. A
+calendar change shows the exact request gcal sends (its ``on_request`` hook,
+only on gcal.GoogleCalendar), checked against what the countdown showed
+(``request_differs``); when Google already had the change nothing was sent and
+the steps say so (NOTHING SENT, ALREADY ...).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import traceback
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -88,6 +98,7 @@ from .actions import (
 from .config import BACKEND_COMPOSIO, BACKEND_GOOGLE, DEFAULT_ACCOUNT, AccountConfig
 from .gcal import (
     NO_TITLE,
+    RESPONSES,
     CalendarError,
     CalendarNotSignedIn,
     CalendarUnknownOutcome,
@@ -95,8 +106,9 @@ from .gcal import (
     EventGone,
     GoogleCalendar,
     NotAllowed,
+    build_event_body,
 )
-from .gmail import GmailError, GmailReader, GmailSender, GmailUnknownOutcome, OutgoingMail
+from .gmail import GmailError, GmailReader, GmailSender, GmailUnknownOutcome, MailView, OutgoingMail, mail_view
 from .google_auth import (
     ACCOUNTS_FILE,
     CALENDAR_FEATURE,
@@ -117,6 +129,25 @@ from .google_auth import (
     GoogleAccount,
     logged_alias,
     migrate_legacy_token,
+)
+from .live import (
+    ACTION_CALL,
+    ACTION_CHECKS,
+    ACTION_PAYLOAD,
+    ACTION_SIGNIN,
+    NO_STEP,
+    NO_TASK,
+    STATUS_BLOCKED,
+    STATUS_FAILED as LIVE_FAILED,
+    STATUS_OK,
+    STATUS_RUNNING as LIVE_RUNNING,
+    STATUS_WARN,
+    Field,
+    LiveStep,
+    LiveTask,
+    Payload,
+    notify_words,
+    quiet,
 )
 from .recipients import (
     OWN_RECIPIENT_MESSAGE,
@@ -243,6 +274,8 @@ class ExecResult:
     status: str             # STATUS_CREATED / STATUS_EXISTS / STATUS_SENT
     link: str = ""          # the event's page (htmlLink), "" when there is none (a cancelled event)
     result_text: str = ""   # "Accepted", "Moved", "Already cancelled" ... ("" = the card's default)
+    # Gmail's id of the sent message / the event's id (the LIVE view shows it); not part of equality.
+    ref: str = field(default="", compare=False)
 
 
 class ExecError(Exception):
@@ -395,9 +428,10 @@ class CalendarBackend:
             raise ExecError(message or UNKNOWN_ACCOUNT_MESSAGE.format(alias=account_of(action)), problem=problem)
 
     def execute(self, action: ProposedAction, *, on_stage: OnStage,
-                interactive: bool = True) -> ExecResult:
+                interactive: bool = True, live: LiveTask | None = None) -> ExecResult:
         """The one call. Without ``interactive`` nothing opens the browser: a missing sign-in is
-        a failure (nothing was sent)."""
+        a failure (nothing was sent). ``live``: the LIVE view's payload (preview() again, right
+        before the call) and call steps."""
         calendar = self._require(action)
         if interactive:
             self.prepare(action, on_stage=on_stage)
@@ -405,33 +439,95 @@ class CalendarBackend:
             raise ExecError(_not_signed_in_text(account_of(action)), problem=PROBLEM_SIGNED_OUT)
         self._require_confirmed(action, calendar)
         on_stage(STAGE_WORKING)
+        task = live or NO_TASK
+        payload = _show_payload(task, self._preview_quietly(action) if live is not None else None)
+        call = _call_step(task, *_CALENDAR_CALLS.get(action.kind, ("Google Calendar", "")))
         field = action.field
+        # The LIVE view hears the exact request right before it goes (gcal's on_request); only a
+        # calendar that takes it gets it, and only with the LIVE view on.
+        sent: list[str] = []
+        hook: dict[str, Any] = {}
+        if live is not None and call is not NO_STEP and getattr(calendar, "REQUEST_HOOK", False) is True:
+            hook["on_request"] = _request_hook(payload, call, action, sent)
         try:
             if action.kind in (CALENDAR, TODO):
                 event = action.block_event() if action.kind == TODO else action
                 if event is None:
                     raise ExecError("This to-do has no block time")
                 # Without interactive ("running" is saved) nothing may open the browser any more.
-                created = (calendar.create_event(event) if interactive
-                           else calendar.create_event(event, interactive=False))
-                return ExecResult(STATUS_EXISTS if created.existed else STATUS_CREATED, created.link)
+                created = (calendar.create_event(event, **hook) if interactive
+                           else calendar.create_event(event, interactive=False, **hook))
+                result = ExecResult(STATUS_EXISTS if created.existed else STATUS_CREATED, created.link,
+                                    ref=_text(getattr(created, "event_id", "")))
+                _calendar_done(call, payload, action, result, already=bool(created.existed), requested=bool(sent))
+                return result
             send_updates = _NOTIFY.get(field("notify", "all"), "all")
             calendar_id = field("cal", "primary")
             if action.kind == RSVP:
                 change = calendar.respond(field("event"), field("answer"), comment=action.body,
                                           send_updates=send_updates, calendar_id=calendar_id,
-                                          interactive=interactive)
+                                          interactive=interactive, **hook)
             elif action.kind == MOVE:
                 if action.start is None or action.end is None:
                     raise ExecError("This move has no new time")
                 change = calendar.move(field("event"), action.start, action.end, send_updates=send_updates,
-                                       calendar_id=calendar_id, now=self._now(), interactive=interactive)
+                                       calendar_id=calendar_id, now=self._now(), interactive=interactive, **hook)
             else:
                 change = calendar.cancel(field("event"), send_updates=send_updates, calendar_id=calendar_id,
-                                         interactive=interactive)
+                                         interactive=interactive, **hook)
         except CalendarError as exc:
             raise _exec_error(exc) from None
-        return ExecResult(STATUS_SENT, change.link, sent_text(action, already=change.already))
+        result = ExecResult(STATUS_SENT, change.link, sent_text(action, already=change.already),
+                            ref=_text(getattr(change, "event_id", "")))
+        _calendar_done(call, payload, action, result, already=bool(change.already), requested=bool(sent))
+        return result
+
+    def preview(self, action: ProposedAction) -> Payload:
+        """What execute() sends or changes for ``action``, in words (pure: no network, never a
+        sign-in; the calendar's own time zone is applied by Google, so times are named as "in your
+        calendar's time zone"). ExecError when it has nothing to carry out."""
+        field = action.field
+        today = self._now().date()
+        if action.kind in (CALENDAR, TODO):
+            event = action.block_event() if action.kind == TODO else action
+            if event is None:
+                raise ExecError("This to-do has no block time")
+            calendar = self._calendars.get(account_of(action))
+            calendar_id = _text(getattr(calendar, "calendar_id", "")) or "primary"
+            fields = [Field("Title", event.title or NO_TITLE), Field("When", _when_words(event, today))]
+            if event.where.strip():
+                fields.append(Field("Where", event.where.strip()))
+            if event.repeat:
+                fields.append(Field("Repeats", event.repeat))
+            fields.append(Field("Calendar", f"{account_of(action)} ({calendar_id})"))
+            try:
+                description = str(build_event_body(event, "").get("description", ""))
+            except CalendarError:
+                description = ""
+            return Payload("Will add exactly this", tuple(fields), "Description", description, start_open=False)
+        if action.kind not in EVENT_KINDS:
+            raise ExecError(NOTHING_TO_DO)
+        # What changes first (a short LIVE tab shows the top rows), then which event it is.
+        fields = [Field("Event", field("title") or action.title or NO_TITLE)]
+        if action.kind == RSVP:
+            fields.append(Field("Answer", _ANSWER_WORDS.get(field("answer"), field("answer"))))
+            fields.append(Field("Note to the organizer", action.body or "none"))
+        elif action.kind == MOVE:
+            if action.start is None or action.end is None:
+                raise ExecError("This move has no new time")
+            fields.append(Field("New time", f"{_when_words(action, today)}, in your calendar's time zone"))
+        else:
+            fields.append(Field("Change", "cancel (delete) the event"))
+        fields.append(Field("Who gets an email", notify_words(_NOTIFY.get(field("notify", "all"), "all"))))
+        fields += [Field("Event id", field("event"), mono=True), Field("Calendar", field("cal", "primary"), mono=True)]
+        return Payload("Will change exactly this", tuple(fields))
+
+    def _preview_quietly(self, action: ProposedAction) -> Payload | None:
+        try:
+            return self.preview(action)
+        except Exception as exc:  # noqa: BLE001 - only what the LIVE view shows
+            logger.debug("Live view: preview failed (%s)", type(exc).__name__)
+            return None
 
     def peek(self, action: ProposedAction) -> EventDetails:
         """Google's own view of the card's event; never signs in (CalendarNotSignedIn instead)."""
@@ -540,8 +636,10 @@ class GmailBackend:
         self._message(action)
 
     def execute(self, action: ProposedAction, *, on_stage: OnStage = _no_stage,
-                interactive: bool = True) -> ExecResult:
-        """The one send (run_action's "running" path only: ``interactive`` must be False)."""
+                interactive: bool = True, live: LiveTask | None = None) -> ExecResult:
+        """The one send (run_action's "running" path only: ``interactive`` must be False).
+        ``live``: the LIVE view's payload (the message exactly as built, right before the send)
+        and call steps."""
         if interactive:
             raise ExecError(COUNTDOWN_ONLY_MESSAGE)
         mail = self._message(action)
@@ -558,19 +656,39 @@ class GmailBackend:
         logger.info("Sending action %s (%s, %s) to %d recipient(s)", action.id, action.kind,
                     logged_alias(action.account), mail.recipient_count)
         on_stage(STAGE_WORKING)
+        task = live or NO_TASK
+        payload = _show_mail(task, mail) if live is not None else NO_STEP
+        call = _call_step(task, "Gmail: send the message (one call, never retried)", "users.messages.send")
         try:
             sent = sender.send(mail)
         except GmailUnknownOutcome as exc:
+            _call_failed(call, payload, str(exc), status=exc.status, unknown=True)
             raise ExecError(str(exc), outcome=OUTCOME_UNKNOWN, problem=exc.problem, status=exc.status) from None
         except GmailError as exc:
+            _call_failed(call, payload, str(exc), status=exc.status, unknown=False)
             raise ExecError(str(exc), problem=exc.problem, status=exc.status) from None
+        remembered = 0
         if self._history is not None:
             try:
                 self._history.add(mail.to + mail.cc)
+                remembered = mail.recipient_count
             except Exception as exc:  # noqa: BLE001 - the message went out; only the memory failed
                 logger.warning("Could not remember the recipients of action %s (%s)", action.id,
                                type(exc).__name__)
-        return ExecResult(STATUS_SENT, getattr(sent, "link", "") or "", sent_text(action))
+        result = ExecResult(STATUS_SENT, getattr(sent, "link", "") or "", sent_text(action),
+                            ref=_text(getattr(sent, "message_id", "")))
+        _mail_sent(call, payload, result, remembered)
+        return result
+
+    def preview(self, action: ProposedAction) -> Payload:
+        """The message execute() would send for ``action``, exactly as built (no network, never a
+        sign-in); ExecError when it may not go out as it stands."""
+        mail = self._message(action)
+        try:
+            view = mail_view(mail)
+        except GmailError as exc:
+            raise ExecError(str(exc) or type(exc).__name__, problem=exc.problem) from None
+        return mail_payload(view)
 
     def peek(self, action: ProposedAction) -> EventDetails:
         raise ExecError(NO_EVENT_MESSAGE)
@@ -786,12 +904,30 @@ class Executor:
         self._backend(action).prepare(action, on_stage=on_stage)
 
     def execute(self, action: ProposedAction, *, on_stage: OnStage = _no_stage,
-                interactive: bool = True) -> ExecResult:
-        """One call to the backend; ExecResult, or ExecError with its outcome. Never retried."""
+                interactive: bool = True, live: LiveTask | None = None) -> ExecResult:
+        """One call to the backend; ExecResult, or ExecError with its outcome. Never retried.
+        ``live`` (the LIVE view) is passed on only when given."""
         backend = self._backend(action)
         logger.info("Carrying out action %s (%s, %s)", action.id, action.kind,
                     logged_alias(account_of(action)))
-        return backend.execute(action, on_stage=on_stage, interactive=interactive)
+        extra = {"live": live} if live is not None else {}
+        return backend.execute(action, on_stage=on_stage, interactive=interactive, **extra)
+
+    def preview(self, action: ProposedAction) -> Payload | None:
+        """What execute() would send or change for ``action`` (the LIVE view's payload during the
+        undo countdown): no network, never a sign-in. None when there is no backend for it, the
+        backend can't say (ExecError) or has no preview."""
+        if not action.actionable:
+            return None
+        try:
+            backend = self.backend_for(action)
+            get = getattr(backend, "preview", None)
+            return get(action) if callable(get) else None
+        except ExecError:
+            return None
+        except Exception as exc:  # noqa: BLE001 - only what the LIVE view shows
+            logger.debug("Live view: preview failed (%s)", type(exc).__name__)
+            return None
 
     def peek(self, action: ProposedAction) -> EventDetails:
         """Google's own view of the card's event (never signs in)."""
@@ -907,7 +1043,7 @@ class Executor:
 
 def run_action(executor: Executor, action: ProposedAction, *, store: ActionStore | None = None,
                writes_running: bool = False, on_stage: OnStage = _no_stage,
-               proceed: Callable[[], bool] | None = None) -> RunOutcome:
+               proceed: Callable[[], bool] | None = None, live: LiveTask | None = None) -> RunOutcome:
     """Carry out one approved proposal, exactly once (never retried here or anywhere else).
 
     ``writes_running`` (any kind whose undo countdown ran out: a Calendar event, a Todo's
@@ -928,25 +1064,38 @@ def run_action(executor: Executor, action: ProposedAction, *, store: ActionStore
     failed). A Reply or Email is never sent that way (failed: nothing was sent). Never raises
     for an ExecError or a bug in a backend (a bug is logged by type only: its message could
     carry a token).
+
+    ``live`` (an approved card's LIVE view task) gets its "Last checks before the call" step, the
+    browser sign-in (from ``on_stage``, recorded before it is passed on), and through the backend
+    the exact payload and the call; nothing it records changes a status, a store write or an
+    exception. The caller finishes the task.
     """
     running = False
     result: ExecResult | None = None
     error: ExecError | None = None
+    task = live or NO_TASK
+    checks = task.step(ACTION_CHECKS, "Last checks before the call") if live is not None else NO_STEP
+    staged = _staged(task, action, on_stage) if live is not None else on_stage
+    extra = {"live": live} if live is not None else {}
     try:
         if action.kind in MAIL_KINDS and not writes_running:
             raise ExecError(COUNTDOWN_ONLY_MESSAGE)
         if writes_running:
             if store is None:
                 raise ExecError(NOT_SAVED_MESSAGE)
-            executor.prepare(action, on_stage=on_stage)
+            executor.prepare(action, on_stage=staged)
+            checks.note("Account ready (the Google account you confirmed)")
             if proceed is not None and not proceed():
                 raise ExecError(CLOSING_MESSAGE)
             if not store.set(action.id, STATUS_RUNNING, kind=action.kind, account=action.account):
                 raise ExecError(NOT_SAVED_MESSAGE)
             running = True
-            result = executor.execute(action, on_stage=on_stage, interactive=False)
+            checks.note('Saved "running" before the call (so a crash shows UNKNOWN, never a silent resend)')
+            checks.done(STATUS_OK)
+            result = executor.execute(action, on_stage=staged, interactive=False, **extra)
         else:
-            result = executor.execute(action, on_stage=on_stage)
+            checks.done(STATUS_OK)
+            result = executor.execute(action, on_stage=staged, **extra)
     except ExecError as exc:
         error = exc
     except Exception as exc:  # noqa: BLE001 - a bug must not end the worker
@@ -959,6 +1108,8 @@ def run_action(executor: Executor, action: ProposedAction, *, store: ActionStore
         logger.info("Action %s (%s, %s) not carried out: %s%s", action.id, action.kind,
                     logged_alias(account_of(action)), status,
                     f" (HTTP {error.status})" if error.status else "")
+        if live is not None:
+            _not_carried_out(task, checks, error, unknown=status == STATUS_UNKNOWN)
     else:
         assert result is not None
         status = result.status
@@ -969,6 +1120,302 @@ def run_action(executor: Executor, action: ProposedAction, *, store: ActionStore
         else:
             store.set(action.id, status, message=str(error or ""), kind=action.kind, account=action.account)
     return RunOutcome(status, result, error)
+
+
+# --------------------------------------------------------------------------
+# The LIVE view's steps of an approved card (on screen only; every helper is quiet)
+# --------------------------------------------------------------------------
+
+_ANSWER_WORDS = {"yes": "yes (accepted)", "no": "no (declined)", "maybe": "maybe (tentative)"}
+# kind -> (the call step's title, the request)
+_CALENDAR_CALLS = {
+    CALENDAR: ("Google Calendar: add the event", "events.insert (after looking for the same event)"),
+    TODO: ("Google Calendar: add the block", "events.insert (after looking for the same event)"),
+    RSVP: ("Google Calendar: answer the invitation", "events.patch (your attendee entry only)"),
+    MOVE: ("Google Calendar: move the event", "events.patch (start, end)"),
+    CANCEL: ("Google Calendar: cancel the event", "events.delete"),
+}
+_RSVP_DONE = {"yes": "ACCEPTED", "no": "DECLINED", "maybe": "ANSWERED MAYBE"}
+# ExecErrors that are one of Jarvis's own guards refusing (BLOCKED), not a failure.
+_GUARD_PROBLEMS = frozenset({PROBLEM_CONFIRM, PROBLEM_IDENTITY})
+_GUARD_MESSAGES = (COUNTDOWN_ONLY_MESSAGE, NEW_RECIPIENTS_MESSAGE, CLOSING_MESSAGE)
+
+
+def _text(value: Any) -> str:
+    return value if isinstance(value, str) else ""
+
+
+def _when_words(item: Any, today: date) -> str:
+    """"Fri Oct 9 2:00-3:00 PM" (the card's words without its separator dots)."""
+    return when_text(item, today).replace(_SEPARATOR, " ")
+
+
+def mail_payload(view: MailView) -> Payload:
+    """A message as the LIVE view shows what will be / was sent (gmail.mail_view)."""
+    return Payload("Will send exactly this", (
+        Field("From", view.from_addr or "(Gmail fills it in)", mono=True), Field("To", view.to),
+        Field("Cc", view.cc or "none"), Field("Subject", view.subject),
+        Field("In-Reply-To", view.in_reply_to or "none", mono=True),
+        Field("References", view.references or "none", mono=True),
+        Field("Gmail thread", view.thread_id or "a new thread", mono=True)), "Message", view.body)
+
+
+@quiet(NO_STEP)
+def _payload_step(task: LiveTask, title: str) -> LiveStep:
+    step = task.find(ACTION_PAYLOAD)
+    return step if step is not NO_STEP else task.step(ACTION_PAYLOAD, title)
+
+
+@quiet(NO_STEP)
+def _show_payload(task: LiveTask, payload: Payload | None) -> LiveStep:
+    """Right before the call: the payload step shows exactly what goes out (a difference from
+    what the countdown showed is named and marks it CHECK)."""
+    if not task.enabled or payload is None:
+        return NO_STEP
+    step = _payload_step(task, payload.title)
+    changed = step.show(payload)
+    step.update(status_text="SENDING")
+    if changed:
+        step.note("Not what the countdown showed: " + ", ".join(changed) + " changed")
+        step.update(status_text="CHANGED SINCE")
+    return step
+
+
+@quiet(NO_STEP)
+def _show_mail(task: LiveTask, mail: OutgoingMail) -> LiveStep:
+    try:
+        view = mail_view(mail)
+    except GmailError:
+        step = _payload_step(task, "Will send exactly this")
+        step.done(LIVE_FAILED, status_text="NOT SENT",
+                  summary="The message could not be put together, so nothing was sent")
+        return step
+    return _show_payload(task, mail_payload(view))
+
+
+@quiet(NO_STEP)
+def _call_step(task: LiveTask, title: str, request: str) -> LiveStep:
+    if not task.enabled:
+        return NO_STEP
+    return task.step(ACTION_CALL, title, fields=[Field("Request", request, mono=True)])
+
+
+@quiet()
+def _call_failed(call: LiveStep, payload: LiveStep, message: str, *, status: int | None, unknown: bool) -> None:
+    http = f" (HTTP {status})" if status else ""
+    if unknown:
+        call.done(STATUS_WARN, status_text="UNKNOWN", summary="it may have happened - check Sent mail / the calendar "
+                                                              f"before retrying{http}")
+        call.note(message)
+        payload.done(STATUS_WARN, status_text="UNKNOWN", summary="it may have gone out - check before retrying")
+    else:
+        call.done(LIVE_FAILED, summary=f"{message}{http}")
+        payload.done(LIVE_FAILED, status_text="NOT SENT", summary="Not sent")
+
+
+def _payload_done(payload: LiveStep, word: str) -> None:
+    view = payload.view()
+    if view is not None and view.status_text == "CHANGED SINCE":
+        payload.done(STATUS_WARN, status_text="CHECK",
+                     summary="what went out is not what the countdown showed (see the note)")
+    else:
+        payload.done(STATUS_OK, status_text=word)
+
+
+@quiet()
+def _mail_sent(call: LiveStep, payload: LiveStep, result: ExecResult, remembered: int) -> None:
+    if call is NO_STEP:
+        return
+    call.field("Gmail message id", result.ref or "(none returned)", mono=True)
+    if result.link:
+        call.field("Thread", "Open the thread in Gmail", link=result.link)
+    call.field("Recipients remembered", str(remembered))
+    call.done(STATUS_OK, status_text="SENT")
+    _payload_done(payload, "SENT EXACTLY THIS")
+
+
+# Google already had it, so nothing was written: what the call step says instead of the change.
+_ALREADY_WORDS = {CALENDAR: "ALREADY THERE", TODO: "ALREADY THERE", RSVP: "ALREADY ANSWERED",
+                  MOVE: "ALREADY AT THAT TIME", CANCEL: "ALREADY GONE"}
+_ALREADY_REQUESTS = {CALENDAR: "none - the same event is already there (found with events.list)",
+                     TODO: "none - the same event is already there (found with events.list)",
+                     RSVP: "none - Google has that answer already (read with events.get)",
+                     MOVE: "none - the event is at that time already (read with events.get)",
+                     CANCEL: "none - Google has no such event any more (read with events.get)"}
+
+
+@quiet()
+def _calendar_done(call: LiveStep, payload: LiveStep, action: ProposedAction, result: ExecResult, *,
+                   already: bool, requested: bool = False) -> None:
+    """The call's result. ``already``: Google had it already; ``requested``: a request went out all
+    the same (a Cancel whose delete found the event gone) - else nothing was sent or written."""
+    if call is NO_STEP:
+        return
+    if result.ref:
+        call.field("Event id", result.ref, mono=True)
+    if result.link:
+        call.field("Event", "Open the event in Google Calendar", link=result.link)
+    if already:
+        if not requested:
+            call.field("Request", _ALREADY_REQUESTS.get(action.kind, "none"), mono=True)
+        call.field("Already that way", "yes - nothing changed")
+        call.done(STATUS_OK, status_text=_ALREADY_WORDS.get(action.kind, "ALREADY SO"), summary=result.result_text)
+        if requested:
+            _payload_done(payload, "SENT - NO CHANGE")
+        elif payload is not NO_STEP:
+            view = payload.view()
+            if view is not None and view.status_text == "CHANGED SINCE":
+                payload.done(STATUS_WARN, status_text="CHECK", summary="Nothing was sent: Google already had it "
+                                                                       "(and the request differed - see the note)")
+            else:
+                payload.done(STATUS_OK, status_text="NOTHING SENT", summary="Google already had this, so nothing "
+                                                                            "was sent or changed")
+        return
+    if action.kind in (CALENDAR, TODO):
+        word = "ADDED"
+    elif action.kind == RSVP:
+        word = _RSVP_DONE.get(action.field("answer"), "ANSWERED")
+    elif action.kind == MOVE:
+        word = "MOVED"
+    else:
+        word = "CANCELLED EVENT"
+    call.done(STATUS_OK, status_text=word, summary=result.result_text)
+    _payload_done(payload, "ADDED" if action.kind in (CALENDAR, TODO) else "CHANGED")
+
+
+REQUEST_BLOCK = "Exact request to Google"
+
+
+def _request_hook(payload: LiveStep, call: LiveStep, action: ProposedAction,
+                  sent: list[str]) -> Callable[[str, dict[str, Any]], None]:
+    """gcal's on_request: the exact request, right before it goes (the worker thread)."""
+
+    def heard(method: str, params: dict[str, Any]) -> None:
+        sent.append(method)
+        _show_request(payload, call, action, method, params)
+
+    return heard
+
+
+def _request_line(method: str, params: Mapping[str, Any]) -> str:
+    """"events.patch calendarId=primary eventId=abc123 sendUpdates=all" (the body is the block)."""
+    names = ("calendarId", "eventId", "sendUpdates")
+    return " ".join([method, *(f"{name}={params[name]}" for name in names if name in params)])
+
+
+@quiet()
+def _show_request(payload: LiveStep, call: LiveStep, action: ProposedAction, method: str,
+                  params: dict[str, Any]) -> None:
+    call.field("Request", _request_line(method, params), mono=True)
+    body = params.get("body")
+    if payload is NO_STEP:
+        return
+    if isinstance(body, Mapping):
+        payload.block(REQUEST_BLOCK, json.dumps(body, indent=2, ensure_ascii=False))
+    differs = request_differs(action, method, params)
+    if differs:
+        verb = "differs" if len(differs) == 1 else "differ"
+        payload.note(f"Not what the countdown showed: {', '.join(differs)} {verb} in the request to Google")
+        payload.update(status_text="CHANGED SINCE")
+
+
+def _wall_text(moment: datetime | None) -> str:
+    return moment.replace(tzinfo=None).strftime("%Y-%m-%dT%H:%M:%S") if moment is not None else ""
+
+
+def request_differs(action: ProposedAction, method: str, params: Mapping[str, Any]) -> list[str]:
+    """The labels of what the countdown showed (preview()) that the request to Google does not carry
+    as shown: the event's title, time, place, repeat, the event id, the answer, the new time, who
+    gets an email, the calendar. [] when the request is what the card said."""
+    differs: list[str] = []
+    body = params.get("body") if isinstance(params.get("body"), Mapping) else {}
+    if action.kind in (CALENDAR, TODO):
+        event = action.block_event() if action.kind == TODO else action
+        if event is None or method != "events.insert":
+            return ["Request"]
+        if str(body.get("summary", "")) != event.title.strip():
+            differs.append("Title")
+        start = body.get("start") if isinstance(body.get("start"), Mapping) else {}
+        if event.start is not None:
+            if start.get("dateTime") != _wall_text(event.start):
+                differs.append("When")
+        elif event.all_day_start is not None and start.get("date") != event.all_day_start.isoformat():
+            differs.append("When")
+        if str(body.get("location", "")) != event.where.strip():
+            differs.append("Where")
+        if bool(body.get("recurrence")) != bool(event.rrule.strip()):
+            differs.append("Repeats")
+        return differs
+    field = action.field
+    expected = {RSVP: "events.patch", MOVE: "events.patch", CANCEL: "events.delete"}.get(action.kind)
+    if method != expected:
+        return ["Request"]
+    if params.get("eventId") != field("event"):
+        differs.append("Event id")
+    if params.get("calendarId") != field("cal", "primary"):
+        differs.append("Calendar")
+    if params.get("sendUpdates") != _NOTIFY.get(field("notify", "all"), "all"):
+        differs.append("Who gets an email")
+    if action.kind == RSVP:
+        attendees = body.get("attendees") if isinstance(body.get("attendees"), list) else []
+        mine = attendees[0] if attendees and isinstance(attendees[0], Mapping) else {}
+        if mine.get("responseStatus") != RESPONSES.get(field("answer")):
+            differs.append("Answer")
+        if str(mine.get("comment", "")) != (action.body or ""):
+            differs.append("Note to the organizer")
+    elif action.kind == MOVE:
+        start = body.get("start") if isinstance(body.get("start"), Mapping) else {}
+        end = body.get("end") if isinstance(body.get("end"), Mapping) else {}
+        if (start.get("dateTime"), end.get("dateTime")) != (_wall_text(action.start), _wall_text(action.end)):
+            differs.append("New time")
+    return differs
+
+
+def _staged(task: LiveTask, action: ProposedAction, on_stage: OnStage) -> OnStage:
+    """``on_stage`` that records the browser sign-in in the LIVE view first, then passes it on."""
+    signin: list[LiveStep] = []
+
+    def staged(stage: str) -> None:
+        _record_stage(task, signin, action, stage)
+        on_stage(stage)
+
+    return staged
+
+
+@quiet()
+def _record_stage(task: LiveTask, signin: list[LiveStep], action: ProposedAction, stage: str) -> None:
+    if stage == STAGE_SIGNIN:
+        signin.append(task.step(ACTION_SIGNIN, "Google sign-in in your browser",
+                                fields=[("Account", account_of(action))]))
+    elif stage == STAGE_SIGNED_IN and signin:
+        signin[-1].done(STATUS_OK, summary="signed in")
+
+
+@quiet()
+def _not_carried_out(task: LiveTask, checks: LiveStep, error: ExecError, *, unknown: bool) -> None:
+    """run_action ended with ``error``: the step it ended in says why."""
+    message = str(error) or "unknown error"
+    http = f" (HTTP {error.status})" if error.status else ""
+    for kind in (ACTION_SIGNIN, ACTION_CALL, ACTION_PAYLOAD):
+        step = task.find(kind)
+        view = step.view()
+        if view is None or view.status != LIVE_RUNNING:
+            continue
+        if kind == ACTION_PAYLOAD:
+            if unknown:
+                step.done(STATUS_WARN, status_text="UNKNOWN", summary="it may have gone out - check before retrying")
+            else:
+                step.done(LIVE_FAILED, status_text="NOT SENT", summary="Not sent")
+        elif kind == ACTION_CALL and unknown:
+            step.done(STATUS_WARN, status_text="UNKNOWN",
+                      summary=f"it may have happened - check Sent mail / the calendar before retrying{http}")
+        else:
+            step.done(LIVE_FAILED, summary=f"{message}{http}")
+    if task.find(ACTION_CALL) is not NO_STEP:
+        return   # the call was made (or tried): its step says what happened
+    guard = error.problem in _GUARD_PROBLEMS or message in _GUARD_MESSAGES or message.startswith(
+        OWN_RECIPIENT_MESSAGE.split("{", 1)[0])
+    checks.done(STATUS_BLOCKED if guard else LIVE_FAILED, summary=f"{message}{http}")
 
 
 # --------------------------------------------------------------------------

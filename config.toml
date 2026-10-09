@@ -213,3 +213,21 @@ speak_results = true
 # true: the scheduled runs and the catch-up show the classic "Hear it now?"
 # prompt instead of announcing the briefing.
 scheduled_prompt = false
+
+[live]
+# The LIVE tab: every step Jarvis takes for an Ask or a card you approved, as it
+# happens - what he read, the exact text he gave the planner, what he will send.
+# On screen only: never saved, never logged; Clear empties it.
+enabled = true
+# When Jarvis starts working on an Ask or an approved card: "tab" brings up the
+# LIVE tab (not while the briefing plays on BRIEFING; in a window too small to
+# show the steps, the pop-out on your other screen when there is one), "window"
+# shows the LIVE pop-out window without taking the focus, "off" never switches.
+auto_open = "tab"
+# Also show the reads Jarvis does on his own (agenda, event checks, sign-ins,
+# Claude Code checks) in one compact row.
+background = true
+# Show the text Jarvis read and sent (email threads, the planner's input and
+# reply, the outgoing message). false: only their sizes (also of the message
+# text in the planner's proposals); subjects, names and addresses still show.
+text = true

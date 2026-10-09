@@ -5,10 +5,10 @@ ground with a faint cyan grid, chamfered (cut-corner) panels, cyan accents,
 amber for anything that needs the user's OK, and three typefaces: Chakra Petch
 (wordmark), Sora (prose) and JetBrains Mono (labels, meta, numbers). Every
 widget paints itself with QPainter; nothing here knows about briefings,
-Notion or Google, so ``ui.py`` composes the views from these parts. The one
-import from the package is the Qt-free clock formatter
+Notion or Google, so ``ui.py`` composes the views from these parts. The
+imports from the package are the Qt-free clock formatter
 (``text_prep.clock_parts`` / ``format_time``), so every screen writes times
-the same way.
+the same way, and the LIVE view's Qt-free event types and words (``live``).
 
 Public API
 ==========
@@ -169,12 +169,51 @@ Widgets
     ``ActivityLog``: ``add(tag, message, sub="", when=None)`` newest first,
         at most ``ActivityLog.MAX_ENTRIES``; tags ``TAG_RUN``, ``TAG_DONE``,
         ``TAG_WAIT``, ``TAG_STOP``, ``TAG_ASK``; ``entries()``; ``set_hour24(bool)``.
-    ``TabStrip``: the JARVIS / BRIEFING folder tabs above the centre panel
-        (``TAB_JARVIS``, ``TAB_BRIEFING``; ``currentChanged(int)``,
+    ``TabStrip(live=False)``: the JARVIS / BRIEFING folder tabs above the
+        centre panel (``TAB_JARVIS``, ``TAB_BRIEFING``; ``currentChanged(int)``,
         ``set_current``, ``current()``, ``set_badge(bool)`` = the amber NEW
         pill on BRIEFING, ``set_unread(bool)`` = a dot on JARVIS,
-        ``set_compact(bool)``, automatic below ``TabStrip.COMPACT_BELOW`` px);
-        each tab is a ``TabButton`` (Left / Right move between them).
+        ``set_compact(bool)``, automatic below ``max(TabStrip.COMPACT_BELOW,
+        natural_width())`` px, the natural width counting every badge so a dot
+        never flips it); each tab is a ``TabButton`` (Left / Right move between
+        the shown tabs). ``live=True`` adds LIVE (``TAB_LIVE``, accessible
+        name "Live steps"): ``set_live_visible(bool)`` (hidden, it is never
+        current and Left / Right skip it), ``set_activity(state)`` its dot
+        (``ACTIVITY_UNREAD`` steady, ``ACTIVITY_WORKING`` blinking on the
+        shared blink clock; none while LIVE is current), ``activity()``.
+    ``LiveLog(clock=time.monotonic)``: the LIVE view (live.py's stream): one
+        chamfered card per task (the pinned "Background reads" first, then
+        oldest -> newest), its header a button (tag pill, the title in at most
+        two lines, the status pill with the running time or "SENDING IN 7 S",
+        the meta line; a compact task is one line until opened) and its steps
+        as button rows (status glyph, title, summary, status word over the
+        elapsed time; click, Space or Enter shows / hides the details: fields
+        in two columns from ``LIVE_FIELDS_MEDIUM_PX`` up (the label column
+        narrower below ``LIVE_FIELDS_WIDE_PX``), items, notes, and
+        collapsible read-only text blocks made on their first open, at most
+        ``LIVE_TEXT_MAX_PX`` tall, "written by other people" on untrusted
+        ones). ``apply(live.LiveChanges)`` redoes only tasks whose revision
+        changed; ``clear()``, ``set_hour24``, ``task_widget(id)``,
+        ``step_widget(id)``, ``task_ids()``, ``reveal(task_id)``,
+        ``following()``, ``scroll_to_newest()``, ``tick()``, ``ticking()``;
+        ``linkClicked(str)`` (a result link or an internal id such as
+        "tab:jarvis"). Plain text only (painted, PlainText labels, a read-only
+        QPlainTextEdit); it follows the newest step unless the owner scrolled
+        in the last 4 s (what came meanwhile is followed when the hold ends),
+        keeps an approved card's payload in view during its undo countdown
+        (a card just approved comes into view whatever was scrolled), shows its
+        empty-state text while only the pinned row is there, and keeps its
+        column at most ``LIVE_CONTENT_MAX_PX`` wide; its timer ticks every
+        250 ms during a countdown, every second while a step runs, never while
+        hidden, minimized or idle; Tab walks the rows in the order they are
+        shown.
+    ``LiveStatus``: the LIVE page's tag in the strip (``set_state(LIVE_IDLE |
+        LIVE_WORKING | LIVE_COUNTDOWN, text=None, since=, deadline=)``,
+        ``text()``: "IDLE", "WORKING 0:12", "SENDING IN 7 S"); it blinks only
+        while working or counting down. ``paint_status_glyph(painter, rect,
+        status, opacity=1.0)`` draws live.STATUS_*'s glyph (running square, ok
+        check, warn triangle, blocked octagon, failed cross, cancelled dash);
+        ``live_status_color(status)``.
     ``ConversationLog``: Jarvis's conversation, oldest first, never elided
         (``add(role, text, when=, tone=, sub=, link_text=, link_id=) -> id``,
         ``update(id, ...)``, ``entries()``, ``clear()``, ``set_hour24``;
@@ -236,6 +275,7 @@ from PySide6.QtGui import (
     QFontInfo,
     QFontMetricsF,
     QImage,
+    QKeySequence,
     QLinearGradient,
     QPainter,
     QPainterPath,
@@ -264,6 +304,7 @@ from PySide6.QtWidgets import (
     QLayout,
     QLayoutItem,
     QLineEdit,
+    QMenu,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -274,6 +315,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import live as live_events
 from .text_prep import clock_parts, format_time
 
 logger = logging.getLogger(__name__)
@@ -1501,6 +1543,173 @@ class LiveMarker(_Blinking):
 
 
 # --------------------------------------------------------------------------
+# LIVE view: status glyphs and the strip's status tag
+# --------------------------------------------------------------------------
+
+# The colour of each LIVE status (live.STATUS_*): words, glyphs and pills.
+LIVE_STATUS_COLORS = {
+    live_events.STATUS_RUNNING: ACCENT, live_events.STATUS_OK: GREEN, live_events.STATUS_WARN: AMBER,
+    live_events.STATUS_BLOCKED: AMBER, live_events.STATUS_FAILED: RED, live_events.STATUS_CANCELLED: TEXT_DIM,
+}
+
+
+def live_status_color(status: str) -> str:
+    return LIVE_STATUS_COLORS.get(status, TEXT_DIM)
+
+
+def paint_status_glyph(painter: QPainter, rect: QRectF, status: str, opacity: float = 1.0) -> None:
+    """The LIVE view's status glyph, centred in ``rect`` (square, about 10 px): RUNNING a filled
+    accent square (``opacity`` blinks it), OK a green check, WARN an amber outline triangle with a
+    bar, BLOCKED an amber filled octagon with an ink bar, FAILED a red cross, CANCELLED a dim dash.
+    Anything else draws nothing."""
+    side = min(rect.width(), rect.height())
+    if side <= 0:
+        return
+    box = QRectF(rect.center().x() - side / 2, rect.center().y() - side / 2, side, side)
+
+    def at(fx: float, fy: float) -> QPointF:
+        return QPointF(box.left() + fx * side, box.top() + fy * side)
+
+    painter.save()
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        pen_width = max(1.5, side / 5)
+        if status == live_events.STATUS_RUNNING:
+            inner = side * 0.7
+            painter.fillRect(QRectF(box.center().x() - inner / 2, box.center().y() - inner / 2, inner, inner),
+                             rgba(ACCENT, opacity))
+        elif status == live_events.STATUS_OK:
+            pen = QPen(QColor(GREEN), pen_width)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.drawPolyline(QPolygonF([at(0.12, 0.52), at(0.4, 0.8), at(0.9, 0.2)]))
+        elif status == live_events.STATUS_WARN:
+            pen = QPen(QColor(AMBER), max(1.2, side / 8))
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.drawPolygon(QPolygonF([at(0.5, 0.04), at(0.97, 0.92), at(0.03, 0.92)]))
+            painter.drawLine(at(0.5, 0.38), at(0.5, 0.62))
+            painter.drawPoint(at(0.5, 0.77))
+        elif status == live_events.STATUS_BLOCKED:
+            c = 0.3
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(AMBER))
+            painter.drawPolygon(QPolygonF([at(c, 0), at(1 - c, 0), at(1, c), at(1, 1 - c), at(1 - c, 1),
+                                           at(c, 1), at(0, 1 - c), at(0, c)]))
+            pen = QPen(QColor(AMBER_INK), max(1.5, side / 6))
+            painter.setPen(pen)
+            painter.drawLine(at(0.25, 0.5), at(0.75, 0.5))
+        elif status == live_events.STATUS_FAILED:
+            pen = QPen(QColor(RED), pen_width)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            painter.drawLine(at(0.15, 0.15), at(0.85, 0.85))
+            painter.drawLine(at(0.15, 0.85), at(0.85, 0.15))
+        elif status == live_events.STATUS_CANCELLED:
+            pen = QPen(QColor(TEXT_DIM), pen_width)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            painter.drawLine(at(0.15, 0.5), at(0.85, 0.5))
+    finally:
+        painter.restore()
+
+
+LIVE_IDLE = "idle"
+LIVE_WORKING = "working"
+LIVE_COUNTDOWN = "countdown"
+LIVE_STATES = (LIVE_IDLE, LIVE_WORKING, LIVE_COUNTDOWN)
+_LIVE_STATE_COLORS = {LIVE_IDLE: TEXT_DIM, LIVE_WORKING: ACCENT, LIVE_COUNTDOWN: AMBER}
+# The widest text of each state (a mono font: the width only depends on the number of characters),
+# so the tag keeps its width while it counts.
+_LIVE_STATE_TEMPLATES = {LIVE_IDLE: "IDLE", LIVE_WORKING: "WORKING 00:00", LIVE_COUNTDOWN: " IN 10 S"}
+
+
+class LiveStatus(_Blinking):
+    """The LIVE page's tag in the centre panel's strip, where the briefing's LiveMarker sits on the
+    other tabs (same height): "IDLE" (dim, no blink), "WORKING 0:12" (accent, a blinking square,
+    the time counting from ``since``) or "SENDING IN 7 S" (amber, counting down to ``deadline``).
+    It blinks (and so repaints its time) only while working or counting down."""
+
+    def __init__(self, parent: QWidget | None = None, *,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        super().__init__(parent)
+        self._font = mono_font(11, 400, 0.12)
+        self._clock = clock
+        self._state = LIVE_IDLE
+        self._word = "IDLE"
+        self._since: float | None = None
+        self._deadline: float | None = None
+        policy = QSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        policy.setRetainSizeWhenHidden(False)
+        self.setSizePolicy(policy)
+        self.set_blinking(False)
+        self.setAccessibleName("Live: idle")
+
+    def state(self) -> str:
+        return self._state
+
+    def set_state(self, state: str, text: str | None = None, *, since: float | None = None,
+                  deadline: float | None = None) -> None:
+        """``state`` LIVE_IDLE / LIVE_WORKING / LIVE_COUNTDOWN; ``text`` the word ("WORKING",
+        "SENDING", "ADDING"; the state's own by default)."""
+        state = state if state in LIVE_STATES else LIVE_IDLE
+        default = {LIVE_IDLE: "IDLE", LIVE_WORKING: "WORKING", LIVE_COUNTDOWN: "SENDING"}[state]
+        word = (text or default).upper()
+        changed = (state, word, since, deadline) != (self._state, self._word, self._since, self._deadline)
+        self._state, self._word = state, word
+        self._since = since if state == LIVE_WORKING else None
+        self._deadline = deadline if state == LIVE_COUNTDOWN else None
+        if changed:
+            self.set_blinking(state != LIVE_IDLE)
+            self.setAccessibleName(f"Live: {self.text().lower()}")
+            self.updateGeometry()
+            self.update()
+
+    def text(self) -> str:
+        """What the tag says now ("WORKING 0:12", "SENDING IN 7 S", "IDLE")."""
+        now = self._clock()
+        if self._state == LIVE_WORKING and self._since is not None:
+            return f"{self._word} {live_events.elapsed_text(now - self._since)}"
+        if self._state == LIVE_COUNTDOWN and self._deadline is not None:
+            return f"{self._word} IN {live_events.countdown_seconds(self._deadline, now)} S"
+        return self._word
+
+    def color(self) -> str:
+        return _LIVE_STATE_COLORS[self._state]
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        template = _LIVE_STATE_TEMPLATES[self._state]
+        if self._state == LIVE_COUNTDOWN:
+            template = self._word + template
+        widest = max(_text_advance(self._font, template), _text_advance(self._font, self.text()))
+        return QSize(math.ceil(8 + 7 + 7 + widest + 8), math.ceil(_line_height(self._font)) + 8 + 2)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return self.sizeHint()
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            rect = QRectF(self.rect())
+            color = self.color()
+            painter.setPen(QPen(rgba(color, 0.5 if self._state != LIVE_IDLE else 0.3), 1))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(rect.adjusted(0.5, 0.5, -0.5, -0.5))
+            square = QRectF(8, round(rect.height() / 2 - 3.5), 7, 7)
+            painter.fillRect(square, rgba(color, self.blink_opacity() if self._state != LIVE_IDLE else 0.6))
+            painter.setFont(self._font)
+            painter.setPen(QColor(color))
+            text_rect = rect.adjusted(8 + 7 + 7, 0, -2, 0)
+            text = QFontMetricsF(self._font).elidedText(self.text(), Qt.TextElideMode.ElideRight, text_rect.width())
+            painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
+        finally:
+            painter.end()
+
+
+# --------------------------------------------------------------------------
 # Orb and state label
 # --------------------------------------------------------------------------
 
@@ -2068,6 +2277,14 @@ class HeaderBar(QWidget):
         layout.addSpacing(self._BUTTON_GAP)
         layout.addWidget(self.close_button, 0, Qt.AlignmentFlag.AlignVCenter)
         self._clock.set_now(self._now())
+        self._sync_chips_box()
+
+    def _sync_chips_box(self) -> None:
+        """No chips shown (the LIVE pop-out's header): their row and its margins take no room, as
+        _required_width counts them."""
+        shown = bool(self._shown_chips())
+        if self._chips_box.isHidden() == shown:
+            self._chips_box.setVisible(shown)
 
     def _on_close_clicked(self) -> None:
         self.closeRequested.emit()
@@ -2121,6 +2338,7 @@ class HeaderBar(QWidget):
             chip.set_tight(self._level >= 3)
             self._chips[name] = chip
             self._chip_row.addWidget(chip)
+            self._sync_chips_box()
             self.updateGeometry()
             self._fit()
         else:
@@ -2134,6 +2352,7 @@ class HeaderBar(QWidget):
         if chip is None or chip.isHidden() == (not visible):
             return
         chip.setVisible(visible)
+        self._sync_chips_box()
         self.updateGeometry()
         self._fit(force=True)
 
@@ -6547,15 +6766,36 @@ class ActivityLog(QScrollArea):
 
 TAB_JARVIS = 0
 TAB_BRIEFING = 1
+TAB_LIVE = 2
 NEW_BADGE_TEXT = "NEW"
 _TAB_TEXT = "#8592a0"           # a tab that is not current (the step chips' "todo" text)
+ACTIVITY_UNREAD = "unread"      # the LIVE tab's dot: steps arrived while LIVE was not current
+ACTIVITY_WORKING = "working"    # ... the same dot blinking: Jarvis is working on an Ask or a card
+ACTIVITIES = ("", ACTIVITY_UNREAD, ACTIVITY_WORKING)
+BADGE_UNREAD = "unread"         # what a tab's badge can be (TabButton.set_badge_kinds)
+BADGE_NEW = "new"
+BADGE_ACTIVITY = "activity"
+_ACTIVITY_NAMES = {ACTIVITY_UNREAD: ", new steps", ACTIVITY_WORKING: ", Jarvis is working"}
+_ACTIVITY_TIPS = {ACTIVITY_UNREAD: "New steps", ACTIVITY_WORKING: "Jarvis is working - see every step"}
+
+
+def _sync_blink_clock(widget: QWidget, wanted: bool) -> None:
+    """Register ``widget`` with the shared blink clock while ``wanted`` and shown (it repaints at
+    each on/off flip), else unregister it."""
+    clock = _blink_clock()
+    if wanted and widget.isVisible():
+        clock.register(widget)
+    else:
+        clock.unregister(widget)
 
 
 class TabButton(QAbstractButton):
     """One folder tab: mono capitals, a 2 px bottom border (accent when current) and an optional
-    badge after the label - the amber NEW pill (an 8 px amber dot when compact) or a 6 px accent
-    "unread" dot. Checkable and auto-exclusive with its siblings; Tab focus only (a ring for
-    keyboard focus); Left / Right move to the neighbouring tab."""
+    badge after the label - the amber NEW pill (an 8 px amber dot when compact), a 6 px accent
+    "unread" dot, or the LIVE tab's activity dot (``set_activity``: ``ACTIVITY_UNREAD``, or
+    ``ACTIVITY_WORKING``, which blinks on the shared blink clock). Checkable and auto-exclusive
+    with its siblings; Tab focus only (a ring for keyboard focus); Left / Right move to the
+    neighbouring tab."""
 
     HEIGHT = 28
     _PAD = 12
@@ -6579,11 +6819,32 @@ class TabButton(QAbstractButton):
         self._name = name
         self._new = False
         self._unread = False
+        self._activity = ""
+        self._badge_kinds: frozenset[str] = frozenset()   # the badges this tab can show (natural_width)
         self._compact = False
         self._focus_visible = False
         self._update_accessible()
 
     # ---- state ----------------------------------------------------------------
+
+    def set_badge_kinds(self, kinds: Sequence[str]) -> None:
+        """The badges this tab can carry (BADGE_UNREAD, BADGE_NEW, BADGE_ACTIVITY): its
+        ``natural_width`` has room for the widest of them, so the strip never flips to compact
+        when one appears."""
+        self._badge_kinds = frozenset(kinds)
+
+    def set_activity(self, state: str) -> None:
+        """The LIVE tab's dot: "" (none), ACTIVITY_UNREAD or ACTIVITY_WORKING (blinking)."""
+        state = state if state in ACTIVITIES else ""
+        if state != self._activity:
+            self._activity = state
+            self._update_accessible()
+            self.updateGeometry()
+            self.update()
+        _sync_blink_clock(self, self._activity == ACTIVITY_WORKING)
+
+    def activity(self) -> str:
+        return self._activity
 
     def set_new(self, new: bool) -> None:
         if bool(new) != self._new:
@@ -6617,13 +6878,14 @@ class TabButton(QAbstractButton):
             name += ", new briefing"
         if self._unread:
             name += ", new entries"
+        name += _ACTIVITY_NAMES.get(self._activity, "")
         self.setAccessibleName(name)
         if self._new:
             self.setToolTip("A new briefing you have not viewed yet")
         elif self._unread:
             self.setToolTip("Jarvis added something here")
         else:
-            self.setToolTip("")
+            self.setToolTip(_ACTIVITY_TIPS.get(self._activity, ""))
 
     # ---- geometry -------------------------------------------------------------
 
@@ -6635,7 +6897,7 @@ class TabButton(QAbstractButton):
             return self._GAP + 2 * self._PILL_PAD + _text_advance(self._badge_font, NEW_BADGE_TEXT)
         if self._new:
             return self._GAP + 8
-        if self._unread:
+        if self._unread or self._activity:
             return self._GAP + self._DOT
         return 0.0
 
@@ -6646,9 +6908,19 @@ class TabButton(QAbstractButton):
     def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
         return self.sizeHint()
 
+    def natural_width(self) -> int:
+        """The tab's width when not compact, with the widest badge it can carry (set_badge_kinds)."""
+        badges = [0.0]
+        if BADGE_NEW in self._badge_kinds:
+            badges.append(self._GAP + 2 * self._PILL_PAD + _text_advance(self._badge_font, NEW_BADGE_TEXT))
+        if self._badge_kinds & {BADGE_UNREAD, BADGE_ACTIVITY}:
+            badges.append(self._GAP + self._DOT)
+        return math.ceil(2 * self._PAD + _text_advance(self._font, self.text().upper()) + max(badges))
+
     def badge_rect(self) -> QRectF:
-        """Where the NEW pill / dot or the unread dot is painted (empty when there is none)."""
-        if not (self._new or self._unread):
+        """Where the NEW pill / dot, the unread dot or the activity dot is painted (empty when
+        there is none)."""
+        if not (self._new or self._unread or self._activity):
             return QRectF()
         x = self._pad() + _text_advance(self._font, self.text().upper()) + self._GAP
         cy = (self.height() - 2) / 2
@@ -6685,6 +6957,19 @@ class TabButton(QAbstractButton):
         super().leaveEvent(event)
         self.update()
 
+    def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().showEvent(event)
+        _sync_blink_clock(self, self._activity == ACTIVITY_WORKING)
+
+    def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().hideEvent(event)
+        _blink_clock().unregister(self)
+
+    def _dot_opacity(self) -> float:
+        if self._activity != ACTIVITY_WORKING or self._unread or self._new:
+            return 1.0
+        return 1.0 if _BlinkClock.is_on() else 0.15
+
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         current, hover = self.isChecked(), self.underMouse() and self.isEnabled()
         painter = QPainter(self)
@@ -6710,7 +6995,7 @@ class TabButton(QAbstractButton):
                     painter.setPen(QColor(AMBER_INK))
                     painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, NEW_BADGE_TEXT)
                 else:
-                    painter.setBrush(QColor(AMBER if self._new else ACCENT))
+                    painter.setBrush(QColor(AMBER) if self._new else rgba(ACCENT, self._dot_opacity()))
                     painter.drawEllipse(badge)
             if self.hasFocus() and self._focus_visible:
                 painter.setPen(QPen(QColor(ACCENT), 2))
@@ -6721,22 +7006,31 @@ class TabButton(QAbstractButton):
 
 
 class TabStrip(QWidget):
-    """The JARVIS / BRIEFING tabs, left-aligned, 28 px tall; one is always current.
+    """The JARVIS / BRIEFING (/ LIVE) tabs, left-aligned, 28 px tall; one is always current.
 
     ``currentChanged(index)`` when the current tab changes (click, Left / Right, ``set_current``).
     BRIEFING carries the NEW badge (``set_badge``), JARVIS the unread dot (``set_unread``; cleared
-    when JARVIS becomes current). Below ``COMPACT_BELOW`` px of width the tabs get narrower
-    padding and the NEW pill becomes a dot (``set_compact`` sets it by hand).
+    when JARVIS becomes current). ``live=True`` adds the LIVE tab (``TAB_LIVE``, "Live steps"):
+    ``set_live_visible`` shows or hides it (hidden, it is never current and Left / Right skip
+    it), ``set_activity`` its dot (cleared when LIVE becomes current). Below
+    ``max(COMPACT_BELOW, natural_width())`` px of width the tabs get narrower padding and the NEW
+    pill becomes a dot (``set_compact`` sets it by hand); the natural width counts every badge,
+    so a dot that appears never flips it.
     """
 
     currentChanged = Signal(int)
     HEIGHT = TabButton.HEIGHT
     COMPACT_BELOW = 220
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, *, live: bool = False) -> None:
         super().__init__(parent)
         self._tabs = [TabButton("Jarvis", "Jarvis conversation", self),
                       TabButton("Briefing", "Briefing transcript", self)]
+        self._tabs[TAB_JARVIS].set_badge_kinds((BADGE_UNREAD,))
+        self._tabs[TAB_BRIEFING].set_badge_kinds((BADGE_NEW,))
+        if live:
+            self._tabs.append(TabButton("Live", "Live steps", self))
+            self._tabs[TAB_LIVE].set_badge_kinds((BADGE_ACTIVITY,))
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -6754,11 +7048,17 @@ class TabStrip(QWidget):
     def tab(self, index: int) -> TabButton:
         return self._tabs[index]
 
+    def has_live(self) -> bool:
+        return len(self._tabs) > TAB_LIVE
+
     def current(self) -> int:
         return self._current
 
+    def _available(self, index: int) -> bool:
+        return 0 <= index < len(self._tabs) and not self._tabs[index].isHidden()
+
     def set_current(self, index: int) -> None:
-        if index not in (TAB_JARVIS, TAB_BRIEFING):
+        if index not in (TAB_JARVIS, TAB_BRIEFING, TAB_LIVE) or not self._available(index):
             return
         self._tabs[index].setChecked(True)   # auto-exclusive: the other one unchecks
         if index == self._current:
@@ -6766,14 +7066,45 @@ class TabStrip(QWidget):
         self._current = index
         if index == TAB_JARVIS:
             self.set_unread(False)
+        elif index == TAB_LIVE:
+            self.set_activity("")
         self.currentChanged.emit(index)
 
     def step(self, delta: int, *, focus: bool = False) -> None:
-        """Left / Right: the neighbouring tab (it stays at the ends)."""
-        index = max(0, min(len(self._tabs) - 1, self._current + delta))
+        """Left / Right: the neighbouring shown tab (it stays at the ends)."""
+        shown = [index for index in range(len(self._tabs)) if self._available(index)]
+        position = shown.index(self._current) if self._current in shown else 0
+        index = shown[max(0, min(len(shown) - 1, position + delta))]
         self.set_current(index)
         if focus:
             self._tabs[index].setFocus(Qt.FocusReason.TabFocusReason)
+
+    def set_live_visible(self, visible: bool) -> None:
+        """Show or hide the LIVE tab ([live] enabled); hidden while current, JARVIS becomes current."""
+        if not self.has_live():
+            return
+        tab = self._tabs[TAB_LIVE]
+        tab.setVisible(bool(visible))
+        if not visible:
+            tab.set_activity("")
+            if self._current == TAB_LIVE:
+                self.set_current(TAB_JARVIS)
+        self._fit_compact()
+
+    def live_visible(self) -> bool:
+        return self.has_live() and not self._tabs[TAB_LIVE].isHidden()
+
+    def set_activity(self, state: str) -> None:
+        """The LIVE tab's dot (ACTIVITY_UNREAD / ACTIVITY_WORKING / ""); none while LIVE is current."""
+        if self.has_live():
+            self._tabs[TAB_LIVE].set_activity(state if self._current != TAB_LIVE else "")
+
+    def activity(self) -> str:
+        return self._tabs[TAB_LIVE].activity() if self.has_live() else ""
+
+    def natural_width(self) -> int:
+        """The shown tabs' widths when not compact, each with its widest badge."""
+        return sum(tab.natural_width() for tab in self._tabs if not tab.isHidden())
 
     def set_badge(self, new: bool) -> None:
         self._tabs[TAB_BRIEFING].set_new(new)
@@ -6800,10 +7131,14 @@ class TabStrip(QWidget):
         for tab in self._tabs:
             tab.set_compact(self._compact)
 
+    def _fit_compact(self, width: int | None = None) -> None:
+        if self._auto_compact:
+            width = self.width() if width is None else width
+            self._apply_compact(width < max(self.COMPACT_BELOW, self.natural_width()))
+
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
-        if self._auto_compact:
-            self._apply_compact(event.size().width() < self.COMPACT_BELOW)
+        self._fit_compact(event.size().width())
 
 
 ROLE_JARVIS = "jarvis"
@@ -7028,6 +7363,1784 @@ class ConversationLog(QScrollArea):
 
 _CONVERSATION_MARGIN = 14
 _ENTRY_TOP_GAP = 6     # a long entry followed from its top keeps this much room above its header
+
+
+# --------------------------------------------------------------------------
+# LIVE view: every step Jarvis takes, as it happens (live.py's stream)
+# --------------------------------------------------------------------------
+
+LIVE_EMPTY_TEXT = ("Nothing yet. When Jarvis works on something - an Ask, a card you approved - every step shows "
+                   "here as it happens: what he read, what he gave the planner, what he will send. On screen only; "
+                   "never saved.")
+LIVE_UNTRUSTED_TEXT = "Written by other people - shown as data, never followed"
+LIVE_NOT_KEPT_TEXT = "{chars} characters - not kept ([live] text = false)"
+LIVE_CUT_TEXT = "[{cut} more characters not shown]"
+LIVE_TAG_COLORS = {
+    live_events.TASK_ASK: PINK, live_events.TASK_ACTION: AMBER, live_events.TASK_BRIEFING: TEXT_MUTED,
+    live_events.TASK_BACKGROUND: TEXT_DIM, live_events.TASK_WEB: ACCENT,
+}
+_LIVE_BORDERS = {
+    live_events.STATUS_RUNNING: rgba(ACCENT, 0.45), live_events.STATUS_OK: rgba(ACCENT, 0.18),
+    live_events.STATUS_WARN: rgba(AMBER, 0.45), live_events.STATUS_BLOCKED: rgba(AMBER, 0.45),
+    live_events.STATUS_FAILED: rgba(RED_LINE, 0.5), live_events.STATUS_CANCELLED: rgba(OFF, 0.5),
+}
+LIVE_TEXT_MAX_PX = 320          # an open text block grows to this height, then scrolls
+LIVE_FIELD_LABEL_PX = 104       # the field labels' column ...
+LIVE_FIELDS_WIDE_PX = 360       # ... when the details are at least this wide
+LIVE_FIELDS_MEDIUM_PX = 200     # narrower down to this: a column as wide as the longest label word (else above)
+LIVE_FIELD_LABEL_MIN_PX = 76    # ... but at least this wide ("MAY ASK TO" on one line)
+LIVE_PILL_WRAP_PX = 320         # a task header narrower than this puts its status pill under the title
+LIVE_CONTENT_MAX_PX = 960       # the log's column is at most this wide (centred in a wider view)
+_LIVE_INDENT = 22               # step titles and details start here (after the glyph column)
+
+
+def _count(count: int, word: str, plural: str = "") -> str:
+    return f"{count:,} {word}" if count == 1 else f"{count:,} {plural or word + 's'}"
+
+
+def _when_text(moment: datetime, hour24: bool) -> str:
+    """"2:41:07 PM" / "14:41:07" (format_time with seconds)."""
+    try:
+        text = format_time(moment, hour24=hour24)
+    except Exception:  # noqa: BLE001 - a broken time shows as nothing
+        return ""
+    digits, _space, meridiem = text.partition(" ")
+    digits = f"{digits}:{moment.second:02d}"
+    return f"{digits} {meridiem}" if meridiem else digits
+
+
+def _set_text_color(widget: QWidget, color: str | QColor) -> None:
+    """The widget's text colour through its palette (cheaper than a widget stylesheet)."""
+    palette = widget.palette()
+    for group in (QPalette.ColorGroup.Active, QPalette.ColorGroup.Inactive, QPalette.ColorGroup.Disabled):
+        palette.setColor(group, QPalette.ColorRole.WindowText, QColor(color))
+        palette.setColor(group, QPalette.ColorRole.Text, QColor(color))
+    widget.setPalette(palette)
+
+
+def _live_label(text: str, font: QFont, color: str | QColor, *, wrap: bool = True) -> QLabel:
+    label = QLabel(text)
+    label.setTextFormat(Qt.TextFormat.PlainText)
+    label.setWordWrap(wrap)
+    label.setFont(font)
+    _set_text_color(label, color)
+    return label
+
+
+class _LiveFonts:
+    """The LIVE view's fonts, made once (after the bundled fonts are loaded)."""
+
+    _instance: _LiveFonts | None = None
+
+    def __init__(self) -> None:
+        self.task_title = body_font(13, 500)
+        self.step_title = body_font(13)
+        self.summary = mono_font(10)
+        self.word = mono_font(10, 500, 0.06)
+        self.time = mono_font(10, 400, 0.02)
+        self.tag = mono_font(9, 700, 0.06)
+        self.label = mono_font(10, 400, 0.08)
+        self.value = body_font(12)
+        self.value_mono = mono_font(11)
+        self.note = mono_font(10)
+        self.link = mono_font(11, 400, 0.04)
+        self.link_underline = mono_font(11, 400, 0.04)
+        self.link_underline.setUnderline(True)
+        self.text = mono_font(11)
+
+    @classmethod
+    def get(cls) -> _LiveFonts:
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+
+class _TextLines:
+    """``text`` laid out in lines ``width`` px wide (breaks at spaces, else anywhere: a long address
+    or id wraps instead of running out of the view), at most ``max_lines`` lines (the last one
+    elided), in the _LiveFonts font called ``font_name``. ``height``, ``line_count``, ``shown``,
+    ``natural_width`` and ``draw(painter, point)`` (in the painter's pen colour).
+
+    Only plain Python data is kept (each line's text and place): no QTextLayout or QFont outlives
+    the measuring, so nothing of Qt's font cache is ever freed by a garbage collection that runs
+    on another thread."""
+
+    __slots__ = ("font_name", "height", "line_count", "lines", "natural_width", "shown")
+
+    def __init__(self, text: str, font_name: str, width: float, max_lines: int = 0) -> None:
+        font = getattr(_LiveFonts.get(), font_name)
+        width = max(1.0, float(width))
+        text = (text or "").replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+        lines, height = self._lay_out(text, font, width)
+        if max_lines and len(lines) > max_lines:
+            begin = lines[max_lines - 1][0]
+            tail = QFontMetricsF(font).elidedText(text[begin:], Qt.TextElideMode.ElideRight, width)
+            text = text[:begin] + tail
+            lines, height = self._lay_out(text, font, width)
+        self.font_name = font_name
+        self.shown = text
+        self.lines = [(text[begin:begin + length], y, ascent) for begin, length, y, ascent, _width in lines]
+        self.natural_width = max((line[4] for line in lines), default=0.0)
+        self.height = height
+        self.line_count = len(lines)
+
+    @staticmethod
+    def _lay_out(text: str, font: QFont, width: float) -> tuple[list[tuple[int, int, float, float, float]], float]:
+        layout = QTextLayout(text, font)
+        option = QTextOption()
+        option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        layout.setTextOption(option)
+        spacing = QFontMetricsF(font).lineSpacing()
+        lines: list[tuple[int, int, float, float, float]] = []
+        y = 0.0
+        layout.beginLayout()
+        while True:
+            line = layout.createLine()
+            if not line.isValid():
+                break
+            line.setLineWidth(width)
+            line.setPosition(QPointF(0, y))
+            lines.append((line.textStart(), line.textLength(), y, line.ascent(), line.naturalTextWidth()))
+            y += max(line.height(), spacing)
+        layout.endLayout()
+        return lines, y
+
+    def draw(self, painter: QPainter, point: QPointF) -> None:
+        painter.setFont(getattr(_LiveFonts.get(), self.font_name))
+        for segment, y, ascent in self.lines:
+            painter.drawText(QPointF(point.x(), point.y() + y + ascent), segment)
+
+
+def _paint_pill(painter: QPainter, rect: QRectF, text: str, font: QFont, color: str | QColor, *,
+                filled: bool, glyph: str = "", glyph_opacity: float = 1.0) -> None:
+    """A small chamfered pill: ``filled`` (the tag: ink on ``color``) or outlined (the status:
+    ``color`` text on a faint fill, with the status glyph first)."""
+    painter.save()
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if filled:
+            painter.fillPath(chamfer_path(rect, 3), QColor(color))
+            painter.setPen(QColor(GROUND))
+            painter.setFont(font)
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+            return
+        painter.fillPath(chamfer_path(rect, 4), rgba(color, 0.08))
+        painter.setPen(QPen(rgba(color, 0.45), 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(chamfer_path(rect.adjusted(0.5, 0.5, -0.5, -0.5), 4))
+        x = rect.left() + 6
+        if glyph:
+            paint_status_glyph(painter, QRectF(x, rect.center().y() - 4, 8, 8), glyph, glyph_opacity)
+            x += 8 + 5
+        painter.setFont(font)
+        painter.setPen(QColor(color))
+        painter.drawText(QRectF(x, rect.top(), rect.right() - x - 4, rect.height()),
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
+    finally:
+        painter.restore()
+
+
+def _paint_caret(painter: QPainter, center: QPointF, open_: bool, color: str | QColor) -> None:
+    """A small chevron: pointing down when open, right when closed."""
+    painter.save()
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor(color), 1.4)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        x, y = center.x(), center.y()
+        if open_:
+            points = [QPointF(x - 3.5, y - 1.8), QPointF(x, y + 1.8), QPointF(x + 3.5, y - 1.8)]
+        else:
+            points = [QPointF(x - 1.8, y - 3.5), QPointF(x + 1.8, y), QPointF(x - 1.8, y + 3.5)]
+        painter.drawPolyline(QPolygonF(points))
+    finally:
+        painter.restore()
+
+
+class _LiveButton(QAbstractButton):
+    """Base of the LIVE view's painted buttons (task headers, step rows, links): Tab focus with a
+    ring for keyboard focus only, hover, Space and Enter both click, and a height for any width
+    (``_height_for``; the layouts give them the whole width)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        policy = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+        self._focus_visible = False
+
+    def _height_for(self, width: int) -> int:
+        raise NotImplementedError
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 - Qt override
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt override
+        return self._height_for(max(1, width))
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        width = self.width() if self.width() > 0 else 300
+        return QSize(240, self._height_for(width))
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return QSize(60, 16)
+
+    def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not event.isAutoRepeat():
+            event.accept()
+            self.click()
+            return
+        super().keyPressEvent(event)
+
+    def focusInEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        self._focus_visible = _focus_ring_after(event.reason(), self._focus_visible)
+        super().focusInEvent(event)
+        self.update()
+
+    def focusOutEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().focusOutEvent(event)
+        self.update()
+
+    def enterEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().enterEvent(event)
+        self.update()
+
+    def leaveEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().leaveEvent(event)
+        self.update()
+
+    def focus_ring(self) -> bool:
+        return self.hasFocus() and self._focus_visible
+
+
+class _WrapLink(_LiveButton):
+    """A LIVE link (a text block's Show / Hide, a result link such as "Open the thread in Gmail"):
+    mono 11 in accent, wrapped over as many lines as it needs, underlined on hover and keyboard
+    focus. Only its text is clickable."""
+
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._cache: dict[tuple[str, int, bool], _TextLines] = {}
+        self.setText(text)
+        self.setAccessibleName(text)
+
+    def set_text(self, text: str) -> None:
+        if text != self.text():
+            self.setText(text)
+            self.setAccessibleName(text)
+            self._cache.clear()
+            self.updateGeometry()
+            self.update()
+
+    def _lines(self, width: int, underline: bool = False) -> _TextLines:
+        key = (self.text(), width, underline)
+        lines = self._cache.get(key)
+        if lines is None:
+            if len(self._cache) > 16:
+                self._cache.clear()
+            lines = self._cache[key] = _TextLines(self.text(), "link_underline" if underline else "link", width)
+        return lines
+
+    def _height_for(self, width: int) -> int:
+        return math.ceil(self._lines(width).height) + 4
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        width = min(math.ceil(_text_advance(_LiveFonts.get().link, self.text())) + 2, 420)
+        return QSize(width, self._height_for(width))
+
+    def hitButton(self, pos: QPoint) -> bool:  # noqa: N802 - Qt override
+        lines = self._lines(max(1, self.width()))
+        return 0 <= pos.y() <= self.height() and 0 <= pos.x() <= lines.natural_width + 6
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        try:
+            active = self.isEnabled() and (self.underMouse() or self.isDown())
+            lines = self._lines(max(1, self.width()), underline=active or self.focus_ring())
+            painter.setPen(QColor(TEXT_BRIGHT if active else ACCENT if self.isEnabled() else TEXT_DIM))
+            lines.draw(painter, QPointF(0, 2))
+        finally:
+            painter.end()
+
+
+class _LiveValue(QLabel):
+    """A field value or the notes: plain text, wrapped (long words may break: zero-width break
+    chances are added for display), selectable by mouse and keyboard. Copying gives the exact
+    text, never the break chances (Ctrl+C and the context menu's Copy)."""
+
+    def __init__(self, text: str, font: QFont, color: str | QColor) -> None:
+        super().__init__()
+        self._plain = ""
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.setWordWrap(True)
+        self.setFont(font)
+        _set_text_color(self, color)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse
+                                     | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+        self.setCursor(Qt.CursorShape.IBeamCursor)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.DefaultContextMenu)
+        self.set_text(text)
+
+    def set_text(self, text: str) -> None:
+        text = text or ""
+        if text != self._plain:
+            self._plain = text
+            self.setText(_with_soft_breaks(text, 0) if len(text) > _LONGEST_PIECE else text)
+            self.setAccessibleName(text)
+
+    def plain_text(self) -> str:
+        return self._plain
+
+    def copy_selection(self) -> None:
+        selected = self.selectedText().replace(_SOFT_BREAK, "")
+        if selected:
+            QApplication.clipboard().setText(selected)
+
+    def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        if event.matches(QKeySequence.StandardKey.Copy):
+            self.copy_selection()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def contextMenuEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        menu = QMenu(self)
+        copy = menu.addAction("Copy")
+        copy.setEnabled(self.hasSelectedText())
+        copy.triggered.connect(self.copy_selection)
+        menu.addAction("Select All").triggered.connect(lambda: self.setSelection(0, len(self.text())))
+        menu.exec(event.globalPos())
+        menu.deleteLater()
+
+
+class _LiveFields(QWidget):
+    """A step's fields: "LABEL  value" rows; a value with a link is a _WrapLink. Two columns (the
+    label column LIVE_FIELD_LABEL_PX wide) when at least LIVE_FIELDS_WIDE_PX wide; narrower, down to
+    LIVE_FIELDS_MEDIUM_PX, still two columns with the label column as wide as its longest word (a
+    short LIVE tab shows more rows); narrower still each label above its value. It places its
+    children itself (no layout object), and is as tall as they need at its width (heightForWidth)."""
+
+    _GAP = 10
+    _ROW_GAP = 6
+    _NARROW_GAP = 8
+    _NARROW_ROW_GAP = 4
+
+    def __init__(self, on_link: Callable[[str], None]) -> None:
+        super().__init__()
+        self._on_link = on_link
+        self._fields: tuple[live_events.Field, ...] = ()
+        self._widgets: list[QWidget] = []
+        self._heights: dict[int, int] = {}
+        self._narrow_label = LIVE_FIELD_LABEL_MIN_PX
+        policy = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+
+    def fields(self) -> tuple[live_events.Field, ...]:
+        return self._fields
+
+    def _fit_narrow_label(self) -> None:
+        """The narrow two-column layout's label column: the longest word of any label fits whole."""
+        font = _LiveFonts.get().label
+        words = [word for item in self._fields for word in item.label.upper().split()]
+        widest = max((_text_advance(font, word) for word in words), default=0.0)
+        self._narrow_label = int(min(LIVE_FIELD_LABEL_PX, max(LIVE_FIELD_LABEL_MIN_PX, math.ceil(widest) + 4)))
+
+    def set_fields(self, fields: Sequence[live_events.Field]) -> bool:
+        """Show ``fields``; True when focusable widgets came or went."""
+        fields = tuple(fields)
+        if fields == self._fields:
+            return False
+        fonts = _LiveFonts.get()
+        self._heights.clear()
+        if len(fields) == len(self._fields) and all(
+                (old.label, bool(old.link), old.mono) == (new.label, bool(new.link), new.mono)
+                for old, new in zip(self._fields, fields)):
+            for index, (old, new) in enumerate(zip(self._fields, fields)):   # same rows: new values only
+                if old != new:
+                    value = self._widgets[2 * index + 1]
+                    value.set_text(new.value)   # type: ignore[attr-defined]
+                    if isinstance(value, _WrapLink):
+                        value.setProperty("live_link", new.link)
+            self._fields = fields
+            self._fit_narrow_label()
+            self._arrange()
+            self.updateGeometry()
+            return False
+        for widget in self._widgets:
+            widget.hide()
+            widget.deleteLater()
+        self._widgets = []
+        for item in fields:
+            label = _live_label(item.label.upper(), fonts.label, TEXT_DIM)
+            if item.link:
+                value: QWidget = _WrapLink(item.value)
+                value.setProperty("live_link", item.link)
+                value.clicked.connect(lambda _checked=False, button=value: self._clicked(button))
+            else:
+                value = _LiveValue(item.value, fonts.value_mono if item.mono else fonts.value, TEXT_BODY)
+            for widget in (label, value):
+                widget.setParent(self)
+                widget.show()
+                self._widgets.append(widget)
+        self._fields = fields
+        self._fit_narrow_label()
+        self._arrange()
+        self.updateGeometry()
+        return True
+
+    def _clicked(self, button: QWidget) -> None:
+        link = button.property("live_link")
+        if isinstance(link, str) and link:
+            self._on_link(link)
+
+    def value_widget(self, label: str) -> QWidget | None:
+        for index, item in enumerate(self._fields):
+            if item.label == label:
+                return self._widgets[2 * index + 1]
+        return None
+
+    def label_widgets(self) -> list[QLabel]:
+        return [widget for widget in self._widgets[0::2] if isinstance(widget, QLabel)]
+
+    def links(self) -> list[_WrapLink]:
+        return [widget for widget in self._widgets if isinstance(widget, _WrapLink)]
+
+    @staticmethod
+    def wide(width: int) -> bool:
+        """Two columns at ``width`` (either tier)."""
+        return width >= LIVE_FIELDS_MEDIUM_PX
+
+    def is_wide(self) -> bool:
+        return self.wide(self.width())
+
+    def label_column(self, width: int) -> int:
+        """The label column's width at ``width`` (0: each label above its value)."""
+        if width >= LIVE_FIELDS_WIDE_PX:
+            return LIVE_FIELD_LABEL_PX
+        return self._narrow_label if width >= LIVE_FIELDS_MEDIUM_PX else 0
+
+    @staticmethod
+    def _height(widget: QWidget, width: int) -> int:
+        height = widget.heightForWidth(width) if widget.hasHeightForWidth() else -1
+        return height if height >= 0 else widget.sizeHint().height()
+
+    def _layout(self, width: int, *, apply: bool) -> int:
+        y, width = 0, max(1, width)
+        column = self.label_column(width)
+        narrow = width < LIVE_FIELDS_WIDE_PX
+        gap = self._NARROW_GAP if narrow else self._GAP
+        row_gap = self._NARROW_ROW_GAP if narrow and column else self._ROW_GAP
+        pairs = list(zip(self._widgets[0::2], self._widgets[1::2]))
+        for index, (label, value) in enumerate(pairs):
+            if index:
+                y += row_gap
+            if column:
+                value_width = max(1, width - column - gap)
+                label_height = self._height(label, column)
+                value_height = self._height(value, value_width)
+                if apply:
+                    label.setGeometry(QRect(0, y + 1, column, label_height))
+                    value.setGeometry(QRect(column + gap, y, value_width, value_height))
+                y += max(label_height + 1, value_height)
+            else:
+                label_height = self._height(label, width)
+                value_height = self._height(value, width)
+                if apply:
+                    label.setGeometry(QRect(0, y, width, label_height))
+                    value.setGeometry(QRect(0, y + label_height + 1, width, value_height))
+                y += label_height + 1 + value_height
+        return y
+
+    def _arrange(self) -> None:
+        if self.width() > 0:
+            self._layout(self.width(), apply=True)
+
+    def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        self._layout(event.size().width(), apply=True)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 - Qt override
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt override
+        height = self._heights.get(width)
+        if height is None:
+            if len(self._heights) > 8:
+                self._heights.clear()
+            height = self._heights[width] = self._layout(width, apply=False)
+        return height
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return QSize(240, self.heightForWidth(self.width() if self.width() > 0 else 240))
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return QSize(40, 0)
+
+
+class _LiveItems(QWidget):
+    """A step's items, painted: each with its small status glyph, its text (wrapped) and a note line
+    (the status word and the note: amber for WARN / BLOCKED, red for FAILED); "N more not listed"
+    after the last."""
+
+    _TEXT_X = 16
+    _GAP = 5
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._items: tuple[live_events.Item, ...] = ()
+        self._more = 0
+        self._cache: dict[int, tuple[list[tuple[float, _TextLines, _TextLines | None]], float]] = {}
+        policy = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+
+    def items(self) -> tuple[live_events.Item, ...]:
+        return self._items
+
+    def set_items(self, items: Sequence[live_events.Item], more: int) -> None:
+        items = tuple(items)
+        if (items, more) == (self._items, self._more):
+            return
+        self._items, self._more = items, int(more)
+        self._cache.clear()
+        texts = [item.text + (f" ({item.status_text})" if item.status_text else "") + (f": {item.note}" if item.note else "")
+                 for item in items]
+        name = "; ".join(texts[:20]) + (f"; {_count(len(items) - 20 + more, 'more')}" if len(items) > 20 or more else "")
+        self.setAccessibleName(name)
+        self.updateGeometry()
+        self.update()
+
+    def _more_text(self) -> str:
+        return f"{self._more:,} more not listed" if self._more else ""
+
+    def _laid_out(self, width: int) -> tuple[list[tuple[float, _TextLines, _TextLines | None]], float]:
+        cached = self._cache.get(width)
+        if cached is not None:
+            return cached
+        if len(self._cache) > 8:
+            self._cache.clear()
+        fonts = _LiveFonts.get()
+        text_width = max(1, width - self._TEXT_X)
+        rows: list[tuple[float, _TextLines, _TextLines | None]] = []
+        y = 0.0
+        for index, item in enumerate(self._items):
+            if index:
+                y += self._GAP
+            text = _TextLines(item.text, "value_mono" if item.mono else "value", text_width)
+            note_text = "  ".join(part for part in (item.status_text, item.note) if part)
+            note = _TextLines(note_text, "note", text_width) if note_text else None
+            rows.append((y, text, note))
+            y += text.height + (1 + note.height if note is not None else 0)
+        if self._more:
+            y += self._GAP + QFontMetricsF(fonts.note).lineSpacing()
+        result = (rows, y)
+        self._cache[width] = result
+        return result
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 - Qt override
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt override
+        return math.ceil(self._laid_out(max(1, width))[1])
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return QSize(240, self.heightForWidth(self.width() if self.width() > 0 else 240))
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return QSize(40, 0)
+
+    def paintEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        rows, height = self._laid_out(max(1, self.width()))
+        exposed = QRectF(event.rect())
+        painter = QPainter(self)
+        try:
+            for (y, text, note), item in zip(rows, self._items):
+                bottom = y + text.height + (1 + note.height if note is not None else 0)
+                if bottom < exposed.top() or y > exposed.bottom():
+                    continue
+                if item.status:
+                    first = QFontMetricsF(_LiveFonts.get().value).lineSpacing()
+                    paint_status_glyph(painter, QRectF(0, y + (first - 9) / 2, 9, 9), item.status)
+                painter.setPen(QColor(TEXT_BODY))
+                text.draw(painter, QPointF(self._TEXT_X, y))
+                if note is not None:
+                    color = (AMBER if item.status in (live_events.STATUS_WARN, live_events.STATUS_BLOCKED)
+                             else RED if item.status == live_events.STATUS_FAILED else TEXT_SUB)
+                    painter.setPen(QColor(color))
+                    note.draw(painter, QPointF(self._TEXT_X, y + text.height + 1))
+            if self._more:
+                fonts = _LiveFonts.get()
+                painter.setFont(fonts.note)
+                painter.setPen(QColor(TEXT_DIM))
+                line = QFontMetricsF(fonts.note).lineSpacing()
+                painter.drawText(QRectF(self._TEXT_X, height - line, self.width() - self._TEXT_X, line),
+                                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self._more_text())
+        finally:
+            painter.end()
+
+
+class _LiveText(QPlainTextEdit):
+    """An open text block: the exact text (thread text, the planner's stdin and reply, an outgoing
+    body), read only and plain text only (nothing is a link, nothing loads), mono 11, wrapped at
+    the widget's width (a long token wraps anywhere), as tall as its text up to LIVE_TEXT_MAX_PX,
+    then it scrolls. Tab leaves it; its context menu has Copy and Select All only."""
+
+    _MEASURE_CHARS = 6000    # a longer text is always at least LIVE_TEXT_MAX_PX tall
+    _PAD = 2
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._text = ""
+        self._measured_width = -1
+        self._fit_pending = False
+        self.setReadOnly(True)
+        self.setUndoRedoEnabled(False)
+        self.setTabChangesFocus(True)
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse
+                                     | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setFont(_LiveFonts.get().text)
+        self.document().setDocumentMargin(5)
+        self.setStyleSheet(
+            "QPlainTextEdit { color: %s; background: %s; border: 1px solid %s; padding: %dpx; "
+            "selection-background-color: %s; selection-color: %s; }"
+            % (_qss_color(TEXT_SOFT), _qss_color(rgba(ACCENT, 0.03)), _qss_color(rgba(ACCENT, 0.12)), self._PAD,
+               _qss_color(rgba(ACCENT, 0.32)), _qss_color(TEXT_BRIGHT)))
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.setFixedHeight(60)
+
+    def text(self) -> str:
+        return self._text
+
+    def set_text(self, text: str) -> None:
+        """Show ``text`` (only when it changed: a block's text is set once per revision)."""
+        if text == self._text:
+            return
+        self._text = text
+        self.setPlainText(text)
+        self._measured_width = -1
+        self._fit_height()
+
+    def _fit_height(self) -> None:
+        width = self.viewport().width()
+        if width == self._measured_width:
+            return
+        self._measured_width = width
+        chrome = self.height() - self.viewport().height()
+        if len(self._text) > self._MEASURE_CHARS:
+            height = LIVE_TEXT_MAX_PX
+        else:
+            total = 2 * self.document().documentMargin()
+            block = self.document().firstBlock()
+            while block.isValid() and total <= LIVE_TEXT_MAX_PX:
+                total += self.blockBoundingRect(block).height()
+                block = block.next()
+            height = min(LIVE_TEXT_MAX_PX, math.ceil(total + chrome) + 1)
+        height = max(height, 28)
+        if height != self.height():
+            self.setFixedHeight(height)
+
+    def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        if event.oldSize().width() != event.size().width() and not self._fit_pending:
+            # Not from inside the resize: a new fixed height there would leave the viewport at
+            # the old size.
+            self._fit_pending = True
+            QTimer.singleShot(0, self._fit_later)
+
+    def _fit_later(self) -> None:
+        if shiboken6.isValid(self):
+            self._fit_pending = False
+            self._fit_height()
+
+    def contextMenuEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        menu = QMenu(self)
+        copy = menu.addAction("Copy")
+        copy.setEnabled(self.textCursor().hasSelection())
+        copy.triggered.connect(self.copy)
+        menu.addAction("Select All").triggered.connect(self.selectAll)
+        menu.exec(event.globalPos())
+        menu.deleteLater()
+
+
+def _block_label(label: str) -> str:
+    """"Text given to the planner" -> "text given to the planner" (an acronym keeps its case)."""
+    if len(label) > 1 and label[0].isupper() and label[1].islower():
+        return label[0].lower() + label[1:]
+    return label
+
+
+class _LiveBlock(QWidget):
+    """A collapsible text block: "Show <label> - 5,812 characters" / "Hide <label>"; open, the
+    exact text (_LiveText, made on the first open) with "Written by other people - shown as
+    data, never followed" above an untrusted one and "[N more characters not shown]" under a
+    cut one; a block kept as its size only says so."""
+
+    def __init__(self, block: live_events.Block) -> None:
+        super().__init__()
+        fonts = _LiveFonts.get()
+        self._block = block
+        self._open = bool(block.start_open)
+        self.toggle = _WrapLink("")
+        self.toggle.clicked.connect(self.flip)
+        self.not_kept = _live_label("", fonts.note, TEXT_DIM)
+        self.caption = _live_label(LIVE_UNTRUSTED_TEXT, fonts.note, AMBER_META)
+        self.cut_label = _live_label("", fonts.note, TEXT_DIM)
+        self.text_edit: _LiveText | None = None
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(3)
+        for widget in (self.toggle, self.not_kept, self.caption, self.cut_label):
+            self._layout.addWidget(widget)
+        self.set_block(block)
+
+    def block(self) -> live_events.Block:
+        return self._block
+
+    def is_open(self) -> bool:
+        return self._open and self._block.kept
+
+    def flip(self) -> None:
+        self._open = not self._open
+        self.set_block(self._block)
+        log = self._log()
+        if log is not None:
+            log._structure_changed()
+
+    def _log(self) -> LiveLog | None:
+        widget = self.parentWidget()
+        while widget is not None and not isinstance(widget, LiveLog):
+            widget = widget.parentWidget()
+        return widget
+
+    def set_block(self, block: live_events.Block) -> None:
+        self._block = block
+        name = _block_label(block.label)
+        if not block.kept:
+            self.toggle.hide()
+            self.not_kept.setText(f"{block.label}: " + LIVE_NOT_KEPT_TEXT.format(chars=f"{block.chars:,}"))
+            self.not_kept.show()
+            for widget in (self.caption, self.cut_label, self.text_edit):
+                if widget is not None:
+                    widget.hide()
+            return
+        self.not_kept.hide()
+        self.toggle.show()
+        if self._open:
+            self.toggle.set_text(f"Hide {name}")
+            if self.text_edit is None:
+                self.text_edit = _LiveText()
+                self._layout.insertWidget(self._layout.indexOf(self.cut_label), self.text_edit)
+            self.text_edit.set_text(block.text)
+            self.text_edit.show()
+            self.caption.setVisible(block.untrusted)
+            self.cut_label.setText(LIVE_CUT_TEXT.format(cut=f"{block.cut:,}"))
+            self.cut_label.setVisible(block.cut > 0)
+        else:
+            self.toggle.set_text(f"Show {name} - {_count(block.chars, 'character')}")
+            for widget in (self.caption, self.cut_label, self.text_edit):
+                if widget is not None:
+                    widget.hide()
+
+    def focusables(self) -> list[QWidget]:
+        widgets: list[QWidget] = [self.toggle]
+        if self.text_edit is not None:
+            widgets.append(self.text_edit)
+        return widgets
+
+
+class _LiveDetails(QWidget):
+    """A step's details, made on its first open: the fields, the items, the notes ("+1.2 s  ..."),
+    the text blocks. Only what changed is redone (a block's text is set once per revision)."""
+
+    def __init__(self, on_link: Callable[[str], None]) -> None:
+        super().__init__()
+        fonts = _LiveFonts.get()
+        self.fields = _LiveFields(on_link)
+        self.items = _LiveItems()
+        self.notes = _LiveValue("", fonts.note, TEXT_SOFT)
+        self.blocks: dict[str, _LiveBlock] = {}
+        self._blocks_box = QWidget()
+        self._blocks_layout = QVBoxLayout(self._blocks_box)
+        self._blocks_layout.setContentsMargins(0, 0, 0, 0)
+        self._blocks_layout.setSpacing(6)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(_LIVE_INDENT, 0, 4, 8)
+        layout.setSpacing(6)
+        for widget in (self.fields, self.items, self.notes, self._blocks_box):
+            layout.addWidget(widget)
+            widget.hide()
+        self._notes_key: tuple = ()
+
+    def apply(self, view: live_events.StepView) -> bool:
+        """Show ``view``; True when focusable widgets came or went."""
+        changed = self.fields.set_fields(view.fields)
+        self.fields.setVisible(bool(view.fields))
+        self.items.set_items(view.items, view.items_more)
+        self.items.setVisible(bool(view.items or view.items_more))
+        notes_key = (view.notes, view.notes_more, view.started)
+        if notes_key != self._notes_key:
+            self._notes_key = notes_key
+            # The stream keeps the first note and the newest ones: the gap is between them.
+            more = _count(view.notes_more, "earlier note") + " not shown" if view.notes_more else ""
+            lines = []
+            for index, note in enumerate(view.notes):
+                if index == 1 and more:
+                    lines.append(more)
+                lines.append(f"+{live_events.elapsed_text(note.at - view.started)}  {note.text}")
+            if more and len(view.notes) == 1:
+                lines.append(more)
+            self.notes.set_text("\n".join(lines))
+        self.notes.setVisible(bool(view.notes))
+        labels = [block.label for block in view.blocks]
+        for label in [label for label in self.blocks if label not in labels]:
+            widget = self.blocks.pop(label)
+            self._blocks_layout.removeWidget(widget)
+            widget.hide()
+            widget.deleteLater()
+            changed = True
+        for index, block in enumerate(view.blocks):
+            widget = self.blocks.get(block.label)
+            if widget is None:
+                widget = self.blocks[block.label] = _LiveBlock(block)
+                self._blocks_layout.insertWidget(index, widget)
+                changed = True
+            elif widget.block() != block:
+                had_text = widget.text_edit is not None
+                widget.set_block(block)
+                changed |= had_text != (widget.text_edit is not None)
+        self._blocks_box.setVisible(bool(view.blocks))
+        return changed
+
+    def focusables(self) -> list[QWidget]:
+        widgets: list[QWidget] = list(self.fields.links())
+        for block in self.blocks.values():
+            widgets.extend(block.focusables())
+        return widgets
+
+
+class _LiveStepRow(_LiveButton):
+    """A step's row: its status glyph (a running one blinks), title, summary, the status word over
+    the elapsed time on the right, and a caret when there are details (click, Space or Enter
+    shows / hides them). Painted, so a burst of steps stays cheap."""
+
+    _GLYPH = 10
+    _PAD = 5
+    _GAP = 8
+    _CARET = 10
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._view: live_events.StepView | None = None
+        self._word = ""
+        self._elapsed = ""
+        self._open = False
+        self._has_details = False
+        self._cache: dict[int, tuple[_TextLines, _TextLines | None]] = {}
+        self._right_chars = 9
+
+    def view(self) -> live_events.StepView | None:
+        return self._view
+
+    def word(self) -> str:
+        return self._word
+
+    def elapsed(self) -> str:
+        return self._elapsed
+
+    def title(self) -> str:
+        return self._view.title if self._view is not None else ""
+
+    def is_open(self) -> bool:
+        return self._open
+
+    def set_view(self, view: live_events.StepView, now: float, open_: bool, has_details: bool) -> None:
+        old = self._view
+        if old is None or (old.title, old.summary) != (view.title, view.summary):
+            self._cache.clear()
+        self._view = view
+        self._open, self._has_details = open_, has_details
+        self._refresh(now, force=True)
+        _sync_blink_clock(self, view.status == live_events.STATUS_RUNNING)
+        self.updateGeometry()
+        self.update()
+
+    def tick(self, now: float) -> None:
+        if self._view is not None and self._view.status == live_events.STATUS_RUNNING and self._refresh(now):
+            self.update()
+
+    def _refresh(self, now: float, force: bool = False) -> bool:
+        view = self._view
+        assert view is not None
+        word = live_events.status_word(view, now)
+        elapsed = live_events.elapsed_text(view.elapsed(now))
+        if not force and (word, elapsed) == (self._word, self._elapsed):
+            return False
+        self._word, self._elapsed = word, elapsed
+        countdown = view.deadline is not None and view.status == live_events.STATUS_RUNNING
+        chars = max(len(word) + (1 if countdown else 0), len(elapsed), 9)
+        if chars != self._right_chars:
+            self._right_chars = chars
+            self._cache.clear()
+            self.updateGeometry()
+        parts = [view.title, word, view.summary, elapsed]
+        self.setAccessibleName(", ".join(part for part in parts if part))
+        self.setAccessibleDescription(("details shown" if self._open else "details hidden") if self._has_details
+                                      else "")
+        return True
+
+    def _right_width(self) -> float:
+        return _text_advance(_LiveFonts.get().word, "M" * self._right_chars)
+
+    def _texts(self, width: int) -> tuple[_TextLines, _TextLines | None]:
+        cached = self._cache.get(width)
+        if cached is None:
+            if len(self._cache) > 8:
+                self._cache.clear()
+            fonts = _LiveFonts.get()
+            text_width = width - _LIVE_INDENT - self._GAP - self._right_width() - 6 - self._CARET
+            view = self._view
+            title = _TextLines(view.title if view is not None else "", "step_title", text_width)
+            summary = (_TextLines(view.summary, "summary", text_width)
+                       if view is not None and view.summary else None)
+            cached = self._cache[width] = (title, summary)
+        return cached
+
+    def _height_for(self, width: int) -> int:
+        title, summary = self._texts(width)
+        left = title.height + (2 + summary.height if summary is not None else 0)
+        right = 2 * QFontMetricsF(_LiveFonts.get().word).lineSpacing()
+        return math.ceil(self._PAD + max(left, right) + self._PAD)
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        view = self._view
+        if view is None:
+            return
+        fonts = _LiveFonts.get()
+        width = max(1, self.width())
+        title, summary = self._texts(width)
+        painter = QPainter(self)
+        try:
+            rect = QRectF(self.rect())
+            if self.isEnabled() and (self.underMouse() or self.isDown()):
+                painter.fillRect(rect, rgba(ACCENT, 0.05))
+            first_line = QFontMetricsF(fonts.step_title).lineSpacing()
+            opacity = (1.0 if _BlinkClock.is_on() else 0.15) if view.status == live_events.STATUS_RUNNING else 1.0
+            paint_status_glyph(painter, QRectF(2, self._PAD + (first_line - self._GLYPH) / 2, self._GLYPH,
+                                               self._GLYPH), view.status, opacity)
+            painter.setPen(QColor(TEXT_BODY))
+            title.draw(painter, QPointF(_LIVE_INDENT, self._PAD))
+            if summary is not None:
+                painter.setPen(QColor(TEXT_SUB))
+                summary.draw(painter, QPointF(_LIVE_INDENT, self._PAD + title.height + 2))
+            line = QFontMetricsF(fonts.word).lineSpacing()
+            right_width = self._right_width()
+            right = width - self._CARET - 6
+            countdown = view.deadline is not None and view.status == live_events.STATUS_RUNNING
+            color = AMBER if countdown else live_status_color(view.status)
+            painter.setFont(fonts.word)
+            painter.setPen(QColor(color))
+            align = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            painter.drawText(QRectF(right - right_width, self._PAD, right_width, line), align, self._word)
+            painter.setFont(fonts.time)
+            painter.setPen(QColor(TEXT_TIME))
+            painter.drawText(QRectF(right - right_width, self._PAD + line, right_width, line), align, self._elapsed)
+            if self._has_details:
+                _paint_caret(painter, QPointF(width - self._CARET / 2, self._PAD + line / 2), self._open, TEXT_MUTED)
+            if self.focus_ring():
+                painter.setPen(QPen(QColor(ACCENT), 1))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(rect.adjusted(0.5, 0.5, -0.5, -0.5))
+        finally:
+            painter.end()
+
+    def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().showEvent(event)
+        _sync_blink_clock(self, self._view is not None and self._view.status == live_events.STATUS_RUNNING)
+
+    def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().hideEvent(event)
+        _blink_clock().unregister(self)
+
+
+class _LiveStep(QWidget):
+    """One step: its row and, below it, its details (made on the first open). The details follow
+    the step's ``open_hint`` until the owner opens or closes them; then his choice sticks."""
+
+    def __init__(self, log: LiveLog) -> None:
+        super().__init__()
+        self._log = log
+        self.row = _LiveStepRow()
+        self.row.clicked.connect(self.toggle)
+        self.details: _LiveDetails | None = None
+        self.view: live_events.StepView | None = None
+        self._user_open: bool | None = None
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(0)
+        self._layout.addWidget(self.row)
+
+    @staticmethod
+    def has_details(view: live_events.StepView) -> bool:
+        return bool(view.fields or view.items or view.items_more or view.notes or view.blocks)
+
+    def is_open(self) -> bool:
+        view = self.view
+        if view is None or not self.has_details(view):
+            return False
+        return self._user_open if self._user_open is not None else view.open_hint
+
+    def set_view(self, view: live_events.StepView, now: float) -> bool:
+        """Show ``view``; True when focusable widgets came or went."""
+        self.view = view
+        open_ = self.is_open()
+        changed = False
+        if open_:
+            if self.details is None:
+                self.details = _LiveDetails(self._log.linkClicked.emit)
+                self._layout.addWidget(self.details)
+                changed = True
+            changed |= self.details.apply(view)
+            if self.details.isHidden():
+                self.details.show()
+                changed = True
+        elif self.details is not None and not self.details.isHidden():
+            self.details.hide()
+            changed = True
+        self.row.set_view(view, now, open_, self.has_details(view))
+        return changed
+
+    def toggle(self) -> None:
+        if self.view is None or not self.has_details(self.view):
+            return
+        self._user_open = not self.is_open()
+        self.set_view(self.view, self._log.now())
+        self._log._structure_changed()
+
+    def set_open(self, open_: bool) -> None:
+        if self.is_open() != bool(open_):
+            self.toggle()
+
+    def focusables(self) -> list[QWidget]:
+        widgets: list[QWidget] = [self.row]
+        if self.details is not None and not self.details.isHidden():
+            widgets.extend(self.details.focusables())
+        return widgets
+
+
+class _LiveTaskHeader(_LiveButton):
+    """A task's header: the tag pill (ASK, ACTION, ...), the title (Sora 13, at most two lines,
+    one for a compact task; the whole title in a plain tooltip), the status pill on the right
+    (under the title when the header is narrower than LIVE_PILL_WRAP_PX; RUNNING counts its time,
+    a countdown its seconds) and the meta line ("2:41:07 PM - 6 steps - 2 cards"). Click, Space
+    or Enter shows / hides the steps."""
+
+    _PAD = 3
+    _TAG_H = 16
+    _PILL_H = 18
+    _CARET = 10
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._view: live_events.TaskView | None = None
+        self._expanded = True
+        self._hour24 = False
+        self._word = ""
+        self._word_color = TEXT_DIM
+        self._pill_chars = 9
+        self._cache: dict[int, tuple] = {}
+
+    def view(self) -> live_events.TaskView | None:
+        return self._view
+
+    def word(self) -> str:
+        return self._word
+
+    def meta(self) -> str:
+        view = self._view
+        if view is None:
+            return ""
+        parts = [_when_text(view.at, self._hour24), _count(len(view.steps) + view.steps_more, "step")]
+        if view.summary:
+            parts.append(view.summary)
+        return " - ".join(part for part in parts if part)
+
+    def shown_title(self) -> str:
+        """The title as painted at the current width (cut to its lines with an ellipsis)."""
+        return self._layout_at(max(1, self.width()))[0].shown
+
+    def set_view(self, view: live_events.TaskView, now: float, expanded: bool, hour24: bool) -> None:
+        self._view = view
+        self._expanded = expanded
+        self._hour24 = hour24
+        self._cache.clear()
+        self.setToolTip(plain_tooltip(view.title))
+        self._refresh(now, force=True)
+        _sync_blink_clock(self, view.status == live_events.STATUS_RUNNING)
+        self.updateGeometry()
+        self.update()
+
+    def tick(self, now: float) -> None:
+        if self._view is not None and self._view.status == live_events.STATUS_RUNNING and self._refresh(now):
+            self.update()
+
+    def _refresh(self, now: float, force: bool = False) -> bool:
+        view = self._view
+        assert view is not None
+        word, color = _task_word(view, now)
+        if not force and (word, color) == (self._word, self._word_color):
+            return False
+        self._word, self._word_color = word, color
+        chars = max(len(word), 13 if view.status == live_events.STATUS_RUNNING else 0, 4)
+        if chars != self._pill_chars:
+            self._pill_chars = chars
+            self._cache.clear()
+            self.updateGeometry()
+        state = "steps shown" if self._expanded else "steps hidden"
+        self.setAccessibleName(f"{view.tag} task: {view.title}, {word}, {self.meta()}, {state}")
+        return True
+
+    def _tag_width(self) -> float:
+        return _text_advance(_LiveFonts.get().tag, self._view.tag if self._view is not None else "") + 10
+
+    def _pill_width(self) -> float:
+        return 6 + 8 + 5 + _text_advance(_LiveFonts.get().word, "M" * self._pill_chars) + 7
+
+    def _layout_at(self, width: int) -> tuple:
+        """(title lines, meta lines or None, title x, pill rect, meta y, height) at ``width``."""
+        cached = self._cache.get(width)
+        if cached is not None:
+            return cached
+        if len(self._cache) > 8:
+            self._cache.clear()
+        fonts = _LiveFonts.get()
+        view = self._view
+        title_x = self._tag_width() + 8
+        pill_w = self._pill_width()
+        wide = width >= LIVE_PILL_WRAP_PX
+        title_w = width - title_x - (pill_w + 8 if wide else 0)
+        compact = view is not None and view.compact and not self._expanded
+        title = _TextLines(view.title if view is not None else "", "task_title", title_w,
+                           max_lines=1 if (view is not None and view.compact) else 2)
+        top = self._PAD
+        bottom = top + 1 + title.height
+        if wide:
+            pill = QRectF(width - pill_w, top, pill_w, self._PILL_H)
+            bottom = max(bottom, top + self._PILL_H)
+        else:
+            pill = QRectF(title_x, bottom + 3, pill_w, self._PILL_H)
+            bottom = pill.bottom()
+        meta = None if compact else _TextLines(self.meta(), "time", width - title_x - self._CARET - 6)
+        meta_y = bottom + 3
+        height = (meta_y + meta.height if meta is not None else bottom) + self._PAD + 1
+        result = (title, meta, title_x, pill, meta_y, height)
+        self._cache[width] = result
+        return result
+
+    def _height_for(self, width: int) -> int:
+        return math.ceil(self._layout_at(width)[5])
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        view = self._view
+        if view is None:
+            return
+        fonts = _LiveFonts.get()
+        width = max(1, self.width())
+        title, meta, title_x, pill, meta_y, height = self._layout_at(width)
+        painter = QPainter(self)
+        try:
+            rect = QRectF(self.rect())
+            if self.isEnabled() and (self.underMouse() or self.isDown()):
+                painter.fillRect(rect, rgba(ACCENT, 0.04))
+            first_line = QFontMetricsF(fonts.task_title).lineSpacing()
+            tag_rect = QRectF(0, self._PAD + 1 + (first_line - self._TAG_H) / 2, self._tag_width(), self._TAG_H)
+            _paint_pill(painter, tag_rect, view.tag, fonts.tag, LIVE_TAG_COLORS.get(view.kind, TEXT_DIM),
+                        filled=True)
+            painter.setPen(QColor(TEXT_BRIGHT))
+            title.draw(painter, QPointF(title_x, self._PAD + 1))
+            glyph = view.status if not (view.pinned and view.status == live_events.STATUS_OK) else ""
+            opacity = (1.0 if _BlinkClock.is_on() else 0.15) if view.status == live_events.STATUS_RUNNING else 1.0
+            _paint_pill(painter, pill, self._word, fonts.word, self._word_color, filled=False, glyph=glyph,
+                        glyph_opacity=opacity)
+            caret_y = (meta_y + QFontMetricsF(fonts.time).lineSpacing() / 2) if meta is not None else pill.center().y()
+            if meta is not None:
+                painter.setPen(QColor(TEXT_TIME))
+                meta.draw(painter, QPointF(title_x, meta_y))
+                _paint_caret(painter, QPointF(width - self._CARET / 2, caret_y), self._expanded, TEXT_MUTED)
+            elif pill.left() > title_x + 1 and not (width >= LIVE_PILL_WRAP_PX):
+                _paint_caret(painter, QPointF(width - self._CARET / 2, caret_y), self._expanded, TEXT_MUTED)
+            if self.focus_ring():
+                painter.setPen(QPen(QColor(ACCENT), 1))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(rect.adjusted(0.5, 0.5, -0.5, -0.5))
+        finally:
+            painter.end()
+
+    def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().showEvent(event)
+        _sync_blink_clock(self, self._view is not None and self._view.status == live_events.STATUS_RUNNING)
+
+    def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().hideEvent(event)
+        _blink_clock().unregister(self)
+
+
+def _running_countdown(view: live_events.TaskView) -> live_events.StepView | None:
+    return next((step for step in reversed(view.steps)
+                 if step.status == live_events.STATUS_RUNNING and step.deadline is not None), None)
+
+
+def _task_word(view: live_events.TaskView, now: float) -> tuple[str, str]:
+    """The task's status pill: "RUNNING 0:12", "SENDING IN 7 S" (a countdown), "DONE", ...; the
+    rolling background task reads "RUNNING" / "IDLE"."""
+    if view.pinned:
+        if view.status == live_events.STATUS_RUNNING:
+            return "RUNNING", ACCENT
+        return ("IDLE", TEXT_DIM) if view.status == live_events.STATUS_OK else (live_events.status_word(view),
+                                                                               live_status_color(view.status))
+    if view.status == live_events.STATUS_RUNNING:
+        countdown = _running_countdown(view)
+        if countdown is not None:
+            return live_events.status_word(countdown, now), AMBER
+        return f"RUNNING {live_events.elapsed_text(view.elapsed(now))}", ACCENT
+    return live_events.status_word(view), live_status_color(view.status)
+
+
+class _LiveTaskCard(QWidget):
+    """One task: a chamfered card (its border in the task's status colour), the header and the
+    steps ("N more steps not shown" past the stream's limit). A compact task (briefing fetch,
+    background reads) is its header only until opened; the owner's choice sticks."""
+
+    def __init__(self, log: LiveLog) -> None:
+        super().__init__()
+        self._log = log
+        self.view: live_events.TaskView | None = None
+        self.header = _LiveTaskHeader()
+        self.header.clicked.connect(self.toggle)
+        self.steps_box = QWidget()
+        self._steps_layout = QVBoxLayout(self.steps_box)
+        self._steps_layout.setContentsMargins(0, 2, 0, 0)
+        self._steps_layout.setSpacing(0)
+        self.more_label = _live_label("", _LiveFonts.get().note, TEXT_DIM)
+        self.more_label.hide()
+        self._steps: dict[int, _LiveStep] = {}
+        self._order: list[int] = []
+        self._user_expanded: bool | None = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 7, 10, 7)
+        layout.setSpacing(2)
+        layout.addWidget(self.header)
+        layout.addWidget(self.steps_box)
+        layout.addWidget(self.more_label)
+
+    @property
+    def revision(self) -> int:
+        return self.view.revision if self.view is not None else -1
+
+    def expanded(self) -> bool:
+        if self._user_expanded is not None:
+            return self._user_expanded
+        return self.view is not None and not self.view.compact
+
+    def set_view(self, view: live_events.TaskView, now: float) -> bool:
+        """Show ``view``; True when focusable widgets came or went."""
+        self.view = view
+        changed = False
+        expanded = self.expanded()
+        if expanded or self._steps:
+            ids = [step.id for step in view.steps]
+            for step_view in view.steps:
+                widget = self._steps.get(step_view.id)
+                if widget is None:
+                    widget = self._steps[step_view.id] = _LiveStep(self._log)
+                    self._steps_layout.addWidget(widget)
+                    changed |= widget.set_view(step_view, now) or True
+                elif widget.view is None or widget.view.revision != step_view.revision:
+                    changed |= widget.set_view(step_view, now)
+            for step_id in [step_id for step_id in self._steps if step_id not in ids]:
+                widget = self._steps.pop(step_id)
+                self._steps_layout.removeWidget(widget)
+                widget.hide()
+                widget.deleteLater()
+                changed = True
+            if ids != self._order:
+                kept = [step_id for step_id in self._order if step_id in ids]
+                if kept + [step_id for step_id in ids if step_id not in self._order] != ids:
+                    for index, step_id in enumerate(ids):   # out of order: put every row in its place
+                        self._steps_layout.insertWidget(index, self._steps[step_id])
+                    changed = True
+                self._order = ids
+        if self.steps_box.isHidden() == expanded:
+            self.steps_box.setVisible(expanded)
+            changed = True
+        more = view.steps_more
+        self.more_label.setText(f"{more:,} more steps not shown" if more != 1 else "1 more step not shown")
+        self.more_label.setVisible(bool(more) and expanded)
+        self.header.set_view(view, now, expanded, self._log.hour24())
+        self.update()
+        return changed
+
+    def toggle(self) -> None:
+        self._user_expanded = not self.expanded()
+        if self.view is not None:
+            self.set_view(self.view, self._log.now())
+        self._log._structure_changed()
+
+    def set_expanded(self, expanded: bool) -> None:
+        if self.expanded() != bool(expanded):
+            self.toggle()
+
+    def tick(self, now: float) -> None:
+        self.header.tick(now)
+        if self.expanded():
+            for widget in self._steps.values():
+                widget.row.tick(now)
+
+    def step_widgets(self) -> list[_LiveStep]:
+        return [self._steps[step_id] for step_id in self._order if step_id in self._steps]
+
+    def step_widget(self, step_id: int) -> _LiveStep | None:
+        return self._steps.get(step_id)
+
+    def newest_step(self) -> _LiveStep | None:
+        steps = self.step_widgets()
+        return steps[-1] if steps and self.expanded() else None
+
+    def focusables(self) -> list[QWidget]:
+        widgets: list[QWidget] = [self.header]
+        if self.expanded():
+            for step in self.step_widgets():
+                widgets.extend(step.focusables())
+        return widgets
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        view = self.view
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            rect = QRectF(self.rect())
+            status = view.status if view is not None else live_events.STATUS_OK
+            border = _LIVE_BORDERS.get(status, rgba(ACCENT, 0.18))
+            if view is not None and view.pinned:
+                border = rgba(ACCENT, 0.3 if status == live_events.STATUS_RUNNING else 0.12)
+            corners = CUT_TL | CUT_BR
+            painter.fillPath(chamfer_path(rect, 8, corners), border)
+            painter.fillPath(chamfer_path(rect.adjusted(1, 1, -1, -1), 8, corners), PANEL_GROUND)
+        finally:
+            painter.end()
+
+
+class LiveLog(QScrollArea):
+    """The LIVE view: every task Jarvis works on (an Ask, an approved card, a briefing fetch, the
+    rolling "Background reads" pinned first) as a card of its steps, newest at the bottom.
+
+    ``apply(changes)`` takes a live.LiveChanges (only tasks whose revision changed are redone;
+    ``removed`` ids go; ``reset`` replaces everything). Every text is plain text (painted, or a
+    PlainText QLabel / read-only QPlainTextEdit); nothing is a link but a field's result link
+    (``linkClicked(link)``: a Jarvis-made Google result link or an internal id such as
+    "tab:jarvis"), and nothing loads from anywhere. Details and text blocks are made on their
+    first open. The elapsed times tick with the view's own timer: every 250 ms while a countdown
+    shows, every second while a step runs, never while hidden, minimized or idle; running glyphs
+    blink on the shared blink clock. It follows the newest step unless the owner scrolled in the
+    last ``SCROLL_HOLD_S`` seconds (a new task is shown from its header; what came during the hold
+    is followed when it ends). While an approved card counts down, what it will send or change
+    (its payload step) stays in view, and a card the owner just approved comes into view whatever
+    he scrolled. ``reveal(task_id)`` scrolls to a task and opens it. The empty-state text shows
+    while no task but the pinned "Background reads" is there. The column is at most
+    LIVE_CONTENT_MAX_PX wide. ``clock``: monotonic seconds (the stream's clock).
+    """
+
+    linkClicked = Signal(str)
+    SCROLL_HOLD_S = ConversationLog.SCROLL_HOLD_S
+    TICK_RUNNING_MS = 1000
+    TICK_COUNTDOWN_MS = 250
+    _GAP = 6
+
+    def __init__(self, parent: QWidget | None = None, *, clock: Callable[[], float] = time.monotonic) -> None:
+        super().__init__(parent)
+        _LiveFonts.get()
+        content = _transparent_scroll(self)
+        self._layout = QVBoxLayout(content)
+        self._layout.setContentsMargins(_CONVERSATION_MARGIN, 10, _CONVERSATION_MARGIN, 10)
+        self._layout.setSpacing(10)
+        self.empty_label = make_label(LIVE_EMPTY_TEXT, body_font(13), TEXT_DIM, wrap=True)
+        self._layout.addWidget(self.empty_label)
+        self._layout.addStretch(1)
+        self._clock = clock
+        self._hour24 = False
+        self._cards: dict[int, _LiveTaskCard] = {}
+        self._order: list[int] = []
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self.tick)
+        self._hold_timer = QTimer(self)
+        self._hold_timer.setSingleShot(True)
+        self._hold_timer.timeout.connect(self._hold_over)
+        self._missed = False
+        self._user_scrolled_at = -math.inf
+        self._follow = True
+        self._header_first = False
+        self._tab_order_pending = False
+        self.apply_count = 0
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        bar = self.verticalScrollBar()
+        bar.actionTriggered.connect(self._on_user_scroll)
+        bar.rangeChanged.connect(self._on_range_changed)
+
+    # ---- API ----------------------------------------------------------------------------------
+
+    def now(self) -> float:
+        return self._clock()
+
+    def hour24(self) -> bool:
+        return self._hour24
+
+    def set_hour24(self, hour24: bool) -> None:
+        """The clock of the task headers' times ("2:41:07 PM" or "14:41:07")."""
+        if bool(hour24) != self._hour24:
+            self._hour24 = bool(hour24)
+            now = self.now()
+            for card in self._cards.values():
+                if card.view is not None:
+                    card.header.set_view(card.view, now, card.expanded(), self._hour24)
+
+    def apply(self, changes: live_events.LiveChanges) -> None:
+        """Show what changed in the stream (only tasks whose revision changed are redone)."""
+        self.apply_count += 1
+        now = self.now()
+        created: set[int] = set()
+        self.setUpdatesEnabled(False)
+        try:
+            if changes.reset:
+                keep = {view.id for view in changes.tasks}
+                for task_id in [task_id for task_id in self._cards if task_id not in keep]:
+                    self._remove(task_id)
+            for task_id in changes.removed:
+                if task_id in self._cards:
+                    self._remove(task_id)
+            for view in changes.tasks:
+                card = self._cards.get(view.id)
+                if card is None:
+                    card = self._cards[view.id] = _LiveTaskCard(self)
+                    self._insert(view, card)
+                    card.set_view(view, now)
+                    created.add(view.id)
+                elif card.revision != view.revision:
+                    card.set_view(view, now)
+            self._sync_empty()
+        finally:
+            self.setUpdatesEnabled(True)
+        self._sync_timer()
+        if any(view.id in created and view.kind == live_events.TASK_ACTION and view.status == live_events.STATUS_RUNNING
+               for view in changes.tasks):
+            # A card the owner just approved: its payload comes into view whatever the owner scrolled.
+            self._user_scrolled_at = -math.inf
+            self._follow = True
+        if changes.tasks or changes.removed or changes.reset:
+            # A task that just came is shown from its header (not a pinned row that came later).
+            self._header_first = bool(self._order) and self._order[-1] in created
+            self._follow_newest()
+
+    def clear(self) -> None:
+        """Empty the view (the stream is unchanged)."""
+        for task_id in list(self._cards):
+            self._remove(task_id)
+        self._sync_empty()
+        self._sync_timer()
+
+    def _sync_empty(self) -> None:
+        """The empty-state text while no task but the pinned "Background reads" is shown (a pinned
+        task with no steps left, after Clear, is not shown at all)."""
+        tasks = False
+        for card in self._cards.values():
+            view = card.view
+            if view is None:
+                continue
+            empty_pinned = view.pinned and not view.steps and not view.steps_more
+            if card.isHidden() != empty_pinned:
+                card.setVisible(not empty_pinned)
+            tasks |= not view.pinned
+        self.empty_label.setVisible(not tasks)
+
+    def task_ids(self) -> list[int]:
+        """The tasks shown, in display order (the pinned one first, then oldest -> newest)."""
+        return list(self._order)
+
+    def task_widget(self, task_id: int) -> _LiveTaskCard | None:
+        return self._cards.get(task_id)
+
+    def step_widget(self, step_id: int) -> _LiveStep | None:
+        for card in self._cards.values():
+            widget = card.step_widget(step_id)
+            if widget is not None:
+                return widget
+        return None
+
+    def reveal(self, task_id: int) -> bool:
+        """Scroll to that task's header and open its steps (False when it is not shown); the view
+        then holds there like after the owner's own scroll."""
+        card = self._cards.get(task_id)
+        if card is None:
+            return False
+        card.set_expanded(True)
+        self._user_scrolled_at = time.monotonic()
+        self._follow = False
+        self.widget().layout().activate()
+        bar = self.verticalScrollBar()
+        bar.setValue(max(0, min(bar.maximum(), card.y() - self._GAP)))
+        QTimer.singleShot(0, lambda: self._scroll_to_card(task_id))
+        return True
+
+    def following(self) -> bool:
+        return self._follow
+
+    def scroll_to_newest(self) -> None:
+        bar = self.verticalScrollBar()
+        bar.setValue(self._newest_target(bar.maximum()))
+
+    def ticking(self) -> int:
+        """The tick interval in ms while the view's timer runs, else 0."""
+        return self._timer.interval() if self._timer.isActive() else 0
+
+    def focusables(self) -> list[QWidget]:
+        widgets: list[QWidget] = []
+        for task_id in self._order:
+            widgets.extend(self._cards[task_id].focusables())
+        return widgets
+
+    # ---- cards ---------------------------------------------------------------------------------
+
+    @staticmethod
+    def _order_key(view: live_events.TaskView) -> tuple[int, int]:
+        return (0 if view.pinned else 1, view.id)
+
+    def _insert(self, view: live_events.TaskView, card: _LiveTaskCard) -> None:
+        key = self._order_key(view)
+        index = 0
+        while index < len(self._order):
+            other = self._cards[self._order[index]].view
+            if other is not None and self._order_key(other) > key:
+                break
+            index += 1
+        self._order.insert(index, view.id)
+        self._layout.insertWidget(1 + index, card)   # after the empty label
+
+    def _remove(self, task_id: int) -> None:
+        card = self._cards.pop(task_id, None)
+        if task_id in self._order:
+            self._order.remove(task_id)
+        if card is not None:
+            self._layout.removeWidget(card)
+            card.hide()
+            card.deleteLater()
+
+    def _structure_changed(self) -> None:
+        """A step or a block was opened or closed by hand: the timer again."""
+        self._sync_timer()
+
+    def focusNextPrevChild(self, next_: bool) -> bool:  # noqa: N802 - Qt override
+        """Tab / Shift+Tab inside the log go in the order the rows are shown (task header, its step
+        rows, an open step's links and text blocks, the next task), whatever order the widgets were
+        made in; past either end, on to the window's next focus widget outside the log."""
+        focus = QApplication.focusWidget()
+        items = [widget for widget in self.focusables() if widget.isVisibleTo(self) and widget.isEnabled()]
+        if focus is None or focus not in items:
+            return super().focusNextPrevChild(next_)
+        reason = Qt.FocusReason.TabFocusReason if next_ else Qt.FocusReason.BacktabFocusReason
+        index = items.index(focus) + (1 if next_ else -1)
+        if 0 <= index < len(items):
+            items[index].setFocus(reason)
+            self.ensureWidgetVisible(items[index], 0, self._GAP)
+            return True
+        widget = focus
+        for _ in range(2000):   # leave the log: the window's next (previous) Tab stop outside it
+            widget = widget.nextInFocusChain() if next_ else widget.previousInFocusChain()
+            if widget is None or widget is focus:
+                break
+            if (not self.isAncestorOf(widget) and widget is not self and widget.isVisible() and widget.isEnabled()
+                    and widget.focusPolicy() & Qt.FocusPolicy.TabFocus and widget.window() is self.window()):
+                widget.setFocus(reason)
+                return True
+        return super().focusNextPrevChild(next_)
+
+    # ---- ticking -------------------------------------------------------------------------------
+
+    def _wanted_interval(self) -> int:
+        window = self.window()
+        if not self.isVisible() or (window is not None and window.isMinimized()):
+            return 0
+        interval = 0
+        for card in self._cards.values():
+            view = card.view
+            if view is None or view.status != live_events.STATUS_RUNNING:
+                continue
+            if _running_countdown(view) is not None:
+                return self.TICK_COUNTDOWN_MS
+            if not view.pinned or any(step.status == live_events.STATUS_RUNNING for step in view.steps):
+                interval = self.TICK_RUNNING_MS
+        return interval
+
+    def _sync_timer(self) -> None:
+        interval = self._wanted_interval()
+        if not interval:
+            self._timer.stop()
+        elif not self._timer.isActive() or self._timer.interval() != interval:
+            self._timer.start(interval)
+
+    def tick(self) -> None:
+        """Count the running steps' times and the countdowns on (the timer calls it)."""
+        now = self.now()
+        for card in self._cards.values():
+            if card.view is not None and card.view.status == live_events.STATUS_RUNNING:
+                card.tick(now)
+        self._sync_timer()
+
+    def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().showEvent(event)
+        window = self.window()
+        if window is not self:
+            window.installEventFilter(self)
+        self.tick()
+
+    def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().hideEvent(event)
+        self._timer.stop()
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt override
+        if event.type() == QEvent.Type.WindowStateChange and watched is self.window():
+            QTimer.singleShot(0, self._resync)
+        return False
+
+    def _resync(self) -> None:
+        if shiboken6.isValid(self):
+            self.tick()
+
+    # ---- following the newest step -----------------------------------------------------------
+
+    def _newest_card(self) -> _LiveTaskCard | None:
+        return self._cards[self._order[-1]] if self._order else None
+
+    def _countdown_card(self) -> _LiveTaskCard | None:
+        """The newest approved card's task still in its undo countdown (shown, with its steps)."""
+        for task_id in reversed(self._order):
+            card = self._cards[task_id]
+            view = card.view
+            if (view is not None and view.kind == live_events.TASK_ACTION and view.status == live_events.STATUS_RUNNING
+                    and _running_countdown(view) is not None and card.expanded() and card.isVisibleTo(self)):
+                return card
+        return None
+
+    def _countdown_target(self, maximum: int) -> int | None:
+        """While an approved card counts down: the whole task when it fits the view, else from what
+        it will send or change (its payload step), so that is in view before it goes out."""
+        card = self._countdown_card()
+        if card is None or card.height() <= 0 or card.view is None:
+            return None
+        content = self.widget()
+        view_height = self.viewport().height()
+        top = card.y()
+        if card.height() + 2 * self._GAP <= view_height:
+            return max(0, min(maximum, top + card.height() + self._GAP - view_height))
+        payload = next((step for step in card.step_widgets()
+                        if step.view is not None and step.view.kind == live_events.ACTION_PAYLOAD), None)
+        if payload is not None and payload.isVisibleTo(self) and payload.height() > 0:
+            top = payload.mapTo(content, QPoint(0, 0)).y()
+            details = payload.details
+            fields = details.fields if details is not None else None
+            if fields is not None and fields.isVisibleTo(self) and fields.height() > 0:
+                fields_top = fields.mapTo(content, QPoint(0, 0)).y()
+                if fields_top + fields.height() + self._GAP > top + view_height - self._GAP:
+                    top = fields_top   # a short view: from the first field (the strip says SENDING IN)
+        return max(0, min(maximum, top - self._GAP))
+
+    def _newest_target(self, maximum: int) -> int:
+        """The bottom, unless the newest task (when it just came) or its newest step is taller than
+        the view: then its top. While an approved card counts down, that card's payload instead
+        (_countdown_target)."""
+        target = self._countdown_target(maximum)
+        if target is not None:
+            return target
+        card = self._newest_card()
+        content = self.widget()
+        if card is None or not card.isVisibleTo(self) or card.height() <= 0:
+            return maximum
+        view_height = self.viewport().height()
+        if card.height() + 2 * self._GAP <= view_height:
+            return maximum
+        if self._header_first:
+            return max(0, min(maximum, card.y() - self._GAP))
+        step = card.newest_step()
+        if step is None or not step.isVisibleTo(self) or step.height() <= 0:
+            return maximum
+        if step.height() + 2 * self._GAP <= view_height:
+            return maximum
+        top = step.mapTo(content, QPoint(0, 0)).y()
+        return max(0, min(maximum, top - self._GAP))
+
+    def _follow_newest(self) -> None:
+        held = time.monotonic() - self._user_scrolled_at
+        if held >= self.SCROLL_HOLD_S:
+            self._follow = True
+        if self._follow:
+            self._missed = False
+            self.scroll_to_newest()
+            QTimer.singleShot(0, self._scroll_if_following)
+        else:
+            # Held by the owner's own scroll: what came meanwhile is followed once the hold is over,
+            # even if nothing else changes by then (a countdown changes nothing until it ends).
+            self._missed = True
+            self._hold_timer.start(max(0, math.ceil((self.SCROLL_HOLD_S - held) * 1000)) + 50)
+
+    def _hold_over(self) -> None:
+        if shiboken6.isValid(self) and self._missed:
+            self._follow_newest()
+
+    def _scroll_if_following(self) -> None:
+        if shiboken6.isValid(self) and self._follow:
+            self.scroll_to_newest()
+
+    def _scroll_to_card(self, task_id: int) -> None:
+        if not shiboken6.isValid(self):
+            return
+        card = self._cards.get(task_id)
+        if card is not None:
+            bar = self.verticalScrollBar()
+            bar.setValue(max(0, min(bar.maximum(), card.y() - self._GAP)))
+
+    def _on_range_changed(self, _minimum: int, maximum: int) -> None:
+        if self._follow:
+            self.verticalScrollBar().setValue(self._newest_target(maximum))
+
+    def _on_user_scroll(self, _action: int) -> None:
+        self._user_scrolled_at = time.monotonic()
+        bar = self.verticalScrollBar()
+        QTimer.singleShot(0, lambda: self._after_user_scroll(bar))
+
+    def _after_user_scroll(self, bar: Any) -> None:
+        if shiboken6.isValid(self) and shiboken6.isValid(bar):
+            self._follow = bar.value() >= bar.maximum() - 2
+
+    def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        self._fit_column()
+        if self._follow:
+            QTimer.singleShot(0, self._scroll_if_following)
+
+    def _fit_column(self) -> None:
+        """At most LIVE_CONTENT_MAX_PX of content, centred (a maximized pop-out on a wide screen keeps
+        each status word next to its step)."""
+        side = max(_CONVERSATION_MARGIN, (self.viewport().width() - LIVE_CONTENT_MAX_PX) // 2)
+        margins = self._layout.contentsMargins()
+        if (margins.left(), margins.right()) != (side, side):
+            self._layout.setContentsMargins(side, margins.top(), side, margins.bottom())
 
 
 # --------------------------------------------------------------------------

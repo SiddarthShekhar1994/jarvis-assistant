@@ -3,6 +3,8 @@ the threads an Ask is about (gmail.readonly only; GmailReader, a separate client
 
     OutgoingMail(...)            one message, exactly as it will be sent
     build_message(mail)          the RFC 5322 message (an email.message.EmailMessage), checked
+    mail_view(mail)              MailView: that message's headers and text as they read (the LIVE
+                                 view shows exactly what will be sent)
     encode_raw(message)          base64url text for users.messages.send
     thread_link(address, id)     the sent message's thread in Gmail (the card's Open link)
     GmailSender(account)         one account's sending: ready(), sign_in(), send(mail) -> SentMail
@@ -233,6 +235,38 @@ def build_message(mail: OutgoingMail) -> EmailMessage:
     _check_round_trip(message, from_addr=from_addr, to=to, cc=cc, subject=subject,
                       in_reply_to=in_reply_to, references=references, body=body)
     return message
+
+
+@dataclass(frozen=True)
+class MailView:
+    """One message exactly as build_message writes it, read back from the built message (the LIVE
+    view's "Will send exactly this"): the headers as they read (the subject with its "Re: ", To and
+    Cc joined) and the text part's content. Shown on screen only; never logged."""
+
+    from_addr: str
+    to: str
+    cc: str
+    subject: str
+    in_reply_to: str
+    references: str
+    thread_id: str                     # Gmail's thread (the send request's threadId, not a header)
+    body: str
+
+    def __repr__(self) -> str:   # names nobody and quotes nothing
+        return f"<MailView: {len(self.body)} chars>"
+
+
+def mail_view(mail: OutgoingMail) -> MailView:
+    """``mail`` as build_message writes it (pure; MessageRefused like build_message)."""
+    message = build_message(mail)
+
+    def header(name: str) -> str:
+        value = message.get(name)
+        return " ".join(str(value).split()) if value is not None else ""
+
+    return MailView(from_addr=header("From"), to=header("To"), cc=header("Cc"), subject=header("Subject"),
+                    in_reply_to=header("In-Reply-To"), references=header("References"), thread_id=mail.thread_id,
+                    body=message.get_content().replace("\r\n", "\n"))
 
 
 def encode_raw(message: EmailMessage) -> str:

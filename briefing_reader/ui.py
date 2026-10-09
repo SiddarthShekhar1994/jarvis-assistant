@@ -8,15 +8,28 @@ The module is organised in three parts:
 * views: ``PromptView`` ("Hear it now?" beside the status orb),
   ``ReadingView`` (STATUS and the TODAY / DEADLINES agenda on the left; orb,
   current line, Ask Jarvis's command bar when [ask] is on, controls and the
-  transcript, with a SECTIONS popover, in the middle; approvals and activity
-  on the right) and ``BriefingWindow``, the frameless HUD window that stacks
-  the two;
+  JARVIS / BRIEFING / LIVE tabs over the centre panel, with a SECTIONS popover,
+  in the middle; approvals and activity on the right) and ``BriefingWindow``,
+  the frameless HUD window that stacks the two; ``LiveWindow``, the LIVE view
+  popped out into a window of its own (not on top, its own taskbar button;
+  closing it docks the view back);
+* the LIVE view's plumbing: ``_LiveFeed`` drains ``AppController.live`` on the
+  GUI thread (the stream's listener only emits a queued signal; at most about
+  ten drains a second) and hands what changed to the LIVE tab's ``hud.LiveLog``
+  and the pop-out's; ``LiveSummary`` drives the tab's dot, the strip's tag (its
+  tooltip) and the pop-out's toolbar. ``[live] auto_open`` brings up LIVE (or
+  the pop-out: also with "tab" when the LIVE tab would be too short to show a
+  step and there is another screen) once per Ask or approved card; the view
+  only shows, it never acts;
 * ``AppController``: the state machine ("prompt", "snoozed", "reading",
   "quitting") that owns the window, tray icon, fetch thread, TTS worker,
   player and the action worker (approved proposals, the agenda, the cards'
   event checks and the Google sign-in of each account), and with [ask] on the
   Ask controller (:mod:`briefing_reader.ask_ui`, its own "ask" thread) whose
-  proposals join the cards under ASK.
+  proposals join the cards under ASK. ``AppController.live`` is the LIVE
+  view's event stream (:mod:`briefing_reader.live`, ``[live]``): every Ask, every
+  approved card (from the click through the undo countdown to Google's answer)
+  and every briefing fetch, as it happens; on screen only.
 
 Threading: Qt objects are only touched on the GUI thread. The fetch thread,
 the TTS worker, the action worker and the ask thread only emit bridge signals,
@@ -93,6 +106,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QPlainTextEdit,
+    QSizePolicy,
     QSystemTrayIcon,
     QTextBrowser,
     QTextEdit,
@@ -101,6 +115,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import hud
+from . import live as _live
 from .actions import (
     CALENDAR,
     CANCEL,
@@ -494,6 +509,53 @@ def _set_status_style(label: QLabel, is_error: bool, normal: str) -> None:
     label.setProperty("error", is_error)
 
 
+class _ElidedLabel(QLabel):
+    """One line of plain text, elided at its width (the whole text is the tooltip then); it never
+    asks for more width than it gets, so a toolbar never pushes its window wider."""
+
+    def __init__(self, font: QFont, color: str) -> None:
+        super().__init__()
+        self._full = ""
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.setFont(font)
+        hud.set_label_color(self, color)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+    def set_full_text(self, text: str) -> None:
+        self._full = text or ""
+        self.setAccessibleName(self._full)
+        self._render()
+
+    def full_text(self) -> str:
+        return self._full
+
+    def _render(self) -> None:
+        shown = QFontMetricsF(self.font()).elidedText(self._full, Qt.TextElideMode.ElideRight,
+                                                     max(0, self.contentsRect().width() - 1))
+        self.setToolTip(hud.plain_tooltip(self._full) if shown != self._full else "")
+        super().setText(shown)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return QSize(0, super().minimumSizeHint().height())
+
+    def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        if event.oldSize().width() != event.size().width():
+            self._render()
+
+
+class _LivePage(QWidget):
+    """The LIVE tab's page: it never needs more height than the JARVIS page (``like``), so the tab
+    row above the panel stays where it is when the tab changes."""
+
+    def __init__(self, like: QWidget) -> None:
+        super().__init__()
+        self._like = like
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return QSize(0, self._like.minimumSizeHint().height())
+
+
 def _screen_area(point: QPoint) -> QRect:
     screen = QGuiApplication.screenAt(point) or QGuiApplication.primaryScreen()
     return screen.availableGeometry()
@@ -773,6 +835,18 @@ _SPEECH_LINES = 3          # the spoken line under the orb is cut to this many l
 _SHORT_SPEECH_LINES = 2
 STRIP_CAPTION = f"Conversation {DOT} this session"   # the centre panel's strip on the JARVIS tab
 STRIP_CAPTION_SHORT = "Conversation"                 # ... when the whole caption does not fit
+LIVE_CAPTION = f"Live steps {DOT} this session"      # ... and on the LIVE tab
+LIVE_CAPTION_SHORT = "Live steps"
+LIVE_AWAY_TEXT = "LIVE is in its own window."        # the LIVE page while the pop-out shows the steps
+POP_OUT_TEXT = "Pop out"
+POP_OUT_TIP = "Show LIVE in its own window - put it on a second screen"
+CLEAR_TEXT = "Clear"
+CLEAR_TIP = "Clear what is shown here (nothing else changes; nothing was saved)"
+DOCK_TEXT = "Dock"
+DOCK_TIP = "Put LIVE back in the main window"
+SHOW_WINDOW_TEXT = "Show window"
+BRING_BACK_TEXT = "Bring it back here"
+SEE_STEPS_TEXT = "See every step"                    # the link under an Ask's answer in the conversation
 
 
 class ReadingView(QWidget):
@@ -785,9 +859,15 @@ class ReadingView(QWidget):
     centre panel. JARVIS shows the conversation (``conversation``, a
     hud.ConversationLog); BRIEFING the transcript (with a moving highlight) and,
     in the panel's header strip, the step chips and the SECTIONS button that
-    opens the section list (click a row to jump). ``tabChanged(index)`` when the
-    current tab changes (a click, Ctrl+1 / Ctrl+2, ``set_tab``). Right: the
-    NEEDS YOUR OK cards and the ACTIVITY log.
+    opens the section list (click a row to jump); LIVE (``set_live_available``)
+    every step Jarvis takes (``live_log``, a hud.LiveLog fed by the app's
+    _LiveFeed), or "LIVE is in its own window." while the pop-out shows it
+    (``set_live_popped``); its strip shows ``live_status`` (hud.LiveStatus, the
+    summary as its tooltip) where the briefing's LIVE marker sits on the other
+    tabs, then Pop out and Clear (Clear only where it fits; no toolbar row, so
+    the log has that height). ``tabChanged(index)`` when the current tab changes (a click,
+    Ctrl+1 / Ctrl+2 / Ctrl+3, ``set_tab``). Right: the NEEDS YOUR OK cards and
+    the ACTIVITY log.
     """
 
     playPause = Signal()
@@ -806,7 +886,12 @@ class ReadingView(QWidget):
     editAction = Signal(str)     # a card's Edit (tools row): the action id
     signInAccount = Signal(str)  # a card's Sign in (tools row): the action id
     connectCalendar = Signal()
-    tabChanged = Signal(int)     # hud.TAB_JARVIS / hud.TAB_BRIEFING became current
+    tabChanged = Signal(int)     # hud.TAB_JARVIS / hud.TAB_BRIEFING / hud.TAB_LIVE became current
+    livePopOut = Signal()        # the LIVE page's Pop out
+    liveDock = Signal()          # "Bring it back here" (the pop-out docks)
+    liveClear = Signal()         # the LIVE page's Clear
+    liveShowWindow = Signal()    # "Show window" (raise the pop-out)
+    liveLink = Signal(str)       # a result link or an internal link id in the LIVE log
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -825,6 +910,7 @@ class ReadingView(QWidget):
         self._short = False                   # a very short view (_fit_short)
         self._doc_folded = False              # ... on the narrowest tier: no title line on BRIEFING
         self._state_text: str | None = None   # the state label's own text (PLANNING), None for the state's
+        self._marker_live = True              # the briefing's LIVE marker should show (as built; not on LIVE)
         self._make_status_column()
         self._make_center_column()
         self._make_sections_popover()
@@ -838,7 +924,7 @@ class ReadingView(QWidget):
         shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
         shortcut.setAutoRepeat(False)   # holding Space must not toggle over and over
         shortcut.activated.connect(lambda: self.playPause.emit())
-        for keys, index in (("Ctrl+1", hud.TAB_JARVIS), ("Ctrl+2", hud.TAB_BRIEFING)):
+        for keys, index in (("Ctrl+1", hud.TAB_JARVIS), ("Ctrl+2", hud.TAB_BRIEFING), ("Ctrl+3", hud.TAB_LIVE)):
             tab_shortcut = QShortcut(QKeySequence(keys), self)
             tab_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
             tab_shortcut.activated.connect(lambda index=index: self.set_tab(index))
@@ -905,11 +991,62 @@ class ReadingView(QWidget):
         self._command_holder.setVisible(False)
         # The JARVIS / BRIEFING tabs above the centre panel, the conversation (JARVIS) and the
         # strip's caption on the JARVIS page (where the step chips and SECTIONS are hidden).
-        self.tabs = hud.TabStrip()
+        self.tabs = hud.TabStrip(live=True)
         self.tabs.currentChanged.connect(self._on_tab_changed)
         self.conversation = hud.ConversationLog()
         self.strip_caption = _label(_caps(hud.mono_font(11, 400, 0.12)), hud.TEXT_DIM, name="stripCaption")
         self.strip_caption.setText(STRIP_CAPTION)
+        self.live_status = hud.LiveStatus()
+        self.live_status.hide()
+        self._make_live_page()
+
+    def _make_live_page(self) -> None:
+        """The LIVE tab's page: the log, or one line and two links while the pop-out window shows
+        the steps. Pop out and Clear sit in the panel's strip on the LIVE tab (no toolbar row of
+        their own: the log gets that height)."""
+        self._live_summary = ""
+        self.live_pop_button = hud.HudButton(POP_OUT_TEXT, hud.LINK)
+        self.live_pop_button.setToolTip(POP_OUT_TIP)
+        self.live_pop_button.clicked.connect(lambda: self.livePopOut.emit())
+        self.live_clear_button = hud.HudButton(CLEAR_TEXT, hud.LINK)
+        self.live_clear_button.setToolTip(CLEAR_TIP)
+        self.live_clear_button.clicked.connect(lambda: self.liveClear.emit())
+        # Both in one box for the strip (shown on the LIVE tab only).
+        self._live_links = QWidget()
+        links_row = QHBoxLayout(self._live_links)
+        links_row.setContentsMargins(0, 0, 0, 0)
+        links_row.setSpacing(_LIVE_LINK_GAP)
+        links_row.addWidget(self.live_pop_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        links_row.addWidget(self.live_clear_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._live_links.hide()
+        self.live_log = hud.LiveLog()
+        self.live_log.linkClicked.connect(self.liveLink)
+        self.live_away = QWidget()
+        away = QVBoxLayout(self.live_away)
+        away.setContentsMargins(14, 14, 14, 14)
+        away.setSpacing(8)
+        self.live_away_label = _label(hud.body_font(13), hud.TEXT_SOFT, wrap=True, name="liveAway")
+        self.live_away_label.setText(LIVE_AWAY_TEXT)
+        self.live_show_button = hud.HudButton(SHOW_WINDOW_TEXT, hud.LINK)
+        self.live_show_button.clicked.connect(lambda: self.liveShowWindow.emit())
+        self.live_back_button = hud.HudButton(BRING_BACK_TEXT, hud.LINK)
+        self.live_back_button.clicked.connect(lambda: self.liveDock.emit())
+        links_holder = QWidget()
+        links = hud.FlowLayout(links_holder, 12, 4)
+        links.addWidget(self.live_show_button)
+        links.addWidget(self.live_back_button)
+        away.addWidget(self.live_away_label)
+        away.addWidget(links_holder)
+        away.addStretch(1)
+        self._live_switch = _PageSwitch()
+        self._live_switch.addWidget(self.live_log)
+        self._live_switch.addWidget(self.live_away)
+        self.live_page = _LivePage(self.conversation)
+        page = QVBoxLayout(self.live_page)
+        page.setContentsMargins(0, 0, 0, 0)
+        page.setSpacing(0)
+        page.addWidget(self._live_switch, 1)
+        self.set_live_summary("Nothing running")
 
     def _make_buttons(self) -> None:
         self.play_button = hud.HudButton("", hud.PRIMARY)
@@ -1007,11 +1144,18 @@ class ReadingView(QWidget):
         doc_layout.addWidget(self._doc_rule)
         strip = self.transcript_panel.strip_layout
         strip.insertWidget(0, self.strip_caption, 1, Qt.AlignmentFlag.AlignVCenter)
+        # The LIVE tab's status tag, in the slot of the briefing's LIVE marker (hidden there).
+        strip.insertWidget(strip.indexOf(self.transcript_panel.live) + 1, self.live_status, 0,
+                           Qt.AlignmentFlag.AlignVCenter)
         strip.addWidget(self.sections_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        # The LIVE tab's Pop out and Clear (shown on that tab only; Clear gives way on a narrow strip).
+        strip.addWidget(self._live_links, 0, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
         # As tall as the step chips and SECTIONS it stands in for: the strip (and the tab row above
-        # the panel) keeps its height when the tab changes.
-        self.strip_caption.setMinimumHeight(max(self.sections_button.sizeHint().height(),
-                                                self.transcript_panel.steps.sizeHint().height()))
+        # the panel) keeps its height when the tab changes (the links too: on LIVE the caption may
+        # give way to them).
+        strip_height = max(self.sections_button.sizeHint().height(), self.transcript_panel.steps.sizeHint().height())
+        self.strip_caption.setMinimumHeight(strip_height)
+        self._live_links.setMinimumHeight(strip_height)
         self.briefing_page = QWidget()
         briefing = QVBoxLayout(self.briefing_page)
         briefing.setContentsMargins(0, 0, 0, 0)
@@ -1021,6 +1165,7 @@ class ReadingView(QWidget):
         self._pages = _PageSwitch()
         self._pages.addWidget(self.conversation)      # hud.TAB_JARVIS
         self._pages.addWidget(self.briefing_page)     # hud.TAB_BRIEFING
+        self._pages.addWidget(self.live_page)         # hud.TAB_LIVE
         self.transcript_panel.body_layout.addWidget(self._pages, 1)
         # Folder tabs: left-aligned right above the panel, the current one's underline on its edge.
         tab_row = QWidget()
@@ -1108,7 +1253,8 @@ class ReadingView(QWidget):
     # ---- tabs ----------------------------------------------------------------------
 
     def set_tab(self, index: int) -> None:
-        """Make JARVIS (hud.TAB_JARVIS) or BRIEFING (hud.TAB_BRIEFING) the current tab."""
+        """Make JARVIS (hud.TAB_JARVIS), BRIEFING (hud.TAB_BRIEFING) or LIVE (hud.TAB_LIVE, while it
+        is available) the current tab."""
         self.tabs.set_current(index)
 
     def current_tab(self) -> int:
@@ -1134,19 +1280,74 @@ class ReadingView(QWidget):
         self.tabChanged.emit(index)
 
     def _show_tab_page(self, index: int) -> None:
-        """The panel's page for ``index``; on JARVIS the strip shows its caption instead of the step
-        chips and SECTIONS (both stay in the strip, hidden)."""
-        jarvis = index == hud.TAB_JARVIS
+        """The panel's page for ``index``; on JARVIS and LIVE the strip shows its caption instead of
+        the step chips and SECTIONS (both stay in the strip, hidden); on LIVE the briefing's LIVE
+        marker gives its slot to ``live_status``."""
+        captioned = index in (hud.TAB_JARVIS, hud.TAB_LIVE)
         page = self._pages.widget(index)
         if page is not None:
             self._pages.setCurrentWidget(page)
-        self.strip_caption.setVisible(jarvis)
-        self.transcript_panel.steps.setVisible(not jarvis)
-        self.sections_button.setVisible(not jarvis)
-        if jarvis:
+        self.strip_caption.setVisible(captioned)
+        self.transcript_panel.steps.setVisible(not captioned)
+        self.sections_button.setVisible(not captioned)
+        self._live_links.setVisible(index == hud.TAB_LIVE)   # Clear: _fit_caption decides
+        self._sync_marker()
+        self._fit_caption()
+        if captioned:
             self.sections_popover.hide()
         else:
             QTimer.singleShot(0, self._after_briefing_page_shown)
+
+    def _sync_marker(self) -> None:
+        """The briefing's LIVE marker on JARVIS / BRIEFING (its space kept while hidden); on the LIVE
+        tab it is out of the strip and ``live_status`` shows in its place."""
+        marker = self.transcript_panel.live
+        on_live = self.tabs.current() == hud.TAB_LIVE
+        policy = marker.sizePolicy()
+        if policy.retainSizeWhenHidden() == on_live:
+            policy.setRetainSizeWhenHidden(not on_live)
+            marker.setSizePolicy(policy)
+        marker.set_live(self._marker_live and not on_live)
+        self.live_status.setVisible(on_live)
+
+    # ---- the LIVE tab --------------------------------------------------------------
+
+    def set_live_available(self, available: bool) -> None:
+        """``[live] enabled``: the LIVE tab and its page (hidden: JARVIS when LIVE was current)."""
+        self.tabs.set_live_visible(available)
+
+    def live_available(self) -> bool:
+        return self.tabs.live_visible()
+
+    def set_live_popped(self, popped: bool) -> None:
+        """The pop-out window shows the steps (the page says so, with Show window and Bring it back
+        here) or the page shows them again."""
+        self._live_switch.setCurrentWidget(self.live_away if popped else self.live_log)
+        self.live_pop_button.setEnabled(not popped)
+
+    def live_popped(self) -> bool:
+        return self._live_switch.currentWidget() is self.live_away
+
+    def live_room(self) -> int:
+        """The height the LIVE tab's log has (the panel's page area, whichever tab is current)."""
+        return self._pages.height()
+
+    def set_live_summary(self, text: str) -> None:
+        """The LIVE summary ("3 tasks - 1 running"): the strip's status tag's tooltip and description."""
+        self._live_summary = text or ""
+        self.live_status.setToolTip(hud.plain_tooltip(self._live_summary) if self._live_summary else "")
+        self.live_status.setAccessibleDescription(self._live_summary)
+
+    def live_summary_text(self) -> str:
+        return self._live_summary
+
+    def set_live_state(self, state: str, text: str | None = None, *, since: float | None = None,
+                       deadline: float | None = None) -> None:
+        """The LIVE tab's strip tag (hud.LiveStatus.set_state); the caption beside it fits again."""
+        old = self.live_status.sizeHint().width()
+        self.live_status.set_state(state, text, since=since, deadline=deadline)
+        if self.live_status.sizeHint().width() != old:
+            self._fit_caption()
 
     def _after_briefing_page_shown(self) -> None:
         if not shiboken6.isValid(self) or self.tabs.current() != hud.TAB_BRIEFING:
@@ -1181,7 +1382,8 @@ class ReadingView(QWidget):
         if state != self.state_label.state() or (label or None) != self._state_text:
             self.state_label.set_state(state, label or None)
             self._state_text = label or None
-        self.transcript_panel.live.set_live(live)
+        self._marker_live = bool(live)
+        self._sync_marker()
 
     def set_ask_available(self, available: bool) -> None:
         """Show Ask Jarvis's command bar ([ask] enabled) or keep it out of the layout."""
@@ -1280,16 +1482,33 @@ class ReadingView(QWidget):
         return super().eventFilter(watched, event)
 
     def _fit_caption(self) -> None:
-        """The JARVIS strip's caption in full, or "CONVERSATION" alone where it does not fit."""
+        """The JARVIS (LIVE) strip's caption in full, or "CONVERSATION" ("LIVE STEPS") alone where it
+        does not fit; on LIVE after the room for the status tag, Pop out and (where it fits) Clear."""
         strip = self.transcript_panel.strip
         margins = strip.layout().contentsMargins()
-        live = self.transcript_panel.live
-        room = (strip.width() - margins.left() - margins.right() - live.sizeHint().width()
-                - strip.layout().spacing())
+        spacing = strip.layout().spacing()
+        on_live = self.tabs.current() == hud.TAB_LIVE
+        tag = self.live_status if on_live else self.transcript_panel.live
+        full, short = (LIVE_CAPTION, LIVE_CAPTION_SHORT) if on_live else (STRIP_CAPTION, STRIP_CAPTION_SHORT)
+        room = (strip.width() - margins.left() - margins.right() - tag.sizeHint().width() - spacing)
+        if on_live:
+            # Pop out always; Clear when it fits beside the tag (else it is in the pop-out window). The
+            # caption comes last and is left out (taking no room) where it does not fit.
+            room -= self.live_pop_button.sizeHint().width() + spacing
+            clear = self.live_clear_button.sizeHint().width() + _LIVE_LINK_GAP
+            fits = room + spacing - clear >= 0
+            if self.live_clear_button.isHidden() == fits:
+                self.live_clear_button.setVisible(fits)
+            if fits:
+                room -= clear
         metrics = QFontMetricsF(self.strip_caption.font())
-        text = STRIP_CAPTION if metrics.horizontalAdvance(STRIP_CAPTION) + 2 <= room else STRIP_CAPTION_SHORT
+        text = full if metrics.horizontalAdvance(full) + 2 <= room else short
+        if on_live and metrics.horizontalAdvance(short) + 2 > room:
+            text = ""   # a narrow strip on LIVE: the tab above already says LIVE; the tag and links keep their room
         if self.strip_caption.text() != text:
             self.strip_caption.setText(text)
+        if on_live and self.strip_caption.isHidden() == bool(text):
+            self.strip_caption.setVisible(bool(text))
 
     def set_pending(self, pending: int, total: int) -> None:
         """Pending proposals: the panel's meta and the STATUS bar."""
@@ -1643,6 +1862,7 @@ class BriefingWindow(hud.HudWindowFrame):
         self.header.set_hour24(hour24)
         self.reading.activity.set_hour24(hour24)
         self.reading.conversation.set_hour24(hour24)
+        self.reading.live_log.set_hour24(hour24)
 
     # ---- views and sizes ------------------------------------------------------
 
@@ -1730,12 +1950,246 @@ class BriefingWindow(hud.HudWindowFrame):
 
     def keep_on_screen(self) -> None:
         """Move the window fully inside the available area of its screen."""
-        frame = QRect(self.pos(), self.size())
-        area = _screen_area(frame.center())
-        x = max(area.x(), min(frame.x(), area.x() + area.width() - frame.width()))
-        y = max(area.y(), min(frame.y(), area.y() + area.height() - frame.height()))
-        if (x, y) != (frame.x(), frame.y()):
-            self.move(x, y)
+        _keep_on_screen(self)
+
+
+def _keep_on_screen(widget: QWidget) -> None:
+    """Move the top-level ``widget`` fully inside the available area of its screen."""
+    frame = QRect(widget.pos(), widget.size())
+    area = _screen_area(frame.center())
+    x = max(area.x(), min(frame.x(), area.x() + area.width() - frame.width()))
+    y = max(area.y(), min(frame.y(), area.y() + area.height() - frame.height()))
+    if (x, y) != (frame.x(), frame.y()):
+        widget.move(x, y)
+
+
+# --------------------------------------------------------------------------
+# The LIVE view: the feed from the stream and the pop-out window
+# --------------------------------------------------------------------------
+
+LIVE_WINDOW_TITLE = "Jarvis - Live"
+LIVE_WINDOW_SIZE = QSize(520, 680)
+LIVE_WINDOW_MIN_SIZE = QSize(360, 320)
+_LIVE_WINDOW_GAP = 12      # between the main window and the pop-out placed beside it
+_LIVE_DRAIN_MS = 100       # the feed takes what changed at most this often
+# A LIVE tab shorter than this (a small screen's window) shows hardly a step: with another screen,
+# auto-open "tab" shows the pop-out there instead (without the focus).
+LIVE_DOCKED_MIN_PX = 120
+_LIVE_LINK_GAP = 8          # between Pop out and Clear in the LIVE tab's strip
+# Notion's page and block ids (a fetch error may quote one): never shown in the LIVE view.
+_NOTION_ID_RE = re.compile(r"\b[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}\b")
+
+
+@dataclasses.dataclass(frozen=True)
+class LiveSummary:
+    """What the LIVE view shows right now, for the tab's dot, the strip's tag and the pop-out's toolbar."""
+
+    tasks: int = 0                        # the tasks shown (not the pinned "Background reads")
+    running: int = 0                      # Asks and approved cards still running
+    working_since: float | None = None    # the oldest of those started (monotonic)
+    countdown_deadline: float | None = None   # an approved card's undo countdown runs out then
+    countdown_word: str = ""              # "SENDING" / "ADDING"
+    attention: bool = False               # this update brought steps of an Ask or an approved card
+
+    def text(self) -> str:
+        """"3 tasks - 1 running", "3 tasks - nothing running", "Nothing running"."""
+        if not self.tasks and not self.running:
+            return "Nothing running"
+        running = f"{self.running} running" if self.running else "nothing running"
+        return f"{_plural(self.tasks, 'task')} - {running}"
+
+
+class _LiveBridge(QObject):
+    changed = Signal()
+
+
+class _LiveFeed(QObject):
+    """Drains the LIVE stream on the GUI thread and hands what changed to every attached view.
+
+    The stream's listener (``poke``, called from any thread, at most once until the next drain)
+    emits a queued signal; the first one starts a 100 ms single-shot timer, and its timeout takes
+    ``stream.changes(version)`` and applies it to every view (hud.LiveLog), then emits
+    ``updated(LiveSummary)``. So a burst of any size costs at most about ten drains a second and
+    one pending event. ``attach(view)`` starts a view from the whole snapshot. Nothing on a worker
+    thread touches Qt widgets and nothing here waits for a worker.
+    """
+
+    updated = Signal(object)   # LiveSummary
+
+    def __init__(self, stream: _live.LiveStream, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._stream = stream
+        self._bridge = _LiveBridge(self)
+        self._bridge.changed.connect(self._on_changed, Qt.ConnectionType.QueuedConnection)
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(_LIVE_DRAIN_MS)
+        self._timer.timeout.connect(self.drain)
+        self._version = 0
+        self._views: list[Any] = []
+        self._tasks: dict[int, _live.TaskView] = {}
+        self._stopped = False
+        self.drains = 0
+        self.summary_now = LiveSummary()
+        if stream.enabled:
+            stream.set_listener(self.poke)
+
+    def poke(self) -> None:
+        """The stream's listener (any thread): one queued signal to the GUI thread."""
+        if self._stopped:
+            return
+        try:
+            self._bridge.changed.emit()
+        except RuntimeError:   # the bridge is gone (shutting down)
+            pass
+
+    def _on_changed(self) -> None:
+        if not self._stopped and shiboken6.isValid(self._timer) and not self._timer.isActive():
+            self._timer.start()
+
+    def views(self) -> list[Any]:
+        return list(self._views)
+
+    def attach(self, view: Any) -> None:
+        """Feed ``view`` too, starting from the whole stream as it is now."""
+        if self._stopped or view in self._views:
+            return
+        self._views.append(view)
+        self._apply(view, _live.LiveChanges(self._stream.version, self._stream.snapshot(), (), True))
+
+    def detach(self, view: Any) -> None:
+        if view in self._views:
+            self._views.remove(view)
+
+    def drain(self) -> None:
+        """Take what changed since the last drain and show it everywhere (the timer calls it)."""
+        if self._stopped:
+            return
+        changes = self._stream.changes(self._version)
+        self._version = changes.version
+        if changes.reset:
+            self._tasks = {view.id: view for view in changes.tasks}
+        else:
+            for task_id in changes.removed:
+                self._tasks.pop(task_id, None)
+            for view in changes.tasks:
+                self._tasks[view.id] = view
+        if changes.tasks or changes.removed or changes.reset:
+            for view in list(self._views):
+                self._apply(view, changes)
+        self.drains += 1
+        attention = any(view.kind in _live.ATTENTION_KINDS for view in changes.tasks) and not changes.reset
+        self.summary_now = self._summary(attention)
+        try:
+            self.updated.emit(self.summary_now)
+        except RuntimeError:   # this feed's controller is gone
+            self.stop()
+
+    def _apply(self, view: Any, changes: _live.LiveChanges) -> None:
+        if not shiboken6.isValid(view):
+            self.detach(view)
+            return
+        try:
+            view.apply(changes)
+        except Exception as exc:  # noqa: BLE001 - a broken view never stops the feed or Jarvis
+            logger.debug("Live view: apply failed (%s)", type(exc).__name__)
+
+    def _summary(self, attention: bool) -> LiveSummary:
+        shown = [view for view in self._tasks.values() if not view.pinned]
+        running = [view for view in self._tasks.values()
+                   if view.kind in _live.ATTENTION_KINDS and view.status == _live.STATUS_RUNNING]
+        deadline, word = None, ""
+        for view in running:
+            step = next((step for step in reversed(view.steps)
+                         if step.status == _live.STATUS_RUNNING and step.deadline is not None), None)
+            if step is not None:
+                deadline, word = step.deadline, step.status_text or "SENDING"
+                break
+        return LiveSummary(tasks=len(shown), running=len(running),
+                           working_since=min((view.started for view in running), default=None),
+                           countdown_deadline=deadline, countdown_word=word, attention=attention)
+
+    def stop(self) -> None:
+        """Shutdown: no more drains, no views."""
+        self._stopped = True
+        self._views.clear()
+        try:
+            self._timer.stop()
+        except RuntimeError:
+            pass
+
+
+class LiveWindow(hud.HudWindowFrame):
+    """The LIVE view in a window of its own ("Pop out"): a normal resizable window with its own
+    taskbar button (never on top), for a second screen. Its header has the wordmark, "live - this
+    session", the clock, minimize and close; a toolbar with the strip's status tag, the summary,
+    Dock and Clear; and its own hud.LiveLog fed by the same _LiveFeed as the LIVE tab. Close,
+    Alt+F4 and Dock ask to dock (``dockRequested``): the controller hides it, it never quits.
+    """
+
+    dockRequested = Signal()
+    clearRequested = Signal()
+    linkClicked = Signal(str)
+
+    def __init__(self) -> None:
+        super().__init__(margins=(10, 4, 10, 10), always_on_top=False)
+        self.setObjectName("LiveWindow")
+        self.setWindowTitle(LIVE_WINDOW_TITLE)
+        self.setWindowIcon(app_icon())
+        assert self.header is not None
+        self.header.set_subtitle(f"live {DOT} this session")
+        self.set_resizable(True)
+        self.setMinimumSize(LIVE_WINDOW_MIN_SIZE)
+        self.resize(LIVE_WINDOW_SIZE)
+        self.status = hud.LiveStatus()
+        self.summary = _ElidedLabel(hud.mono_font(10, 400, 0.04), hud.TEXT_DIM)
+        self.summary.setObjectName("liveWindowSummary")
+        self.dock_button = hud.HudButton(DOCK_TEXT, hud.LINK)
+        self.dock_button.setToolTip(DOCK_TIP)
+        self.dock_button.clicked.connect(lambda: self.dockRequested.emit())
+        self.clear_button = hud.HudButton(CLEAR_TEXT, hud.LINK)
+        self.clear_button.setToolTip(CLEAR_TIP)
+        self.clear_button.clicked.connect(lambda: self.clearRequested.emit())
+        toolbar = QWidget()
+        row = QHBoxLayout(toolbar)
+        row.setContentsMargins(4, 8, 4, 6)
+        row.setSpacing(10)
+        row.addWidget(self.status, 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(self.summary, 1, Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(self.dock_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(self.clear_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.log = hud.LiveLog()
+        self.log.linkClicked.connect(self.linkClicked)
+        self.body_layout.addWidget(toolbar)
+        self.body_layout.addWidget(self.log, 1)
+        self.set_summary(LiveSummary())
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt override
+        event.ignore()   # closing docks the view back into the main window; the app never quits here
+        self.dockRequested.emit()
+
+    def set_hour24(self, hour24: bool) -> None:
+        assert self.header is not None
+        self.header.set_hour24(hour24)
+        self.log.set_hour24(hour24)
+
+    def set_summary(self, summary: LiveSummary) -> None:
+        self.summary.set_full_text(summary.text())
+        _show_live_state(self.status.set_state, summary)
+
+    def keep_on_screen(self) -> None:
+        _keep_on_screen(self)
+
+
+def _show_live_state(set_state: Callable[..., None], summary: LiveSummary) -> None:
+    """The strip's / pop-out's status tag (``set_state`` as hud.LiveStatus.set_state's): SENDING IN
+    7 S, WORKING 0:12 or IDLE."""
+    if summary.countdown_deadline is not None:
+        set_state(hud.LIVE_COUNTDOWN, summary.countdown_word or "SENDING", deadline=summary.countdown_deadline)
+    elif summary.running:
+        set_state(hud.LIVE_WORKING, since=summary.working_since)
+    else:
+        set_state(hud.LIVE_IDLE)
 
 
 # --------------------------------------------------------------------------
@@ -1954,6 +2408,7 @@ class _ExecJob:
     action: ProposedAction
     writes_running: bool
     expected_from: str = ""
+    live: Any = None                    # the card's LIVE view task (live.LiveTask), None without one
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2065,10 +2520,10 @@ class _ActionWorker:
         the call). The app itself always uses execute."""
         self._jobs.put(_ExecJob(action, writes_running=False))
 
-    def execute(self, action: ProposedAction, expected_from: str = "") -> None:
+    def execute(self, action: ProposedAction, expected_from: str = "", live: Any = None) -> None:
         """A proposal whose countdown ran out: "running", the one call, the result. A Reply /
-        Email goes out only from ``expected_from``."""
-        self._jobs.put(_ExecJob(action, writes_running=True, expected_from=expected_from))
+        Email goes out only from ``expected_from``. ``live``: its LIVE view task (finished here)."""
+        self._jobs.put(_ExecJob(action, writes_running=True, expected_from=expected_from, live=live))
 
     def list_agenda(self, job: _AgendaJob) -> None:
         self._jobs.put(job)
@@ -2258,6 +2713,7 @@ class _ActionWorker:
 
     def _exec(self, job: _ExecJob) -> None:
         action = job.action
+        task = job.live if job.live is not None else _live.NO_TASK
 
         def on_stage(stage: str) -> None:
             self._emit("actionProgress", action.id, stage)
@@ -2268,11 +2724,14 @@ class _ActionWorker:
                 logger.info("Action %s (%s, %s) not sent: the sending account is not the one the card showed",
                             action.id, action.kind, logged_alias(action.account))
                 self._store.set(action.id, STATUS_FAILED, message=problem, kind=action.kind, account=action.account)
+                _live_exec_refused(task, problem)
                 self._emit("actionResult", action.id, None, ExecError(problem), STATUS_FAILED)
                 return
+        extra = {"live": job.live} if job.live is not None else {}
         outcome = run_action(self._executor, action, store=self._store if job.writes_running else None,
                              writes_running=job.writes_running, on_stage=on_stage,
-                             proceed=lambda: not self._stop.is_set())
+                             proceed=lambda: not self._stop.is_set(), **extra)
+        _live_exec_finished(task, action, outcome)
         self._emit("actionResult", action.id, outcome.result, outcome.error, outcome.status)
 
     def _emit(self, signal_name: str, *args: Any) -> None:
@@ -2469,6 +2928,7 @@ class _Countdown:
     started: float               # time.monotonic() of the click that started it (Undo's double-click guard)
     shown: int = -1              # the seconds the card shows
     sender: str = ""             # a Reply / Email: the From address its card showed (it goes out only from it)
+    task: Any = _live.NO_TASK    # its LIVE view task (live.LiveTask)
 
 
 def _action_phrase(action: ProposedAction) -> str:
@@ -2574,6 +3034,74 @@ def _remove_old_sessions(root: Path, keep: Path) -> None:
         logger.debug("Could not clean old audio folders: %s", exc)
 
 
+# --------------------------------------------------------------------------
+# The LIVE view's steps of approved cards and briefing fetches (on screen only; quiet)
+# --------------------------------------------------------------------------
+
+_LIVE_KIND_WORDS = {CALENDAR: "Add event", TODO: "Add block", RSVP: "RSVP", MOVE: "Move", CANCEL: "Cancel",
+                    REPLY: "Reply", EMAIL: "Email"}
+
+
+def _live_action_title(action: ProposedAction) -> str:
+    """"Reply work: Re: Budget", "Move work: Project sync", "Add event: Dentist"."""
+    word = _LIVE_KIND_WORDS.get(action.kind, action.kind.capitalize())
+    title = action.title or _kind_title(action)
+    if action.kind in (CALENDAR, TODO):
+        return f"{word}: {title}"
+    return f"{word} {action.account}: {title}" if action.account else f"{word}: {title}"
+
+
+@_live.quiet()
+def _live_countdown_ran_out(countdown: _Countdown) -> None:
+    verb = "adding" if _adds_event(countdown.action) else "sending"
+    countdown.task.find(_live.ACTION_COUNTDOWN).done(_live.STATUS_OK, summary=f"ran out - {verb} now")
+
+
+@_live.quiet()
+def _live_countdown_end(countdown: _Countdown, status: str, word: str, summary: str, *,
+                        task_summary: str = "") -> None:
+    """The countdown ended without a call (Undo, a stop, the sending account changed, Jarvis closed)."""
+    task = countdown.task
+    task.find(_live.ACTION_COUNTDOWN).done(status, status_text=word, summary=summary)
+    task.finish(status, status_text=word, summary=task_summary or summary)
+
+
+def _without_ids(text: str) -> str:
+    """A fetch error for the LIVE view: any Notion page or block id it quotes is left out."""
+    return _NOTION_ID_RE.sub("[id not shown]", text)
+
+
+@_live.quiet()
+def _live_fetch_task(stream: _live.LiveStream, poll_run: str | None) -> Any:
+    """A briefing fetch's compact LIVE view task (the page id is never shown: it is in .env)."""
+    task = stream.task(_live.TASK_BRIEFING, f"{poll_run} briefing from Notion" if poll_run else "Briefing from Notion",
+                       compact=True)
+    fields = [("Waiting for", f"the {poll_run} run")] if poll_run else []
+    task.step(_live.BRIEFING_FETCH, "Read the briefing page in Notion (read only)", fields=fields)
+    return task
+
+
+@_live.quiet()
+def _live_exec_refused(task: Any, problem: str) -> None:
+    task.step(_live.ACTION_CHECKS, "Last checks before the call", status=_live.STATUS_BLOCKED, summary=problem)
+    task.finish(_live.STATUS_BLOCKED, summary=problem)
+
+
+@_live.quiet()
+def _live_exec_finished(task: Any, action: ProposedAction, outcome: Any) -> None:
+    """The approved card's LIVE view task ends as run_action did."""
+    status = outcome.status
+    if status in (STATUS_CREATED, STATUS_EXISTS, STATUS_SENT) and outcome.result is not None:
+        words = outcome.result.result_text or result_text(action, status) or {
+            STATUS_CREATED: "Added", STATUS_EXISTS: "Already on the calendar"}.get(status, "Done")
+        task.finish(_live.STATUS_OK, summary=words)
+    elif status == STATUS_UNKNOWN:
+        task.finish(_live.STATUS_WARN, status_text="UNKNOWN",
+                    summary="it may have happened - check Sent mail / the calendar before retrying")
+    else:
+        task.finish(_live.STATUS_FAILED, summary=str(outcome.error or "") or "it did not happen")
+
+
 class AppController(QObject):
     """State machine behind the window: prompt -> (snoozed ->) reading -> quit.
 
@@ -2676,6 +3204,11 @@ class AppController(QObject):
         self._closing = threading.Event()
         self._shut_down = False
         self._bridge = _Bridge(self)
+        # The LIVE view's event stream ([live]; memory only): created before the Ask controller.
+        live_config = getattr(config, "live", None)
+        self.live = _live.LiveStream(enabled=bool(getattr(live_config, "enabled", True)),
+                                     keep_text=bool(getattr(live_config, "text", True)),
+                                     hour24=bool(config.display.hour24))
         self._volume = volume
         self.window = BriefingWindow(config.prompt.later_short_minutes, config.prompt.later_long_minutes)
         self.window.set_hour24(config.display.hour24)
@@ -2705,6 +3238,7 @@ class AppController(QObject):
         self._init_talk_state(prefs, locked)
         self._init_timers()
         self._connect_signals()
+        self._init_live_view()
         self.ask: Any = self._create_ask(ask_factory)   # ask_ui.AskController, or None while [ask] is off
         # Jarvis's own voice: silent unless injected; start() builds the real one ([assistant] speak).
         self._voice_injected = voice_factory is not None
@@ -2715,6 +3249,7 @@ class AppController(QObject):
     def _init_fetch_state(self) -> None:
         self._fetch_id = 0
         self._fetch_stop: threading.Event | None = None
+        self._fetch_task: Any = _live.NO_TASK      # the current fetch's LIVE view task
         self._fetch_poll_run: str | None = None
         self._fetch_attempts = 0                 # attempts finished by the current fetch
         self._poll_deadline = self._now()
@@ -2892,6 +3427,31 @@ class AppController(QObject):
         self.window.visibilityChanged.connect(self._sync_agenda_timer)
         self.window.visibilityChanged.connect(self._on_window_state)
         self.window.activeChanged.connect(self._on_window_active)
+
+    def _init_live_view(self) -> None:
+        """The LIVE tab ([live]): the feed from the stream to the views (the LIVE tab's log, and the
+        pop-out's once it is made), the tab's dot, and what auto-open remembers (memory only)."""
+        live_config = getattr(self.config, "live", None)
+        self._live_mode = str(getattr(live_config, "auto_open", "tab"))
+        self._live_feed = _LiveFeed(self.live, self)
+        self._live_feed.updated.connect(self._on_live_updated)
+        self._live_summary = LiveSummary()
+        self._live_window: LiveWindow | None = None   # the pop-out, made on the first Pop out (kept)
+        self._live_placed = False                  # the pop-out was placed once this session
+        self._live_restored = False                # assistant.json's pop-out was looked at (once)
+        self._live_unread = False                  # Ask / card steps came while LIVE was not in sight
+        self._live_opened: list[int] = []          # tasks that already switched to LIVE (one switch each)
+        self._ask_task_id = 0                      # the running (or last) Ask's LIVE task
+        self._live_peeks = [0, 0, 0]               # event checks on their way: jobs, cards, problems
+        reading = self.window.reading
+        reading.set_live_available(self.live.enabled)
+        if self.live.enabled:
+            self._live_feed.attach(reading.live_log)
+        reading.livePopOut.connect(self.pop_out_live)
+        reading.liveDock.connect(self.dock_live)
+        reading.liveClear.connect(self.clear_live)
+        reading.liveShowWindow.connect(self.show_live_window)
+        reading.liveLink.connect(self._on_live_link)
 
     def _create_player(self) -> BriefingPlayer:
         player = BriefingPlayer(self, section_gap_ms=self.config.voice.section_gap_ms,
@@ -3270,6 +3830,7 @@ class AppController(QObject):
 
     def _start_fetch(self, poll_run: str | None) -> None:
         """Start a fetch thread; ``poll_run`` set means keep polling until that run is fresh."""
+        self._fetch_task.finish(_live.STATUS_CANCELLED, summary="replaced")   # a fetch still running
         self._stop_fetch()
         self._fetch_id += 1
         stop = threading.Event()
@@ -3286,6 +3847,7 @@ class AppController(QObject):
         thread = threading.Thread(
             target=_run_fetch, name=f"fetch-{self._fetch_id}", daemon=True,
             args=(self._bridge, self._fetch_id, stop, lambda: fetch_briefing(client, page_id), options))
+        self._fetch_task = _live_fetch_task(self.live, poll_run)
         thread.start()
         logger.info("Fetching the briefing (%s)",
                     f"waiting for the {poll_run} run" if poll_run else "first successful fetch")
@@ -3294,12 +3856,14 @@ class AppController(QObject):
         if self._fetch_stop is not None:
             self._fetch_stop.set()
             self._fetch_stop = None
+        self._fetch_task.finish(_live.STATUS_CANCELLED, summary="stopped")   # nothing once it ended
 
     def _on_fetch_attempt(self, fetch_id: int, briefing: Briefing | None, error: NotionError | None,
                           attempt: int) -> None:
         if fetch_id != self._fetch_id or self.state == STATE_QUITTING:
             return
         self._fetch_attempts += 1
+        self._live_fetch_attempt(briefing, error, attempt)
         if briefing is None:
             logger.info("Fetch attempt %d failed: %s", attempt, error)
             self._fetch_error = error
@@ -3356,6 +3920,7 @@ class AppController(QObject):
         if fetch_id != self._fetch_id or self.state == STATE_QUITTING:
             return
         self._fetch_stop = None
+        self._live_fetch_done(result)
         logger.info("Fetching finished after %d attempt(s): %s", result.attempts, _describe_poll(result))
         if result.briefing is None and result.error is not None:
             self._fetch_error = result.error
@@ -3379,6 +3944,47 @@ class AppController(QObject):
             return
         self._refresh_prefetch()
         self._refresh_views()
+
+    @_live.quiet()
+    def _live_fetch_attempt(self, briefing: Briefing | None, error: NotionError | None, attempt: int) -> None:
+        """One note per attempt on the fetch's LIVE view step (the page id is never shown)."""
+        step = self._fetch_task.find(_live.BRIEFING_FETCH)
+        if step is _live.NO_STEP:
+            return
+        if briefing is None:
+            step.note(f"Attempt {attempt}: {_without_ids(str(error)) if error else 'no answer'}")
+            return
+        hour24 = self.config.display.hour24
+        run = f", {briefing.header.run} run" if briefing.header.run else ""
+        fresh = self._freshness(briefing).fresh
+        state = ("new" if fresh else "not new yet") if self._fetch_poll_run else "read"
+        step.note(f"Attempt {attempt}: updated {_short_updated(briefing.header, self._now(), hour24)}{run} - {state}")
+
+    @_live.quiet()
+    def _live_fetch_done(self, result: PollResult) -> None:
+        task = self._fetch_task
+        step = task.find(_live.BRIEFING_FETCH)
+        if step is _live.NO_STEP:
+            return
+        briefing = result.briefing
+        if briefing is not None:
+            step.field("Updated", _short_updated(briefing.header, self._now(), self.config.display.hour24))
+            if briefing.header.run:
+                step.field("Run", briefing.header.run)
+            step.field("Lines", str(len(briefing.lines)))
+            step.field("Proposals found", str(len(self._source_lists.get(SOURCE_BRIEFING, ()))))
+            step.field("Deadlines found", str(len(self._page_deadlines)))
+        if result.stopped:
+            status, word, summary = _live.STATUS_CANCELLED, "", "stopped"
+        elif result.timed_out:
+            status, word = _live.STATUS_WARN, "NOTHING NEW"
+            summary = f"no new {self._fetch_poll_run or ''} briefing yet"
+        elif briefing is None and result.error is not None:
+            status, word, summary = _live.STATUS_FAILED, "", _without_ids(str(result.error))
+        else:
+            status, word, summary = _live.STATUS_OK, "", _plural(result.attempts, "attempt")
+        step.done(status, status_text=word, summary=summary)
+        task.finish(status, status_text=word, summary=summary)
 
     # ---- proposed actions ------------------------------------------------------------------
 
@@ -4089,6 +4695,8 @@ class AppController(QObject):
         now = time.monotonic()
         self._hints.pop(action.id, None)
         self._countdown = _Countdown(action, deadline=now + seconds, started=now, sender=sender)
+        self._countdown.task = self._live_action_task(action, seconds, now + seconds)
+        self._live_auto_open(_live.TASK_ACTION, self._countdown.task.id)
         self._jobs[action.id] = _STAGE_COUNTDOWN
         logger.info("Approved action %s (%s, %s): %s in %d s unless undone", action.id, action.kind,
                     logged_alias(account_of(action)), "adding" if _adds_event(action) else "sending", seconds)
@@ -4107,6 +4715,34 @@ class AppController(QObject):
         # said after this approval it would sound like this card's result, which only comes later.
         self._voice_call("cancel_key", _RESULT_KEY)
         self._pump_voice()   # nothing Jarvis says starts during the countdown
+
+    @_live.quiet(_live.NO_TASK)
+    def _live_action_task(self, action: ProposedAction, seconds: int, deadline: float) -> Any:
+        """An approved card's LIVE view task: "You approved", what it will send or change exactly
+        (Executor.preview: no network) and the undo countdown."""
+        if not self.live.enabled:
+            return _live.NO_TASK
+        saved = self._store.get(action.id) or {}
+        retry = saved.get("status") in (STATUS_FAILED, STATUS_UNKNOWN)
+        task = self.live.task(_live.TASK_ACTION, _live_action_title(action) + (" (retry)" if retry else ""))
+        today = self._now().date()
+        view = card_view(action, today)
+        kind = {RSVP: "RSVP"}.get(action.kind, action.kind.upper())
+        fields: list[Any] = [("Card", f"{action.source.upper()} {kind}"), ("Account", account_of(action)),
+                             ("Card says", " - ".join(part for part in (view.title, _card_detail(action, view, today))
+                                                      if part))]
+        check = self._checks.get(action.id)
+        if action.changes_event and check is not None:
+            fields.append(("Google's event now", check.text))
+        if retry:
+            fields.append(("Retry", f"the last try ended {str(saved.get('status')).upper()}"))
+        task.step(_live.ACTION_APPROVED, "You approved", status=_live.STATUS_OK, fields=fields)
+        preview = self._executor.preview(action)
+        if preview is not None:
+            task.step(_live.ACTION_PAYLOAD, preview.title, status_text="PREVIEW").show(preview)
+        task.step(_live.ACTION_COUNTDOWN, "Undo countdown", status_text="ADDING" if _adds_event(action) else "SENDING",
+                  deadline=deadline, fields=[("Length", f"{seconds} s"), ("Undo", "on the card")])
+        return task
 
     def _activity_sub(self, action: ProposedAction) -> str:
         """"MOVE \u00b7 WORK"; a Reply / Email adds its recipient count ("REPLY \u00b7 WORK \u00b7 2 recipients")."""
@@ -4152,10 +4788,13 @@ class AppController(QObject):
         worker = self._calendar_worker
         if self.state == STATE_QUITTING or worker is None:
             self._jobs.pop(action.id, None)
+            _live_countdown_end(countdown, _live.STATUS_CANCELLED, "", "Jarvis closed - nothing was sent")
             return
         if action.sends_mail:
             problem = _mail_from_problem(self._executor, action, countdown.sender)
             if problem:   # the account (or its address) changed under the countdown: nothing is sent
+                _live_countdown_end(countdown, _live.STATUS_BLOCKED, "",
+                                    "the sending account changed during the countdown - nothing was sent")
                 self._jobs.pop(action.id, None)
                 logger.info("Action %s (%s, %s) not sent: the sending account changed during the countdown",
                             action.id, action.kind, logged_alias(action.account))
@@ -4174,7 +4813,9 @@ class AppController(QObject):
             self._activity(hud.TAG_RUN, f"Adding a block for {_activity_title(action)}", "Google Calendar")
         else:
             self._activity(hud.TAG_RUN, f"Sending: {_action_phrase(action)}", self._activity_sub(action))
-        worker.execute(action, expected_from=countdown.sender)
+        _live_countdown_ran_out(countdown)
+        task = countdown.task
+        worker.execute(action, expected_from=countdown.sender, live=task if task is not _live.NO_TASK else None)
 
     def undo_action(self, action_id: str) -> None:
         """Undo during the countdown: nothing is sent and nothing is saved; the card waits again.
@@ -4204,6 +4845,12 @@ class AppController(QObject):
         action_id = countdown.action.id
         self._jobs.pop(action_id, None)
         logger.info("Action %s undone (%s); nothing was sent", action_id, reason)
+        nothing = "nothing was created" if _adds_event(countdown.action) else "nothing was sent"
+        if reason == "undone":
+            _live_countdown_end(countdown, _live.STATUS_CANCELLED, "UNDONE", nothing,
+                                task_summary=f"Undone - {nothing}")
+        else:
+            _live_countdown_end(countdown, _live.STATUS_CANCELLED, "STOPPED", f"{reason} - {nothing}")
         self._show_card_state(action_id)
         self._sync_card_locks()
 
@@ -4467,6 +5114,7 @@ class AppController(QObject):
             return
         self._peek_seq += 1
         self._peeking.update(action.id for action in todo)
+        self._live_peeks_started(len(todo))
         worker.peek(_PeekJob(self._peek_seq, tuple(todo)))
         for action in todo:
             self._show_card_state(action.id)
@@ -4500,6 +5148,7 @@ class AppController(QObject):
             else:
                 self._checks[action_id] = check_failure(action, error)
             logger.info("Could not check the event of action %s (%s)", action_id, type(error).__name__)
+        self._live_peeks_done(results)
         self._refresh_countdown_cards()
         if accounts_changed:
             self._update_service_chips()
@@ -4685,6 +5334,8 @@ class AppController(QObject):
         self._sync_card_locks()
         self._refresh_countdown_cards()
         self._update_service_chips()
+        self._live_background().step(_live.ACCOUNT_SIGNIN, f"Google sign-in for {alias} in your browser",
+                                     key=f"signin:{alias}", fields=[("Account", alias)])
         worker.connect(alias, action, disconnect=disconnect, force=force)
         self._render_agenda()
 
@@ -4807,6 +5458,7 @@ class AppController(QObject):
     def _on_account_connect(self, alias: str, stage: str, message: str, problem: str) -> None:
         if self.state == STATE_QUITTING or self._connect_alias != alias:
             return
+        self._live_sign_in(alias, stage, message)
         personal = alias == DEFAULT_ACCOUNT
         if stage == _CONNECT_SIGN_IN:
             self._activity(hud.TAG_WAIT, "Google sign-in",
@@ -4956,6 +5608,7 @@ class AppController(QObject):
         if self._agenda_events is None and (self._agenda_status == _AGENDA_INIT or (
                 self._agenda_status == _AGENDA_SIGNED_OUT and self._calendar_signed_in)):
             self._agenda_status = _AGENDA_LOADING
+        self._live_agenda_started(self._agenda_job)
         worker.list_agenda(self._agenda_job)
 
     def _on_agenda_result(self, request_id: int, events: list[CalendarEvent] | None, problem: str,
@@ -4964,6 +5617,7 @@ class AppController(QObject):
         if self.state == STATE_QUITTING or job is None or job.request_id != request_id:
             return   # stale: not the read this controller waits for
         self._agenda_job = None
+        self._live_agenda_done(events, problem, message)
         if not problem:
             self._agenda_events, self._agenda_range = list(events or ()), (job.start, job.end)
             self._agenda_status, self._agenda_problem, self._connect_note = _AGENDA_OK, "", ""
@@ -5052,6 +5706,89 @@ class AppController(QObject):
         panel.set_deadlines(_deadline_rows(items, now), f"No deadlines in the {_next_days(agenda.deadline_days)}")
         panel.set_deadlines_meta(_plural(agenda.deadline_days, "day"))   # the horizon: "14 DAYS"
 
+    # ---- the LIVE view's "Background reads" ([live] background) -----------------------------------
+
+    @_live.quiet(_live.NO_TASK)
+    def _live_background(self) -> Any:
+        """The rolling "Background reads" task (pinned, never finished; its steps are replaced in
+        place), or NO_TASK when [live] background is off."""
+        live_config = getattr(self.config, "live", None)
+        if not getattr(live_config, "background", True) or not self.live.enabled:
+            return _live.NO_TASK
+        return self.live.task(_live.TASK_BACKGROUND, _live.BACKGROUND_TITLE, compact=True, key=_live.BACKGROUND_KEY)
+
+    @_live.quiet()
+    def _live_agenda_started(self, job: _AgendaJob) -> None:
+        first, last = job.start, job.end
+        span = (f"{_WEEKDAYS[first.weekday()]} {_MONTHS[first.month - 1]} {first.day} to "
+                f"{_WEEKDAYS[last.weekday()]} {_MONTHS[last.month - 1]} {last.day}")
+        self._live_background().step(_live.AGENDA_READ, "Agenda: read the personal calendar (read only)",
+                                     key="agenda", fields=[("Range", span),
+                                                           ("Calendars", ", ".join(job.calendar_ids))])
+
+    @_live.quiet()
+    def _live_agenda_done(self, events: Any, problem: str, message: str) -> None:
+        step = self._live_background().find(_live.AGENDA_READ, "agenda")
+        if not problem:
+            step.field("Events", str(len(events or ())))
+            step.done(_live.STATUS_OK, summary=_plural(len(events or ()), "event"))
+        elif problem == _PROBLEM_ERROR:
+            step.done(_live.STATUS_FAILED, summary=message or "Google Calendar could not be read")
+        else:
+            step.done(_live.STATUS_WARN, summary=message or "not signed in - not read")
+
+    @staticmethod
+    def _live_peeks_title(count: int) -> str:
+        cards = "1 card's" if count == 1 else f"{count} cards'"
+        return f"Checked {cards} events with Google (read only)"
+
+    @_live.quiet()
+    def _live_peeks_started(self, count: int) -> None:
+        """A read job for cards' events: one "event checks" step for every job on its way (a second
+        job while one runs adds its cards to the same step, which ends when the last job is back)."""
+        jobs, cards, _problems = self._live_peeks
+        background = self._live_background()
+        if jobs:
+            self._live_peeks = [jobs + 1, cards + count, _problems]
+            background.find(_live.EVENT_CHECK, "peek").update(title=self._live_peeks_title(cards + count))
+            return
+        self._live_peeks = [1, count, 0]
+        background.step(_live.EVENT_CHECK, self._live_peeks_title(count), key="peek")
+
+    @_live.quiet()
+    def _live_peeks_done(self, results: Any) -> None:
+        jobs, cards, problems = self._live_peeks
+        jobs = max(0, jobs - 1)
+        step = self._live_background().find(_live.EVENT_CHECK, "peek")
+        for action_id, (details, _error) in results.items():
+            check = self._checks.get(action_id)
+            if details is not None and check is not None:
+                step.item(check.text, status=_live.STATUS_OK if check.allowed else _live.STATUS_WARN,
+                          note=check.reason)
+            else:
+                problems += 1
+                step.item(check.text if check is not None else "not checked (the account is not signed in)",
+                          status=_live.STATUS_WARN)
+        self._live_peeks = [jobs, cards, problems]
+        if jobs:
+            return   # another job's events are still being read
+        step.done(_live.STATUS_WARN if problems else _live.STATUS_OK,
+                  summary=f"{_plural(cards, 'event')} checked")
+
+    @_live.quiet()
+    def _live_sign_in(self, alias: str, stage: str, message: str) -> None:
+        step = self._live_background().find(_live.ACCOUNT_SIGNIN, f"signin:{alias}")
+        if stage == _CONNECT_SIGN_IN:
+            step.note("Google's sign-in is open in your browser")
+        elif stage == _CONNECT_SIGNED_IN:
+            step.done(_live.STATUS_OK, summary="signed in")
+        elif stage == _CONNECT_READY:
+            step.done(_live.STATUS_OK, summary="was signed in already")
+        elif stage == _CONNECT_KEPT:
+            step.done(_live.STATUS_BLOCKED, summary=message or "the old sign-in could not be forgotten")
+        else:
+            step.done(_live.STATUS_FAILED, summary=message or "the sign-in did not finish")
+
     # ---- Ask Jarvis -------------------------------------------------------------------------
 
     def _create_ask(self, factory: Callable[..., Any] | None) -> Any:
@@ -5069,7 +5806,8 @@ class AppController(QObject):
             return None
         reading = self.window.reading
         controller = ask_ui.AskController(self.config, planner, reading.command_bar, context=self._ask_context,
-                                          blocked=self._ask_blocked, calendars=self._calendars, parent=self)
+                                          blocked=self._ask_blocked, calendars=self._calendars, live=self.live,
+                                          parent=self)
         controller.busyChanged.connect(self._on_ask_busy)
         controller.outcomeReady.connect(self._on_ask_outcome)
         controller.askStarted.connect(self._on_ask_started)
@@ -5132,12 +5870,15 @@ class AppController(QObject):
         self._say(KIND_ACK, with_address(self._last_ack, assistant.address), key=ASK_ACK_KEY)
 
     def _on_ask_started(self, _seq: int, text: str) -> None:
-        """An Ask really started: the owner's words as a YOU entry, and the JARVIS tab comes up (it
+        """An Ask really started: the owner's words as a YOU entry, and the LIVE tab comes up
+        ([live] auto_open = "tab", the default: every step as it happens), else the JARVIS tab (it
         shows the whole answer when it arrives)."""
         if self.state == STATE_QUITTING:
             return
         self._you(text)
-        self.window.reading.set_tab(hud.TAB_JARVIS)
+        self._ask_task_id = self.ask.task_id if self.ask is not None else 0
+        if not self._live_auto_open(_live.TASK_ASK, self._ask_task_id):
+            self.window.reading.set_tab(hud.TAB_JARVIS)
 
     def _on_ask_cancelled(self, _seq: int) -> None:
         if self.state == STATE_QUITTING:
@@ -5158,8 +5899,10 @@ class AppController(QObject):
             if outcome.runs:
                 sub.append(f"{outcome.duration_ms / 1000:.1f} s")
             question_only = bool(outcome.question) and not outcome.cards
+            task_id = self._ask_task_id
+            link = (SEE_STEPS_TEXT, f"live:{task_id}") if self.live.enabled and task_id else ("", "")
             self._jarvis(AskController._answer(outcome), tone=hud.TONE_WARN if question_only else hud.TONE_DONE,
-                         sub=f" {DOT} ".join(sub))
+                         sub=f" {DOT} ".join(sub), link=link)
             if assistant.speak_replies:
                 reply = ask_reply_speech(outcome, assistant.address)
                 if reply.guarded:
@@ -5384,6 +6127,256 @@ class AppController(QObject):
     def _on_conversation_link(self, link_id: str) -> None:
         if link_id == VIEW_BRIEFING_LINK:
             self.window.reading.set_tab(hud.TAB_BRIEFING)
+        elif link_id.startswith("live:"):
+            self._reveal_live(link_id)
+
+    # ---- the LIVE view -----------------------------------------------------------------------
+
+    def _on_live_updated(self, summary: LiveSummary) -> None:
+        """The feed drained: the summary, the strip's tag (and the pop-out's), the tab's dot."""
+        self._live_summary = summary
+        reading = self.window.reading
+        reading.set_live_summary(summary.text())
+        _show_live_state(reading.set_live_state, summary)
+        window = self._live_window
+        if window is not None:
+            window.set_summary(summary)
+        if summary.attention and not self._live_popped() and reading.current_tab() != hud.TAB_LIVE:
+            self._live_unread = True
+        self._sync_live_dot()
+
+    def _live_popped(self) -> bool:
+        """The pop-out window shows the steps (shown or minimized)."""
+        window = self._live_window
+        return window is not None and window.isVisible()
+
+    def _sync_live_dot(self) -> None:
+        """The LIVE tab's dot: blinking while an Ask or an approved card runs, steady for steps the
+        owner has not seen; none while LIVE is current or popped out."""
+        reading = self.window.reading
+        if self._live_popped() or reading.current_tab() == hud.TAB_LIVE or not self.live.enabled:
+            self._live_unread = False
+            reading.tabs.set_activity("")
+            return
+        if self._live_summary.running:
+            reading.tabs.set_activity(hud.ACTIVITY_WORKING)
+        else:
+            reading.tabs.set_activity(hud.ACTIVITY_UNREAD if self._live_unread else "")
+
+    def _live_auto_open(self, kind: str, task_id: int) -> bool:
+        """[live] auto_open when Jarvis starts on an Ask or an approved card (once per task): "tab"
+        makes LIVE current (not while the briefing plays, for a card), "window" shows the pop-out
+        without the focus, "off" nothing. "tab" shows the pop-out too (without the focus) when the
+        LIVE tab would be shorter than LIVE_DOCKED_MIN_PX and there is another screen. Never while
+        the main window is hidden, minimized or on the prompt; an open pop-out keeps everything as
+        with "off" (a minimized one is restored without the focus). True when LIVE became the
+        current tab."""
+        if not self.live.enabled or not task_id or self.state == STATE_QUITTING or task_id in self._live_opened:
+            return False
+        self._live_opened = (self._live_opened + [task_id])[-64:]
+        mode = self._live_mode
+        window = self._live_window
+        if window is not None and window.isVisible():
+            if mode != "off" and window.isMinimized():
+                _restore_without_activating(window)
+            return False
+        if mode == "off":
+            return False
+        main = self.window
+        if self.state != STATE_READING or not main.isVisible() or main.isMinimized() or not main.is_reading_view():
+            return False
+        if mode == "window" or (self.window.reading.live_room() < LIVE_DOCKED_MIN_PX and self._other_screen()):
+            # "window"; or the LIVE tab would show hardly a step and there is another screen for it.
+            self.pop_out_live(activate=False)
+            return False
+        if kind == _live.TASK_ACTION and self.player.state in (PLAYING, WAITING):
+            return False   # the briefing plays on BRIEFING: the tab stays, LIVE gets its working dot
+        self.window.reading.set_tab(hud.TAB_LIVE)
+        return True
+
+    def _other_screen(self) -> bool:
+        """There is a screen besides the main window's (tests replace this)."""
+        main = self.window.screen()
+        return any(screen is not main for screen in QGuiApplication.screens())
+
+    def _ensure_live_window(self) -> LiveWindow:
+        window = self._live_window
+        if window is None:
+            window = self._live_window = LiveWindow()
+            window.set_hour24(self.config.display.hour24)
+            window.header.set_clock(self._now)
+            window.dockRequested.connect(self.dock_live)
+            window.clearRequested.connect(self.clear_live)
+            window.linkClicked.connect(self._on_live_link)
+            window.set_summary(self._live_summary)
+        return window
+
+    def pop_out_live(self, *, activate: bool = True) -> None:
+        """Pop out: the LIVE view in its own window (made once, kept for the session), on another
+        screen when there is one; the LIVE tab says where it is. ``activate``: the owner clicked
+        (the window comes to the front with the focus); else it shows without the focus."""
+        if self.state == STATE_QUITTING or not self.live.enabled:
+            return
+        window = self._ensure_live_window()
+        if not window.isVisible():
+            self._live_feed.attach(window.log)
+            self._place_live_window(window)
+            self.window.reading.set_live_popped(True)
+            if activate:
+                force_foreground(window)
+            else:
+                show_without_activating(window)
+            logger.info("LIVE popped out")
+            self._remember_live_window(popped=True)
+        elif activate:
+            force_foreground(window)
+        else:
+            show_without_activating(window)
+        self._sync_live_dot()
+
+    def show_live_window(self) -> None:
+        """"Show window" on the LIVE tab: the pop-out to the front (restored when minimized)."""
+        window = self._live_window
+        if window is None or not window.isVisible():
+            self.pop_out_live()
+            return
+        force_foreground(window)
+
+    def dock_live(self) -> None:
+        """Dock (the pop-out's close button, Alt+F4, Dock, or "Bring it back here"): the window hides
+        (it is kept, never quits) and the LIVE tab shows the steps again."""
+        window = self._live_window
+        if window is not None and window.isVisible():
+            self._remember_live_window(popped=False)
+            window.hide()
+            self._live_feed.detach(window.log)
+            logger.info("LIVE docked")
+        self.window.reading.set_live_popped(False)
+        self._sync_live_dot()
+
+    def clear_live(self) -> None:
+        """Clear: every finished task leaves both views (a running one stays whole); nothing else
+        changes and nothing was saved."""
+        self.live.clear()
+        self._live_unread = False
+        self._sync_live_dot()
+
+    def _close_live_window(self) -> None:
+        """Quitting: the pop-out goes too (its place and whether it was open are remembered)."""
+        window, self._live_window = self._live_window, None
+        if window is None:
+            return
+        try:
+            self._remember_live_window(popped=window.isVisible(), window=window)
+        except Exception as exc:  # noqa: BLE001 - quitting goes on
+            logger.debug("Could not remember the LIVE window (%s)", type(exc).__name__)
+        self._live_feed.detach(window.log)
+        window.hide()
+        window.deleteLater()
+
+    def _place_live_window(self, window: LiveWindow) -> None:
+        """The pop-out's first place this session: where it was left last time (assistant.json, if
+        that is still on a screen), else on another screen than the main window's (centred), else
+        beside the main window (left if it fits, else right), else overlapping it 40 px down-left.
+        Later it stays where the owner left it."""
+        if self._live_placed:
+            window.keep_on_screen()
+            return
+        self._live_placed = True
+        saved = self._saved_live_geometry()
+        if saved is not None:
+            window.setGeometry(saved)
+            window.keep_on_screen()
+            return
+        main = self.window
+        main_screen = main.screen() if main.isVisible() else QGuiApplication.primaryScreen()
+        others = [screen for screen in QGuiApplication.screens() if screen is not main_screen]
+        target = others[0] if others else main_screen
+        area = target.availableGeometry() if target is not None else QRect(0, 0, 1280, 800)
+        window.resize(LIVE_WINDOW_SIZE.boundedTo(area.size() - QSize(2 * SCREEN_MARGIN, 2 * SCREEN_MARGIN))
+                      .expandedTo(LIVE_WINDOW_MIN_SIZE))
+        width, height = window.width(), window.height()
+        if others or not main.isVisible():
+            x, y = area.x() + (area.width() - width) // 2, area.y() + (area.height() - height) // 2
+        else:
+            frame = main.frameGeometry()
+            y = max(area.top(), min(frame.top(), area.bottom() - height))
+            if frame.left() - _LIVE_WINDOW_GAP - width >= area.left():
+                x = frame.left() - _LIVE_WINDOW_GAP - width
+            elif frame.right() + _LIVE_WINDOW_GAP + width <= area.right():
+                x = frame.right() + _LIVE_WINDOW_GAP
+            else:
+                x, y = frame.left() - 40, frame.top() + 40
+        window.move(x, y)
+        window.keep_on_screen()
+
+    def _saved_live_geometry(self) -> QRect | None:
+        """The pop-out's rectangle from assistant.json, when its centre is still on a screen."""
+        try:
+            saved = self._prefs_store().live_window
+        except Exception:  # noqa: BLE001 - placed afresh then
+            return None
+        if saved is None:
+            return None
+        rect = QRect(*saved)
+        if rect.width() < LIVE_WINDOW_MIN_SIZE.width() or rect.height() < LIVE_WINDOW_MIN_SIZE.height():
+            rect.setSize(rect.size().expandedTo(LIVE_WINDOW_MIN_SIZE))
+        center = rect.center()
+        if not any(screen.availableGeometry().contains(center) for screen in QGuiApplication.screens()):
+            return None
+        return rect
+
+    def _remember_live_window(self, *, popped: bool, window: LiveWindow | None = None) -> None:
+        """assistant.json keeps the pop-out's place and size and whether it was open (U7b)."""
+        window = window or self._live_window
+        if window is None:
+            return
+        rect = window.normalGeometry() if window.isMinimized() else window.geometry()
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+        self._prefs_store().set_live_window((rect.x(), rect.y(), rect.width(), rect.height()), popped)
+
+    def _restore_live_window(self) -> None:
+        """The first time the assistant screen opens: the pop-out comes back (without the focus) when
+        it was open when Jarvis last quit."""
+        if self._live_restored or not self.live.enabled:
+            return
+        self._live_restored = True
+        try:
+            popped = self._prefs_store().live_popped_out
+        except Exception:  # noqa: BLE001 - not restored then
+            popped = False
+        if popped:
+            self.pop_out_live(activate=False)
+
+    def _reveal_live(self, link_id: str) -> None:
+        """"See every step" (live:<task id>): LIVE comes up (the pop-out to the front when it is
+        out) with that task in view and open."""
+        try:
+            task_id = int(link_id.partition(":")[2])
+        except ValueError:
+            return
+        window = self._live_window
+        if window is not None and window.isVisible():
+            self.show_live_window()
+            window.log.reveal(task_id)
+            return
+        reading = self.window.reading
+        reading.set_tab(hud.TAB_LIVE)
+        if reading.current_tab() == hud.TAB_LIVE:
+            reading.live_log.reveal(task_id)
+
+    def _on_live_link(self, link: str) -> None:
+        """A link in the LIVE log: "tab:jarvis" makes JARVIS current, "live:<id>" shows that task,
+        and a result link opens only if it is an allowed https link (open_action_link checks)."""
+        if link == "tab:jarvis":
+            self.window.reading.set_tab(hud.TAB_JARVIS)
+            if self._live_popped() and self.window.isVisible():
+                force_foreground(self.window)
+        elif link.startswith("live:"):
+            self._reveal_live(link)
+        elif link.startswith("https://"):
+            self.open_action_link(link)
 
     # ---- NEW briefings and viewing ---------------------------------------------------------
 
@@ -5424,7 +6417,10 @@ class AppController(QObject):
         """The window is the active one (the owner can see the BRIEFING tab); tests replace this."""
         return self.window.isActiveWindow()
 
-    def _on_tab_changed(self, _index: int) -> None:
+    def _on_tab_changed(self, index: int) -> None:
+        if index == hud.TAB_LIVE:
+            self._live_unread = False
+        self._sync_live_dot()
         self._mark_viewed_if_seen()
 
     def _on_window_active(self, _active: bool) -> None:
@@ -6099,6 +7095,7 @@ class AppController(QObject):
         self._render_agenda()
         self._request_agenda()
         self._sync_agenda_timer()
+        self._restore_live_window()
         if self.startup_error:
             self._show_reading_error(self.startup_error, can_retry=False)
         elif self._briefing is None:
@@ -6813,6 +7810,8 @@ class AppController(QObject):
             return
         self._shut_down = True
         logger.info("Shutting down")
+        self.live.set_listener(None)   # the LIVE view's feed hears nothing more
+        self._live_feed.stop()
         if self._on_shutdown is not None:
             self._on_shutdown()
         self.state = STATE_QUITTING
@@ -6825,8 +7824,10 @@ class AppController(QObject):
         if countdown is not None:
             self._jobs.pop(countdown.action.id, None)
             logger.info("Action %s undone (app closed); nothing was sent", countdown.action.id)
+            _live_countdown_end(countdown, _live.STATUS_CANCELLED, "", "Jarvis closed - nothing was sent")
         if self.ask is not None:
             self.ask.shutdown()   # a running Ask is cancelled: nothing is proposed
+        self._close_live_window()
         if self._dialog is not None:
             self._dialog.reject()
         if self._account_dialog is not None:
@@ -6849,6 +7850,7 @@ class AppController(QObject):
                 logger.info("The change on its way to Google %s", "finished" if finished
                             else "did not finish in time; it shows as unknown at the next start")
             self._calendar_worker.stop()
+        self.live.close()   # a worker that still records hits no-ops
         if self.tray is not None:
             self.tray.hide()
         if self._audio_dir is not None:

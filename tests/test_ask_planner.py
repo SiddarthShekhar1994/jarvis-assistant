@@ -15,6 +15,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+from briefing_reader import live
 from briefing_reader.actions import MOVE, REPLY, SOURCE_ASK, parse_action_line
 from briefing_reader.ask import commands, planner
 from briefing_reader.ask.context import AccountInfo, BriefingContext
@@ -389,6 +390,312 @@ class MailTests(PlannerTestCase):
         self.assertLess(len(mail_part), 16_000 + 2_000)
         self.assertIn("[the rest of this message is left out]", mail_part)
         self.assertEqual(outcome.runs, 2)
+
+
+def second_thread() -> dict:
+    return gmail_thread("thr0000778", [gmail_message(
+        "msg0000778", sender="Ben Ode <ben@example.edu>", to="you@example.edu", subject="Budget numbers",
+        body="Here are the budget numbers.\nLine two", msgid="<CAB8@mail.example.edu>", at_ms=1791300000000)])
+
+
+class LiveTests(PlannerTestCase):
+    """The LIVE view's steps of an Ask (live.LiveStream): what each step shows, and that the Ask's
+    outcome is exactly the same with or without them."""
+
+    REPLY_FROM_MAIL = MailTests.REPLY_FROM_MAIL
+    SEARCH = MailTests.SEARCH
+
+    def task(self, *, keep_text: bool = True) -> live.LiveTask:
+        self.stream = live.LiveStream(keep_text=keep_text)
+        return self.stream.task(live.TASK_ASK, "request")
+
+    def steps(self) -> tuple[live.StepView, ...]:
+        return self.stream.snapshot()[0].steps
+
+    def step(self, kind: str, number: int = 0) -> live.StepView:
+        return [step for step in self.steps() if step.kind == kind][number]
+
+    @staticmethod
+    def fields(step: live.StepView) -> dict[str, str]:
+        return {field.label: field.value for field in step.fields}
+
+    @staticmethod
+    def block(step: live.StepView, label: str) -> str:
+        return next(block.text for block in step.blocks if block.label == label)
+
+    def test_engine_run_passes_progress_and_capture_through(self) -> None:
+        plan = {"say": SAY, "question": "", "lines": [MOVE_LINE]}
+        self.make(plan_stream(plan))
+        heard: list[str] = []
+        result = self.engine.run("prompt", allow_search=False, progress=lambda what, _value: heard.append(what),
+                                 capture=True)
+        self.assertEqual(heard, ["started", "init", "turn", "result"])
+        self.assertEqual(result.reply, json.dumps(plan, indent=2, ensure_ascii=False))
+        self.make(plan_stream(plan))
+        self.assertEqual(self.engine.run("prompt", allow_search=False).reply, "")
+
+    def test_a_search_and_two_runs(self) -> None:
+        self.reader.threads["thr0000778"] = second_thread()
+        self.reader.found = ["thr0000777", "thr0000778"]
+        second = {"say": "I've drafted a reply.", "lines": [self.REPLY_FROM_MAIL, self.REPLY_FROM_MAIL]}
+        ask = self.make(plan_stream(self.SEARCH), plan_stream(second))
+        task = self.task()
+        outcome = ask.plan("reply to Ana's budget email saying it's confirmed", live=task)
+        self.assertTrue(outcome.ok, outcome)
+        kinds = [step.kind for step in self.steps()]
+        self.assertEqual(kinds, [live.ASK_CHECKS, live.CALENDAR_READ, live.PLANNER_RUN, live.MAIL_SEARCH,
+                                 live.MAIL_THREAD, live.MAIL_THREAD, live.PLANNER_RUN, live.ASK_VALIDATE])
+        self.assertTrue(all(step.status != live.STATUS_RUNNING for step in self.steps()))
+        checks = self.step(live.ASK_CHECKS)
+        self.assertEqual(checks.status, live.STATUS_OK)
+        self.assertEqual(self.fields(checks)["Planner runs left"], "20 of 20 this hour, 60 of 60 today")
+        self.assertEqual(self.fields(checks)["Claude Code"], "2.1.293, standalone install")
+        self.assertIn("claude.ai plan", self.fields(checks)["Sign-in"])
+        calendar = self.step(live.CALENDAR_READ)
+        self.assertEqual(self.fields(calendar)["work"], "1 event")
+        self.assertEqual(self.fields(calendar)["Window"], "Tue Oct 6 to Wed Oct 21")
+        self.assertEqual(calendar.summary, "1 event read; 1 given to the planner")
+        self.assertEqual([item.text for item in calendar.items],
+                         ["Thu Oct 8 2:00-3:00 PM - Project sync - work - you organize - 1 guest"])
+        first_run, second_run = self.step(live.PLANNER_RUN), self.step(live.PLANNER_RUN, 1)
+        self.assertEqual((first_run.title, second_run.title), ("Planner run 1", "Planner run 2 (with your mail)"))
+        stdin = "Exact text sent to Claude Code (stdin)"
+        self.assertEqual(self.block(first_run, stdin), self.stdin(0))
+        self.assertEqual(self.block(second_run, stdin), self.stdin(1))
+        self.assertTrue(all(block.untrusted for block in first_run.blocks if block.label == stdin))
+        self.assertEqual(self.block(first_run, "Planner's reply (raw)"),
+                         json.dumps(self.SEARCH, indent=2, ensure_ascii=False))
+        self.assertEqual(self.block(second_run, "Planner's reply (raw)"),
+                         json.dumps(second, indent=2, ensure_ascii=False))
+        self.assertEqual(self.fields(first_run)["Input"], f"{len(self.stdin(0)):,} characters")
+        self.assertEqual(self.fields(first_run)["May ask to search mail"], "yes")
+        self.assertEqual(self.fields(second_run)["May ask to search mail"], "no - this is the second run")
+        command_line = self.fields(first_run)["Command line"]
+        self.assertTrue(command_line.startswith("claude -p --output-format stream-json"))
+        self.assertNotIn(str(self.exe.path.parent), command_line)
+        self.assertNotIn(str(self.root), command_line)
+        notes = [note.text for note in first_run.notes]
+        self.assertEqual(notes[1:], ["Claude Code started", "Checked its start: model claude-sonnet-4-5-20250929, "
+                                     "tools: StructuredOutput, MCP servers: 0, API key source: none",
+                                     "Claude is answering (turn 1)", "Answer received"])
+        self.assertTrue(notes[0].startswith("Sign-in checked again: claude.ai plan"))
+        self.assertIn("Wants a mail search: work - from:ana@example.edu subject:budget - the budget",
+                      [item.text for item in first_run.items])
+        self.assertEqual(self.fields(first_run)["Tokens"], "5,200 in / 420 out / 3,000 cache read / 0 cache write")
+        search = self.step(live.MAIL_SEARCH)
+        self.assertEqual(self.fields(search)["Gmail query (exact)"], self.reader.searches[0])
+        self.assertEqual(self.fields(search)["Planner's query"], "from:ana@example.edu subject:budget")
+        self.assertEqual((self.fields(search)["Found"], search.status), ("2 threads", live.STATUS_OK))
+        threads = [step for step in self.steps() if step.kind == live.MAIL_THREAD]
+        self.assertEqual([self.fields(step)["Why"] for step in threads], [planner.WHY_SEARCH] * 2)
+        self.assertEqual(self.fields(threads[0])["People"],
+                         "Ana Lima <ana@example.edu>, you@example.edu, Mallory <m@evil.example>")
+        self.assertEqual(self.fields(threads[0])["Subject"], "Budget review")
+        for step in threads:
+            text = self.block(step, "Text given to the planner")
+            self.assertIn(text, self.stdin(1))
+            self.assertTrue(text.startswith("thread | acct=work | thread=thr000077"))
+            self.assertTrue(step.blocks[0].untrusted)
+        self.assertIn("  Can you confirm the Q4 budget by Friday?", self.block(threads[0], "Text given to the planner"))
+        validate_step = self.step(live.ASK_VALIDATE)
+        # Accepted with a recipient you didn't type: amber (WARN), like the card's own NEW note.
+        self.assertEqual([item.status for item in validate_step.items], [live.STATUS_WARN, live.STATUS_WARN])
+        self.assertEqual(validate_step.items[0].text, "Reply - work - to ana@example.edu - Re: Budget review")
+        self.assertIn("NEW recipient ana@example.edu", validate_step.items[0].note)
+        self.assertEqual((validate_step.items[1].status_text, validate_step.items[1].note),
+                         ("DROPPED", "a repeat of an earlier line"))
+        self.assertEqual((validate_step.status, validate_step.summary),
+                         (live.STATUS_WARN, "1 card, 0 refused, 1 dropped, 1 recipient you didn't type"))
+        self.assertIn("addresses Jarvis supplied, 0 you typed", self.fields(validate_step)["Checked against"])
+        self.assertFalse(task.finished)   # the controller finishes the task
+
+    def test_the_outcome_is_the_same_with_or_without_live(self) -> None:
+        def run(with_live: bool) -> planner.AskOutcome:
+            self.setUp()
+            self.reader.threads["thr0000778"] = second_thread()
+            self.reader.found = ["thr0000777", "thr0000778"]
+            ask = self.make(plan_stream(self.SEARCH), plan_stream({"say": "Done.", "lines": [self.REPLY_FROM_MAIL]}))
+            kwargs = {"live": self.task()} if with_live else {}
+            with self.assertLogs("briefing_reader", level="DEBUG") as logs:
+                outcome = ask.plan("reply to Ana's budget email saying it's confirmed", **kwargs)
+            self.logs = list(logs.output)
+            return outcome
+
+        without = run(False)
+        logs_without = self.logs
+        with_live = run(True)
+        self.assertEqual(with_live, without)
+        for name in planner.AskOutcome.__dataclass_fields__:
+            self.assertEqual(getattr(with_live, name), getattr(without, name), name)
+        self.assertEqual(self.logs, logs_without)   # no log line gains or loses anything
+        self.assertNotIn("Live view", "\n".join(self.logs))
+
+    def test_a_briefing_thread_and_text_off(self) -> None:
+        self.reader.threads["18c0ffee00000001"] = budget_thread()
+        self.reader.threads["18c0ffee00000001"]["id"] = "18c0ffee00000001"
+        briefing = BriefingContext(pending=(parse_action_line(BRIEFING_REPLY),))
+        ask = self.make(plan_stream({"say": "Drafted.", "lines": [BRIEFING_REPLY]}))
+        self.task(keep_text=False)
+        task = self.stream.snapshot() and self.stream.task(live.TASK_ASK, "other")
+        ask.plan("reply to Ana's email: yes, Friday works", briefing=briefing, live=task)
+        steps = self.stream.snapshot()[1].steps
+        thread = next(step for step in steps if step.kind == live.MAIL_THREAD)
+        self.assertEqual(self.fields(thread)["Why"], planner.WHY_BRIEFING)
+        self.assertEqual(self.fields(thread)["Thread id"], "18c0ffee00000001")
+        self.assertEqual(thread.key, "work:18c0ffee00000001")
+        block = thread.blocks[0]
+        self.assertEqual((block.text, block.kept), ("", False))   # [live] text = false: the size only
+        self.assertGreater(block.chars, 100)
+        run_step = next(step for step in steps if step.kind == live.PLANNER_RUN)
+        self.assertTrue(all(not block.kept and block.text == "" for block in run_step.blocks))
+        self.assertEqual([step.kind for step in steps],
+                         [live.ASK_CHECKS, live.CALENDAR_READ, live.MAIL_THREAD, live.PLANNER_RUN, live.ASK_VALIDATE])
+
+    def test_a_refused_search(self) -> None:
+        search = dict(self.SEARCH, gmail_search={"account": "work", "query": "password reset", "why": "x"})
+        self.make(plan_stream(search)).plan("find the email", live=self.task())
+        step = self.step(live.MAIL_SEARCH)
+        self.assertEqual((step.status, step.status_text), (live.STATUS_BLOCKED, "REFUSED"))
+        self.assertTrue(step.summary.startswith("Jarvis refused it: Jarvis does not search mail for passwords"))
+        self.assertEqual(self.reader.searches, [])
+        self.assertNotIn("Gmail query (exact)", self.fields(step))
+
+    def test_nothing_found_and_an_unreadable_account(self) -> None:
+        self.make(plan_stream(self.SEARCH)).plan("find Ana's budget email", live=self.task())
+        step = self.step(live.MAIL_SEARCH)
+        self.assertEqual((step.status, step.status_text, step.summary),
+                         (live.STATUS_WARN, "NOTHING FOUND", "nothing was read"))
+        self.assertEqual(self.fields(step)["Found"], "0 threads")
+        search = dict(self.SEARCH, gmail_search={"account": "personal", "query": "from:ben", "why": "x"})
+        self.make(plan_stream(search)).plan("find Ben's email", live=self.task())
+        step = self.step(live.MAIL_SEARCH)
+        self.assertEqual(step.status, live.STATUS_BLOCKED)
+        self.assertIn('click "Allow personal mail"', step.summary)
+
+    def test_refusals_start_no_run(self) -> None:
+        self.write_config(CONFIG.replace("enabled = true", "enabled = false"))
+        self.make().plan(COMMAND, live=self.task())
+        checks, = self.steps()
+        self.assertEqual((checks.kind, checks.status, checks.summary),
+                         (live.ASK_CHECKS, live.STATUS_BLOCKED, planner.DISABLED_MESSAGE))
+        self.write_config(CONFIG)
+        ask = self.make()
+        for _ in range(20):
+            self.usage.start(NOW - timedelta(minutes=10))
+        ask.plan(COMMAND, live=self.task())
+        checks, = self.steps()
+        self.assertEqual(checks.status, live.STATUS_BLOCKED)
+        self.assertEqual(self.fields(checks)["Planner runs left"], "0 of 20 this hour, 40 of 60 today")
+        self.setUp()   # a fresh usage file
+        auth = '{"loggedIn": false, "authMethod": "none", "apiProvider": "firstParty"}'
+        self.make(auth=auth).plan(COMMAND, live=self.task())
+        checks, = self.steps()
+        self.assertEqual(checks.status, live.STATUS_BLOCKED)
+        self.assertIn("claude auth login", checks.summary)
+        self.assertEqual(self.runner.started, [])
+        ask = self.make()
+        self.assertEqual(ask.plan("   ", live=self.task()).kind, planner.EMPTY)
+        self.assertEqual((self.steps()[0].status, self.steps()[0].summary), (live.STATUS_BLOCKED, planner.EMPTY_MESSAGE))
+        ask._busy.acquire()
+        try:
+            ask.plan(COMMAND, live=self.task())
+        finally:
+            ask._busy.release()
+        self.assertEqual((self.steps()[0].status, self.steps()[0].summary), (live.STATUS_BLOCKED, planner.BUSY_MESSAGE))
+
+    def test_cancel_guard_and_overage(self) -> None:
+        cancel = threading.Event()
+        process = FakeProcess(stream("success")[:1], clock=self.clock, hang=True, cancel_after=2, cancel=cancel)
+        self.make(process).plan(COMMAND, cancel=cancel, live=self.task())
+        run_step = self.step(live.PLANNER_RUN)
+        self.assertEqual(run_step.status, live.STATUS_CANCELLED)
+        self.assertTrue(any(note.text.startswith("Stopped: Cancelled") for note in run_step.notes))
+        self.make(stream("api_key")).plan(COMMAND, live=self.task())
+        run_step = self.step(live.PLANNER_RUN)
+        self.assertEqual((run_step.status, run_step.status_text), (live.STATUS_BLOCKED, "STOPPED"))
+        with self.assertLogs("briefing_reader.ask.planner", level="WARNING"):
+            self.make(stream("overage")).plan(COMMAND, live=self.task())
+        run_step = self.step(live.PLANNER_RUN)
+        self.assertEqual((run_step.status, run_step.status_text, run_step.summary),
+                         (live.STATUS_BLOCKED, "STOPPED", planner.OVERAGE_WORDS))
+
+    def test_a_run_refused_before_it_starts(self) -> None:
+        ask = self.make(plan_stream({"say": "a", "lines": []}))
+        self.assertTrue(ask.plan(COMMAND).ok)
+        self.runner.auth = '{"loggedIn": true, "authMethod": "console", "apiProvider": "firstParty"}'
+        self.clock.t += 60
+        ask.plan(COMMAND, live=self.task())
+        run_step = self.step(live.PLANNER_RUN)
+        self.assertEqual((run_step.status, run_step.status_text), (live.STATUS_BLOCKED, "SKIPPED"))
+        self.assertTrue(run_step.summary.startswith("Not started: Run: claude auth login --claudeai"))
+        # Nothing reached Claude Code: the stdin block never says "sent".
+        self.assertEqual([block.label for block in run_step.blocks], [planner.STDIN_NOT_SENT])
+
+    def test_the_stdin_block_says_sent_only_once_claude_code_started(self) -> None:
+        ask = self.make(plan_stream({"say": "a", "lines": []}))
+        heard: list[list[str]] = []
+        task = self.task()
+
+        def start(argv, **kwargs):   # what the block is called at the moment Claude Code starts
+            heard.append([block.label for block in self.step(live.PLANNER_RUN).blocks])
+            raise OSError("could not start")
+
+        self.runner.start = start
+        with self.assertLogs("briefing_reader.ask", level="WARNING"):
+            outcome = ask.plan(COMMAND, live=task)
+        self.assertFalse(outcome.ok)
+        self.assertEqual(heard, [[planner.STDIN_PENDING]])
+        run_step = self.step(live.PLANNER_RUN)
+        self.assertEqual(run_step.status, live.STATUS_FAILED)
+        self.assertEqual([block.label for block in run_step.blocks], [planner.STDIN_NOT_SENT])
+
+    def test_text_off_keeps_no_message_text_in_the_planner_lines(self) -> None:
+        self.make(plan_stream({"say": "ok", "lines": [EMAIL_LINE, EMAIL_LINE]})).plan(
+            COMMAND, live=self.task(keep_text=False))
+        run_step = self.step(live.PLANNER_RUN)
+        shown = [item.text for item in run_step.items][1:]
+        head, body = EMAIL_LINE.split("| body=", 1)
+        self.assertEqual(shown, [f"{head}| body= [{len(body)} characters - not kept ([live] text = false)]"] * 2)
+        texts = [item.text + item.note for step in self.steps() for item in step.items]
+        self.assertFalse(any("Moved to Friday" in text for text in texts), texts)
+        self.assertFalse(any(block.kept for step in self.steps() for block in step.blocks))
+        self.assertEqual(planner.line_text(MOVE_LINE, False), MOVE_LINE.replace("body=", "body= [0 characters - not "
+                                                                                "kept ([live] text = false)]"))
+        self.assertEqual(planner.line_text(EMAIL_LINE, True), EMAIL_LINE)
+
+    def test_card_text_tells_cards_with_one_title_apart(self) -> None:
+        move = parse_action_line(MOVE_LINE)
+        other = parse_action_line(MOVE_LINE.replace("evt0001aa", "evt0002bb").replace("14:00-15:00 | notify",
+                                                                                     "16:00-17:00 | notify"))
+        self.assertEqual(planner.card_text(move),
+                         "Move - work - Project sync (event evt0001aa) - to Fri Oct 9 2:00-3:00 PM - notify all")
+        self.assertEqual(planner.card_text(other, hour24=True),
+                         "Move - work - Project sync (event evt0002bb) - to Fri Oct 9 16:00-17:00 - notify all")
+        rsvp = parse_action_line("RSVP: acct=work | event=evt0003cc | answer=no | notify=none | title=Standup")
+        self.assertEqual(planner.card_text(rsvp), "RSVP - work - Standup (event evt0003cc) - answer no - notify none")
+        cancel = parse_action_line("Cancel: acct=work | event=evt0004dd | title=Standup")
+        self.assertEqual(planner.card_text(cancel),
+                         "Cancel - work - Standup (event evt0004dd) - cancel the event - notify all")
+        email = parse_action_line(EMAIL_LINE)
+        self.assertEqual(planner.card_text(email), "Email - work - to ana@example.edu - Project sync moved to Friday")
+
+    def test_validation_lists_every_line(self) -> None:
+        lines = [MOVE_LINE, EMAIL_LINE.replace("ana@example.edu", "x@evil.example"),
+                 "Slack: channel=C0123ABCD | ts=1696000000.000100 | who=Ana | body=Sure"]
+        self.make(plan_stream({"say": "ok", "lines": lines})).plan(COMMAND, live=self.task())
+        step = self.step(live.ASK_VALIDATE)
+        self.assertEqual([(item.status, item.status_text) for item in step.items],
+                         [(live.STATUS_OK, ""), (live.STATUS_BLOCKED, "REFUSED"), (live.STATUS_BLOCKED, "REFUSED")])
+        # The event's id and the new time: two Moves of events with one title read differently.
+        self.assertEqual(step.items[0].text,
+                         "Move - work - Project sync (event evt0001aa) - to Fri Oct 9 2:00-3:00 PM - notify all")
+        self.assertIn("didn't find x@evil.example", step.items[1].note)
+        self.assertEqual(step.items[2].note, "Ask can't propose Slack")
+        self.assertEqual((step.status, step.summary), (live.STATUS_WARN, "1 card, 2 refused, 0 dropped"))
+        self.assertTrue(step.open_hint)
+        run_step = self.step(live.PLANNER_RUN)
+        self.assertEqual([item.text for item in run_step.items][1:], lines)
+        self.assertTrue(all(item.mono for item in run_step.items[1:]))
 
 
 class RefusalTests(PlannerTestCase):

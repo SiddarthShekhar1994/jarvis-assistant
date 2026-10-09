@@ -968,6 +968,35 @@ class ImportTests(unittest.TestCase):
         self.assertTrue(Path(gmail.__file__).read_bytes().isascii())
 
 
+class MailViewTests(unittest.TestCase):
+    """gmail.mail_view: the message exactly as build_message writes it (the LIVE view's payload)."""
+
+    def test_a_reply_reads_as_built(self) -> None:
+        view = gmail.mail_view(reply(subject="Thursday noon meeting", cc=("cy@example.edu", "di@example.edu")))
+        self.assertEqual((view.from_addr, view.to, view.cc, view.subject),
+                         (ME, "ana@example.edu, ben@example.edu", "cy@example.edu, di@example.edu",
+                          "Re: Thursday noon meeting"))
+        self.assertEqual((view.in_reply_to, view.references, view.thread_id), (MSGID, MSGID, "18c0ffee00000001"))
+        self.assertEqual(view.body, "Hi both,\nNoon works.\nThanks\n")
+        parsed = parse(build_message(reply(subject="Thursday noon meeting", cc=("cy@example.edu", "di@example.edu"))))
+        self.assertEqual(view.body, parsed.get_content().replace("\r\n", "\n"))
+        self.assertEqual(view.subject, str(parsed["Subject"]))
+
+    def test_a_new_email_and_unicode(self) -> None:
+        body = "Bonjour \u00e9t\u00e9 \U0001F44B\n" + "long line " * 20
+        view = gmail.mail_view(new_email(body=body, cc=()))
+        self.assertEqual((view.to, view.cc, view.in_reply_to, view.references, view.thread_id),
+                         ("office@example.edu", "", "", "", ""))
+        self.assertEqual(view.body, body + "\n")
+        self.assertNotIn("Bonjour", repr(view))
+        self.assertNotIn("office", repr(view))
+
+    def test_refused_like_build_message(self) -> None:
+        for mail in (reply(to=()), reply(subject="=?utf-8?b?SGk=?="), reply(to=(ME,)), reply(body=" ")):
+            with self.subTest(mail=mail.subject), self.assertRaises(MessageRefused):
+                gmail.mail_view(mail)
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.CRITICAL)
     unittest.main()

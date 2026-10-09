@@ -429,7 +429,7 @@ class AskConversationTests(unittest.TestCase):
         reading.set_tab(hud.TAB_BRIEFING)
         with self.assertLogs("briefing_reader", level="DEBUG") as logs:
             self.submit(c)
-            self.assertEqual(reading.current_tab(), hud.TAB_JARVIS)
+            self.assertEqual(reading.current_tab(), hud.TAB_LIVE)   # [live] auto_open = "tab" (the default)
             self.assertEqual(reading.conversation.entries()[-1][0::2], ("you", COMMAND))
             self.assertTrue(wait_for(lambda: not c.ask.busy, 10))
             settle()
@@ -449,6 +449,18 @@ class AskConversationTests(unittest.TestCase):
         self.assertIn("Ask reply not spoken as written (it claimed something was done)", text)
         for secret in (COMMAND, SAY, GUEST, "One moment", "lined up"):
             self.assertNotIn(secret, text)
+
+    def test_request_brings_up_jarvis_with_auto_open_off(self) -> None:
+        app = self.make(plan(), config_extra='\n[live]\nauto_open = "off"\n')
+        c, reading = app.c, app.c.window.reading
+        reading.set_tab(hud.TAB_BRIEFING)
+        self.submit(c)
+        self.assertEqual(reading.current_tab(), hud.TAB_JARVIS)
+        self.assertEqual(reading.conversation.entries()[-1][0::2], ("you", COMMAND))
+        self.assertTrue(wait_for(lambda: not c.ask.busy, 10))
+        settle()
+        self.assertEqual(reading.current_tab(), hud.TAB_JARVIS)
+        self.assertEqual(reading.conversation.entries()[-1][0::2], ("jarvis", SAY))
 
     def test_a_plain_answer_is_spoken_as_written(self) -> None:
         say = "Right, sir. I've lined up moving Jarvis test sync to Friday at two. It is waiting for your OK."

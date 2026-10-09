@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, Signal
 from PySide6.QtWidgets import QApplication
 
 from briefing_reader import config as config_module
@@ -362,11 +362,12 @@ class AppHarness:
     def __init__(self, test: Any, *, ask: bool = True, runs: Sequence[Any] = (), auth: str | None = None,
                  readers: dict | None = None, ask_mode: bool = False, run_state: Any = None,
                  lines: Sequence[str] = (B_CALENDAR, B_TODO), engine_clock: Any = None,
-                 max_per_hour: int = 20) -> None:
+                 max_per_hour: int = 20, config_extra: str = "") -> None:
         tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         test.addCleanup(tmp.cleanup)
         self.root = root = Path(tmp.name)
-        (root / "config.toml").write_text(CONFIG.format(enabled="true" if ask else "false"), encoding="utf-8")
+        (root / "config.toml").write_text(CONFIG.format(enabled="true" if ask else "false") + config_extra,
+                                          encoding="utf-8")
         base = load_config(root, environ={"LOCALAPPDATA": str(root / "local")})
         self.fixture = page_fixture(root, lines)
         session = FixtureSession(self.fixture)
@@ -404,6 +405,8 @@ class AppHarness:
 
     def close(self) -> None:
         c = self.c
+        c.live.set_listener(None)   # the LIVE feed hears nothing more
+        c._live_feed.stop()
         if c.ask is not None:
             c.ask.shutdown()
             c.ask.join(5)
@@ -413,9 +416,16 @@ class AppHarness:
             c._closing.set()
             c._calendar_worker.stop()
         c.state = ui.STATE_QUITTING
-        c.window.hide()
-        c.window.deleteLater()
+        for window in (c._live_window, c.window):
+            if window is not None:
+                window.hide()
+                window.deleteLater()
         settle()
+        # Delete the windows and the controller now, on this (the GUI) thread: left to Python's
+        # garbage collector (the controller and its Ask controller refer to each other), they
+        # could be deleted by a collection that happens to run on a worker thread of a later test.
+        c.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 class _StepClock:

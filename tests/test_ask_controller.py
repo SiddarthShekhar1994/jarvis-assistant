@@ -20,12 +20,13 @@ from unittest import mock
 
 from PySide6.QtWidgets import QApplication
 
-from briefing_reader import ask_ui, hud, ui
+from briefing_reader import ask_ui, hud, live, ui
 from briefing_reader.actions import SOURCE_ASK
 from briefing_reader.ask import planner as ask_planner
 from briefing_reader.google_auth import PROBLEM_SCOPE
 from briefing_reader.runstate import RunState, handled_slot_key
 from tests.ask_fakes import FakeClock, FakeProcess, FakeReader, plan_stream, stream
+from tests.ask_fakes import stream as stream_lines
 from tests.ui_fakes import (
     CAL_LINE,
     COMMAND,
@@ -482,6 +483,134 @@ class AskModeTests(unittest.TestCase):
             c.open_ask()
         self.assertEqual(c.state, ui.STATE_READING)
         self.assertIn("[ask] enabled = false", c._note)
+
+
+class AskLiveTests(unittest.TestCase):
+    """The Ask's LIVE view task (live.LiveStream through AskController(live=)): one task per accepted
+    Ask, from "Your request" to "Answer and cards", finished as the Ask ended."""
+
+    make = AskControllerTests.make
+    bar = AskControllerTests.bar
+
+    def stream_of(self, app: AppHarness) -> live.LiveStream:
+        stream = getattr(app.c, "live", None)
+        if not isinstance(stream, live.LiveStream):   # before the app owns one: give the controller its own
+            stream = live.LiveStream()
+            app.c.ask.live = stream
+        return stream
+
+    @staticmethod
+    def asks(stream: live.LiveStream) -> list[live.TaskView]:
+        return [task for task in stream.snapshot() if task.kind == live.TASK_ASK]
+
+    def test_an_ask_is_one_task_from_request_to_cards(self) -> None:
+        gate = threading.Event()
+        app = self.make(GatedProcess(plan(), gate))
+        c = app.c
+        stream = self.stream_of(app)
+        self.assertEqual(c.ask.task_id, 0)
+        submit(c)
+        (task,) = self.asks(stream)
+        self.assertEqual((task.title, task.status), (COMMAND, live.STATUS_RUNNING))
+        self.assertEqual(c.ask.task_id, task.id)
+        first = task.steps[0]
+        self.assertEqual((first.kind, first.title, first.status), (live.ASK_REQUEST, "Your request", live.STATUS_OK))
+        fields = {field.label: field.value for field in first.fields}
+        self.assertEqual(fields["You typed"], COMMAND)
+        self.assertTrue(fields["Briefing given"].startswith("today's briefing: "))
+        self.assertTrue(wait_for(lambda: any(step.kind == live.PLANNER_RUN and step.status == live.STATUS_RUNNING
+                                             for step in self.asks(stream)[0].steps)))
+        gate.set()
+        self.assertTrue(wait_for(lambda: not c.ask.busy))
+        (task,) = self.asks(stream)
+        # The Email goes to a guest you didn't type: the Ask ends CHECK (amber), not a plain DONE.
+        self.assertEqual((task.status, task.summary), (live.STATUS_WARN, "2 cards, 1 recipient you didn't type"))
+        kinds = [step.kind for step in task.steps]
+        self.assertEqual((kinds[0], kinds[-1]), (live.ASK_REQUEST, live.ASK_CARDS))
+        self.assertEqual(kinds, [live.ASK_REQUEST, live.ASK_CHECKS, live.CALENDAR_READ, live.PLANNER_RUN,
+                                 live.ASK_VALIDATE, live.ASK_CARDS])
+        cards = task.steps[-1]
+        self.assertEqual(cards.summary, "2 cards under NEEDS YOUR OK")
+        self.assertEqual([item.text for item in cards.items][0],
+                         "ASK MOVE - work - Jarvis test sync (event jts0001aa) - to Fri Oct 9 2:00-3:00 PM - notify all")
+        self.assertTrue(cards.items[1].text.startswith("ASK EMAIL - work - to "))
+        self.assertTrue(cards.items[1].text.endswith(" - Jarvis test sync moved"))
+        self.assertEqual([item.status for item in cards.items], [live.STATUS_OK, live.STATUS_WARN])
+        self.assertEqual(cards.items[1].note, "1 recipient you didn't type - check the card before Send")
+        answer = next(field for field in cards.fields if field.label == "Answer")
+        self.assertEqual(answer.link, "tab:jarvis")
+        self.assertEqual(next(field.value for field in cards.fields if field.label == "Jarvis says"), SAY)
+        self.assertEqual(c.ask.last_task_id, task.id)
+        self.assertTrue(all(step.status != live.STATUS_RUNNING for step in task.steps))
+
+    def test_refused_submits_create_no_task(self) -> None:
+        gate = threading.Event()
+        app = self.make(GatedProcess(plan(), gate))
+        c = app.c
+        stream = self.stream_of(app)
+        submit(c, "   ")                       # empty
+        self.assertEqual(self.asks(stream), [])
+        c._connect_alias = "work"              # blocked: a Google sign-in is open
+        submit(c)
+        self.assertEqual(self.asks(stream), [])
+        c._connect_alias = None
+        submit(c)
+        c.ask.submit("another request")        # busy
+        self.assertEqual(len(self.asks(stream)), 1)
+        gate.set()
+        self.assertTrue(wait_for(lambda: not c.ask.busy))
+
+    def test_cancel_and_shutdown(self) -> None:
+        gate = threading.Event()
+        process = GatedProcess(plan(), gate)
+        app = self.make(process)
+        c, bar = app.c, self.bar(app)
+        stream = self.stream_of(app)
+        submit(c)
+        self.assertTrue(wait_for(lambda: process.given >= 1), "the CLI is running")
+        bar.button.click()
+        self.assertTrue(wait_for(lambda: not c.ask.busy, 3))
+        (task,) = self.asks(stream)
+        self.assertEqual(task.status, live.STATUS_CANCELLED)
+        run_step = next(step for step in task.steps if step.kind == live.PLANNER_RUN)
+        self.assertEqual(run_step.status, live.STATUS_CANCELLED)
+        self.assertIn("Cancel clicked", [note.text for note in run_step.notes])
+        self.assertEqual(c.ask.last_task_id, task.id)
+
+    def test_shutdown_during_a_run_finishes_the_task(self) -> None:
+        gate = threading.Event()
+        process = GatedProcess(plan(), gate)
+        app = self.make(process)
+        c = app.c
+        stream = self.stream_of(app)
+        submit(c)
+        self.assertTrue(wait_for(lambda: process.given >= 1), "the CLI is running")
+        c.ask.shutdown()
+        c.ask.join(3)
+        (task,) = self.asks(stream)
+        self.assertEqual((task.status, task.summary), (live.STATUS_CANCELLED, "Jarvis closed"))
+        run_step = next(step for step in task.steps if step.kind == live.PLANNER_RUN)
+        self.assertEqual((run_step.status, run_step.summary), (live.STATUS_CANCELLED, "Jarvis closed"))
+
+    def test_a_refusal_and_a_failure_finish_the_task(self) -> None:
+        app = self.make(auth=AUTH_NONE)
+        c = app.c
+        stream = self.stream_of(app)
+        submit(c)
+        self.assertTrue(wait_for(lambda: not c.ask.busy))
+        (task,) = self.asks(stream)
+        self.assertEqual(task.status, live.STATUS_BLOCKED)
+        self.assertEqual([step.kind for step in task.steps], [live.ASK_REQUEST, live.ASK_CHECKS])
+        clock = FakeClock()
+        timeout = self.make(FakeProcess(stream_lines("success")[:1], clock=clock, hang=True), engine_clock=clock)
+        stream = self.stream_of(timeout)
+        submit(timeout.c)
+        self.assertTrue(wait_for(lambda: not timeout.c.ask.busy, 10))
+        (task,) = self.asks(stream)
+        self.assertEqual((task.status, task.summary), (live.STATUS_FAILED, "Took too long; nothing was proposed"))
+        run_step = next(step for step in task.steps if step.kind == live.PLANNER_RUN)
+        self.assertEqual((run_step.status, run_step.summary),
+                         (live.STATUS_FAILED, "Took too long; nothing was proposed"))
 
 
 if __name__ == "__main__":

@@ -290,6 +290,65 @@ class RateLimitTests(Engine):
         self.assertEqual(st.clock_words(NOW.replace(hour=0, minute=0) + st.timedelta(days=3), NOW), "Sat 12:00 AM")
 
 
+class ProgressTests(Engine):
+    """progress= and capture= (the LIVE view): reported in order, never changing the run."""
+
+    def run_live(self, process: FakeProcess | list[str], *, progress=None, capture: bool = False,
+                 cancel: threading.Event | None = None, allow_search: bool = False) -> st.RunResult:
+        self.runner = FakeRunner(process, clock=self.clock)
+        return run_planner(self.runner, ARGV, "the prompt", env={"PATH": "x"}, cwd=Path("."), timeout_s=90.0,
+                           allow_search=allow_search, cancel=cancel, clock=self.clock, now=lambda: NOW,
+                           progress=progress, capture=capture)
+
+    def test_progress_in_order(self) -> None:
+        heard: list[tuple[str, object]] = []
+        result = self.run_live(stream("success"), progress=lambda what, value: heard.append((what, value)))
+        self.assertIsNone(result.failure)
+        self.assertEqual([what for what, _value in heard], ["started", "init", "turn", "result"])
+        self.assertEqual(heard[1][1], result.init)
+        self.assertEqual([value for what, value in heard if what == "turn"], [1])
+
+    def test_stopped_is_reported_with_the_failure(self) -> None:
+        heard: list[tuple[str, object]] = []
+        result = self.run_live(stream("api_key"), progress=lambda what, value: heard.append((what, value)))
+        self.assertEqual(result.failure.kind, GUARD)
+        self.assertEqual(heard[-1], ("stopped", result.failure))
+        cancel = threading.Event()
+        heard.clear()
+        process = FakeProcess(stream("success")[:1], clock=self.clock, hang=True, cancel_after=3, cancel=cancel)
+        result = self.run_live(process, cancel=cancel, progress=lambda what, value: heard.append((what, value)))
+        self.assertEqual([what for what, _value in heard], ["started", "init", "stopped"])
+        self.assertEqual(heard[-1][1].kind, CANCELLED)
+
+    def test_a_raising_callback_changes_nothing(self) -> None:
+        def broken(_what: str, _value: object) -> None:
+            raise RuntimeError("listener")
+
+        for name in ("success", "api_key", "max_turns", "auth_error", "fallback_json"):
+            with self.subTest(name=name):
+                plain = self.run_live(stream(name))
+                self.clock = FakeClock()
+                noisy = self.run_live(stream(name), progress=broken)
+                self.clock = FakeClock()
+                self.assertEqual(noisy, plain)
+
+    def test_capture_keeps_the_raw_reply(self) -> None:
+        plan = {"say": "Caf\u00e9 at two.", "question": "", "lines": ["Move: x"]}
+        captured = self.run_live(plan_stream(plan), capture=True)
+        self.assertEqual(captured.reply, json.dumps(plan, indent=2, ensure_ascii=False))
+        self.assertIn("Caf\u00e9", captured.reply)
+        plain = self.run_live(plan_stream(plan))
+        self.assertEqual(plain.reply, "")
+        self.assertEqual(plain.plan, captured.plan)
+        fallback = self.run_live(stream("fallback_json"), capture=True)
+        self.assertTrue(fallback.plan.via_fallback)
+        self.assertTrue(fallback.reply.startswith("```json\n{"))
+        self.assertEqual(self.run_live(stream("max_turns"), capture=True).failure.kind, MAX_TURNS)
+        killed = self.run_live(stream("api_key"), capture=True)
+        self.assertEqual(killed.reply, "")   # no result event: nothing to show
+        self.assertNotIn('"say"', repr(captured))   # the raw reply is never in a repr (logs)
+
+
 class MessagesTests(unittest.TestCase):
     def test_every_kind_has_plain_words(self) -> None:
         for kind in st.FAILURE_KINDS:

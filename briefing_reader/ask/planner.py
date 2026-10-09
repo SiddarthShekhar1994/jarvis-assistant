@@ -4,11 +4,13 @@
         readiness(refresh=False)   Readiness: claude.exe found, its flags probed, a claude.ai
                                    subscription sign-in, an empty work folder. No model request;
                                    cached until a run fails
-        run(prompt, allow_search, cancel)   RunResult of one planner run (stream.run_planner)
+        run(prompt, allow_search, cancel, progress, capture)   RunResult of one planner run
+                                   (stream.run_planner; progress / capture feed the LIVE view)
     GoogleSources(config, calendars, senders, readers)   what Jarvis may tell the planner about each
                                    account (no sign-in ever; reads only)
     AskPlanner(config, engine, sources, usage)
-        plan(command, briefing, page_ids, cancel, on_stage) -> AskOutcome
+        plan(command, briefing, page_ids, cancel, on_stage, live) -> AskOutcome (``live``: the Ask's
+                                   LIVE view task: every check, read, run and line, as it happens)
         dry_run(command, briefing) -> DryRun (the exact stdin text, email text as counts)
     briefing_context(...)          the briefing as Ask may see it (pending cards, sections, deadlines)
 
@@ -19,7 +21,7 @@ accounts with "gmail_read"). The first run may ask to search mail instead of pla
 that account, takes at most 3 threads, trims them and runs the planner once more with them as
 quoted data (both runs count against the caps). Every line becomes a card through
 validate.to_cards. Thread text lives only in this call's memory: it is never logged, saved or
-returned.
+returned; with [live] text on, the LIVE view shows it on screen (memory only, this session).
 
 The UI calls plan() on its Ask worker thread (it blocks: Google reads and up to two CLI runs);
 ``on_stage`` reports STAGE_* as it goes, and setting ``cancel`` ends a running CLI within a second.
@@ -29,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -43,8 +46,30 @@ from ..gcal import CalendarError, CalendarNotSignedIn, EventBrief, local_timezon
 from ..gmail import GmailError
 from ..google_auth import PROBLEM_EXPIRED, PROBLEM_SCOPE, PROBLEM_SETUP, PROBLEM_SIGNED_OUT, logged_alias
 from . import cli
+from ..live import (
+    ASK_CHECKS,
+    ASK_VALIDATE,
+    CALENDAR_READ,
+    MAIL_SEARCH,
+    MAIL_THREAD,
+    NO_STEP,
+    NO_TASK,
+    PLANNER_RUN,
+    STATUS_BLOCKED,
+    STATUS_CANCELLED,
+    STATUS_FAILED,
+    STATUS_OK,
+    STATUS_WARN,
+    Field,
+    LiveStep,
+    LiveTask,
+    command_line_text,
+    elapsed_text,
+)
+from ..live import quiet as _quiet
 from .context import (
     COMMAND_CAP,
+    SOURCE_OWNER,
     AccountInfo,
     AskContext,
     BriefingContext,
@@ -52,9 +77,12 @@ from .context import (
     briefing_from_script,
     build_prompt,
     day_window,
+    fit_mail,
+    thread_text,
 )
 from .mail import (
     MAX_THREADS,
+    MailPerson,
     MailReport,
     MailThread,
     QueryRefused,
@@ -65,9 +93,9 @@ from .mail import (
     thread_from_api,
     trim_threads,
 )
-from .stream import CANCELLED, AskFailure, InitSummary, Plan, RunResult, RunStats, run_planner
+from .stream import CANCELLED, OVERAGE, AskFailure, InitSummary, Plan, RunResult, RunStats, run_planner
 from .usage import USAGE_FILE, CapCheck, UsageLog
-from .validate import Cards, to_cards
+from .validate import LINE_CARD, LINE_REFUSED, LINE_REPEAT, Cards, to_cards
 
 logger = logging.getLogger(__name__)
 
@@ -201,8 +229,10 @@ class ClaudeEngine:
             return ready, failure(kind, auth.problem or "auth", auth.message)
         return ready, None
 
-    def run(self, prompt: str, *, allow_search: bool, cancel: threading.Event | None = None) -> RunResult:
-        """One planner run with ``prompt`` on stdin, after preflight()."""
+    def run(self, prompt: str, *, allow_search: bool, cancel: threading.Event | None = None,
+            progress: Callable[[str, Any], None] | None = None, capture: bool = False) -> RunResult:
+        """One planner run with ``prompt`` on stdin, after preflight(). ``progress`` / ``capture``:
+        stream.run_planner's (the LIVE view; neither changes the run)."""
         from .stream import failure
 
         ready, refused = self.preflight()
@@ -214,7 +244,7 @@ class ClaudeEngine:
         result = run_planner(self.runner, self.argv(ready, allow_search=allow_search), prompt,
                              env=env, cwd=self.work_folder,
                              timeout_s=float(self.ask.timeout_seconds), allow_search=allow_search, cancel=cancel,
-                             clock=self._clock)
+                             clock=self._clock, progress=progress, capture=capture)
         init = result.init
         logger.info("Ask: planner run %s in %.1f s (%d turn(s), %d in / %d out / %d cached tokens; tools %s, "
                     "structured output %s, exit %s)", result.outcome, result.stats.duration_ms / 1000,
@@ -474,23 +504,29 @@ class AskPlanner:
 
     def _context(self, command: str, briefing: BriefingContext | None, now: datetime,
                  on_stage: Callable[[str], None],
-                 cancel: threading.Event | None = None) -> tuple[AskContext, list[str]]:
+                 cancel: threading.Event | None = None, live: LiveTask = NO_TASK,
+                 threads_shown: dict[tuple[str, str], LiveStep] | None = None) -> tuple[AskContext, list[str]]:
         """The context (Google reads only). Cancel is checked between reads: the rest is skipped and
-        the caller sees the event set."""
+        the caller sees the event set. ``live``: the LIVE view's calendar.read and mail.thread steps
+        (``threads_shown`` collects the thread steps by (account, thread id))."""
         on_stage(STAGE_CONTEXT)
         ask = self.config.ask
         accounts = self.sources.accounts()
         start, end = day_window(now, ask.days_back, ask.days_ahead)
+        calendar = _calendar_step(live, start, end, ask.calendars)
         events: dict[str, tuple[EventBrief, ...]] = {}
         updated = []
         for account in accounts:
             if account.calendar != "yes" or (cancel is not None and cancel.is_set()):
+                _calendar_account(calendar, account.alias, account.calendar, None, cancelled=account.calendar == "yes")
                 updated.append(account)
                 continue
             briefs, status = self.sources.event_briefs(account.alias, start, end, ask.calendars)
             if status == "yes":
                 events[account.alias] = tuple(briefs)
+            _calendar_account(calendar, account.alias, status, briefs if status == "yes" else None)
             updated.append(replace(account, calendar=status))
+        _calendar_done(calendar, events, updated, self._hour24(), cancelled=cancel is not None and cancel.is_set())
         notes: list[str] = []
         threads: list[MailThread] = []
         readable = {account.alias for account in updated if account.read_mail == "yes"}
@@ -498,7 +534,7 @@ class AskPlanner:
             for ref in briefing_threads(command, briefing.pending, readable):
                 if cancel is not None and cancel.is_set():
                     break
-                thread = self._read_thread(ref.account, ref.thread_id, notes)
+                thread = self._read_thread(ref.account, ref.thread_id, notes, live, WHY_BRIEFING, threads_shown)
                 if thread is not None:
                     threads.append(thread)
         ctx = AskContext(now=now, time_zone=self.sources.time_zone(), command=command, accounts=tuple(updated),
@@ -510,9 +546,16 @@ class AskPlanner:
         assistant = getattr(self.config, "assistant", None)
         return str(getattr(assistant, "address", "") or "")
 
-    def _read_thread(self, alias: str, thread_id: str, notes: list[str]) -> MailThread | None:
+    def _hour24(self) -> bool:
+        display = getattr(self.config, "display", None)
+        return bool(getattr(display, "hour24", False))
+
+    def _read_thread(self, alias: str, thread_id: str, notes: list[str], live: LiveTask = NO_TASK, why: str = "",
+                     threads_shown: dict[tuple[str, str], LiveStep] | None = None) -> MailThread | None:
+        step = _thread_step(live, alias, thread_id, why)
         reader = self.sources.reader(alias)
         if reader is None:
+            step.done(STATUS_BLOCKED, summary=f"Not read: Jarvis can't read the {alias} account's mail")
             return None
         try:
             thread = thread_from_api(reader.thread(thread_id), alias)
@@ -520,24 +563,38 @@ class AskPlanner:
             note = f"Jarvis couldn't read a {alias} thread ({exc})"
             if note not in notes:
                 notes.append(note)
+            step.done(STATUS_FAILED, summary=note)
             return None
         except Exception as exc:  # noqa: BLE001 - reading is optional; the Ask goes on without it
             logger.warning("Ask: reading a %s thread failed unexpectedly (%s)", logged_alias(alias), type(exc).__name__)
+            step.done(STATUS_FAILED, summary=f"unexpected error ({type(exc).__name__})")
             return None
+        _thread_read(step, thread)
+        if thread is not None and threads_shown is not None and step is not NO_STEP:
+            threads_shown[(alias, thread.thread_id)] = step
         return thread
 
     # ---- runs ---------------------------------------------------------------------------------
 
-    def _run(self, prompt: str, *, allow_search: bool, cancel: threading.Event | None) -> RunResult:
-        _ready, refused = self.engine.preflight()   # a run refused before it starts is not counted
+    def _run(self, prompt: str, *, allow_search: bool, cancel: threading.Event | None, live: LiveTask = NO_TASK,
+             number: int = 1, search_words: str = "") -> RunResult:
+        step = _run_step(live, self.config.ask.model, prompt, number, search_words)
+        ready, refused = self.engine.preflight()   # a run refused before it starts is not counted
         if refused is not None:
+            step.rename_block(STDIN_PENDING, STDIN_NOT_SENT)
+            step.done(STATUS_BLOCKED, status_text="SKIPPED", summary=f"Not started: {refused.message}")
             return RunResult(failure=refused, started=False)
+        _run_ready(step, self.engine, ready, allow_search)
         run = self.usage.start()
         result: RunResult | None = None
         try:
-            result = self.engine.run(prompt, allow_search=allow_search, cancel=cancel)
+            extra: dict[str, Any] = {}
+            if step is not NO_STEP:   # only with the LIVE view: an engine without these keywords keeps working
+                extra = {"progress": _run_progress(step), "capture": True}
+            result = self.engine.run(prompt, allow_search=allow_search, cancel=cancel, **extra)
             if result.limit is not None and result.limit.overage:
                 self._pause_for_overage(result.limit.resets_at)
+            _run_result(step, result, keep_text=live.keep_text)
             return result
         finally:
             stats = result.stats if result is not None else RunStats()
@@ -559,16 +616,20 @@ class AskPlanner:
 
     def plan(self, command: str, *, briefing: BriefingContext | None = None, page_ids: Sequence[str] = (),
              cancel: threading.Event | None = None,
-             on_stage: Callable[[str], None] = lambda stage: None) -> AskOutcome:
-        """One Ask (see the module docs). Never raises for Google or the CLI; one at a time."""
+             on_stage: Callable[[str], None] = lambda stage: None, live: LiveTask | None = None) -> AskOutcome:
+        """One Ask (see the module docs). Never raises for Google or the CLI; one at a time.
+        ``live``: the Ask's LIVE view task (its steps are added here; the caller finishes it)."""
+        task = live or NO_TASK
         if not self._busy.acquire(blocking=False):
-            return AskOutcome(False, "busy", "Jarvis is already planning; wait or Cancel it")
+            task.step(ASK_CHECKS, CHECKS_TITLE, status=STATUS_BLOCKED, summary=BUSY_MESSAGE)
+            return AskOutcome(False, "busy", BUSY_MESSAGE)
         started = self._monotonic()
         try:
             outcome = self._plan(" ".join((command or "").split())[:COMMAND_CAP], briefing, page_ids, cancel,
-                                 on_stage)
+                                 on_stage, task)
         except Exception as exc:  # noqa: BLE001 - an Ask must never take the app down
             logger.warning("Ask: stopped by an unexpected error (%s)", type(exc).__name__)
+            task.current().done(STATUS_FAILED, summary=f"unexpected error ({type(exc).__name__})")
             outcome = AskOutcome(False, "error", "Ask stopped because of an unexpected error; nothing was proposed")
         finally:
             self._busy.release()
@@ -576,26 +637,38 @@ class AskPlanner:
         logger.info("Ask: %s", outcome.summary())
         return outcome
 
-    def _refusal(self) -> AskOutcome | None:
+    def _refusal(self, live: LiveTask = NO_TASK) -> AskOutcome | None:
+        step = live.step(ASK_CHECKS, CHECKS_TITLE)
         if not self.config.ask.enabled:
+            step.field("Ask", "off")
+            step.done(STATUS_BLOCKED, summary=DISABLED_MESSAGE)
             return AskOutcome(False, DISABLED, DISABLED_MESSAGE)
+        step.field("Ask", "on")
         caps = self.usage.check()
+        _checks_caps(step, caps, self.usage)
         if not caps.allowed:
+            step.done(STATUS_BLOCKED, summary=caps.message)
             return AskOutcome(False, CAPS, caps.message, caps=caps)
         ready = self.engine.readiness()
+        _checks_ready(step, ready)
         if not ready.ok:
+            step.done(STATUS_BLOCKED, summary=ready.message)
             return AskOutcome(False, ready.problem or NOT_READY, ready.message)
+        step.done(STATUS_OK)
         return None
 
     def _plan(self, command: str, briefing: BriefingContext | None, page_ids: Sequence[str],
-              cancel: threading.Event | None, on_stage: Callable[[str], None]) -> AskOutcome:
+              cancel: threading.Event | None, on_stage: Callable[[str], None],
+              live: LiveTask = NO_TASK) -> AskOutcome:
         if not command:
-            return AskOutcome(False, EMPTY, "Type what you'd like Jarvis to do")
-        refusal = self._refusal()
+            live.step(ASK_CHECKS, CHECKS_TITLE, status=STATUS_BLOCKED, summary=EMPTY_MESSAGE)
+            return AskOutcome(False, EMPTY, EMPTY_MESSAGE)
+        refusal = self._refusal(live)
         if refusal is not None:
             return refusal
         now = self.clock()
-        ctx, notes = self._context(command, briefing, now, on_stage, cancel)
+        shown: dict[tuple[str, str], LiveStep] = {}   # the mail.thread steps (this call's memory only)
+        ctx, notes = self._context(command, briefing, now, on_stage, cancel, live, shown)
         if cancel is not None and cancel.is_set():
             return AskOutcome(False, CANCELLED, "Cancelled; nothing was proposed")
         searchable = {account.alias for account in ctx.accounts if account.read_mail == "yes"}
@@ -606,8 +679,12 @@ class AskPlanner:
         prompt, index = build_prompt(ctx)
         logger.info("Ask: context of %d characters (%s; mail %d thread(s))", len(prompt),
                     ", ".join(f"{name} {count}" for name, count in index.counts().items()), len(ctx.mail))
+        _given(live, ctx, index)
+        _threads_given(shown, ctx.mail, prompt)
         on_stage(STAGE_PLANNING)
-        first = self._run(prompt, allow_search=allow_search, cancel=cancel)
+        why_not = "" if allow_search else ("no - the Ask limit leaves one run" if searchable
+                                           else "no - no account's mail can be read")
+        first = self._run(prompt, allow_search=allow_search, cancel=cancel, live=live, number=1, search_words=why_not)
         del prompt
         if first.failure is not None or first.plan is None:
             failure = first.failure
@@ -620,7 +697,7 @@ class AskPlanner:
         if plan.search is not None and allow_search:
             search = plan.search
             mail_note, found, ran = self._search(search.account, search.query, ctx, searchable, on_stage, cancel,
-                                                 index.search_grounding())
+                                                 index.search_grounding(), live, search.why, shown)
             if cancel is not None and cancel.is_set():
                 return AskOutcome(False, CANCELLED, "Cancelled; nothing was proposed", runs=1, init=first.init,
                                   stats=tuple(stats), mail=report(ctx.mail))
@@ -633,14 +710,18 @@ class AskPlanner:
                 caps = self.usage.check()
                 if not caps.allowed:
                     notes.append(caps.message)
+                    live.step(ASK_CHECKS, "Second planner run", status=STATUS_WARN, status_text="SKIPPED",
+                              summary=caps.message)
                 else:
                     mail_threads = trim_threads(list(ctx.mail) + found)
                     second_ctx = replace(ctx, mail=tuple(mail_threads), accounts=tuple(
                         replace(account, read_mail="no (mail already read for this request)")
                         if account.read_mail == "yes" else account for account in ctx.accounts))
                     second_prompt, final_index = build_prompt(second_ctx)
+                    _threads_given(shown, second_ctx.mail, second_prompt)
                     on_stage(STAGE_PLANNING_AGAIN)
-                    second = self._run(second_prompt, allow_search=False, cancel=cancel)
+                    second = self._run(second_prompt, allow_search=False, cancel=cancel, live=live, number=2,
+                                       search_words="no - this is the second run")
                     del second_prompt
                     if second.started:
                         runs, stats = 2, stats + [second.stats]
@@ -654,53 +735,85 @@ class AskPlanner:
                     plan = second.plan
         outcome = self._finish(plan, final_index, now=now, page_ids=page_ids, notes=notes, runs=runs,
                                stats=tuple(stats), init=first.init, mail=report(mail_threads), search=search_text,
-                               search_account=search_account)
+                               search_account=search_account, live=live)
         return replace(outcome, mail_needed=mail_needed)
 
     def _search(self, account: str, query: str, ctx: AskContext, searchable: set[str],
                 on_stage: Callable[[str], None], cancel: threading.Event | None,
-                grounding: SearchGrounding) -> tuple[str, list[MailThread], str]:
+                grounding: SearchGrounding, live: LiveTask = NO_TASK, why: str = "",
+                threads_shown: dict[tuple[str, str], LiveStep] | None = None) -> tuple[str, list[MailThread], str]:
         """(a note when nothing could be read, the new threads, the search as it ran ("" when it
         did not run)). The search must name only what the owner typed (``grounding``)."""
+        step = live.step(MAIL_SEARCH, "Mail search the planner asked for",
+                         fields=[("Account", account), Field("Planner's query", query, mono=True), ("Why", why)])
         if account not in searchable:
             known = next((item for item in ctx.accounts if item.alias == account), None)
-            return unreadable_note(account, known), [], ""
+            note = unreadable_note(account, known)
+            step.done(STATUS_BLOCKED, summary=note)
+            return note, [], ""
         try:
             query = check_query(query, grounding)
         except QueryRefused as exc:
             logger.info("Ask: refused a mail search the planner asked for")
             reason = str(exc)
+            step.done(STATUS_BLOCKED, status_text="REFUSED", summary=f"Jarvis refused it: {reason}")
             return f"Jarvis didn't search your mail: {reason[:1].lower()}{reason[1:]}", [], ""
         reader = self.sources.reader(account)
         if reader is None:
-            return f"Jarvis can't read the {account} account's mail", [], ""
+            note = f"Jarvis can't read the {account} account's mail"
+            step.done(STATUS_BLOCKED, summary=note)
+            return note, [], ""
         if cancel is not None and cancel.is_set():
+            step.done(STATUS_CANCELLED, summary="Cancel clicked - nothing was searched")
             return "", [], ""
         on_stage(STAGE_MAIL)
         seen = {(thread.account, thread.thread_id) for thread in ctx.mail}
+        step.field("Gmail query (exact)", query, mono=True)
+        step.field("Rules", f"read only - never spam or trash - at most {MAX_THREADS} threads")
+        step.note("Sent to Gmail (read only)")
         try:
             ids = reader.search(query, max_threads=MAX_THREADS)
         except GmailError as exc:
-            return f"Jarvis couldn't search your mail ({exc})", [], query
+            note = f"Jarvis couldn't search your mail ({exc})"
+            step.done(STATUS_FAILED, summary=note)
+            return note, [], query
+        step.field("Found", _count_words(len(ids), "thread"))
         notes: list[str] = []
         found: list[MailThread] = []
+        skipped = limited = 0
         for thread_id in ids:
             if cancel is not None and cancel.is_set():
+                step.done(STATUS_CANCELLED, summary="Cancel clicked - the rest was not read")
                 return "", [], query
             if len(found) + len(ctx.mail) >= MAX_THREADS or (account, thread_id) in seen:
+                if (account, thread_id) in seen:
+                    skipped += 1
+                else:
+                    limited += 1
                 continue
-            thread = self._read_thread(account, thread_id, notes)
+            thread = self._read_thread(account, thread_id, notes, live, WHY_SEARCH, threads_shown)
             if thread is not None:
                 found.append(thread)
+        if skipped:
+            step.note(f"{skipped} already read for this request - skipped")
+        if limited:
+            step.note(f"{MAX_THREADS}-thread limit reached")
         if not found:
-            return notes[0] if notes else "Jarvis found no email matching that search; nothing was read", [], query
+            note = notes[0] if notes else "Jarvis found no email matching that search; nothing was read"
+            if notes:
+                step.done(STATUS_WARN, summary=note)
+            else:
+                step.done(STATUS_WARN, status_text="NOTHING FOUND", summary="nothing was read")
+            return note, [], query
+        step.done(STATUS_OK, summary=f"{_count_words(len(found), 'thread')} read")
         return "", found, query
 
     def _finish(self, plan: Plan, index: ContextIndex, *, now: datetime, page_ids: Sequence[str], notes: list[str],
                 runs: int, stats: tuple[RunStats, ...], init: InitSummary | None, mail: MailReport, search: str,
-                search_account: str) -> AskOutcome:
+                search_account: str, live: LiveTask = NO_TASK) -> AskOutcome:
         cards: Cards = to_cards(plan.lines, index, now=now, link_hosts=self.config.actions.link_hosts,
                                 page_ids=page_ids, max_cards=self.config.ask.max_cards)
+        _validated(live, cards, index, self.config.ask.max_cards, self._hour24())
         message_parts = list(notes)
         if cards.dropped:
             message_parts.append(f"{cards.dropped} more proposal(s) were left out")
@@ -728,6 +841,412 @@ class AskPlanner:
                                         schema=cli.schema_text(allow_search=searchable),
                                         hardened=ready.hardened))
         return DryRun(prompt, argv, ready, index.counts(), report(ctx.mail))
+
+
+# --------------------------------------------------------------------------
+# The LIVE view's steps of an Ask (memory only, on screen only; every helper is quiet: whatever
+# goes wrong in one, the Ask goes on exactly as without the LIVE view)
+# --------------------------------------------------------------------------
+
+CHECKS_TITLE = "Ready to plan?"
+BUSY_MESSAGE = "Jarvis is already planning; wait or Cancel it"
+EMPTY_MESSAGE = "Type what you'd like Jarvis to do"
+WHY_BRIEFING = "your request names this briefing reply"
+WHY_SEARCH = "found by the planner's search"
+MAX_PEOPLE_SHOWN = 20
+STOPPED_KINDS = frozenset({"guard", "limit", "not_signed_in"})
+OVERAGE_WORDS = "Claude Code said this would use extra usage, so Ask stopped it"
+# The planner run's stdin block: named "sent" only once Claude Code has started with it.
+STDIN_PENDING = "Text for Claude Code (stdin) - not sent yet"
+STDIN_SENT = "Exact text sent to Claude Code (stdin)"
+STDIN_NOT_SENT = "Text not sent to Claude Code (stdin) - it did not start"
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+_DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+_KIND_WORDS = {"rsvp": "RSVP", "todo": "Todo"}
+
+
+def _count_words(count: int, noun: str, plural: str = "") -> str:
+    return f"{count} {noun if count == 1 else (plural or noun + 's')}"
+
+
+def _day(moment: date | datetime) -> str:
+    return f"{_DAYS[moment.weekday()]} {_MONTHS[moment.month - 1]} {moment.day}"
+
+
+def _clock(moment: datetime, hour24: bool) -> tuple[str, str]:
+    if hour24:
+        return f"{moment.hour:02d}:{moment.minute:02d}", ""
+    return f"{moment.hour % 12 or 12}:{moment.minute:02d}", "AM" if moment.hour < 12 else "PM"
+
+
+def event_when(brief: EventBrief, hour24: bool = False) -> str:
+    """"Wed Oct 7 2:00-3:00 PM", "Wed Oct 7 11:00 AM-1:00 PM", "Wed Oct 7 all day", "Mon Oct 12 to
+    Fri Oct 16 all day" (the event's own wall times)."""
+    if brief.all_day_start is not None:
+        last = brief.all_day_end or brief.all_day_start
+        if last == brief.all_day_start:
+            return f"{_day(brief.all_day_start)} all day"
+        return f"{_day(brief.all_day_start)} to {_day(last)} all day"
+    if brief.start is None:
+        return "no time"
+    end = brief.end or brief.start
+    (first, first_m), (last, last_m) = _clock(brief.start, hour24), _clock(end, hour24)
+    if end.date() != brief.start.date():
+        return f"{_day(brief.start)} {first} {first_m} to {_day(end)} {last} {last_m}".replace("  ", " ").strip()
+    if first_m == last_m:
+        return f"{_day(brief.start)} {first}-{last} {last_m}".rstrip()
+    return f"{_day(brief.start)} {first} {first_m}-{last} {last_m}"
+
+
+def event_item(alias: str, brief: EventBrief, hour24: bool = False) -> str:
+    """One event as the LIVE view lists it (never a guest's name or address: they are in the stdin
+    block)."""
+    who = "you organize" if brief.organizer_self else "organized by someone else"
+    guests = len(brief.guests)
+    parts = [event_when(brief, hour24), brief.title or "(No title)", alias, who,
+             _count_words(guests, "guest") if guests else "no guests"]
+    if brief.recurring:
+        parts.append("repeating")
+    return " - ".join(parts)
+
+
+def _event_key(brief: EventBrief) -> datetime:
+    if brief.start is not None:
+        return brief.start if brief.start.tzinfo is not None else brief.start.astimezone()
+    first = brief.all_day_start or date.min
+    return datetime.combine(first, datetime.min.time()).astimezone()
+
+
+@_quiet(NO_STEP)
+def _calendar_step(live: LiveTask, start: datetime, end: datetime, calendars: Sequence[str]) -> LiveStep:
+    if not live.enabled:
+        return NO_STEP
+    last = end - timedelta(days=1)
+    return live.step(CALENDAR_READ, "Calendar", fields=[("Window", f"{_day(start)} to {_day(last)}"),
+                                                        ("Calendars", ", ".join(calendars))])
+
+
+_CALENDAR_WORDS = {"no": "no calendar", "not signed in": "not signed in - not read", "error": "error - not read"}
+
+
+@_quiet()
+def _calendar_account(step: LiveStep, alias: str, status: str, briefs: Sequence[EventBrief] | None, *,
+                      cancelled: bool = False) -> None:
+    if step is NO_STEP:
+        return
+    if briefs is not None:
+        step.field(alias, _count_words(len(briefs), "event"))
+    elif cancelled:
+        step.field(alias, "not read (cancelled)")
+    else:
+        step.field(alias, _CALENDAR_WORDS.get(status, f"{status} - not read"))
+
+
+@_quiet()
+def _calendar_done(step: LiveStep, events: Mapping[str, Sequence[EventBrief]], accounts: Sequence[AccountInfo],
+                   hour24: bool, *, cancelled: bool) -> None:
+    if step is NO_STEP:
+        return
+    listed = sorted(((brief, alias) for alias, briefs in events.items() for brief in briefs),
+                    key=lambda pair: (_event_key(pair[0]), pair[1]))
+    for brief, alias in listed:
+        step.item(event_item(alias, brief, hour24))
+    summary = f"{_count_words(len(listed), 'event')} read"
+    if cancelled:
+        step.done(STATUS_CANCELLED, summary=f"{summary}; Cancel clicked")
+    elif any(account.calendar == "error" for account in accounts):
+        step.done(STATUS_WARN, summary=f"{summary}; a calendar answered with an error")
+    else:
+        step.done(STATUS_OK, summary=summary)
+
+
+@_quiet()
+def _given(live: LiveTask, ctx: AskContext, index: ContextIndex) -> None:
+    """After the first build_prompt: how many of the events read the planner was given."""
+    if not live.enabled:
+        return
+    read = sum(len(briefs) for briefs in ctx.events.values())
+    given = index.counts()["events"]
+    words = f"{read} given to the planner" if given == read else f"{given} given - the rest did not fit"
+    live.find(CALENDAR_READ).update(summary=f"{_count_words(read, 'event')} read; {words}")
+
+
+@_quiet(NO_STEP)
+def _thread_step(live: LiveTask, alias: str, thread_id: str, why: str) -> LiveStep:
+    if not live.enabled:
+        return NO_STEP
+    return live.step(MAIL_THREAD, "Read email thread", key=f"{alias}:{thread_id}",
+                     fields=[("Account", alias), ("Why", why), Field("Thread id", thread_id, mono=True)])
+
+
+def _person_text(person: MailPerson) -> str:
+    name = " ".join((person.name or "").split())
+    return f"{name} <{person.email}>" if name else person.email
+
+
+@_quiet()
+def _thread_read(step: LiveStep, thread: MailThread | None) -> None:
+    if step is NO_STEP:
+        return
+    if thread is None:
+        step.done(STATUS_WARN, summary="Gmail's answer was not a thread Jarvis can read; nothing was read")
+        return
+    people: list[str] = []
+    seen: set[str] = set()
+    for message in thread.messages:
+        for person in message.people():
+            key = (person.email or "").casefold()
+            if key and key not in seen:
+                seen.add(key)
+                people.append(_person_text(person))
+    shown = ", ".join(people[:MAX_PEOPLE_SHOWN])
+    if len(people) > MAX_PEOPLE_SHOWN:
+        shown += f", +{len(people) - MAX_PEOPLE_SHOWN} more"
+    count = len(thread.messages)
+    messages = f"{count} read (the newest)" if thread.left_out else f"{count} read"
+    if thread.left_out:
+        messages += f"; {thread.left_out} older not read"
+    step.field("Subject", thread.subject or "(no subject)")
+    step.field("People", shown or "none shown")
+    step.field("Messages", messages)
+    step.done(STATUS_OK, summary=f"{_count_words(count, 'message')} read")
+
+
+@_quiet()
+def _threads_given(shown: Mapping[tuple[str, str], LiveStep], mail: Sequence[MailThread], prompt: str) -> None:
+    """After a build_prompt: each thread step shows the exact lines the planner got, checked
+    against the prompt; a thread that is not in it says so."""
+    if not shown:
+        return
+    fitted = {(thread.account, thread.thread_id): thread for thread in fit_mail(mail)}
+    for key, step in shown.items():
+        thread = fitted.get(key)
+        text = thread_text(thread) if thread is not None else ""
+        if text and text in prompt:
+            step.block("Text given to the planner", text, untrusted=True)
+        else:
+            step.done(STATUS_WARN, summary="Not given to the planner: the mail did not fit")
+
+
+@_quiet(NO_STEP)
+def _run_step(live: LiveTask, model: str, prompt: str, number: int, search_words: str) -> LiveStep:
+    if not live.enabled:
+        return NO_STEP
+    title = "Planner run 1" if number == 1 else f"Planner run {number} (with your mail)"
+    step = live.step(PLANNER_RUN, title, fields=[
+        Field("Model", model, mono=True), ("May ask to search mail", search_words or "yes"),
+        ("Input", f"{len(prompt):,} characters")])
+    step.block(STDIN_PENDING, prompt, untrusted=True)
+    return step
+
+
+@_quiet()
+def _run_ready(step: LiveStep, engine: Any, ready: Readiness, allow_search: bool) -> None:
+    if step is NO_STEP:
+        return
+    hardened = "hardened (--safe-mode --restricted)" if ready.hardened else "not hardened"
+    step.field("Claude Code", f"{ready.version or '?'}, {hardened}")
+    method = ready.auth.method if ready.auth is not None else ""
+    step.note(f"Sign-in checked again: {'claude.ai plan' if method == 'claude.ai' else method or 'ok'} "
+              "(no model request)")
+    try:
+        argv = engine.argv(ready, allow_search=allow_search)
+    except Exception:  # noqa: BLE001 - only what the view shows
+        return
+    step.field("Command line", command_line_text(argv), mono=True)
+
+
+def _run_progress(step: LiveStep) -> Callable[[str, Any], None]:
+    def progress(what: str, value: Any) -> None:
+        if what == "started":
+            step.rename_block(STDIN_PENDING, STDIN_SENT)
+            step.note("Claude Code started")
+        elif what == "init" and value is not None:
+            step.note(f"Checked its start: model {value.model or '?'}, tools: {', '.join(value.tools) or 'none'}, "
+                      f"MCP servers: {value.mcp_servers}, API key source: {value.api_key_source}")
+        elif what == "turn":
+            step.note(f"Claude is answering (turn {value})")
+        elif what == "result":
+            step.note("Answer received")
+        elif what == "stopped" and value is not None:
+            step.note(f"Stopped: {value.message}")
+
+    return progress
+
+
+@_quiet()
+def _run_result(step: LiveStep, result: RunResult, *, keep_text: bool = True) -> None:
+    if step is NO_STEP:
+        return
+    if result.failure is not None and result.failure.detail == "start":
+        step.rename_block(STDIN_PENDING, STDIN_NOT_SENT)   # Claude Code could not be started
+    else:
+        step.rename_block(STDIN_PENDING, STDIN_SENT)       # an engine that reports no "started"
+    stats = result.stats
+    step.field("Took", elapsed_text(stats.duration_ms / 1000))
+    if stats.turns:
+        step.field("Turns", str(stats.turns))
+    if stats.input_tokens or stats.output_tokens or stats.cache_read_tokens or stats.cache_write_tokens:
+        step.field("Tokens", f"{stats.input_tokens:,} in / {stats.output_tokens:,} out / "
+                             f"{stats.cache_read_tokens:,} cache read / {stats.cache_write_tokens:,} cache write")
+    if result.init is not None and result.init.model:
+        step.field("Model (Claude Code says)", result.init.model, mono=True)
+    if result.reply:
+        step.block("Planner's reply (raw)", result.reply)
+    plan = result.plan
+    if plan is not None:
+        if plan.say:
+            step.item(f"Says: {plan.say}")
+        if plan.question:
+            step.item(f"Asks: {plan.question}")
+        if plan.search is not None:
+            search = plan.search
+            step.item(f"Wants a mail search: {search.account} - {search.query} - {search.why}")
+        for line in plan.lines:
+            step.item(line_text(line, keep_text), mono=True)
+    failure = result.failure
+    if failure is None:
+        lines = len(plan.lines) if plan is not None else 0
+        step.done(STATUS_OK, summary=_count_words(lines, "proposal") + (" (from its plain text)"
+                                                                       if plan is not None and plan.via_fallback
+                                                                       else ""))
+    elif failure.kind == CANCELLED:
+        step.done(STATUS_CANCELLED, summary="Cancel clicked")
+    elif failure.kind in STOPPED_KINDS:
+        summary = OVERAGE_WORDS if failure.detail == OVERAGE else failure.message
+        step.done(STATUS_BLOCKED, status_text="STOPPED", summary=summary)
+    else:
+        step.done(STATUS_FAILED, summary=failure.message)
+
+
+@_quiet()
+def _checks_caps(step: LiveStep, caps: CapCheck, usage: Any) -> None:
+    if step is NO_STEP:
+        return
+    hour = getattr(usage, "max_per_hour", "?")
+    day = getattr(usage, "max_per_day", "?")
+    step.field("Planner runs left", f"{caps.left_hour} of {hour} this hour, {caps.left_day} of {day} today")
+
+
+@_quiet()
+def _checks_ready(step: LiveStep, ready: Readiness) -> None:
+    if step is NO_STEP:
+        return
+    if ready.exe is None:
+        step.field("Claude Code", "not found")
+    else:
+        step.field("Claude Code", f"{ready.version or 'version unknown'}, {ready.exe.source}")
+    auth = ready.auth
+    if auth is not None:
+        if auth.ok:
+            step.field("Sign-in", "claude.ai plan (checked with `claude auth status`, no model request)")
+        else:
+            step.field("Sign-in", f"{auth.method or 'not signed in'} - not a claude.ai plan sign-in")
+    if ready.exe is not None and ready.version:
+        step.field("Hardening", "--safe-mode --restricted used" if ready.hardened else
+                   ("available, off ([ask] hardened_flags)" if ready.hardening else "not available"))
+
+
+_LINE_BODY_RE = re.compile(r"\|\s*body\s*=", re.IGNORECASE)
+
+
+def line_text(line: str, keep_text: bool = True) -> str:
+    """A proposal line as the LIVE view lists it: as written, or with [live] text = false its
+    body= text (an outgoing message or note: the rest of the line) as its size only."""
+    if keep_text:
+        return line
+    match = _LINE_BODY_RE.search(line)
+    if match is None:
+        return line
+    body = line[match.end():].strip()
+    return f"{line[:match.end()]} [{_count_words(len(body), 'character')} - not kept ([live] text = false)]"
+
+
+def card_details(card: ProposedAction, hour24: bool = False) -> list[str]:
+    """What a card does, for the LIVE view: its account, then the recipients (a Reply / Email), or
+    the event's title and id and the change (an RSVP, Move or Cancel), or the title and time (a
+    Calendar event, a Todo's block): two cards with the same title still read differently."""
+    parts = [card.account] if card.account else []
+    kind = card.kind
+    title = card.title or card.raw
+    if kind in ("email", "reply"):
+        recipients = ", ".join(card.mail_recipients())
+        if recipients:
+            parts.append(f"to {recipients}")
+        parts.append(title)
+    elif kind in ("rsvp", "move", "cancel"):
+        event = card.field("event")
+        parts.append(f"{title} (event {event})" if event else title)
+        if kind == "rsvp" and card.field("answer"):
+            parts.append(f"answer {card.field('answer')}")
+        elif kind == "move":
+            parts.append(f"to {event_when(card, hour24)}" if card.start is not None else "no new time")
+        elif kind == "cancel":
+            parts.append("cancel the event")
+        if card.field("notify"):
+            parts.append(f"notify {card.field('notify')}")
+    elif kind == "calendar":
+        parts.append(title)
+        if card.start is not None or card.all_day_start is not None:
+            parts.append(event_when(card, hour24))
+        if card.repeat:
+            parts.append(card.repeat)
+    elif kind == "todo":
+        parts.append(title)
+        if card.field("due"):
+            parts.append(f"due {card.field('due')}")
+        if card.start is not None:
+            parts.append(f"block {event_when(card, hour24)}")
+    else:
+        parts.append(title)
+    return [part for part in parts if part]
+
+
+def card_text(card: ProposedAction, hour24: bool = False) -> str:
+    """A card as the LIVE view lists it: "Email - work - to sam@example.com - Re: Budget", "Move -
+    work - Team sync (event abc123) - to Fri Oct 9 2:00-3:00 PM - notify all"."""
+    return " - ".join([_KIND_WORDS.get(card.kind, card.kind.capitalize()), *card_details(card, hour24)])
+
+
+@_quiet()
+def _validated(live: LiveTask, cards: Cards, index: ContextIndex, max_cards: int, hour24: bool = False) -> None:
+    if not live.enabled:
+        return
+    keep_text = live.keep_text
+    typed = sum(1 for sources in index.addresses.values() if SOURCE_OWNER in sources)
+    supplied = sum(1 for sources in index.addresses.values() if sources - {SOURCE_OWNER})
+    counts = index.counts()
+    step = live.step(ASK_VALIDATE, "Checking the proposals", fields=[(
+        "Checked against", f"{_count_words(counts['events'], 'event')}, {_count_words(counts['threads'], 'thread')}, "
+                           f"{_count_words(supplied, 'address', 'addresses')} Jarvis supplied, {typed} you typed")])
+    by_id = {card.id: card for card in cards.cards}
+    new = 0
+    for entry in cards.report:
+        card = by_id.get(entry.card_id)
+        if entry.outcome == LINE_CARD and card is not None:
+            notes = [f"NEW recipient {address}: you didn't type it - tick it in Edit before Send"
+                     for address in sorted(card.unverified)]
+            new += len(card.unverified)
+            notes += list(card.warnings)
+            # Accepted, but look at it (amber): a recipient you didn't type, a soft problem.
+            step.item(card_text(card, hour24), status=STATUS_WARN if notes else STATUS_OK, note="; ".join(notes))
+        elif entry.outcome == LINE_REFUSED:
+            step.item(card_text(card, hour24) if card is not None else line_text(entry.line, keep_text),
+                      status=STATUS_BLOCKED, status_text="REFUSED", note=entry.reason)
+        elif entry.outcome == LINE_REPEAT:
+            step.item(line_text(entry.line, keep_text), status=STATUS_WARN, status_text="DROPPED",
+                      note="a repeat of an earlier line")
+        else:
+            step.item(line_text(entry.line, keep_text), status=STATUS_WARN, status_text="DROPPED",
+                      note=f"more than {max_cards} proposals")
+    made = sum(1 for card in cards.cards if not card.error)
+    if not cards.report:
+        step.done(STATUS_OK, summary="no proposals")
+        return
+    summary = f"{_count_words(made, 'card')}, {cards.refused} refused, {cards.dropped} dropped"
+    if new:
+        summary += f", {_count_words(new, 'recipient')} you didn't type"
+    step.done(STATUS_WARN if cards.refused or cards.dropped or new else STATUS_OK, summary=summary)
 
 
 # --------------------------------------------------------------------------

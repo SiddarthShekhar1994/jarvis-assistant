@@ -1820,6 +1820,52 @@ class CancelTests(EventCallTestCase):
                 self.assertEqual([retries for _, retries in self.change_calls()], [0])
 
 
+class RequestHookTests(EventCallTestCase):
+    """on_request (the LIVE view): the exact request, right before it goes; never when nothing is sent."""
+
+    def heard(self) -> tuple[list[tuple[str, dict[str, Any]]], Any]:
+        calls: list[tuple[str, dict[str, Any]]] = []
+        return calls, lambda method, params: calls.append((method, params))
+
+    def test_each_change_hears_exactly_what_is_sent(self) -> None:
+        self.assertTrue(GoogleCalendar.REQUEST_HOOK)
+        calls, hook = self.heard()
+        cal = self.signed_in_calendar()
+        action = make_action(rrule="RRULE:FREQ=WEEKLY;COUNT=4")
+        cal.create_event(action, on_request=hook)
+        (kwargs, _), = self.service.calls_to("events.insert")
+        self.assertEqual(calls, [("events.insert", kwargs)])
+        calls.clear()
+        self.event_calendar().respond(EVENT_ID, "yes", comment=COMMENT, on_request=hook)
+        (kwargs, _), = self.service.calls_to("events.patch")
+        self.assertEqual(calls, [("events.patch", kwargs)])
+        for name, call in (("move", lambda cal: cal.move(EVENT_ID, MoveTests.NEW_START, MoveTests.NEW_END, now=BEFORE,
+                                                         on_request=hook)),
+                           ("cancel", lambda cal: cal.cancel(EVENT_ID, send_updates="none", on_request=hook))):
+            with self.subTest(change=name):
+                self.service = FakeService()
+                calls.clear()
+                call(self.event_calendar())
+                (kwargs, _), = self.change_calls()
+                self.assertEqual(calls, [("events.patch" if name == "move" else "events.delete", kwargs)])
+
+    def test_nothing_sent_nothing_heard_and_a_failing_hook_changes_nothing(self) -> None:
+        calls, hook = self.heard()
+        self.event_calendar(_event_item(status="cancelled")).cancel(EVENT_ID, on_request=hook)
+        self.assertEqual(calls, [])
+        self.service = FakeService()
+
+        def broken(_method: str, params: dict[str, Any]) -> None:
+            params["eventId"] = "changed"   # a copy: the request is untouched
+            raise RuntimeError("hook")
+
+        with self.assertLogs(GCAL_LOGGER, level="DEBUG") as logs:
+            result = self.event_calendar().cancel(EVENT_ID, on_request=broken)
+        self.assertEqual(result, gcal.ChangeResult(event_id=EVENT_ID, link="", already=False))
+        self.assertEqual(self.service.calls_to("events.delete")[0][0]["eventId"], EVENT_ID)
+        self.assertIn("Live view: on_request failed (RuntimeError)", " ".join(logs.output))
+
+
 class _StaleConnection:
     """A connection whose first answer is lost (a broken status line), then answers 200."""
 

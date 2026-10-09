@@ -1,6 +1,9 @@
 """The planner's lines -> NEEDS YOUR OK cards (source="ask"), each checked against what Jarvis supplied.
 
-    to_cards(lines, index, ...)   Cards: one card per line (at most ``max_cards``)
+    to_cards(lines, index, ...)   Cards: one card per line (at most ``max_cards``), and
+                                  Cards.report: what became of each line, in order (LineReport:
+                                  a card, refused with its reason, a repeat, over the cap), for the
+                                  LIVE view only
 
 For each line, in order (the first problem wins; the card then shows it and offers nothing to
 approve):
@@ -20,13 +23,13 @@ approve):
 8. A card whose id is already on the page becomes "Already in your list under BRIEFING - use Edit
    there"; a repeat of an earlier line of the same answer is dropped.
 
-Pure; nothing is logged here (planner.py logs the counts).
+Pure; nothing is logged here (planner.py logs the counts; Cards.report never is).
 """
 
 from __future__ import annotations
 
 from collections.abc import Collection, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 
 from ..actions import (
@@ -60,11 +63,31 @@ PAST_MOVE = "The new time is in the past"
 FAR_MOVE = f"The new time is more than {FAR_DAYS} days away - check the date"
 
 
+LINE_CARD = "card"            # the line became a card Jarvis can carry out
+LINE_REFUSED = "refused"      # the line became an information-only card (reason: the card's error)
+LINE_REPEAT = "repeat"        # a repeat of an earlier line of the same answer: dropped
+LINE_OVER_CAP = "over_cap"    # past [ask] max_cards: dropped unchecked
+
+
+@dataclass(frozen=True)
+class LineReport:
+    """What became of one planner line (the LIVE view's "Checking the proposals"; never logged)."""
+
+    line: str                 # the planner's line as given
+    outcome: str              # LINE_CARD | LINE_REFUSED | LINE_REPEAT | LINE_OVER_CAP
+    card_id: str = ""
+    reason: str = ""          # the refusal text (the card's error); "" for a card
+
+    def __repr__(self) -> str:   # never the line or the reason (they name people)
+        return f"LineReport(outcome={self.outcome!r})"
+
+
 @dataclass(frozen=True)
 class Cards:
     cards: tuple[ProposedAction, ...] = ()
     dropped: int = 0            # lines beyond max_cards (or repeats)
     refused: int = 0            # cards that became information only
+    report: tuple[LineReport, ...] = field(default=(), repr=False)   # every line, in order
 
     def kinds(self) -> dict[str, int]:
         """Cards per kind, with "refused" for the information-only ones (safe to log)."""
@@ -135,16 +158,20 @@ def to_cards(lines: Sequence[str], index: ContextIndex, *, now: datetime, link_h
     cards: list[ProposedAction] = []
     seen: set[str] = set()
     dropped = 0
+    report: list[LineReport] = []
     for line in lines:
         if len(cards) >= max_cards:
             dropped += 1
+            report.append(LineReport(line, LINE_OVER_CAP))
             continue
         card = check_line(line, index, now=now, link_hosts=link_hosts)
         if not card.error and card.id in page_ids:
             card = with_error(card, ALREADY_LISTED)
         if card.id in seen:
             dropped += 1
+            report.append(LineReport(line, LINE_REPEAT, card.id))
             continue
         seen.add(card.id)
         cards.append(card)
-    return Cards(tuple(cards), dropped, sum(1 for card in cards if card.error))
+        report.append(LineReport(line, LINE_REFUSED if card.error else LINE_CARD, card.id, card.error))
+    return Cards(tuple(cards), dropped, sum(1 for card in cards if card.error), tuple(report))

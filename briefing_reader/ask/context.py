@@ -1,6 +1,7 @@
 """The planner's input for one Ask, and the index of every id and address Jarvis supplied.
 
     build_prompt(ctx, redact_mail=False) -> (text, ContextIndex)
+    thread_text(thread)   the exact <mail> lines of one thread (what the LIVE view shows of it)
 
 The text has these blocks, in order: <now>, <owner> (one line: the word Jarvis addresses the owner
 with, "sir" by default, from [assistant] address; empty for none), <accounts>, <calendar>,
@@ -325,25 +326,30 @@ def _briefing_block(briefing: BriefingContext | None) -> tuple[str, int]:
     return text.rstrip("\n"), shown
 
 
-def _mail_block(threads: Sequence[MailThread], *, redact: bool) -> str:
-    lines = [MAIL_NOTE]
-    for thread in threads:
-        older = f" | {thread.left_out} older message(s) not shown" if thread.left_out else ""
-        lines.append(f"thread | acct={data(thread.account, 24)} | thread={data(thread.thread_id, 64)} | "
-                     f"subject={data(thread.subject, 200)}{older}")
-        for message in thread.messages:
-            lines.append(_message_header(message))
-            if redact:
-                lines.append(f"  [text not shown: {len(message.text)} characters]")
-                continue
-            for line in message.text.split("\n"):
-                cleaned = data(line, 2000)
-                if cleaned:
-                    lines.append("  " + cleaned)
-            if message.cut:
-                lines.append("  [the rest of this message is left out]")
-        lines.append("end of thread")
+def thread_text(thread: MailThread, *, redact: bool = False) -> str:
+    """The exact lines the <mail> block holds for one thread, from "thread | acct=..." to "end of
+    thread" (the LIVE view shows them as "Text given to the planner"). ``redact``: each email's
+    text as its length (the dry run)."""
+    older = f" | {thread.left_out} older message(s) not shown" if thread.left_out else ""
+    lines = [f"thread | acct={data(thread.account, 24)} | thread={data(thread.thread_id, 64)} | "
+             f"subject={data(thread.subject, 200)}{older}"]
+    for message in thread.messages:
+        lines.append(_message_header(message))
+        if redact:
+            lines.append(f"  [text not shown: {len(message.text)} characters]")
+            continue
+        for line in message.text.split("\n"):
+            cleaned = data(line, 2000)
+            if cleaned:
+                lines.append("  " + cleaned)
+        if message.cut:
+            lines.append("  [the rest of this message is left out]")
+    lines.append("end of thread")
     return "\n".join(lines)
+
+
+def _mail_block(threads: Sequence[MailThread], *, redact: bool) -> str:
+    return "\n".join([MAIL_NOTE] + [thread_text(thread, redact=redact) for thread in threads])
 
 
 def _people_text(people: Iterable[MailPerson]) -> str:

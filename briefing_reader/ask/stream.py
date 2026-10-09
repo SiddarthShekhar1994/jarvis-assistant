@@ -9,12 +9,16 @@
     read_result(event, init) the result event -> Plan, or AskFailure(kind)
     run_planner(...)         one run end to end: no init within 20 s, any guard trip, a rate-limit
                              signal, the overall timeout and Cancel all kill the process; a run is
-                             never retried
+                             never retried. ``progress(what, value)`` hears "started", "init"
+                             (InitSummary), "turn" (n), "result" and "stopped" (AskFailure) as they
+                             happen (for the LIVE view; a callback that raises changes nothing);
+                             ``capture`` keeps the planner's raw reply in RunResult.reply
 
 Failure kinds (AskFailure.kind): not_signed_in, limit, max_turns, schema_retries, timeout,
 cancelled, guard, garbled, cli_unsupported, error. Their messages are Jarvis's own words (the only
 model or CLI text in one is a sanitized usage-limit reset time) and are safe to show and log; the
-stream itself (the plan, the result text, stderr) is never logged. ``total_cost_usd`` is a
+stream itself (the plan, the result text, stderr) is never logged (RunResult.reply, kept only with
+``capture`` for the LIVE view, never is either). ``total_cost_usd`` is a
 client-side estimate, not a charge on a subscription: it is never read.
 """
 
@@ -163,6 +167,9 @@ class RunResult:
     stats: RunStats = field(default_factory=RunStats)
     limit: LimitSignal | None = None   # set when a rate_limit_event stopped the run
     started: bool = True               # False: refused before any process (not a planner run)
+    # With run_planner(capture=True) only: the planner's raw reply as it came (structured_output as
+    # indented JSON, else the result text). Shown in the LIVE view; never logged or saved.
+    reply: str = field(default="", repr=False)
 
     @property
     def outcome(self) -> str:
@@ -401,24 +408,56 @@ def read_result(event: Mapping[str, Any], init: InitSummary | None, *, allow_sea
 # The engine loop
 # --------------------------------------------------------------------------
 
+Progress = Callable[[str, Any], None]
+
+
+def _report(progress: Progress | None, what: str, value: Any = None) -> None:
+    """Tell ``progress`` (the LIVE view); whatever it does, the run goes on unchanged."""
+    if progress is None:
+        return
+    try:
+        progress(what, value)
+    except Exception:  # noqa: BLE001 - a broken callback never changes the run
+        pass
+
+
+def raw_reply(event: Mapping[str, Any] | None) -> str:
+    """The planner's reply in a result event as it came: structured_output as indented JSON, else
+    the result text ("" when there is neither)."""
+    if not isinstance(event, Mapping):
+        return ""
+    data = event.get("structured_output")
+    if data is not None:
+        try:
+            return json.dumps(data, indent=2, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return ""
+    text = event.get("result")
+    return text if isinstance(text, str) else ""
+
+
 def run_planner(runner: Runner, argv: Sequence[str], prompt: str, *, env: Mapping[str, str], cwd: Path,
                 timeout_s: float, allow_search: bool, cancel: threading.Event | None = None,
                 clock: Callable[[], float] = time.monotonic, init_timeout_s: float = INIT_TIMEOUT_S,
                 poll_s: float = POLL_S,
-                now: Callable[[], datetime] = lambda: datetime.now().astimezone()) -> RunResult:
+                now: Callable[[], datetime] = lambda: datetime.now().astimezone(),
+                progress: Progress | None = None, capture: bool = False) -> RunResult:
     """Start the CLI with ``prompt`` on stdin and read its events until the result, a guard trip,
-    the timeout or Cancel (the process is killed then). Never raises for the CLI's behaviour."""
+    the timeout or Cancel (the process is killed then). Never raises for the CLI's behaviour.
+    ``progress`` / ``capture``: see the module docs (neither changes the run)."""
     started = clock()
     try:
         process = runner.start(argv, stdin_text=prompt, env=env, cwd=cwd)
     except OSError as exc:
         logger.warning("Ask: Claude Code could not be started (%s)", type(exc).__name__)
         return RunResult(failure=failure(ERROR, "start"))
+    _report(progress, "started")
     init: InitSummary | None = None
     result_event: Mapping[str, Any] | None = None
     stop: AskFailure | None = None
     limit: LimitSignal | None = None
     garbage = 0
+    turns = 0
     try:
         while True:
             if cancel is not None and cancel.is_set():
@@ -455,19 +494,26 @@ def run_planner(runner: Runner, argv: Sequence[str], prompt: str, *, env: Mappin
                 if init is None:
                     if event.get("type") == "result":
                         result_event = event   # e.g. a sign-in error before any init: never a plan
+                        _report(progress, "result")
                         break
                     init = check_init(event)
+                    _report(progress, "init", init)
                     continue
                 check_event(event)
             except GuardTrip as trip:
                 stop = failure(GUARD, trip.reason)
                 break
+            if event.get("type") == "assistant":
+                turns += 1
+                _report(progress, "turn", turns)
             if event.get("type") == "result":
                 result_event = event
+                _report(progress, "result")
                 break
     finally:
         if stop is not None:
             process.kill()
+            _report(progress, "stopped", stop)
         exit_code = process.wait(5.0 if stop is None else 2.0)
         if exit_code is None:
             process.kill()
@@ -489,6 +535,7 @@ def run_planner(runner: Runner, argv: Sequence[str], prompt: str, *, env: Mappin
         return RunResult(failure=found, init=init, stats=RunStats(duration_ms=measured, exit_code=exit_code))
     stats = stats_of(result_event, measured_ms=measured, exit_code=exit_code)
     outcome = read_result(result_event, init, allow_search=allow_search, now=now)
+    reply = raw_reply(result_event) if capture else ""
     if isinstance(outcome, AskFailure):
-        return RunResult(failure=outcome, init=init, stats=stats)
-    return RunResult(plan=outcome, init=init, stats=stats)
+        return RunResult(failure=outcome, init=init, stats=stats, reply=reply)
+    return RunResult(plan=outcome, init=init, stats=stats, reply=reply)

@@ -38,6 +38,7 @@ from briefing_reader.config import (
     Config,
     DisplayConfig,
     HotkeyConfig,
+    LiveConfig,
     PollingConfig,
     PromptConfig,
     RedactingFilter,
@@ -366,6 +367,7 @@ class ConfigFileTests(ProjectTestCase):
             "display": {f.name for f in dataclasses.fields(DisplayConfig)},
             "ask": {f.name for f in dataclasses.fields(AskConfig)},
             "assistant": {f.name for f in dataclasses.fields(AssistantConfig)},
+            "live": {f.name for f in dataclasses.fields(LiveConfig)},
         }
         self.assertEqual(set(doc), set(expected_keys))
         for table, keys in expected_keys.items():
@@ -408,6 +410,9 @@ class ConfigFileTests(ProjectTestCase):
         self.assertTrue(cfg.assistant.speak)
         self.assertFalse(cfg.assistant.scheduled_prompt)
         self.assertIn("opens Jarvis", raw.decode("ascii").split("[hotkey]", 1)[1].split("[agenda]", 1)[0])
+        # The LIVE tab ships on, opening as a tab, with the background row and the text blocks.
+        self.assertEqual(cfg.live, LiveConfig(enabled=True, auto_open="tab", background=True, text=True))
+        self.assertIn("never saved, never logged", raw.decode("ascii").split("[live]", 1)[1])
 
     def test_client_secret_is_gitignored(self) -> None:
         lines = (config.PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
@@ -928,6 +933,42 @@ class AssistantConfigTests(ProjectTestCase):
         self.assertTrue(config.ADDRESS_RE.fullmatch("sir"))
         self.assertTrue(config.ADDRESS_RE.fullmatch("A" * 20))
         self.assertIsNone(config.ADDRESS_RE.fullmatch("A" * 21))
+
+
+class LiveConfigTests(ProjectTestCase):
+    def test_defaults_without_the_table(self) -> None:
+        self.write_config("")
+        cfg = self.load_quietly()
+        self.assertEqual(cfg.live, LiveConfig(enabled=True, auto_open="tab", background=True, text=True))
+        self.assertEqual(config.LIVE_OPEN_CHOICES, ("tab", "window", "off"))
+
+    def test_every_key(self) -> None:
+        self.write_config('[live]\nenabled = false\nauto_open = "window"\nbackground = false\ntext = false\n')
+        self.assertEqual(self.load_quietly().live, LiveConfig(enabled=False, auto_open="window", background=False,
+                                                              text=False))
+
+    def test_auto_open_values(self) -> None:
+        for value, expected in (("true", "tab"), ("false", "off"), ('"tab"', "tab"), ('" Window "', "window"),
+                                ('"OFF"', "off")):
+            with self.subTest(value=value):
+                self.write_config(f"[live]\nauto_open = {value}\n")
+                self.assertEqual(self.load_quietly().live.auto_open, expected)
+
+    def test_bad_values_fall_back(self) -> None:
+        for value in ('"popup"', "1", '["tab"]', '""'):
+            with self.subTest(value=value):
+                self.write_config(f"[live]\nauto_open = {value}\n")
+                self.assertEqual(self.load_warning("live.auto_open").live.auto_open, "tab")
+        self.write_config('[live]\nenabled = "no"\nbackground = 0\ntext = "false"\n')
+        cfg = self.load_warning("live.enabled", "live.background", "live.text")
+        self.assertEqual(cfg.live, LiveConfig())
+
+    def test_unknown_key_and_wrong_table_are_reported(self) -> None:
+        self.write_config('[live]\nenabled = false\nexport = true\n')
+        cfg = self.load_warning("live.export")
+        self.assertFalse(cfg.live.enabled)
+        self.write_config('live = "on"\n')
+        self.assertEqual(self.load_warning("[live]").live, LiveConfig())
 
 
 # --------------------------------------------------------------------------

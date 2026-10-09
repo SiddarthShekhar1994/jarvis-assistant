@@ -48,6 +48,7 @@ names events by id only.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -353,7 +354,13 @@ class GoogleCalendar:
     Calls that talk to Google are serialised by an internal lock.
     :meth:`is_configured` and :meth:`is_signed_in` never take that lock or
     touch the network, so the UI thread may call them while a sign-in waits.
+
+    The changes (create_event, respond, move, cancel) take ``on_request(method, params)``: it hears
+    the exact request (a copy) right before it goes to Google, for the LIVE view; it is never called
+    when nothing is sent (already so), and a hook that fails changes nothing.
     """
+
+    REQUEST_HOOK = True   # the changes take on_request= (executor passes it only then)
 
     def __init__(self, *, client_secret_path: Path | None = None, token_path: Path | None = None,
                  calendar_id: str = "primary",
@@ -685,7 +692,8 @@ class GoogleCalendar:
                 break
         return None
 
-    def create_event(self, action: ProposedAction, *, interactive: bool = True) -> EventResult:
+    def create_event(self, action: ProposedAction, *, interactive: bool = True,
+                     on_request: RequestHook | None = None) -> EventResult:
         """Add ``action`` to the calendar unless a matching event is already there.
 
         Signs in first when there is no saved sign-in (without ``interactive``:
@@ -705,8 +713,9 @@ class GoogleCalendar:
                                    existed=True)
             service = self._get_service(interactive=interactive)
             self._require_change_allowed()
-            request = service.events().insert(calendarId=self._calendar_id,
-                                              body=build_event_body(action, tz))
+            body = build_event_body(action, tz)
+            request = service.events().insert(calendarId=self._calendar_id, body=body)
+            _tell_request(on_request, "events.insert", {"calendarId": self._calendar_id, "body": body})
             created = self._execute(request, "adding the event", mutation=True)
             created = created if isinstance(created, dict) else {}
             event_id = str(created.get("id") or "")
@@ -856,7 +865,8 @@ class GoogleCalendar:
             return details
 
     def respond(self, event_id: str, answer: str, *, comment: str = "", send_updates: str = "all",
-                calendar_id: str | None = None, interactive: bool = True) -> ChangeResult:
+                calendar_id: str | None = None, interactive: bool = True,
+                on_request: RequestHook | None = None) -> ChangeResult:
         """Answer an invitation ("yes" / "no" / "maybe"), with an optional note to the organizer.
 
         events.patch with ``attendeesOmitted`` and only your own attendee entry, so nobody
@@ -879,9 +889,10 @@ class GoogleCalendar:
                 attendee["comment"] = comment
             service = self._get_service(interactive=interactive)
             self._require_change_allowed()
-            request = service.events().patch(
-                calendarId=calendar, eventId=event_id, sendUpdates=updates,
-                body={"attendeesOmitted": True, "attendees": [attendee]})
+            body = {"attendeesOmitted": True, "attendees": [attendee]}
+            request = service.events().patch(calendarId=calendar, eventId=event_id, sendUpdates=updates, body=body)
+            _tell_request(on_request, "events.patch", {"calendarId": calendar, "eventId": event_id,
+                                                       "sendUpdates": updates, "body": body})
             result = self._execute(request, "answering the invitation", mutation=True, event_call=True)
             result = result if isinstance(result, dict) else {}
             logger.info("%s: answered the invitation (event %s)", self._log_name(), event_id)
@@ -890,7 +901,7 @@ class GoogleCalendar:
 
     def move(self, event_id: str, start: datetime, end: datetime, *, send_updates: str = "all",
              calendar_id: str | None = None, now: datetime | None = None,
-             interactive: bool = True) -> ChangeResult:
+             interactive: bool = True, on_request: RequestHook | None = None) -> ChangeResult:
         """Give an event you organize (or may modify) a new start and end.
 
         ``start``/``end`` are naive wall times in the calendar's time zone (as the briefing
@@ -924,10 +935,11 @@ class GoogleCalendar:
             tz = self.timezone(interactive=interactive)
             service = self._get_service(interactive=interactive)
             self._require_change_allowed()
-            request = service.events().patch(
-                calendarId=calendar, eventId=event_id, sendUpdates=updates,
-                body={"start": {"dateTime": _wall_time(start), "timeZone": tz},
-                      "end": {"dateTime": _wall_time(end), "timeZone": tz}})
+            body = {"start": {"dateTime": _wall_time(start), "timeZone": tz},
+                    "end": {"dateTime": _wall_time(end), "timeZone": tz}}
+            request = service.events().patch(calendarId=calendar, eventId=event_id, sendUpdates=updates, body=body)
+            _tell_request(on_request, "events.patch", {"calendarId": calendar, "eventId": event_id,
+                                                       "sendUpdates": updates, "body": body})
             result = self._execute(request, "moving the event", mutation=True, event_call=True)
             result = result if isinstance(result, dict) else {}
             logger.info("%s: moved event %s", self._log_name(), event_id)
@@ -935,7 +947,8 @@ class GoogleCalendar:
                                 already=False)
 
     def cancel(self, event_id: str, *, send_updates: str = "all",
-               calendar_id: str | None = None, interactive: bool = True) -> ChangeResult:
+               calendar_id: str | None = None, interactive: bool = True,
+               on_request: RequestHook | None = None) -> ChangeResult:
         """Cancel (delete) an event you organize; guests are told as ``send_updates`` says.
 
         ``already`` when Google has no such event any more. Refused for events you do not
@@ -958,12 +971,28 @@ class GoogleCalendar:
             self._require_change_allowed()
             request = service.events().delete(calendarId=calendar, eventId=event_id,
                                               sendUpdates=updates)
+            _tell_request(on_request, "events.delete", {"calendarId": calendar, "eventId": event_id,
+                                                        "sendUpdates": updates})
             try:
                 self._execute(request, "cancelling the event", mutation=True, event_call=True)
             except EventGone:
                 return ChangeResult(event_id=event_id, link="", already=True)
             logger.info("%s: cancelled event %s", self._log_name(), event_id)
             return ChangeResult(event_id=event_id, link="", already=False)
+
+
+RequestHook = Callable[[str, dict[str, Any]], None]
+
+
+def _tell_request(on_request: RequestHook | None, method: str, params: dict[str, Any]) -> None:
+    """``on_request(method, a copy of params)`` right before a change goes to Google (the LIVE
+    view shows it); whatever goes wrong in it changes nothing here."""
+    if on_request is None:
+        return
+    try:
+        on_request(method, copy.deepcopy(params))
+    except Exception as exc:  # noqa: BLE001 - only what the LIVE view shows
+        logger.debug("Live view: on_request failed (%s)", type(exc).__name__)
 
 
 def _send_updates(value: str) -> str:

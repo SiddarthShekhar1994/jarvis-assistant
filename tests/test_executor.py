@@ -21,7 +21,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
-from briefing_reader import actions, executor, gcal, gmail, google_auth, recipients
+from briefing_reader import actions, executor, gcal, gmail, google_auth, live, recipients
 from briefing_reader.actions import (
     CALENDAR,
     RSVP,
@@ -220,6 +220,50 @@ class FakeCalendar:
 
     def names(self) -> list[str]:
         return [call[0] for call in self.calls]
+
+
+class HookCalendar(FakeCalendar):
+    """A FakeCalendar that, like gcal.GoogleCalendar, takes on_request and tells it the request it
+    would send (``tamper``: keys changed in it, as a bug in between would)."""
+
+    REQUEST_HOOK = True
+    ZONE = "America/New_York"
+
+    def __init__(self, *, tamper: dict[str, Any] | None = None, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.tamper = dict(tamper or {})
+        self.requests: list[tuple[str, dict[str, Any]]] = []
+
+    def _call(self, name: str, default: Any, *args: Any, **kwargs: Any) -> Any:
+        hook = kwargs.pop("on_request", None)
+        request = self._request(name, *args, **kwargs)
+        if hook is not None and request is not None:
+            method, params = request
+            params.update(self.tamper)
+            self.requests.append((method, params))
+            hook(method, json.loads(json.dumps(params)))
+        return super()._call(name, default, *args, **kwargs)
+
+    def _request(self, name: str, *args: Any, **kwargs: Any) -> tuple[str, dict[str, Any]] | None:
+        notify = kwargs.get("send_updates", "all")
+        updates = {"external": "externalOnly"}.get(notify, notify)
+        target = {"calendarId": kwargs.get("calendar_id") or "primary"}
+        if name == "create_event":
+            return "events.insert", {**target, "body": gcal.build_event_body(args[0], self.ZONE)}
+        if name == "respond":
+            attendee = {"email": "me@example.edu", "responseStatus": gcal.RESPONSES[args[1]]}
+            if kwargs.get("comment"):
+                attendee["comment"] = kwargs["comment"]
+            return "events.patch", {**target, "eventId": args[0], "sendUpdates": updates,
+                                    "body": {"attendeesOmitted": True, "attendees": [attendee]}}
+        if name == "move":
+            wall = [moment.strftime("%Y-%m-%dT%H:%M:%S") for moment in args[1:3]]
+            return "events.patch", {**target, "eventId": args[0], "sendUpdates": updates,
+                                    "body": {"start": {"dateTime": wall[0], "timeZone": self.ZONE},
+                                             "end": {"dateTime": wall[1], "timeZone": self.ZONE}}}
+        if name == "cancel":
+            return "events.delete", {**target, "eventId": args[0], "sendUpdates": updates}
+        return None
 
 
 ACCOUNTS = {"personal": AccountConfig("personal"), "work": AccountConfig("work")}
@@ -1696,6 +1740,309 @@ class ImportTests(unittest.TestCase):
         for name in ("executor.py", "google_auth.py", "gcal.py", "gmail.py", "recipients.py"):
             with self.subTest(name=name):
                 self.assertTrue((Path(executor.__file__).parent / name).read_bytes().isascii())
+
+
+class LiveRunTests(MailTestCase):
+    """run_action / Executor.execute / preview with a LIVE view task: the steps (checks, sign-in,
+    payload, call) and that every outcome and store write is the same with or without them."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.stream = live.LiveStream()
+
+    def task(self) -> live.LiveTask:
+        return self.stream.task(live.TASK_ACTION, "card")
+
+    def steps(self, task: live.LiveTask) -> tuple[live.StepView, ...]:
+        return self.stream.task_view(task.id).steps
+
+    def step(self, task: live.LiveTask, kind: str) -> live.StepView:
+        return next(step for step in self.steps(task) if step.kind == kind)
+
+    @staticmethod
+    def fields(step: live.StepView) -> dict[str, str]:
+        return {field.label: field.value for field in step.fields}
+
+    def stored(self, action: ProposedAction) -> dict | None:
+        saved = ActionStore(self.store.path).get(action.id)
+        return {key: value for key, value in saved.items() if key not in ("at", "decided_at", "updated")} \
+            if saved else None
+
+    def test_a_reply_shows_exactly_what_was_sent(self) -> None:
+        action = example("Reply", cc="cy@example.edu")
+        run = self.mail_executor()
+        preview = run.preview(action)
+        task = self.task()
+        payload = task.step(live.ACTION_PAYLOAD, preview.title, status_text="PREVIEW")
+        payload.show(preview)
+        with self.assertLogs(EXECUTOR_LOGGER, level="INFO"), \
+                self.assertLogs("briefing_reader.recipients", level="INFO"):
+            outcome = self.run_mail(action, executor=run, live=task)
+        self.assertEqual(outcome.status, STATUS_SENT)
+        self.assertEqual(outcome.result.ref, "18c0ffee000000aa")
+        kinds = [step.kind for step in self.steps(task)]
+        self.assertEqual(kinds, [live.ACTION_PAYLOAD, live.ACTION_CHECKS, live.ACTION_CALL])
+        (mail,) = self.senders["work"].sent
+        view = gmail.mail_view(mail)
+        shown = self.step(task, live.ACTION_PAYLOAD)
+        self.assertEqual((shown.status, shown.status_text), (live.STATUS_OK, "SENT EXACTLY THIS"))
+        fields = self.fields(shown)
+        self.assertEqual((fields["From"], fields["To"], fields["Cc"], fields["Subject"]),
+                         (view.from_addr, view.to, view.cc, view.subject))
+        self.assertEqual((fields["In-Reply-To"], fields["References"], fields["Gmail thread"]),
+                         (view.in_reply_to, view.references, view.thread_id))
+        body = shown.blocks[0]
+        self.assertEqual((body.label, body.text, body.start_open), ("Message", view.body, True))
+        call = self.step(task, live.ACTION_CALL)
+        self.assertEqual((call.status, call.status_text), (live.STATUS_OK, "SENT"))
+        self.assertEqual(self.fields(call)["Request"], "users.messages.send")
+        self.assertEqual(self.fields(call)["Gmail message id"], "18c0ffee000000aa")
+        self.assertEqual(self.fields(call)["Recipients remembered"], "3")
+        link = next(field.link for field in call.fields if field.label == "Thread")
+        self.assertEqual(link, "https://mail.google.com/mail/#all/18c0ffee00000001")
+        checks = self.step(task, live.ACTION_CHECKS)
+        self.assertEqual(checks.status, live.STATUS_OK)
+        self.assertEqual([note.text for note in checks.notes],
+                         ["Account ready (the Google account you confirmed)",
+                          'Saved "running" before the call (so a crash shows UNKNOWN, never a silent resend)'])
+        self.assertFalse(task.finished)   # the worker finishes the task
+
+    def test_preview_makes_no_call_and_equals_what_is_sent(self) -> None:
+        action = email_line()
+        run = self.mail_executor()
+        preview = run.preview(action)
+        self.assertEqual(self.senders["personal"].sent, [])
+        self.assertEqual(self.senders["personal"].calls, [])
+        task = self.task()
+        with self.assertLogs(EXECUTOR_LOGGER, level="INFO"), \
+                self.assertLogs("briefing_reader.recipients", level="INFO"):
+            self.run_mail(action, executor=run, live=task)
+        recorded = self.step(task, live.ACTION_PAYLOAD)
+        self.assertEqual([(field.label, field.value) for field in recorded.fields],
+                         [(field.label, field.value) for field in preview.fields])
+        self.assertEqual(recorded.blocks[0].text, preview.body)
+        self.assertEqual(preview.values()["To"], "office@example.edu")
+        for kind in ("RSVP", "Move", "Cancel", "Todo"):
+            with self.subTest(kind=kind):
+                before = len(self.work.calls) + len(self.personal.calls)
+                calendar_preview = run.preview(example(kind))
+                self.assertIsNotNone(calendar_preview)
+                self.assertEqual(len(self.work.calls) + len(self.personal.calls), before)   # no Google call
+        self.assertIsNone(run.preview(example("Reply", replied="yes")))   # nothing to carry out
+        self.assertIsNone(run.preview(example("RSVP", acct="school")))    # no backend
+
+    def test_a_payload_that_changed_since_the_countdown_says_so(self) -> None:
+        action = email_line()
+        run = self.mail_executor()
+        task = self.task()
+        payload = task.step(live.ACTION_PAYLOAD, "Will send exactly this", status_text="PREVIEW")
+        payload.show(run.preview(apply_edit(action, ActionEdit(body="Another text"))))
+        with self.assertLogs(EXECUTOR_LOGGER, level="INFO"), \
+                self.assertLogs("briefing_reader.recipients", level="INFO"):
+            self.run_mail(action, executor=run, live=task)
+        shown = self.step(task, live.ACTION_PAYLOAD)
+        self.assertEqual((shown.status, shown.status_text), (live.STATUS_WARN, "CHECK"))
+        self.assertEqual(shown.notes[0].text, "Not what the countdown showed: Message changed")
+
+    def test_calendar_kinds(self) -> None:
+        cases = {"RSVP": ("Google Calendar: answer the invitation", "events.patch (your attendee entry only)",
+                          "ACCEPTED", "abc123def456ghi789"),
+                 "Move": ("Google Calendar: move the event", "events.patch (start, end)", "MOVED",
+                          "abc123def456ghi789_20261008T190000Z"),
+                 "Cancel": ("Google Calendar: cancel the event", "events.delete", "CANCELLED EVENT",
+                            "zyx987wvu654tsr321"),
+                 "Todo": ("Google Calendar: add the block", "events.insert (after looking for the same event)",
+                          "ADDED", "evt1")}
+        for kind, (title, request, word, ref) in cases.items():
+            with self.subTest(kind=kind):
+                task = self.task()
+                outcome = self.run_mail(example(kind), live=task)
+                self.assertEqual((outcome.status, outcome.result.ref), (STATUS_SENT if kind != "Todo" else
+                                                                        STATUS_CREATED, ref))
+                kinds = [step.kind for step in self.steps(task)]
+                self.assertEqual(kinds, [live.ACTION_CHECKS, live.ACTION_PAYLOAD, live.ACTION_CALL])
+                call = self.step(task, live.ACTION_CALL)
+                self.assertEqual((call.title, self.fields(call)["Request"], call.status_text, call.status),
+                                 (title, request, word, live.STATUS_OK))
+                self.assertEqual(self.fields(call)["Event id"], ref)
+                payload = self.step(task, live.ACTION_PAYLOAD)
+                self.assertEqual(payload.status, live.STATUS_OK)
+                self.assertIn(payload.status_text, ("CHANGED", "ADDED"))
+        rsvp = self.run_mail(example("RSVP"), live=(task := self.task()))
+        self.assertEqual(rsvp.status, STATUS_SENT)
+        fields = self.fields(self.step(task, live.ACTION_PAYLOAD))
+        self.assertEqual((fields["Event"], fields["Event id"], fields["Answer"], fields["Who gets an email"]),
+                         ("Speaker series", "abc123def456ghi789", "yes (accepted)",
+                          live.notify_words("all")))
+        move = self.fields(self.step(self.last_task(example("Move")), live.ACTION_PAYLOAD))
+        self.assertEqual(move["New time"], "Thu Oct 8 2:00-3:00 PM, in your calendar's time zone")
+        chess = parse_action_line(CHESS)
+        task = self.task()
+        self.run_mail(chess, live=task)
+        payload = self.step(task, live.ACTION_PAYLOAD)
+        self.assertEqual(self.fields(payload)["Title"], "Chess Club Weekly Meeting")
+        self.assertEqual(self.fields(payload)["Calendar"], "personal (primary)")
+        self.assertEqual(payload.blocks[0].text, gcal.EVENT_FOOTER)   # as build_event_body writes it
+
+    def test_already_so_sends_nothing_and_says_so(self) -> None:
+        cases = {"RSVP": ("respond", ChangeResult("abc123def456ghi789", EVENT_LINK, already=True), "ALREADY ANSWERED",
+                          "none - Google has that answer already (read with events.get)"),
+                 "Move": ("move", ChangeResult("abc123def456ghi789_20261008T190000Z", EVENT_LINK, already=True),
+                          "ALREADY AT THAT TIME", "none - the event is at that time already (read with events.get)"),
+                 "Cancel": ("cancel", ChangeResult("zyx987wvu654tsr321", "", already=True), "ALREADY GONE",
+                            "none - Google has no such event any more (read with events.get)"),
+                 "Todo": ("create_event", EventResult("evt1", EVENT_LINK, existed=True), "ALREADY THERE",
+                          "none - the same event is already there (found with events.list)")}
+        for kind, (name, answer, word, request) in cases.items():
+            with self.subTest(kind=kind):
+                for calendar in (self.work, self.personal):
+                    calendar.outcomes[name] = answer
+                task = self.task()
+                self.run_mail(example(kind), live=task)
+                call = self.step(task, live.ACTION_CALL)
+                self.assertEqual((call.status, call.status_text), (live.STATUS_OK, word))
+                self.assertEqual(self.fields(call)["Request"], request)
+                self.assertEqual(self.fields(call)["Already that way"], "yes - nothing changed")
+                payload = self.step(task, live.ACTION_PAYLOAD)
+                self.assertEqual((payload.status, payload.status_text), (live.STATUS_OK, "NOTHING SENT"))
+                self.assertIn("nothing was sent", payload.summary)
+
+    def hook_executor(self, tamper: dict[str, Any] | None = None) -> Executor:
+        self.work, self.personal = (HookCalendar(store=self.store, tamper=tamper),
+                                    HookCalendar(store=self.store, tamper=tamper))
+        return self.mail_executor()
+
+    def test_the_exact_request_to_google_is_shown_and_checked(self) -> None:
+        for kind in ("RSVP", "Move", "Cancel", "Todo"):
+            with self.subTest(kind=kind):
+                run = self.hook_executor()
+                task = self.task()
+                self.run_mail(example(kind), executor=run, live=task)
+                calendar = self.personal if kind in ("Cancel", "Todo") else self.work   # account_of
+                ((method, params),) = calendar.requests
+                call = self.step(task, live.ACTION_CALL)
+                self.assertEqual(self.fields(call)["Request"], executor._request_line(method, params))
+                self.assertTrue(self.fields(call)["Request"].startswith(method + " calendarId=primary"))
+                payload = self.step(task, live.ACTION_PAYLOAD)
+                self.assertEqual(payload.status, live.STATUS_OK)
+                self.assertIn(payload.status_text, ("CHANGED", "ADDED"))
+                blocks = {block.label: block.text for block in payload.blocks}
+                if "body" in params:
+                    self.assertEqual(json.loads(blocks[executor.REQUEST_BLOCK]), params["body"])
+                else:
+                    self.assertNotIn(executor.REQUEST_BLOCK, blocks)   # a delete has no body
+                self.assertEqual(executor.request_differs(example(kind), method, params), [])
+        # A request that is not what the countdown showed says so (CHECK), whatever Google answers.
+        run = self.hook_executor(tamper={"eventId": "another0event"})
+        task = self.task()
+        self.run_mail(example("Move"), executor=run, live=task)
+        payload = self.step(task, live.ACTION_PAYLOAD)
+        self.assertEqual((payload.status, payload.status_text), (live.STATUS_WARN, "CHECK"))
+        self.assertEqual(payload.notes[-1].text, "Not what the countdown showed: Event id differs in the request to "
+                                                 "Google")
+        move = example("Move")
+        good = {"calendarId": "primary", "eventId": move.field("event"), "sendUpdates": "all",
+                "body": {"start": {"dateTime": "2026-10-08T14:00:00", "timeZone": "X"},
+                         "end": {"dateTime": "2026-10-08T15:00:00", "timeZone": "X"}}}
+        self.assertEqual(executor.request_differs(move, "events.patch", good), [])
+        late = dict(good, sendUpdates="none", body={"start": {"dateTime": "2026-10-08T16:00:00"},
+                                                   "end": {"dateTime": "2026-10-08T17:00:00"}})
+        self.assertEqual(executor.request_differs(move, "events.patch", late), ["Who gets an email", "New time"])
+        self.assertEqual(executor.request_differs(move, "events.delete", good), ["Request"])
+
+    def last_task(self, action: ProposedAction) -> live.LiveTask:
+        task = self.task()
+        self.run_mail(action, live=task)
+        return task
+
+    def test_sign_in_stages(self) -> None:
+        self.work.signed = False
+        task = self.task()
+        self.run_mail(example("Move"), live=task)
+        self.assertEqual(self.stages, [STAGE_SIGNIN, STAGE_SIGNED_IN, STAGE_WORKING])   # passed on unchanged
+        signin = self.step(task, live.ACTION_SIGNIN)
+        self.assertEqual((signin.status, self.fields(signin)["Account"]), (live.STATUS_OK, "work"))
+        self.assertEqual([step.kind for step in self.steps(task)],
+                         [live.ACTION_CHECKS, live.ACTION_SIGNIN, live.ACTION_PAYLOAD, live.ACTION_CALL])
+        self.stages.clear()
+        self.work.signed = False
+        self.work.sign_in_error = CalendarAuthError("Google sign-in was cancelled", problem=PROBLEM_DENIED)
+        task = self.task()
+        outcome = self.run_mail(example("Move"), live=task)
+        self.assertEqual(outcome.status, STATUS_FAILED)
+        signin = self.step(task, live.ACTION_SIGNIN)
+        self.assertEqual((signin.status, signin.summary), (live.STATUS_FAILED, "Google sign-in was cancelled"))
+
+    def test_unknown_failed_and_refused(self) -> None:
+        self.senders["work"].outcome = GmailUnknownOutcome("No answer from Gmail while sending (TimeoutError); "
+                                                           "the message may or may not have been sent", status=503)
+        task = self.task()
+        with self.assertLogs(EXECUTOR_LOGGER, level="INFO"):
+            outcome = self.run_mail(example("Reply"), live=task)
+        self.assertEqual(outcome.status, STATUS_UNKNOWN)
+        call = self.step(task, live.ACTION_CALL)
+        self.assertEqual((call.status, call.status_text), (live.STATUS_WARN, "UNKNOWN"))
+        self.assertIn("HTTP 503", call.summary)
+        self.assertEqual(self.step(task, live.ACTION_PAYLOAD).status_text, "UNKNOWN")
+        self.senders["work"].outcome = GmailError("Gmail refused the message (400: Bad); nothing was sent", status=400)
+        task = self.task()
+        with self.assertLogs(EXECUTOR_LOGGER, level="INFO"):
+            self.run_mail(example("Reply"), live=task)
+        call = self.step(task, live.ACTION_CALL)
+        self.assertEqual(call.status, live.STATUS_FAILED)
+        self.assertEqual(call.summary, "Gmail refused the message (400: Bad); nothing was sent (HTTP 400)")
+        self.assertEqual((self.step(task, live.ACTION_PAYLOAD).status_text,
+                          self.step(task, live.ACTION_PAYLOAD).summary), ("NOT SENT", "Not sent"))
+        # The sending account itself as a recipient: Jarvis's own guard, before any call.
+        self.senders["work"].outcome = None
+        self.senders["work"].sent.clear()
+        mine = apply_edit(example("Reply"), ActionEdit(cc=(ME,)))
+        task = self.task()
+        with self.assertLogs(EXECUTOR_LOGGER, level="INFO"):
+            outcome = self.run_mail(mine, live=task)
+        self.assertEqual(outcome.status, STATUS_FAILED)
+        checks = self.step(task, live.ACTION_CHECKS)
+        self.assertEqual(checks.status, live.STATUS_BLOCKED)
+        self.assertEqual(checks.summary, str(outcome.error))
+        self.assertNotIn(live.ACTION_CALL, [step.kind for step in self.steps(task)])
+        self.assertEqual(self.senders["work"].sent, [])
+        # Not saved: nothing is sent and there is no call step.
+        task = self.task()
+        with self.assertLogs(EXECUTOR_LOGGER, level="INFO"):
+            outcome = self.run_mail(example("Reply"), store=None, live=task)
+        self.assertEqual(str(outcome.error), NOT_SAVED_MESSAGE)
+        checks = self.step(task, live.ACTION_CHECKS)
+        self.assertEqual((checks.status, checks.summary), (live.STATUS_FAILED, NOT_SAVED_MESSAGE))
+        self.assertEqual([step.kind for step in self.steps(task)], [live.ACTION_CHECKS])
+
+    def test_outcomes_and_store_writes_are_the_same_with_or_without_live(self) -> None:
+        cases = [("reply", lambda: example("Reply", cc="cy@example.edu"), None),
+                 ("email", email_line, None),
+                 ("rsvp", lambda: example("RSVP"), None),
+                 ("move", lambda: example("Move"), None),
+                 ("cancel", lambda: example("Cancel"), None),
+                 ("todo", lambda: example("Todo"), None),
+                 ("calendar", lambda: parse_action_line(CHESS), None),
+                 ("unknown", lambda: example("Reply"), GmailUnknownOutcome("No answer (TimeoutError)", status=502)),
+                 ("refused", lambda: apply_edit(example("Reply"), ActionEdit(cc=(ME,))), None)]
+        for name, make, failure in cases:
+            with self.subTest(case=name):
+                results = []
+                for with_live in (False, True):
+                    self.setUp()
+                    self.senders["work"].outcome = failure
+                    kwargs = {"live": self.task()} if with_live else {}
+                    with self.assertLogs("briefing_reader", level="DEBUG") as logs:
+                        logging.getLogger("briefing_reader").debug("marker")
+                        outcome = self.run_mail(make(), **kwargs)
+                    sent = [(mail.to, mail.cc, mail.subject, mail.body) for mail in
+                            self.senders["work"].sent + self.senders["personal"].sent]
+                    results.append((outcome.status, outcome.result, outcome.result.ref if outcome.result else "",
+                                    str(outcome.error), type(outcome.error).__name__, self.stored(make()), sent,
+                                    [line for line in logs.output], self.stages[:], self.work.changes(),
+                                    self.personal.changes()))
+                self.assertEqual(results[0], results[1])
+                self.assertNotIn("Live view", "\n".join(results[1][7]))
 
 
 if __name__ == "__main__":
