@@ -16,6 +16,7 @@ goes through the Calendar / free-text path exactly as before.
     parse_action_line(text)    one line -> ProposedAction (never raises)
     extract_actions(lines)     pull that section out of a page's FlatLines
     link_allowed(url)          the https hosts a card's Open may open
+    web_link_allowed(url)      a web research card's link: any public https host (public_host_problem)
     card_view(action, today)   what a card shows (kind label, texts, buttons)
     edit_action(action, ...)   the Edit dialog's changes to an RSVP, Move or Cancel, checked
                                like a line (same id)
@@ -159,6 +160,10 @@ class ProposedAction:
     ``unverified`` holds the recipients of an Ask Reply / Email that you did not
     type yourself (casefolded; memory only): each counts as NEW, even in a
     trusted domain, unless Jarvis sent to it before (recipients.review).
+    ``web`` marks a web research card (an Open card for a source, a Todo with a
+    source's link): its link is checked with the web rule (web_link_allowed:
+    any public https host) instead of the Open allowlist, when it is read and
+    again on the click. Not part of the id.
     """
 
     id: str
@@ -183,6 +188,7 @@ class ProposedAction:
     confirmed: frozenset[str] = frozenset()    # new recipients ticked in Edit (casefolded; memory only)
     source: str = "briefing"                   # SOURCE_BRIEFING or SOURCE_ASK; never part of the id
     unverified: frozenset[str] = frozenset()   # Ask recipients you did not type (casefolded; memory only)
+    web: bool = False                          # a web research card: its link follows the web rule
 
     @property
     def decidable(self) -> bool:
@@ -1080,28 +1086,38 @@ def link_allowed(url: str, extra_hosts: Sequence[str] = ()) -> bool:
     return not _link_problem(url, extra_hosts)
 
 
-def _link_problem(url: str, extra_hosts: Sequence[str] = ()) -> str:
-    """Why Open may not open ``url`` ("" when it may)."""
+def _https_parts(url: str) -> tuple[str, Any, str]:
+    """(why ``url`` is not a plain https link ("" when it is), its urlsplit parts, its host).
+    https only, at most 2,048 characters, no whitespace / control / format character or
+    backslash, no user name or password, port none or 443, no dot segments, an ASCII host."""
     if not isinstance(url, str) or not url or len(url) > _LINK_CAP or "\\" in url:
-        return _NOT_HTTPS
+        return _NOT_HTTPS, None, ""
     if any(ch.isspace() or unicodedata.category(ch) in ("Cc", "Cf") for ch in url):
-        return _NOT_HTTPS
+        return _NOT_HTTPS, None, ""
     if not url[:8].casefold() == "https://":
-        return _NOT_HTTPS
+        return _NOT_HTTPS, None, ""
     try:
         parts = urlsplit(url)
         port = parts.port
     except ValueError:
-        return _NOT_HTTPS
+        return _NOT_HTTPS, None, ""
     if parts.scheme != "https" or parts.username is not None or parts.password is not None:
-        return _NOT_HTTPS
+        return _NOT_HTTPS, None, ""
     if port not in (None, 443):
-        return _NOT_HTTPS
+        return _NOT_HTTPS, None, ""
     # "/calendar/../url" (also as "%2e%2e" or ".%2E") passes a path check, but the browser removes
     # the dot segments and opens "/url": refused on every host.
     if any(unquote(segment) in (".", "..") for segment in parts.path.split("/")):
-        return _NOT_HTTPS
+        return _NOT_HTTPS, None, ""
     host = (parts.hostname or "").rstrip(".")
+    return "", parts, host
+
+
+def _link_problem(url: str, extra_hosts: Sequence[str] = ()) -> str:
+    """Why Open may not open ``url`` ("" when it may)."""
+    problem, parts, host = _https_parts(url)
+    if problem:
+        return problem
     if not host or not host.isascii() or not _HOST_RE.fullmatch(host):
         return _NOT_HTTPS
     extras = (extra_hosts,) if isinstance(extra_hosts, str) else tuple(extra_hosts or ())
@@ -1122,6 +1138,106 @@ def _host_listed(host: str, patterns: Sequence[str]) -> bool:
         elif host == pattern:
             return True
     return False
+
+
+LOCAL_ADDRESS = "a local or private address"
+NOT_WEB_ADDRESS = "not a web address"
+IDN_WARNING = "International domain name - check the address before you open it"
+# Hosts that name this PC, its network or no public place (a name under these is never on the web).
+_PRIVATE_HOSTS = ("localhost",)
+_PRIVATE_SUFFIXES = (".localhost", ".local", ".lan", ".home", ".internal", ".intranet", ".corp", ".home.arpa",
+                     ".test", ".invalid", ".onion")
+_TLD_RE = re.compile(r"[a-z]{2,63}|xn--[a-z0-9-]{1,59}")
+_WEB_LINK_BANNED = frozenset('|<>"`')
+# Public names known to lead to this PC or its network (Jarvis checks a name, never where it
+# resolves): wildcard DNS that answers any IP address written in the name ("192.168.1.1.nip.io"),
+# names fixed to 127.0.0.1, and the setup pages of home routers. A name under one is local too.
+LOCAL_DOMAINS = frozenset({
+    "nip.io", "sslip.io", "xip.io", "nip.direct", "localtest.me", "lvh.me", "vcap.me", "lacolhost.com",
+    "localhost.direct", "traefik.me", "fuf.me", "localho.st",
+    "routerlogin.net", "routerlogin.com", "orbilogin.net", "orbilogin.com", "mywifiext.net", "mywifiext.com",
+    "tplinkwifi.net", "tplinklogin.net", "tplinkmodem.net", "tplinkrepeater.net", "tplinkap.net",
+    "router.asus.com", "asusrouter.com", "repeater.asus.com", "linksyssmartwifi.com", "miwifi.com",
+    "fritz.box", "speedport.ip", "dlinkrouter.com", "myrouter.com"})
+
+
+def _names_local_ip(labels: Sequence[str]) -> bool:
+    """Four labels in a row ("10.0.0.1.example.net") or four parts of one label
+    ("127-0-0-1.example.net") that read as a loopback, private or other non-public IPv4 address:
+    wildcard DNS answers with that address."""
+    runs = [list(labels)] + [label.split("-") for label in labels if label.count("-") >= 3]
+    for parts in runs:
+        for start in range(len(parts) - 3):
+            quad = parts[start:start + 4]
+            if all(part.isdigit() and len(part) <= 3 and int(part) <= 255 for part in quad) \
+                    and not _public_ip(".".join(str(int(part)) for part in quad)):
+                return True
+    return False
+
+
+def public_host_problem(host: Any) -> str:
+    """Why ``host`` is not a public web host ("" when it is): an ASCII host name (IDN as "xn--"
+    labels) with a dot, whose last label is letters or "xn--...", that is not an IP address (no
+    label-only-digits IPv4; IPv6 literals fail the name rule) and not localhost or a name under
+    .localhost, .local, .lan, .home, .internal, .intranet, .corp, .home.arpa, .test, .invalid or
+    .onion, nor a public name known to lead to this PC or its network (LOCAL_DOMAINS; a name that
+    spells a non-public IPv4 address, such as "192.168.1.1.example.net"). LOCAL_ADDRESS or
+    NOT_WEB_ADDRESS. Only the name is checked: where it resolves is not (README: Web research)."""
+    if not isinstance(host, str):
+        return NOT_WEB_ADDRESS
+    name = host.strip().casefold().rstrip(".")
+    if ":" in name or name.startswith("["):   # an IPv6 literal: never a web host
+        return NOT_WEB_ADDRESS if _public_ip(name.strip("[]")) else LOCAL_ADDRESS
+    if not name or not name.isascii() or not _HOST_RE.fullmatch(name):
+        return NOT_WEB_ADDRESS
+    labels = name.split(".")
+    if all(label.isdigit() for label in labels):   # an IPv4 literal (or a short form such as 127.1)
+        return NOT_WEB_ADDRESS if _public_ip(name) else LOCAL_ADDRESS
+    if name in _PRIVATE_HOSTS or name.endswith(_PRIVATE_SUFFIXES) or len(labels) < 2:
+        return LOCAL_ADDRESS   # a name without a dot is looked up on the local network
+    if any(".".join(labels[start:]) in LOCAL_DOMAINS for start in range(len(labels) - 1)) \
+            or _names_local_ip(labels):
+        return LOCAL_ADDRESS
+    if not _TLD_RE.fullmatch(labels[-1]):
+        return NOT_WEB_ADDRESS
+    return ""
+
+
+def _public_ip(text: str) -> bool:
+    """True for a public IP address (still refused, as "not a web address"); False for a loopback,
+    private, link-local, reserved one and for anything Python cannot read as one (a short form the
+    browser would still read, such as 127.1)."""
+    import ipaddress
+
+    try:
+        address = ipaddress.ip_address(text)
+    except ValueError:
+        return False
+    return address.is_global
+
+
+def web_link_problem(url: Any) -> str:
+    """Why a web research card may not open ``url`` ("" when it may): everything an Open link must
+    be (https, at most 2,048 characters, no whitespace / control / format character or backslash,
+    no user name or password, port none or 443, no dot segments), none of | < > " ` (a source
+    becomes a key=value line and is shown as text), and a public host (public_host_problem) on any
+    site. Checked when the research's answer is read and again on the card's click."""
+    if not isinstance(url, str) or any(char in _WEB_LINK_BANNED for char in url):
+        return _NOT_HTTPS
+    problem, _parts, host = _https_parts(url)
+    if problem:
+        return problem
+    return public_host_problem(host)
+
+
+def web_link_allowed(url: Any) -> bool:
+    """True for a link a web research card may open (web_link_problem)."""
+    return not web_link_problem(url)
+
+
+def idn_host(url: str) -> bool:
+    """The host of ``url`` has an internationalized ("xn--") label: shown with IDN_WARNING."""
+    return any(label.startswith("xn--") for label in link_host(url).casefold().split("."))
 
 
 def link_host(url: str) -> str:
@@ -1753,8 +1869,12 @@ def _describe_structured(action: ProposedAction, today: date) -> str:
         block = _describe_when(action, today)
         if block:
             parts += [f"block {block[0]}", *block[1:]]
+        if action.web and action.link:   # a research Todo's page (any public site): its domain shows
+            parts.append(f"{WEB_TODO_WORDS} {link_host(action.link)}")
     elif kind == OPEN:
         parts.append(link_host(action.link))
+        if action.web:
+            parts += list(WEB_SOURCE_WORDS)
     return _SEPARATOR.join(part for part in parts if part)
 
 
@@ -2011,10 +2131,56 @@ _COPIED_TEXTS = {REPLY: "Copied the reply", SLACK: "Copied the reply", EMAIL: "C
                  RSVP: "Copied the note", MOVE: "Copied the note", CANCEL: "Copied the note"}
 
 
+WEB_OPEN_TEXT = "Open page"
+WEB_SOURCE_WORDS = ("web source", "opens in your browser")
+WEB_TODO_WORDS = "opens"
+
+
+def is_web_open(action: ProposedAction) -> bool:
+    """A web research source card (an Open card whose link follows the web rule)."""
+    return action.web and action.kind == OPEN
+
+
+LABEL_HOST_CHARS = 17   # what a card's one-line kind label shows of a web host at the narrowest (900 px)
+# Second levels under a two-letter country code ("example.co.uk") and shared hosts whose names are
+# anyone's ("someone.github.io"): the site is one label more.
+_SECOND_LEVELS = frozenset("co com net org gov edu ac or ne go gob mil nic ltd plc sch".split())
+_SHARED_HOSTS = frozenset({
+    "github.io", "gitlab.io", "blogspot.com", "wordpress.com", "herokuapp.com", "netlify.app", "vercel.app",
+    "pages.dev", "workers.dev", "web.app", "firebaseapp.com", "appspot.com", "azurewebsites.net",
+    "cloudfront.net", "amazonaws.com", "glitch.me", "onrender.com", "fly.dev", "wixsite.com", "weebly.com",
+    "webflow.io", "notion.site", "substack.com", "medium.com", "tumblr.com", "translate.goog", "ngrok.io",
+    "ngrok-free.app", "trycloudflare.com", "github.dev", "repl.co", "replit.app", "carrd.co", "square.site"})
+
+
+def label_host(host: str) -> str:
+    """The host as a web card's kind label shows it: always its right end, which names the site
+    ("example.net", "someone.github.io", "example.co.uk"), with more labels to the left while it
+    stays within LABEL_HOST_CHARS characters, and "\u2026" where something was left out
+    ("\u2026example.net" for "accounts.google.com.check.example.net": the label never shows a
+    leading part that could pass for another site; the card's detail shows the whole host)."""
+    labels = (host or "").rstrip(".").split(".")
+    keep = len(labels)
+    if len(labels) > 2:
+        site = 3 if (len(labels[-1]) == 2 and labels[-2].casefold() in _SECOND_LEVELS) \
+            or ".".join(labels[-2:]).casefold() in _SHARED_HOSTS else 2
+        keep = site
+        while keep < len(labels) and len(".".join(labels[-(keep + 1):])) <= LABEL_HOST_CHARS:
+            keep += 1
+    shown = ".".join(labels[-keep:])
+    if len(shown) > LABEL_HOST_CHARS:
+        return "\u2026" + shown[-(LABEL_HOST_CHARS - 1):]
+    return "\u2026" + shown if keep < len(labels) else shown
+
+
 def kind_label(action: ProposedAction) -> str:
-    """"reply \u00b7 work", "todo", "calendar"; "note" for a line without a kind."""
+    """"reply \u00b7 work", "todo", "calendar"; "note" for a line without a kind; "web \u00b7
+    example.org" for a web research source (label_host: the end of the host, which names the site;
+    the whole host is in the detail)."""
     if action.kind == UNKNOWN:
         return "note"
+    if is_web_open(action):
+        return f"web{_SEPARATOR}{label_host(link_host(action.link))}"
     if action.structured and action.account and action.kind in _ACCOUNT_KINDS:
         return f"{action.kind}{_SEPARATOR}{action.account}"
     return action.kind
@@ -2024,6 +2190,8 @@ def open_text(action: ProposedAction) -> str:
     """The tools row's Open label ("" when the card has no usable link)."""
     if action.error or not action.structured or not action.link:
         return ""
+    if action.web:   # a source's card, or a research Todo carrying a source's link
+        return WEB_OPEN_TEXT
     if action.kind == TODO and link_host(action.link).endswith(".instructure.com"):
         return "Open in Canvas"
     return _OPEN_TEXTS.get(action.kind, "")
@@ -2062,7 +2230,12 @@ def card_view(action: ProposedAction, today: date) -> CardView:
         return CardView(label, title, INFO_DETAIL)
     if not action.decidable:   # a Reply the briefing says was sent already
         return CardView(label, title, ALREADY_REPLIED, open_text=open_text(action))
+    detail = action.describe(today)
     notes = list(action.warnings[:_MAX_WARNINGS_SHOWN])
+    if action.web and action.link and idn_host(action.link):
+        # In the detail, above Open page (the note is drawn below Deny / Done).
+        detail = _SEPARATOR.join(part for part in (detail, IDN_WARNING) if part)
+        notes = [note for note in action.warnings if note != IDN_WARNING][:_MAX_WARNINGS_SHOWN]
     if action.kind in (MOVE, CANCEL) and action.body and action.changes_event:
         notes.append(NOTE_NOT_SENT)
     if action.sends_mail:
@@ -2071,7 +2244,7 @@ def card_view(action: ProposedAction, today: date) -> CardView:
     body = action.body
     if action.kind == RSVP and body and action.changes_event:
         body = RSVP_NOTE_PREFIX + body
-    return CardView(label, title, action.describe(today), body=body, open_text=open_text(action),
+    return CardView(label, title, detail, body=body, open_text=open_text(action),
                     copy_text=copy_text(action), approve_text=approve_label(action) or DONE_TEXT,
                     decidable=True, note=_SEPARATOR.join(note for note in notes if note),
                     editable=action.editable, check=action.changes_event,

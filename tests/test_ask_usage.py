@@ -176,5 +176,114 @@ class UsageTests(unittest.TestCase):
         self.assertFalse(usage.check().allowed)
 
 
+class ResearchUsageTests(UsageTests):
+    """Web research runs: "kind": "research" in the file, their own caps, and every run counts for Ask."""
+
+    def research(self, usage: UsageLog, count: int, step: timedelta = timedelta(minutes=1)) -> None:
+        for _ in range(count):
+            usage.finish(usage.start(kind="research"), outcome="ok", duration_ms=9000, turns=4)
+            self.clock.now += step
+
+    def test_research_entries_carry_their_kind_and_plan_entries_keep_todays_keys(self) -> None:
+        usage = self.log()
+        self.spend(usage, 1)
+        self.research(usage, 1)
+        data = json.loads(self.path.read_text(encoding="utf-8"))
+        plan, research = data["runs"]
+        self.assertEqual(set(plan), {"id", "at", "outcome", "duration_ms", "turns", "input_tokens", "output_tokens",
+                                     "cache_read_tokens", "cache_write_tokens"})
+        self.assertEqual(research["kind"], "research")
+        self.assertEqual(set(research) - set(plan), {"kind"})
+        self.assertEqual((research["outcome"], research["turns"]), ("ok", 4))
+        # Read back by another process: the kinds survive.
+        other = self.log()
+        self.assertEqual(other.counts(kind="research"), (1, 1))
+        self.assertEqual(other.counts(kind="plan"), (1, 1))
+        self.assertEqual(other.counts(), (2, 2))
+
+    def test_an_entry_without_a_kind_is_a_plan_run(self) -> None:
+        self.path.parent.mkdir(parents=True)
+        at = NOW.isoformat()
+        self.path.write_text(json.dumps({"runs": [{"id": "a1", "at": at, "outcome": "ok"},
+                                                  {"id": "a2", "at": at, "outcome": "ok", "kind": "odd"},
+                                                  {"id": "a3", "at": at, "outcome": "ok", "kind": "research"}]}),
+                             encoding="utf-8")
+        usage = self.log()
+        self.assertEqual(usage.counts(kind="plan"), (2, 2))
+        self.assertEqual(usage.counts(kind="research"), (1, 1))
+        usage.finish(usage.start(), outcome="ok")   # rewritten: the odd kind is dropped, research kept
+        kinds = [run.get("kind") for run in json.loads(self.path.read_text(encoding="utf-8"))["runs"]]
+        self.assertEqual(sorted(kind or "" for kind in kinds), ["", "", "", "research"])
+
+    def test_the_hourly_research_cap(self) -> None:
+        usage = self.log(max_per_hour=20, max_per_day=60, max_research_per_hour=6, max_research_per_day=20)
+        start = self.clock.now
+        self.research(usage, 6)
+        plain = usage.check()
+        self.assertTrue(plain.allowed)   # a planner run is still allowed
+        self.assertEqual((plain.left_hour, plain.left_research_hour, plain.left_research_day), (14, 0, 14))
+        check = usage.check(research=1)
+        self.assertFalse(check.allowed)
+        self.assertFalse(check.held)
+        self.assertEqual(check.retry_at, start + timedelta(hours=1))
+        self.assertEqual(check.message, "Web research limit reached; try again after 10:30 AM "
+                                        "(6 research runs an hour: [research] max_per_hour)")
+        self.assertEqual((check.left_research_hour, check.left_research_day), (0, 14))
+        self.clock.now = start + timedelta(hours=1, seconds=1)
+        self.assertTrue(usage.check(research=1).allowed)
+
+    def test_the_daily_research_cap(self) -> None:
+        usage = self.log(max_per_hour=20, max_per_day=60, max_research_per_hour=6, max_research_per_day=3)
+        self.research(usage, 3, step=timedelta(hours=2))
+        check = usage.check(research=1)
+        self.assertFalse(check.allowed)
+        self.assertIn("Web research's daily limit reached; try again after 9:30 AM ", check.message)
+        self.assertIn("(3 research runs a day: [research] max_per_day)", check.message)
+        self.assertEqual(check.left_research_day, 0)
+
+    def test_research_runs_count_for_the_ask_caps(self) -> None:
+        usage = self.log(max_per_hour=3, max_per_day=60, max_research_per_hour=6)
+        self.research(usage, 3)
+        check = usage.check()
+        self.assertFalse(check.allowed)
+        self.assertIn("(3 planner runs an hour: [ask] max_per_hour)", check.message)   # the Ask cap says so first
+        self.assertFalse(usage.check(research=1).allowed)
+        self.assertEqual(usage.counts(), (3, 3))
+
+    def test_a_routed_research_needs_two_runs_and_one_research(self) -> None:
+        usage = self.log(max_per_hour=3, max_per_day=60, max_research_per_hour=2)
+        self.spend(usage, 1)
+        self.assertTrue(usage.check(runs=2, research=1).allowed)
+        self.research(usage, 1)
+        self.assertFalse(usage.check(runs=2, research=1).allowed)   # one Ask run left
+        self.assertTrue(usage.check(runs=1, research=1).allowed)
+        self.path = self.path.with_name("other_usage.json")   # a fresh count
+        usage = self.log(max_per_hour=20, max_per_day=60, max_research_per_hour=2)
+        self.research(usage, 1)
+        self.assertTrue(usage.check(runs=2, research=1).allowed)
+        self.research(usage, 1)
+        check = usage.check(runs=2, research=1)
+        self.assertFalse(check.allowed)
+        self.assertIn("[research] max_per_hour", check.message)
+
+    def test_the_hold_refuses_research_too(self) -> None:
+        usage = self.log()
+        until = self.clock.now + timedelta(hours=2)
+        usage.hold(until)
+        check = usage.check(research=1)
+        self.assertFalse(check.allowed)
+        self.assertTrue(check.held)
+        self.assertIn("Ask is paused until", check.message)
+        self.assertEqual((check.left_research_hour, check.left_research_day), (6, 20))
+
+    def test_research_lefts_are_always_filled(self) -> None:
+        usage = self.log(max_research_per_hour=6, max_research_per_day=20)
+        self.research(usage, 2)
+        for check in (usage.check(), usage.check(runs=2), usage.check(research=1)):
+            self.assertEqual((check.left_research_hour, check.left_research_day), (4, 18))
+        self.assertEqual((usage.max_research_per_hour, usage.max_research_per_day), (6, 20))
+        self.assertEqual(self.log(max_research_per_hour=0).max_research_per_hour, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,15 +1,24 @@
 """How many planner runs Ask Jarvis made: the hourly and daily caps, and the extra-usage pause.
 
-    UsageLog(path, max_per_hour=20, max_per_day=60, clock=...)
-        check(runs=1)    CapCheck: may ``runs`` more planner runs start now? (and how many are left)
-        start()          records a run as it starts (it counts even if Jarvis stops mid-run)
+    UsageLog(path, max_per_hour=20, max_per_day=60, clock=..., max_research_per_hour=6,
+             max_research_per_day=20)
+        check(runs=1, research=0)   CapCheck: may ``runs`` more runs start now, ``research`` of them
+                         web research runs? (and how many of each are left)
+        start(kind="plan")   records a run as it starts (it counts even if Jarvis stops mid-run);
+                         kind="research" for a web research run
         finish(run, ...) adds its duration, turns, token totals and outcome kind
         hold(until)      no run may start before ``until`` (Claude Code said a run would use extra
                          usage: Ask pauses until the plan's limit resets)
+        counts(kind=None)   (runs in the last hour, in the last 24 hours), of one kind or all
+
+Every run counts against the Ask caps ([ask] max_per_hour / max_per_day), web research runs
+included; web research runs also count against their own caps ([research] max_per_hour /
+max_per_day).
 
 %LOCALAPPDATA%\\briefing-reader\\ask_usage.json holds one entry per run: a random id, when it
-started, how long it took, turns, input / output / cache token totals and the outcome kind; and
-the pause, when there is one. Never the request, the context or anything the planner wrote.
+started, how long it took, turns, input / output / cache token totals and the outcome kind (a web
+research run also ``"kind": "research"``; a planner run's entry has no kind); and the pause, when
+there is one. Never the request, the context or anything the planner or the research wrote.
 Entries older than two days are pruned.
 
 The file is the count for every Jarvis process (the app and ``--ask-text`` from the command line):
@@ -44,6 +53,8 @@ DAY = timedelta(days=1)
 MAX_HOLD = timedelta(days=8)
 LOCK_TIMEOUT_S = 3.0
 _FIELDS = ("duration_ms", "turns", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
+KIND_PLAN = "plan"
+KIND_RESEARCH = "research"
 
 
 @dataclass(frozen=True)
@@ -54,6 +65,9 @@ class CapCheck:
     message: str = ""          # why not (safe to show and log: no request text)
     retry_at: datetime | None = None
     held: bool = False         # refused by the extra-usage pause (not by a count)
+    left_research_hour: int = 0    # web research runs left this hour ([research] max_per_hour)
+    left_research_day: int = 0     # ... and today
+    research_limit: bool = False   # refused by the web research caps (the Ask caps allow it)
 
 
 def _clock_words(moment: datetime, now: datetime | None = None) -> str:
@@ -139,11 +153,14 @@ class _FileLock:
 
 class UsageLog:
     def __init__(self, path: Path, *, max_per_hour: int = 20, max_per_day: int = 60,
-                 clock: Callable[[], datetime] | None = None) -> None:
+                 clock: Callable[[], datetime] | None = None, max_research_per_hour: int = 6,
+                 max_research_per_day: int = 20) -> None:
         self.path = Path(path)
         self.lock_path = self.path.with_name(self.path.name + ".lock")
         self.max_per_hour = max(1, int(max_per_hour))
         self.max_per_day = max(1, int(max_per_day))
+        self.max_research_per_hour = max(1, int(max_research_per_hour))
+        self.max_research_per_day = max(1, int(max_research_per_day))
         self._clock = clock or (lambda: datetime.now().astimezone())
         self._lock = threading.Lock()
         # This process's runs by id: they count even when the file could not be written.
@@ -179,6 +196,8 @@ class UsageLog:
             if at is None:
                 continue
             entry: dict[str, Any] = {"at": at, "outcome": str(item.get("outcome") or "")[:30]}
+            if item.get("kind") == KIND_RESEARCH:   # anything else (or none) is a planner run
+                entry["kind"] = KIND_RESEARCH
             run_id = item.get("id")
             if isinstance(run_id, str) and run_id.isalnum() and len(run_id) <= 40:
                 entry["id"] = run_id
@@ -204,7 +223,8 @@ class UsageLog:
 
     def _write(self, entries: list[dict[str, Any]], hold: datetime | None) -> bool:
         data: dict[str, Any] = {"runs": [{"id": entry.get("id", ""), "at": entry["at"].isoformat(timespec="seconds"),
-                                          "outcome": entry["outcome"], **{name: entry[name] for name in _FIELDS}}
+                                          "outcome": entry["outcome"], **{name: entry[name] for name in _FIELDS},
+                                          **({"kind": KIND_RESEARCH} if _is_research(entry) else {})}
                                          for entry in sorted(entries, key=lambda item: item["at"])]}
         if hold is not None:
             data["hold_until"] = hold.isoformat(timespec="seconds")
@@ -230,11 +250,14 @@ class UsageLog:
 
     # ---- reading ---------------------------------------------------------------------------
 
-    def counts(self, now: datetime | None = None) -> tuple[int, int]:
-        """(runs in the last hour, runs in the last 24 hours)."""
+    def counts(self, now: datetime | None = None, kind: str | None = None) -> tuple[int, int]:
+        """(runs in the last hour, runs in the last 24 hours): every run, or only the planner runs
+        (``kind="plan"``) or the web research runs (``kind="research"``)."""
         now = now or self._clock()
         with self._lock, _FileLock(self.lock_path):
             entries, _ = self._state(now)
+        if kind is not None:
+            entries = [entry for entry in entries if _is_research(entry) == (kind == KIND_RESEARCH)]
         return (sum(1 for entry in entries if now - entry["at"] < HOUR),
                 sum(1 for entry in entries if now - entry["at"] < DAY))
 
@@ -244,8 +267,9 @@ class UsageLog:
         with self._lock, _FileLock(self.lock_path):
             return self._state(now)[1]
 
-    def check(self, runs: int = 1, now: datetime | None = None) -> CapCheck:
-        """May ``runs`` more planner runs start now?"""
+    def check(self, runs: int = 1, now: datetime | None = None, research: int = 0) -> CapCheck:
+        """May ``runs`` more runs start now, ``research`` of them web research runs? Every run
+        counts against the Ask caps; the research runs also against the research caps."""
         now = now or self._clock()
         with self._lock, _FileLock(self.lock_path):
             entries, hold = self._state(now)
@@ -253,30 +277,53 @@ class UsageLog:
         hour = [entry["at"] for entry in entries if now - entry["at"] < HOUR]
         day = [entry["at"] for entry in entries if now - entry["at"] < DAY]
         left_hour, left_day = self.max_per_hour - len(hour), self.max_per_day - len(day)
+        research_hour = [entry["at"] for entry in entries if _is_research(entry) and now - entry["at"] < HOUR]
+        research_day = [entry["at"] for entry in entries if _is_research(entry) and now - entry["at"] < DAY]
+        left_r_hour = self.max_research_per_hour - len(research_hour)
+        left_r_day = self.max_research_per_day - len(research_day)
+        lefts = {"left_research_hour": max(0, left_r_hour), "left_research_day": max(0, left_r_day)}
         if hold is not None:
-            return CapCheck(False, max(0, left_hour), max(0, left_day), hold_message(hold, now), hold, held=True)
+            return CapCheck(False, max(0, left_hour), max(0, left_day), hold_message(hold, now), hold, held=True,
+                            **lefts)
         if left_day < runs:
             index = max(0, len(day) - self.max_per_day + runs - 1)
             retry = day[index] + DAY if day else now
             return CapCheck(False, max(0, left_hour), max(0, left_day),
                             f"Ask's daily limit reached; try again after {_clock_words(retry, now)} "
-                            f"({self.max_per_day} planner runs a day: [ask] max_per_day)", retry)
+                            f"({self.max_per_day} planner runs a day: [ask] max_per_day)", retry, **lefts)
         if left_hour < runs:
             index = max(0, len(hour) - self.max_per_hour + runs - 1)
             retry = hour[index] + HOUR if hour else now
             return CapCheck(False, max(0, left_hour), max(0, left_day),
                             f"Ask limit reached; try again after {_clock_words(retry, now)} "
-                            f"({self.max_per_hour} planner runs an hour: [ask] max_per_hour)", retry)
-        return CapCheck(True, left_hour, left_day)
+                            f"({self.max_per_hour} planner runs an hour: [ask] max_per_hour)", retry, **lefts)
+        if research > 0 and left_r_day < research:
+            index = max(0, len(research_day) - self.max_research_per_day + research - 1)
+            retry = research_day[index] + DAY if research_day else now
+            return CapCheck(False, left_hour, left_day,
+                            f"Web research's daily limit reached; try again after {_clock_words(retry, now)} "
+                            f"({self.max_research_per_day} research runs a day: [research] max_per_day)", retry,
+                            research_limit=True, **lefts)
+        if research > 0 and left_r_hour < research:
+            index = max(0, len(research_hour) - self.max_research_per_hour + research - 1)
+            retry = research_hour[index] + HOUR if research_hour else now
+            return CapCheck(False, left_hour, left_day,
+                            f"Web research limit reached; try again after {_clock_words(retry, now)} "
+                            f"({self.max_research_per_hour} research runs an hour: [research] max_per_hour)", retry,
+                            research_limit=True, **lefts)
+        return CapCheck(True, left_hour, left_day, **lefts)
 
     # ---- writing ---------------------------------------------------------------------------
 
-    def start(self, now: datetime | None = None) -> str:
-        """Record a run that starts now; returns its handle for finish()."""
+    def start(self, now: datetime | None = None, kind: str = KIND_PLAN) -> str:
+        """Record a run that starts now (``kind="research"`` for a web research run); returns its
+        handle for finish()."""
         now = now or self._clock()
         run_id = uuid.uuid4().hex[:16]
         entry: dict[str, Any] = {"id": run_id, "at": now, "outcome": "started"}
         entry.update({name: 0 for name in _FIELDS})
+        if kind == KIND_RESEARCH:
+            entry["kind"] = KIND_RESEARCH
         with self._lock, _FileLock(self.lock_path):
             self._local[run_id] = entry
             entries, hold = self._state(now)
@@ -322,6 +369,10 @@ def _aware(text: Any) -> datetime | None:
     except ValueError:
         return None
     return moment if moment.tzinfo is not None else None
+
+
+def _is_research(entry: dict[str, Any]) -> bool:
+    return entry.get("kind") == KIND_RESEARCH
 
 
 def _recent(entry: dict[str, Any], now: datetime) -> bool:

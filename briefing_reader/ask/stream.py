@@ -7,15 +7,20 @@
                              "overage", or the plan "rejected" with overage allowed) or the plan's
                              own limit ("rejected")
     read_result(event, init) the result event -> Plan, or AskFailure(kind)
-    run_planner(...)         one run end to end: no init within 20 s, any guard trip, a rate-limit
-                             signal, the overall timeout and Cancel all kill the process; a run is
-                             never retried. ``progress(what, value)`` hears "started", "init"
-                             (InitSummary), "turn" (n), "result" and "stopped" (AskFailure) as they
-                             happen (for the LIVE view; a callback that raises changes nothing);
-                             ``capture`` keeps the planner's raw reply in RunResult.reply
+    run_cli(..., read, init_check, event_check)   one CLI run end to end: no init within 20 s, any
+                             guard trip (GuardTrip) or stop (RunStop) from the two checks, a
+                             rate-limit signal, the overall timeout and Cancel all kill the process;
+                             a run is never retried. ``read(result_event, init)`` turns the result
+                             into a value (a Plan -> RunResult.plan, anything else ->
+                             RunResult.answer) or an AskFailure. ``progress(what, value)`` hears
+                             "started", "init" (InitSummary), "turn" (n), "result" and "stopped"
+                             (AskFailure) as they happen (for the LIVE view; a callback that raises
+                             changes nothing); ``capture`` keeps the raw reply in RunResult.reply
+    run_planner(...)         run_cli with the planner's checks and read_result (web research uses
+                             run_cli with its own: ask.research.run_research)
 
 Failure kinds (AskFailure.kind): not_signed_in, limit, max_turns, schema_retries, timeout,
-cancelled, guard, garbled, cli_unsupported, error. Their messages are Jarvis's own words (the only
+cancelled, guard, garbled, cli_unsupported, error, research_cap. Their messages are Jarvis's own words (the only
 model or CLI text in one is a sanitized usage-limit reset time) and are safe to show and log; the
 stream itself (the plan, the result text, stderr) is never logged (RunResult.reply, kept only with
 ``capture`` for the LIVE view, never is either). ``total_cost_usd`` is a
@@ -49,8 +54,9 @@ GUARD = "guard"
 GARBLED = "garbled"
 CLI_UNSUPPORTED = "cli_unsupported"
 ERROR = "error"
+RESEARCH_CAP = "research_cap"   # web research wanted more searches or page reads than allowed
 FAILURE_KINDS = (NOT_SIGNED_IN, LIMIT, MAX_TURNS, SCHEMA_RETRIES, TIMEOUT, CANCELLED, GUARD, GARBLED,
-                 CLI_UNSUPPORTED, ERROR)
+                 CLI_UNSUPPORTED, ERROR, RESEARCH_CAP)
 
 STRUCTURED_TOOL = "StructuredOutput"
 INIT_TIMEOUT_S = 20.0
@@ -61,6 +67,7 @@ LINES_CAP = 8
 LINE_CAP = 12000
 QUERY_CAP = 200
 WHY_CAP = 200
+WEB_QUESTION_CAP = 200
 ACCOUNT_CAP = 24
 KIND_PREFIXES = ("Calendar:", "Email:", "Reply:", "RSVP:", "Move:", "Cancel:", "Todo:", "Open:", "Slack:",
                  "Share:")
@@ -77,6 +84,7 @@ MESSAGES = {
     GARBLED: f"The planner's answer could not be read; {NOTHING}",
     CLI_UNSUPPORTED: "This Claude Code is not supported by Ask yet",
     ERROR: f"Claude Code failed; {NOTHING}",
+    RESEARCH_CAP: f"Jarvis stopped the web research: it wanted more searches or page reads than allowed; {NOTHING}",
 }
 OVERAGE = "overage"           # AskFailure.detail: Claude Code said this run uses extra usage
 REJECTED = "rejected"         # AskFailure.detail: Claude Code said the plan's limit is reached
@@ -112,6 +120,7 @@ class InitSummary:
     model: str
     version: str
     structured_tool: bool        # StructuredOutput is available: the result carries structured_output
+    permission_mode: str = ""    # permissionMode as a plain word ("dontAsk"; "" when not said)
 
 
 @dataclass(frozen=True)
@@ -124,12 +133,22 @@ class MailSearch:
 
 
 @dataclass(frozen=True)
+class WebRequest:
+    """The first run's request for web research (planner text: shown to the owner, never logged;
+    the question goes to the research only when it passes ask.research.check_question)."""
+
+    question: str
+    why: str
+
+
+@dataclass(frozen=True)
 class Plan:
     say: str
     question: str
     lines: tuple[str, ...]
     search: MailSearch | None = None
     via_fallback: bool = False   # read from the result text (StructuredOutput was not available)
+    web: WebRequest | None = None   # web_research (only when the run was allowed to ask for it)
 
 
 @dataclass(frozen=True)
@@ -170,6 +189,10 @@ class RunResult:
     # With run_planner(capture=True) only: the planner's raw reply as it came (structured_output as
     # indented JSON, else the result text). Shown in the LIVE view; never logged or saved.
     reply: str = field(default="", repr=False)
+    # What run_cli's ``read`` made of the result when it is not a Plan (web research: a
+    # ResearchAnswer, built from web text: shown, never logged).
+    answer: Any = field(default=None, repr=False)
+    web: Any = None                    # web research: the run's research.WebLog (its repr is counts only)
 
     @property
     def outcome(self) -> str:
@@ -183,6 +206,14 @@ class GuardTrip(Exception):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
+
+
+class RunStop(Exception):
+    """A check of run_cli stops the run with ``failure`` (its own words; the process is killed)."""
+
+    def __init__(self, failure: AskFailure) -> None:
+        super().__init__(failure.kind)
+        self.failure = failure
 
 
 def failure(kind: str, detail: str = "", message: str = "") -> AskFailure:
@@ -221,7 +252,8 @@ def check_init(event: Mapping[str, Any]) -> InitSummary:
     if set(tools) - {STRUCTURED_TOOL}:
         raise GuardTrip("tools")
     return InitSummary(api_key_source="none", tools=tuple(tools), mcp_servers=0, model=_word(event.get("model")),
-                       version=_word(event.get("claude_code_version")), structured_tool=STRUCTURED_TOOL in tools)
+                       version=_word(event.get("claude_code_version")), structured_tool=STRUCTURED_TOOL in tools,
+                       permission_mode=_word(event.get("permissionMode")))
 
 
 def check_event(event: Mapping[str, Any]) -> None:
@@ -305,8 +337,27 @@ def _one_line(text: str) -> str:
     return " ".join(_CONTROL_RE.sub(" ", text).split())
 
 
-def _plan_from(data: Any, *, allow_search: bool, fallback: bool = False) -> Plan | None:
-    """structured_output (or the fallback's JSON) shape-checked locally; None when it does not fit."""
+_NOT_A_REQUEST = WebRequest("", "")   # web_research that does not fit the schema: the answer is garbled
+
+
+def _web_request(wanted: Any) -> WebRequest | None:
+    """A web_research value as the schema allows it; None for an empty question (no web research
+    asked: the rest of the answer stands, as with an empty gmail_search); _NOT_A_REQUEST when it
+    does not fit (the whole answer is then garbled)."""
+    if not isinstance(wanted, dict):
+        return _NOT_A_REQUEST
+    question, why = wanted.get("question"), wanted.get("why", "")
+    if not isinstance(question, str) or not isinstance(why, str):
+        return _NOT_A_REQUEST
+    if len(question) > WEB_QUESTION_CAP or len(why) > WHY_CAP:
+        return _NOT_A_REQUEST
+    question = _one_line(question)
+    return WebRequest(question, _one_line(why)) if question else None
+
+
+def _plan_from(data: Any, *, allow_search: bool, allow_web: bool = False, fallback: bool = False) -> Plan | None:
+    """structured_output (or the fallback's JSON) shape-checked locally; None when it does not fit.
+    ``gmail_search`` / ``web_research`` are read only when allowed (ignored otherwise)."""
     if not isinstance(data, dict):
         return None
     say, question, lines = data.get("say", ""), data.get("question", ""), data.get("lines")
@@ -328,11 +379,16 @@ def _plan_from(data: Any, *, allow_search: bool, fallback: bool = False) -> Plan
         if len(account) > ACCOUNT_CAP or len(query) > QUERY_CAP or len(why) > WHY_CAP:
             return None
         search = MailSearch(account.strip().casefold(), query.strip(), _one_line(why))
+    web = None
+    if allow_web and data.get("web_research") is not None:
+        web = _web_request(data.get("web_research"))
+        if web is _NOT_A_REQUEST:
+            return None
     kept = tuple(line.strip() for line in lines if line.strip())
-    return Plan(say, question, kept, search, fallback)
+    return Plan(say, question, kept, search, fallback, web)
 
 
-def _fallback_plan(text: str, *, allow_search: bool) -> Plan | None:
+def _fallback_plan(text: str, *, allow_search: bool, allow_web: bool = False) -> Plan | None:
     """Only when init showed no StructuredOutput: the result text as JSON (code fences dropped),
     else its lines that start with a known kind."""
     text = text or ""
@@ -341,7 +397,8 @@ def _fallback_plan(text: str, *, allow_search: bool) -> Plan | None:
         data = json.loads(fenced.group(1) if fenced else text)
     except ValueError:
         data = None
-    plan = _plan_from(data, allow_search=allow_search, fallback=True) if data is not None else None
+    plan = _plan_from(data, allow_search=allow_search, allow_web=allow_web, fallback=True) \
+        if data is not None else None
     if plan is not None:
         return plan
     found = [line.strip() for line in text.splitlines() if line.strip().startswith(KIND_PREFIXES)]
@@ -380,9 +437,10 @@ def classify_text(text: str, *, now: Callable[[], datetime] = lambda: datetime.n
     return None
 
 
-def read_result(event: Mapping[str, Any], init: InitSummary | None, *, allow_search: bool,
-                now: Callable[[], datetime] = lambda: datetime.now().astimezone()) -> Plan | AskFailure:
-    """The result event -> Plan or AskFailure. A plan needs a checked init first."""
+def result_failure(event: Mapping[str, Any], init: InitSummary | None, *,
+                   now: Callable[[], datetime] = lambda: datetime.now().astimezone()) -> AskFailure | None:
+    """The result event's failure, when it is one (the subtypes, an error, no checked init first);
+    None for a success after a checked init (its answer is then read by the caller)."""
     subtype = event.get("subtype")
     text = event.get("result") if isinstance(event.get("result"), str) else ""
     status = event.get("api_error_status")
@@ -394,13 +452,24 @@ def read_result(event: Mapping[str, Any], init: InitSummary | None, *, allow_sea
         return classify_text(text, now=now, status=status) or failure(ERROR, _word(subtype) or "result_error")
     if init is None:
         return failure(GUARD, "no_init")
+    return None
+
+
+def read_result(event: Mapping[str, Any], init: InitSummary | None, *, allow_search: bool, allow_web: bool = False,
+                now: Callable[[], datetime] = lambda: datetime.now().astimezone()) -> Plan | AskFailure:
+    """The result event -> Plan or AskFailure. A plan needs a checked init first."""
+    found = result_failure(event, init, now=now)
+    if found is not None:
+        return found
+    assert init is not None
+    text = event.get("result") if isinstance(event.get("result"), str) else ""
     data = event.get("structured_output")
     if data is not None:
-        plan = _plan_from(data, allow_search=allow_search)
+        plan = _plan_from(data, allow_search=allow_search, allow_web=allow_web)
         return plan if plan is not None else failure(GARBLED, "shape")
     if init.structured_tool:
         return failure(GARBLED, "no_structured_output")
-    plan = _fallback_plan(text, allow_search=allow_search)
+    plan = _fallback_plan(text, allow_search=allow_search, allow_web=allow_web)
     return plan if plan is not None else failure(GARBLED, "fallback")
 
 
@@ -436,15 +505,37 @@ def raw_reply(event: Mapping[str, Any] | None) -> str:
     return text if isinstance(text, str) else ""
 
 
+Reader = Callable[[Mapping[str, Any], InitSummary | None], Any]   # (result event, init) -> value or AskFailure
+
+
 def run_planner(runner: Runner, argv: Sequence[str], prompt: str, *, env: Mapping[str, str], cwd: Path,
                 timeout_s: float, allow_search: bool, cancel: threading.Event | None = None,
                 clock: Callable[[], float] = time.monotonic, init_timeout_s: float = INIT_TIMEOUT_S,
                 poll_s: float = POLL_S,
                 now: Callable[[], datetime] = lambda: datetime.now().astimezone(),
-                progress: Progress | None = None, capture: bool = False) -> RunResult:
-    """Start the CLI with ``prompt`` on stdin and read its events until the result, a guard trip,
-    the timeout or Cancel (the process is killed then). Never raises for the CLI's behaviour.
-    ``progress`` / ``capture``: see the module docs (neither changes the run)."""
+                progress: Progress | None = None, capture: bool = False, allow_web: bool = False) -> RunResult:
+    """One planner run (run_cli with check_init, check_event and read_result). ``allow_search`` /
+    ``allow_web``: the run may ask to read mail / for web research."""
+    return run_cli(runner, argv, prompt, env=env, cwd=cwd, timeout_s=timeout_s,
+                   read=lambda event, init: read_result(event, init, allow_search=allow_search, allow_web=allow_web,
+                                                        now=now),
+                   cancel=cancel, clock=clock, init_timeout_s=init_timeout_s, poll_s=poll_s, now=now,
+                   progress=progress, capture=capture)
+
+
+def run_cli(runner: Runner, argv: Sequence[str], prompt: str, *, env: Mapping[str, str], cwd: Path,
+            timeout_s: float, read: Reader, init_check: Callable[[Mapping[str, Any]], InitSummary] = check_init,
+            event_check: Callable[[Mapping[str, Any]], None] = check_event,
+            cancel: threading.Event | None = None,
+            clock: Callable[[], float] = time.monotonic, init_timeout_s: float = INIT_TIMEOUT_S,
+            poll_s: float = POLL_S,
+            now: Callable[[], datetime] = lambda: datetime.now().astimezone(),
+            progress: Progress | None = None, capture: bool = False) -> RunResult:
+    """Start the CLI with ``prompt`` on stdin and read its events until the result, a guard trip
+    or stop, the timeout or Cancel (the process is killed then). Never raises for the CLI's
+    behaviour. ``init_check`` checks the first event (InitSummary, or GuardTrip / RunStop),
+    ``event_check`` every later one (GuardTrip / RunStop stop the run), ``read`` the result
+    event. ``progress`` / ``capture``: see the module docs (neither changes the run)."""
     started = clock()
     try:
         process = runner.start(argv, stdin_text=prompt, env=env, cwd=cwd)
@@ -496,12 +587,15 @@ def run_planner(runner: Runner, argv: Sequence[str], prompt: str, *, env: Mappin
                         result_event = event   # e.g. a sign-in error before any init: never a plan
                         _report(progress, "result")
                         break
-                    init = check_init(event)
+                    init = init_check(event)
                     _report(progress, "init", init)
                     continue
-                check_event(event)
+                event_check(event)
             except GuardTrip as trip:
                 stop = failure(GUARD, trip.reason)
+                break
+            except RunStop as stopped:
+                stop = stopped.failure
                 break
             if event.get("type") == "assistant":
                 turns += 1
@@ -534,8 +628,10 @@ def run_planner(runner: Runner, argv: Sequence[str], prompt: str, *, env: Mappin
                                                             else "no_result")
         return RunResult(failure=found, init=init, stats=RunStats(duration_ms=measured, exit_code=exit_code))
     stats = stats_of(result_event, measured_ms=measured, exit_code=exit_code)
-    outcome = read_result(result_event, init, allow_search=allow_search, now=now)
+    outcome = read(result_event, init)
     reply = raw_reply(result_event) if capture else ""
     if isinstance(outcome, AskFailure):
         return RunResult(failure=outcome, init=init, stats=stats, reply=reply)
-    return RunResult(plan=outcome, init=init, stats=stats, reply=reply)
+    if isinstance(outcome, Plan):
+        return RunResult(plan=outcome, init=init, stats=stats, reply=reply)
+    return RunResult(init=init, stats=stats, reply=reply, answer=outcome)

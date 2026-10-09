@@ -26,7 +26,12 @@ The module is organised in three parts:
   player and the action worker (approved proposals, the agenda, the cards'
   event checks and the Google sign-in of each account), and with [ask] on the
   Ask controller (:mod:`briefing_reader.ask_ui`, its own "ask" thread) whose
-  proposals join the cards under ASK. ``AppController.live`` is the LIVE
+  proposals join the cards under ASK. A web research's answer (a "web:"
+  request, or one the planner hands over) is one JARVIS entry with its
+  numbered sources, spoken without the [n] marks; each source is an ASK card
+  labelled with its site whose "Open page" opens it in the browser only on that
+  click, after the web rule (any public https site, never a local or private
+  address) is checked again. ``AppController.live`` is the LIVE
   view's event stream (:mod:`briefing_reader.live`, ``[live]``): every Ask, every
   approved card (from the click through the undo countdown to Google's answer)
   and every briefing fetch, as it happens; on screen only.
@@ -155,6 +160,7 @@ from .actions import (
     link_host,
     parse_time_range,
     result_text,
+    web_link_allowed,
     when_text,
     with_error,
 )
@@ -262,6 +268,7 @@ from .persona import (
     outcome_tone,
     pick_ack,
     pick_greeting,
+    research_reply_speech,
     salutation,
     spoken_when,
     with_address,
@@ -4893,7 +4900,10 @@ class AppController(QObject):
         self._refresh_actions_ui()
 
     def open_action_source(self, action_id: str) -> None:
-        """A card's Open (tools row): its own link, checked again, in the browser; never by itself."""
+        """A card's Open (tools row): its own link, checked again, in the browser; never by itself.
+        A web research card's link (``action.web``: a source's Open page, a Todo with a source's
+        link) follows the web rule instead of the Open allowlist: any public https site
+        (actions.web_link_allowed), never a local or private address, checked again here."""
         action = self._action(action_id)
         if action is None or self.state == STATE_QUITTING:
             return
@@ -4907,8 +4917,8 @@ class AppController(QObject):
             return
         url = QUrl(link, QUrl.ParsingMode.StrictMode)
         host = url.host(QUrl.ComponentFormattingOption.FullyEncoded).rstrip(".").casefold()
-        if (not link_allowed(link, self.config.actions.link_hosts) or not url.isValid()
-                or url.scheme() != "https" or host != link_host(link)):
+        allowed = web_link_allowed(link) if action.web else link_allowed(link, self.config.actions.link_hosts)
+        if not allowed or not url.isValid() or url.scheme() != "https" or host != link_host(link):
             logger.info("Not opening the link of action %s: not an allowed https link", action_id)
             return
         logger.info("Open the link of action %s (%s)", action_id, action.kind)
@@ -5871,13 +5881,14 @@ class AppController(QObject):
 
     def _on_ask_started(self, _seq: int, text: str) -> None:
         """An Ask really started: the owner's words as a YOU entry, and the LIVE tab comes up
-        ([live] auto_open = "tab", the default: every step as it happens), else the JARVIS tab (it
-        shows the whole answer when it arrives)."""
+        ([live] auto_open = "tab", the default: every step as it happens; a "web:" request's WEB task
+        as an Ask's), else the JARVIS tab (it shows the whole answer when it arrives)."""
         if self.state == STATE_QUITTING:
             return
         self._you(text)
         self._ask_task_id = self.ask.task_id if self.ask is not None else 0
-        if not self._live_auto_open(_live.TASK_ASK, self._ask_task_id):
+        kind = (self.ask.running_kind if self.ask is not None else "") or _live.TASK_ASK
+        if not self._live_auto_open(kind, self._ask_task_id):
             self.window.reading.set_tab(hud.TAB_JARVIS)
 
     def _on_ask_cancelled(self, _seq: int) -> None:
@@ -5893,6 +5904,9 @@ class AppController(QObject):
         from .ask_ui import _SOFT_KINDS, AskController
 
         assistant = self.config.assistant
+        if outcome.ok and getattr(outcome, "research", None) is not None:
+            self._converse_research(outcome)
+            return
         if outcome.ok:
             decidable = sum(1 for card in outcome.cards if not card.error)
             sub = [f"{_plural(decidable, 'proposal')} under NEEDS YOUR OK" if decidable else "no proposals"]
@@ -5922,6 +5936,41 @@ class AppController(QObject):
         else:
             self._voice_call("cancel_key", ASK_ACK_KEY)
 
+    def _converse_research(self, outcome: Any) -> None:
+        """A web research's answer in the conversation: one JARVIS entry with the answer and its
+        numbered sources (each with its site; what was left out and why), a sub line of counts and
+        "See every step"; then Jarvis says the answer without its [n] marks, that the sources are on
+        screen and how many suggestions wait for the OK (persona.research_reply_speech)."""
+        from .ask.research_validate import cards_words, entry_text, steps_words
+        from .ask.research_validate import notes as research_notes
+        from .ask_ui import research_proposals
+
+        assistant = self.config.assistant
+        report = outcome.research
+        text = entry_text(report)
+        # Jarvis's own notes the entry does not already show (a thread the planner could not read,
+        # Claude Code refusing its web tools); the left-out lines are in the entry itself.
+        shown = {note for note in research_notes(report) if "left out" in note}
+        extra = [note for note in (outcome.message or "").split("; ") if note and note not in shown]
+        for note in extra:
+            note = note[:1].upper() + note[1:]
+            text += "\n" + (note if note.endswith((".", "!", "?", ")")) else note + ".")
+        proposals = research_proposals(outcome)
+        cards = cards_words(len(report.sources), proposals)
+        sub = ["web research", f"{cards} under NEEDS YOUR OK" if report.sources or proposals else cards]
+        if outcome.runs:
+            sub.append(f"{outcome.duration_ms / 1000:.1f} s")
+        sub.append(steps_words(report))
+        task_id = self._ask_task_id
+        link = (SEE_STEPS_TEXT, f"live:{task_id}") if self.live.enabled and task_id else ("", "")
+        self._jarvis(text, tone=hud.TONE_DONE, sub=f" {DOT} ".join(sub), link=link)
+        if assistant.speak_replies:
+            reply = research_reply_speech(report.answer, sources=len(report.sources), cards=proposals,
+                                          address=assistant.address)
+            if reply.guarded:
+                logger.info("Web research answer not spoken as written (it claimed something was done)")
+            self._say(KIND_REPLY, reply.text)
+
     def _on_ask_outcome(self, outcome: Any) -> None:
         """A finished Ask: its cards go under ASK (above the briefing's; a countdown on another
         card goes on), the conversation gets the whole answer (and Jarvis says it), and ACTIVITY
@@ -5929,7 +5978,18 @@ class AppController(QObject):
         if self.state == STATE_QUITTING:
             return
         self._converse_ask(outcome)
-        if outcome.ok:
+        report = getattr(outcome, "research", None) if outcome.ok else None
+        if report is not None:
+            # Web research: counts only (never the question, the answer, a title or a site).
+            from .ask.research_validate import cards_words, steps_words
+            from .ask_ui import research_proposals
+
+            self._take_ask_cards(list(outcome.cards))
+            message = "Web research: " + cards_words(len(report.sources), research_proposals(outcome))
+            sub = [f"{outcome.duration_ms / 1000:.1f} s", _plural(outcome.runs, "run"), steps_words(report)]
+            self._activity(hud.TAG_ASK, message, f" {DOT} ".join(sub))
+            logger.info("Ask: %d card(s) shown under ASK (%d not doable)", len(outcome.cards), outcome.refused)
+        elif outcome.ok:
             self._take_ask_cards(list(outcome.cards))
             decidable = sum(1 for card in outcome.cards if not card.error)
             if decidable:

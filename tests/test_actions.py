@@ -2507,6 +2507,150 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(edited.id, line.id)
 
 
+class WebCardTests(unittest.TestCase):
+    """Web research cards: the web link rule (any public https host) and how such a card reads."""
+
+    SOURCE = "Open: title=[1] Visit - Example Museum | link=https://www.example.org/visit"
+
+    def web_open(self, line: str = SOURCE, host: str = "www.example.org") -> ProposedAction:
+        return dataclasses.replace(parse_action_line(line, link_hosts=(host,)), source=actions.SOURCE_ASK, web=True)
+
+    def test_web_link_rule(self) -> None:
+        good = ("https://www.example.org/visit", "https://example.org", "https://EXAMPLE.org./a?b=c#d",
+                "https://museum.example.net:443/hours", "https://xn--bcher-kva.example/page",
+                "https://a.b.example.com/" + "x" * 2000)
+        for url in good:
+            with self.subTest(url=url):
+                self.assertEqual(actions.web_link_problem(url), "")
+                self.assertTrue(actions.web_link_allowed(url))
+        bad = {
+            "not an https link": ("http://example.org", "javascript:alert(1)", "data:text/html,x", "ftp://example.org",
+                                  "file:///C:/x", "https://user:pw@example.org/", "https://example.org:8443/",
+                                  "https://example.org/a b", "https://example.org/\u202ex", "https://example.org/a\\b",
+                                  "https://example.org/a/../b", "https://example.org/%2e%2e/b", "https://example.org/a|b",
+                                  'https://example.org/"x', "https://example.org/<x>", "https://example.org/`x`",
+                                  "https://example.org/" + "x" * 2048, "", "example.org"),
+            actions.LOCAL_ADDRESS: ("https://localhost/x", "https://LOCALHOST./x", "https://127.0.0.1/",
+                                    "https://10.0.0.1/", "https://192.168.1.1/admin", "https://169.254.1.1/",
+                                    "https://[::1]/", "https://[fe80::1]/", "https://router.local/",
+                                    "https://printer.lan/", "https://a.internal/", "https://intranet/",
+                                    "https://box.home.arpa/", "https://x.test/", "https://x.invalid/",
+                                    "https://abc.onion/", "https://web.localhost/", "https://127.1/"),
+            actions.NOT_WEB_ADDRESS: ("https://8.8.8.8/", "https://0x7f.0.0.1/", "https://example.123/",
+                                      "https://ex_ample.org/", "https://b\u00fccher.example/"),
+        }
+        for reason, urls in bad.items():
+            for url in urls:
+                with self.subTest(url=url):
+                    self.assertEqual(actions.web_link_problem(url), reason)
+                    self.assertFalse(actions.web_link_allowed(url))
+        for value in (None, 3, b"https://example.org"):
+            self.assertFalse(actions.web_link_allowed(value))
+
+    def test_public_host_problem(self) -> None:
+        for host in ("example.org", "www.example.org", "EXAMPLE.ORG", "example.org.", "xn--bcher-kva.example",
+                     "a-b.example.co.uk", "site.xn--p1ai"):
+            with self.subTest(host=host):
+                self.assertEqual(actions.public_host_problem(host), "")
+        for host in ("localhost", "127.0.0.1", "10.1.2.3", "192.168.1.1", "::1", "[::1]", "router.local",
+                     "intranet", "printer.lan", "a.internal", "nas.home", "x.corp"):
+            with self.subTest(host=host):
+                self.assertEqual(actions.public_host_problem(host), actions.LOCAL_ADDRESS)
+        for host in ("", "8.8.8.8", "-bad.example", "example.c", "exa mple.org", None):
+            with self.subTest(host=host):
+                self.assertEqual(actions.public_host_problem(host), actions.NOT_WEB_ADDRESS)
+
+    def test_public_names_that_lead_to_this_pc_or_its_network(self) -> None:
+        # Wildcard DNS, names fixed to 127.0.0.1 and router setup pages: Jarvis checks the name only.
+        for host in ("192.168.1.1.nip.io", "app.10.0.0.5.nip.io", "127-0-0-1.sslip.io", "x.sslip.io", "localtest.me",
+                     "a.lvh.me", "routerlogin.net", "www.routerlogin.com", "tplinkwifi.net", "router.asus.com",
+                     "fritz.box", "10.0.0.1.example.net", "x.192-168-0-10.example.org", "host-127-0-0-1.example.com"):
+            with self.subTest(host=host):
+                self.assertEqual(actions.public_host_problem(host), actions.LOCAL_ADDRESS)
+                self.assertEqual(actions.web_link_problem(f"https://{host}/admin"), actions.LOCAL_ADDRESS)
+        for host in ("8.8.8.8.example.net", "www.2-1-3-4.example.com", "asus.com", "www.nip.com",
+                     "2026-10-09.example.org", "notrouterlogin.net"):
+            with self.subTest(host=host):
+                self.assertEqual(actions.public_host_problem(host), "")
+
+    def test_the_label_shows_the_end_of_the_host(self) -> None:
+        for host, shown in (("www.example.org", "www.example.org"), ("example.org", "example.org"),
+                            ("accounts.google.com.sign-in-check.example.net", "\u2026example.net"),
+                            ("evil.github.io", "evil.github.io"), ("shop.example.co.uk", "\u2026example.co.uk"),
+                            ("www.shop.example.co.uk", "\u2026example.co.uk"),
+                            ("www.the-very-long-name-of-a-museum-example.com", "\u2026seum-example.com"),
+                            ("xn--bcher-kva.example", "\u2026cher-kva.example"),
+                            ("museum.example.net", "\u2026example.net"), ("a.b.example.org", "a.b.example.org")):
+            with self.subTest(host=host):
+                label = actions.label_host(host)
+                self.assertEqual(label, shown)
+                self.assertLessEqual(len(label), actions.LABEL_HOST_CHARS)
+                self.assertTrue(host.endswith(label.lstrip("\u2026")))
+        card = self.web_open("Open: title=[1] Sign in | link=https://accounts.google.com.sign-in-check.example.net/x",
+                             "accounts.google.com.sign-in-check.example.net")
+        view = card_view(card, TODAY)
+        self.assertEqual(view.kind_label, "web \u00b7 \u2026example.net")
+        self.assertTrue(view.detail.startswith("accounts.google.com.sign-in-check.example.net \u00b7 web source"))
+
+    def test_the_open_allowlist_is_unchanged(self) -> None:
+        # The web rule is separate: an Open card from the briefing or the planner still needs a listed host.
+        self.assertFalse(link_allowed("https://www.example.org/visit"))
+        self.assertTrue(parse_action_line(self.SOURCE).error)
+        self.assertEqual(parse_action_line(self.SOURCE, link_hosts=("www.example.org",)).error, "")
+
+    def test_web_is_not_part_of_the_id_and_is_kept(self) -> None:
+        plain = parse_action_line(self.SOURCE, link_hosts=("www.example.org",))
+        self.assertFalse(plain.web)
+        web = self.web_open()
+        self.assertEqual(web.id, plain.id)
+        self.assertTrue(actions.with_error(web, "refused").web)
+        self.assertTrue(actions.restrict(web, {OPEN}, actions.SOURCE_ASK).web)
+        self.assertTrue(actions.restrict(web, {TODO}, actions.SOURCE_ASK).web)   # refused, still web
+        self.assertTrue(dataclasses.replace(web, title="x").web)
+        self.assertEqual(dataclasses.fields(ProposedAction)[-1].name, "web")
+
+    def test_a_web_open_card(self) -> None:
+        card = self.web_open()
+        self.assertEqual(actions.kind_label(card), "web \u00b7 www.example.org")
+        self.assertEqual(actions.open_text(card), "Open page")
+        view = card_view(card, TODAY)
+        self.assertEqual(view.kind_label, "web \u00b7 www.example.org")
+        self.assertEqual(view.title, "[1] Visit - Example Museum")
+        self.assertEqual(view.detail, "www.example.org \u00b7 web source \u00b7 opens in your browser")
+        self.assertEqual((view.open_text, view.approve_text, view.decidable, view.note), ("Open page", "Done", True, ""))
+        # Not web: the same card reads like any Open card.
+        plain = parse_action_line(self.SOURCE, link_hosts=("www.example.org",))
+        self.assertEqual((actions.kind_label(plain), actions.open_text(plain)), (OPEN, "Open"))
+        self.assertEqual(card_view(plain, TODAY).detail, "www.example.org")
+
+    def test_an_international_domain_gets_a_warning(self) -> None:
+        card = self.web_open("Open: title=[2] Books | link=https://xn--bcher-kva.example/page", "xn--bcher-kva.example")
+        self.assertEqual(card.error, "")
+        self.assertTrue(actions.idn_host(card.link))
+        view = card_view(card, TODAY)
+        # In the detail, above Open page (the note is drawn below Deny / Done).
+        self.assertEqual(view.note, "")
+        self.assertEqual(view.detail, "xn--bcher-kva.example \u00b7 web source \u00b7 opens in your browser \u00b7 "
+                                      + actions.IDN_WARNING)
+        self.assertEqual(view.kind_label, "web \u00b7 \u2026cher-kva.example")
+        warned = dataclasses.replace(card, warnings=(actions.IDN_WARNING, "other"))
+        self.assertEqual(card_view(warned, TODAY).detail.count(actions.IDN_WARNING), 1)   # said once
+        self.assertEqual(card_view(warned, TODAY).note, "other")
+        self.assertFalse(actions.idn_host("https://www.example.org/"))
+
+    def test_a_web_todo_shows_the_site_it_opens(self) -> None:
+        # Its link may be any public site (a source's page): the detail names the domain and the
+        # tool reads Open page, like a source's card.
+        line = "Todo: title=Buy tickets | due=2026-10-09 18:00 | block= | acct= | link=https://www.example.org/visit"
+        todo = dataclasses.replace(parse_action_line(line, link_hosts=("www.example.org",)), web=True)
+        self.assertEqual((actions.kind_label(todo), actions.open_text(todo)), (TODO, "Open page"))
+        view = card_view(todo, TODAY)
+        self.assertTrue(view.detail.endswith(" \u00b7 opens www.example.org"), view.detail)
+        plain = parse_action_line(line, link_hosts=("www.example.org",))
+        self.assertEqual(actions.open_text(plain), "Open")
+        self.assertNotIn("opens", card_view(plain, TODAY).detail)
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.CRITICAL)
     unittest.main()

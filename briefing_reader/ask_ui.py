@@ -30,6 +30,17 @@ gives the briefing as Ask may see it and the briefing cards' ids; ``blocked()`` 
 now (a Google sign-in is open). Nothing here logs the request, the planner's text, the context or an
 address: counts, kinds and durations only. One Ask at a time; a run that is cancelled or ends after
 shutdown proposes nothing.
+
+Web research: a request that starts with "web:" (or "research:") is a WEB task (live.TASK_WEB;
+``running_kind``) whose "Your request" says nothing is read from the accounts; the command still
+goes to planner.plan() as typed, which runs only the research (ask.research). A request the
+planner hands over to research stays in its ASK task. While the research runs the bar says
+"Searching the web... N s"; its outcome (AskOutcome.research) ends the task with the cards in the
+words every view uses (research_validate.cards_words: "2 source cards + 1 proposal"; CHECK when a
+source or a suggestion was left out), and the "Answer and cards" step lists the sources' cards as
+"ASK WEB - <site> - [n] <title>". Web research is part of Ask: it counts against the Ask caps and
+its own ([research] max_per_hour, max_per_day); after a research (or its limit) the meta line shows
+the web research runs left, and the research limit is its own kind (planner.RESEARCH_LIMIT).
 """
 
 from __future__ import annotations
@@ -45,9 +56,12 @@ from typing import Any
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 
 from . import hud
+from .actions import is_web_open, link_host
 from .ask import planner as ask_planner
 from .ask.context import COMMAND_CAP
-from .ask.stream import CANCELLED, LIMIT
+from .ask.research import forced_question
+from .ask.research_validate import NO_ANSWER, cards_words, source_card_ids
+from .ask.stream import CANCELLED, LIMIT, RESEARCH_CAP
 from .config import Config
 from .google_auth import PROBLEM_EXPIRED, PROBLEM_SCOPE, PROBLEM_SIGNED_OUT, logged_alias
 from .live import (
@@ -65,6 +79,7 @@ from .live import (
     STATUS_WARN,
     TASK_ASK,
     TASK_BACKGROUND,
+    TASK_WEB,
     LiveStep,
     LiveStream,
     LiveTask,
@@ -79,11 +94,18 @@ STAGE_TEXTS = {
     ask_planner.STAGE_PLANNING: "Planning...",
     ask_planner.STAGE_MAIL: "Searching your mail...",
     ask_planner.STAGE_PLANNING_AGAIN: "Planning with your mail...",
+    ask_planner.STAGE_RESEARCH: "Searching the web...",
 }
-_TIMED_STAGES = (ask_planner.STAGE_PLANNING, ask_planner.STAGE_PLANNING_AGAIN)
+_TIMED_STAGES = (ask_planner.STAGE_PLANNING, ask_planner.STAGE_PLANNING_AGAIN, ask_planner.STAGE_RESEARCH)
 RUNNING_META = f"uses your Claude plan {DOT} Esc cancels"
 IDLE_HINT = ("Type a request: Jarvis plans it with your calendar and today's briefing, and every "
              "proposal waits under NEEDS YOUR OK")
+# The field's tooltip adds this while web research is on ([research] enabled).
+WEB_HINT = ("Start with web: to look something up on the web: a separate search that gets only your words "
+            "and today's date, never your calendar, mail or briefing")
+WEB_MODE_TEXT = "web research (you started it with web:) - nothing is read from your accounts"
+WEB_BRIEFING_TEXT = "none - web research gets only your words and today's date"
+RESEARCH_LIMIT_META = "web research limit reached"   # the meta line while the research caps refuse
 CHECKING_TEXT = "Checking Claude Code..."
 STARTING_TEXT = "Starting..."
 CANCELLING_TEXT = "Cancelling..."
@@ -101,7 +123,8 @@ CHIP_STATUSES = {ask_planner.CHIP_OK: hud.STATUS_OK, ask_planner.CHIP_SIGN_IN: h
                  ask_planner.CHIP_ERR: hud.STATUS_ERROR}
 # What a mail reader's problem means for the bar: these are fixed by one more Google sign-in.
 _SIGN_IN_FIXES = (PROBLEM_SIGNED_OUT, PROBLEM_SCOPE, PROBLEM_EXPIRED)
-_SOFT_KINDS = (ask_planner.EMPTY, ask_planner.CAPS, "busy", CANCELLED)   # amber, not red
+_SOFT_KINDS = (ask_planner.EMPTY, ask_planner.CAPS, "busy", CANCELLED,   # amber, not red
+               ask_planner.RESEARCH_OFF, RESEARCH_CAP, ask_planner.RESEARCH_LIMIT)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -137,6 +160,7 @@ class _Running:
     cancel_requested: bool = False
     busy_sent: bool = False             # busyChanged(True) went out (on the first stage)
     task: LiveTask = NO_TASK            # the Ask's LIVE view task
+    kind: str = TASK_ASK                # TASK_WEB: a request that starts with "web:" (web research only)
 
 
 class _AskBridge(QObject):
@@ -304,6 +328,12 @@ class AskController(QObject):
         """The running Ask's LIVE view task id (0 when idle or without the LIVE view)."""
         return self._running.task.id if self._running is not None else 0
 
+    @property
+    def running_kind(self) -> str:
+        """The running request's LIVE task kind: live.TASK_WEB for "web:" (web research only),
+        live.TASK_ASK otherwise; "" when idle."""
+        return self._running.kind if self._running is not None else ""
+
     def stage(self) -> str:
         """The running Ask's planner.STAGE_* ("" when idle)."""
         return self._running.stage if self._running is not None else ""
@@ -335,8 +365,9 @@ class AskController(QObject):
         assert self._worker is not None
         briefing, page_ids = self._context()
         self._seq += 1
-        task = _request_task(self.live, text, briefing)
-        running = _Running(self._seq, threading.Event(), self._monotonic(), task=task)
+        kind = TASK_WEB if forced_question(text) is not None else TASK_ASK
+        task = _request_task(self.live, text, briefing, kind=kind)
+        running = _Running(self._seq, threading.Event(), self._monotonic(), task=task, kind=kind)
         self._running = running
         logger.info("Ask %d started", running.seq)
         self._worker.put(_PlanJob(running.seq, text, briefing, tuple(page_ids), running.cancel,
@@ -410,7 +441,7 @@ class AskController(QObject):
                 self._limit_message = outcome.message
             tone = hud.TONE_WARN if outcome.kind in _SOFT_KINDS else hud.TONE_ERROR
             self._status(outcome.message or "Ask failed; nothing was proposed", tone)
-        self._show_meta(outcome)
+        self._show_meta(outcome, web=running.kind == TASK_WEB)
         if running.busy_sent:
             self.busyChanged.emit(False)
         if outcome.ok:
@@ -442,8 +473,11 @@ class AskController(QObject):
     @staticmethod
     def _answer(outcome: Any) -> str:
         """The planner's words and Jarvis's own note as a sentence of its own (never in brackets).
-        With nothing to decide the note comes first: it says what to do (and survives a cut)."""
+        With nothing to decide the note comes first: it says what to do (and survives a cut). A web
+        research's answer keeps its [n] source marks (the JARVIS tab numbers the sources)."""
         parts = [part for part in (outcome.say, outcome.question) if part]
+        if not parts and getattr(outcome, "research", None) is not None:
+            parts.append(NO_ANSWER)
         if not parts and not outcome.cards:
             parts.append(NOTHING_TEXT + ("." if outcome.message else ""))
         note = (outcome.message or "").strip()
@@ -484,16 +518,29 @@ class AskController(QObject):
         elif self._limit_message:
             self.bar.set_status(self._limit_message, hud.TONE_WARN)
         else:
-            self.bar.set_hint(IDLE_HINT)
+            self.bar.set_hint(IDLE_HINT, tooltip=f"{IDLE_HINT}.\n{WEB_HINT}." if self._research_on() else "")
         self._show_meta()
+
+    def _research_on(self) -> bool:
+        """[research] enabled (web research needs Ask on too, which it is while this bar exists)."""
+        return bool(getattr(getattr(self.config, "research", None), "enabled", False))
 
     def _status(self, text: str, tone: str, *, keep_link: bool = False) -> None:
         self._answered = True
         self.bar.set_status(text, tone, keep_link=keep_link)
 
-    def _show_meta(self, outcome: Any = None) -> None:
+    def _show_meta(self, outcome: Any = None, *, web: bool = False) -> None:
+        """The bar's meta line: what the last answer put under ASK, how long it took and the runs
+        left this hour; after a web research (or a "web:" request, or the research limit) the web
+        research runs left, which the research caps can make fewer."""
         parts: list[str] = []
-        if outcome is not None and outcome.ok:
+        report = getattr(outcome, "research", None) if outcome is not None and outcome.ok else None
+        if report is not None:
+            # "2 source cards + 1 proposal under ASK": the sources' Open cards, then the suggestions.
+            proposals = research_proposals(outcome)
+            words = cards_words(len(report.sources), proposals)
+            parts.append(f"{words} under ASK" if report.sources or proposals else words)
+        elif outcome is not None and outcome.ok:
             cards = sum(1 for card in outcome.cards if not card.error)
             parts.append(f"{cards} proposal{'' if cards == 1 else 's'} under ASK" if cards else "no proposals")
             if outcome.refused:
@@ -502,7 +549,16 @@ class AskController(QObject):
             parts.append(f"{outcome.duration_ms / 1000:.1f} s")
         caps = self.caps
         if caps is not None:
-            parts.append(f"{caps.left_hour} run{'' if caps.left_hour == 1 else 's'} left this hour")
+            research_on = self._research_on()
+            web = web or report is not None or (outcome is not None
+                                                and outcome.kind == ask_planner.RESEARCH_LIMIT)
+            research_left = min(caps.left_hour, caps.left_research_hour, caps.left_research_day)
+            if research_on and web:
+                parts.append(f"{research_left} web research run{'' if research_left == 1 else 's'} left this hour")
+            else:
+                parts.append(f"{caps.left_hour} run{'' if caps.left_hour == 1 else 's'} left this hour")
+                if research_on and min(caps.left_research_hour, caps.left_research_day) <= 0:
+                    parts.append(RESEARCH_LIMIT_META)
         if not parts:
             parts.append("uses your Claude plan")
         self.bar.set_meta(f" {DOT} ".join(parts))
@@ -513,7 +569,8 @@ class AskController(QObject):
             return ask_planner.CHIP_OFF, "Ask Jarvis: checking Claude Code..."
         if self._limit_message and self.ready.ok:
             return ask_planner.CHIP_LIMIT, self._limit_message
-        state, tip = ask_planner.chip_state(self.config.ask.enabled, self.ready, self.caps)
+        state, tip = ask_planner.chip_state(self.config.ask.enabled, self.ready, self.caps,
+                                            research=self._research_on())
         return state, tip
 
     def _update_chip(self) -> None:
@@ -567,14 +624,24 @@ class AskController(QObject):
 # The LIVE view's first and last steps of an Ask (on screen only; quiet)
 # --------------------------------------------------------------------------
 
-# Refusals before or instead of a planner run: Jarvis's own checks or guards stopped the Ask.
+# Refusals before or instead of a planner run: Jarvis's own checks or guards stopped the Ask
+# (a web research too: off, a Claude Code without --allowedTools, or more searches than allowed).
 _BLOCKED_KINDS = frozenset({ask_planner.DISABLED, ask_planner.CAPS, ask_planner.CLI_MISSING, "not_signed_in",
                             ask_planner.NOT_SUBSCRIPTION, ask_planner.WORKDIR, "guard", LIMIT, "busy",
-                            ask_planner.EMPTY})
+                            ask_planner.EMPTY, ask_planner.RESEARCH_OFF, ask_planner.RESEARCH_UNSUPPORTED,
+                            RESEARCH_CAP, ask_planner.RESEARCH_LIMIT})
 
 
 def _plural(count: int, noun: str) -> str:
     return f"{count} {noun}" + ("" if count == 1 else "s")
+
+
+def research_proposals(outcome: Any) -> int:
+    """A web research's decidable suggestion cards (a Todo, a new event, an Open page it suggests):
+    never the Open cards of its sources (those are counted as sources)."""
+    report = getattr(outcome, "research", None)
+    sources = source_card_ids(report) if report is not None else frozenset()
+    return sum(1 for card in outcome.cards if not card.error and card.id not in sources)
 
 
 def _briefing_words(briefing: Any) -> str:
@@ -587,15 +654,19 @@ def _briefing_words(briefing: Any) -> str:
 
 
 @quiet(NO_TASK)
-def _request_task(live: LiveStream | None, text: str, briefing: Any) -> LiveTask:
-    """A new Ask's LIVE view task and its "Your request" step (NO_TASK without the LIVE view)."""
+def _request_task(live: LiveStream | None, text: str, briefing: Any, *, kind: str = TASK_ASK) -> LiveTask:
+    """A new Ask's LIVE view task and its "Your request" step (NO_TASK without the LIVE view).
+    ``kind`` TASK_WEB: a "web:" request (web research only: nothing is read from the accounts)."""
     if live is None:
         return NO_TASK
-    task = live.task(TASK_ASK, text)
+    task = live.task(kind, text)
     if task is NO_TASK:
         return NO_TASK
-    step = task.step(ASK_REQUEST, "Your request", fields=[("You typed", text),
-                                                          ("Briefing given", _briefing_words(briefing))])
+    if kind == TASK_WEB:
+        fields = [("You typed", text), ("Mode", WEB_MODE_TEXT), ("Briefing given", WEB_BRIEFING_TEXT)]
+    else:
+        fields = [("You typed", text), ("Briefing given", _briefing_words(briefing))]
+    step = task.step(ASK_REQUEST, "Your request", fields=fields)
     if len(text) > COMMAND_CAP:
         step.note(f"Jarvis uses the first {COMMAND_CAP} characters")
     step.done(STATUS_OK)
@@ -603,20 +674,30 @@ def _request_task(live: LiveStream | None, text: str, briefing: Any) -> LiveTask
 
 
 def _card_words(card: Any, hour24: bool = False) -> str:
-    """"ASK MOVE - work - Team sync (event abc123) - to Fri Oct 9 2:00-3:00 PM - notify all"."""
+    """"ASK MOVE - work - Team sync (event abc123) - to Fri Oct 9 2:00-3:00 PM - notify all"; a web
+    research source "ASK WEB - example.org - [1] Visit - Example Museum"."""
+    if is_web_open(card):
+        return " - ".join(part for part in ("ASK WEB", link_host(card.link), card.title or card.raw) if part)
     kind = {"rsvp": "RSVP"}.get(card.kind, card.kind.upper())
     return " - ".join([f"ASK {kind}", *ask_planner.card_details(card, hour24)])
 
 
 @quiet()
 def _cards_step(task: LiveTask, outcome: Any, hour24: bool = False) -> None:
-    """Right before the answer is handed over: what Jarvis says and the cards, as returned."""
+    """Right before the answer is handed over: what Jarvis says and the cards, as returned (a web
+    research: its answer, how many sources it showed and left out, and the sources' cards)."""
     if task is NO_TASK:
         return
     step = task.step(ASK_CARDS, "Answer and cards")
     for label, value in (("Jarvis says", outcome.say), ("Question", outcome.question), ("Note", outcome.message)):
         if value:
             step.field(label, value)
+    report = getattr(outcome, "research", None)
+    if report is not None:
+        left = f" ({len(report.left_out)} left out)" if report.left_out else ""
+        step.field("Sources", f"{len(report.sources)}{left}")
+        if report.dropped:
+            step.field("Suggestions left out", str(len(report.dropped)))
     for card in outcome.cards:
         if card.error:
             step.item(_card_words(card, hour24), status=STATUS_BLOCKED, note=f"information only: {card.error}")
@@ -628,7 +709,9 @@ def _cards_step(task: LiveTask, outcome: Any, hour24: bool = False) -> None:
             step.item(_card_words(card, hour24), status=STATUS_OK)
     step.field("Answer", "in the JARVIS tab", link="tab:jarvis")
     decidable = sum(1 for card in outcome.cards if not card.error)
-    if decidable:
+    if report is not None and decidable:
+        summary = f"{cards_words(len(report.sources), research_proposals(outcome))} under NEEDS YOUR OK"
+    elif decidable:
         summary = f"{_plural(decidable, 'card')} under NEEDS YOUR OK"
     elif outcome.question:
         summary = "a question back"
@@ -665,6 +748,17 @@ def _finish_words(outcome: Any, *, cancelled: bool) -> tuple[str, str]:
     has a recipient you didn't type - the header says so without opening a step."""
     if cancelled or outcome.kind == CANCELLED:
         return STATUS_CANCELLED, "Cancelled; nothing was proposed"
+    report = getattr(outcome, "research", None)
+    if outcome.ok and report is not None:
+        # A web research: "2 source cards + 1 proposal"; CHECK when a source or a suggestion was left out.
+        words = cards_words(len(report.sources), research_proposals(outcome))
+        problems = [part for part in (f"{_plural(len(report.left_out), 'source')} left out" if report.left_out else "",
+                                      f"{_plural(len(report.dropped), 'suggestion')} left out" if report.dropped
+                                      else "",
+                                      f"{outcome.refused} refused" if outcome.refused else "") if part]
+        if problems:
+            return STATUS_WARN, f"{words}, {', '.join(problems)}"
+        return STATUS_OK, words
     if outcome.ok:
         decidable = sum(1 for card in outcome.cards if not card.error)
         if decidable:

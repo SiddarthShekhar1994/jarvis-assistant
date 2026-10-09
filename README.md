@@ -779,6 +779,16 @@ card, newest at the bottom:
   didn't type is marked in amber); and the answer and cards. An Ask that ended
   with a refused or dropped proposal, or a recipient you didn't type, shows
   CHECK (amber) instead of DONE.
+- **A web research** (a WEB card for a `web:` request; inside the Ask's card
+  when the planner hands a request over): exactly what the research got and
+  what it did not get; the research run (its command line, the exact text sent,
+  the raw answer); each **web search** with its exact query and the pages it
+  listed, and each **page read** with its address, how it was found, the HTTP
+  status, size and what came back (open, under "Written by other people": an
+  excerpt, or all of it when it is short), each with its own timer, as they
+  happen; and the check of the answer (each source kept or left out, each
+  suggestion made into a card or left out, with the reason). See [Web
+  research](#web-research).
 - **A card you approved**: what you approved, **what will be sent or changed,
   exactly** (an email's From, To, Cc, subject and body as it will go out; an
   event's id, the change and who Google emails) during the undo countdown
@@ -802,8 +812,9 @@ show or hide its details; the steps that need a look (running, a warning, a
 refusal, what will be sent) open by themselves. The texts Jarvis read or sent
 are collapsed under "Show ..." links and, when opened, shown exactly, as plain
 text you can select and copy; text written by other people (email, the planner's
-input) is labelled so and is never followed or opened. The only links are the
-Google result links Jarvis made (they open like a card's Open).
+input, search results and web pages) is labelled so and is never followed or
+opened. The only links are the Google result links Jarvis made (they open like
+a card's Open); a web address in a research step is plain text.
 
 When Jarvis starts on an Ask or on a card you approved, LIVE comes up by itself
 (`[live] auto_open = "tab"`, the default); not while the briefing plays (the
@@ -828,9 +839,10 @@ changes.
 
 LIVE is on screen only: it is never saved, never logged, and gone when Jarvis
 closes. `[live] text = false` keeps only the sizes of the long texts (email
-threads, the planner's input and reply, the outgoing message, and the message
-text in the planner's proposal lines); subjects, names, addresses, event titles
-and Jarvis's answer still show. `[live] enabled = false` removes the tab and
+threads, the planner's input and reply, the outgoing message, the message
+text in the planner's proposal lines, and what a web search or page read
+returned); subjects, names, addresses, event titles and Jarvis's answer still
+show. `[live] enabled = false` removes the tab and
 records nothing.
 
 ## TODAY and DEADLINES
@@ -1076,7 +1088,10 @@ What they do:
   link_hosts`. Any other link, and any link whose path has a `.` or `..` part
   (a browser would open another page), is not shown (the card says "Link
   hidden: ..."). The link is checked again when you click, and a second click
-  within a second opens nothing more.
+  within a second opens nothing more. Web research cards (**Open page**: a
+  source's card, ASK · WEB, or a research to-do) follow the web rule instead:
+  any public https site, never a local or private address; see [Web
+  research](#web-research).
 - **Copy** puts the drafted text, with its line breaks, on the Windows
   clipboard (the link reads "Copied" for a moment). Paste it into Gmail or
   Slack, check it and send it yourself. If Windows clipboard history (Win+V) is
@@ -1443,7 +1458,8 @@ briefing; with the app already open, the same command brings it forward there.
 - Type your request and press **Enter** (or click **Ask**). Once Jarvis has
   checked that Claude Code is ready and no limit is reached, the briefing pauses,
   the orb reads PLANNING and the line under the bar says what Jarvis is doing:
-  "Reading your calendar...", "Planning... 6 s", "Searching your mail...". A
+  "Reading your calendar...", "Planning... 6 s", "Searching your mail...",
+  "Searching the web... 12 s" (see [Web research](#web-research)). A
   request that can't run (not signed in, a limit) only says why: the briefing
   keeps playing. **Esc** or **Cancel** stops it within a second, and nothing is
   proposed. One request runs at a time. Space in the bar types a space;
@@ -1555,6 +1571,92 @@ cards, and at most 8 cards come from one request (`[ask] max_cards`).
 seconds (`timeout_seconds`), or a Claude Code version Ask does not know: the
 message says so, nothing is proposed, and Jarvis never retries by itself or
 falls back to anything else.
+
+### Web research
+
+Ask Jarvis can look things up on the web: opening hours, a fact, the latest on
+something. Start a request with `web:` (or `research:`), for example
+`web: when does the Example Museum open on Saturday`, or just ask: when the
+planner sees that a request needs the web, it hands the question to web
+research instead of proposing cards. It needs Ask on and `[research] enabled =
+true` (the default; `JARVIS_RESEARCH_ENABLED=false` in `.env` turns it off).
+
+**The isolation rule.** Web research is a separate run of your Claude Code
+whose only tools are web search and web fetch. It gets your words and today's
+date, time and time zone, and nothing else: never your calendar, mail,
+contacts, briefing, accounts, addresses, or how Jarvis addresses you. It cannot
+send, change, book, buy or sign in to anything, and it never shares a run with
+the planner that sees your calendar and mail. When the planner hands a request
+over, Jarvis sends your own words; the planner's shorter wording goes along
+only if every word in it is one you typed (exactly, or with a plain ending such
+as -s, -ed or -ing), a weekday or month, a plain word such as "opening" or
+"hours", or a number you typed (besides at most two: a year, or a day next to
+a weekday or month), so nothing from your calendar or mail can slip into a web
+search. With `web:` Jarvis reads nothing from your accounts at all: the time
+zone is the one Jarvis already knows from your calendar, or this PC's, never a
+new request to Google. What the research finds never goes back to the planner:
+its cards are never part of a later request's input.
+
+**What you get.** Jarvis says a short answer, and the JARVIS tab shows it with
+numbered sources ("[1] Visit - Example Museum (example.org)"). Each source is
+an Open card under ASK labelled with its site ("ASK · WEB · EXAMPLE.ORG"; a
+long address shows its end, which names the site, as "ASK · WEB ·
+...EXAMPLE.NET", and the card's detail shows the whole address); the page opens
+in your browser only when you click **Open page** on that card, and only if it
+is an https page the research actually found or read (when Jarvis could not
+read the search results, the card says it couldn't check the page), never
+localhost, an IP address, a local-network name or a public name known to lead
+to one (such as `*.nip.io` or a router's setup page). Jarvis checks the
+address as written, not where it leads. The research may also suggest a to-do
+(its page, if any, must be one of the sources, and the card names the site) or
+a new calendar event for you alone (no guests, no repeat, no link or phone
+number; only the title, time and place it shows go into your calendar):
+ordinary cards with Add block or Approve and the undo countdown. Anything else
+it writes (an email, a reply, a move) is left out, and the LIVE tab says why.
+
+**Watching it.** The LIVE tab shows every step as it happens: the exact text
+Claude Code got, each web search with its exact query and results, each page
+read with its address, HTTP status, size and what came back, how long each
+took, and how Jarvis checked the answer.
+
+**Limits.** At most 4 searches and 4 page reads per request (`[research]
+max_searches`, `max_fetches`): Jarvis stops a run that wants more (that step
+may already have started) and proposes nothing. At most 6 research runs an hour
+and 20 a day (`max_per_hour`, `max_per_day`); each also counts as an Ask planner
+run, so a request the planner hands over is two runs. After a research the bar
+shows the web research runs left this hour (and the `claude` chip's tooltip
+too); once the research limit is reached, `web:` says so and the planner is not
+offered the web until then. A run may take 120
+seconds (`timeout_seconds`). Every run gets the same checks as Ask: a claude.ai
+plan sign-in checked right before it, an environment without any API key, and
+an immediate stop if Claude Code says it would use extra usage.
+
+**What is sent where.**
+
+- To Anthropic, on your Claude plan: your words, the date and time zone, the
+  searches Claude makes and what the pages it reads say (Claude Code's web
+  fetch has a small model read each page for your question).
+- To Anthropic's web search: the queries Claude writes for your question. One
+  search step may run a few related searches; LIVE says how many result groups
+  came back.
+- To each website Claude reads: an ordinary request from your PC, so the site
+  sees your IP address as with any visit. Claude Code may first check the site
+  with Anthropic.
+- Never: your calendar, mail, contacts, briefing, accounts or addresses, or
+  anything from Jarvis's `.env`.
+
+Because the research gets only your words, name what to look up: "look up the
+place of my dinner with Ana" sends exactly those words, and the research cannot
+know which dinner you mean.
+
+**A gray zone.** Driving your own Claude Code from your own app, when you ask,
+is the same personal use as Ask. Automated web searching and page reading on a
+consumer plan, and automated visits to websites, may still be restricted by
+Anthropic's terms or a website's own terms. Jarvis keeps it small and in your
+hands: one run per request you type, low caps, never on a schedule or in the
+background, every step visible in LIVE. If you are unsure, set `[research]
+enabled = false`; `web:` then says web research is off and the planner never
+hands anything over.
 
 ## "Proposed actions" format
 
@@ -1883,9 +1985,9 @@ py -3.13 -m briefing_reader [--run {am,pm} | --catch-up | --hotkey-agent | --ask
 | `--catch-up` | What the catch-up task runs at logon and unlock: if a scheduled briefing passed in the last 3 hours, was not announced, viewed or answered, and the app is not open, behave exactly like `--run` for that run; otherwise exit at once (see [Catch-up and the hotkey](#catch-up-and-the-hotkey)). |
 | `--hotkey-agent` | What the hotkey task runs at logon: listen for the `[hotkey]` combination until logoff. |
 | `--ask` | [Ask Jarvis](#ask-jarvis-optional) in the app: like `--open`, the assistant screen with the command bar ready to type, without playing the briefing or counting it as heard (Play does both). With the app already open, it comes forward there. Needs `[ask] enabled = true`; otherwise the screen says Ask is off. |
-| `--ask-check` | [Ask Jarvis](#ask-jarvis-optional): print whether Ask is ready (Claude Code found, its version and flags, a claude.ai plan sign-in, the work folder, mail reading per account, usage). Runs only `claude --version`, `--help` and `auth status`: no Claude request. Exit code 0 when ready. |
-| `--ask-text TEXT` | Ask Jarvis once from the command line, without a window: prints what the planner said, the proposals and how Claude Code started. One request on your Claude plan (two when it reads mail). With `--from-file`, the briefing comes from that fixture. |
-| `--ask-dry-run` | With `--ask-text`: print the exact text Jarvis would send to Claude Code (email text as character counts) and the command line, and stop. No Claude request, nothing counted. |
+| `--ask-check` | [Ask Jarvis](#ask-jarvis-optional): print whether Ask is ready (Claude Code found, its version and flags, a claude.ai plan sign-in, the work folder, mail reading per account, usage), then whether [web research](#web-research) is ready (`Web research ready: yes`; it never changes `Ready:` or the exit code). Runs only `claude --version`, `--help` and `auth status`: no Claude request. Exit code 0 when ready. |
+| `--ask-text TEXT` | Ask Jarvis once from the command line, without a window: prints what the planner said, the proposals and how Claude Code started. One request on your Claude plan (two when it reads mail or hands the request to web research). Starting the text with `web:` runs web research only (one run; nothing is read from your accounts). With `--from-file`, the briefing comes from that fixture. |
+| `--ask-dry-run` | With `--ask-text`: print the exact text Jarvis would send to Claude Code (email text as character counts) and the command line, and stop. With `web:`: the exact text the web research would get and its command line. No Claude request, nothing counted. |
 | `--slots am=10:12,pm=23:42` | The scheduled times (24-hour), which tell the app which briefing an answer belongs to. The tasks pass them; without it (or for a run it leaves out) `[schedule]` in `config.toml` applies. A value that cannot be read is logged and ignored. |
 | `--open` | Open Jarvis: the assistant screen in front, on its JARVIS tab, with a greeting (and "Your AM briefing is ready to view." when one is waiting); the briefing waits in its BRIEFING tab and nothing is read until you press Play. The same as starting without options. A running app comes forward. What the Start menu shortcut and the hotkey use. |
 | `--now` | Older name of `--open`, kept so existing shortcuts keep working; it no longer starts reading. |
@@ -1918,8 +2020,10 @@ There is no default page; when the id is missing or cannot be read, the app
 shows "Notion page ID missing." and fetches nothing. Optional:
 `JARVIS_CLAUDE_EXE`, the `claude.exe` [Ask Jarvis](#ask-jarvis-optional) runs when
 it is not found by itself (the path holds your Windows user name, so it never
-goes into `config.toml`). Variables already set in the environment win over
-`.env`.
+goes into `config.toml`); `JARVIS_ASK_ENABLED` and `JARVIS_RESEARCH_ENABLED`
+(`true` or `false`) turn Ask and [web research](#web-research) on or off for this
+PC, whatever `[ask] enabled` and `[research] enabled` say. Variables already set
+in the environment win over `.env`.
 
 **`google_client_secret.json`** (next to this README, optional): the Google OAuth
 client for calendar actions (setup step 8).
@@ -1950,7 +2054,7 @@ log. Changes apply the next time the app starts.
 | `[calendar] client_secret` | `"google_client_secret.json"` | The OAuth client file from step 8 (also used for sending email): a path relative to the project folder, or an absolute path. |
 | `[calendar] calendar_id` | `"primary"` | The calendar new events go to. `"primary"` is your main calendar; another calendar's id is in Google Calendar under that calendar's Settings > Integrate calendar. |
 | `[actions] heading` | `"Proposed actions"` | The heading the proposals are under: one name, or a list such as `["Proposed actions", "Actions"]`. Matching ignores case and a trailing count. |
-| `[actions] link_hosts` | `[]` | Extra web hosts a card's **Open** may open, besides the built-in Google (mail, docs, drive, calendar, meet), Slack (`*.slack.com`) and Canvas (`*.instructure.com`) hosts: an exact name such as `"forms.example.edu"`, or `"*.example.edu"` for every subdomain. https only; an entry that is not a host name is skipped with a warning. |
+| `[actions] link_hosts` | `[]` | Extra web hosts a card's **Open** may open, besides the built-in Google (mail, docs, drive, calendar, meet), Slack (`*.slack.com`) and Canvas (`*.instructure.com`) hosts: an exact name such as `"forms.example.edu"`, or `"*.example.edu"` for every subdomain. https only; an entry that is not a host name is skipped with a warning. Web research cards do not use this list: they follow the web rule (any public https site; see [Web research](#web-research)). |
 | `[actions] undo_seconds` | `10` | Seconds between a click on Approve / Add block / Accept / Decline / Maybe / Move / Cancel event / Send and the call to Google (3-60). Undo works until then and sends nothing. |
 | `[actions] trusted_domains` | `[]` | Email recipient domains that never get the red NEW RECIPIENT badge, such as `["example.edu"]` (its subdomains count too; a leading `@` is dropped). Any other address must be the account's own or one Jarvis sent to before, or Send asks you to confirm it in Edit first (see [Replies and emails](#replies-and-emails)). |
 | `[accounts.<name>]` | `personal` and `work` | The Google accounts Jarvis may act for, one table each; the name is what the briefing writes as `acct=` (lowercase letters, digits, `-`, `_`). Without any `[accounts]` table only `personal` exists. Which Google account a name is never goes here: you pick it in Google's sign-in, and its first sign-in binds the name to it in `accounts.json` (setup step 8). Calendar proposals, to-do blocks and TODAY always use `personal`. |
@@ -1976,6 +2080,15 @@ log. Changes apply the next time the app starts.
 | `[ask] max_cards` | `8` | Proposals from one request (1-8); more are left out, and the status line says how many. |
 | `[ask] hardened_flags` | `true` | Run Claude Code with `--safe-mode --restricted` when it has them. |
 | `[ask] read_mail` | `true` | `false`: Ask never reads mail, whatever the accounts' features say. |
+| `[research] enabled` | `true` | [Web research](#web-research) (part of Ask: it needs `[ask] enabled = true`): `web:` requests and the planner handing a request over. `false`: `web:` says web research is off and the planner never hands anything over. `JARVIS_RESEARCH_ENABLED` in `.env` overrides it both ways. |
+| `[research] planner_may_ask` | `true` | The Ask planner may hand a request to web research; `false`: only `web:` starts it. |
+| `[research] model` | `"sonnet"` | The model the research runs with; `"haiku"` uses less of your plan. A name that starts with `-` or has spaces is refused. |
+| `[research] timeout_seconds` | `120` | One research run may take this long (30-300); then it is stopped and nothing is proposed. |
+| `[research] max_searches` | `4` | Web searches one research run may make (1-8); Jarvis stops a run that wants more. |
+| `[research] max_fetches` | `4` | Pages one research run may read (0-8; `0`: search only, WebFetch is not offered); Jarvis stops a run that wants more. |
+| `[research] max_per_hour` | `6` | Research runs per hour (1-30); each also counts as an Ask planner run. |
+| `[research] max_per_day` | `20` | Research runs per 24 hours (1-100). |
+| `[research] max_sources` | `5` | Sources that become Open cards (1-6); more are left out, and the JARVIS tab says so. |
 | `[assistant] speak` | `true` | Jarvis speaks on his own: the greeting, "Your AM briefing is ready to view", his Ask answers and what happened after you approved a card, in the `[voice]` voice. `false`: he never speaks on his own (his words are shown in the JARVIS tab; the briefing still plays when you press Play). |
 | `[assistant] address` | `"sir"` | How Jarvis addresses you ("Good morning, sir."; "boss" gives "Good morning, boss."). A letter, then letters, spaces, `.` `'` `-` (at most 20 characters); `""` for no form of address ("Good morning."). |
 | `[assistant] greet` | `true` | A short, random greeting for the time of day each time you open Jarvis (Start menu, hotkey, `--open`; not when you restore the window). |
@@ -2113,6 +2226,10 @@ sign-in method, how long each planner run took, its turns and token counts,
 the outcome (ok, timeout, limit, ...), the size of the context and how many
 cards of each kind it gave; never your request, the context, what the planner
 said, a search, email text, a subject or an address.
+Web research logs how long each run took, its turns, token counts and how many
+searches and page reads it made, how many sources and cards it gave and the
+outcome; never your question, a search query, a web address or site name, page
+text or the answer.
 Jarvis's own words are never logged either: the log says how a launch was
 asked for (`launch=open`, `read` or `scheduled`), the greeting's id (such as
 "Greeting m3"), which briefing was announced (spoken, text only, or held while
@@ -2134,8 +2251,9 @@ Other files in `%LOCALAPPDATA%\briefing-reader`:
 | `google_token_personal.json`, `google_token_work.json` | The Google sign-in of each account (access and refresh token, the permissions Google granted, and which Google account it was issued for). Private: never share them. Delete one to sign that account out on this PC. Older versions kept a single `google_token.json`; it becomes `google_token_personal.json` at the first start. |
 | `accounts.json` | Which Google account each account name is (its address and Google's account id), written by the first sign-in that says so, and whether you confirmed it ("confirmed", after "Signed in as ... - is that right?"; nothing is sent or changed for a name until then). **No, use another account** removes the entry; or delete an entry, or the file, to bind a name to another Google account (setup step 8, "Disconnecting"). A name with a saved sign-in but no entry Jarvis can read (deleted, or the file is not valid JSON) sends and changes nothing until it signs in again. |
 | `recipients.json` | The addresses Jarvis sent replies and emails to, as one-way hashes (never the addresses), with the time; at most 5000. An address in it needs no NEW RECIPIENT confirmation. Delete it to confirm every address again. |
-| `ask_usage.json` | Ask Jarvis's planner runs of the last two days, for the hourly and daily caps (shared by every Jarvis process): a random id per run, when it started, how long it took, its turns and token counts and the outcome; and, after Claude Code reported extra usage, until when Ask is paused (`hold_until`). Never a request or anything the planner wrote. Delete it to reset the counts and the pause (`ask_usage.json.lock` next to it only takes turns between processes). |
+| `ask_usage.json` | Ask Jarvis's planner runs of the last two days, for the hourly and daily caps (shared by every Jarvis process): a random id per run, when it started, how long it took, its turns and token counts and the outcome (web research runs carry `"kind": "research"` and count against both the Ask caps and the research caps); and, after Claude Code reported extra usage, until when Ask is paused (`hold_until`). Never a request or anything the planner wrote. Delete it to reset the counts and the pause (`ask_usage.json.lock` next to it only takes turns between processes). |
 | `ask\` | The empty folder Claude Code runs in for Ask. Ask refuses to run while anything is in it (a `CLAUDE.md` or `.mcp.json` there would add instructions or tools). |
+| `research\` | The empty folder Claude Code runs in for web research; research refuses to run while anything is in it. |
 | `runstate.json` | Per scheduled briefing: when it was first shown, when it was announced (`announced_at`) and first viewed (`viewed_at`), and when and how a classic prompt was answered (read, dismissed, done), kept for 14 days. The catch-up task uses it, and it keeps a briefing from being announced twice; see [Catch-up and the hotkey](#catch-up-and-the-hotkey). Safe to delete (a briefing may then be announced once more). |
 | `assistant.json` | Whether Jarvis's voice is muted, the ids of the last 5 greetings (so the next one differs), whether the briefings an older version read through its prompt were taken as viewed (done once, at the first start after the update, so they are not announced again), and, once you used it, where the LIVE pop-out window was and whether it was open. Never any text. Safe to delete. |
 
@@ -2185,7 +2303,10 @@ The app talks to these services, all free:
   or Jarvis's own `.env` values; Jarvis checks before every run that it is
   signed in to a claude.ai subscription and stops a run that Claude Code says
   would use extra usage), and nothing is saved by Claude Code
-  (`--no-session-persistence`).
+  (`--no-session-persistence`);
+- only with web research on: the services of "What is sent where" under [Web
+  research](#web-research): Anthropic (on your plan) and its web search get your
+  words and the date; the websites Claude reads get a request from your PC.
 
 **Reading your calendar.** Once Google Calendar is connected on this PC, every
 time the reading screen opens the app reads your calendar events from the start
@@ -2219,8 +2340,10 @@ is why Ask is off by default and every user installs and signs in to Claude Code
 themselves.
 
 The LIVE tab shows on your screen what Jarvis read and sent - email text, the
-exact input he gave the planner, the message he will send - and keeps none of
-it: nothing is saved, logged or sent anywhere, and it is gone when he closes.
+exact input he gave the planner, the message he will send and, for web
+research, the queries, the pages' addresses and what came back - and keeps
+none of it: nothing is saved, logged or sent anywhere, and it is gone when he
+closes.
 `[live] text = false` shows only the sizes of those texts (subjects, names and
 addresses still show).
 
@@ -2265,7 +2388,10 @@ calendars and Gmail are fakes, and the subprocess tests start a few lines of
 Python standing in for the CLI. The command bar, Ask controller and card-source
 tests run the app's window offscreen with those fakes, and so do the LIVE view's
 tests (the stream, the LIVE tab, the pop-out, auto-open and a burst of steps
-that must never stall the window).
+that must never stall the window). Web research's tests play invented research
+runs the same way (`tests\fixtures\ask\research_*.jsonl`: searches, page reads
+and answers on example.org, example.net and example.com only); nothing reaches
+the web.
 
 The hotkey tests register Ctrl+Alt+Shift+F24 (a key no keyboard has) for a
 moment with a private agent lock, simulate a press without pressing anything,
@@ -2309,6 +2435,20 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
 - **Ask can't read mail for an account**: `--ask-check` says why: the account has
   no `"gmail_read"` feature, needs one more Google sign-in, or the box "Read your
   email" was unticked (step 8c).
+- **Web research says "Claude Code refused its web tools"** (its LIVE steps
+  read DENIED): check that `--ask-check` ends with "Web research ready: yes",
+  that `claude --help` lists `--allowedTools`, and that no managed policy on
+  this PC denies WebSearch or WebFetch. Jarvis never widens the tools; it shows
+  what came back and proposes nothing more.
+- **Web research is not offered** (`web:` says it is off, or the planner
+  answers from your calendar instead of looking it up): check `[research]
+  enabled` (and `JARVIS_RESEARCH_ENABLED` in `.env`), `planner_may_ask`, the
+  research caps (`max_per_hour`, `max_per_day`; the bar's meta line says "web
+  research limit reached", and LIVE's checks show the runs left), and that
+  `%LOCALAPPDATA%\briefing-reader\research` is empty.
+- **Web research: "Jarvis stopped the web research: it wanted a fifth web
+  search ..."**: the question needed more searches or page reads than
+  `[research] max_searches` / `max_fetches` allow; ask a narrower question.
 - **"Notion rejected the token (401)"**: the secret in `.env` is wrong or was
   regenerated. Copy it again from the integration page into `NOTION_TOKEN=`.
 - **"...not found or is not shared with the integration (404)"**: share the page
@@ -2587,17 +2727,19 @@ briefing_reader/recipients.py never to the sending account itself (any spelling)
 briefing_reader/executor.py   carrying out an approved proposal per account ("running" first), the cards' check lines
 briefing_reader/ask/          Ask Jarvis (no Qt): Claude Code checks and runs (cli), its output (stream), the planner's
                               input (context), email text and searches (mail), cards with provenance checks (validate),
-                              the caps (usage), one request end to end (planner), --ask-check / --ask-text (commands);
-                              ask/assets: the planner's instructions, answer format and settings
+                              the caps (usage), one request end to end (planner), --ask-check / --ask-text (commands),
+                              web research: its run and isolation (research), its answer's check (research_validate)
+                              and its LIVE steps (research_live); ask/assets: the planner's and the research's
+                              instructions, answer formats and settings
 briefing_reader/live.py       the LIVE view's event stream (no Qt): every step Jarvis takes, in memory only, bounded
 briefing_reader/tts.py        edge-tts synthesis, Windows SAPI fallback, highlight timing, background worker
 briefing_reader/player.py     QtMultimedia player that plays sections in order with pauses
 briefing_reader/hud.py        Jarvis HUD widget kit: colours, fonts, chamfered panels, orb, buttons, cards, agenda, command bar, tabs, conversation, the LIVE log
 briefing_reader/ui.py         assistant screen (JARVIS / BRIEFING / LIVE tabs), the LIVE pop-out window, classic prompt, tray icon, approvals, TODAY / DEADLINES, app controller (launch kinds, NEW, greeting, announcement)
-briefing_reader/ask_ui.py     Ask Jarvis in the app: the command bar's controller and its "ask" thread
+briefing_reader/ask_ui.py     Ask Jarvis in the app: the command bar's controller and its "ask" thread (web: requests too)
 fonts/                        Chakra Petch, Sora and JetBrains Mono fonts with their OFL licences
 tests/                        unit tests and saved fake Notion pages (tests/fixtures)
-config.toml                   voice, prompt, polling, section, calendar, actions, schedule, hotkey, agenda, display, Ask, assistant and LIVE settings
+config.toml                   voice, prompt, polling, section, calendar, actions, schedule, hotkey, agenda, display, Ask, web research, assistant and LIVE settings
 .env.example                  template for .env (NOTION_TOKEN, BRIEFING_PAGE_ID)
 requirements.txt              Python dependencies
 install-schedule.ps1          registers the Briefing AM / PM / catch-up / hotkey scheduled tasks

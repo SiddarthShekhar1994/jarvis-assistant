@@ -349,6 +349,150 @@ class ProgressTests(Engine):
         self.assertNotIn('"say"', repr(captured))   # the raw reply is never in a repr (logs)
 
 
+class RunCliTests(Engine):
+    """run_cli: the generic loop run_planner and web research share (its hooks, RunStop, answer)."""
+
+    FIXTURES = ("success", "search", "api_key", "auth_error", "bash_tool", "fallback_json", "fallback_lines",
+                "garbage", "limit", "max_turns", "mcp", "no_structured_with_tool", "overage", "schema_retries",
+                "tool_use", "truncated")
+
+    def cli_with(self, lines: list[str], **kwargs: object) -> st.RunResult:
+        self.runner = FakeRunner(lines, clock=self.clock)
+        return st.run_cli(self.runner, ARGV, "the prompt", env={"PATH": "x"}, cwd=Path("."), timeout_s=90.0,
+                          clock=self.clock, now=lambda: NOW, **kwargs)  # type: ignore[arg-type]
+
+    def test_run_cli_is_run_planner_on_every_fixture(self) -> None:
+        for name in self.FIXTURES:
+            for allow_search in (False, True):
+                with self.subTest(name=name, allow_search=allow_search):
+                    self.clock = FakeClock()
+                    planner = self.run_with(stream(name), allow_search=allow_search)
+                    self.clock = FakeClock()
+                    generic = self.cli_with(stream(name), read=lambda event, init, a=allow_search: st.read_result(
+                        event, init, allow_search=a, now=lambda: NOW))
+                    self.assertEqual(generic, planner)
+                    self.assertIsNone(generic.answer)
+
+    def test_a_value_that_is_not_a_plan_is_the_answer(self) -> None:
+        heard: list[object] = []
+
+        def read(event, init):  # type: ignore[no-untyped-def]
+            heard.append((event.get("type"), init.model))
+            return {"answer": event["structured_output"]["say"]}
+
+        result = self.cli_with(stream("success"), read=read)
+        self.assertIsNone(result.failure)
+        self.assertIsNone(result.plan)
+        self.assertEqual(result.answer, {"answer": "Right. I've lined up moving Project sync to Friday at two, "
+                                                   "and a short note to Ana."})
+        self.assertEqual(heard, [("result", "claude-sonnet-4-5-20250929")])
+        self.assertNotIn("Project sync", repr(result))   # the answer is never in a repr (logs)
+        failed = self.cli_with(stream("success"), read=lambda event, init: st.failure(GARBLED, "shape"))
+        self.assertEqual((failed.failure.kind, failed.answer), (GARBLED, None))
+
+    def test_run_stop_from_an_event_check_kills_the_process(self) -> None:
+        stop = st.failure(st.RESEARCH_CAP, "searches", "Jarvis stopped it")
+
+        def event_check(event):  # type: ignore[no-untyped-def]
+            if event.get("type") == "assistant":
+                raise st.RunStop(stop)
+
+        heard: list[tuple[str, object]] = []
+        result = self.cli_with(stream("success"), read=lambda event, init: self.fail("no result is read"),
+                               event_check=event_check, progress=lambda what, value: heard.append((what, value)))
+        self.assertEqual(result.failure, stop)
+        self.assertTrue(self.process().killed)
+        self.assertTrue(self.process().closed)
+        self.assertEqual(heard[-1], ("stopped", stop))
+        self.assertEqual(result.outcome, "research_cap")
+
+    def test_run_stop_and_guard_trip_from_the_init_check(self) -> None:
+        stop = st.failure(GUARD, "no_web_search", "no search tool")
+
+        def init_check(event):  # type: ignore[no-untyped-def]
+            raise st.RunStop(stop)
+
+        result = self.cli_with(stream("success"), read=lambda event, init: None, init_check=init_check)
+        self.assertEqual((result.failure, result.init), (stop, None))
+        self.assertTrue(self.process().killed)
+
+        def tripping(event):  # type: ignore[no-untyped-def]
+            raise GuardTrip("tools")
+
+        result = self.cli_with(stream("success"), read=lambda event, init: None, init_check=tripping)
+        self.assertEqual((result.failure.kind, result.failure.detail), (GUARD, "tools"))
+        self.assertEqual(result.failure.message, st.MESSAGES[GUARD])
+
+    def test_a_custom_init_check_lets_other_tools_through(self) -> None:
+        lines = stream("success")
+        init = json.loads(lines[0])
+        init["tools"] = ["StructuredOutput", "WebSearch"]
+        lines[0] = json.dumps(init)
+
+        def lenient(event):  # type: ignore[no-untyped-def]
+            return st.InitSummary("none", tuple(event["tools"]), 0, "m", "v", True)
+
+        result = self.cli_with(lines, read=lambda event, init: "answer", init_check=lenient)
+        self.assertEqual((result.failure, result.answer, result.init.tools),
+                         (None, "answer", ("StructuredOutput", "WebSearch")))
+        self.assertEqual(self.cli_with(lines, read=lambda event, init: "answer").failure.detail, "tools")
+
+
+class WebRequestTests(Engine):
+    WEB = {"say": "Let me look that up.", "question": "", "lines": [],
+           "web_research": {"question": "museum opening hours\nsaturday", "why": "opening\u2028hours"}}
+
+    def test_web_research_only_when_allowed(self) -> None:
+        allowed = self.cli_with_web(self.WEB, allow_web=True)
+        self.assertEqual(allowed.plan.web, st.WebRequest("museum opening hours saturday", "opening hours"))
+        self.assertEqual(allowed.plan.lines, ())
+        self.assertIsNone(self.cli_with_web(self.WEB, allow_web=False).plan.web)   # ignored, like gmail_search
+        self.assertIsNone(self.run_with(plan_stream(self.WEB)).plan.web)           # run_planner's default
+
+    def cli_with_web(self, plan: dict, *, allow_web: bool) -> st.RunResult:
+        self.runner = FakeRunner(plan_stream(plan), clock=self.clock)
+        return run_planner(self.runner, ARGV, "p", env={}, cwd=Path("."), timeout_s=90, allow_search=False,
+                           allow_web=allow_web, clock=self.clock, now=lambda: NOW)
+
+    def test_bad_web_research_shapes_are_garbled(self) -> None:
+        for bad in ("museum", ["museum"], {"why": "x"},
+                    {"question": 3, "why": "x"}, {"question": "q", "why": 3}, {"question": "q" * 201, "why": ""},
+                    {"question": "q", "why": "w" * 201}):
+            with self.subTest(bad=str(bad)[:30]):
+                plan = dict(self.WEB, web_research=bad)
+                self.assertEqual(self.cli_with_web(plan, allow_web=True).failure.kind, GARBLED)
+                self.assertIsNone(self.cli_with_web(plan, allow_web=False).failure)
+        missing_why = dict(self.WEB, web_research={"question": "museum hours"})
+        self.assertEqual(self.cli_with_web(missing_why, allow_web=True).plan.web, st.WebRequest("museum hours", ""))
+        null = dict(self.WEB, web_research=None)
+        self.assertIsNone(self.cli_with_web(null, allow_web=True).plan.web)
+
+    def test_an_empty_web_question_is_no_request_and_keeps_the_lines(self) -> None:
+        # The schema allows "" (no minLength): an ordinary Ask must not turn GARBLED over it.
+        for empty in ({"question": "", "why": "x"}, {"question": "  \n ", "why": ""}, {"question": "", "why": ""}):
+            with self.subTest(empty=empty):
+                plan = {"say": "Lined up.", "question": "", "lines": ["Todo: title=Call Ana | due=2026-10-10"],
+                        "web_research": empty}
+                result = self.cli_with_web(plan, allow_web=True)
+                self.assertIsNone(result.failure)
+                self.assertIsNone(result.plan.web)
+                self.assertEqual(result.plan.lines, ("Todo: title=Call Ana | due=2026-10-10",))
+
+    def test_both_requests_are_read(self) -> None:
+        both = dict(self.WEB, gmail_search={"account": "work", "query": "from:ana", "why": "x"})
+        self.runner = FakeRunner(plan_stream(both), clock=self.clock)
+        result = run_planner(self.runner, ARGV, "p", env={}, cwd=Path("."), timeout_s=90, allow_search=True,
+                             allow_web=True, clock=self.clock, now=lambda: NOW)
+        self.assertIsNotNone(result.plan.search)
+        self.assertIsNotNone(result.plan.web)   # the planner decides what to do with both
+
+    def test_the_init_says_its_permission_mode(self) -> None:
+        self.assertEqual(check_init(init_event()).permission_mode, "dontAsk")
+        self.assertEqual(check_init(init_event(permissionMode="bad mode!")).permission_mode, "other")
+        no_mode = {key: value for key, value in init_event().items() if key != "permissionMode"}
+        self.assertEqual(check_init(no_mode).permission_mode, "")
+
+
 class MessagesTests(unittest.TestCase):
     def test_every_kind_has_plain_words(self) -> None:
         for kind in st.FAILURE_KINDS:

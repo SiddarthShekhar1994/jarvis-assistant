@@ -6617,11 +6617,12 @@ class CommandBar(QWidget):
         self._hint = False
         self._show_status(text, tone, keep_link)
 
-    def set_hint(self, text: str) -> None:
-        """Nothing to report: ``text`` is the idle hint (the field's tooltip too); the status and
-        meta lines fold away unless the link shows."""
+    def set_hint(self, text: str, *, tooltip: str = "") -> None:
+        """Nothing to report: ``text`` is the idle hint (the field's tooltip too, or ``tooltip``
+        when given); the status and meta lines fold away unless the link shows."""
         self._hint = True
-        self.input.setToolTip(plain_tooltip(text) if text else "")
+        tip = tooltip or text
+        self.input.setToolTip(plain_tooltip(tip) if tip else "")
         self._show_status(text, TONE_IDLE, False)
 
     def _show_status(self, text: str, tone: str, keep_link: bool) -> None:

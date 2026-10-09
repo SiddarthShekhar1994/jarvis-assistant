@@ -17,7 +17,7 @@ from typing import Any
 
 from briefing_reader import live
 from briefing_reader.actions import MOVE, REPLY, SOURCE_ASK, parse_action_line
-from briefing_reader.ask import commands, planner
+from briefing_reader.ask import commands, planner, research_live
 from briefing_reader.ask.context import AccountInfo, BriefingContext
 from briefing_reader.ask.planner import AskPlanner, ClaudeEngine
 from briefing_reader.ask.usage import UsageLog
@@ -61,6 +61,27 @@ features = ["calendar", "gmail_send", "gmail_read"]
 """
 
 
+PLANNER_BLOCKS = ("<now>", "<owner>", "<accounts>", "<calendar>", "<briefing>", "<contacts>", "<mail>", "<command>")
+
+
+def assert_isolated(case: unittest.TestCase, runner: FakeRunner) -> None:
+    """T-ISO-3 (I4): a planner run (``--tools ""``) never gets a research <question>; a research run
+    (``--tools WebSearch...``) never gets a planner block and runs in its own folder."""
+    for started in runner.started:
+        argv = started.argv
+        tools = argv[argv.index("--tools") + 1] if "--tools" in argv else None
+        if tools == "":
+            case.assertNotIn("<question>", started.stdin)
+            case.assertNotIn("WebSearch", " ".join(argv))
+            case.assertEqual(started.cwd.name, "ask")
+        else:
+            case.assertTrue(tools and tools.startswith("WebSearch"), tools)
+            for block in PLANNER_BLOCKS:
+                case.assertNotIn(block, started.stdin)
+            case.assertEqual(started.cwd.name, "research")
+            case.assertIn("--allowedTools", argv)
+
+
 def budget_thread(body: str = "Can you confirm the Q4 budget by Friday?") -> dict:
     return gmail_thread("thr0000777", [gmail_message(
         "msg0000777", sender="Ana Lima <ana@example.edu>", to="you@example.edu", cc="Mallory <m@evil.example>",
@@ -94,6 +115,7 @@ class PlannerTestCase(unittest.TestCase):
     def make(self, *runs: Any, auth: str | None = None, locate: Any = None) -> AskPlanner:
         kwargs = {} if auth is None else {"auth": auth}
         self.runner = FakeRunner(*runs, clock=self.clock, **kwargs)
+        self.addCleanup(assert_isolated, self, self.runner)   # T-ISO-3, over every Ask in this file
         self.engine = ClaudeEngine(self.config.ask, self.config.data_dir, runner=self.runner, environ=self.environ,
                                    locate=locate or (lambda environ: planner.cli.ClaudeExe(self.exe.path, "standalone install")),
                                    clock=self.clock)
@@ -698,6 +720,638 @@ class LiveTests(PlannerTestCase):
         self.assertTrue(all(item.mono for item in run_step.items[1:]))
 
 
+ROUTED_COMMAND = "what time does the museum open on saturday"
+FORCED_COMMAND = "web: what time does the Example Museum open on Saturday"
+FORCED_QUESTION = "what time does the Example Museum open on Saturday"
+WEB_PLAN = {"say": "Let me look that up.", "question": "", "lines": [],
+            "web_research": {"question": "museum opening hours saturday", "why": "opening hours"}}
+RESEARCH_KINDS = [live.RESEARCH_INPUT, live.RESEARCH_RUN, live.WEB_SEARCH, live.WEB_FETCH, live.RESEARCH_VALIDATE]
+
+
+def research_golden(question: str, hint: str = "") -> str:
+    text = ("<today>\nWednesday 2026-10-07 09:30 (time zone America/Los_Angeles)\n</today>\n"
+            "<limits>\nat most 4 web searches and 4 page reads; at most 5 sources; at most 3 suggestions\n</limits>\n")
+    if hint:
+        text += f"<search_hint>\n{hint}\n</search_hint>\n"
+    return text + f"<question>\n{question}\n</question>\n"
+
+
+class ResearchTests(PlannerTestCase):
+    """Web research: routed by planner run 1 or forced with "web:", isolated from every personal
+    datum (T-ISO-1..3), with its LIVE steps, refusals, failures and logs."""
+
+    def task(self, *, keep_text: bool = True, kind: str = live.TASK_ASK) -> live.LiveTask:
+        self.stream = live.LiveStream(keep_text=keep_text)
+        return self.stream.task(kind, "request")
+
+    def steps(self) -> tuple[live.StepView, ...]:
+        return self.stream.snapshot()[0].steps
+
+    def step(self, kind: str, number: int = 0) -> live.StepView:
+        return [step for step in self.steps() if step.kind == kind][number]
+
+    @staticmethod
+    def fields(step: live.StepView) -> dict[str, str]:
+        return {field.label: field.value for field in step.fields}
+
+    @staticmethod
+    def block(step: live.StepView, label: str) -> str:
+        return next(block.text for block in step.blocks if block.label == label)
+
+    def research_argv(self) -> list[str]:
+        return planner.cli.build_research_argv(self.exe.path, model="sonnet", max_turns=10,
+                                               schema=planner.cli.research_schema_text(), hardened=True,
+                                               web_fetch=True)
+
+    # ---- routed -----------------------------------------------------------------------------
+
+    def test_routed_end_to_end(self) -> None:
+        ask = self.make(plan_stream(WEB_PLAN), stream("research_success"))
+        stages: list[str] = []
+        outcome = ask.plan(ROUTED_COMMAND, on_stage=stages.append)
+        self.assertTrue(outcome.ok, outcome)
+        self.assertEqual((outcome.kind, outcome.runs, outcome.message), ("ok", 2, ""))
+        self.assertEqual(stages, [planner.STAGE_CONTEXT, planner.STAGE_PLANNING, planner.STAGE_RESEARCH])
+        self.assertIn("web_research", self.schema(0)["properties"])
+        research = self.runner.started[1]
+        self.assertEqual(research.argv, self.research_argv())
+        self.assertEqual(research.stdin, research_golden(ROUTED_COMMAND, "museum opening hours saturday"))
+        self.assertEqual(research.cwd, self.config.data_dir / "research")
+        for name in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "NOTION_TOKEN"):
+            self.assertNotIn(name, research.env)
+        self.assertFalse(any("dummy" in value for value in research.env.values()))
+        report = outcome.research
+        self.assertIsNotNone(report)
+        self.assertFalse(report.forced)
+        self.assertEqual((report.question, report.hint), (ROUTED_COMMAND, "museum opening hours saturday"))
+        self.assertEqual(outcome.say, report.answer)
+        self.assertEqual([card.kind for card in outcome.cards], ["todo", "open", "open"])   # suggestions first
+        self.assertTrue(all(card.source == SOURCE_ASK for card in outcome.cards))
+        self.assertEqual([card.web for card in outcome.cards], [True, True, True])
+        self.assertEqual(len(outcome.stats), 2)
+        self.assertEqual(self.usage.counts(NOW, kind="plan"), (1, 1))
+        self.assertEqual(self.usage.counts(NOW, kind="research"), (1, 1))
+        self.assertEqual(outcome.caps.left_research_hour, 5)
+        self.assertEqual(outcome.mail.threads, 0)
+        self.assertNotIn("Example Museum", repr(outcome.research))
+
+    def test_the_research_never_asks_google_for_the_time_zone(self) -> None:
+        # "web:" reads nothing from the accounts: the zone is the one Jarvis already has (cached),
+        # else this PC's - never a Calendar request (the CLI's --ask-text has no cache at all).
+        class CachedOnly(FakeSources):
+            def time_zone(self) -> str:
+                raise AssertionError("a Google request for the time zone")
+
+            def cached_time_zone(self) -> str:
+                return "Europe/London"
+
+        self.sources = CachedOnly()
+        ask = self.make(stream("research_success"))
+        self.assertTrue(ask.plan(FORCED_COMMAND).ok)
+        self.assertIn("(time zone Europe/London)", self.stdin(0))
+        self.assertIn("(time zone Europe/London)", ask.research_dry_run("museum hours").prompt)
+
+    def test_google_sources_give_the_cached_zone_without_a_request(self) -> None:
+        from briefing_reader.gcal import local_timezone
+
+        class Calendar:
+            def __init__(self, cached: str | None) -> None:
+                self.cached = cached
+
+            def is_signed_in(self) -> bool:
+                return True
+
+            def timezone(self, *, interactive: bool = True) -> str:
+                raise AssertionError("a Google request for the time zone")
+
+            def cached_timezone(self) -> str | None:
+                return self.cached
+
+        sources = planner.GoogleSources(self.config, {"personal": Calendar("Asia/Tokyo")})
+        self.assertEqual(sources.cached_time_zone(), "Asia/Tokyo")
+        self.assertEqual(planner.GoogleSources(self.config, {"personal": Calendar(None)}).cached_time_zone(),
+                         local_timezone())
+        self.assertEqual(planner.GoogleSources(self.config, {}).cached_time_zone(), local_timezone())
+
+    def test_routed_live_steps(self) -> None:
+        ask = self.make(plan_stream(WEB_PLAN), stream("research_success"))
+        outcome = ask.plan(ROUTED_COMMAND, live=self.task())
+        self.assertTrue(outcome.ok)
+        self.assertEqual([step.kind for step in self.steps()],
+                         [live.ASK_CHECKS, live.CALENDAR_READ, live.PLANNER_RUN] + RESEARCH_KINDS)
+        self.assertTrue(all(step.status != live.STATUS_RUNNING for step in self.steps()))
+        checks = self.step(live.ASK_CHECKS)
+        self.assertEqual(self.fields(checks)["Research runs left"], "6 of 6 this hour, 20 of 20 today")
+        self.assertEqual(self.fields(self.step(live.PLANNER_RUN))["May ask for web research"], "yes")
+        self.assertEqual([item.text for item in self.step(live.PLANNER_RUN).items],
+                         ["Says: Let me look that up.",
+                          "Wants web research: museum opening hours saturday - opening hours"])
+        # Collapsed, the planner's step says why the web research started (not "0 proposals").
+        self.assertEqual(self.step(live.PLANNER_RUN).summary, "asked for web research - opening hours")
+        given = self.step(live.RESEARCH_INPUT)
+        self.assertEqual(given.status, live.STATUS_OK)
+        fields = self.fields(given)
+        self.assertEqual(fields["Started by"], "the planner (planner run 1)")
+        self.assertEqual(fields["Planner's question"], "museum opening hours saturday")
+        self.assertEqual(fields["Planner's why"], "opening hours")
+        self.assertEqual(fields["Isolation check"], "passed: only words you typed, dates and plain words")
+        self.assertEqual(fields["Question (exact)"], ROUTED_COMMAND)
+        self.assertEqual(fields["Search hint (exact)"], "museum opening hours saturday")
+        self.assertEqual(fields["Today"], "Wed Oct 7 2026 9:30 AM, America/Los_Angeles")
+        self.assertEqual(fields["Not given"], "your calendar, mail, contacts, briefing, accounts, addresses and how "
+                                              "Jarvis addresses you")
+        self.assertIn("none of it goes to the research", fields["Read from your accounts"])
+        run = self.step(live.RESEARCH_RUN)
+        self.assertEqual(run.status, live.STATUS_OK)
+        run_fields = self.fields(run)
+        self.assertEqual(run_fields["Tools"], "WebSearch, WebFetch - nothing else")
+        self.assertEqual(run_fields["Limits"], "4 searches, 4 page reads, 10 turns, 120 s")
+        self.assertEqual(run_fields["Web steps"], "1 search, 1 page read, 0 refused")
+        self.assertIn("--tools WebSearch,WebFetch --allowedTools WebSearch,WebFetch", run_fields["Command line"])
+        self.assertIn("research_prompt.md", run_fields["Command line"])
+        self.assertIn("research_settings.json", run_fields["Command line"])
+        self.assertNotIn(str(self.root), run_fields["Command line"])
+        self.assertEqual(self.block(run, planner.STDIN_SENT), self.stdin(1))
+        self.assertFalse(next(block for block in run.blocks if block.label == planner.STDIN_SENT).untrusted)
+        raw = next(block for block in run.blocks if block.label == "Research answer (raw)")
+        self.assertTrue(raw.untrusted)
+        self.assertEqual(json.loads(raw.text), json.loads(stream("research_success")[-1])["structured_output"])
+        notes = [note.text for note in run.notes]
+        self.assertIn("Checked its start: model claude-sonnet-4-5-20250929, tools: StructuredOutput, WebFetch, "
+                      "WebSearch, MCP servers: 0, API key source: none, permission mode: dontAsk", notes)
+        self.assertEqual(notes[-1], "Answer received")
+        search = self.step(live.WEB_SEARCH)
+        self.assertEqual((search.title, search.key, search.status), ("Web search 1", "web:toolu_s1", live.STATUS_OK))
+        self.assertEqual(self.fields(search)["Query (exact)"], "Example Museum opening hours Saturday")
+        self.assertEqual(self.fields(search)["Search"], "1 of at most 4")
+        self.assertEqual(self.fields(search)["Results"], "3 pages listed")
+        self.assertEqual([item.text for item in search.items][0], "Visit - Example Museum - https://www.example.org/visit")
+        self.assertTrue(all(block.untrusted for block in search.blocks))
+        fetch = self.step(live.WEB_FETCH)
+        fetch_fields = self.fields(fetch)
+        self.assertEqual((fetch.title, fetch.status, fetch.summary), ("Page read 1", live.STATUS_OK, "200 - 48,213 bytes"))
+        self.assertEqual(fetch_fields["URL (asked)"], "https://www.example.org/visit")
+        self.assertEqual(fetch_fields["Domain"], "www.example.org")
+        self.assertEqual(fetch_fields["Found by"], "a search result")
+        self.assertEqual((fetch_fields["HTTP"], fetch_fields["Size"]), ("200 OK", "48,213 bytes"))
+        self.assertEqual(fetch_fields["Title"], "Visit - Example Museum")
+        # The page's text only as untrusted ("Written by other people"): a short one open in one block.
+        self.assertNotIn("Excerpt", fetch_fields)
+        page, = fetch.blocks
+        self.assertEqual((page.label, page.untrusted, page.start_open),
+                         (research_live.FETCH_BLOCK, True, True))
+        self.assertTrue(page.text.startswith("The Example Museum opens at 10 AM"))
+        self.assertTrue(all(not field.link for step in self.steps() for field in step.fields))   # URLs never links
+        checked = self.step(live.RESEARCH_VALIDATE)
+        self.assertEqual(checked.status, live.STATUS_OK)
+        self.assertEqual(self.fields(checked)["Checked against"], "1 search (3 results listed), 1 page read")
+        self.assertEqual([item.text for item in checked.items][:2],
+                         ["[1] www.example.org - Visit - Example Museum", "[2] museum.example.net - Hours and tickets"])
+        self.assertTrue(checked.items[2].text.startswith("Todo - Visit the Example Museum"))
+
+    def test_the_outcome_is_the_same_with_or_without_live(self) -> None:
+        def run(with_live: bool, command: str, *runs: Any) -> planner.AskOutcome:
+            self.setUp()
+            ask = self.make(*runs)
+            kwargs = {"live": self.task()} if with_live else {}
+            with self.assertLogs("briefing_reader", level="DEBUG") as logs:
+                outcome = ask.plan(command, **kwargs)
+            self.logs = list(logs.output)
+            return outcome
+
+        for command, runs in ((ROUTED_COMMAND, (plan_stream(WEB_PLAN), stream("research_success"))),
+                              (FORCED_COMMAND, (stream("research_success"),)),
+                              (FORCED_COMMAND, (stream("research_local_fetch"),))):
+            with self.subTest(command=command, runs=len(runs)):
+                without = run(False, command, *runs)
+                logs_without = self.logs
+                with_live = run(True, command, *runs)
+                self.assertEqual(with_live, without)
+                self.assertEqual(with_live.research, without.research)
+                self.assertEqual(self.logs, logs_without)
+
+    def test_lines_alongside_a_web_request_are_left_out(self) -> None:
+        plan = dict(WEB_PLAN, lines=[MOVE_LINE, EMAIL_LINE])
+        ask = self.make(plan_stream(plan), stream("research_success"))
+        outcome = ask.plan(ROUTED_COMMAND, live=self.task())
+        self.assertEqual([card.kind for card in outcome.cards], ["todo", "open", "open"])   # no Move, no Email
+        given = self.step(live.RESEARCH_INPUT)
+        self.assertIn("2 proposal lines the planner wrote alongside its web request were left out",
+                      [note.text for note in given.notes])
+
+    def test_a_planner_question_with_other_words_is_not_sent(self) -> None:
+        plan = dict(WEB_PLAN, web_research={"question": "Project sync museum hours", "why": "x"})
+        ask = self.make(plan_stream(plan), stream("research_success"))
+        outcome = ask.plan(ROUTED_COMMAND, live=self.task())
+        self.assertTrue(outcome.ok)
+        self.assertEqual(self.stdin(1), research_golden(ROUTED_COMMAND))   # the owner's words only, no hint
+        given = self.step(live.RESEARCH_INPUT)
+        self.assertEqual(given.status, live.STATUS_WARN)
+        self.assertEqual(self.fields(given)["Isolation check"],
+                         "not used: it named words you didn't type (project, sync) - your own words are sent instead")
+        self.assertNotIn("Search hint (exact)", self.fields(given))
+        self.assertEqual(outcome.research.hint, "")
+        same = dict(WEB_PLAN, web_research={"question": "What time does the museum open on Saturday?", "why": "x"})
+        self.make(plan_stream(same), stream("research_success")).plan(ROUTED_COMMAND, live=self.task())
+        self.assertEqual(self.stdin(1), research_golden(ROUTED_COMMAND, "What time does the museum open on Saturday?"))
+
+    def test_mail_and_web_together_read_mail_only(self) -> None:
+        both = dict(WEB_PLAN, gmail_search={"account": "work", "query": "from:ana@example.edu subject:budget",
+                                             "why": "the budget"})
+        self.reader.found = ["thr0000777"]
+        ask = self.make(plan_stream(both), plan_stream({"say": "Read it.", "lines": []}))
+        outcome = ask.plan("find Ana's budget email and the museum hours", live=self.task())
+        self.assertTrue(outcome.ok, outcome)
+        self.assertEqual((outcome.runs, outcome.research), (2, None))
+        self.assertTrue(all(started.argv[started.argv.index("--tools") + 1] == "" for started in self.runner.started))
+        skipped = next(step for step in self.steps() if step.kind == live.ASK_CHECKS and step.title == "Web research")
+        self.assertEqual((skipped.status, skipped.status_text, skipped.summary),
+                         (live.STATUS_WARN, "SKIPPED", planner.BOTH_MESSAGE))
+        self.assertEqual(self.fields(self.step(live.PLANNER_RUN, 1))["May ask for web research"],
+                         "no - this is the second run")
+        self.assertNotIn("web_research", self.schema(1)["properties"])
+
+    def test_when_the_planner_may_not_ask(self) -> None:
+        cases = {
+            "no - web research is off": CONFIG + "\n[research]\nenabled = false\n",
+            "no - the planner may not ask ([research] planner_may_ask)": CONFIG + "\n[research]\nplanner_may_ask = false\n",
+        }
+        for words, config in cases.items():
+            with self.subTest(words=words):
+                self.setUp()
+                self.write_config(config)
+                ask = self.make(plan_stream(WEB_PLAN))
+                outcome = ask.plan(ROUTED_COMMAND, live=self.task())
+                self.assertTrue(outcome.ok)
+                self.assertEqual((outcome.runs, outcome.research), (1, None))   # web_research ignored
+                self.assertNotIn("web_research", self.schema()["properties"])
+                self.assertEqual(self.fields(self.step(live.PLANNER_RUN))["May ask for web research"], words)
+        # This Claude Code lacks --allowedTools; the research folder is not empty; the caps.
+        self.setUp()
+        ask = self.make(plan_stream(WEB_PLAN))
+        self.runner.help_text = self.runner.help_text.replace("--allowedTools", "--allowed-toolz")
+        ask.plan(ROUTED_COMMAND, live=self.task())
+        self.assertEqual(self.fields(self.step(live.PLANNER_RUN))["May ask for web research"],
+                         "no - This Claude Code lacks --allowedTools, which web research needs")
+        self.assertNotIn("web_research", self.schema()["properties"])
+        self.setUp()
+        folder = self.config.data_dir / "research"
+        folder.mkdir(parents=True)
+        (folder / "CLAUDE.md").write_text("x", encoding="ascii")
+        ask = self.make(plan_stream(WEB_PLAN))
+        ask.plan(ROUTED_COMMAND, live=self.task())
+        self.assertTrue(self.fields(self.step(live.PLANNER_RUN))["May ask for web research"].startswith(
+            "no - Web research's work folder (%LOCALAPPDATA%\\briefing-reader\\research) must be empty"))
+        for spend, kind in ((19, "plan"), (6, "research")):
+            with self.subTest(spend=spend, kind=kind):
+                self.setUp()
+                ask = self.make(plan_stream(WEB_PLAN))
+                for _ in range(spend):
+                    self.usage.finish(self.usage.start(NOW - timedelta(minutes=5), kind=kind), outcome="ok")
+                outcome = ask.plan(ROUTED_COMMAND, live=self.task())
+                self.assertEqual((outcome.runs, outcome.research), (1, None))
+                self.assertEqual(self.fields(self.step(live.PLANNER_RUN))["May ask for web research"],
+                                 {"plan": "no - the Ask limit leaves one run",
+                                  "research": "no - the web research limit is reached"}[kind])
+                self.assertNotIn("web_research", self.schema()["properties"])
+
+    def test_refusals_right_before_the_research_run(self) -> None:
+        ask = self.make(plan_stream(WEB_PLAN))
+        start = self.runner.start
+
+        def spend(argv, **kwargs):  # type: ignore[no-untyped-def]
+            for _ in range(6):   # another Jarvis process used the research cap during planner run 1
+                self.usage.start(NOW - timedelta(minutes=1), kind="research")
+            return start(argv, **kwargs)
+
+        self.runner.start = spend   # type: ignore[method-assign]
+        outcome = ask.plan(ROUTED_COMMAND, live=self.task())
+        self.assertEqual((outcome.ok, outcome.kind, outcome.runs), (False, planner.RESEARCH_LIMIT, 1))
+        self.assertIn("[research] max_per_hour", outcome.message)
+        blocked = self.steps()[-1]
+        self.assertEqual((blocked.kind, blocked.title, blocked.status), (live.ASK_CHECKS, "Web research",
+                                                                         live.STATUS_BLOCKED))
+        self.assertEqual(len(self.runner.started), 1)
+        # The sign-in changed between planner run 1 and the research: not started, not counted.
+        self.setUp()
+        ask = self.make(plan_stream(WEB_PLAN))
+
+        def sign_out(stage: str) -> None:
+            if stage == planner.STAGE_RESEARCH:
+                self.runner.auth = '{"loggedIn": true, "authMethod": "console", "apiProvider": "firstParty"}'
+                self.clock.t += 60
+
+        outcome = ask.plan(ROUTED_COMMAND, on_stage=sign_out, live=self.task())
+        self.assertEqual((outcome.ok, outcome.kind, outcome.runs), (False, "not_signed_in", 1))
+        run = self.step(live.RESEARCH_RUN)
+        self.assertEqual((run.status, run.status_text), (live.STATUS_BLOCKED, "SKIPPED"))
+        self.assertTrue(run.summary.startswith("Not started: Run: claude auth login --claudeai"))
+        self.assertEqual([block.label for block in run.blocks], [planner.STDIN_NOT_SENT])
+        self.assertEqual(self.usage.counts(NOW, kind="research"), (0, 0))
+        self.assertEqual(len(self.runner.started), 1)
+
+    # ---- forced -----------------------------------------------------------------------------
+
+    def test_forced_end_to_end(self) -> None:
+        """T-ISO-2 (I3): "web:" reads nothing from Google: no events, no threads, no searches."""
+        briefing = BriefingContext(pending=(parse_action_line(BRIEFING_REPLY),))
+        ask = self.make(stream("research_success"))
+        stages: list[str] = []
+        outcome = ask.plan(FORCED_COMMAND, briefing=briefing, on_stage=stages.append, live=self.task(kind=live.TASK_WEB))
+        self.assertTrue(outcome.ok, outcome)
+        self.assertEqual((outcome.runs, outcome.mail, len(outcome.stats)), (1, planner.MailReport(), 1))
+        self.assertEqual(stages, [planner.STAGE_RESEARCH])
+        self.assertEqual(self.sources.calls, [])
+        self.assertEqual((self.reader.reads, self.reader.searches), ([], []))
+        started, = self.runner.started
+        self.assertEqual(started.stdin, research_golden(FORCED_QUESTION))
+        self.assertEqual(started.argv, self.research_argv())
+        self.assertTrue(outcome.research.forced)
+        self.assertEqual(outcome.research.question, FORCED_QUESTION)
+        self.assertEqual(self.usage.counts(NOW, kind="research"), (1, 1))
+        self.assertEqual(self.usage.counts(NOW, kind="plan"), (0, 0))
+        self.assertEqual([step.kind for step in self.steps()], [live.ASK_CHECKS] + RESEARCH_KINDS)
+        checks = self.step(live.ASK_CHECKS)
+        self.assertEqual((checks.title, checks.status), ("Ready to research?", live.STATUS_OK))
+        fields = self.fields(checks)
+        self.assertEqual((fields["Ask"], fields["Web research"]), ("on", "on"))
+        self.assertEqual(fields["Research runs left"], "6 of 6 this hour, 20 of 20 today")
+        self.assertEqual(fields["Planner runs left"], "20 of 20 this hour, 60 of 60 today")
+        self.assertEqual(fields["Tools"], "WebSearch, WebFetch - nothing else")
+        self.assertIn("claude.ai plan", fields["Sign-in"])
+        given = self.fields(self.step(live.RESEARCH_INPUT))
+        self.assertEqual((given["Started by"], given["Read from your accounts"]), ("you (web:)", "nothing"))
+        self.assertNotIn("Isolation check", given)
+        self.assertNotIn("Planner's question", given)
+        self.assertNotIn("<calendar>", started.stdin)
+
+    def test_forced_refusals(self) -> None:
+        ask = self.make()
+        for command in ("web:", "Research:  ", "web :"):
+            with self.subTest(command=command):
+                outcome = ask.plan(command, live=self.task())
+                self.assertEqual((outcome.kind, outcome.message), (planner.EMPTY, "Type what to look up after web:"))
+                checks, = self.steps()
+                self.assertEqual((checks.title, checks.status, checks.summary),
+                                 ("Ready to research?", live.STATUS_BLOCKED, "Type what to look up after web:"))
+        self.assertEqual((self.runner.quick, self.runner.started), ([], []))
+        self.write_config(CONFIG + "\n[research]\nenabled = false\n")
+        outcome = self.make().plan(FORCED_COMMAND, live=self.task())
+        self.assertEqual((outcome.kind, outcome.message), (planner.RESEARCH_OFF, planner.RESEARCH_OFF_MESSAGE))
+        self.assertEqual(self.fields(self.steps()[0])["Web research"], "off")
+        self.write_config(CONFIG.replace("enabled = true", "enabled = false"))
+        self.assertEqual(self.make().plan(FORCED_COMMAND).kind, planner.DISABLED)
+        self.write_config(CONFIG)
+        ask = self.make()
+        for _ in range(6):
+            self.usage.start(NOW - timedelta(minutes=5), kind="research")
+        outcome = ask.plan(FORCED_COMMAND, live=self.task())
+        # The web research caps have their own kind (the bar, the meta and the voice say "web research").
+        self.assertEqual(outcome.kind, planner.RESEARCH_LIMIT)
+        self.assertTrue(outcome.message.startswith("Web research limit reached"))
+        self.assertEqual(self.fields(self.steps()[0])["Research runs left"], "0 of 6 this hour, 14 of 20 today")
+        self.assertEqual(outcome.caps.left_research_hour, 0)   # what is left after this Ask (the meta line)
+        self.setUp()
+        ask = self.make()
+        for _ in range(20):
+            self.usage.start(NOW - timedelta(minutes=5))   # the Ask caps: CAPS as before
+        self.assertEqual(ask.plan(FORCED_COMMAND).kind, planner.CAPS)
+        self.setUp()
+        ask = self.make()
+        self.runner.help_text = self.runner.help_text.replace("--allowedTools", "--allowed-toolz")
+        outcome = ask.plan(FORCED_COMMAND)
+        self.assertEqual((outcome.kind, outcome.message), (planner.RESEARCH_UNSUPPORTED,
+                                                           planner.RESEARCH_UNSUPPORTED_MESSAGE))
+        self.setUp()
+        folder = self.config.data_dir / "research"
+        folder.mkdir(parents=True)
+        (folder / ".mcp.json").write_text("{}", encoding="ascii")
+        self.assertEqual(self.make().plan(FORCED_COMMAND).kind, planner.WORKDIR)
+        self.assertEqual(self.make(auth='{"loggedIn": false}').plan(FORCED_COMMAND).kind, "not_signed_in")
+        self.assertEqual(self.runner.started, [])
+        self.assertEqual(self.usage.counts(NOW), (0, 0))
+
+    def test_failures(self) -> None:
+        cases = (("research_init_mcp", "guard", live.STATUS_BLOCKED, "STOPPED"),
+                 ("research_local_fetch", "guard", live.STATUS_BLOCKED, "STOPPED"),
+                 ("research_too_many_searches", "research_cap", live.STATUS_BLOCKED, "STOPPED"),
+                 ("research_garbled", "garbled", live.STATUS_FAILED, ""),
+                 ("research_max_turns", "max_turns", live.STATUS_FAILED, ""))
+        for name, kind, status, status_text in cases:
+            with self.subTest(name=name):
+                self.setUp()
+                outcome = self.make(stream(name)).plan(FORCED_COMMAND, live=self.task())
+                self.assertEqual((outcome.ok, outcome.kind, outcome.runs, outcome.cards), (False, kind, 1, ()))
+                self.assertIsNone(outcome.research)
+                run = self.step(live.RESEARCH_RUN)
+                self.assertEqual((run.status, run.status_text), (status, status_text))
+                self.assertEqual(self.usage.counts(NOW, kind="research"), (1, 1))   # it started: it counts
+                self.assertNotIn(live.RESEARCH_VALIDATE, [step.kind for step in self.steps()])
+        self.setUp()
+        self.make(stream("research_local_fetch")).plan(FORCED_COMMAND, live=self.task())
+        local = self.step(live.WEB_FETCH)
+        self.assertEqual((local.status, local.status_text), (live.STATUS_BLOCKED, "STOPPED"))
+        self.assertEqual(local.summary, "a local or private address - Jarvis stopped the research (it may have started)")
+        self.assertEqual(self.fields(local)["URL (asked)"], "http://192.168.1.1/admin")
+        self.setUp()
+        outcome = self.make(stream("research_too_many_searches")).plan(FORCED_COMMAND, live=self.task())
+        self.assertIn("it wanted a fifth web search (at most 4: [research] max_searches)", outcome.message)
+        over = self.step(live.WEB_SEARCH, 4)
+        self.assertEqual((over.title, over.status, over.status_text), ("Web search 5", live.STATUS_BLOCKED, "OVER LIMIT"))
+        self.assertIn("at most 4 searches ([research] max_searches); this search may have started already", over.summary)
+        self.assertTrue(all(step.status == live.STATUS_OK for step in self.steps() if step.kind == live.WEB_SEARCH
+                            and step.title != "Web search 5"))
+
+    def test_extra_usage_pauses_everything(self) -> None:
+        with self.assertLogs("briefing_reader.ask.planner", level="WARNING"):
+            outcome = self.make(stream("research_overage")).plan(FORCED_COMMAND, live=self.task())
+        self.assertEqual((outcome.kind, outcome.runs), ("limit", 1))
+        self.assertTrue(self.runner.processes[0].killed)
+        run = self.step(live.RESEARCH_RUN)
+        self.assertEqual((run.status, run.summary), (live.STATUS_BLOCKED, planner.OVERAGE_WORDS))
+        self.assertEqual(self.step(live.WEB_SEARCH).status, live.STATUS_CANCELLED)
+        self.assertEqual(self.usage.hold_until(NOW), NOW + timedelta(hours=3))
+        self.assertTrue(self.usage.check(research=1).held)
+        later = self.make().plan(FORCED_COMMAND)
+        self.assertEqual(later.kind, planner.CAPS)
+        self.assertEqual(self.runner.started, [])
+
+    def test_timeout_and_cancel(self) -> None:
+        timeout = FakeProcess(stream("research_success")[:2], clock=self.clock, hang=True)
+        outcome = self.make(timeout).plan(FORCED_COMMAND, live=self.task())
+        self.assertEqual((outcome.kind, outcome.message), ("timeout", "The web research took too long (120 s: "
+                                                                     "[research] timeout_seconds); nothing was proposed"))
+        self.assertTrue(timeout.killed)
+        self.assertEqual(self.step(live.WEB_SEARCH).status, live.STATUS_CANCELLED)
+        self.assertEqual(self.step(live.WEB_SEARCH).summary, "the run was stopped")
+        after_fetch = FakeProcess(stream("research_success")[:5], clock=self.clock, hang=True)
+        self.make(after_fetch).plan(FORCED_COMMAND, live=self.task())
+        fetch = self.step(live.WEB_FETCH)
+        self.assertEqual((fetch.status, self.fields(fetch)["Title"]), (live.STATUS_OK, "Visit - Example Museum"))
+        self.assertEqual(self.step(live.RESEARCH_RUN).status, live.STATUS_FAILED)
+        cancel = threading.Event()
+        process = FakeProcess(stream("research_success")[:4], clock=self.clock, hang=True, cancel_after=6,
+                              cancel=cancel)
+        outcome = self.make(process).plan(FORCED_COMMAND, cancel=cancel, live=self.task())
+        self.assertEqual((outcome.kind, outcome.runs), ("cancelled", 1))
+        self.assertTrue(process.killed)
+        self.assertEqual(self.step(live.RESEARCH_RUN).status, live.STATUS_CANCELLED)
+        self.assertEqual(self.step(live.WEB_SEARCH).status, live.STATUS_OK)
+        self.assertEqual(self.step(live.WEB_FETCH).status, live.STATUS_CANCELLED)
+
+    def test_left_out_sources_and_dropped_suggestions(self) -> None:
+        outcome = self.make(stream("research_injection")).plan(FORCED_COMMAND, live=self.task())
+        self.assertTrue(outcome.ok)
+        self.assertEqual([card.kind for card in outcome.cards], ["todo", "open"])
+        self.assertEqual(outcome.message, "5 sources left out; 2 suggestions left out")
+        checked = self.step(live.RESEARCH_VALIDATE)
+        self.assertEqual(checked.status, live.STATUS_WARN)
+        self.assertTrue(checked.open_hint)
+        statuses = [(item.status, item.status_text) for item in checked.items]
+        # One word for both, as in the bar and the JARVIS tab: 5 sources and 2 suggestions left out.
+        self.assertEqual(statuses.count((live.STATUS_BLOCKED, "LEFT OUT")), 7)
+        self.assertEqual(statuses.count((live.STATUS_BLOCKED, "DROPPED")), 0)
+        self.assertEqual(checked.summary, "1 source card + 1 proposal, 5 sources left out, 2 suggestions left out")
+        self.assertIn("Web research can't propose Email", [item.note for item in checked.items])
+        denied = self.make(stream("research_denied")).plan(FORCED_COMMAND, live=self.task())
+        self.assertTrue(denied.ok)
+        fetch = self.step(live.WEB_FETCH)
+        self.assertEqual((fetch.status, fetch.status_text), (live.STATUS_BLOCKED, "DENIED"))
+        self.assertIn("haven't granted it yet", self.fields(fetch)["Claude Code said"])
+
+    def test_redirects_errors_and_text_off(self) -> None:
+        outcome = self.make(stream("research_redirect")).plan(FORCED_COMMAND, live=self.task())
+        self.assertTrue(outcome.ok)
+        moved, final = self.step(live.WEB_FETCH), self.step(live.WEB_FETCH, 1)
+        self.assertEqual((moved.status, moved.status_text), (live.STATUS_WARN, "REDIRECTED"))
+        self.assertEqual(self.fields(moved)["Redirects to"], "https://www.example.net/new")
+        self.assertEqual(self.fields(moved)["HTTP"], "301 Moved Permanently")
+        self.assertEqual(self.fields(moved)["Title"], "Old hours")   # a search hit's title
+        self.assertEqual(self.fields(final)["Found by"],
+                         "not a search result - Claude followed a link or typed the address")
+        self.assertEqual(self.fields(final)["Title (as the answer names it)"], "A page")
+        self.make(stream("research_fetch_error")).plan(FORCED_COMMAND, live=self.task())
+        failed = self.step(live.WEB_FETCH)
+        self.assertEqual((failed.status, failed.summary), (live.STATUS_FAILED, "HTTP 404 Not Found"))
+        self.make(stream("research_unread")).plan(FORCED_COMMAND, live=self.task())
+        unread = self.step(live.WEB_SEARCH)
+        self.assertEqual((unread.status, unread.summary), (live.STATUS_WARN, "results came back as text Jarvis could "
+                                                                              "not list"))
+        self.assertEqual(self.step(live.RESEARCH_VALIDATE).items[0].status, live.STATUS_WARN)   # unchecked source
+        self.make(stream("research_success")).plan(FORCED_COMMAND, live=self.task(keep_text=False))
+        fetch = self.step(live.WEB_FETCH)
+        self.assertNotIn("Excerpt", self.fields(fetch))
+        self.assertEqual([(block.label, block.kept) for block in fetch.blocks], [(research_live.FETCH_BLOCK, False)])
+        self.assertTrue(all(not block.kept for step in self.steps() for block in step.blocks))
+
+    def test_page_ids_make_a_card_information_only(self) -> None:
+        source = parse_action_line("Open: title=[1] Visit - Example Museum | link=https://www.example.org/visit",
+                                   link_hosts=("www.example.org",))
+        outcome = self.make(stream("research_success")).plan(FORCED_COMMAND, page_ids=[source.id])
+        listed = next(card for card in outcome.cards if card.error)
+        self.assertEqual((listed.link, listed.web), ("https://www.example.org/visit", True))
+        self.assertEqual(listed.error, "Already in your list under BRIEFING - use Edit there")
+        self.assertEqual(outcome.refused, 1)
+
+    # ---- isolation --------------------------------------------------------------------------
+
+    def iso_setup(self) -> tuple[BriefingContext, str]:
+        """T-ISO-1's world: every personal datum carries a marker."""
+        self.write_config(CONFIG.replace("[accounts.work]", "[accounts.zq7acct]") + '\n[assistant]\naddress = "Guvnor"\n')
+        self.environ["NOTION_TOKEN"] = "ntn_dummyzq7notiontoken000000000000"
+        reply = ("Reply: acct=zq7acct | thread=18c0ffee00000099 | msgid=<CAB9@mail.example.edu> | gmid= | "
+                 "to=Zed Guest <zq7guest@example.edu> | cc= | subject=Re: Budget review | replied=no | due= | link= | "
+                 "body=Thanks")
+        pending = parse_action_line("Todo: title=ZQ7BRIEF prep | due=2026-10-09 18:00 | block= | acct= | link=")
+        thread = gmail_thread("18c0ffee00000099", [gmail_message(
+            "msg0000999", sender="Zed Guest <zq7guest@example.edu>", to="zq7owner@example.com",
+            subject="Budget review", body="ZQ7MAILBODY: the numbers are attached.", msgid="<CAB9@mail.example.edu>",
+            at_ms=1791200000000)])
+        reader = FakeReader("zq7acct", {"18c0ffee00000099": thread})
+        self.sources = FakeSources(
+            accounts_list=[AccountInfo("personal", "you@example.com", "yes", True, "no (needs a Google sign-in)",
+                                       "America/Los_Angeles"),
+                           AccountInfo("zq7acct", "zq7owner@example.com", "yes", True, "yes", "America/Los_Angeles")],
+            briefs={"zq7acct": [brief("evtzq70001", "Zq7 Calmarker dinner", TOMORROW_2PM,
+                                      guests=(("Zed Guest", "zq7guest@example.edu"),))]},
+            readers={"zq7acct": reader})
+        self.reader = reader
+        return BriefingContext(pending=(parse_action_line(reply), pending)), \
+            "check the Budget review reply and what time the museum opens on saturday"
+
+    MARKERS = ("zq7", "calmarker", "zq7guest", "zq7owner", "zq7acct", "zq7brief", "zq7mailbody", "guvnor")
+
+    def test_iso_1_no_personal_datum_reaches_the_research(self) -> None:
+        briefing, command = self.iso_setup()
+        planner_question = dict(WEB_PLAN, web_research={"question": "Zq7 Calmarker museum opening hours",
+                                                        "why": "the dinner place"})
+        ask = self.make(plan_stream(planner_question), stream("research_success"))
+        outcome = ask.plan(command, briefing=briefing, live=self.task())
+        self.assertTrue(outcome.ok, outcome)
+        first, research = self.runner.started
+        planner_text = first.stdin.casefold()
+        for marker in self.MARKERS:   # the planner did see them ...
+            self.assertIn(marker, planner_text)
+        self.assertIn("<mail>", first.stdin)
+        for marker in self.MARKERS:   # ... and the research got none of them
+            self.assertNotIn(marker, research.stdin.casefold())
+            self.assertNotIn(marker, " ".join(research.argv).casefold())
+            self.assertNotIn(marker, " ".join(f"{key}={value}" for key, value in research.env.items()).casefold())
+        self.assertEqual(research.stdin, research_golden(command))
+        given = self.step(live.RESEARCH_INPUT)
+        self.assertEqual(given.status, live.STATUS_WARN)
+        self.assertIn("(calmarker, zq7)", self.fields(given)["Isolation check"])
+        self.assertEqual(outcome.mail.threads, 1)
+
+    def test_iso_1_nothing_rides_on_a_typed_word_a_number_or_an_invisible_character(self) -> None:
+        # A datum glued to a typed word ("timezq7guest") or spelled as numbers: the planner's
+        # question is not used (an invisible character is a space by the time the planner's answer
+        # is read; check_question's own tests cover one that reaches it).
+        for question in ("museum timezq7guest openszq7owner hours", "museum hours 4 8 2 9 1 7",
+                         "museum 5 5 5 0 1 3 4", "museum sat 4 sat 8 sat 2"):
+            with self.subTest(question=question):
+                self.setUp()
+                briefing, command = self.iso_setup()
+                smuggled = dict(WEB_PLAN, web_research={"question": question, "why": "x"})
+                ask = self.make(plan_stream(smuggled), stream("research_success"))
+                self.assertTrue(ask.plan(command, briefing=briefing, live=self.task()).ok)
+                research = self.runner.started[1]
+                self.assertEqual(research.stdin, research_golden(command))   # the owner's words only
+                self.assertNotIn("<search_hint>", research.stdin)
+                self.assertEqual(self.step(live.RESEARCH_INPUT).status, live.STATUS_WARN)
+
+    def test_iso_1_a_grounded_question_goes_along_as_the_hint(self) -> None:
+        briefing, command = self.iso_setup()
+        grounded = dict(WEB_PLAN, web_research={"question": "museum opening hours saturday october 2026", "why": "x"})
+        ask = self.make(plan_stream(grounded), stream("research_success"))
+        self.assertTrue(ask.plan(command, briefing=briefing).ok)
+        research = self.runner.started[1]
+        self.assertEqual(research.stdin, research_golden(command, "museum opening hours saturday october 2026"))
+        for marker in self.MARKERS:
+            self.assertNotIn(marker, research.stdin.casefold())
+
+    def test_the_logs_hold_no_question_query_url_or_web_text(self) -> None:
+        """I10: a routed and a forced research with markers everywhere: the log has counts only."""
+        briefing, command = self.iso_setup()
+        planner_question = dict(WEB_PLAN, web_research={"question": "Zq7 Calmarker museum opening hours", "why": "x"})
+        with self.assertLogs("briefing_reader", level="DEBUG") as logs:
+            self.make(plan_stream(planner_question), stream("research_success")).plan(command, briefing=briefing)
+            self.make(stream("research_injection")).plan("web: zq7question museum hours")
+            self.make(stream("research_local_fetch")).plan("web: zq7question museum hours")
+        text = "\n".join(logs.output)
+        for secret in (*self.MARKERS, "zq7question", "museum", "Museum", "example.org", "example.net", "example.com",
+                       "opening hours", "10 AM", "Ignore previous", "192.168", "toolu_", "Visit", "booked"):
+            self.assertNotIn(secret, text)
+        self.assertIn("Research: started by web: (nothing read from the accounts)", text)
+        self.assertIn("Research: handed over by the planner (its question not used)", text)
+        self.assertRegex(text, r"Research: run ok in \d+\.\d s \(4 turn\(s\), 1 search\(es\), 1 page read\(s\), "
+                               r"0 refused; 21000 in / 820 out / 9000 cached tokens; tools StructuredOutput,WebFetch,"
+                               r"WebSearch; exit 0\)")
+        self.assertIn("Research: 2 source(s) shown, 0 left out, 1 suggestion card(s), 0 dropped", text)
+        self.assertIn("research: 2 source(s), 0 left out, 1 search(es), 1 page read(s)", text)
+        self.assertIn("Research: run guard in", text)
+
+
 class RefusalTests(PlannerTestCase):
     def test_disabled(self) -> None:
         self.write_config(CONFIG.replace("enabled = true", "enabled = false"))
@@ -846,6 +1500,14 @@ class ChipTests(unittest.TestCase):
         state, tip = planner.chip_state(True, ok, CapCheck(True, 18, 50))
         self.assertEqual(state, planner.CHIP_OK)
         self.assertIn("18 planner run(s) left this hour", tip)
+        # With web research on: its runs left too, or that its limit is reached (the next Ask may still run).
+        caps = CapCheck(True, 18, 50, left_research_hour=4, left_research_day=12)
+        self.assertTrue(planner.chip_state(True, ok, caps, research=True)[1].endswith(
+            "; 18 planner run(s) left this hour; 4 web research run(s) left"))
+        capped = CapCheck(True, 14, 50, left_research_hour=0, left_research_day=12)
+        state, tip = planner.chip_state(True, ok, capped, research=True)
+        self.assertEqual(state, planner.CHIP_OK)
+        self.assertTrue(tip.endswith("; 14 planner run(s) left this hour; the web research limit is reached"))
 
 
 class DryRunTests(PlannerTestCase):
@@ -919,6 +1581,110 @@ class CommandsTests(PlannerTestCase):
         self.assertIn(f"Say: {SAY}", text)
         self.assertIn("Card: ASK MOVE \u00b7 WORK | Project sync", text)
         self.assertIn("(unverified recipients: ana@example.edu)", text)
+
+    def test_ask_check_research_lines(self) -> None:
+        self.make()
+        environ = dict(self.environ, JARVIS_CLAUDE_EXE=str(self.exe.path))
+        out = io.StringIO()
+        usage = UsageLog(self.root / "usage.json")
+        usage.finish(usage.start(kind="research"), outcome="ok")
+        code = commands.ask_check(self.config, out, environ=environ, runner=self.runner, sources=self.sources,
+                                  usage=usage)
+        text = out.getvalue()
+        self.assertEqual(code, 0, text)
+        self.assertIn("  Web research: on ([research] enabled) - --allowedTools: available - work folder research\\ empty",
+                      text)
+        self.assertIn("  Research usage: 1 of 6 research runs this hour, 1 of 20 today", text)
+        self.assertTrue(text.endswith("Ready: yes\nWeb research ready: yes\n"))
+        self.assertEqual(self.runner.started, [])
+        # Research not ready never changes Ready: or the exit code.
+        self.write_config(CONFIG + "\n[research]\nenabled = false\n")
+        self.make()
+        self.runner.help_text = self.runner.help_text.replace("--allowedTools", "--allowed-toolz")
+        planner.cli.forget_probes()
+        out = io.StringIO()
+        code = commands.ask_check(self.config, out, environ=environ, runner=self.runner, sources=self.sources,
+                                  usage=UsageLog(self.root / "usage2.json"))
+        text = out.getvalue()
+        self.assertEqual(code, 0, text)
+        self.assertIn("  Web research: off ([research] enabled = false) - --allowedTools: missing (update Claude Code)",
+                      text)
+        self.assertTrue(text.endswith("Ready: yes\nWeb research ready: no\n"))
+
+    def test_web_dry_run_reads_nothing(self) -> None:
+        self.make()
+        environ = dict(self.environ, JARVIS_CLAUDE_EXE=str(self.exe.path))
+        out = io.StringIO()
+        briefing = BriefingContext(pending=(parse_action_line(BRIEFING_REPLY),))
+        self.assertEqual(commands.ask_dry_run(FORCED_COMMAND, self.config, out, briefing=briefing, environ=environ,
+                                              runner=self.runner, sources=self.sources), 0)
+        import re
+
+        text = out.getvalue()
+        self.assertRegex(text, r"<today>\n\w+day \d{4}-\d\d-\d\d \d\d:\d\d \(time zone America/Los_Angeles\)\n</today>")
+        dated = re.sub(r"<today>\n[^\n]*\n</today>",
+                       "<today>\nWednesday 2026-10-07 09:30 (time zone America/Los_Angeles)\n</today>", text)
+        self.assertTrue(dated.startswith("Ask Jarvis dry run (no Claude request was made; nothing was counted)\n"
+                                         "Web research: nothing is read from your accounts for this request\n"
+                                         "---- stdin ----\n" + research_golden(FORCED_QUESTION) +
+                                         "---- end of stdin ----\n"), text)
+        self.assertIn("--tools WebSearch,WebFetch --allowedTools WebSearch,WebFetch", text)
+        self.assertIn("research_prompt.md", text)
+        self.assertNotIn("Example Museum", text.split("---- end of stdin ----")[1])   # never in the command line
+        self.assertEqual(self.sources.calls, [])
+        self.assertEqual((self.reader.reads, self.reader.searches), ([], []))
+        self.assertEqual(self.runner.started, [])
+        self.assertEqual(self.usage.counts(NOW), (0, 0))
+        out = io.StringIO()
+        self.assertEqual(commands.ask_dry_run("web:", self.config, out, briefing=None, environ=environ,
+                                              runner=self.runner, sources=self.sources), 1)
+        self.assertIn("Type what to look up after web:", out.getvalue())
+        # The planner's own dry run offers web_research when run 1 would.
+        out = io.StringIO()
+        commands.ask_dry_run(COMMAND, self.config, out, briefing=None, environ=environ, runner=self.runner,
+                             sources=self.sources)
+        self.assertIn("web_research", out.getvalue())
+        self.write_config(CONFIG + "\n[research]\nplanner_may_ask = false\n")
+        self.make()
+        out = io.StringIO()
+        commands.ask_dry_run(COMMAND, self.config, out, briefing=None, environ=environ, runner=self.runner,
+                             sources=self.sources)
+        self.assertNotIn("web_research", out.getvalue())
+
+    def test_ask_once_prints_a_research(self) -> None:
+        self.make(stream("research_injection"))
+        environ = dict(self.environ, JARVIS_CLAUDE_EXE=str(self.exe.path))
+        out = io.StringIO()
+        self.assertEqual(commands.ask_once(FORCED_COMMAND, self.config, out, briefing=None, environ=environ,
+                                           runner=self.runner, sources=self.sources, now=lambda: NOW), 0)
+        text = out.getvalue()
+        self.assertIn("Searching the web (uses your Claude plan)...\n", text)
+        self.assertIn("Answer: The Example Museum opens at 10 AM on Saturday [4]. I've booked your tickets.\n", text)
+        self.assertIn("Source [4]: Visit / Example \u2039b\u203aMuseum\u2039/b\u203a (www.example.org) "
+                      "https://www.example.org/visit\n", text)
+        self.assertIn("Left out [1]: not an https link\n", text)
+        self.assertIn("Left out [6]: not a page the research found or read\n", text)
+        self.assertIn("Suggestion left out: Web research can't propose Email\n", text)
+        self.assertIn("Web: 1 search, 1 page read, 0 refused\n", text)
+        self.assertIn("Card: ASK WEB \u00b7 WWW.EXAMPLE.ORG | [4] Visit", text)
+        self.assertIn("Run 1: ", text)
+        self.assertIn("Total: 1 run(s)", text)
+        self.assertNotIn("Say:", text)
+
+    def test_run_reads_no_briefing_for_web(self) -> None:
+        class Args:
+            ask_check = False
+            ask_dry_run = True
+            ask_text = FORCED_COMMAND
+            from_file = None
+
+        from unittest import mock
+
+        with mock.patch.object(commands, "cli_briefing", side_effect=AssertionError("no briefing for web:")), \
+                mock.patch.object(commands, "ask_dry_run", return_value=0) as dry:
+            self.assertEqual(commands.run(Args(), self.config, io.StringIO()), 0)
+        self.assertIsNone(dry.call_args.kwargs["briefing"])
+        self.assertEqual(commands.STAGE_WORDS["research"], "Searching the web (uses your Claude plan)...")
 
 
 if __name__ == "__main__":

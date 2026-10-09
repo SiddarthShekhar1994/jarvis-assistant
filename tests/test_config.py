@@ -42,6 +42,7 @@ from briefing_reader.config import (
     PollingConfig,
     PromptConfig,
     RedactingFilter,
+    ResearchConfig,
     ScheduleConfig,
     SectionsConfig,
     VoiceConfig,
@@ -368,6 +369,7 @@ class ConfigFileTests(ProjectTestCase):
             "ask": {f.name for f in dataclasses.fields(AskConfig)},
             "assistant": {f.name for f in dataclasses.fields(AssistantConfig)},
             "live": {f.name for f in dataclasses.fields(LiveConfig)},
+            "research": {f.name for f in dataclasses.fields(ResearchConfig)},
         }
         self.assertEqual(set(doc), set(expected_keys))
         for table, keys in expected_keys.items():
@@ -413,6 +415,11 @@ class ConfigFileTests(ProjectTestCase):
         # The LIVE tab ships on, opening as a tab, with the background row and the text blocks.
         self.assertEqual(cfg.live, LiveConfig(enabled=True, auto_open="tab", background=True, text=True))
         self.assertIn("never saved, never logged", raw.decode("ascii").split("[live]", 1)[1])
+        # Web research ships with its defaults (it only runs with [ask] enabled); no address or path.
+        self.assertEqual(cfg.research, ResearchConfig())
+        research_part = raw.decode("ascii").split("[research]", 1)[1].split("[assistant]", 1)[0]
+        self.assertNotIn("@", research_part)
+        self.assertIn("never your calendar, mail, contacts", research_part)
 
     def test_client_secret_is_gitignored(self) -> None:
         lines = (config.PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
@@ -885,6 +892,70 @@ class AskConfigTests(ProjectTestCase):
         self.write_config('[ask]\nenabled = true\napi_key = "sk-not-used"\n')
         cfg = self.load_warning("ask.api_key")
         self.assertTrue(cfg.ask.enabled)
+
+
+class ResearchConfigTests(ProjectTestCase):
+    def test_defaults(self) -> None:
+        self.assertEqual(ResearchConfig(), ResearchConfig(
+            enabled=True, planner_may_ask=True, model="sonnet", timeout_seconds=120, max_searches=4, max_fetches=4,
+            max_per_hour=6, max_per_day=20, max_sources=5))
+        self.assertEqual(ResearchConfig().max_turns, 10)
+        self.assertEqual(ResearchConfig(max_searches=2, max_fetches=0).max_turns, 4)
+        self.assertEqual(self.load_quietly().research, ResearchConfig())
+        self.assertEqual(config.RESEARCH_RANGES, {
+            "timeout_seconds": (30, 300), "max_searches": (1, 8), "max_fetches": (0, 8), "max_per_hour": (1, 30),
+            "max_per_day": (1, 100), "max_sources": (1, 6)})
+
+    def test_full_research_table(self) -> None:
+        self.write_config('[research]\nenabled = false\nplanner_may_ask = false\nmodel = "haiku"\n'
+                          'timeout_seconds = 60\nmax_searches = 2\nmax_fetches = 0\nmax_per_hour = 3\n'
+                          'max_per_day = 9\nmax_sources = 2\n')
+        self.assertEqual(self.load_quietly().research, ResearchConfig(
+            enabled=False, planner_may_ask=False, model="haiku", timeout_seconds=60, max_searches=2, max_fetches=0,
+            max_per_hour=3, max_per_day=9, max_sources=2))
+
+    def test_out_of_range_numbers_are_clamped(self) -> None:
+        self.write_config('[research]\ntimeout_seconds = 5\nmax_searches = 0\nmax_fetches = 50\n'
+                          'max_per_hour = 999\nmax_per_day = 0\nmax_sources = 9\n')
+        cfg = self.load_warning("research.timeout_seconds", "research.max_searches", "research.max_fetches",
+                                "research.max_per_hour", "research.max_per_day", "research.max_sources")
+        research = cfg.research
+        self.assertEqual((research.timeout_seconds, research.max_searches, research.max_fetches,
+                          research.max_per_hour, research.max_per_day, research.max_sources), (30, 1, 8, 30, 1, 6))
+        self.write_config("[research]\nmax_fetches = -1\n")
+        self.assertEqual(self.load_warning("research.max_fetches").research.max_fetches, 4)
+
+    def test_bad_values_fall_back_to_the_defaults(self) -> None:
+        for model in ('"--bare"', '"-p"', '"son net"', '""', "3"):
+            with self.subTest(model=model):
+                self.write_config(f"[research]\nmodel = {model}\n")
+                self.assertEqual(self.load_warning("research.model").research.model, "sonnet")
+        self.write_config('[research]\nenabled = "yes"\nplanner_may_ask = 1\nmax_searches = "4"\n')
+        cfg = self.load_warning("research.enabled", "research.planner_may_ask", "research.max_searches")
+        self.assertEqual(cfg.research, ResearchConfig())
+        self.write_config('research = "on"\n')
+        self.assertEqual(self.load_warning("[research]").research, ResearchConfig())
+
+    def test_unknown_research_key_is_reported(self) -> None:
+        self.write_config('[research]\nenabled = true\nallowed_domains = ["example.org"]\n')
+        cfg = self.load_warning("research.allowed_domains")
+        self.assertTrue(cfg.research.enabled)
+
+    def test_env_overrides_enabled_both_ways(self) -> None:
+        self.write_config("[research]\nenabled = false\n")
+        for value in ("true", "1", "yes", "on", " TRUE "):
+            with self.subTest(value=value):
+                self.assertTrue(self.load_quietly(JARVIS_RESEARCH_ENABLED=value).research.enabled)
+        self.write_config("[research]\nenabled = true\n")
+        for value in ("false", "0", "no", "off"):
+            with self.subTest(value=value):
+                self.assertFalse(self.load_quietly(JARVIS_RESEARCH_ENABLED=value).research.enabled)
+        self.assertTrue(self.load_quietly(JARVIS_RESEARCH_ENABLED="").research.enabled)
+        cfg = self.load_warning("JARVIS_RESEARCH_ENABLED", JARVIS_RESEARCH_ENABLED="maybe")
+        self.assertTrue(cfg.research.enabled)
+        # The Ask switch does not move the research switch, nor the other way round.
+        cfg = self.load_quietly(JARVIS_ASK_ENABLED="true", JARVIS_RESEARCH_ENABLED="false")
+        self.assertEqual((cfg.ask.enabled, cfg.research.enabled), (True, False))
 
 
 class AssistantConfigTests(ProjectTestCase):

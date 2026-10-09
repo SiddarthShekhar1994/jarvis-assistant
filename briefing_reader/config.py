@@ -87,7 +87,7 @@ UNDO_SECONDS_RANGE = (3, 60)
 
 _MISSING = object()
 _KNOWN_TABLES = ("voice", "prompt", "polling", "sections", "notion", "calendar", "actions",
-                 "accounts", "schedule", "hotkey", "agenda", "display", "ask", "assistant", "live")
+                 "accounts", "schedule", "hotkey", "agenda", "display", "ask", "research", "assistant", "live")
 # Library loggers kept at WARNING, also under --debug. The Google sign-in libraries log the
 # authorization code, the access token and the refresh token at DEBUG (requests_oauthlib),
 # before Jarvis could register them for redaction, so they never get DEBUG here.
@@ -264,6 +264,33 @@ class AskConfig:
             object.__setattr__(self, "calendars", tuple(self.calendars))
 
 
+# Web research ([research]): a separate run of the same Claude Code whose only tools are web search
+# and web fetch, given only the owner's words and today's date (briefing_reader.ask.research).
+RESEARCH_RANGES = {"timeout_seconds": (30, 300), "max_searches": (1, 8), "max_fetches": (0, 8),
+                   "max_per_hour": (1, 30), "max_per_day": (1, 100), "max_sources": (1, 6)}
+
+
+@dataclass(frozen=True)
+class ResearchConfig:
+    """``[research]``: web research (part of Ask; needs [ask] enabled). Bad values become the default
+    with a warning."""
+
+    enabled: bool = True           # needs [ask] enabled
+    planner_may_ask: bool = True   # the Ask planner may hand a request to web research
+    model: str = "sonnet"
+    timeout_seconds: int = 120     # one research run (30..300)
+    max_searches: int = 4          # web searches per run (1..8)
+    max_fetches: int = 4           # page reads per run (0..8); 0 = search only (WebFetch not offered)
+    max_per_hour: int = 6          # research runs (each also counts as an Ask planner run), 1..30
+    max_per_day: int = 20          # 1..100
+    max_sources: int = 5           # sources shown as Open cards (1..6)
+
+    @property
+    def max_turns(self) -> int:
+        """The run's --max-turns: every allowed search and page read, the answer and one spare."""
+        return self.max_searches + self.max_fetches + 2
+
+
 # How Jarvis addresses the owner: a letter, then letters, spaces, . ' - (20 characters at most).
 ADDRESS_RE = re.compile(r"[A-Za-z][A-Za-z .'-]{0,19}")
 
@@ -324,6 +351,7 @@ class Config:
     ask: AskConfig = field(default_factory=AskConfig)
     assistant: AssistantConfig = field(default_factory=AssistantConfig)
     live: LiveConfig = field(default_factory=LiveConfig)
+    research: ResearchConfig = field(default_factory=ResearchConfig)
 
     @property
     def notion_url(self) -> str:
@@ -445,6 +473,7 @@ def load_config(project_root: Path | None = None, *,
         ask=_parse_ask(doc, environ),
         assistant=_parse_assistant(doc),
         live=_parse_live(doc),
+        research=_parse_research(doc, environ),
     )
 
 
@@ -887,6 +916,17 @@ _ENV_TRUE = frozenset({"1", "true", "yes", "on"})
 _ENV_FALSE = frozenset({"0", "false", "no", "off"})
 
 
+def _enabled_override(enabled: bool, environ: Mapping[str, str] | None, name: str, setting: str) -> bool:
+    """``enabled`` unless the environment variable ``name`` says true or false (a bad value is
+    reported and the config.toml value kept)."""
+    override = _clean_value((environ or {}).get(name)).lower()
+    if override in _ENV_TRUE or override in _ENV_FALSE:
+        return override in _ENV_TRUE
+    if override:
+        logger.warning("%s should be true or false; using config.toml %s", name, setting)
+    return enabled
+
+
 def _parse_ask(doc: Mapping[str, Any], environ: Mapping[str, str] | None = None) -> AskConfig:
     """``[ask]`` from config.toml; ``JARVIS_ASK_ENABLED`` (e.g. in the gitignored ``.env``)
     overrides ``enabled`` so a personal setting never has to change the tracked file."""
@@ -899,18 +939,31 @@ def _parse_ask(doc: Mapping[str, Any], environ: Mapping[str, str] | None = None)
             calendars.append(name)
         else:
             logger.warning("config.toml: ask.calendars entry %s is not a calendar id; skipped", _short_repr(name))
-    enabled = r.boolean("enabled", d.enabled)
-    override = _clean_value((environ or {}).get(ASK_ENABLED_ENV)).lower()
-    if override in _ENV_TRUE or override in _ENV_FALSE:
-        enabled = override in _ENV_TRUE
-    elif override:
-        logger.warning("%s should be true or false; using config.toml ask.enabled", ASK_ENABLED_ENV)
+    enabled = _enabled_override(r.boolean("enabled", d.enabled), environ, ASK_ENABLED_ENV, "ask.enabled")
     return AskConfig(
         enabled=enabled,
         model=r.string("model", d.model, pattern=_MODEL_RE),
         calendars=tuple(calendars) or d.calendars,
         hardened_flags=r.boolean("hardened_flags", d.hardened_flags),
         read_mail=r.boolean("read_mail", d.read_mail),
+        **numbers,
+    )
+
+
+RESEARCH_ENABLED_ENV = "JARVIS_RESEARCH_ENABLED"
+
+
+def _parse_research(doc: Mapping[str, Any], environ: Mapping[str, str] | None = None) -> ResearchConfig:
+    """``[research]`` from config.toml; ``JARVIS_RESEARCH_ENABLED`` (e.g. in the gitignored ``.env``)
+    overrides ``enabled`` both ways, like JARVIS_ASK_ENABLED."""
+    d = ResearchConfig()
+    r = _TableReader(doc, "research", _field_names(ResearchConfig))
+    numbers = {key: r.integer(key, getattr(d, key), low, high) for key, (low, high) in RESEARCH_RANGES.items()}
+    enabled = _enabled_override(r.boolean("enabled", d.enabled), environ, RESEARCH_ENABLED_ENV, "research.enabled")
+    return ResearchConfig(
+        enabled=enabled,
+        planner_may_ask=r.boolean("planner_may_ask", d.planner_may_ask),
+        model=r.string("model", d.model, pattern=_MODEL_RE),
         **numbers,
     )
 

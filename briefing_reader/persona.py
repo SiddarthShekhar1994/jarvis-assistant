@@ -30,6 +30,9 @@ This module only builds sentences; it never speaks, logs or stores them.
   (the planner's say and question only, guarded by ``claims_done``; the question
   is always kept, and after mail was read the say is kept short and never quotes
   it), its failures and the short "One moment, sir." while it plans.
+* ``research_reply_speech``: web research's spoken answer (the answer without its
+  [n] marks, guarded by ``claims_done(first_person_only=True)``, then that the
+  sources are on screen and how many suggestions wait for the OK).
 * ``scrub_for_speech``: addresses, links and long ids out, at most 400
   characters cut at a sentence; every spoken text goes through it.
 
@@ -384,15 +387,20 @@ _CLAIM_RES = (
 )
 
 
-def claims_done(text: str) -> bool:
+def claims_done(text: str, *, first_person_only: bool = False) -> bool:
     """The text says something was already carried out ("Done.", "All set.", "I've sent the email",
     "I've put it on your calendar", "I've let Ana know", "It has been moved", "The meeting was moved
     to Friday", "Project sync is now on Friday", "Your email is on its way", "Consider it done").
     Only the executor's result may say that, so such a planner answer is never spoken as written.
     "I've lined up a move", "Shall I set up a block?" or "waiting for your OK" do not count. It errs
-    on the side of a claim: the owner still reads the planner's words in the JARVIS tab."""
+    on the side of a claim: the owner still reads the planner's words in the JARVIS tab.
+
+    ``first_person_only`` (a web research answer, which states facts about the world): only a
+    sentence that starts with a claim ("Done.", "All set.", "Booked ...") or the speaker's own
+    ("I've added", "I moved") counts; "The match was cancelled [1]." is a fact, not a claim."""
     flat = " ".join(str(text or "").replace("\u2019", "'").split())
-    return bool(_CLAIM_START_RE.search(flat) or any(pattern.search(flat) for pattern in _CLAIM_RES))
+    patterns = _CLAIM_RES[:2] if first_person_only else _CLAIM_RES
+    return bool(_CLAIM_START_RE.search(flat) or any(pattern.search(flat) for pattern in patterns))
 
 
 # --------------------------------------------------------------------------
@@ -633,6 +641,49 @@ def ask_reply_speech(outcome: Any, address: str = "sir") -> ReplySpeech:
     return ReplySpeech(" ".join(part for part in (said, asked) if part), guarded)
 
 
+_SOURCE_MARK_RE = re.compile(r"\s*\[\d{1,2}\]")
+_FOUND_GUARDED = "Here's what I found, {sir}. The details are on screen."
+_NO_WEB_ANSWER = "I couldn't find an answer to that on the web, {sir}."
+_SOURCES_SHOWN = "The sources are on screen, {sir}."
+_NO_SOURCE = "I couldn't find a source I could show you, {sir}."
+
+
+def research_reply_speech(answer: str, *, sources: int, cards: int, address: str = "sir") -> ReplySpeech:
+    """What Jarvis says when web research answered: the answer without its [n] source marks, then
+    "The sources are on screen, sir." (or that no source could be shown), then how many suggestion
+    cards wait for the OK (``cards`` counts the decidable suggestion cards only, never the source
+    cards). An answer that claims Jarvis did something in his own words ("I've booked ...", "Done.":
+    ``claims_done(first_person_only=True)``; a fact such as "The match was cancelled" is not one)
+    is replaced by "Here's what I found, sir. The details are on screen." (``guarded``). The address
+    is said once, in the first sentence that has a place for it; the answer gets what is left of
+    SPEECH_LIMIT; everything goes through scrub_for_speech (no address, link or long id is said).
+    The address word is Jarvis's own: it never went to the research."""
+    flat = " ".join(_SOURCE_MARK_RE.sub("", str(answer or "")).split())
+    guarded = bool(flat) and claims_done(flat, first_person_only=True)
+    templates: list[str] = []
+    if guarded:
+        templates.append(_FOUND_GUARDED)
+    elif not flat:
+        templates.append(_NO_WEB_ANSWER)
+    if sources > 0:
+        if not guarded:
+            templates.append(_SOURCES_SHOWN)
+    elif flat:   # with no answer either, "I couldn't find an answer" says it all
+        templates.append(_NO_SOURCE)
+    said: list[str] = []
+    used = False
+    for template in templates:
+        said.append(with_address(template, "" if used else address))
+        used = used or "{sir}" in template or "{Sir}" in template
+    approvals = approvals_sentence(cards) if cards > 0 else ""
+    tail = " ".join(part for part in (*said, approvals) if part)
+    if guarded or not flat:
+        return ReplySpeech(scrub_for_speech(tail), guarded)
+    room = SPEECH_LIMIT - len(tail) - 1
+    spoken = scrub_for_speech(_end_sentence(flat), limit=max(room, 40))
+    return ReplySpeech(" ".join(part for part in (spoken, tail) if part), False)
+
+
 _SIGN_IN_AGAIN = "{Sir}, Claude Code needs you to sign in again. The details are under the bar."
 _LIMIT_REACHED = "{Sir}, we've reached the Ask limit for now."
 _FAILURE_SPEECH = {
@@ -641,6 +692,9 @@ _FAILURE_SPEECH = {
     "not_subscription": _SIGN_IN_AGAIN,
     "caps": _LIMIT_REACHED,
     "limit": _LIMIT_REACHED,
+    "research_cap": "Sorry, {sir} - that needed more searching than I allow. Nothing was proposed.",
+    "research_off": "{Sir}, web research is turned off.",
+    "research_limit": "{Sir}, we've reached the web research limit for now.",
 }
 _SILENT_FAILURES = ("cancelled", "empty", "busy")
 _OTHER_FAILURE = "Sorry, {sir} - something went wrong. Nothing was proposed."

@@ -196,7 +196,7 @@ class SearchGrounding:
 
     def word(self, word: str) -> bool:
         """``word`` (casefolded) is one the owner typed (or the same word with another ending)."""
-        return any(_same_word(word, typed) for typed in self.words)
+        return any(same_word(word, typed) for typed in self.words)
 
     def named_people(self) -> dict[str, frozenset[str]]:
         """The supplied people the command names (a name or address word of theirs was typed)."""
@@ -214,7 +214,10 @@ def address_words(address: str) -> set[str]:
     return {word for word in search_words(address) if word not in _ADDRESS_NOISE}
 
 
-def _same_word(word: str, typed: str) -> bool:
+def same_word(word: str, typed: str) -> bool:
+    """``word`` and ``typed`` (casefolded) are the same word, or the same word with another
+    ending ("budget" / "budgets", "confirmation" / "confirmed"): a shared start of four letters
+    when one starts the other, else of six."""
     if word == typed:
         return True
     short, long_ = sorted((word, typed), key=len)

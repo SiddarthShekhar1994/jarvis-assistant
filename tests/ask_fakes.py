@@ -254,3 +254,177 @@ def gmail_thread(thread_id: str, messages: Sequence[dict[str, Any]]) -> dict[str
 
 
 Clock = Callable[[], datetime]
+
+
+class GatedProcess(FakeProcess):
+    """A CLI run whose lines after the first ``after`` lines wait for ``gate`` (a run "in progress"
+    for the UI tests and harnesses; used by the Ask and the web research tests)."""
+
+    def __init__(self, lines: Sequence[str], gate: threading.Event, *, after: int = 1,
+                 clock: FakeClock | None = None) -> None:
+        super().__init__(lines, clock=clock)
+        self.gate = gate
+        self.after = after
+        self.given = 0
+
+    def read_line(self, timeout: float) -> str | None:
+        if self.killed:
+            return None
+        if self.given >= self.after and not self.gate.is_set():
+            self.gate.wait(min(timeout, 0.05))
+            if not self.gate.is_set():
+                return ""
+        self.given += 1
+        return super().read_line(timeout)
+
+
+# --------------------------------------------------------------------------
+# Web research streams (invented; example.org / example.net / example.com only)
+# --------------------------------------------------------------------------
+
+SESSION = "00000000-0000-4000-8000-00000000b7e5"
+RESEARCH_QUESTION = "what time does the Example Museum open on Saturday"
+RESEARCH_QUERY = "Example Museum opening hours Saturday"
+VISIT_URL = "https://www.example.org/visit"
+HOURS_URL = "https://museum.example.net/hours"
+RESEARCH_HITS = (("Visit - Example Museum", VISIT_URL), ("Hours and tickets", HOURS_URL),
+                 ("Example Museum - Wikipedia", "https://en.example.com/wiki/Example_Museum"))
+VISIT_TEXT = ("The Example Museum opens at 10 AM on Saturdays and closes at 6 PM. On the first Friday of the "
+              "month it stays open until 9 PM.")
+RESEARCH_ANSWER = {
+    "answer": "The Example Museum opens at 10 AM on Saturday and closes at 6 PM [1]. On the first Friday of the "
+              "month it stays open until 9 PM [2].",
+    "sources": [{"title": "Visit - Example Museum", "url": VISIT_URL},
+                {"title": "Hours and tickets", "url": HOURS_URL}],
+    "suggestions": ["Todo: title=Visit the Example Museum | due=2026-10-10 18:00 | block=2026-10-10 10:00-12:00 | "
+                    "acct= | link=" + VISIT_URL],
+}
+
+
+def research_init(**changes: Any) -> dict[str, Any]:
+    """The init event of a research run (its own folder; StructuredOutput, WebFetch, WebSearch)."""
+    event = {"type": "system", "subtype": "init", "cwd": "C:/Users/example/AppData/Local/briefing-reader/research",
+             "session_id": SESSION, "tools": ["StructuredOutput", "WebFetch", "WebSearch"], "mcp_servers": [],
+             "model": "claude-sonnet-4-5-20250929", "permissionMode": "dontAsk", "slash_commands": [],
+             "apiKeySource": "none", "claude_code_version": "2.1.294", "output_style": "default", "agents": [],
+             "skills": [], "plugins": [], "uuid": "33333333-3333-4333-8333-333333333333"}
+    event.update(changes)
+    return event
+
+
+def assistant(*blocks: dict[str, Any], parent: str | None = None) -> dict[str, Any]:
+    return {"type": "assistant", "session_id": SESSION, "parent_tool_use_id": parent,
+            "message": {"id": "msg_research", "type": "message", "role": "assistant",
+                        "model": "claude-sonnet-4-5-20250929", "content": list(blocks), "stop_reason": "tool_use",
+                        "usage": {"input_tokens": 900, "output_tokens": 60}}}
+
+
+def search_block(tool_id: str, query: str, **extra: Any) -> dict[str, Any]:
+    return {"type": "tool_use", "id": tool_id, "name": "WebSearch", "input": {"query": query, **extra}}
+
+
+def fetch_block(tool_id: str, url: str, prompt: str = "") -> dict[str, Any]:
+    return {"type": "tool_use", "id": tool_id, "name": "WebFetch",
+            "input": {"url": url, "prompt": prompt or "What does this page say about the question?"}}
+
+
+def search_call(tool_id: str, query: str, *, text: str = "", parent: str | None = None, **extra: Any) -> dict:
+    """An assistant event with one WebSearch call (``text``: a text block before it)."""
+    blocks = ([{"type": "text", "text": text}] if text else []) + [search_block(tool_id, query, **extra)]
+    return assistant(*blocks, parent=parent)
+
+
+def fetch_call(tool_id: str, url: str, prompt: str = "", *, parent: str | None = None) -> dict:
+    return assistant(fetch_block(tool_id, url, prompt), parent=parent)
+
+
+def tool_result(tool_id: str, content: Any, *, structured: Any = None, error: bool = False,
+                parent: str | None = None) -> dict[str, Any]:
+    """A user event with one tool_result (``structured``: its tool_use_result)."""
+    block: dict[str, Any] = {"type": "tool_result", "tool_use_id": tool_id, "content": content}
+    if error:
+        block["is_error"] = True
+    event: dict[str, Any] = {"type": "user", "session_id": SESSION, "parent_tool_use_id": parent,
+                             "message": {"role": "user", "content": [block]}}
+    if structured is not None:
+        event["tool_use_result"] = structured
+    return event
+
+
+def search_text(query: str, hits: Sequence[tuple[str, str]], summary: str = "") -> str:
+    links = json.dumps([{"title": title, "url": url} for title, url in hits])
+    return f'Web search results for query: "{query}"\n\nLinks: {links}\n\n{summary}'
+
+
+def search_result(tool_id: str, hits: Sequence[tuple[str, str]], text: str = "", *, structured: bool = True,
+                  query: str = RESEARCH_QUERY, summary: str = "The museum opens at 10 AM ...",
+                  parent: str | None = None) -> dict[str, Any]:
+    """WebSearch's result: the text Claude got (with a Links array) and, when ``structured``, the
+    tool_use_result with the hits as one result group."""
+    content = text or search_text(query, hits, summary)
+    details = None
+    if structured:
+        details = {"query": query, "results": [{"tool_use_id": "srvtoolu_" + tool_id[-4:],
+                                                "content": [{"title": title, "url": url} for title, url in hits]},
+                                               summary], "durationSeconds": 2.4}
+    return tool_result(tool_id, content, structured=details, parent=parent)
+
+
+def fetch_result(tool_id: str, url: str = VISIT_URL, *, code: int = 200, text: str = VISIT_TEXT, size: int = 48213,
+                 structured: bool = True, error: str = "", code_text: str = "OK",
+                 parent: str | None = None) -> dict[str, Any]:
+    """WebFetch's result: its summary of the page; ``error``: an is_error result with that text."""
+    if error:
+        return tool_result(tool_id, error, error=True, parent=parent,
+                           structured=f"Error: {error}" if structured else None)
+    details = {"bytes": size, "code": code, "codeText": code_text, "result": text, "durationMs": 1840,
+               "url": url} if structured else None
+    return tool_result(tool_id, text, structured=details, parent=parent)
+
+
+def research_answer(answer: str, sources: Sequence[Mapping[str, str]] = (), suggestions: Sequence[str] = (),
+                    **result_changes: Any) -> list[dict[str, Any]]:
+    """The StructuredOutput call, its tool_result and the result event carrying structured_output."""
+    output = {"answer": answer, "sources": [dict(source) for source in sources], "suggestions": list(suggestions)}
+    return research_output(output, **result_changes)
+
+
+def research_output(output: Any, **result_changes: Any) -> list[dict[str, Any]]:
+    """As research_answer, with any structured_output (also a wrong shape)."""
+    call = assistant({"type": "tool_use", "id": "toolu_answer", "name": "StructuredOutput", "input": output})
+    done = tool_result("toolu_answer", "Structured output provided successfully")
+    result = research_result(output, **result_changes)
+    return [call, done, result]
+
+
+def research_result(output: Any = None, **changes: Any) -> dict[str, Any]:
+    event: dict[str, Any] = {"type": "result", "subtype": "success", "is_error": False, "duration_ms": 18400,
+                             "duration_api_ms": 17100, "num_turns": 4, "result": "", "session_id": SESSION,
+                             "total_cost_usd": 0.0456,
+                             "usage": {"input_tokens": 21000, "cache_creation_input_tokens": 0,
+                                       "cache_read_input_tokens": 9000, "output_tokens": 820,
+                                       "service_tier": "standard"},
+                             "modelUsage": {}, "permission_denials": [], "uuid": "44444444-4444-4444-8444-444444444444"}
+    if output is not None:
+        event["structured_output"] = output
+    event.update(changes)
+    return event
+
+
+def research_stream(*events: Any, init: Mapping[str, Any] | None = None) -> list[str]:
+    """JSON lines: the research init (or ``init``), then every event (an event list is flattened;
+    a str is kept as a raw line)."""
+    lines = [json.dumps(dict(init) if init is not None else research_init())]
+    for item in events:
+        for event in (item if isinstance(item, list) else [item]):
+            lines.append(event if isinstance(event, str) else json.dumps(event))
+    return lines
+
+
+def success_events() -> list[Any]:
+    """The research_success run's events after init (see tests/fixtures/ask/research_success.jsonl)."""
+    return [search_call("toolu_s1", RESEARCH_QUERY, text="Let me look that up."),
+            search_result("toolu_s1", RESEARCH_HITS),
+            fetch_call("toolu_f1", VISIT_URL, "What are the opening hours on Saturday?"),
+            fetch_result("toolu_f1"),
+            research_answer(**RESEARCH_ANSWER)]

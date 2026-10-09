@@ -4,8 +4,8 @@ pop-out window (ui.py; hud.LiveLog renders it).
     LiveStream(enabled=True, keep_text=True, hour24=False, ...)
                                       one per app (AppController.live): thread-safe, bounded
                                       (LiveLimits), in memory only, this session only
-        task(kind, title, ...)        a LiveTask (TASK_*: an Ask, an approved card, a briefing
-                                      fetch, the rolling "Background reads"); NO_TASK when disabled
+        task(kind, title, ...)        a LiveTask (TASK_*: an Ask, a web research, an approved card, a
+                                      briefing fetch, the rolling "Background reads"); NO_TASK when disabled
                                       or closed
         snapshot()                    every TaskView, the pinned task first, then oldest -> newest
         changes(since)                the TaskViews changed since a version, the ids removed since
@@ -76,7 +76,7 @@ TASK_ASK = "ask"
 TASK_ACTION = "action"
 TASK_BRIEFING = "briefing"
 TASK_BACKGROUND = "background"
-TASK_WEB = "web"                  # reserved: a standalone web research task (spec section 9)
+TASK_WEB = "web"                  # a web research started with "web:" (ask.research)
 TASK_KINDS = (TASK_ASK, TASK_ACTION, TASK_BRIEFING, TASK_BACKGROUND, TASK_WEB)
 TASK_TAGS = {TASK_ASK: "ASK", TASK_ACTION: "ACTION", TASK_BRIEFING: "BRIEFING", TASK_BACKGROUND: "BACKGROUND",
              TASK_WEB: "WEB"}
@@ -105,12 +105,15 @@ AGENDA_READ = "agenda.read"
 EVENT_CHECK = "event.check"
 ACCOUNT_SIGNIN = "account.signin"
 CLAUDE_CHECK = "claude.check"
-WEB_SEARCH = "web.search"         # reserved (spec section 9)
-WEB_FETCH = "web.fetch"           # reserved (spec section 9)
+WEB_SEARCH = "web.search"         # one web search of a research run (its exact query and results)
+WEB_FETCH = "web.fetch"           # one page read of a research run (its URL, HTTP status, excerpt)
+RESEARCH_INPUT = "research.input"         # what the web research gets (the isolation check)
+RESEARCH_RUN = "research.run"             # the web research run (Claude Code with web tools only)
+RESEARCH_VALIDATE = "research.validate"   # the research answer checked: sources and suggestions
 STEP_KINDS = (ASK_REQUEST, ASK_CHECKS, CALENDAR_READ, MAIL_THREAD, MAIL_SEARCH, PLANNER_RUN, ASK_VALIDATE,
               ASK_CARDS, ACTION_APPROVED, ACTION_PAYLOAD, ACTION_COUNTDOWN, ACTION_SIGNIN, ACTION_CHECKS,
               ACTION_CALL, BRIEFING_FETCH, AGENDA_READ, EVENT_CHECK, ACCOUNT_SIGNIN, CLAUDE_CHECK, WEB_SEARCH,
-              WEB_FETCH)
+              WEB_FETCH, RESEARCH_INPUT, RESEARCH_RUN, RESEARCH_VALIDATE)
 
 # Internal link ids a Field may carry besides a Jarvis-made Google result link ("tab:jarvis").
 INTERNAL_LINK_RE = re.compile(r"(?:tab:[a-z]{1,16}|live:\d{1,12})")
@@ -514,7 +517,7 @@ def open_hint(kind: str, status: str, items: Iterable[Item] = ()) -> bool:
         return True
     if kind in (ACTION_PAYLOAD, ASK_CARDS):
         return True
-    if kind == ASK_VALIDATE:
+    if kind in (ASK_VALIDATE, RESEARCH_VALIDATE):
         return any(item.status and item.status != STATUS_OK for item in items)
     return False
 

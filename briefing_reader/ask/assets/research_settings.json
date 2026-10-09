@@ -1,0 +1,10 @@
+{
+  "disableAllHooks": true,
+  "disableClaudeAiConnectors": true,
+  "autoMemoryEnabled": false,
+  "permissions": {
+    "allow": ["WebSearch", "WebFetch"],
+    "deny": ["Bash", "PowerShell", "Edit", "Write", "Read", "Glob", "Grep", "NotebookEdit",
+             "Agent", "Task", "mcp__*"]
+  }
+}

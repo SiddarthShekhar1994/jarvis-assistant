@@ -10,9 +10,13 @@
                                      request and nothing counted against the caps
     --ask-text "..."                 one real Ask (one or two planner runs on your Claude plan):
                                      prints what the planner said, the cards and an init summary
+    --ask-text "web: ..."            web research only (one run; nothing is read from your accounts):
+                                     the answer, its sources, what was left out and the cards; with
+                                     --ask-dry-run the exact text the research would get and its
+                                     command line
 
 These print to the console only. The log gets what the app logs anyway (kinds, counts, durations):
-never the request, the context or the planner's text.
+never the request, the context, the planner's text or anything from the web.
 """
 
 from __future__ import annotations
@@ -29,14 +33,17 @@ from ..actions import card_view
 from ..config import Config
 from . import cli
 from .context import BriefingContext
-from .planner import AskPlanner, ClaudeEngine, GoogleSources, Readiness, briefing_from_page
-from .usage import USAGE_FILE, UsageLog
+from .planner import AskPlanner, ClaudeEngine, GoogleSources, Readiness, ResearchEngine, briefing_from_page
+from .research import forced_question
+from .research_validate import steps_words
+from .usage import KIND_RESEARCH, USAGE_FILE, UsageLog
 
 logger = logging.getLogger(__name__)
 
 ACTIONS_FILE = "actions.json"   # as ui.ACTIONS_FILE (ui imports Qt; this module must not)
 STAGE_WORDS = {"context": "Reading your calendar...", "planning": "Planning (uses your Claude plan)...",
-               "mail": "Reading your mail...", "planning_again": "Planning with your mail (uses your Claude plan)..."}
+               "mail": "Reading your mail...", "planning_again": "Planning with your mail (uses your Claude plan)...",
+               "research": "Searching the web (uses your Claude plan)..."}
 
 
 def google_sources(config: Config) -> GoogleSources:
@@ -122,26 +129,53 @@ def ask_check(config: Config, out: TextIO, *, environ: Mapping[str, str] | None 
     for account in accounts:
         out.write(f"  Account {account.alias}: calendar {account.calendar}, sending "
                   f"{'set up' if account.send_mail else 'not set up'}, mail reading {account.read_mail}\n")
+    research = config.research
     usage = usage or UsageLog(config.data_dir / USAGE_FILE, max_per_hour=config.ask.max_per_hour,
-                              max_per_day=config.ask.max_per_day)
+                              max_per_day=config.ask.max_per_day, max_research_per_hour=research.max_per_hour,
+                              max_research_per_day=research.max_per_day)
     hour, day = usage.counts()
     out.write(f"  Usage: {hour} of {config.ask.max_per_hour} planner runs this hour, {day} of "
               f"{config.ask.max_per_day} today\n")
     caps = usage.check()
     if caps.held:
         out.write(f"  Paused: {caps.message}\n")
+    engine_research = ResearchEngine(research, engine)
+    research_ready = engine_research.readiness() if ready.ok else ready
+    out.write(f"  Web research: {_research_line(config, ready, engine_research)}\n")
+    research_hour, research_day = usage.counts(kind=KIND_RESEARCH)
+    out.write(f"  Research usage: {research_hour} of {research.max_per_hour} research runs this hour, {research_day} "
+              f"of {research.max_per_day} today\n")
     ok = ready.ok and config.ask.enabled and not caps.held
     out.write(f"Ready: {'yes' if ok else 'no'}\n")
+    research_ok = ok and research.enabled and research_ready.ok and usage.check(research=1).allowed
+    out.write(f"Web research ready: {'yes' if research_ok else 'no'}\n")   # never changes Ready: or the exit code
     return 0 if ok else 1
+
+
+def _research_line(config: Config, ready: Readiness, research: ResearchEngine) -> str:
+    """"on ([research] enabled) - --allowedTools: available - work folder research\\ empty"."""
+    state = "on ([research] enabled)" if config.research.enabled else "off ([research] enabled = false)"
+    if ready.exe is None or not ready.version:
+        flag = "unknown (Claude Code not checked)"
+    else:
+        flag = "missing (update Claude Code)" if ready.research_missing else "available"
+    problem = cli.prepare_work_folder(research.work_folder, what="Web research", folder=cli.RESEARCH_WORK_FOLDER)
+    folder = problem or f"work folder {cli.RESEARCH_WORK_FOLDER}\\ empty"
+    return f"{state} - --allowedTools: {flag} - {folder}"
 
 
 def ask_dry_run(text: str, config: Config, out: TextIO, *, briefing: BriefingContext | None,
                 environ: Mapping[str, str] | None = None, runner: cli.Runner | None = None,
                 sources: GoogleSources | None = None) -> int:
-    """Print what the first planner run would get (email text as counts) and its command line."""
+    """Print what the first planner run would get (email text as counts) and its command line; for
+    "web: ...", what the web research run would get and its command line (nothing read from the
+    accounts)."""
     environ = os.environ if environ is None else environ
     engine = ClaudeEngine(config.ask, config.data_dir, runner=runner, environ=environ)
     planner = AskPlanner(config, engine, sources if sources is not None else google_sources(config))
+    question = forced_question(text)
+    if question is not None:
+        return _research_dry_run(planner, question, out)
     dry = planner.dry_run(text, briefing=briefing)
     out.write("Ask Jarvis dry run (no Claude request was made; nothing was counted)\n")
     out.write("---- stdin (email text shown as counts) ----\n")
@@ -156,6 +190,42 @@ def ask_dry_run(text: str, config: Config, out: TextIO, *, briefing: BriefingCon
     if not dry.readiness.ok:
         out.write(f"Not ready to run: {dry.readiness.message}\n")
     return 0
+
+
+def _research_dry_run(planner: AskPlanner, question: str, out: TextIO) -> int:
+    from .planner import EMPTY_WEB_MESSAGE
+
+    out.write("Ask Jarvis dry run (no Claude request was made; nothing was counted)\n")
+    if not question:
+        out.write(EMPTY_WEB_MESSAGE + "\n")
+        return 1
+    dry = planner.research_dry_run(question)
+    out.write("Web research: nothing is read from your accounts for this request\n")
+    out.write("---- stdin ----\n")
+    out.write(dry.prompt)
+    out.write("---- end of stdin ----\n")
+    if dry.argv:
+        out.write("Command line (the question goes to stdin, never here):\n  " + subprocess.list2cmdline(dry.argv)
+                  + "\n")
+    else:
+        out.write(f"Command line: not built ({dry.readiness.message})\n")
+    if not dry.readiness.ok:
+        out.write(f"Not ready to run: {dry.readiness.message}\n")
+    return 0
+
+
+def _research_lines(outcome: Any, out: TextIO) -> None:
+    """A research's answer, sources, what was left out and its web steps (counts)."""
+    report = outcome.research
+    out.write(f"Answer: {report.answer or '(none)'}\n")
+    for source in report.sources:
+        checked = "" if source.checked else " (not checked against the search results)"
+        out.write(f"Source [{source.number}]: {source.title} ({source.domain}) {source.url}{checked}\n")
+    for number, reason in report.left_out:
+        out.write(f"Left out [{number}]: {reason}\n")
+    for _line, reason in report.dropped:
+        out.write(f"Suggestion left out: {reason}\n")
+    out.write(f"Web: {steps_words(report)}, {report.denied} refused\n")
 
 
 def ask_once(text: str, config: Config, out: TextIO, *, briefing: BriefingContext | None,
@@ -185,7 +255,10 @@ def ask_once(text: str, config: Config, out: TextIO, *, briefing: BriefingContex
     if not outcome.ok:
         out.write(f"Not planned: {outcome.message}\n")
         return 1
-    out.write(f"Say: {outcome.say}\n")
+    if outcome.research is not None:
+        _research_lines(outcome, out)
+    else:
+        out.write(f"Say: {outcome.say}\n")
     if outcome.question:
         out.write(f"Question: {outcome.question}\n")
     if outcome.message:
@@ -194,10 +267,13 @@ def ask_once(text: str, config: Config, out: TextIO, *, briefing: BriefingContex
     for card in outcome.cards:
         view = card_view(card, today)
         extra = f" (unverified recipients: {', '.join(sorted(card.unverified))})" if card.unverified else ""
+        if card.web and card.link:
+            extra += f" -> {card.link}"
         out.write(f"Card: ASK {view.kind_label.upper()} | {view.title} | {view.detail}{extra}\n")
     if not outcome.cards:
         out.write("Cards: none\n")
-    out.write(f"Total: {outcome.runs} planner run(s), {outcome.duration_ms / 1000:.1f} s\n")
+    out.write(f"Total: {outcome.runs} run(s), {outcome.duration_ms / 1000:.1f} s\n" if outcome.research is not None
+              else f"Total: {outcome.runs} planner run(s), {outcome.duration_ms / 1000:.1f} s\n")
     return 0
 
 
@@ -213,7 +289,10 @@ def run(args: Any, config: Config, out: TextIO | None) -> int:
     if args.ask_check:
         return ask_check(config, stream)
     now = datetime.now().astimezone()
-    briefing = cli_briefing(config, getattr(args, "from_file", None), now=now, out=stream)
+    if forced_question(args.ask_text or "") is not None:   # web research: nothing is read, not even the briefing
+        briefing = None
+    else:
+        briefing = cli_briefing(config, getattr(args, "from_file", None), now=now, out=stream)
     if args.ask_dry_run:
         return ask_dry_run(args.ask_text, config, stream, briefing=briefing)
     return ask_once(args.ask_text, config, stream, briefing=briefing)

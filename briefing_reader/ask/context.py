@@ -448,10 +448,15 @@ def _named(raw: str) -> list[tuple[str, str]]:
     return pairs
 
 
-def _now_block(ctx: AskContext) -> str:
-    now = ctx.now
-    zone = data(ctx.time_zone, 60) or "unknown"
+def now_line(now: datetime, time_zone: str) -> str:
+    """"Wednesday 2026-10-07 09:30 (time zone America/Los_Angeles)": the <now> line of the planner
+    and the <today> line of web research."""
+    zone = data(time_zone, 60) or "unknown"
     return f"{_WEEKDAYS[now.weekday()]} {now.strftime('%Y-%m-%d %H:%M')} (time zone {zone})"
+
+
+def _now_block(ctx: AskContext) -> str:
+    return now_line(ctx.now, ctx.time_zone)
 
 
 def fit_mail(threads: Sequence[MailThread], *, redact: bool = False,

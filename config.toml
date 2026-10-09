@@ -191,6 +191,31 @@ hardened_flags = true
 # (read only; the text is used for that one Ask and never saved or logged).
 read_mail = true
 
+[research]
+# Web research (part of Ask Jarvis; needs [ask] enabled = true). Start a request
+# with "web:" or let the Ask planner hand it over: a separate run of your Claude
+# Code whose only tools are web search and web fetch. It gets only your words
+# and today's date and time zone - never your calendar, mail, contacts,
+# briefing or addresses - and only proposes cards (sources to open, a to-do,
+# a new event) that wait for your OK. See the README before turning it on.
+enabled = true
+# The Ask planner may hand a request to web research (false: only "web:").
+planner_may_ask = true
+# "sonnet"; "haiku" uses less of your plan.
+model = "sonnet"
+# One research run may take this many seconds (30 to 300), make at most this
+# many web searches (1 to 8) and read at most this many pages (0 to 8; 0 =
+# search only). Jarvis stops a run that wants more.
+timeout_seconds = 120
+max_searches = 4
+max_fetches = 4
+# Research runs per hour (1 to 30) and per day (1 to 100). Each one also counts
+# as an Ask planner run ([ask] max_per_hour, max_per_day).
+max_per_hour = 6
+max_per_day = 20
+# At most this many sources become Open cards (1 to 6).
+max_sources = 5
+
 [assistant]
 # Jarvis speaks on his own: a greeting when you open him, "your briefing is
 # ready to view", his answers to Ask and what happened after you approved a

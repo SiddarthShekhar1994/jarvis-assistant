@@ -642,6 +642,11 @@ class GoogleCalendar:
                 self._timezone = value
             return self._timezone
 
+    def cached_timezone(self) -> str | None:
+        """The time zone setting only when :meth:`timezone` read it already (None otherwise):
+        never a request to Google (web research is told the zone without one)."""
+        return self._timezone
+
     def _read_timezone(self, *, interactive: bool = True) -> str | None:
         service = self._get_service(interactive=interactive)
         try:

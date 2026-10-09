@@ -665,5 +665,76 @@ class ScrubTests(unittest.TestCase):
         self.assertEqual(persona.scrub_for_speech(""), "")
 
 
+class ResearchSpeechTests(unittest.TestCase):
+    """Web research's spoken answer: the answer without its [n] marks, then the sources and cards."""
+
+    ANSWER = "The Example Museum opens at 10 AM on Saturday [1]. It closes at 6 PM [2]."
+
+    def test_the_answer_then_the_tails(self) -> None:
+        said = persona.research_reply_speech(self.ANSWER, sources=2, cards=1)
+        self.assertEqual(said, persona.ReplySpeech(
+            "The Example Museum opens at 10 AM on Saturday. It closes at 6 PM. The sources are on screen, sir. "
+            "One proposal is waiting for your OK.", False))
+        self.assertEqual(persona.research_reply_speech(self.ANSWER, sources=2, cards=0).text,
+                         "The Example Museum opens at 10 AM on Saturday. It closes at 6 PM. The sources are on screen, sir.")
+        self.assertEqual(persona.research_reply_speech("Open from 10 [1][2]", sources=0, cards=2).text,
+                         "Open from 10. I couldn't find a source I could show you, sir. Two proposals are waiting for "
+                         "your OK.")
+        self.assertNotIn("[", persona.research_reply_speech("A [12] b [3].", sources=1, cards=0).text)
+        self.assertIn("[123]", persona.research_reply_speech("Room [123].", sources=1, cards=0).text)
+
+    def test_the_address_is_said_once(self) -> None:
+        for address, expected in (("", "It opens at 10. The sources are on screen."),
+                                  ("boss", "It opens at 10. The sources are on screen, boss.")):
+            with self.subTest(address=address):
+                self.assertEqual(persona.research_reply_speech("It opens at 10 [1].", sources=1, cards=0,
+                                                               address=address).text, expected)
+        empty = persona.research_reply_speech("", sources=2, cards=0, address="boss")
+        self.assertEqual(empty.text, "I couldn't find an answer to that on the web, boss. The sources are on screen.")
+
+    def test_nothing_found(self) -> None:
+        self.assertEqual(persona.research_reply_speech("", sources=0, cards=0),
+                         persona.ReplySpeech("I couldn't find an answer to that on the web, sir.", False))
+        self.assertEqual(persona.research_reply_speech("  [1] ", sources=0, cards=0).text,
+                         "I couldn't find an answer to that on the web, sir.")
+
+    def test_first_person_claims_are_guarded_facts_are_not(self) -> None:
+        for answer in ("I've booked your tickets [1].", "Done. The museum opens at 10 [1].", "I added it to your calendar.",
+                       "All set: tickets are booked.", "I have now emailed the museum."):
+            with self.subTest(answer=answer):
+                said = persona.research_reply_speech(answer, sources=1, cards=2)
+                self.assertTrue(said.guarded)
+                self.assertEqual(said.text, "Here's what I found, sir. The details are on screen. Two proposals are "
+                                            "waiting for your OK.")
+        for answer in ("The match was cancelled [1].", "The museum has been moved to a new site [1].",
+                       "The exhibition is now open daily [1].", "Tickets were sold out last week [2]."):
+            with self.subTest(answer=answer):
+                said = persona.research_reply_speech(answer, sources=1, cards=0)
+                self.assertFalse(said.guarded)
+                self.assertTrue(said.text.startswith(answer.replace(" [1]", "").replace(" [2]", "")))
+        self.assertTrue(persona.claims_done("The match was cancelled."))   # the planner's guard is unchanged
+        self.assertFalse(persona.claims_done("The match was cancelled.", first_person_only=True))
+        self.assertTrue(persona.claims_done("I moved it.", first_person_only=True))
+        guarded = persona.research_reply_speech("I've booked it.", sources=0, cards=0)
+        self.assertEqual(guarded.text, "Here's what I found, sir. The details are on screen. I couldn't find a source "
+                                       "I could show you.")
+
+    def test_addresses_links_and_the_length(self) -> None:
+        said = persona.research_reply_speech("Write to info@example.org or see https://www.example.org/visit [1].",
+                                             sources=1, cards=0)
+        self.assertEqual(said.text, "Write to that address or see the link. The sources are on screen, sir.")
+        long = persona.research_reply_speech(("This is a long sentence about the museum [1]. " * 30).strip(), sources=3,
+                                             cards=3)
+        self.assertLessEqual(len(long.text), persona.SPEECH_LIMIT)
+        self.assertTrue(long.text.endswith("The sources are on screen, sir. Three proposals are waiting for your OK."))
+        self.assertTrue(long.text.startswith("This is a long sentence about the museum."))
+
+    def test_failure_speech(self) -> None:
+        self.assertEqual(persona.ask_failure_speech("research_cap"),
+                         "Sorry, sir - that needed more searching than I allow. Nothing was proposed.")
+        self.assertEqual(persona.ask_failure_speech("research_off", "boss"), "Boss, web research is turned off.")
+        self.assertEqual(persona.ask_failure_speech("research_off", ""), "Web research is turned off.")
+
+
 if __name__ == "__main__":
     unittest.main()

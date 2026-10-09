@@ -16,8 +16,12 @@
                                 switches set
     build_argv(...)             the exact command line: a list, never a shell; the prompt goes to
                                 stdin and never into argv
-    prepare_work_folder(path)   %LOCALAPPDATA%\\briefing-reader\\ask, created empty; anything in it
-                                (a CLAUDE.md, .mcp.json, .claude) refuses the run
+    build_research_argv(...)    web research's: the same, but its only tools are WebSearch and
+                                WebFetch (--tools and --allowedTools), its own prompt, schema and
+                                settings (ask.research)
+    prepare_work_folder(path)   %LOCALAPPDATA%\\briefing-reader\\ask (web research: ...\\research),
+                                created empty; anything in it (a CLAUDE.md, .mcp.json, .claude)
+                                refuses the run
     SubprocessRunner            CREATE_NO_WINDOW, a kill-on-close Job Object, stdout lines through
                                 a queue (so every wait has a timeout), a 4 KB stderr tail, kill()
 
@@ -51,6 +55,12 @@ PROMPT_FILE = ASSETS / "planner_prompt.md"
 SETTINGS_FILE = ASSETS / "ask_settings.json"
 SCHEMA_FILE = ASSETS / "schema.json"
 WORK_FOLDER = "ask"
+# Web research (ask.research): its own system prompt, answer schema, settings and empty folder.
+RESEARCH_PROMPT_FILE = ASSETS / "research_prompt.md"
+RESEARCH_SETTINGS_FILE = ASSETS / "research_settings.json"
+RESEARCH_SCHEMA_FILE = ASSETS / "research_schema.json"
+RESEARCH_WORK_FOLDER = "research"
+WEB_SEARCH_TOOL, WEB_FETCH_TOOL = "WebSearch", "WebFetch"
 
 SOURCE_ENV = "JARVIS_CLAUDE_EXE"
 SOURCE_PATH = "PATH"
@@ -64,6 +74,9 @@ REQUIRED_FLAGS = ("--print", "--output-format", "--verbose", "--model", "--json-
                   "--disallowedTools", "--disable-slash-commands", "--permission-mode",
                   "--permission-prompts", "--no-session-persistence")
 HARDENING_FLAGS = ("--safe-mode", "--restricted")
+# Flags web research needs besides REQUIRED_FLAGS (probed, not required by Ask): the allow rules
+# --permission-mode dontAsk needs for WebSearch / WebFetch (it denies anything not pre-approved).
+RESEARCH_FLAGS = ("--allowedTools",)
 # Never passed, whatever a later version offers: --bare reads API keys only, the others resume
 # saved sessions, write debug files or skip permissions.
 FORBIDDEN_FLAGS = ("--bare", "--resume", "--continue", "-c", "-r", "--debug", "--debug-file",
@@ -125,6 +138,7 @@ class Probe:
     missing: tuple[str, ...] = ()             # required flags --help does not list
     hardening: bool = False                   # --safe-mode and --restricted are both there
     message: str = ""                         # why not ok (safe to show and log)
+    research_missing: tuple[str, ...] = ()    # RESEARCH_FLAGS --help does not list (Ask stays ok)
 
 
 @dataclass(frozen=True)
@@ -283,18 +297,45 @@ def build_argv(exe: Path | str, *, model: str, max_turns: int, schema: str, hard
     return argv
 
 
-def prepare_work_folder(path: Path) -> str:
+def build_research_argv(exe: Path | str, *, model: str, max_turns: int, schema: str, hardened: bool,
+                        web_fetch: bool, prompt_file: Path = RESEARCH_PROMPT_FILE,
+                        settings_file: Path = RESEARCH_SETTINGS_FILE) -> list[str]:
+    """Web research's exact command line: like build_argv, but its only tools are WebSearch and
+    (``web_fetch``) WebFetch, allowed by name (``--allowedTools``: what dontAsk needs; anything else
+    is denied, never prompted), with research_settings.json's allow / deny rules, its own system
+    prompt and answer schema. --restricted keeps WebFetch because --tools names it. The prompt
+    (the owner's question) is never in argv: it goes to stdin."""
+    if not model or model.startswith("-") or any(char.isspace() for char in model):
+        raise ValueError("not a model name")
+    tools = ",".join((WEB_SEARCH_TOOL, WEB_FETCH_TOOL) if web_fetch else (WEB_SEARCH_TOOL,))
+    argv = [str(exe), "-p", "--output-format", "stream-json", "--verbose", "--model", model,
+            "--system-prompt-file", str(prompt_file), "--json-schema", schema,
+            "--tools", tools, "--allowedTools", tools,
+            "--mcp-config", EMPTY_MCP_CONFIG, "--strict-mcp-config",
+            "--setting-sources", "", "--settings", str(settings_file),
+            "--disallowedTools", "mcp__*", "--disable-slash-commands",
+            "--permission-mode", "dontAsk", "--permission-prompts", "none",
+            "--max-turns", str(int(max_turns)), "--no-session-persistence"]
+    if hardened:
+        argv += list(HARDENING_FLAGS)
+    if set(argv) & set(FORBIDDEN_FLAGS):   # never, whatever changes above
+        raise ValueError("a forbidden flag")
+    return argv
+
+
+def prepare_work_folder(path: Path, *, what: str = "Ask", folder: str = WORK_FOLDER) -> str:
     """Create ``path`` (the folder the CLI runs in) when missing; "" when it is an empty folder,
-    else why Ask refuses to run there (a CLAUDE.md, .mcp.json or .claude would add instructions,
-    servers or settings). The message names no path."""
+    else why ``what`` ("Ask", "Web research") refuses to run there (a CLAUDE.md, .mcp.json or
+    .claude would add instructions, servers or settings). The message names no path but
+    %LOCALAPPDATA%\\briefing-reader\\<folder>."""
     try:
         path.mkdir(parents=True, exist_ok=True)
         entries = [entry.name for entry in path.iterdir()]
     except OSError as exc:
-        return f"Ask's work folder could not be prepared ({exc.strerror or type(exc).__name__})"
+        return f"{what}'s work folder could not be prepared ({exc.strerror or type(exc).__name__})"
     if entries:
-        return (f"Ask's work folder (%LOCALAPPDATA%\\briefing-reader\\{WORK_FOLDER}) must be empty but holds "
-                f"{len(entries)} item(s); Ask will not run until you empty it")
+        return (f"{what}'s work folder (%LOCALAPPDATA%\\briefing-reader\\{folder}) must be empty but holds "
+                f"{len(entries)} item(s); {what} will not run until you empty it")
     return ""
 
 
@@ -565,11 +606,12 @@ def check_help(help_text: str, version: str) -> Probe:
     if not missing and "dontAsk" not in help_text:
         missing = ("--permission-mode dontAsk",)
     hardening = all(flag in flags for flag in HARDENING_FLAGS)
+    research_missing = tuple(flag for flag in RESEARCH_FLAGS if flag not in flags)
     if missing:
         return Probe(False, version, missing, hardening,
                      f"Claude Code {version or '(unknown version)'} is not supported by Ask yet (it lacks "
-                     f"{', '.join(missing)})")
-    return Probe(True, version, (), hardening)
+                     f"{', '.join(missing)})", research_missing)
+    return Probe(True, version, (), hardening, research_missing=research_missing)
 
 
 def probe(exe: Path, runner: Runner, env: Mapping[str, str], cwd: Path | None = None) -> Probe:
@@ -640,13 +682,22 @@ def forget_probes() -> None:
         _probe_cache.clear()
 
 
-def schema_text(*, allow_search: bool, path: Path = SCHEMA_FILE) -> str:
+def schema_text(*, allow_search: bool, allow_web: bool = False, path: Path = SCHEMA_FILE) -> str:
     """The --json-schema value: schema.json compact; without ``allow_search`` the gmail_search
-    property is removed (the second planner run may not ask to read mail again)."""
+    property is removed (the second planner run may not ask to read mail again), without
+    ``allow_web`` the web_research property (only the first run may hand a request to web
+    research, and only when [research] allows it)."""
     data = json.loads(path.read_text(encoding="utf-8"))
     if not allow_search:
         data.get("properties", {}).pop("gmail_search", None)
+    if not allow_web:
+        data.get("properties", {}).pop("web_research", None)
     return compact_json(data)
+
+
+def research_schema_text(path: Path = RESEARCH_SCHEMA_FILE) -> str:
+    """Web research's --json-schema value: research_schema.json compact."""
+    return compact_json(json.loads(path.read_text(encoding="utf-8")))
 
 
 def flags_of(argv: Iterable[str]) -> list[str]:

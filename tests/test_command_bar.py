@@ -215,6 +215,15 @@ class CommandBarTests(unittest.TestCase):
         self.assertFalse(self.bar.is_folded())
         self.assertEqual(self.bar.sizeHint().height(), full)
 
+    def test_the_hint_may_have_a_longer_tooltip(self) -> None:
+        self.bar.set_hint("Type a request", tooltip="Type a request.\nStart with web: to look something up <b>x</b>")
+        self.assertEqual(self.bar.status(), "Type a request")             # the status itself is the hint
+        tip = self.bar.input.toolTip()
+        self.assertIn("Start with web: to look something up", tip)
+        self.assertIn("&lt;b&gt;x&lt;/b&gt;", tip)                         # plain text, never markup
+        self.bar.set_hint("Type a request")
+        self.assertNotIn("web:", self.bar.input.toolTip())
+
     def test_the_placeholder_keeps_its_promise_short(self) -> None:
         self.assertEqual(hud.COMMAND_PLACEHOLDER, "Ask Jarvis - nothing happens without your OK")
         for width, expected in ((700, hud.COMMAND_PLACEHOLDERS[0]), (300, hud.COMMAND_PLACEHOLDERS[1]),

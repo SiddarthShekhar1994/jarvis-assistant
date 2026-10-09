@@ -51,23 +51,7 @@ def setUpModule() -> None:
     ask_planner.cli.forget_probes()
 
 
-class GatedProcess(FakeProcess):
-    """A planner run whose lines after the init event wait for ``gate``."""
-
-    def __init__(self, lines, gate: threading.Event) -> None:
-        super().__init__(lines)
-        self.gate = gate
-        self.given = 0
-
-    def read_line(self, timeout: float):
-        if self.killed:
-            return None
-        if self.given >= 1 and not self.gate.is_set():
-            self.gate.wait(min(timeout, 0.05))
-            if not self.gate.is_set():
-                return ""
-        self.given += 1
-        return super().read_line(timeout)
+from tests.ask_fakes import GatedProcess  # noqa: E402 - a planner run whose lines after the init wait for a gate
 
 
 def ui_NOW_PLUS_TWO_HOURS():  # noqa: N802 - a time after the hour's cap is over
@@ -116,7 +100,7 @@ class AskControllerTests(unittest.TestCase):
         self.assertTrue(c.window.reading.ask_available())
         chip = c.window.header.service_chip(ui.ASK_CHIP)
         self.assertEqual(chip.status(), hud.STATUS_OK)
-        self.assertIn("20 planner run(s) left this hour", chip.toolTip())
+        self.assertIn("20 planner run(s) left this hour; 6 web research run(s) left", chip.toolTip())
         self.assertEqual(set(app.factory.quick_threads), {"ask"})   # --version, --help, auth status
         tails = [argv[1:] for argv, _env in app.factory.runner.quick]
         self.assertEqual(tails, [["--version"], ["--help"], ["auth", "status", "--json"]])
@@ -611,6 +595,205 @@ class AskLiveTests(unittest.TestCase):
         run_step = next(step for step in task.steps if step.kind == live.PLANNER_RUN)
         self.assertEqual((run_step.status, run_step.summary),
                          (live.STATUS_FAILED, "Took too long; nothing was proposed"))
+
+
+WEB_COMMAND = "web: what time does the Example Museum open on Saturday"
+
+
+def research_run(*events) -> list[str]:
+    """A research run's JSON lines (tests.ask_fakes builders; the research_success run by default)."""
+    from tests.ask_fakes import research_stream, success_events
+
+    return research_stream(*(events or success_events()))
+
+
+class WebResearchControllerTests(unittest.TestCase):
+    """A "web:" request in the command bar (ask_ui): a WEB task whose "Your request" says nothing is
+    read from the accounts, the "Searching the web..." stage, the research's end words and cards
+    step, Cancel, and the refusals (research off, the research cap)."""
+
+    make = AskControllerTests.make
+    bar = AskControllerTests.bar
+
+    @staticmethod
+    def webs(app: AppHarness) -> list[live.TaskView]:
+        return [task for task in app.c.live.snapshot() if task.kind == live.TASK_WEB]
+
+    def test_a_web_request_is_a_web_task_from_request_to_cards(self) -> None:
+        from tests.ask_fakes import RESEARCH_ANSWER
+
+        gate = threading.Event()
+        app = self.make(GatedProcess(research_run(), gate, after=2))   # held after the first search call
+        c, bar = app.c, self.bar(app)
+        self.assertEqual(c.ask.running_kind, "")
+        submit(c, WEB_COMMAND)
+        self.assertEqual(c.ask.running_kind, live.TASK_WEB)
+        (task,) = self.webs(app)
+        self.assertEqual((task.title, task.status), (WEB_COMMAND, live.STATUS_RUNNING))
+        request = task.steps[0]
+        fields = {field.label: field.value for field in request.fields}
+        self.assertEqual(fields["You typed"], WEB_COMMAND)
+        self.assertEqual(fields["Mode"], ask_ui.WEB_MODE_TEXT)
+        self.assertEqual(fields["Briefing given"], ask_ui.WEB_BRIEFING_TEXT)
+        self.assertTrue(wait_for(lambda: c.ask.stage() == ask_planner.STAGE_RESEARCH))
+        self.assertTrue(bar.status().startswith("Searching the web..."), bar.status())
+        c.ask._running.started -= 3                                    # 3 s since Enter
+        c.ask._show_stage()
+        self.assertEqual(bar.status(), "Searching the web... 3 s")      # timed, like planning
+        gate.set()
+        self.assertTrue(wait_for(lambda: not c.ask.busy))
+        self.assertEqual(c.ask.running_kind, "")
+        (task,) = self.webs(app)
+        self.assertEqual((task.status, task.summary), (live.STATUS_OK, "2 source cards + 1 proposal"))
+        self.assertEqual([step.kind for step in task.steps],
+                         [live.ASK_REQUEST, live.ASK_CHECKS, live.RESEARCH_INPUT, live.RESEARCH_RUN, live.WEB_SEARCH,
+                          live.WEB_FETCH, live.RESEARCH_VALIDATE, live.ASK_CARDS])
+        cards = task.steps[-1]
+        shown = {field.label: field.value for field in cards.fields}
+        self.assertEqual(shown["Jarvis says"], RESEARCH_ANSWER["answer"])
+        self.assertEqual(shown["Sources"], "2")
+        self.assertEqual([item.text for item in cards.items],
+                         ["ASK TODO - Visit the Example Museum - due 2026-10-10T18:00 - block Sat Oct 10 "
+                          "10:00 AM-12:00 PM - opens www.example.org",
+                          "ASK WEB - www.example.org - [1] Visit - Example Museum",
+                          "ASK WEB - museum.example.net - [2] Hours and tickets"])
+        self.assertEqual(cards.summary, "2 source cards + 1 proposal under NEEDS YOUR OK")   # the header's words
+        self.assertEqual(bar.status(), RESEARCH_ANSWER["answer"])        # [n] marks kept: the sources are numbered
+        self.assertEqual(bar.tone(), hud.TONE_DONE)
+        self.assertTrue(bar.meta().startswith("2 SOURCE CARDS + 1 PROPOSAL UNDER ASK \u00b7 "), bar.meta())
+        # The runs left that count here: web research (6 an hour), not only the planner's 20.
+        self.assertTrue(bar.meta().endswith("5 WEB RESEARCH RUNS LEFT THIS HOUR"), bar.meta())
+        self.assertEqual(bar.text(), "")                                 # cards to decide: cleared
+        self.assertEqual(len(app.factory.runner.started), 1)            # one run: the research
+        self.assertEqual(c.ask.last_task_id, task.id)
+
+    def test_a_normal_request_is_an_ask_task(self) -> None:
+        gate = threading.Event()
+        app = self.make(GatedProcess(plan(), gate))
+        c = app.c
+        for text in ("webinar: tickets for Friday", "the web: x"):     # not the prefix
+            with self.subTest(text):
+                self.assertIsNone(ask_ui.forced_question(text))
+        submit(c)
+        self.assertEqual(c.ask.running_kind, live.TASK_ASK)
+        self.assertEqual(self.webs(app), [])
+        gate.set()
+        self.assertTrue(wait_for(lambda: not c.ask.busy))
+
+    def test_left_out_sources_and_dropped_suggestions_end_check(self) -> None:
+        from tests.ask_fakes import (RESEARCH_HITS, RESEARCH_QUERY, VISIT_URL, research_answer, search_call,
+                                     search_result)
+
+        answer = research_answer("It opens at 10 AM [1].", [{"title": "Visit", "url": VISIT_URL},
+                                                            {"title": "Unseen", "url": "https://other.example.com/x"}],
+                                 ["Email: acct=work | to=a@example.com | cc= | subject=Hi | due= | link= | body=x"])
+        app = self.make(research_run(search_call("toolu_s1", RESEARCH_QUERY), search_result("toolu_s1", RESEARCH_HITS),
+                                     answer))
+        c, bar = app.c, self.bar(app)
+        submit(c, WEB_COMMAND)
+        self.assertTrue(wait_for(lambda: not c.ask.busy))
+        (task,) = self.webs(app)
+        self.assertEqual((task.status, task.summary),
+                         (live.STATUS_WARN, "1 source card, 1 source left out, 1 suggestion left out"))
+        cards = task.steps[-1]
+        self.assertEqual({field.label: field.value for field in cards.fields}["Sources"], "1 (1 left out)")
+        self.assertEqual(bar.status(), "It opens at 10 AM [1]. 1 source left out; 1 suggestion left out.")
+        self.assertTrue(bar.meta().startswith("1 SOURCE CARD UNDER ASK \u00b7 "), bar.meta())
+        self.assertEqual({field.label: field.value for field in cards.fields}["Suggestions left out"], "1")
+
+    def test_cancel_ends_the_web_steps_too(self) -> None:
+        gate = threading.Event()
+        process = GatedProcess(research_run(), gate, after=2)
+        app = self.make(process)
+        c, bar = app.c, self.bar(app)
+        submit(c, WEB_COMMAND)
+        self.assertTrue(wait_for(lambda: any(step.kind == live.WEB_SEARCH and step.status == live.STATUS_RUNNING
+                                             for step in self.webs(app)[0].steps)))
+        bar.button.click()
+        self.assertTrue(wait_for(lambda: not c.ask.busy, 3))
+        self.assertTrue(process.killed)
+        (task,) = self.webs(app)
+        self.assertEqual((task.status, task.summary), (live.STATUS_CANCELLED, "Cancelled; nothing was proposed"))
+        by_kind = {step.kind: step for step in task.steps}
+        self.assertEqual(by_kind[live.WEB_SEARCH].status, live.STATUS_CANCELLED)
+        self.assertEqual(by_kind[live.RESEARCH_RUN].status, live.STATUS_CANCELLED)
+        self.assertEqual(bar.status(), ask_ui.CANCELLED_TEXT)
+        self.assertFalse([action for action in c._actions if action.source == SOURCE_ASK])
+        self.assertEqual(bar.text(), WEB_COMMAND)
+
+    def test_research_off_is_refused_amber_and_blocked(self) -> None:
+        app = AppHarness(self, config_extra="\n[research]\nenabled = false\n")
+        app.reading()
+        c, bar = app.c, self.bar(app)
+        c.ask.start()
+        self.assertTrue(wait_for(lambda: c.ask.ready is not None))
+        self.assertNotIn("web:", bar.input.toolTip())                   # research off: the hint says nothing of it
+        submit(c, WEB_COMMAND)
+        self.assertTrue(wait_for(lambda: not c.ask.busy))
+        (task,) = self.webs(app)
+        self.assertEqual((task.status, task.summary), (live.STATUS_BLOCKED, ask_planner.RESEARCH_OFF_MESSAGE))
+        self.assertEqual((bar.status(), bar.tone()), (ask_planner.RESEARCH_OFF_MESSAGE, hud.TONE_WARN))
+        self.assertFalse(app.factory.runner.started)
+        self.assertEqual(bar.text(), WEB_COMMAND)
+
+    def test_the_research_cap_is_blocked_and_amber(self) -> None:
+        app = self.make(stream("research_too_many_searches"))
+        c, bar = app.c, self.bar(app)
+        submit(c, WEB_COMMAND)
+        self.assertTrue(wait_for(lambda: not c.ask.busy))
+        (task,) = self.webs(app)
+        self.assertEqual(task.status, live.STATUS_BLOCKED)
+        self.assertIn("at most 4", task.summary)
+        self.assertEqual(bar.tone(), hud.TONE_WARN)
+        self.assertTrue(bar.status().startswith("Jarvis stopped the web research"), bar.status())
+        over = [step for step in task.steps if step.kind == live.WEB_SEARCH][-1]
+        self.assertEqual((over.status, over.status_text), (live.STATUS_BLOCKED, "OVER LIMIT"))
+
+    def test_the_research_limit_says_web_research_everywhere(self) -> None:
+        app = self.make()
+        c, bar = app.c, self.bar(app)
+        for _ in range(6):   # [research] max_per_hour; the Ask caps still allow a planner run
+            c.ask.planner.usage.start(kind="research")
+        submit(c, WEB_COMMAND)
+        self.assertTrue(wait_for(lambda: not c.ask.busy))
+        (task,) = self.webs(app)
+        self.assertEqual(task.status, live.STATUS_BLOCKED)
+        self.assertTrue(bar.status().startswith("Web research limit reached; try again after "), bar.status())
+        self.assertEqual(bar.tone(), hud.TONE_WARN)
+        self.assertTrue(bar.meta().endswith("0 WEB RESEARCH RUNS LEFT THIS HOUR"), bar.meta())
+        self.assertFalse(app.factory.runner.started)
+        chip = c.window.header.service_chip(ui.ASK_CHIP)
+        self.assertEqual(chip.status(), hud.STATUS_OK)                  # a plain Ask may still run
+        self.assertIn("the web research limit is reached", chip.toolTip())
+        # A plain request now: its meta says the web research limit is reached (the planner is not offered it).
+        c.ask._show_meta()
+        self.assertTrue(bar.meta().endswith("RUNS LEFT THIS HOUR \u00b7 WEB RESEARCH LIMIT REACHED"), bar.meta())
+
+    def test_the_fields_tooltip_mentions_web_while_research_is_on(self) -> None:
+        app = self.make()
+        bar = self.bar(app)
+        self.assertEqual(bar.status(), ask_ui.IDLE_HINT)                 # the status line itself is unchanged
+        tip = bar.input.toolTip()
+        self.assertIn("NEEDS YOUR OK", tip)
+        self.assertIn("Start with web: to look something up on the web", tip)
+
+    def test_end_words_of_every_kind(self) -> None:
+        def outcome(kind: str, message: str = "") -> ask_planner.AskOutcome:
+            return ask_planner.AskOutcome(False, kind, message)
+
+        for kind in (ask_planner.RESEARCH_OFF, "research_cap", ask_planner.RESEARCH_UNSUPPORTED):
+            with self.subTest(kind):
+                self.assertEqual(ask_ui._finish_words(outcome(kind, "why"), cancelled=False),
+                                 (live.STATUS_BLOCKED, "why"))
+        self.assertEqual(ask_ui._finish_words(outcome("timeout", "slow"), cancelled=False), (live.STATUS_FAILED, "slow"))
+        self.assertIn("research_cap", ask_ui._SOFT_KINDS)
+        self.assertIn(ask_planner.RESEARCH_OFF, ask_ui._SOFT_KINDS)
+        self.assertNotIn(ask_planner.RESEARCH_UNSUPPORTED, ask_ui._SOFT_KINDS)   # red: Claude Code must change
+        from briefing_reader.ask.research_validate import ResearchReport
+
+        empty = ask_planner.AskOutcome(True, "ok", research=ResearchReport(answer=""))
+        self.assertEqual(ask_ui._finish_words(empty, cancelled=False), (live.STATUS_OK, "no sources"))
+        self.assertEqual(ask_ui.AskController._answer(empty), "I couldn't find an answer to that on the web.")
 
 
 if __name__ == "__main__":
