@@ -383,7 +383,7 @@ class EventBodyTests(unittest.TestCase):
         body = build_event_body(action, TZ)
         self.assertEqual(body["location"], "https://meet.google.com/aaa-bbbb-ccc")
         self.assertEqual(body["description"],
-                         "Carol's team sync\n\nAdded by briefing-reader from your Daily Briefing.")
+                         "Carol's team sync\n\nAdded by Jarvis from your Daily Briefing.")
 
     def test_empty_location_is_left_out(self) -> None:
         self.assertNotIn("location", build_event_body(make_action(where="   "), TZ))
@@ -659,7 +659,7 @@ class SignInTests(GcalTestCase):
         self.assertEqual(kwargs["authorization_prompt_message"], "")
         self.assertEqual(kwargs["success_message"], SIGN_IN_SUCCESS_MESSAGE)
         self.assertEqual(SIGN_IN_SUCCESS_MESSAGE,
-                         "briefing-reader is connected to Google Calendar. You can close this tab.")
+                         "Jarvis is connected to Google Calendar. You can close this tab.")
         self.assertIn("Google Calendar: signed in", "\n".join(captured.output))
 
     def test_default_timeout_is_five_minutes(self) -> None:

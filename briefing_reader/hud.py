@@ -2021,7 +2021,7 @@ class _Brand(QWidget):
         super().__init__(parent)
         self._word_font = display_font(20, 600, 0.34)
         self._sub_font = mono_font(11, 400, 0.1)
-        self._subtitle = f"briefing {MIDDLE_DOT} desktop"
+        self._subtitle = f"assistant {MIDDLE_DOT} desktop"
         self._show_subtitle = True
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 

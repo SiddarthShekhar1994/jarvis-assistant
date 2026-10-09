@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Registers the scheduled tasks for briefing-reader: "Briefing AM", "Briefing PM",
+Registers the scheduled tasks for Jarvis Assistant: "Briefing AM", "Briefing PM",
 "Briefing catch-up" and "Briefing hotkey".
 
 .DESCRIPTION
@@ -169,7 +169,7 @@ function Test-PythonSetup([string]$PyExe) {
         & $PyExe "-$PythonVersion" -c $ImportCheck
         if ($LASTEXITCODE -ne 0) {
             Write-Host ""
-            Write-Host "ERROR: briefing-reader or one of its packages cannot be imported (see the message above)." -ForegroundColor Red
+            Write-Host "ERROR: Jarvis Assistant (briefing_reader) or one of its packages cannot be imported (see the message above)." -ForegroundColor Red
             Write-Host "Install the packages from the project folder with:" -ForegroundColor Red
             Write-Host ("  py -{0} -m pip install -r requirements.txt" -f $PythonVersion)
             exit 1
@@ -433,10 +433,10 @@ if ($PythonVersion -notmatch '^[0-9]+(\.[0-9]+)?(-[A-Za-z0-9]+)?$') {
     Stop-WithError ("-PythonVersion '{0}' is not a version like 3.13." -f $PythonVersion)
 }
 
-Write-Host "briefing-reader: scheduled tasks"
+Write-Host "Jarvis Assistant: scheduled tasks"
 Write-Host ("  Project folder: {0}" -f $ProjectRoot)
 if (-not (Test-Path -LiteralPath (Join-Path $ProjectRoot "briefing_reader\__main__.py") -PathType Leaf)) {
-    Stop-WithError ("briefing_reader\__main__.py was not found in {0}. Keep this script in the briefing-reader project folder (next to README.md) and run it from there." -f $ProjectRoot)
+    Stop-WithError ("briefing_reader\__main__.py was not found in {0}. Keep this script in the Jarvis Assistant project folder (next to README.md) and run it from there." -f $ProjectRoot)
 }
 
 $pyExe = Resolve-Launcher "py.exe"
@@ -544,7 +544,7 @@ foreach ($daily in @(@{ Name = "Briefing AM"; Run = "am"; Label = "AM"; Time = $
         Action = (New-PlanAction $taskProgram $arguments)
         Triggers = @(New-DailyTrigger $daily.Time); Time = $daily.Time
         When = ("daily at {0}, wakes the PC" -f (Format-TimeOfDay $daily.Time))
-        Description = ("briefing-reader: announces the $($daily.Label) email briefing from Notion when it is ready " +
+        Description = ("Jarvis Assistant: announces the $($daily.Label) email briefing from Notion when it is ready " +
             "(nothing is read until you press Play). " +
             "Runs '$(Split-Path -Leaf $taskProgram) $arguments' in $ProjectRoot. $descriptionTail")
     }
@@ -555,7 +555,7 @@ $plans += @{
     Action = (New-PlanAction $taskProgram $catchUpArguments)
     Triggers = @((New-LogonTrigger $userId $CatchUpDelay), (New-UnlockTrigger $userId $CatchUpDelay)); Time = $null
     When = $catchUpWhen
-    Description = ("briefing-reader: after logon or unlock, announces a scheduled briefing of the last 3 hours " +
+    Description = ("Jarvis Assistant: after logon or unlock, announces a scheduled briefing of the last 3 hours " +
         "that was not announced or viewed (nothing happens otherwise). " +
         "Runs '$(Split-Path -Leaf $taskProgram) $catchUpArguments' in $ProjectRoot. $descriptionTail")
 }
@@ -566,7 +566,7 @@ if ($installHotkey) {
         Action = (New-PlanAction $agentProgram $hotkeyArguments)
         Triggers = @(New-LogonTrigger $userId ""); Time = $null
         When = "at logon of $userId and right after installing; runs until logoff, one at a time; hotkey $hotkeyCombo"
-        Description = ("briefing-reader: listens for the global hotkey ($hotkeyCombo, [hotkey] in config.toml) " +
+        Description = ("Jarvis Assistant: listens for the global hotkey ($hotkeyCombo, [hotkey] in config.toml) " +
             "that opens Jarvis. Runs '$(Split-Path -Leaf $agentProgram) $hotkeyArguments' in $ProjectRoot. " +
             $descriptionTail)
     }
@@ -684,7 +684,7 @@ Show-WakeTimerCheck
 
 Write-Host ""
 Write-Host "Single instance"
-Write-Host "  Only one briefing window runs at a time: the app holds its own lock, so an AM, PM or manual run"
+Write-Host "  Only one Jarvis window runs at a time: the app holds its own lock, so an AM, PM or manual run"
 Write-Host "  that starts while another one is open hands its run to the open window and exits at once."
 Write-Host "  The catch-up task leaves an open window alone."
 Write-Host ""

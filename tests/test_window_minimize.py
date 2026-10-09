@@ -123,6 +123,17 @@ class HeaderButtonTests(unittest.TestCase):
 
 class FrameTests(unittest.TestCase):
 
+    def test_the_window_taskbar_and_tray_name_jarvis(self) -> None:
+        window = ui.BriefingWindow(10, 30)
+        self.addCleanup(window.deleteLater)
+        assert window.header is not None
+        self.assertEqual(window.windowTitle(), "Jarvis")
+        self.assertEqual(window.header.subtitle(), f"assistant {hud.MIDDLE_DOT} desktop")
+        header = hud.HeaderBar()
+        self.addCleanup(header.deleteLater)
+        self.assertEqual(header.subtitle(), f"assistant {hud.MIDDLE_DOT} desktop")   # the default too
+        self.assertEqual(ui.TRAY_TOOLTIP, "Jarvis")
+
     def test_a_plain_top_level_window_keeps_its_taskbar_button(self) -> None:
         frame = hud.HudWindowFrame()
         self.addCleanup(frame.deleteLater)

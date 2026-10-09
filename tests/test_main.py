@@ -10,6 +10,7 @@ LOCALAPPDATA pointing into a temporary folder and .env loading switched off
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import logging
 import os
@@ -23,6 +24,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import briefing_reader
 import briefing_reader.__main__ as entry
 from briefing_reader import hotkey
 from briefing_reader.config import load_config
@@ -69,6 +71,17 @@ class ArgumentTests(unittest.TestCase):
         self.assertIn("older name of --open", help_text)
         self.assertIn("read the briefing aloud at once (what --now did before)", help_text)
         self.assertTrue(parser.format_help().isascii())
+
+    def test_product_name_and_unchanged_command(self) -> None:
+        # The visible name is Jarvis Assistant; the command and the internal names stay briefing_reader.
+        parser = entry.build_parser()
+        help_text = " ".join(parser.format_help().split())
+        self.assertTrue(help_text.startswith("usage: py -3.13 -m briefing_reader "))
+        self.assertIn("Jarvis Assistant: a personal AI desktop assistant for Windows", help_text)
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out, self.assertRaises(SystemExit):
+            parser.parse_args(["--version"])
+        self.assertEqual(out.getvalue().strip(), f"Jarvis Assistant {briefing_reader.__version__}")
+        self.assertEqual(briefing_reader.APP_NAME, "briefing-reader")   # the data folder's name never changes
 
     def test_launch_kind(self) -> None:
         parser = entry.build_parser()

@@ -1744,6 +1744,8 @@ READING_MIN_SIZE = QSize(900, 600)
 SCREEN_MARGIN = 24
 _PROMPT_MARGINS = (10, 4, 10, 10)
 _READING_MARGINS = (12, 4, 12, 12)
+MAIN_WINDOW_TITLE = "Jarvis"                  # the taskbar button, Alt+Tab and the window's accessible name
+HEADER_SUBTITLE = f"assistant {DOT} desktop"  # next to the JARVIS wordmark (the LIVE pop-out has its own)
 
 
 class _PageSwitch(QWidget):
@@ -1810,10 +1812,10 @@ class BriefingWindow(hud.HudWindowFrame):
     def __init__(self, short_minutes: int, long_minutes: int) -> None:
         super().__init__(margins=_PROMPT_MARGINS)
         self.setObjectName("BriefingWindow")
-        self.setWindowTitle("Briefing")
+        self.setWindowTitle(MAIN_WINDOW_TITLE)
         self.setWindowIcon(app_icon())
         assert self.header is not None
-        self.header.set_subtitle(f"briefing {DOT} desktop")
+        self.header.set_subtitle(HEADER_SUBTITLE)
         for name in ("notion", "voice", "calendar"):
             self.header.set_service(name, hud.STATUS_OFF)
         self.prompt = PromptView(short_minutes, long_minutes)
@@ -2210,7 +2212,7 @@ STATE_READING = "reading"        # the assistant screen (JARVIS / BRIEFING); not
 STATE_WAITING = "waiting"        # a scheduled run polls with the window hidden (tray icon only)
 STATE_QUITTING = "quitting"
 
-TRAY_TOOLTIP = "briefing-reader"
+TRAY_TOOLTIP = "Jarvis"
 VIEW_BRIEFING_TEXT = "View briefing"   # the announcement's link in the conversation
 VIEW_BRIEFING_LINK = "view-briefing"
 ASK_CANCELLED_ENTRY = "Cancelled; nothing was proposed."   # the conversation's entry for a cancelled Ask

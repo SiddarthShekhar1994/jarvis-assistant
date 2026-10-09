@@ -137,8 +137,8 @@ LEGACY_TOKEN = "google_token.json"
 TOKEN_PATTERN = "google_token_{alias}.json"
 LEGACY_ALIAS = "personal"          # the account google_token.json of older versions belongs to
 SETUP_HINT = "Set up Google sign-in: README step 8"
-SIGN_IN_SUCCESS_MESSAGE = "briefing-reader is connected to Google Calendar. You can close this tab."
-ALIAS_SUCCESS_MESSAGE = ("briefing-reader is connected to Google for the {alias} account. "
+SIGN_IN_SUCCESS_MESSAGE = "Jarvis is connected to Google Calendar. You can close this tab."
+ALIAS_SUCCESS_MESSAGE = ("Jarvis is connected to Google for the {alias} account. "
                          "You can close this tab.")
 NOT_SIGNED_IN_MESSAGE = "Not signed in to Google"
 # "select_account": Google shows its account chooser, so the right account is picked for each

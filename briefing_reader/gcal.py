@@ -96,8 +96,8 @@ TOKEN_FILE_NAME = "google_token.json"
 # Used when neither the calendar's setting nor Windows names a time zone.
 LAST_RESORT_TIMEZONE = "UTC"
 SETUP_HINT = "Set up Google Calendar: README step 8"
-SIGN_IN_SUCCESS_MESSAGE = "briefing-reader is connected to Google Calendar. You can close this tab."
-EVENT_FOOTER = "Added by briefing-reader from your Daily Briefing."
+SIGN_IN_SUCCESS_MESSAGE = "Jarvis is connected to Google Calendar. You can close this tab."
+EVENT_FOOTER = "Added by Jarvis from your Daily Briefing."
 DEFAULT_EVENT_MINUTES = 60
 NO_TITLE = "(No title)"
 NOT_SIGNED_IN_MESSAGE = "Not signed in to Google Calendar"

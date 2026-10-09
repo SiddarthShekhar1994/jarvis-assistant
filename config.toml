@@ -1,4 +1,4 @@
-# briefing-reader settings
+# Jarvis Assistant settings
 #
 # Every key is optional: delete a line to go back to its built-in default.
 # A bad value never stops the app; it is replaced by the default and a warning
@@ -90,10 +90,11 @@ link_hosts = []
 # Move / Cancel event / Send and the call to Google (3 to 60). Undo works until
 # then and sends nothing.
 undo_seconds = 10
-# Email recipients in these domains never get the red NEW RECIPIENT badge, e.g.
-# ["example.edu"] (its subdomains count too). Any other address must be the
-# account's own or one you emailed through Jarvis before; otherwise Send asks
-# you to confirm it in Edit first.
+# Email recipients in these domains do not get the red NEW RECIPIENT badge,
+# e.g. ["example.edu"] (its subdomains count too), except an Ask recipient you
+# did not type yourself. Any other address must be one you emailed through
+# Jarvis before; otherwise Send asks you to confirm it in Edit first. The
+# sending account's own address is never sent to.
 trusted_domains = []
 
 # The Google accounts Jarvis may act for, one [accounts.<name>] table each. The

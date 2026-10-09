@@ -41,7 +41,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import APP_NAME, __version__
+from . import APP_NAME, DISPLAY_NAME, __version__
 from .runstate import RUNSTATE_FILE, RunState, format_slots, parse_slots, slot_for
 
 logger = logging.getLogger("briefing_reader.main")
@@ -95,7 +95,8 @@ def __getattr__(name: str) -> Any:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="py -3.13 -m briefing_reader",
-        description="Jarvis: your twice-daily Notion email briefing, read aloud on request, and Ask Jarvis.",
+        description=(f"{DISPLAY_NAME}: a personal AI desktop assistant for Windows - your scheduled "
+                     "briefing, Ask Jarvis, web research and the actions you approve."),
         epilog="Without options Jarvis opens with a greeting; the briefing waits in its BRIEFING tab.",
     )
     mode = parser.add_mutually_exclusive_group()
@@ -137,7 +138,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--from-file", metavar="PATH",
                         help="load a saved Notion API fixture instead of calling Notion")
     parser.add_argument("--debug", action="store_true", help="write detailed (debug) logging")
-    parser.add_argument("--version", action="version", version=f"{APP_NAME} {__version__}")
+    parser.add_argument("--version", action="version", version=f"{DISPLAY_NAME} {__version__}")
     # Internal: marks the copy a scheduled start hands its window to.
     parser.add_argument("--detached", action="store_true", help=argparse.SUPPRESS)
     return parser

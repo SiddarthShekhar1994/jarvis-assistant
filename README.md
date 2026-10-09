@@ -1,48 +1,318 @@
-# briefing-reader
+# Jarvis Assistant
 
-A small Windows desktop assistant, Jarvis, for your email briefing. Twice a day
-a scheduled AI task (for example a Claude scheduled task) overwrites a Notion
-page, such as "Daily Briefing (auto)", with an email triage. briefing-reader
-starts on a schedule (10:12 and 23:42 by default; both configurable), waits in
-the background until the fresh page is there, then shows its window on top
-without taking the focus and announces it once: "Sir, your AM briefing is ready
-to view." The briefing waits in its **BRIEFING** tab, marked NEW until you look
-at it; it is read aloud only when you press **Play**, with the current line
-highlighted. Each time you open Jarvis (the Start menu, the hotkey) he greets
-you with a short, random line for the time of day, and his answers collect in
-the **JARVIS** tab (see [Using it](#using-it)). He also tells you, aloud and in
-that tab, what happened after you approved a card ("Done, sir - I've moved
-'Project sync' to Friday at 2 PM."); a speaker button in the header mutes him
-(see [Jarvis talks](#jarvis-talks)).
+A personal AI desktop assistant for Windows. Jarvis announces the email
+briefing your own cloud routine writes twice a day and reads it aloud when you
+press Play. You type what you need ("move my project sync to Friday and tell
+Ana"), your own Claude Code plans it on your claude.ai plan, and Jarvis lines
+up the replies, invitation answers and calendar changes for you to approve:
+nothing is sent or changed until you click that card and its 10-second undo
+runs out. Every step he takes can be watched live, he answers in a calm
+British voice, and he runs on your own accounts, with no paid API calls.
 
-The briefing can also propose calendar events, email replies, answers to
-invitations, to-dos and links to look at. They appear in an amber
-**NEEDS YOUR OK** column: **Approve** adds a calendar event (or a to-do's work
-block) to your Google Calendar; **Accept** / **Decline** / **Maybe**, **Move**
-and **Cancel event** answer an invitation or move or cancel an event you
-organize; **Send** sends a drafted reply or email from your personal or your
-work Google account. Each of them happens only after your click on that card
-and a 10-second countdown you can undo; the other cards hand the item over to
-you with **Open** and **Copy** (see [Calendar actions](#calendar-actions),
-[Invitations, moves and cancellations](#invitations-moves-and-cancellations),
-[Replies and emails](#replies-and-emails) and
-[Other proposals](#other-proposals-replies-invites-to-dos-and-links)).
-Next to the reading, a **TODAY** panel lists the day's calendar events (from
-18:00 on: tomorrow's) and **DEADLINES** lists what is due in the next 14 days
-(see [TODAY and DEADLINES](#today-and-deadlines)).
+This is a personal Windows project, built with Claude Code and shared as is
+under the MIT licence (see [License](#license)). It started out as
+briefing-reader; the Python package, the command and the data folder keep that
+name (see [About the name](#about-the-name)). It brings no Notion page of its
+own: you point it at yours (setup steps 2 to 4), and the page is written by
+your own scheduled routine (see
+[Instructions for the Claude briefing task](#instructions-for-the-claude-briefing-task)).
 
-If the PC was asleep or locked at the scheduled time, the app announces the
-briefing when you log on or unlock within 3 hours, and a global hotkey
-(**Ctrl+Alt+J**) opens Jarvis at any time (see
-[Catch-up and the hotkey](#catch-up-and-the-hotkey)).
+## What Jarvis does
+
+- **Your briefing, on schedule.** A cloud routine (for example a Claude
+  scheduled task with Gmail, Calendar and Notion access) overwrites a Notion
+  page, such as "Daily Briefing (auto)", with an email triage twice a day.
+  Jarvis starts on a schedule (10:12 and 23:42 by default; both
+  configurable), waits in the background until the fresh page is there, then
+  shows his window on top without taking the focus and announces it once:
+  "Sir, your AM briefing is ready to view." The briefing waits in its
+  **BRIEFING** tab, marked NEW until you look at it; it is read aloud only
+  when you press **Play**, with the current line highlighted. Next to it,
+  **TODAY** lists the day's calendar events (from 18:00 on: tomorrow's) and
+  **DEADLINES** what is due in the next 14 days. If the PC was asleep or
+  locked at the scheduled time, Jarvis announces the briefing when you log on
+  or unlock within 3 hours. See [Using it](#using-it),
+  [TODAY and DEADLINES](#today-and-deadlines) and
+  [Catch-up and the hotkey](#catch-up-and-the-hotkey).
+- **Ask Jarvis.** Type a request in the command bar and Jarvis lines up cards
+  for it. The planner is **your own Claude Code**, signed in with **your
+  claude.ai plan** (Pro or Max), never an API key. It gets your calendar,
+  today's briefing and, when your request names an email ("reply to Ana's
+  budget email"), that thread (read only, at most 3 threads), and it can only
+  propose. Off until you turn it on. See [Ask Jarvis](#ask-jarvis-optional).
+- **Actions you approve.** The briefing's proposals and Ask's are cards in an
+  amber **NEEDS YOUR OK** column: **Send** a drafted reply or a new email from
+  your personal or your work Google account; **Accept**, **Decline** or
+  **Maybe** an invitation; **Move** or **Cancel event** for a meeting you
+  organize; **Approve** a calendar event; **Add block** puts time to work on a
+  to-do on your calendar. **Edit** changes exactly what a card will do. Each
+  one happens only after your click on that card and a 10-second countdown
+  you can **Undo**; a new recipient needs your tick first, and he never sends
+  or changes anything on his own. Share requests, Slack replies and links are
+  hand-offs (**Open**, **Copy**). See
+  [Calendar actions](#calendar-actions),
+  [Invitations, moves and cancellations](#invitations-moves-and-cancellations),
+  [Replies and emails](#replies-and-emails) and
+  [Other proposals](#other-proposals-replies-invites-to-dos-and-links).
+- **Voice and persona.** Each time you open him, Jarvis greets you with a
+  short, random line for the time of day ("Good morning, sir."). He says Ask's
+  answer and, once Google has answered, what happened after you approved a
+  card ("Done, sir - I've moved 'Project sync' to Friday at 2 PM."). He speaks
+  with Microsoft's online en-GB Ryan voice (edge-tts), or a Windows voice when
+  that cannot be reached. The speaker button in the header or **Ctrl+M** mutes
+  him, and everything he says is also written in the **JARVIS** tab. See
+  [Jarvis talks](#jarvis-talks).
+- **LIVE view.** The **LIVE** tab shows every step he takes, as it happens:
+  what he read, the exact text he gave Claude Code, each check, what will be
+  sent during the countdown and what Google answered. **Pop out** puts it in a
+  window of its own, for a second screen. It only shows, and only on screen:
+  nothing of it is saved or logged. See
+  [LIVE: watch Jarvis work](#live-watch-jarvis-work).
+- **Web research.** Start a request with `web:` (or let the planner hand it
+  over) to look something up on the web: a separate Claude Code run whose
+  only tools are web search and web fetch, and which gets your words and
+  today's date, time and time zone, nothing else. You get a short answer with
+  numbered sources, each an Open card. See [Web research](#web-research).
+- **Always at hand.** **Ctrl+Alt+J** opens Jarvis from anywhere, and so does a
+  Start menu shortcut. Minimize him to his taskbar button; while a scheduled
+  run waits for the briefing, only his tray icon shows. See
+  [Catch-up and the hotkey](#catch-up-and-the-hotkey) and
+  [Start menu shortcut](#start-menu-shortcut).
 
 Both windows use the "Jarvis HUD" look: a dark, frameless sci-fi panel with a
 glowing status orb (see [The look](#the-look-jarvis-hud)).
 
-This is a personal Windows project, built with Claude Code and shared as is
-under the MIT licence (see [License](#license)). It brings no Notion page of its
-own: you point it at yours (setup steps 2 to 4), and the page is written by your
-own scheduled task (see [Instructions for the Claude briefing task](#instructions-for-the-claude-briefing-task)).
+## How it stays safe
+
+- **Proposals only.** The Ask planner has no tools, so it cannot send,
+  answer, move, cancel or add anything: it writes proposals, and Jarvis shows
+  each one as a card. The briefing routine is your own cloud task with its
+  own connectors, so Jarvis cannot stop it from acting; its
+  [instructions](#instructions-for-the-claude-briefing-task) tell it never to
+  send or change anything and to write proposals instead. Deny, Skip or not
+  deciding at all contacts nobody.
+- **Your click, then an undo.** A card is carried out only after your click
+  on that card and a countdown (10 seconds, `[actions] undo_seconds`) that
+  **Undo**, minimizing or closing the window stops. One card at a time, with
+  one call to Google that is never repeated by itself: an unclear answer shows
+  UNKNOWN. A calendar card's Retry looks in Google first, so it is never done
+  twice; an email's Retry sends again without checking, so look in that
+  account's Sent mail before you click it.
+- **Provenance and recipient checks.** An Ask card may only use event ids,
+  threads and addresses that Jarvis supplied from your calendar, briefing or
+  mail, or that you typed, and a mail search must ask for what you typed. A
+  recipient Jarvis has not sent to before is a red NEW RECIPIENT until you
+  tick it (a domain in `[actions] trusted_domains` counts as known, except for
+  an Ask recipient you did not type yourself). Never the sending account
+  itself, at most 5 recipients, never a Bcc, an attachment or a forward. Each
+  account name is bound to the Google account you confirm after its first
+  sign-in, so nothing goes out from the wrong account.
+- **Isolated web research.** A separate run with only web search and web
+  fetch: it never sees your calendar, mail, contacts, briefing or addresses,
+  and what it finds never goes back to the planner. Its pages open only on
+  your click, and only public https addresses.
+- **A locked-down planner.** Claude Code runs with no tools, no MCP servers,
+  no settings files and no saved session, in an empty folder of its own and an
+  environment without API keys or Jarvis's secrets; right before every run
+  Jarvis checks that it is signed in to your claude.ai plan.
+- **No paid API calls.** Notion, the online voice and your own Google Cloud
+  project are free. Ask and web research use your claude.ai plan, never an API
+  key: a run that Claude Code says would be billed to extra usage is stopped,
+  and Ask pauses until your plan's limit resets (keep usage credits off).
+- **Nothing private logged.** The log has ids, kinds, counts, statuses and
+  times, never the briefing text, subjects, addresses, email text, your
+  requests or Jarvis's words, and secrets are redacted. LIVE keeps what it
+  shows in memory only. Notion access is read-only, and Google access is the
+  few permissions listed in setup step 8.
+- **Gray zones, stated.** Driving your own signed-in Claude Code from your own
+  app, when you ask, is personal use; sharing such a feature in a public
+  project, and automated web searching and page reading on a consumer plan,
+  are less clear-cut. So Ask is off by default, every user installs and signs
+  in to Claude Code themselves, and web research is small, runs only when you
+  ask and shows every step in LIVE (`[research] enabled = false` turns it
+  off). See [Privacy and cost](#privacy-and-cost) and
+  [Web research](#web-research).
+
+## How it fits together
+
+```
+ CLOUD, on your schedule
+ +----------------------------------------------+
+ | briefing routine (e.g. a Claude scheduled    |
+ | task with Gmail, Calendar and Notion access) |
+ | triages your mail; told to propose, not act  |
+ +----------------------------------------------+
+                        |  overwrites twice a day
+                        v
+ +----------------------------------------------+
+ | Notion page "Daily Briefing (auto)"          |
+ +----------------------------------------------+
+                        |  read-only Notion API
+ YOUR WINDOWS PC        v
+ +----------------------------------------------+     Task Scheduler: AM, PM
+ | Jarvis desktop app (Python 3.13, PySide6)    | <-- and catch-up tasks; the
+ | JARVIS / BRIEFING / LIVE, NEEDS YOUR OK      |     Ctrl+Alt+J hotkey agent
+ +----------------------------------------------+
+        |                  |                  |
+        v                  v                  v
+ Google APIs        Claude Code CLI      Voice
+ (your own OAuth    (your claude.ai      edge-tts online,
+  client)            plan)               Windows voices
+ Calendar: TODAY,   Ask planner: no      offline
+ add, answer,       tools, proposes
+ move, cancel       only
+ after your OK;     Web research: web
+ read for Ask       search and fetch
+ Gmail: send what   only, gets only
+ you approved;      your words + date
+ read threads
+ for Ask
+```
+
+- **The routine** runs in the cloud on your schedule, reads your mail and
+  calendar through its own connectors and overwrites one Notion page with the
+  triage and its proposals (format:
+  [Instructions for the Claude briefing task](#instructions-for-the-claude-briefing-task)).
+  Its instructions tell it never to send or change anything itself.
+- **The desktop app** (this repository) reads that page through a read-only
+  Notion integration, speaks with edge-tts (or the Windows voices) played by
+  QtMultimedia, and draws the HUD with PySide6 (Qt).
+- **Google** is called directly, with your own free OAuth client and no
+  service in between: Google Calendar for TODAY, the cards' check lines, the
+  changes you approve and, for Ask, the events it plans from (by default
+  yesterday to 14 days ahead, with guests' names and addresses; see "What
+  Claude Code gets" under [Ask Jarvis](#ask-jarvis-optional)); Gmail to send
+  what you approved and, for Ask, to read the threads a request is about.
+- **Claude Code** runs on this PC (`claude -p`), signed in to your claude.ai
+  plan: once per Ask (twice when it reads mail), and as a separate, isolated
+  run for web research.
+- **Windows Task Scheduler** starts the app for the AM and PM runs and at
+  logon and unlock (the catch-up), and keeps a small agent waiting for the
+  hotkey. What the app keeps (sign-ins, decisions, logs) is in
+  `%LOCALAPPDATA%\briefing-reader` on this PC.
+
+The modules are listed under [Project layout](#project-layout).
+
+## Quick start
+
+The short version; each step links to the details. When Jarvis or this README
+says "setup step 8" (or "README step 8"), it means step 8 of [Setup](#setup),
+not of this list.
+
+1. **Check the [requirements](#requirements):** Windows 10 or 11 and Python
+   3.13 through the `py` launcher; a Notion account and a scheduled routine
+   that writes your briefing page; for the optional parts, one or two Google
+   accounts and Claude Code on a claude.ai Pro or Max plan.
+2. **Get the code** into a folder of its own:
+
+   ```powershell
+   git clone https://github.com/SiddarthShekhar1994/jarvis-assistant.git
+   cd jarvis-assistant
+   ```
+
+   (or download the ZIP from GitHub and unzip it). The folder is called
+   `jarvis-assistant`, but the Python package inside it is still
+   `briefing_reader`, so every command is `py -3.13 -m briefing_reader ...`
+   (see [About the name](#about-the-name)). A folder outside OneDrive is best
+   (setup step 4 says why).
+3. **Install the packages:** `py -3.13 -m pip install -r requirements.txt`
+   (setup step 1).
+4. **Connect Notion:** create a read-only Notion integration, share your
+   briefing page with it, and put its secret and the page id in `.env` (setup
+   steps 2 to 4). Give your briefing routine the
+   [instructions](#instructions-for-the-claude-briefing-task), so it writes the
+   page in the format Jarvis reads and proposes instead of acting. Then try
+   `py -3.13 -m briefing_reader --open` (setup step 5).
+5. **Connect Google** (optional: TODAY, calendar actions, sending, mail for
+   Ask): a free Google Cloud project with the Calendar API (and the Gmail API
+   for email), its consent screen set to In production, and a Desktop OAuth
+   client saved as `google_client_secret.json` (setup steps 8, 8b and 8c).
+   Each account in `config.toml` (`personal`, `work`) signs in at its first
+   click that needs Google (Connect, Approve, Sign in or Send), and Jarvis
+   asks you once to confirm which Google account it is.
+6. **Set up Claude Code** (optional: Ask Jarvis and web research): install
+   it, run `claude auth login --claudeai`, turn usage credits **off** at
+   claude.ai (Settings > Usage), set `enabled = true` under `[ask]` in
+   `config.toml`, and run `py -3.13 -m briefing_reader --ask-check` until it
+   says `Ready: yes` (and, for web research, `Web research ready: yes`; see
+   the setup under [Ask Jarvis](#ask-jarvis-optional)).
+7. **Schedule it** (setup step 6):
+
+   ```powershell
+   powershell -NoProfile -ExecutionPolicy Bypass -File .\install-schedule.ps1
+   ```
+
+   It registers the AM, PM, catch-up and hotkey tasks. Set `[schedule]` in
+   `config.toml` (or pass `-AmTime` and `-PmTime`) a few minutes after your
+   routine writes the page.
+8. **Add a Start menu shortcut** that starts
+   `pythonw.exe -m briefing_reader --open` in the project folder (see
+   [Start menu shortcut](#start-menu-shortcut)), or just press **Ctrl+Alt+J**.
+
+## Roadmap
+
+Planned for later versions; none of it is built yet, and all of it will keep
+the same rules (proposals, your click, every step visible in LIVE):
+
+- **Visual snapshots in LIVE**: a picture of the page, the email or the
+  calendar change a step is about, next to its text.
+- **A live browser Jarvis drives**: he opens and fills in pages in a browser
+  you can watch, and every submit waits for your click.
+- **Plan my day**: a proposed plan for the day from your calendar, deadlines
+  and to-dos, as cards you approve.
+- **Meeting prep**: a short brief before a meeting: who is coming, your last
+  thread with them, what is still open.
+- **Follow-up nudges**: threads that wait on your answer, or on an answer you
+  are owed.
+- **Memory**: what you ask Jarvis to remember, kept on your PC, where you can
+  see and change it.
+- **Radar**: internships, hackathons, deadlines and subscriptions (renewals,
+  trials that end) worth your attention.
+- **Push-to-talk voice**: hold a key and say your request.
+- **Meeting summaries**, only with the consent of everyone in the meeting.
+
+## About the name
+
+The project began as **briefing-reader**, a reader for the email briefing. It
+does much more now, so it is called **Jarvis Assistant**, and its GitHub
+repository is
+[jarvis-assistant](https://github.com/SiddarthShekhar1994/jarvis-assistant)
+(the old briefing-reader address redirects there). Only the names you see
+changed; to keep existing setups working, the internals keep the old name:
+
+- the Python package and the command: `briefing_reader`,
+  `py -3.13 -m briefing_reader ...` (also in shortcuts and scheduled tasks);
+- the data folder `%LOCALAPPDATA%\briefing-reader` (sign-ins, decisions and
+  the log, `briefing-reader.log`) and the audio folder `%TEMP%\briefing-reader`;
+- the scheduled tasks "Briefing AM", "Briefing PM", "Briefing catch-up" and
+  "Briefing hotkey", and the names of the app's single-instance locks;
+- the `.env` keys (`NOTION_TOKEN`, `BRIEFING_PAGE_ID`, `JARVIS_...`).
+
+**Coming from briefing-reader?** Update the folder you have (`git pull`). An
+old clone keeps working because GitHub redirects; `git remote set-url origin
+https://github.com/SiddarthShekhar1994/jarvis-assistant.git` points it at the
+new address. Nothing needs a new sign-in, and a Notion integration or Google
+Cloud app you named briefing-reader can keep that name: those names are only
+labels. If you clone into a new `jarvis-assistant` folder instead, copy `.env`,
+`google_client_secret.json` (or your `secrets\` folder, if you keep the client
+file there) and your edited `config.toml` into it: a fresh clone has the
+default `config.toml`, so `[ask]` would be off again and the schedule, hotkey,
+accounts and trusted domains back to their defaults. Then rerun
+`install-schedule.ps1` there (it reads `[schedule]` and `[hotkey]` from that
+`config.toml`, and the tasks start the app in the folder they were registered
+from) and point your Start menu shortcut's **Start in** at it.
+
+**The rest of this README is the reference:** [Requirements](#requirements)
+and [Setup](#setup), [the look](#the-look-jarvis-hud),
+[using it](#using-it), [Calendar actions](#calendar-actions) and the other
+cards, [Ask Jarvis](#ask-jarvis-optional) and [web research](#web-research),
+the [proposal](#proposed-actions-format) and [deadline](#deadlines-format)
+formats, the [routine's instructions](#instructions-for-the-claude-briefing-task),
+the [command line](#command-line), [configuration](#configuration),
+[logs and saved files](#logs-and-saved-files),
+[privacy and cost](#privacy-and-cost), [tests](#tests),
+[troubleshooting](#troubleshooting), the [project layout](#project-layout)
+and the [license](#license).
 
 ## Requirements
 
@@ -63,13 +333,15 @@ own scheduled task (see [Instructions for the Claude briefing task](#instruction
   it, everything else works: proposals are still shown (Approve just says that
   Google Calendar is not set up yet, and replies stay Copy / Open hand-offs),
   and DEADLINES still lists the briefing's own deadlines.
-- For [Ask Jarvis](#ask-jarvis-optional) only (off by default): Claude Code,
-  installed and signed in with your own claude.ai plan (Pro or Max).
+- For [Ask Jarvis](#ask-jarvis-optional) only (off by default), which also runs
+  [web research](#web-research): Claude Code, installed and signed in with your
+  own claude.ai plan (Pro or Max).
 
 ## Setup
 
 Run these in PowerShell from the project folder (the folder that contains this
-README and `config.toml`; for example the folder you cloned or unzipped):
+README and `config.toml`: `jarvis-assistant` when you cloned it as in
+[Quick start](#quick-start), or the folder you unzipped):
 
 ```powershell
 cd "<project folder>"
@@ -88,7 +360,8 @@ cd "<project folder>"
 2. **Create the Notion integration**
 
    Open <https://www.notion.so/profile/integrations> and click **New integration**.
-   Choose type **Internal**, pick your workspace, and name it `briefing-reader`.
+   Choose type **Internal**, pick your workspace, and name it `jarvis-assistant`
+   (any name works).
    Under **Capabilities** keep only **Read content** (uncheck Update content and
    Insert content; no user information is needed). Save, then copy the
    **Internal Integration Secret** (it starts with `ntn_`, or `secret_` for older
@@ -98,8 +371,9 @@ cd "<project folder>"
 
    Open your briefing page (for example "Daily Briefing (auto)") in Notion,
    click the **...** menu (top right) > **Connections** (called **Connect to** in
-   some versions) > pick **briefing-reader** > **Confirm**. Newer Notion versions
-   also let you pick the page on the integration's **Access** tab. Without this
+   some versions) > pick your integration (**jarvis-assistant**) > **Confirm**.
+   Newer Notion versions also let you pick the page on the integration's
+   **Access** tab. Without this
    step the Notion API answers 404 (the page looks like it does not exist), and
    the app says that the page is not found or not shared with the integration.
 
@@ -139,7 +413,7 @@ cd "<project folder>"
    synced to that account and to other PCs that sync it. The integration is
    read-only, so the secret can only read pages you shared with it. If that still
    matters to you, move the project out of the synced folder (for example to
-   `C:\Tools\briefing-reader`) and rerun `install-schedule.ps1` there. If you keep
+   `C:\Tools\jarvis-assistant`) and rerun `install-schedule.ps1` there. If you keep
    it in OneDrive with Files On-Demand, right-click the folder > **Always keep on
    this device**, so a scheduled run never waits for a download.
 
@@ -237,30 +511,32 @@ cd "<project folder>"
    Copy the folder to the other PC (or clone it), install Python 3.13 and the
    packages (step 1), create `.env` (step 4; it is not in git), copy
    `google_client_secret.json` if you use calendar actions (step 8; it is not in
-   git either), and run `install-schedule.ps1` there; it finds that PC's
-   `pythonw.exe` again. The Google sign-in is kept per PC, so the first Approve
-   on the new PC opens the Google sign-in once. Rerunning the script overwrites
-   the tasks, which is also how you change the times (or set them in `[schedule]`
-   in `config.toml` and rerun it). Run `uninstall-schedule.ps1` on the old PC if
-   it should stop announcing briefings.
+   git either), and, if you cloned it, copy your edited `config.toml` too (a
+   clone has the default one, with `[ask]` off and the default schedule,
+   hotkey and accounts). Then run `install-schedule.ps1` there; it finds that
+   PC's `pythonw.exe` again. The Google sign-in is kept per PC, so the first
+   Approve on the new PC opens the Google sign-in once. Rerunning the script
+   overwrites the tasks, which is also how you change the times (or set them
+   in `[schedule]` in `config.toml` and rerun it). Run `uninstall-schedule.ps1`
+   on the old PC if it should stop announcing briefings.
 
 8. **Google setup (for calendar actions, sending replies and TODAY)**
 
    Only needed if you want **Approve** to add proposed events to Google Calendar,
    the reading screen to show your day's events, and **Send** to send replies and
    emails (that also needs step 8b below).
-   You create your own small OAuth app in Google Cloud, so briefing-reader talks
-   to Google only as you. It is free; no billing account is needed.
+   You create your own small OAuth app in Google Cloud, so Jarvis talks to
+   Google only as you. It is free; no billing account is needed.
 
    1. Open <https://console.cloud.google.com/>, signed in with the Google account
       whose calendar should get the events. In the project picker at the top,
-      click **New project**, name it `briefing-reader`, **Create**, and make sure
+      click **New project**, name it `jarvis-assistant`, **Create**, and make sure
       it is selected.
    2. **APIs & Services > Library**: search for **Google Calendar API**, open it,
       click **Enable**.
    3. **APIs & Services > OAuth consent screen** (newer consoles call it **Google
       Auth Platform** and start with **Get started**): app name
-      `briefing-reader`, user support email = your email, audience **External**,
+      `jarvis-assistant`, user support email = your email, audience **External**,
       contact email = your email, accept the policy, **Create**.
    4. **Audience**: under **Test users** click **Add users** and add your own
       Google address. Then, on the same page, set the **Publishing status** to
@@ -269,11 +545,11 @@ cd "<project folder>"
       sign in again every week. Verification by Google is not needed for an app
       only you use (the console may suggest it; you can ignore that). Because the
       app is not verified, the first sign-in shows "Google hasn't verified this
-      app": click **Advanced** > **Go to briefing-reader (unsafe)**. It is safe
+      app": click **Advanced** > **Go to jarvis-assistant (unsafe)**. It is safe
       here because the app is your own.
    5. **Clients** (older consoles: **Credentials > Create credentials > OAuth
       client ID**): **Create client**, application type **Desktop app**, name
-      `briefing-reader`, **Create**. In the dialog that confirms it, click
+      `jarvis-assistant`, **Create**. In the dialog that confirms it, click
       **Download JSON**. Newer consoles show the client secret only in that
       dialog; if you closed it, open the client and add a new secret, or create
       another client.
@@ -290,8 +566,8 @@ cd "<project folder>"
    7. That's all. The first time you click **Approve**, or **Connect** in the
       TODAY panel, your browser opens the
       Google sign-in: pick your account and allow every permission it asks
-      for. The page then says "briefing-reader is connected to Google for the
-      personal account. You can close this tab." The sign-in must be finished
+      for. The page then says "Jarvis is connected to Google for the personal
+      account. You can close this tab." The sign-in must be finished
       within 5 minutes; the app stays usable meanwhile. It is saved in
       `%LOCALAPPDATA%\briefing-reader\google_token_personal.json` (on this PC
       only, outside the project folder) and refreshed automatically, so later
@@ -398,9 +674,9 @@ cd "<project folder>"
    `%LOCALAPPDATA%\briefing-reader\google_token_personal.json`
    (or `google_token_work.json` for the work account; the next click on that
    account's card signs in again), and remove the app's access at
-   <https://myaccount.google.com/permissions> (pick briefing-reader and remove
-   its access), in each Google account you signed in with. To use an account
-   name with another Google account, also delete that name's entry in
+   <https://myaccount.google.com/permissions> (pick your app, jarvis-assistant,
+   and remove its access), in each Google account you signed in with. To use an
+   account name with another Google account, also delete that name's entry in
    `%LOCALAPPDATA%\briefing-reader\accounts.json` (or the whole file: every name
    is then bound again at its next sign-in, and asked about again). A name whose
    saved sign-in is still there but whose entry is gone (or whose
@@ -520,7 +796,8 @@ labels and times.
   **speaker** button left of minimize mutes Jarvis's own voice (**Ctrl+M**; a
   cyan speaker while he may speak, struck through in amber while muted; see
   [Jarvis talks](#jarvis-talks)).
-- **Header.** The JARVIS wordmark, three service chips and the date and time,
+- **Header.** The JARVIS wordmark with "assistant · desktop" next to it (left
+  out when the window is narrow), three service chips and the date and time,
   such as TUE 06 OCT 1:05 PM (`[display] clock = "24h"` shows 13:05; the
   small prompt window has room for the time only), and, with Ask Jarvis on, a
   fourth chip on the reading screen, **claude** (see
@@ -955,7 +1232,7 @@ keeps working the same way (`--now` is an older name of `--open`); use
 
 The briefing task does not add calendar events itself. It only **proposes**
 them, in a "Proposed actions" section of the page (format below), and you
-decide in briefing-reader:
+decide in Jarvis:
 
 - The proposals are not read out line by line. Instead, just before "That's the
   end of your briefing." the app says how many invites need your OK and names
@@ -1000,8 +1277,8 @@ What Approve does:
    one, nothing is added and the card shows ALREADY ON CALENDAR.
 4. Otherwise it creates the event: the title, the start and end in your
    calendar's time zone (or all day), the repeat, the place as location, and the
-   notes as the description followed by "Added by briefing-reader from your
-   Daily Briefing.", with your default reminders. The card shows ADDED and an
+   notes as the description followed by "Added by Jarvis from your Daily
+   Briefing.", with your default reminders. The card shows ADDED and an
    **Open** link to the event in Google Calendar.
 5. If something goes wrong, the card keeps its Approve and Deny buttons, so you
    can try again, and shows FAILED with the reason under them (at most two
@@ -1035,8 +1312,9 @@ If `[calendar] enabled = false`, or step 8 was not done, the cards are still
 shown, but Approve only shows "Google Calendar is not set up yet - see README
 step 8" and sends nothing.
 
-Approvals happen in the reading screen. To approve without listening, click
-**Read now** and then **Pause**.
+Approvals happen on the assistant screen, which opens without reading
+anything (the Start menu, the hotkey or `--open`): nothing is read until you
+press Play.
 
 ### Other proposals: replies, invites, to-dos and links
 
@@ -1303,7 +1581,7 @@ what is next:
    edit the recipients", and the click only says so again (no dialog, no
    countdown). Open **Edit** and **Remove** that address.
 3. While a red NEW RECIPIENT is not confirmed, the click opens **Edit**, with a
-   "Send to <address>" tick under each new address. Tick the ones you mean (or
+   `Send to <address>` tick under each new address. Tick the ones you mean (or
    remove the others) and **Save**; the badge then reads "NEW · CONFIRMED".
 4. When the card does not show all of the message (more than its ten lines,
    counting a long paragraph as the lines it wraps into, or a subject cut at
@@ -1432,8 +1710,9 @@ Runs are capped: 20 an hour and 60 a day by default (`[ask] max_per_hour`,
    request: where `claude.exe` is and its version, that it has every flag Ask
    needs, that it is signed in to a claude.ai plan, that its work folder is
    empty, how many environment variables it keeps and removes, which accounts'
-   mail Ask can read, today's usage and any extra-usage pause. It ends with
-   `Ready: yes` or says what is missing.
+   mail Ask can read, today's usage and any extra-usage pause. It prints
+   `Ready: yes` or says what is missing, and last whether web research is
+   ready (`Web research ready: yes`).
 6. `py -3.13 -m briefing_reader --ask-text "move my test sync to Friday" --ask-dry-run`
    prints exactly what Jarvis would send to Claude Code (email text as a
    character count only) and the command line, without a Claude request. Read
@@ -1809,14 +2088,14 @@ section works; calendar events named like deadlines are still listed.
 
 Paste this block into the instructions of the scheduled task (for example a
 Claude scheduled task with Notion access) that writes your briefing page, such
-as "Daily Briefing (auto)". It keeps the page in the format briefing-reader
-reads best, and it makes the task propose calendar events instead of creating
+as "Daily Briefing (auto)". It keeps the page in the format Jarvis reads
+best, and it makes the task propose calendar events instead of creating
 them, and propose (never send) replies and the other items of step 6. Replace
 the page name if yours is different.
 
 ```text
 DAILY BRIEFING PAGE FORMAT
-(The page "Daily Briefing (auto)" is read aloud by the briefing-reader app,
+(The page "Daily Briefing (auto)" is read aloud by the Jarvis Assistant app,
 which also turns the "Proposed actions" section into calendar invites and other
 proposals that the user decides one by one.)
 
@@ -1994,7 +2273,7 @@ py -3.13 -m briefing_reader [--run {am,pm} | --catch-up | --hotkey-agent | --ask
 | `--read` | Open Jarvis on the BRIEFING tab and read the briefing at once (what `--now` did before); no greeting. Not with `--ask`. |
 | `--from-file PATH` | Developer/testing option: load a saved Notion API fixture instead of calling Notion; no token or page id needed, and nothing is recorded for the catch-up. Example: `py -3.13 -m briefing_reader --read --from-file tests\fixtures\fake_page.json` |
 | `--debug` | More detailed log. |
-| `--version` | Print the version and exit. |
+| `--version` | Print the name and version (such as `Jarvis Assistant 1.2.0`) and exit. |
 
 `--open`, `--now` and `--read` exclude each other, and none of them goes with
 `--catch-up`, `--hotkey-agent`, `--ask-check` or `--ask-text`. Without `--run`,
@@ -2056,7 +2335,7 @@ log. Changes apply the next time the app starts.
 | `[actions] heading` | `"Proposed actions"` | The heading the proposals are under: one name, or a list such as `["Proposed actions", "Actions"]`. Matching ignores case and a trailing count. |
 | `[actions] link_hosts` | `[]` | Extra web hosts a card's **Open** may open, besides the built-in Google (mail, docs, drive, calendar, meet), Slack (`*.slack.com`) and Canvas (`*.instructure.com`) hosts: an exact name such as `"forms.example.edu"`, or `"*.example.edu"` for every subdomain. https only; an entry that is not a host name is skipped with a warning. Web research cards do not use this list: they follow the web rule (any public https site; see [Web research](#web-research)). |
 | `[actions] undo_seconds` | `10` | Seconds between a click on Approve / Add block / Accept / Decline / Maybe / Move / Cancel event / Send and the call to Google (3-60). Undo works until then and sends nothing. |
-| `[actions] trusted_domains` | `[]` | Email recipient domains that never get the red NEW RECIPIENT badge, such as `["example.edu"]` (its subdomains count too; a leading `@` is dropped). Any other address must be the account's own or one Jarvis sent to before, or Send asks you to confirm it in Edit first (see [Replies and emails](#replies-and-emails)). |
+| `[actions] trusted_domains` | `[]` | Email recipient domains that do not get the red NEW RECIPIENT badge, such as `["example.edu"]` (its subdomains count too; a leading `@` is dropped). An Ask recipient you did not type yourself is the exception: it is new even in these domains. Any other address must be one Jarvis sent to before, or Send asks you to confirm it in Edit first; the sending account's own address is never sent to (see [Replies and emails](#replies-and-emails)). |
 | `[accounts.<name>]` | `personal` and `work` | The Google accounts Jarvis may act for, one table each; the name is what the briefing writes as `acct=` (lowercase letters, digits, `-`, `_`). Without any `[accounts]` table only `personal` exists. Which Google account a name is never goes here: you pick it in Google's sign-in, and its first sign-in binds the name to it in `accounts.json` (setup step 8). Calendar proposals, to-do blocks and TODAY always use `personal`. |
 | `[accounts.<name>] backend` | `"google"` | Who carries out the account's actions. Only `"google"` (your own OAuth client) works in this version; `"composio"` is accepted but its cards say "Composio is not built into this version". |
 | `[accounts.<name>] features` | `["calendar"]` (the shipped `config.toml`: `["calendar", "gmail_send", "gmail_read"]`) | What Jarvis may do for the account: `"calendar"` answers invitations and moves or cancels events; `"gmail_send"` sends the replies and emails you approve (send only; setup step 8b); `"gmail_read"` lets Ask Jarvis read the threads a request is about (read only, never used to send; step 8c). Adding a feature means one new Google sign-in for that account. `[]` makes the account's cards hand-off only (Open, Copy, Done, Deny). |
@@ -2194,6 +2473,9 @@ is less exact.
 
 ## Logs and saved files
 
+The folders and the log file keep the project's first name, briefing-reader
+(see [About the name](#about-the-name)).
+
 `%LOCALAPPDATA%\briefing-reader\logs\briefing-reader.log`, rotated at 1 MB with 5
 old files kept (`briefing-reader.log.1` to `.5`). If that folder cannot be
 created, the log goes to `%TEMP%\briefing-reader\logs`. The catch-up launches and
@@ -2240,8 +2522,8 @@ counts; never a greeting, an announcement, an answer, a confirmation or
 anything else he says or shows.
 The LIVE tab ([LIVE: watch Jarvis work](#live-watch-jarvis-work)) keeps
 everything it shows in memory only: none of it is logged or written to any
-file, and it is gone when Jarvis closes (its own failures are logged as "Live
-view: <what> failed (<error type>)" and nothing more).
+file, and it is gone when Jarvis closes (its own failures are logged as
+`Live view: <what> failed (<error type>)` and nothing more).
 
 Other files in `%LOCALAPPDATA%\briefing-reader`:
 
@@ -2545,11 +2827,12 @@ they are quoted here in normal case, and the log has the same text)
   packages are missing": run setup step 1 again. "the Google Calendar API is not
   enabled": enable it (step 8.2) and wait a few minutes.
 - **"Google hasn't verified this app"** on the sign-in page: expected for your
-  own client. Check that it names briefing-reader and your own email as the
-  developer, then click **Advanced** > **Go to briefing-reader (unsafe)**.
-- **"Access blocked: briefing-reader has not completed the Google verification
-  process" (Error 403: access_denied)**: the app is still in **Testing** and the
-  account you picked is not a test user. Add it under **Audience > Test users**,
+  own client. Check that it names your app (jarvis-assistant, or the name you
+  gave it in step 8.3) and your own email as the developer, then click
+  **Advanced** > **Go to jarvis-assistant (unsafe)**.
+- **"Access blocked: jarvis-assistant has not completed the Google
+  verification process" (Error 403: access_denied; with your app's name)**:
+  the app is still in **Testing** and the account you picked is not a test user. Add it under **Audience > Test users**,
   or set the publishing status to **In production** (step 8.4).
 - **Access blocked with a school or work account**, or a card's line says
   "Sign-in blocked by the work account's administrator" (the note under the
@@ -2683,7 +2966,7 @@ they are quoted here in normal case, and the log has the same text)
   from your own app. Use Copy (and Open), and remove `"gmail_send"` from that
   account's features so its sign-in asks for the calendar only.
 - **A red NEW RECIPIENT badge**: Jarvis has not sent to that address before.
-  Check it is right, tick "Send to <address>" in Edit, Save, then click Send. To
+  Check it is right, tick `Send to <address>` in Edit, Save, then click Send. To
   trust a whole domain, add it to `[actions] trusted_domains`.
 - **Send opens Edit instead of counting down**: a new recipient is not ticked
   yet, or the card does not show all of the message (or its subject) and the
@@ -2695,8 +2978,8 @@ they are quoted here in normal case, and the log has the same text)
 
 **Revoking access**
 
-- Open <https://myaccount.google.com/permissions> in each
-  Google account, pick briefing-reader, remove its access, and delete
+- Open <https://myaccount.google.com/permissions> in each Google account,
+  pick your app (jarvis-assistant), remove its access, and delete
   `%LOCALAPPDATA%\briefing-reader\google_token_personal.json` (and
   `google_token_work.json`).
   If you only revoke on Google's side, the next use of that account fails once
@@ -2704,8 +2987,11 @@ they are quoted here in normal case, and the log has the same text)
 
 ## Project layout
 
+The repository (the `jarvis-assistant` folder; the Python package keeps its
+first name, `briefing_reader`, see [About the name](#about-the-name)):
+
 ```
-briefing_reader/__init__.py   version and app name
+briefing_reader/__init__.py   version, the shown name (Jarvis Assistant) and APP_NAME (the data folder's name)
 briefing_reader/__main__.py   command line, single-instance lock, hand-off out of the scheduled task, catch-up, app start
 briefing_reader/activation.py "come forward" messages between launches (Qt local socket), Qt log forwarding
 briefing_reader/runstate.py   scheduled slots, briefing keys, which briefings were answered, announced or viewed (runstate.json), the catch-up window
@@ -2740,7 +3026,7 @@ briefing_reader/ask_ui.py     Ask Jarvis in the app: the command bar's controlle
 fonts/                        Chakra Petch, Sora and JetBrains Mono fonts with their OFL licences
 tests/                        unit tests and saved fake Notion pages (tests/fixtures)
 config.toml                   voice, prompt, polling, section, calendar, actions, schedule, hotkey, agenda, display, Ask, web research, assistant and LIVE settings
-.env.example                  template for .env (NOTION_TOKEN, BRIEFING_PAGE_ID)
+.env.example                  template for .env (NOTION_TOKEN, BRIEFING_PAGE_ID; the optional JARVIS_ keys)
 requirements.txt              Python dependencies
 install-schedule.ps1          registers the Briefing AM / PM / catch-up / hotkey scheduled tasks
 uninstall-schedule.ps1        removes them

@@ -1,13 +1,13 @@
 <#
 .SYNOPSIS
-Removes the scheduled tasks created by install-schedule.ps1: "Briefing AM",
-"Briefing PM", "Briefing catch-up" and "Briefing hotkey".
+Removes the Jarvis Assistant scheduled tasks created by install-schedule.ps1:
+"Briefing AM", "Briefing PM", "Briefing catch-up" and "Briefing hotkey".
 
 .DESCRIPTION
 Unregisters the tasks that exist and reports what was removed and what was
 not found. A running "Briefing hotkey" agent is stopped first, so the hotkey
 is released at once. Nothing else is changed: the project folder, .env, logs
-and power settings are left alone. A briefing window that is open right now
+and power settings are left alone. A Jarvis window that is open right now
 keeps running until you close it.
 
 Use -WhatIf to see what would be removed without removing anything.
