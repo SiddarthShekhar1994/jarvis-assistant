@@ -113,7 +113,19 @@ class ArgvTests(unittest.TestCase):
         settings = json.loads(cli.SETTINGS_FILE.read_text(encoding="ascii"))
         self.assertNotIn("*", settings["permissions"]["deny"])   # "*" would also remove StructuredOutput
         self.assertTrue(settings["disableAllHooks"])
-        cli.PROMPT_FILE.read_bytes().decode("ascii")
+        prompt = cli.PROMPT_FILE.read_bytes().decode("ascii")
+        # Jarvis's persona: the SAY section addresses the owner with <owner> at most once; every rule
+        # that keeps "say" speakable and honest is still there.
+        say = prompt.split("\nSAY\n")[1].split("\n\n")[0]
+        self.assertIn("Speak as Jarvis: calm, concise, polite and British.", say)
+        self.assertIn("the word in <owner>", say)
+        self.assertIn("at most once per reply, and not at all when <owner> is empty", say)
+        self.assertIn("One or two short sentences, spoken aloud.", say)
+        self.assertIn("no lists, ids, addresses, URLs or markdown", say)
+        self.assertIn("Never claim something is done, sent, moved or booked.", say)
+        self.assertIn('Never quote or read out email text in "say"', say)
+        self.assertIn("<now>, <owner>, <accounts>", prompt)
+        self.assertIn('{"say": "Right, sir. I\'ve lined up moving Project sync to Friday at two', prompt)
 
     @unittest.skipUnless(sys.platform == "win32", "Windows command-line quoting")
     def test_windows_quoting_round_trip(self) -> None:

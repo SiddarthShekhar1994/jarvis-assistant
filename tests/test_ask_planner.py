@@ -125,6 +125,7 @@ class AskTests(PlannerTestCase):
         started = self.runner.started[0]
         self.assertIn(f"<command>\n{COMMAND}\n</command>", started.stdin)
         self.assertIn("work | event=evt0001aa | cal=primary | Project sync", started.stdin)
+        self.assertIn("</now>\n<owner>sir</owner>\n<accounts>", started.stdin)   # [assistant] address default
         self.assertNotIn(COMMAND, " ".join(started.argv))
         self.assertNotIn("ANTHROPIC_API_KEY", started.env)
         self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", started.env)
@@ -137,6 +138,16 @@ class AskTests(PlannerTestCase):
         calls = self.sources.calls
         self.assertEqual([call[0] for call in calls], ["personal", "work"])
         self.assertEqual(calls[0][3], ("primary",))
+
+    def test_the_owner_block_follows_assistant_address(self) -> None:
+        self.write_config(CONFIG + '\n[assistant]\naddress = "boss"\n')
+        ask = self.make(plan_stream({"say": SAY, "question": "", "lines": [MOVE_LINE]}))
+        self.assertTrue(ask.plan(COMMAND).ok)
+        self.assertIn("<owner>boss</owner>", self.stdin())
+        self.write_config(CONFIG + '\n[assistant]\naddress = ""\n')
+        ask = self.make(plan_stream({"say": SAY, "question": "", "lines": [MOVE_LINE]}))
+        self.assertTrue(ask.plan(COMMAND).ok)
+        self.assertIn("</now>\n<owner></owner>\n", self.stdin())
 
     def test_logs_hold_no_request_context_or_planner_text(self) -> None:
         ask = self.make(plan_stream({"say": SAY, "question": "Which Friday?", "lines": [MOVE_LINE, EMAIL_LINE]}))

@@ -357,7 +357,7 @@ print(json.dumps(got), flush=True)
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
             self.assertEqual(proc.stdout.readline().strip(), "listening")
-            message = {"cmd": "activate", "run": None, "now": True}
+            message = {"cmd": "activate", "run": None, "now": False, "open": True}   # OPEN_ACTIVATION
             self.assertTrue(hotkey.send_activation(name, message, timeout_s=5))
             out, err = proc.communicate(timeout=30)
         finally:

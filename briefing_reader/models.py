@@ -192,3 +192,13 @@ class SectionAudio:
     section_key: str
     segments: tuple[AudioSegment, ...] = field(default_factory=tuple)
     engine: str = "edge"                # "edge" or "sapi"
+
+
+# --------------------------------------------------------------------------
+# Launch kinds (how a start or an activation asked for Jarvis)
+# --------------------------------------------------------------------------
+
+LAUNCH_OPEN = "open"            # the assistant screen with a greeting; nothing is read until Play
+LAUNCH_READ = "read"            # the assistant screen on its BRIEFING tab, reading at once (--read)
+LAUNCH_SCHEDULED = "scheduled"  # a scheduled run or the catch-up: wait for the run's briefing
+LAUNCH_KINDS = (LAUNCH_OPEN, LAUNCH_READ, LAUNCH_SCHEDULED)

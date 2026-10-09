@@ -2,8 +2,10 @@
 
     build_prompt(ctx, redact_mail=False) -> (text, ContextIndex)
 
-The text has these blocks, in order: <now>, <accounts>, <calendar>, <briefing>, <contacts>, <mail>
-(only when Jarvis read mail for this Ask) and <command>, always last. Every data field is
+The text has these blocks, in order: <now>, <owner> (one line: the word Jarvis addresses the owner
+with, "sir" by default, from [assistant] address; empty for none), <accounts>, <calendar>,
+<briefing>, <contacts>, <mail> (only when Jarvis read mail for this Ask) and <command>, always
+last. Every data field is
 sanitized: "<" and ">" become "\u2039" and "\u203a" (so no data can open or close a block), "|"
 becomes "/" (so no field can split a row), control and invisible format characters are removed,
 line breaks too except inside quoted email text (indented, one line per line), and lengths are
@@ -47,6 +49,7 @@ MAX_GUESTS = 10
 TITLE_CAP = 120
 NAME_CAP = 60
 COMMAND_CAP = 500
+OWNER_CAP = 20                     # [assistant] address is at most 20 characters
 BODY_PREVIEW = 400
 MAX_CONTACTS = 60
 LINE_CAP = 1_000                   # one briefing text line
@@ -102,6 +105,7 @@ class AskContext:
     events: Mapping[str, tuple[EventBrief, ...]] = field(default_factory=dict, hash=False)
     briefing: BriefingContext | None = None
     mail: tuple[MailThread, ...] = ()
+    owner: str = ""                                 # how Jarvis addresses the owner ("sir"; "" for none)
 
 
 # --------------------------------------------------------------------------
@@ -465,7 +469,8 @@ def build_prompt(ctx: AskContext, *, redact_mail: bool = False) -> tuple[str, Co
     ``redact_mail`` (the dry run) each email's text is replaced by its length; the index is the
     same. The text is never over MAX_STDIN_CHARS."""
     ctx = replace(ctx, mail=fit_mail(ctx.mail))
-    head = [f"<now>\n{_now_block(ctx)}\n</now>", f"<accounts>\n{_accounts_block(ctx)}\n</accounts>"]
+    head = [f"<now>\n{_now_block(ctx)}\n</now>", f"<owner>{data(ctx.owner, OWNER_CAP)}</owner>",
+            f"<accounts>\n{_accounts_block(ctx)}\n</accounts>"]
     briefing_text, shown_pending = _briefing_block(ctx.briefing)
     pending = tuple(ctx.briefing.pending[:shown_pending]) if ctx.briefing is not None else ()
     ordered = _ordered_events(ctx)

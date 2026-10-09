@@ -169,6 +169,17 @@ Widgets
     ``ActivityLog``: ``add(tag, message, sub="", when=None)`` newest first,
         at most ``ActivityLog.MAX_ENTRIES``; tags ``TAG_RUN``, ``TAG_DONE``,
         ``TAG_WAIT``, ``TAG_STOP``, ``TAG_ASK``; ``entries()``; ``set_hour24(bool)``.
+    ``TabStrip``: the JARVIS / BRIEFING folder tabs above the centre panel
+        (``TAB_JARVIS``, ``TAB_BRIEFING``; ``currentChanged(int)``,
+        ``set_current``, ``current()``, ``set_badge(bool)`` = the amber NEW
+        pill on BRIEFING, ``set_unread(bool)`` = a dot on JARVIS,
+        ``set_compact(bool)``, automatic below ``TabStrip.COMPACT_BELOW`` px);
+        each tab is a ``TabButton`` (Left / Right move between them).
+    ``ConversationLog``: Jarvis's conversation, oldest first, never elided
+        (``add(role, text, when=, tone=, sub=, link_text=, link_id=) -> id``,
+        ``update(id, ...)``, ``entries()``, ``clear()``, ``set_hour24``;
+        roles ``ROLE_JARVIS`` / ``ROLE_YOU``; ``linkClicked(link_id)``); it
+        follows the newest entry unless the owner scrolled in the last 4 s.
     ``HudChip(text, color)``: small chamfered tag (e.g. "2 NEED YOUR OK").
     ``FlowLayout(h_spacing, v_spacing)``: wrapping row for buttons, so a
         narrow column gets two rows instead of a wider window.
@@ -1163,6 +1174,9 @@ class _HeaderButton(QPushButton):
     def _draw_glyph(self, painter: QPainter, center: QPointF) -> None:
         raise NotImplementedError
 
+    def _glyph_color(self, active: bool) -> str:
+        return self._ACTIVE if active else TEXT_MUTED
+
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         painter = QPainter(self)
         try:
@@ -1171,7 +1185,7 @@ class _HeaderButton(QPushButton):
             active = self.underMouse() or self.isDown()
             if active:
                 painter.fillPath(chamfer_path(rect, 6), rgba(self._LINE, 0.18 if self.isDown() else 0.12))
-            pen = QPen(QColor(self._ACTIVE if active else TEXT_MUTED), 1.6)
+            pen = QPen(QColor(self._glyph_color(active)), 1.6)
             pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             painter.setPen(pen)
             self._draw_glyph(painter, rect.center())
@@ -1205,6 +1219,50 @@ class _MinimizeButton(_HeaderButton):
     def _draw_glyph(self, painter: QPainter, center: QPointF) -> None:
         y = math.floor(center.y()) + 0.5   # on a pixel row at 100 %, so the bar stays crisp
         painter.drawLine(QPointF(center.x() - 5.0, y), QPointF(center.x() + 5.0, y))
+
+
+SPEAKER_ON_TIP = "Mute Jarvis's voice (the briefing still plays when you press Play)"
+SPEAKER_MUTED_TIP = "Jarvis is muted - click to let him speak"
+
+
+class _SpeakerButton(_HeaderButton):
+    """The header's speaker button, left of minimize: Jarvis's own voice on (a speaker with two
+    arcs, cyan) or muted (the speaker struck through, amber). It only switches what Jarvis says on
+    his own; the briefing still plays when you press Play. ``muted()`` / ``set_muted``."""
+
+    _NAME = SPEAKER_ON_TIP
+    _LINE = ACCENT
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._muted = False
+        self.set_muted(False)
+
+    def muted(self) -> bool:
+        return self._muted
+
+    def set_muted(self, muted: bool) -> None:
+        self._muted = bool(muted)
+        tip = SPEAKER_MUTED_TIP if self._muted else SPEAKER_ON_TIP
+        self.setToolTip(tip)
+        self.setAccessibleName(tip)
+        self.update()
+
+    def _glyph_color(self, active: bool) -> str:
+        return AMBER if self._muted else ACCENT
+
+    def _draw_glyph(self, painter: QPainter, center: QPointF) -> None:
+        x, y = center.x() - 3.0, center.y()   # the speaker sits left of centre, the arcs to its right
+        body = QPolygonF([QPointF(x - 4.5, y - 2.5), QPointF(x - 1.5, y - 2.5), QPointF(x + 2.5, y - 6.0),
+                          QPointF(x + 2.5, y + 6.0), QPointF(x - 1.5, y + 2.5), QPointF(x - 4.5, y + 2.5)])
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPolygon(body)
+        if self._muted:   # struck through: one slash across the speaker and where its arcs were
+            painter.drawLine(QPointF(x - 6.5, y - 7.5), QPointF(x + 11.0, y + 7.5))
+            return
+        for radius in (4.5, 8.0):
+            arc = QRectF(x + 2.5 - radius, y - radius, 2 * radius, 2 * radius)
+            painter.drawArc(arc, -50 * 16, 100 * 16)
 
 
 class FlowLayout(QLayout):
@@ -1960,12 +2018,14 @@ class HeaderBar(QWidget):
 
     closeRequested = Signal()
     minimizeRequested = Signal()
+    muteToggled = Signal(bool)   # the speaker button: True = Jarvis's voice muted
 
     _MAX_LEVEL = 4           # 3 on the 24-hour clock
     _RIGHT_MARGIN = 8
     _CHIP_MARGINS = ((16, 16), (16, 16), (16, 16), (8, 8), (0, 8))   # (left, right) of the chips, per level
     _CLOSE_GAPS = (10, 10, 10, 10, 6)                                  # between the clock and the buttons, per level
     _BUTTON_GAP = 2                                                    # between minimize and close
+    _SPEAKER_GAP = 6                                                   # between the speaker and minimize
     _MERIDIEM_ROOM = 12      # at least this much between the chips and a 12-hour clock
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -1980,6 +2040,9 @@ class HeaderBar(QWidget):
         self._chip_row = QHBoxLayout(self._chips_box)
         self._chip_row.setSpacing(4)
         self._chip_row.setContentsMargins(16, 0, 16, 0)
+        self.speaker_button = _SpeakerButton()   # shown by set_speaker_visible (the assistant screen)
+        self.speaker_button.hide()
+        self.speaker_button.clicked.connect(self._on_speaker_clicked)
         self.minimize_button = _MinimizeButton()
         self.minimize_button.clicked.connect(self._on_minimize_clicked)
         self.close_button = _CloseButton()
@@ -1998,6 +2061,9 @@ class HeaderBar(QWidget):
         layout.addWidget(self._clock)
         self._close_gap = QSpacerItem(self._CLOSE_GAPS[0], 0, QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
         layout.addSpacerItem(self._close_gap)
+        layout.addWidget(self.speaker_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._speaker_gap = QSpacerItem(0, 0, QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
+        layout.addSpacerItem(self._speaker_gap)
         layout.addWidget(self.minimize_button, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addSpacing(self._BUTTON_GAP)
         layout.addWidget(self.close_button, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -2008,6 +2074,35 @@ class HeaderBar(QWidget):
 
     def _on_minimize_clicked(self) -> None:
         self.minimizeRequested.emit()
+
+    def _on_speaker_clicked(self) -> None:
+        muted = not self.speaker_button.muted()
+        self.speaker_button.set_muted(muted)
+        self.muteToggled.emit(muted)
+
+    # ---- the speaker button ---------------------------------------------------------
+
+    def set_speaker_visible(self, visible: bool) -> None:
+        """Show the speaker button (left of minimize, 6 px apart) or take it out of the bar; the bar
+        fits as if it were not there while hidden."""
+        if self.speaker_button.isHidden() == (not visible):
+            return
+        self.speaker_button.setVisible(visible)
+        self._speaker_gap.changeSize(self._SPEAKER_GAP if visible else 0, 0, QSizePolicy.Policy.Fixed,
+                                     QSizePolicy.Policy.Minimum)
+        self.layout().invalidate()
+        self.updateGeometry()
+        self._fit(force=True)
+
+    def speaker_visible(self) -> bool:
+        return not self.speaker_button.isHidden()
+
+    def set_muted(self, muted: bool) -> None:
+        """The speaker button's state (it does not emit ``muteToggled``)."""
+        self.speaker_button.set_muted(muted)
+
+    def muted(self) -> bool:
+        return self.speaker_button.muted()
 
     # ---- content ----------------------------------------------------------------
 
@@ -2062,7 +2157,13 @@ class HeaderBar(QWidget):
         chips = [chip.width_for(tight) for chip in self._shown_chips()]
         chips_width = sum(chips) + 4 * max(0, len(chips) - 1) + (sum(self._chip_margins(level)) if chips else 0)
         return (self._brand.width_for(level == 0) + chips_width + self._clock.width_for(level <= 1)
-                + self._CLOSE_GAPS[level] + self._buttons_width() + self._RIGHT_MARGIN)
+                + self._CLOSE_GAPS[level] + self._speaker_width() + self._buttons_width() + self._RIGHT_MARGIN)
+
+    def _speaker_width(self) -> int:
+        """The speaker button and its gap to minimize while it is shown, else 0."""
+        if self.speaker_button.isHidden():
+            return 0
+        return self.speaker_button.width() + self._SPEAKER_GAP
 
     def _buttons_width(self) -> int:
         """Minimize, the gap and close."""
@@ -2418,6 +2519,7 @@ class TelemetryBar(QWidget):
         self._short = ""
         self._fraction = max(0.0, min(1.0, fraction))
         self._color = QColor(color)
+        self._value_color = QColor(TEXT_BRIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self._update_accessible()
 
@@ -2427,15 +2529,20 @@ class TelemetryBar(QWidget):
         self.update()
 
     def set_value(self, value: str, fraction: float | None = None, color: str | QColor | None = None,
-                  short: str = "") -> None:
+                  short: str = "", value_color: str | QColor | None = None) -> None:
+        """``color`` is the bar's; ``value_color`` the value text's (default TEXT_BRIGHT)."""
         self._value = value
         self._short = short
         if fraction is not None:
             self._fraction = max(0.0, min(1.0, fraction))
         if color is not None:
             self._color = QColor(color)
+        self._value_color = QColor(value_color if value_color is not None else TEXT_BRIGHT)
         self._update_accessible()
         self.update()
+
+    def value_color(self) -> QColor:
+        return QColor(self._value_color)
 
     def label(self) -> str:
         return self._label
@@ -2469,7 +2576,7 @@ class TelemetryBar(QWidget):
             painter.setFont(self._font)
             painter.setPen(QColor(TEXT_MUTED))
             painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self._label)
-            painter.setPen(QColor(TEXT_BRIGHT))
+            painter.setPen(self._value_color)
             painter.drawText(text_rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                              self.shown_value())
             paint_dash_bar(painter, QRectF(0, self.height() - 4, self.width(), 4), self._fraction, self._color)
@@ -5985,9 +6092,10 @@ TONE_WORKING = "working"    # reading the calendar, planning (cyan)
 TONE_DONE = "done"          # the planner's answer (bright)
 TONE_WARN = "warn"          # a question back, a limit, something to do first (amber)
 TONE_ERROR = "error"        # nothing was proposed (red)
-TONES = (TONE_IDLE, TONE_WORKING, TONE_DONE, TONE_WARN, TONE_ERROR)
+TONE_GOOD = "good"          # an approved card that was carried out (green; the conversation)
+TONES = (TONE_IDLE, TONE_WORKING, TONE_DONE, TONE_WARN, TONE_ERROR, TONE_GOOD)
 _TONE_COLORS = {TONE_IDLE: TEXT_MUTED, TONE_WORKING: ACCENT, TONE_DONE: TEXT_BODY, TONE_WARN: AMBER,
-                TONE_ERROR: RED}
+                TONE_ERROR: RED, TONE_GOOD: GREEN}
 COMMAND_MAX_LENGTH = 500
 COMMAND_PLACEHOLDER = "Ask Jarvis - nothing happens without your OK"
 # Shorter placeholders for a narrower field: the longest that fits is shown (never cut).
@@ -6431,6 +6539,495 @@ class ActivityLog(QScrollArea):
             row.hide()
             row.deleteLater()
         self._rows = []
+
+
+# --------------------------------------------------------------------------
+# Tabs (JARVIS / BRIEFING) and the conversation
+# --------------------------------------------------------------------------
+
+TAB_JARVIS = 0
+TAB_BRIEFING = 1
+NEW_BADGE_TEXT = "NEW"
+_TAB_TEXT = "#8592a0"           # a tab that is not current (the step chips' "todo" text)
+
+
+class TabButton(QAbstractButton):
+    """One folder tab: mono capitals, a 2 px bottom border (accent when current) and an optional
+    badge after the label - the amber NEW pill (an 8 px amber dot when compact) or a 6 px accent
+    "unread" dot. Checkable and auto-exclusive with its siblings; Tab focus only (a ring for
+    keyboard focus); Left / Right move to the neighbouring tab."""
+
+    HEIGHT = 28
+    _PAD = 12
+    _PAD_COMPACT = 8
+    _GAP = 7
+    _DOT = 6
+    _PILL_PAD = 5
+    _PILL_HEIGHT = 15
+
+    def __init__(self, text: str, name: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setText(text)
+        self.setCheckable(True)
+        self.setAutoExclusive(True)
+        self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._font = mono_font(11, 400, 0.08)
+        self._badge_font = mono_font(9, 700, 0.06)
+        self._name = name
+        self._new = False
+        self._unread = False
+        self._compact = False
+        self._focus_visible = False
+        self._update_accessible()
+
+    # ---- state ----------------------------------------------------------------
+
+    def set_new(self, new: bool) -> None:
+        if bool(new) != self._new:
+            self._new = bool(new)
+            self._update_accessible()
+            self.updateGeometry()
+            self.update()
+
+    def is_new(self) -> bool:
+        return self._new
+
+    def set_unread(self, unread: bool) -> None:
+        if bool(unread) != self._unread:
+            self._unread = bool(unread)
+            self._update_accessible()
+            self.updateGeometry()
+            self.update()
+
+    def is_unread(self) -> bool:
+        return self._unread
+
+    def set_compact(self, compact: bool) -> None:
+        if bool(compact) != self._compact:
+            self._compact = bool(compact)
+            self.updateGeometry()
+            self.update()
+
+    def _update_accessible(self) -> None:
+        name = self._name
+        if self._new:
+            name += ", new briefing"
+        if self._unread:
+            name += ", new entries"
+        self.setAccessibleName(name)
+        if self._new:
+            self.setToolTip("A new briefing you have not viewed yet")
+        elif self._unread:
+            self.setToolTip("Jarvis added something here")
+        else:
+            self.setToolTip("")
+
+    # ---- geometry -------------------------------------------------------------
+
+    def _pad(self) -> int:
+        return self._PAD_COMPACT if self._compact else self._PAD
+
+    def _badge_width(self) -> float:
+        if self._new and not self._compact:
+            return self._GAP + 2 * self._PILL_PAD + _text_advance(self._badge_font, NEW_BADGE_TEXT)
+        if self._new:
+            return self._GAP + 8
+        if self._unread:
+            return self._GAP + self._DOT
+        return 0.0
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        width = 2 * self._pad() + _text_advance(self._font, self.text().upper()) + self._badge_width()
+        return QSize(math.ceil(width), self.HEIGHT)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return self.sizeHint()
+
+    def badge_rect(self) -> QRectF:
+        """Where the NEW pill / dot or the unread dot is painted (empty when there is none)."""
+        if not (self._new or self._unread):
+            return QRectF()
+        x = self._pad() + _text_advance(self._font, self.text().upper()) + self._GAP
+        cy = (self.height() - 2) / 2
+        if self._new and not self._compact:
+            width = 2 * self._PILL_PAD + _text_advance(self._badge_font, NEW_BADGE_TEXT)
+            return QRectF(x, cy - self._PILL_HEIGHT / 2, width, self._PILL_HEIGHT)
+        size = 8.0 if self._new else float(self._DOT)
+        return QRectF(x, cy - size / 2, size, size)
+
+    # ---- events ---------------------------------------------------------------
+
+    def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        strip = self.parentWidget()
+        if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right) and isinstance(strip, TabStrip):
+            strip.step(-1 if event.key() == Qt.Key.Key_Left else 1, focus=True)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def focusInEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        self._focus_visible = _focus_ring_after(event.reason(), self._focus_visible)
+        super().focusInEvent(event)
+        self.update()
+
+    def focusOutEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().focusOutEvent(event)
+        self.update()
+
+    def enterEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().enterEvent(event)
+        self.update()
+
+    def leaveEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().leaveEvent(event)
+        self.update()
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        current, hover = self.isChecked(), self.underMouse() and self.isEnabled()
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            rect = QRectF(self.rect())
+            if current or hover:
+                painter.fillRect(rect, rgba(ACCENT, 0.08 if current else 0.04))
+            painter.fillRect(QRectF(0, rect.height() - 2, rect.width(), 2),
+                             QColor(ACCENT) if current else rgba("#ffffff", 0.08))
+            painter.setFont(self._font)
+            painter.setPen(QColor(BUTTON_TEXT if current else TEXT_SOFT if hover else _TAB_TEXT))
+            label = self.text().upper()
+            painter.drawText(QRectF(self._pad(), 0, rect.width(), rect.height() - 2),
+                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, label)
+            badge = self.badge_rect()
+            if not badge.isEmpty():
+                painter.setPen(Qt.PenStyle.NoPen)
+                if self._new and not self._compact:
+                    painter.setBrush(QColor(AMBER))
+                    painter.drawPath(chamfer_path(badge, 3))
+                    painter.setFont(self._badge_font)
+                    painter.setPen(QColor(AMBER_INK))
+                    painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, NEW_BADGE_TEXT)
+                else:
+                    painter.setBrush(QColor(AMBER if self._new else ACCENT))
+                    painter.drawEllipse(badge)
+            if self.hasFocus() and self._focus_visible:
+                painter.setPen(QPen(QColor(ACCENT), 2))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(rect.adjusted(1, 1, -1, -3))
+        finally:
+            painter.end()
+
+
+class TabStrip(QWidget):
+    """The JARVIS / BRIEFING tabs, left-aligned, 28 px tall; one is always current.
+
+    ``currentChanged(index)`` when the current tab changes (click, Left / Right, ``set_current``).
+    BRIEFING carries the NEW badge (``set_badge``), JARVIS the unread dot (``set_unread``; cleared
+    when JARVIS becomes current). Below ``COMPACT_BELOW`` px of width the tabs get narrower
+    padding and the NEW pill becomes a dot (``set_compact`` sets it by hand).
+    """
+
+    currentChanged = Signal(int)
+    HEIGHT = TabButton.HEIGHT
+    COMPACT_BELOW = 220
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._tabs = [TabButton("Jarvis", "Jarvis conversation", self),
+                      TabButton("Briefing", "Briefing transcript", self)]
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        for index, tab in enumerate(self._tabs):
+            tab.clicked.connect(lambda _checked=False, i=index: self.set_current(i))
+            layout.addWidget(tab, 0, Qt.AlignmentFlag.AlignBottom)
+        layout.addStretch(1)
+        self._current = TAB_JARVIS
+        self._tabs[TAB_JARVIS].setChecked(True)
+        self._compact = False
+        self._auto_compact = True
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.setFixedHeight(self.HEIGHT)
+
+    def tab(self, index: int) -> TabButton:
+        return self._tabs[index]
+
+    def current(self) -> int:
+        return self._current
+
+    def set_current(self, index: int) -> None:
+        if index not in (TAB_JARVIS, TAB_BRIEFING):
+            return
+        self._tabs[index].setChecked(True)   # auto-exclusive: the other one unchecks
+        if index == self._current:
+            return
+        self._current = index
+        if index == TAB_JARVIS:
+            self.set_unread(False)
+        self.currentChanged.emit(index)
+
+    def step(self, delta: int, *, focus: bool = False) -> None:
+        """Left / Right: the neighbouring tab (it stays at the ends)."""
+        index = max(0, min(len(self._tabs) - 1, self._current + delta))
+        self.set_current(index)
+        if focus:
+            self._tabs[index].setFocus(Qt.FocusReason.TabFocusReason)
+
+    def set_badge(self, new: bool) -> None:
+        self._tabs[TAB_BRIEFING].set_new(new)
+
+    def badge(self) -> bool:
+        return self._tabs[TAB_BRIEFING].is_new()
+
+    def set_unread(self, unread: bool) -> None:
+        self._tabs[TAB_JARVIS].set_unread(bool(unread) and self._current != TAB_JARVIS)
+
+    def unread(self) -> bool:
+        return self._tabs[TAB_JARVIS].is_unread()
+
+    def set_compact(self, compact: bool) -> None:
+        """Narrow tabs by hand (no longer follows the width)."""
+        self._auto_compact = False
+        self._apply_compact(compact)
+
+    def is_compact(self) -> bool:
+        return self._compact
+
+    def _apply_compact(self, compact: bool) -> None:
+        self._compact = bool(compact)
+        for tab in self._tabs:
+            tab.set_compact(self._compact)
+
+    def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        if self._auto_compact:
+            self._apply_compact(event.size().width() < self.COMPACT_BELOW)
+
+
+ROLE_JARVIS = "jarvis"
+ROLE_YOU = "you"
+_ROLE_TEXT = {ROLE_JARVIS: "JARVIS", ROLE_YOU: "YOU"}
+_ROLE_COLORS = {ROLE_JARVIS: ACCENT, ROLE_YOU: TEXT_MUTED}
+CONVERSATION_EMPTY_TEXT = "Jarvis's answers and what he has done appear here."
+
+
+class _ConversationEntry(QWidget):
+    """One entry: "JARVIS  2:41 PM", the text (plain, wrapped, never cut, selectable), an optional
+    sub line and an optional link."""
+
+    linkClicked = Signal(str)
+
+    def __init__(self, entry_id: int, role: str, stamp: str, text: str, tone: str, sub: str,
+                 link_text: str, link_id: str) -> None:
+        super().__init__()
+        self.entry_id = entry_id
+        self.role = role if role in _ROLE_TEXT else ROLE_JARVIS
+        self.stamp = stamp
+        self._link_id = link_id
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(8)
+        self.role_label = make_label(_ROLE_TEXT[self.role], mono_font(10, 500, 0.12), _ROLE_COLORS[self.role])
+        self.time_label = make_label(stamp, mono_font(10, 400, 0.04), TEXT_TIME)
+        header.addWidget(self.role_label)
+        header.addWidget(self.time_label)
+        header.addStretch(1)
+        self.text_label = _BreakableLabel(text, body_font(14), _TONE_COLORS.get(tone, TEXT_BODY))
+        self.text_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.text_label.setCursor(Qt.CursorShape.IBeamCursor)
+        self.text_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        self.sub_label = make_label(sub, mono_font(10, 400, 0.02), TEXT_SUB, wrap=True)
+        self.sub_label.setVisible(bool(sub))
+        self.link_button = HudButton(link_text, LINK)
+        self.link_button.setVisible(bool(link_text))
+        self.link_button.clicked.connect(lambda: self.linkClicked.emit(self._link_id))
+        link_row = QHBoxLayout()
+        link_row.setContentsMargins(0, 0, 0, 0)
+        link_row.addWidget(self.link_button)
+        link_row.addStretch(1)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addLayout(header)
+        layout.addWidget(self.text_label)
+        layout.addWidget(self.sub_label)
+        layout.addLayout(link_row)
+        self._tone = tone
+        self._update_accessible()
+
+    @property
+    def entry(self) -> tuple[str, str, str, str]:
+        return (self.role, self.stamp, self.text_label.text(), self.sub_label.text())
+
+    def tone(self) -> str:
+        return self._tone
+
+    def link(self) -> tuple[str, str]:
+        return (self.link_button.text() if not self.link_button.isHidden() else "", self._link_id)
+
+    def set_content(self, *, text: str | None = None, sub: str | None = None, tone: str | None = None,
+                    link_text: str | None = None, link_id: str | None = None) -> None:
+        if text is not None:
+            self.text_label.setText(text)
+        if tone is not None:
+            self._tone = tone
+            set_label_color(self.text_label, _TONE_COLORS.get(tone, TEXT_BODY))
+        if sub is not None:
+            self.sub_label.setText(sub)
+            self.sub_label.setVisible(bool(sub))
+        if link_id is not None:
+            self._link_id = link_id
+        if link_text is not None:
+            self.link_button.setText(link_text)
+            self.link_button.setVisible(bool(link_text))
+        self._update_accessible()
+
+    def _update_accessible(self) -> None:
+        role, stamp, text, sub = self.entry
+        self.setAccessibleName(f"{_ROLE_TEXT[role]} {stamp}: {text}" + (f" ({sub})" if sub else ""))
+
+
+class ConversationLog(QScrollArea):
+    """The JARVIS tab: the owner's asks and Jarvis's replies, announcements and results, oldest
+    first. Every text is plain text, wrapped and shown whole (never elided); the area scrolls.
+
+    ``add`` returns the entry's id for ``update`` (the greeting is updated once composed). At most
+    ``MAX_ENTRIES`` are kept (the oldest go). Adding or updating scrolls to the newest entry unless
+    the owner scrolled within the last ``SCROLL_HOLD_S`` seconds: to the bottom, or, when that entry
+    is taller than the view, to its top (its "JARVIS  2:41 PM" header first), so a long reply is
+    read from its first line and never shows up cut off at the top. Memory only.
+    """
+
+    linkClicked = Signal(str)
+    MAX_ENTRIES = 100
+    SCROLL_HOLD_S = 4.0
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        content = _transparent_scroll(self)
+        self._layout = QVBoxLayout(content)
+        self._layout.setContentsMargins(_CONVERSATION_MARGIN, 10, _CONVERSATION_MARGIN, 10)
+        self._layout.setSpacing(14)
+        self.empty_label = make_label(CONVERSATION_EMPTY_TEXT, body_font(13), TEXT_DIM, wrap=True)
+        self._layout.addWidget(self.empty_label)
+        self._layout.addStretch(1)
+        self._entries: list[_ConversationEntry] = []
+        self._next_id = 1
+        self._hour24 = False
+        self._user_scrolled_at = -math.inf
+        self._follow = True
+        bar = self.verticalScrollBar()
+        bar.actionTriggered.connect(self._on_user_scroll)
+        bar.rangeChanged.connect(self._on_range_changed)
+
+    def set_hour24(self, hour24: bool) -> None:
+        """The clock of the entries added from now on."""
+        self._hour24 = hour24
+
+    def add(self, role: str, text: str, *, when: datetime | str | None = None, tone: str = TONE_DONE,
+            sub: str = "", link_text: str = "", link_id: str = "") -> int:
+        stamp = when if isinstance(when, str) else format_time(when or datetime.now(), hour24=self._hour24)
+        entry = _ConversationEntry(self._next_id, role, stamp, text, tone, sub, link_text, link_id)
+        self._next_id += 1
+        entry.linkClicked.connect(self.linkClicked)
+        self._layout.insertWidget(self._layout.count() - 1, entry)   # before the stretch
+        self._entries.append(entry)
+        while len(self._entries) > self.MAX_ENTRIES:
+            old = self._entries.pop(0)
+            self._layout.removeWidget(old)
+            old.hide()
+            old.deleteLater()
+        self.empty_label.hide()
+        self._follow_newest()
+        return entry.entry_id
+
+    def update(self, *args: Any, text: str | None = None, sub: str | None = None,  # type: ignore[override]
+               tone: str | None = None, link_text: str | None = None, link_id: str | None = None) -> Any:
+        """``update(entry_id, text=, sub=, tone=, link_text=, link_id=)`` changes an entry (False when
+        it is gone: beyond MAX_ENTRIES, or cleared). Without an entry id it is QWidget.update()."""
+        if len(args) != 1 or not isinstance(args[0], int) or isinstance(args[0], bool):
+            return super().update(*args)
+        entry = self.entry(args[0])
+        if entry is None:
+            return False
+        entry.set_content(text=text, sub=sub, tone=tone, link_text=link_text, link_id=link_id)
+        self._follow_newest()
+        return True
+
+    def entry(self, entry_id: int) -> _ConversationEntry | None:
+        return next((entry for entry in self._entries if entry.entry_id == entry_id), None)
+
+    def entry_widgets(self) -> list[_ConversationEntry]:
+        return list(self._entries)
+
+    def entries(self) -> list[tuple[str, str, str, str]]:
+        """(role, time, text, sub), oldest first."""
+        return [entry.entry for entry in self._entries]
+
+    def clear(self) -> None:
+        for entry in self._entries:
+            self._layout.removeWidget(entry)
+            entry.hide()
+            entry.deleteLater()
+        self._entries = []
+        self.empty_label.show()
+
+    def following(self) -> bool:
+        """The view keeps the newest entry in sight."""
+        return self._follow
+
+    def scroll_to_newest(self) -> None:
+        bar = self.verticalScrollBar()
+        bar.setValue(self._newest_target(bar.maximum()))
+
+    def _newest_target(self, maximum: int) -> int:
+        """Where following the newest entry scrolls to: the bottom, or the top of that entry when it
+        does not fit in the view."""
+        if not self._entries:
+            return maximum
+        entry = self._entries[-1]
+        height = entry.height()
+        # Not shown and laid out yet (just added): the bottom, as before; the range change that
+        # follows its layout comes back here with its real place and height.
+        if not entry.isVisibleTo(self) or height <= 0 or height + 2 * _ENTRY_TOP_GAP <= self.viewport().height():
+            return maximum
+        return max(0, min(maximum, entry.y() - _ENTRY_TOP_GAP))
+
+    def _follow_newest(self) -> None:
+        if time.monotonic() - self._user_scrolled_at >= self.SCROLL_HOLD_S:
+            self._follow = True
+        if self._follow:
+            self.scroll_to_newest()
+            QTimer.singleShot(0, self._scroll_if_following)   # once the new entry is laid out
+
+    def _scroll_if_following(self) -> None:
+        if shiboken6.isValid(self) and self._follow:
+            self.scroll_to_newest()
+
+    def _on_range_changed(self, _minimum: int, maximum: int) -> None:
+        if self._follow:
+            self.verticalScrollBar().setValue(self._newest_target(maximum))
+
+    def _on_user_scroll(self, _action: int) -> None:
+        # actionTriggered fires for wheel, drag, clicks and keys, never for setValue().
+        self._user_scrolled_at = time.monotonic()
+        bar = self.verticalScrollBar()
+        QTimer.singleShot(0, lambda: self._after_user_scroll(bar))
+
+    def _after_user_scroll(self, bar: Any) -> None:
+        if shiboken6.isValid(self) and shiboken6.isValid(bar):
+            self._follow = bar.value() >= bar.maximum() - 2   # scrolled back to the bottom: follow again
+
+    def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        if self._follow:   # a taller or shorter view: the newest entry's start or the bottom again
+            QTimer.singleShot(0, self._scroll_if_following)
+
+
+_CONVERSATION_MARGIN = 14
+_ENTRY_TOP_GAP = 6     # a long entry followed from its top keeps this much room above its header
 
 
 # --------------------------------------------------------------------------

@@ -7,9 +7,10 @@ own thread and then sleeps in a blocking ``GetMessage`` loop, so it uses no
 CPU until the key is pressed. Each ``WM_HOTKEY`` goes to ``on_press``.
 
 :class:`PressDispatcher` is the ``on_press`` the agent uses: it ignores
-presses within 2 seconds of the last one, then asks a running app to start
-reading (the same one-line JSON activation message a second launch sends,
-written to the app's local pipe by :func:`send_activation`) or starts the app.
+presses within 2 seconds of the last one, then asks a running app to open
+Jarvis (the same one-line JSON activation message a second launch sends,
+written to the app's local pipe by :func:`send_activation`) or starts the app;
+nothing is read until the owner presses Play.
 The work runs on a short-lived thread, so the message loop never blocks.
 
 Qt-free. The module imports on any platform; the Win32 calls are only made
@@ -197,12 +198,12 @@ class PressDispatcher:
     def _dispatch(self) -> str:
         if self._is_app_running():
             if self._activate():
-                logger.info("Hotkey: asked the running app to read the briefing")
+                logger.info("Hotkey: asked the running app to open Jarvis")
                 return "activated"
             logger.warning("Hotkey: the app is running but did not take the request")
             return "failed"
         if self._start_app():
-            logger.info("Hotkey: started the app to read the briefing")
+            logger.info("Hotkey: started the app (it opens Jarvis)")
             return "started"
         logger.warning("Hotkey: could not start the app")
         return "failed"

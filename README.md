@@ -1,13 +1,19 @@
 # briefing-reader
 
-A small Windows desktop app that reads your email briefing aloud. Twice a day a
-scheduled AI task (for example a Claude scheduled task) overwrites a Notion page,
-such as "Daily Briefing (auto)", with an email triage. briefing-reader starts on
-a schedule (10:12 and 23:42 by default; both configurable), pops up a small
-always-on-top window that asks "Your AM briefing is ready. Hear it now?", fetches
-the page in the background while it waits, and reads it aloud when you click
-**Read now**. It never starts reading on its own. While it reads, the text is
-shown with the current line highlighted.
+A small Windows desktop assistant, Jarvis, for your email briefing. Twice a day
+a scheduled AI task (for example a Claude scheduled task) overwrites a Notion
+page, such as "Daily Briefing (auto)", with an email triage. briefing-reader
+starts on a schedule (10:12 and 23:42 by default; both configurable), waits in
+the background until the fresh page is there, then shows its window on top
+without taking the focus and announces it once: "Sir, your AM briefing is ready
+to view." The briefing waits in its **BRIEFING** tab, marked NEW until you look
+at it; it is read aloud only when you press **Play**, with the current line
+highlighted. Each time you open Jarvis (the Start menu, the hotkey) he greets
+you with a short, random line for the time of day, and his answers collect in
+the **JARVIS** tab (see [Using it](#using-it)). He also tells you, aloud and in
+that tab, what happened after you approved a card ("Done, sir - I've moved
+'Project sync' to Friday at 2 PM."); a speaker button in the header mutes him
+(see [Jarvis talks](#jarvis-talks)).
 
 The briefing can also propose calendar events, email replies, answers to
 invitations, to-dos and links to look at. They appear in an amber
@@ -25,9 +31,10 @@ Next to the reading, a **TODAY** panel lists the day's calendar events (from
 18:00 on: tomorrow's) and **DEADLINES** lists what is due in the next 14 days
 (see [TODAY and DEADLINES](#today-and-deadlines)).
 
-If the PC was asleep or locked at the scheduled time, the app asks when you log
-on or unlock within 3 hours, and a global hotkey (**Ctrl+Alt+J**) reads the
-briefing at any time (see [Catch-up and the hotkey](#catch-up-and-the-hotkey)).
+If the PC was asleep or locked at the scheduled time, the app announces the
+briefing when you log on or unlock within 3 hours, and a global hotkey
+(**Ctrl+Alt+J**) opens Jarvis at any time (see
+[Catch-up and the hotkey](#catch-up-and-the-hotkey)).
 
 Both windows use the "Jarvis HUD" look: a dark, frameless sci-fi panel with a
 glowing status orb (see [The look](#the-look-jarvis-hud)).
@@ -139,8 +146,9 @@ cd "<project folder>"
 5. **Try it**
 
    ```powershell
-   py -3.13 -m briefing_reader --now      # skips the prompt, fetches and reads immediately
-   py -3.13 -m briefing_reader --run am   # the prompt, plus waiting for today's AM briefing
+   py -3.13 -m briefing_reader --open     # opens Jarvis with a greeting; nothing is read until Play
+   py -3.13 -m briefing_reader --read     # opens Jarvis and reads the briefing at once
+   py -3.13 -m briefing_reader --run am   # what the AM task does: waits for today's AM briefing, announces it
    ```
 
 6. **Schedule it**
@@ -180,18 +188,18 @@ cd "<project folder>"
    `pythonw.exe` is the full path of Python 3.13's windowless interpreter, which
    the script finds with `py -3.13` and prints. The tasks used to start the `pyw`
    App Execution Alias instead; right after a PC wakes from sleep, that alias can
-   take minutes to start Python, so the prompt came late. Rerun the
+   take minutes to start Python, so the window came late. Rerun the
    script after installing or moving Python and it finds the interpreter again.
    `-UseLauncherAlias` goes back to the `pyw.exe` alias if you ever need it.
-   `--slots` tells the app the scheduled times, so it knows which briefing an
-   answer belongs to (see [Catch-up and the hotkey](#catch-up-and-the-hotkey)).
+   `--slots` tells the app the scheduled times, so it knows which briefing was
+   announced, viewed or answered (see [Catch-up and the hotkey](#catch-up-and-the-hotkey)).
 
    The AM and PM tasks wake the computer to run, start on battery, and run only
    while you are logged on (the window needs your desktop, so the script runs
    from a normal, non-administrator PowerShell). The app hands its window to a
    separate process and the task itself ends within seconds, so a task never
    keeps a PC it woke from going back to sleep, and there is no task time limit
-   that could close a window you have not answered yet. The app keeps its own
+   that could close a window you have not looked at yet. The app keeps its own
    lock, so an AM, PM or manual run that starts while another one is open only
    passes its run to the open window (the tasks allow parallel starts for exactly
    that). With `-Console` the window stays inside the task instead, so that task
@@ -214,14 +222,15 @@ cd "<project folder>"
    turn it on; it does not change power settings itself. Wake timers can wake a PC
    from sleep and usually from hibernate, but not from a full shutdown, and the
    result also depends on the hardware. If the PC is off or does not wake at the
-   scheduled time, the catch-up task asks about that run when you log on or
+   scheduled time, the catch-up task announces that run when you log on or
    unlock within 3 hours of it; later than that it is skipped ("start the task
    as soon as possible after a missed start" is deliberately not set, so a
    laptop that was off does not pop up a stale briefing hours later). If the PC
-   wakes while you are away, the prompt keeps coming back (it hides itself after
-   2 minutes without an answer and asks again 10 minutes later), so it is there
-   when you come back; since the task has already ended, Windows can put the PC
-   back to sleep meanwhile.
+   wakes while you are away, the briefing waits on screen, marked NEW, until you
+   come back; since the task has already ended, Windows can put the PC back to
+   sleep meanwhile. (With `[assistant] scheduled_prompt = true` the classic
+   prompt hides itself after 2 minutes without an answer and asks again 10
+   minutes later instead.)
 
 7. **Moving to another PC**
 
@@ -233,7 +242,7 @@ cd "<project folder>"
    on the new PC opens the Google sign-in once. Rerunning the script overwrites
    the tasks, which is also how you change the times (or set them in `[schedule]`
    in `config.toml` and rerun it). Run `uninstall-schedule.ps1` on the old PC if
-   it should stop asking.
+   it should stop announcing briefings.
 
 8. **Google setup (for calendar actions, sending replies and TODAY)**
 
@@ -503,11 +512,14 @@ Chakra Petch for the JARVIS wordmark, Sora for text and JetBrains Mono for
 labels and times.
 
 - **Frameless window.** The header bar is the title bar: drag it to move the
-  window. The small **X** at its right end closes it (on the prompt that counts
-  as Later (10 min), on the reading screen it is the same as Done). The
+  window. The small **X** at its right end closes it (on the assistant screen it
+  is the same as Done; on the classic prompt it counts as Later (10 min)). The
   **minimize** button (a dash) next to it minimizes the window to its taskbar
   button; click that button (or the tray icon, or press the hotkey) to bring it
-  back. The window stays on top of other windows.
+  back. The window stays on top of other windows. On the assistant screen a
+  **speaker** button left of minimize mutes Jarvis's own voice (**Ctrl+M**; a
+  cyan speaker while he may speak, struck through in amber while muted; see
+  [Jarvis talks](#jarvis-talks)).
 - **Header.** The JARVIS wordmark, three service chips and the date and time,
   such as TUE 06 OCT 1:05 PM (`[display] clock = "24h"` shows 13:05; the
   small prompt window has room for the time only), and, with Ask Jarvis on, a
@@ -527,7 +539,78 @@ labels and times.
 
 ## Using it
 
-**The prompt.** On launch the window appears at the bottom right, on top of other
+**Opening Jarvis.** The Start menu shortcut (see
+[Start menu shortcut](#start-menu-shortcut)), the hotkey (**Ctrl+Alt+J**) and
+`py -3.13 -m briefing_reader --open` (or no option at all) open the assistant
+screen at the bottom right, in front, with the command bar ready when
+[Ask Jarvis](#ask-jarvis-optional) is on. Jarvis says one short greeting picked
+at random for the time of day ("Good morning, sir.", "Evening, sir. What can I
+do for you?", "At your service, sir."), never the one you heard last; when a
+briefing is waiting that you have not seen, he adds "Your AM briefing is ready
+to view." to it. The greeting may add one fact that is safe to say aloud: how
+many proposals wait for your OK, or your next event within 3 hours (never
+anything from your email). When something follows it, the greeting opens with
+a plain statement: a question such as "How can I help, sir?" (or a second
+"ready") gives way to "Good afternoon, sir.". It waits up to 3 seconds for the briefing; one that
+arrives later is announced on its own. Nothing is read aloud until you press
+**Play**. Restoring the window from its taskbar button or the tray never
+greets; opening it again (the hotkey, the Start menu) does when the last
+greeting was more than 2 minutes ago. Without sound (muted, `[assistant]
+speak = false`, no voice available) the same words are shown in the JARVIS
+tab; `[assistant] greet = false` turns the greeting off.
+
+**JARVIS and BRIEFING.** The middle panel has two tabs right above it (click
+them, press **Ctrl+1** / **Ctrl+2**, or Left / Right on a focused tab):
+
+- **JARVIS** is this session's conversation: the greeting, "Your AM briefing is
+  ready to view." with a **View briefing** link, your Ask requests and Jarvis's
+  whole answers, never cut off. It scrolls and follows the newest entry unless
+  you just scrolled yourself; an answer taller than the panel is shown from its
+  first line (its "JARVIS" time line at the top), the rest a scroll away. A dot
+  on the tab says something new came while you were on BRIEFING. It is kept in
+  memory only (at most 100 entries).
+- **BRIEFING** is the briefing's text, as before: chips for the current section
+  and its neighbours, **SECTIONS**, and the line being spoken marked while it
+  plays. In a very small window (a screen narrower than 900 px, Ask on) its
+  "AM BRIEFING . UPDATED ..." line folds away so the controls keep their room
+  (STATUS still shows the time; a "May be stale" warning always shows).
+
+**NEW.** A briefing nobody has looked at yet is NEW: an amber **NEW** badge on
+the BRIEFING tab, "Your AM briefing is ready to view" under the orb while
+nothing is spoken, "new" before the Updated time in STATUS (amber) and "Jarvis:
+AM briefing ready to view" on the tray icon. It is viewed once its BRIEFING
+tab is open while the window is active, or as soon as it plays (**Play** on
+the JARVIS tab switches to BRIEFING). A briefing more than 18 hours old, a page
+without an "Updated:" line and a setup error are never NEW. Each briefing is
+announced at most once, also across restarts (`runstate.json`): open Jarvis at
+10:08, hear "Your AM briefing is ready to view" and close him, and the 10:12
+task stays silent. While the PC is locked, an announcement waits for the
+unlock (its JARVIS entry is there at once).
+
+**Scheduled runs.** The AM and PM tasks (and the catch-up) start Jarvis
+without a window: only the tray icon shows ("Jarvis: waiting for the AM
+briefing") while he checks Notion every minute for up to 15 minutes
+(`[polling]`). When the fresh briefing is in, the window appears on top
+**without taking the focus** (what you type keeps going where it went), on its
+JARVIS tab, and Jarvis says "Good morning, sir. Your AM briefing is ready to
+view." (the plain greeting for the hour: you did not open him, so never
+"Welcome back" or a question). There is no "Hear it now?" and no Later: the briefing stays NEW until
+you look at it. Minimize the window to keep it on the taskbar, or close it
+(Done). If no fresh briefing arrives in time, or it was already announced or
+viewed, nothing is shown or said and the process ends (the log says which). A
+scheduled run while Jarvis is open takes no focus either: when nothing is
+playing, the newer briefing replaces the one shown (NEW, announced); during a
+reading it waits ("Your PM briefing is ready - it shows when this reading
+ends") and comes when the reading ends.
+
+**Reading at once.** `--read` opens Jarvis on the BRIEFING tab and reads at
+once, without a greeting or an announcement (what `--now` did before; `--now`
+is now an older name of `--open`).
+
+**The classic prompt.** With `[assistant] scheduled_prompt = true` in
+`config.toml` the scheduled runs and the catch-up show the earlier "Hear it
+now?" prompt instead, as described here; opening Jarvis by hand works as above.
+On a scheduled launch the window appears at the bottom right, on top of other
 windows, and takes focus once. The orb is on the left; next to it the question
 ("Your AM briefing is ready. Hear it now?"), when the page was last updated (for
 example "UPDATED TODAY AT 10:04 AM"), whether the audio is ready and, if the page
@@ -564,7 +647,7 @@ were typing elsewhere at that moment cannot press one.
   be under the ^ overflow arrow). Click it to bring the prompt back now; right-click
   for Show briefing and Dismiss (Quit while reading).
 
-**The reading screen.** A larger window (about 1120 x 700, resizable down to
+**The assistant screen.** A larger window (about 1120 x 700, resizable down to
 900 x 600; on a smaller screen it fits the screen) with three columns:
 
 - **Left: STATUS, TODAY and DEADLINES.** STATUS shows Progress (sections
@@ -572,12 +655,15 @@ were typing elsewhere at that moment cannot press one.
   and Needs your OK (how many proposals wait for a decision). Below it, one
   panel lists the day's calendar events and then what is due soon (see
   [TODAY and DEADLINES](#today-and-deadlines)); it scrolls when it does not fit.
-- **Middle: the reading.** The orb and its state, the sentence being spoken in
-  large type, and the buttons. Below them is the text panel: chips for the
-  current section and its neighbours, a blinking LIVE marker while it plays, a
-  **SECTIONS** button, and the briefing text with the line being spoken marked
-  by a glowing cyan bar. The panel scrolls along unless you just scrolled
-  yourself. **SECTIONS** opens the list of the briefing's sections: played ones
+- **Middle: Jarvis and the briefing.** The orb and its state, the sentence being
+  spoken in large type, the command bar (with Ask Jarvis on), the buttons and
+  the JARVIS / BRIEFING tabs. Below them is the panel: on JARVIS the
+  conversation (its strip says CONVERSATION · THIS SESSION); on BRIEFING chips
+  for the current section and its neighbours, a **SECTIONS** button, and the
+  briefing text with the line being spoken marked by a glowing cyan bar. A
+  blinking LIVE marker shows while the briefing plays, on either tab. The text
+  scrolls along unless you just scrolled yourself. **SECTIONS** opens the list
+  of the briefing's sections: played ones
   green, the current one cyan, upcoming ones dim, and the Ignore section grey
   with "not read". Click a section to jump there (the Ignore section after
   **Read everything**); a click outside the list or Esc closes it.
@@ -592,7 +678,8 @@ Buttons:
 - **Pause / Play** (Space does the same, unless you moved the keyboard focus to a
   button with Tab: then Space presses that button). It becomes **Replay** at the
   end, and **Retry** if the page could not be loaded (Retry fetches the page
-  again right away).
+  again right away). Play, Replay, a section and Read everything on the JARVIS
+  tab switch to BRIEFING.
 - **Skip section** jumps to the next section.
 - **Read everything** also reads the Ignore section (shown dimmed with "(not read
   aloud)" until then). It is disabled when the page has no Ignore section.
@@ -610,6 +697,61 @@ icon or press the hotkey to bring it back.
 If the speech for a section could not be generated, that section is skipped: its
 row in SECTIONS says "no audio", and the STATUS panel and the activity log say
 so.
+
+### Jarvis talks
+
+Besides the briefing, which he reads only when you press **Play**, Jarvis says
+a few short things on his own, in the `[voice]` voice (Ryan online, the Windows
+voice when the online one cannot be reached), politely and to the point:
+
+- **When you open him**: the greeting and, once per briefing, "Your AM
+  briefing is ready to view." (see [Using it](#using-it)).
+- **Ask** (see [Ask Jarvis](#ask-jarvis-optional)): "One moment, sir." while it
+  plans (left out when the answer is quicker), then the planner's answer and
+  its question back, for example "Right, sir. I've lined up moving Project sync
+  to Friday at two. It's waiting for your OK." Never Jarvis's own note, a mail
+  search or a card's text. His question back is always said whole; a long
+  answer before it is cut after a sentence or a clause (the JARVIS tab has all
+  of it). After he read your mail he sums it up in a sentence and never reads
+  an email out: a sentence quoting one is left out. An answer that claims
+  something was already done ("All set", "I've put it on your calendar", "It's
+  on its way") is not said as written ("I've lined up two proposals for your
+  OK, sir." instead): nothing is done before your click. When Ask fails he says so briefly ("Sorry,
+  sir - that took too long. Nothing was proposed."); the details stay under the
+  bar.
+- **After an approved card was carried out**, and only then: never at your
+  click and never during the undo countdown, but once Google has answered.
+  "Done, sir - I've added 'Study block' to your calendar for tomorrow at 7 PM.",
+  "Done, sir - I've moved 'Project sync' to Friday at 2 PM.", "Done, sir - I've
+  accepted 'Lab meeting'.", "Sent, sir - your reply to 'Budget review' is on its
+  way." A failure: "Sorry, sir - I couldn't move 'Project sync'. The card says
+  why." An outcome Jarvis cannot be sure of: "Sir, I can't tell whether 'Project
+  sync' was moved. Please check your calendar before trying again." He names
+  titles and subjects only (cut to 60 characters), never an email's text, an
+  address or the error message (the card and ACTIVITY show the details); a
+  reply's "Re:" is left out. Deny, Undo, Copy, Open and Done are not spoken. A
+  confirmation he has not started yet when you approve the next card is left
+  out (it is in the JARVIS tab), so nothing he says after that click can be
+  taken for the new card's result.
+
+Everything he says is also written in the JARVIS tab. While he speaks the orb
+reads SPEAKING and the large line next to it shows his words. He never talks
+over the briefing: if it is playing he pauses it and it carries on 0.4 seconds
+after he has finished (unless you pressed Play, Pause, Skip section or a
+section meanwhile). Pressing one of those, or Read everything, stops him at
+once and drops what he still had to say. Something that waited too long (a
+greeting 20 seconds, an answer 30, a result 60) is left out; it stays in the
+JARVIS tab.
+
+**Mute.** The speaker button in the header (left of minimize, on the assistant
+screen) or **Ctrl+M** mutes Jarvis's own voice at once: he stops mid-sentence,
+says nothing on his own and only writes in the JARVIS tab. The briefing still
+plays when you press Play. Mute is remembered (`assistant.json`) until you
+click the button again. In `config.toml`, `[assistant] speak = false` turns his
+voice off for good (no speaker button), `speak_replies = false` keeps Ask
+silent, `speak_results = false` keeps the confirmations silent, `greet = false`
+drops the greeting, and `address` changes "sir" (see
+[Configuration](#configuration)).
 
 ## TODAY and DEADLINES
 
@@ -657,37 +799,43 @@ the next 14 days" when there are none.
 ## Catch-up and the hotkey
 
 **Catch-up.** The app keeps track of each scheduled briefing (a "slot", such as
-the PM briefing of October 4): when its prompt was first shown, and whether you
-answered it. **Read now**, **Dismiss** and **Done** settle the current slot, and
-so does starting to read with the hotkey or `--now`. An answer up to 18 hours
-after a slot belongs to that slot, so answering the PM prompt after midnight
-still settles the evening's briefing; **Later** settles nothing (the app is
-still open then). When you log on or unlock the PC, the "Briefing catch-up" task
-checks 20 seconds later:
+the PM briefing of October 4): when it was first shown, when it was announced
+("ready to view") and viewed, and how a classic prompt was answered. A
+briefing belongs to the slot nearest its "Updated:" time, so a PM briefing
+written at 00:10 still belongs to the evening's 23:42 slot. Announcing or
+viewing a briefing handles its slot, and so do playing it (also `--read`) and,
+on the classic prompt, **Read now**, **Dismiss** and **Done**; an answer up to
+18 hours after a slot belongs to that slot. **Later** handles nothing (the app
+is still open then). When you log on or unlock the PC, the "Briefing catch-up"
+task checks 20 seconds later:
 
 - if the app is already open, nothing happens (it does not take the focus at
   every unlock);
-- if a slot passed in the last 3 hours and was not answered, the prompt appears
-  exactly as if the AM or PM task had just run (including the wait for a fresh
-  briefing; after midnight, a PM catch-up takes the PM briefing of the evening
-  before as fresh, as the 23:42 task would have);
+- if a slot passed in the last 3 hours and its briefing was neither announced
+  nor viewed (nor answered), Jarvis behaves exactly as if the AM or PM task had
+  just run: he waits invisibly for the fresh briefing, then shows it without
+  taking the focus and announces it (after midnight, a PM catch-up takes the
+  PM briefing of the evening before as fresh, as the 23:42 task would have);
 - otherwise nothing happens.
 
 Only the latest slot counts: once the PM time has passed, a missed AM briefing
-is not asked about any more. When nothing is due the check takes well under a
+is not announced any more. When nothing is due the check takes well under a
 second and loads no window code; it always writes one line with its decision
 to the log ("Catch-up: ..."). The slot times come from `--slots` in the tasks,
 or from `[schedule]` in `config.toml` when you start the app by hand. The record
 is `%LOCALAPPDATA%\briefing-reader\runstate.json`, kept for 14 days; deleting it
 only means that the next catch-up may ask about a briefing you already heard. A
-`--from-file` test run never writes it.
+`--from-file` test run never writes it (it remembers announced and viewed
+briefings for that run only).
 
-**The hotkey.** Press **Ctrl+Alt+J** anywhere. If the app is open, it comes
-forward (restored first when it is minimized) and starts reading (from the
-prompt, or after Later, it is the same as Read now; on the reading screen it only
-comes forward). If it is not running, it starts with `--now` and reads the latest
-briefing. Presses within 2 seconds of
-the previous one are ignored. The "Briefing hotkey" task runs a small agent
+**The hotkey.** Press **Ctrl+Alt+J** anywhere: it opens Jarvis. If the app is
+open, it comes forward (restored first when it is minimized, with a greeting
+when the last one was more than 2 minutes ago); from the classic prompt it
+opens the assistant screen. If the app is not running, it starts with `--open`.
+Nothing is read until you press Play. Presses within 2 seconds of
+the previous one are ignored. After updating Jarvis, rerun
+`install-schedule.ps1` once: it restarts the running hotkey agent, which until
+then keeps its old behaviour (it reads the briefing at once). The "Briefing hotkey" task runs a small agent
 (`--hotkey-agent`) from logon until you log off; it waits inside Windows and
 uses no CPU until the key is pressed, and it never loads the window code.
 Change the combination with `[hotkey] combo` in `config.toml` (ctrl, alt, shift,
@@ -696,6 +844,20 @@ win), or turn it off with `[hotkey] enabled = false`; then rerun
 `install-schedule.ps1`, which restarts the agent (or removes it). If another
 program already uses the combination, the agent logs a warning and exits (see
 [Troubleshooting](#troubleshooting)).
+
+### Start menu shortcut
+
+A Start menu (or desktop) shortcut opens Jarvis like the hotkey. Create a
+shortcut with the target
+
+```
+"<path of Python 3.13's pythonw.exe>" -m briefing_reader --open
+```
+
+(`install-schedule.ps1` prints that `pythonw.exe` path) and set **Start in** to
+the project folder; an icon is optional. A shortcut that still says `--now`
+keeps working the same way (`--now` is an older name of `--open`); use
+`--read` instead if the shortcut should read the briefing at once.
 
 ## Calendar actions
 
@@ -1188,10 +1350,10 @@ Runs are capped: 20 an hour and 60 a day by default (`[ask] max_per_hour`,
    tokens and time). Try it on a throwaway event first.
 9. In the app: `py -3.13 -m briefing_reader --ask` (below).
 
-**In the app.** With Ask on, the reading screen has a command bar between the
-orb and the controls. `py -3.13 -m briefing_reader --ask` opens the reading
-screen with the bar ready to type, without playing the briefing; with the app
-already open, the same command brings it forward there.
+**In the app.** With Ask on, the assistant screen has a command bar between
+the orb and the controls. `py -3.13 -m briefing_reader --ask` (like `--open`)
+opens the assistant screen with the bar ready to type, without playing the
+briefing; with the app already open, the same command brings it forward there.
 
 - While nothing is going on, the bar is just its field ("Ask Jarvis - nothing
   happens without your OK"; hover it for more), so the transcript keeps its
@@ -1208,7 +1370,10 @@ already open, the same command brings it forward there.
   elsewhere it still plays and pauses.
 - When it is done, the planner's answer (or a question back) is under the bar,
   then Jarvis's own note when there is one ("Jarvis couldn't read your work
-  mail: click "Allow work mail" to let it"). Your request stays in the field
+  mail: click "Allow work mail" to let it"). The bar shows two lines of it; the
+  **JARVIS** tab below, which comes up when you press Enter, has your request
+  and the whole answer, never cut off, and Jarvis says the answer aloud (see
+  [Jarvis talks](#jarvis-talks)). Your request stays in the field
   after a question back or when nothing was proposed, so you can edit it and
   press Enter again; it is cleared once there is a card to decide. The
   proposals are at the top of NEEDS YOUR OK under **ASK**, above the
@@ -1236,13 +1401,15 @@ already open, the same command brings it forward there.
   (Esc in the empty bar clears the last answer). It is hidden while a request
   runs: finish or cancel the request first.
 - A request can't start while a Google sign-in is open in your browser.
-- Done on a reading screen opened with `--ask` does not count as having heard
-  the briefing: the catch-up still asks about it, unless you played it.
+- Done on an assistant screen opened with `--ask` or `--open` does not count as
+  having heard the briefing; the catch-up still announces it unless it was
+  already announced or viewed.
 
 **What Claude Code gets.** Through standard input (never the command line):
 
-- the date, time and time zone, and your accounts (their addresses, whether
-  each one's calendar, sending and mail reading are available);
+- the date, time and time zone, how Jarvis addresses you (`[assistant]
+  address`, "sir"), and your accounts (their addresses, whether each one's
+  calendar, sending and mail reading are available);
 - your calendar from yesterday to 14 days ahead (`[ask] days_back`,
   `days_ahead`, `calendars`), each event as its id, title, times, who organizes
   it and the guests' names, addresses and answers (at most 10 guests an event,
@@ -1623,37 +1790,41 @@ proposals that the user decides one by one.)
 
 ```
 py -3.13 -m briefing_reader [--run {am,pm} | --catch-up | --hotkey-agent | --ask | --ask-check | --ask-text TEXT]
-                            [--ask-dry-run] [--slots am=HH:MM,pm=HH:MM] [--now] [--from-file PATH]
-                            [--debug] [--version]
+                            [--ask-dry-run] [--slots am=HH:MM,pm=HH:MM] [--open | --now | --read]
+                            [--from-file PATH] [--debug] [--version]
 ```
 
 | Option | Meaning |
 |---|---|
-| `--run am` / `--run pm` | Expect that run (case-insensitive). Polls the page every 60 s for up to 15 min until "Updated" is from today and "Run" matches; if it never does, reads what is there with a spoken note that it may be stale. Within 3 hours after the run's scheduled time (`--slots`), the day of that time also counts, so a PM start at 00:30 accepts the page written at 23:42. This is what the scheduled tasks use. |
-| `--catch-up` | What the catch-up task runs at logon and unlock: if a scheduled briefing passed in the last 3 hours, was not answered and the app is not open, behave exactly like `--run` for that run; otherwise exit at once (see [Catch-up and the hotkey](#catch-up-and-the-hotkey)). |
+| `--run am` / `--run pm` | Wait for that run (case-insensitive) with no window: polls the page every 60 s for up to 15 min until "Updated" is from today and "Run" matches, then shows Jarvis without taking the focus and announces the briefing once; if it never arrives, or it was already announced or viewed, nothing is shown. Within 3 hours after the run's scheduled time (`--slots`), the day of that time also counts, so a PM start at 00:30 accepts the page written at 23:42. This is what the scheduled tasks use. With `--open`, Jarvis opens at once and the run's briefing is announced when it arrives; with `[assistant] scheduled_prompt = true`, the classic prompt (which reads what is there, with a spoken stale note, if the fresh page never comes). |
+| `--catch-up` | What the catch-up task runs at logon and unlock: if a scheduled briefing passed in the last 3 hours, was not announced, viewed or answered, and the app is not open, behave exactly like `--run` for that run; otherwise exit at once (see [Catch-up and the hotkey](#catch-up-and-the-hotkey)). |
 | `--hotkey-agent` | What the hotkey task runs at logon: listen for the `[hotkey]` combination until logoff. |
-| `--ask` | [Ask Jarvis](#ask-jarvis-optional) in the app: open the reading screen with the command bar ready to type, without playing the briefing or counting it as heard (Play does both). With the app already open, it comes forward there. Needs `[ask] enabled = true`; otherwise the reading screen says Ask is off. |
+| `--ask` | [Ask Jarvis](#ask-jarvis-optional) in the app: like `--open`, the assistant screen with the command bar ready to type, without playing the briefing or counting it as heard (Play does both). With the app already open, it comes forward there. Needs `[ask] enabled = true`; otherwise the screen says Ask is off. |
 | `--ask-check` | [Ask Jarvis](#ask-jarvis-optional): print whether Ask is ready (Claude Code found, its version and flags, a claude.ai plan sign-in, the work folder, mail reading per account, usage). Runs only `claude --version`, `--help` and `auth status`: no Claude request. Exit code 0 when ready. |
 | `--ask-text TEXT` | Ask Jarvis once from the command line, without a window: prints what the planner said, the proposals and how Claude Code started. One request on your Claude plan (two when it reads mail). With `--from-file`, the briefing comes from that fixture. |
 | `--ask-dry-run` | With `--ask-text`: print the exact text Jarvis would send to Claude Code (email text as character counts) and the command line, and stop. No Claude request, nothing counted. |
 | `--slots am=10:12,pm=23:42` | The scheduled times (24-hour), which tell the app which briefing an answer belongs to. The tasks pass them; without it (or for a run it leaves out) `[schedule]` in `config.toml` applies. A value that cannot be read is logged and ignored. |
-| `--now` | Skip the prompt: fetch and read immediately (no waiting for a fresh page). |
-| `--from-file PATH` | Developer/testing option: load a saved Notion API fixture instead of calling Notion; no token or page id needed, and answers are not recorded for the catch-up. Example: `py -3.13 -m briefing_reader --now --from-file tests\fixtures\fake_page.json` |
+| `--open` | Open Jarvis: the assistant screen in front, on its JARVIS tab, with a greeting (and "Your AM briefing is ready to view." when one is waiting); the briefing waits in its BRIEFING tab and nothing is read until you press Play. The same as starting without options. A running app comes forward. What the Start menu shortcut and the hotkey use. |
+| `--now` | Older name of `--open`, kept so existing shortcuts keep working; it no longer starts reading. |
+| `--read` | Open Jarvis on the BRIEFING tab and read the briefing at once (what `--now` did before); no greeting. Not with `--ask`. |
+| `--from-file PATH` | Developer/testing option: load a saved Notion API fixture instead of calling Notion; no token or page id needed, and nothing is recorded for the catch-up. Example: `py -3.13 -m briefing_reader --read --from-file tests\fixtures\fake_page.json` |
 | `--debug` | More detailed log. |
 | `--version` | Print the version and exit. |
 
-Without `--run`, the app shows the prompt and fetches the page (retrying if Notion
-cannot be reached) but does not wait for a fresh one; a briefing that is not from
-today still gets the spoken stale note.
+`--open`, `--now` and `--read` exclude each other, and none of them goes with
+`--catch-up`, `--hotkey-agent`, `--ask-check` or `--ask-text`. Without `--run`,
+the app fetches the page once (retrying if Notion cannot be reached) and does
+not wait for a fresh one; a briefing that is not from today still gets the
+spoken stale note when it is read.
 Starting the app while it is already running brings the running window forward
-instead of opening a second one (with `--now` it switches to reading; with a
-different `--run`, a prompt that is still waiting switches to that run, so the PM
-task taking over an AM window that was never answered asks about the PM briefing;
-the same `--run` again waits for that run anew if the page shown is not fresh).
-If the reading screen is open, a run whose briefing is not the one on screen
-brings back the prompt for it; while the briefing is still playing or paused, the
-reading screen says "Your AM briefing is due" instead (in the STATUS panel), and
-the prompt for it comes when the reading ends or you click Done.
+instead of opening a second one: `--open` (and `--now`) comes forward, `--read`
+also starts reading, and a scheduled `--run` takes no focus at all: when the
+briefing shown is not that run's fresh one, the running app waits for it in the
+background and shows it when it arrives (at once when nothing is playing,
+otherwise when the reading ends: "Your PM briefing is ready - it shows when
+this reading ends"), announced once. In the classic mode (`[assistant]
+scheduled_prompt = true`) a prompt that is still waiting switches to the newer
+run, and an open reading screen brings back the prompt for it instead.
 
 ## Configuration
 
@@ -1683,7 +1854,7 @@ log. Changes apply the next time the app starts.
 | `[voice] offline_voice` | `""` | Part of a Windows voice name for the offline fallback, e.g. `"Zira"` or `"David"`; empty = Windows default. List them with `py -3.13 -c "import pyttsx3; [print(v.name) for v in pyttsx3.init().getProperty('voices')]"`. |
 | `[voice] section_gap_ms` | `600` | Silence between sections (0-10000 ms). |
 | `[voice] divider_pause_ms` | `900` | Silence for a divider line (0-10000 ms). |
-| `[prompt] later_short_minutes` | `10` | First Later button, also used when the prompt is ignored (1-1440). |
+| `[prompt] later_short_minutes` | `10` | The classic prompt's first Later button, also used when the prompt is ignored (1-1440). The `[prompt]` keys only matter with `[assistant] scheduled_prompt = true`. |
 | `[prompt] later_long_minutes` | `30` | Second Later button (1-1440). |
 | `[prompt] ignore_after_seconds` | `120` | Unanswered prompt counts as the short Later after this (10-3600). |
 | `[prompt] refocus_on_reprompt` | `false` | `true`: prompts after Later also take keyboard focus. |
@@ -1704,7 +1875,7 @@ log. Changes apply the next time the app starts.
 | `[accounts.<name>] features` | `["calendar"]` (the shipped `config.toml`: `["calendar", "gmail_send", "gmail_read"]`) | What Jarvis may do for the account: `"calendar"` answers invitations and moves or cancels events; `"gmail_send"` sends the replies and emails you approve (send only; setup step 8b); `"gmail_read"` lets Ask Jarvis read the threads a request is about (read only, never used to send; step 8c). Adding a feature means one new Google sign-in for that account. `[]` makes the account's cards hand-off only (Open, Copy, Done, Deny). |
 | `[schedule] am` | `"10:12"` | Time of the AM task (24-hour `HH:MM`); the default is only an example, set it a few minutes after your own briefing task runs. `install-schedule.ps1` uses it unless you pass `-AmTime`; the app uses it to tell which briefing an answer belongs to when it was started without `--slots`. Rerun the script after a change. |
 | `[schedule] pm` | `"23:42"` | Time of the PM task, the same way (`-PmTime`). |
-| `[hotkey] enabled` | `true` | `false`: `install-schedule.ps1` does not install the hotkey task (and removes an existing one); an agent that is started anyway exits at once. |
+| `[hotkey] enabled` | `true` | The global hotkey that opens Jarvis. `false`: `install-schedule.ps1` does not install the hotkey task (and removes an existing one); an agent that is started anyway exits at once. |
 | `[hotkey] combo` | `"ctrl+alt+j"` | The global hotkey: `ctrl`, `alt`, `shift`, `win` plus one letter, digit or `F1`-`F24`, e.g. `"ctrl+shift+F9"`. A letter or digit needs ctrl, alt or win. Rerun `install-schedule.ps1` (or log off and on) after a change. |
 | `[agenda] evening_from_hour` | `18` | From this hour on, the TODAY panel shows tomorrow (0-24; 24 = always today). |
 | `[agenda] deadline_days` | `14` | How many days ahead DEADLINES looks (1-60). |
@@ -1722,6 +1893,13 @@ log. Changes apply the next time the app starts.
 | `[ask] max_cards` | `8` | Proposals from one request (1-8); more are left out, and the status line says how many. |
 | `[ask] hardened_flags` | `true` | Run Claude Code with `--safe-mode --restricted` when it has them. |
 | `[ask] read_mail` | `true` | `false`: Ask never reads mail, whatever the accounts' features say. |
+| `[assistant] speak` | `true` | Jarvis speaks on his own: the greeting, "Your AM briefing is ready to view", his Ask answers and what happened after you approved a card, in the `[voice]` voice. `false`: he never speaks on his own (his words are shown in the JARVIS tab; the briefing still plays when you press Play). |
+| `[assistant] address` | `"sir"` | How Jarvis addresses you ("Good morning, sir."; "boss" gives "Good morning, boss."). A letter, then letters, spaces, `.` `'` `-` (at most 20 characters); `""` for no form of address ("Good morning."). |
+| `[assistant] greet` | `true` | A short, random greeting for the time of day each time you open Jarvis (Start menu, hotkey, `--open`; not when you restore the window). |
+| `[assistant] greeting_context` | `true` | The greeting may add one fact that is safe to say aloud: how many proposals wait for your OK, or your next event within 3 hours (only when TODAY has loaded). Never email. |
+| `[assistant] speak_replies` | `true` | Speak Ask's answers (and a short "One moment, sir" while it plans). |
+| `[assistant] speak_results` | `true` | Speak what happened after an approved card was carried out ("Done, sir - ..."). |
+| `[assistant] scheduled_prompt` | `false` | `true`: the scheduled runs and the catch-up show the classic "Hear it now?" prompt (with Later and Read now) instead of announcing the briefing. |
 | `[display] clock` | `"12h"` | How the header clock, TODAY, ACTIVITY, STATUS and the Intro line of the SECTIONS list show times: `"12h"` (1:05 PM) or `"24h"` (13:05). Times inside sentences ("Updated today at 10:04 AM", "asking again at 1:15 PM", "until 1:20 PM" on the prompt, in the tray and on the reading screen), the proposal cards, the DEADLINES due labels and the spoken briefing always use 12-hour times. |
 
 The offline voice uses the same `rate` and `volume`: the rate scales Windows'
@@ -1848,6 +2026,14 @@ sign-in method, how long each planner run took, its turns and token counts,
 the outcome (ok, timeout, limit, ...), the size of the context and how many
 cards of each kind it gave; never your request, the context, what the planner
 said, a search, email text, a subject or an address.
+Jarvis's own words are never logged either: the log says how a launch was
+asked for (`launch=open`, `read` or `scheduled`), the greeting's id (such as
+"Greeting m3"), which briefing was announced (spoken, text only, or held while
+the session was locked) or viewed, what kind of sentence he said, how long it
+was, which voice made it and how long that took ("Say: kind=result chars=63
+engine=edge 0.9 s", "Say skipped: muted", "Say dropped: stale (ack)"), and
+counts; never a greeting, an announcement, an answer, a confirmation or
+anything else he says or shows.
 
 Other files in `%LOCALAPPDATA%\briefing-reader`:
 
@@ -1859,10 +2045,11 @@ Other files in `%LOCALAPPDATA%\briefing-reader`:
 | `recipients.json` | The addresses Jarvis sent replies and emails to, as one-way hashes (never the addresses), with the time; at most 5000. An address in it needs no NEW RECIPIENT confirmation. Delete it to confirm every address again. |
 | `ask_usage.json` | Ask Jarvis's planner runs of the last two days, for the hourly and daily caps (shared by every Jarvis process): a random id per run, when it started, how long it took, its turns and token counts and the outcome; and, after Claude Code reported extra usage, until when Ask is paused (`hold_until`). Never a request or anything the planner wrote. Delete it to reset the counts and the pause (`ask_usage.json.lock` next to it only takes turns between processes). |
 | `ask\` | The empty folder Claude Code runs in for Ask. Ask refuses to run while anything is in it (a `CLAUDE.md` or `.mcp.json` there would add instructions or tools). |
-| `runstate.json` | Per scheduled briefing: when its prompt was first shown and when and how it was answered (read, dismissed, done), kept for 14 days. The catch-up task uses it; see [Catch-up and the hotkey](#catch-up-and-the-hotkey). Safe to delete. |
+| `runstate.json` | Per scheduled briefing: when it was first shown, when it was announced (`announced_at`) and first viewed (`viewed_at`), and when and how a classic prompt was answered (read, dismissed, done), kept for 14 days. The catch-up task uses it, and it keeps a briefing from being announced twice; see [Catch-up and the hotkey](#catch-up-and-the-hotkey). Safe to delete (a briefing may then be announced once more). |
+| `assistant.json` | Whether Jarvis's voice is muted, the ids of the last 5 greetings (so the next one differs), and whether the briefings an older version read through its prompt were taken as viewed (done once, at the first start after the update, so they are not announced again). Never any text. Safe to delete. |
 
-Generated audio goes to `%TEMP%\briefing-reader\session-<process id>` and is
-deleted when the app closes. If a section is still being generated at that
+Generated audio goes to `%TEMP%\briefing-reader\session-<process id>` (Jarvis's own
+sentences to its `say` folder) and is deleted when the app closes. If a section is still being generated at that
 moment, the (already hidden) app waits up to 15 seconds for it to finish and then
 deletes the folder; leftovers older than 12 hours are removed at the next start.
 
@@ -1872,7 +2059,12 @@ The app talks to these services, all free:
 
 - the Notion API: it only reads the one page, with a read-only integration;
 - Microsoft's Edge read-aloud service, which receives the briefing text to turn
-  it into speech;
+  it into speech, and the same way Jarvis's own sentences ([Jarvis
+  talks](#jarvis-talks)): greetings, "Your AM briefing is ready to view", Ask's
+  answers, your next event's title in a greeting, and the event titles and email
+  subjects in his confirmations (never an email's text or an address). They are
+  never logged or saved after the app closes; muting him (the speaker button,
+  Ctrl+M) or `[assistant] speak = false` stops sending them;
 - the Google Calendar API, and only for an account you signed in with a click
   (**Approve**, **Connect** or a card's **Sign in**): an Approve reads your
   calendar's time zone, searches your calendar for the same event around its
@@ -2032,21 +2224,38 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
 - **No sound**: check the Windows default output device and its volume; the app
   plays on the default device and follows it when it changes. Look in the log for
   playback or speech errors.
+- **Jarvis is silent** (the briefing plays, but he says nothing on his own):
+  the header's speaker button is struck through in amber (muted; click it or
+  press Ctrl+M), or `config.toml` has `[assistant] speak = false` (no speaker
+  button at all), `speak_replies = false` or `speak_results = false`. His words
+  are then still in the JARVIS tab. Otherwise the log tells: "Say skipped:
+  muted", "Say failed (greeting)" when neither the online voice nor the Windows
+  voice could make the sentence (check the internet connection and that a
+  Windows voice is installed), "Say dropped: stale" when it waited too long, for
+  example behind an undo countdown, and "Could not set up Jarvis's voice" at
+  start-up.
 - **The task did not fire**: open Task Scheduler (`taskschd.msc`) > Task Scheduler
   Library > Briefing AM and check Last Run Result and the History tab (if History
   is empty, "Enable All Tasks History" in the right pane turns it on; that needs
   administrator rights). Check the wake timers (rerun `install-schedule.ps1 -DryRun`).
   The task does not run when the PC was shut down or you were signed out; the
-  catch-up task then asks when you log on or unlock within 3 hours. To see
+  catch-up task then announces it when you log on or unlock within 3 hours. To see
   errors, reinstall with `-Console` or run `py -3.13 -m briefing_reader --run am
   --debug` by hand.
-- **The prompt came late after the PC woke up**: check in Task Scheduler that the
+- **No window after a scheduled run**: the task waits invisibly (only the tray
+  icon) for up to `[polling] timeout_minutes` (15) and shows nothing when no
+  fresh briefing arrived in that time, or when that briefing was already
+  announced or viewed (for example you opened Jarvis just before the task). The
+  log says which: "No new AM briefing arrived; nothing shown" or "The AM
+  briefing was already announced; nothing to show". Open Jarvis (the hotkey or
+  the Start menu) to see the latest briefing under BRIEFING.
+- **The window came late after the PC woke up**: check in Task Scheduler that the
   tasks start `pythonw.exe` (the Actions tab), not `pyw.exe`; rerun
   `install-schedule.ps1` (without `-UseLauncherAlias`) if they do not. The log
   shows when Python actually started ("briefing-reader ... starting").
-- **No prompt after unlocking, although a briefing was missed**: the catch-up
-  only asks about the latest scheduled briefing, only within 3 hours of it, and
-  only when it was not answered and the app is not open. Its decision is in the
+- **Nothing after unlocking, although a briefing was missed**: the catch-up
+  only announces the latest scheduled briefing, only within 3 hours of it, and
+  only when it was not announced, viewed or answered and the app is not open. Its decision is in the
   log, in a line starting with "Catch-up:". Check that "Briefing catch-up" exists
   in Task Scheduler (rerun `install-schedule.ps1`).
 - **The hotkey does nothing**: look in the log for "Could not register the hotkey
@@ -2057,10 +2266,13 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
   Scheduler (rerun `install-schedule.ps1`, which starts it, or right-click it >
   Run). Some programs that run as administrator (or full-screen games) keep keys
   to themselves while they are in front.
-- **The prompt is hidden**: click the tray icon, or run the command again
+- **The window is hidden**: click the tray icon, or run the command again
   (`py -3.13 -m briefing_reader`), which brings the running instance forward.
-  The hotkey brings it forward too, but starts reading right away. A minimized
-  window also has its own taskbar button.
+  The hotkey brings it forward too. A minimized window also has its own taskbar
+  button.
+- **The hotkey still reads the briefing at once**: the hotkey agent started
+  before the update keeps its old behaviour; rerun `install-schedule.ps1` (it
+  restarts the agent) or log off and on.
 - **No proposals show up**: the heading must be named "Proposed actions" (or what
   `[actions] heading` says) and each line must start with `Calendar:` or be in
   the key=value format of the other kinds; see
@@ -2257,10 +2469,14 @@ they are quoted here in normal case, and the log has the same text)
 briefing_reader/__init__.py   version and app name
 briefing_reader/__main__.py   command line, single-instance lock, hand-off out of the scheduled task, catch-up, app start
 briefing_reader/activation.py "come forward" messages between launches (Qt local socket), Qt log forwarding
-briefing_reader/runstate.py   scheduled slots, which briefings were answered (runstate.json), the catch-up window
+briefing_reader/runstate.py   scheduled slots, briefing keys, which briefings were answered, announced or viewed (runstate.json), the catch-up window
+briefing_reader/prefs.py      Jarvis's small preferences (assistant.json): mute, the last greetings' ids
+briefing_reader/persona.py    what Jarvis says on his own: the greetings, "ready to view", the one safe fact, Ask's spoken answer, "Done, sir - ..." after a result, speech scrubbing (no Qt)
+briefing_reader/speech.py     Jarvis's voice: utterance kinds, the Voice interface, the silent default, the queue rules and the "tts-say" worker (no Qt)
+briefing_reader/voice_ui.py   Jarvis's voice in the app: his own player and the voice the controller speaks through (pauses and resumes the briefing, mute, countdown hold)
 briefing_reader/hotkey.py     global hotkey agent (RegisterHotKey), press handling, activation pipe
 briefing_reader/config.py     .env, environment and config.toml loading, paths, logging with secret redaction
-briefing_reader/models.py     shared data types (flattened lines, script, audio)
+briefing_reader/models.py     shared data types (flattened lines, script, audio, launch kinds)
 briefing_reader/notion_client.py  Notion REST client, block flattener, header parsing, freshness, polling, fixtures
 briefing_reader/text_prep.py  markdown stripping, text for listening, script with sections, stale note and Needs your OK part
 briefing_reader/actions.py    "Proposed actions" parsing (Calendar: and key=value lines), card texts, edits, saved decisions
@@ -2276,12 +2492,12 @@ briefing_reader/ask/          Ask Jarvis (no Qt): Claude Code checks and runs (c
                               ask/assets: the planner's instructions, answer format and settings
 briefing_reader/tts.py        edge-tts synthesis, Windows SAPI fallback, highlight timing, background worker
 briefing_reader/player.py     QtMultimedia player that plays sections in order with pauses
-briefing_reader/hud.py        Jarvis HUD widget kit: colours, fonts, chamfered panels, orb, buttons, cards, agenda, command bar
-briefing_reader/ui.py         prompt and reading windows, tray icon, approvals, TODAY / DEADLINES, app controller
+briefing_reader/hud.py        Jarvis HUD widget kit: colours, fonts, chamfered panels, orb, buttons, cards, agenda, command bar, tabs, conversation
+briefing_reader/ui.py         assistant screen (JARVIS / BRIEFING tabs), classic prompt, tray icon, approvals, TODAY / DEADLINES, app controller (launch kinds, NEW, greeting, announcement)
 briefing_reader/ask_ui.py     Ask Jarvis in the app: the command bar's controller and its "ask" thread
 fonts/                        Chakra Petch, Sora and JetBrains Mono fonts with their OFL licences
 tests/                        unit tests and saved fake Notion pages (tests/fixtures)
-config.toml                   voice, prompt, polling, section, calendar, actions, schedule, hotkey, agenda, display and Ask settings
+config.toml                   voice, prompt, polling, section, calendar, actions, schedule, hotkey, agenda, display, Ask and assistant settings
 .env.example                  template for .env (NOTION_TOKEN, BRIEFING_PAGE_ID)
 requirements.txt              Python dependencies
 install-schedule.ps1          registers the Briefing AM / PM / catch-up / hotkey scheduled tasks

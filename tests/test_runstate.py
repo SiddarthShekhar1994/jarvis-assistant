@@ -14,6 +14,7 @@ import tempfile
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from briefing_reader import runstate
 from briefing_reader.runstate import (
@@ -372,6 +373,180 @@ class RecordTests(RunStateTestCase):
         self.assertEqual(runstate.ANSWERS, ("read", "dismissed", "done"))
         self.assertEqual(runstate.KEEP_DAYS, 14)
         self.assertEqual(dict(DEFAULT_SLOTS), {"AM": "10:12", "PM": "23:42"})
+
+
+# --------------------------------------------------------------------------
+# briefing_key and the announced / viewed marks
+# --------------------------------------------------------------------------
+
+class Header:
+    """A stand-in for models.BriefingHeader (runstate never imports models)."""
+
+    def __init__(self, updated_at: datetime | None, run: str | None) -> None:
+        self.updated_at = updated_at
+        self.run = run
+
+
+SLOTS_TALKS = {"AM": "10:12", "PM": "23:42"}
+
+
+class BriefingKeyTests(unittest.TestCase):
+    def test_am_written_before_its_slot_belongs_to_that_day(self) -> None:
+        self.assertEqual(runstate.briefing_key(Header(datetime(2026, 10, 8, 10, 4, tzinfo=PDT), "AM"),
+                                               SLOTS_TALKS), "2026-10-08 AM")
+
+    def test_pm_written_after_midnight_belongs_to_the_evening_before(self) -> None:
+        self.assertEqual(runstate.briefing_key(Header(datetime(2026, 10, 9, 0, 10, tzinfo=PDT), "PM"),
+                                               SLOTS_TALKS), "2026-10-08 PM")
+        self.assertEqual(runstate.briefing_key(Header(datetime(2026, 10, 8, 23, 30), "PM"), SLOTS_TALKS),
+                         "2026-10-08 PM")
+
+    def test_no_run_takes_the_closest_slot(self) -> None:
+        self.assertEqual(runstate.briefing_key(Header(datetime(2026, 10, 8, 17, 0), None), SLOTS_TALKS),
+                         "2026-10-08 PM")
+        self.assertEqual(runstate.briefing_key(Header(datetime(2026, 10, 8, 9, 0), None), SLOTS_TALKS),
+                         "2026-10-08 AM")
+        self.assertEqual(runstate.briefing_key(Header(datetime(2026, 10, 9, 1, 0), None), SLOTS_TALKS),
+                         "2026-10-08 PM")
+
+    def test_no_update_time_gives_none(self) -> None:
+        self.assertIsNone(runstate.briefing_key(Header(None, "AM"), SLOTS_TALKS))
+        self.assertIsNone(runstate.briefing_key(Header(None, None), SLOTS_TALKS))
+        self.assertIsNone(runstate.briefing_key(object(), SLOTS_TALKS))
+
+    def test_far_from_its_slot_takes_the_nearest_occurrence(self) -> None:
+        slots = {"AM": "06:00", "PM": "07:00"}
+        # 20:00 is 13 h after that day's 07:00 and 11 h before the next day's.
+        self.assertEqual(runstate.briefing_key(Header(datetime(2026, 10, 8, 20, 0), "PM"), slots),
+                         "2026-10-09 PM")
+        self.assertEqual(runstate.briefing_key(Header(datetime(2026, 10, 8, 20, 0), "AM"), slots),
+                         "2026-10-09 AM")
+        self.assertEqual(runstate.briefing_key(Header(datetime(2026, 10, 8, 18, 0), "PM"), slots),
+                         "2026-10-08 PM")
+
+    def test_custom_and_missing_slots(self) -> None:
+        header = Header(datetime(2026, 10, 8, 7, 5), "AM")
+        self.assertEqual(runstate.briefing_key(header, {"AM": "07:00"}), "2026-10-08 AM")
+        self.assertEqual(runstate.briefing_key(header, {}), "2026-10-08 AM")        # DEFAULT_SLOTS
+        self.assertEqual(runstate.briefing_key(header, None), "2026-10-08 AM")
+        self.assertEqual(runstate.briefing_key(header, {"AM": "late"}), "2026-10-08 AM")   # bad: default
+        pm = Header(datetime(2026, 10, 9, 0, 30), "PM")
+        self.assertEqual(runstate.briefing_key(pm, {"pm": "18:05"}), "2026-10-08 PM")
+
+    def test_ties_go_to_the_earlier_occurrence(self) -> None:
+        slots = {"AM": "08:00", "PM": "20:00"}
+        self.assertEqual(runstate.briefing_key(Header(datetime(2026, 10, 8, 14, 0), None), slots),
+                         "2026-10-08 AM")
+
+    def test_matches_the_slot_a_scheduled_run_waits_for(self) -> None:
+        # The 23:42 task polls; the routine writes at 23:51 or 00:05: one key either way.
+        for when in (datetime(2026, 10, 8, 23, 51), datetime(2026, 10, 9, 0, 5)):
+            with self.subTest(when=when):
+                key = runstate.briefing_key(Header(when, "PM"), SLOTS_TALKS)
+                self.assertEqual(key, slot_for(datetime(2026, 10, 9, 0, 20), SLOTS_TALKS).key)
+
+
+class AnnouncedViewedTests(RunStateTestCase):
+    def test_marks_are_set_once_and_saved(self) -> None:
+        state = self.state()
+        self.assertFalse(state.is_announced("2026-10-04 PM"))
+        self.assertFalse(state.is_viewed("2026-10-04 PM"))
+        self.assertTrue(state.mark_announced("2026-10-04 PM"))
+        self.clock.now += timedelta(minutes=3)
+        self.assertFalse(state.mark_announced("2026-10-04 PM"))
+        self.assertTrue(state.mark_viewed("2026-10-04 PM"))
+        self.clock.now += timedelta(minutes=3)
+        self.assertFalse(state.mark_viewed("2026-10-04 PM"))
+        self.assertEqual(self.saved(), {"2026-10-04 PM": {
+            "announced_at": "2026-10-05T00:30:00-07:00", "viewed_at": "2026-10-05T00:33:00-07:00"}})
+        again = self.state()
+        self.assertTrue(again.is_announced("2026-10-04 PM"))
+        self.assertTrue(again.is_viewed("2026-10-04 PM"))
+        self.assertEqual(list(self.dir.glob("*.tmp")), [])
+
+    def test_announced_or_viewed_counts_as_handled(self) -> None:
+        state = self.state()
+        state.mark_shown("2026-10-04 PM")
+        self.assertFalse(state.is_handled("2026-10-04 PM"))
+        state.mark_announced("2026-10-04 PM")
+        self.assertTrue(state.is_handled("2026-10-04 PM"))
+        self.assertEqual(state.handled_how("2026-10-04 PM"), "announced")
+        state.mark_viewed("2026-10-05 AM")
+        self.assertTrue(self.state().is_handled("2026-10-05 AM"))
+        self.assertEqual(state.handled_how("2026-10-05 AM"), "viewed")
+        state.mark_handled("2026-10-05 AM", "read")
+        self.assertEqual(state.handled_how("2026-10-05 AM"), "read")   # an answer is named first
+        self.assertEqual(state.handled_how("2026-10-03 PM"), "")
+
+    def test_answers_of_an_older_version_are_adopted_as_viewed(self) -> None:
+        self.dir.mkdir(parents=True)
+        self.path.write_text(json.dumps({
+            "2026-10-04 PM": {"how": "read", "handled_at": "2026-10-04T23:50:00-07:00"},
+            "2026-10-05 AM": {"how": "done", "handled_at": "2026-10-05T10:30:00-07:00"},
+            "2026-10-03 PM": {"how": "dismissed", "handled_at": "2026-10-03T23:45:00-07:00"},
+            "2026-10-03 AM": {"how": "read", "handled_at": "2026-10-03T10:20:00-07:00",
+                              "viewed_at": "2026-10-03T10:15:00-07:00"},
+        }), encoding="utf-8")
+        state = self.state()
+        self.assertEqual(state.adopt_heard_answers(), 2)
+        self.assertTrue(state.is_viewed("2026-10-04 PM"))
+        self.assertTrue(state.is_viewed("2026-10-05 AM"))
+        self.assertFalse(state.is_viewed("2026-10-03 PM"))      # dismissed: never heard
+        saved = self.saved()
+        self.assertEqual(saved["2026-10-04 PM"]["viewed_at"], "2026-10-04T23:50:00-07:00")
+        self.assertEqual(saved["2026-10-03 AM"]["viewed_at"], "2026-10-03T10:15:00-07:00")   # kept
+        self.assertEqual(state.adopt_heard_answers(), 0)
+        self.assertEqual(self.state().adopt_heard_answers(), 0)
+
+    def test_adopting_never_raises(self) -> None:
+        state = self.state()
+        with mock.patch.object(runstate, "_load_entries", side_effect=RuntimeError("boom")):
+            self.assertEqual(state.adopt_heard_answers(), 0)
+
+    def test_bad_keys_raise(self) -> None:
+        state = self.state()
+        for key in ("today", "2026-10-04", ""):
+            with self.subTest(key=key):
+                with self.assertRaises(ValueError):
+                    state.mark_announced(key)
+                with self.assertRaises(ValueError):
+                    state.mark_viewed(key)
+        self.assertFalse(self.path.exists())
+
+    def test_old_files_load_and_new_fields_survive_merge_and_prune(self) -> None:
+        self.dir.mkdir(parents=True)
+        self.path.write_text(json.dumps({
+            "2026-09-01 AM": {"announced_at": "2026-09-01T10:12:00-07:00"},   # pruned (old)
+            "2026-10-04 PM": {"shown_at": "2026-10-04T23:42:00-07:00", "how": "read",
+                              "handled_at": "2026-10-04T23:50:00-07:00"},
+            "2026-10-05 AM": {"viewed_at": "2026-10-05T10:20:00-07:00", "announced_at": 3},
+        }), encoding="utf-8")
+        first, second = self.state(), self.state()
+        self.assertTrue(first.is_viewed("2026-10-05 AM"))
+        self.assertFalse(first.is_announced("2026-10-05 AM"))     # a malformed field is dropped
+        second.mark_announced("2026-10-04 PM")
+        first.mark_viewed("2026-10-04 PM")                        # re-reads: keeps the other's mark
+        saved = self.saved()
+        self.assertEqual(set(saved), {"2026-10-04 PM", "2026-10-05 AM"})
+        self.assertEqual(set(saved["2026-10-04 PM"]),
+                         {"shown_at", "how", "handled_at", "announced_at", "viewed_at"})
+        self.assertEqual(saved["2026-10-05 AM"], {"viewed_at": "2026-10-05T10:20:00-07:00"})
+
+    def test_record_helpers_log_and_never_raise(self) -> None:
+        state = self.state()
+        with self.assertLogs(LOGGER, level="INFO") as captured:
+            self.assertTrue(state.record_announced("2026-10-04 PM", "text only"))
+            self.assertTrue(state.record_viewed("2026-10-04 PM"))
+        text = "\n".join(captured.output)
+        self.assertIn("The 2026-10-04 PM briefing was announced (text only)", text)
+        self.assertIn("The 2026-10-04 PM briefing was viewed", text)
+        with self.assertLogs(LOGGER, level="WARNING"):
+            self.assertFalse(state.record_viewed("not a key"))
+        self.path.unlink()
+        self.path.mkdir()   # every write fails from now on: kept in memory
+        with self.assertLogs(LOGGER, level="WARNING"):
+            self.assertTrue(state.record_announced("2026-10-05 AM"))
+        self.assertTrue(state.is_announced("2026-10-05 AM"))
 
 
 class ModuleHygieneTests(unittest.TestCase):

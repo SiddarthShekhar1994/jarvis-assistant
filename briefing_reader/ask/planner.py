@@ -502,8 +502,13 @@ class AskPlanner:
                 if thread is not None:
                     threads.append(thread)
         ctx = AskContext(now=now, time_zone=self.sources.time_zone(), command=command, accounts=tuple(updated),
-                         events=events, briefing=briefing, mail=tuple(trim_threads(threads)))
+                         events=events, briefing=briefing, mail=tuple(trim_threads(threads)), owner=self._owner())
         return ctx, notes
+
+    def _owner(self) -> str:
+        """[assistant] address: the word Jarvis's answers address the owner with ("" for none)."""
+        assistant = getattr(self.config, "assistant", None)
+        return str(getattr(assistant, "address", "") or "")
 
     def _read_thread(self, alias: str, thread_id: str, notes: list[str]) -> MailThread | None:
         reader = self.sources.reader(alias)

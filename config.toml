@@ -133,9 +133,10 @@ am = "10:12"
 pm = "23:42"
 
 [hotkey]
-# A global hotkey that reads the briefing: it brings the running app forward
-# and starts reading, or starts the app. Rerun install-schedule.ps1 after a
-# change. false: install-schedule.ps1 removes the "Briefing hotkey" task.
+# A global hotkey that opens Jarvis: it brings the running app forward, or
+# starts it, with a greeting; nothing is read until you press Play. Rerun
+# install-schedule.ps1 after a change. false: install-schedule.ps1 removes
+# the "Briefing hotkey" task.
 enabled = true
 # ctrl, alt, shift, win plus one letter, digit or F1..F24, e.g. "ctrl+alt+j"
 # or "ctrl+shift+F9". A letter or digit needs ctrl, alt or win.
@@ -189,3 +190,26 @@ hardened_flags = true
 # Read the Gmail threads a request is about, on accounts with "gmail_read"
 # (read only; the text is used for that one Ask and never saved or logged).
 read_mail = true
+
+[assistant]
+# Jarvis speaks on his own: a greeting when you open him, "your briefing is
+# ready to view", his answers to Ask and what happened after you approved a
+# card. false: he never speaks on his own (the briefing still plays when you
+# press Play) and the header has no speaker button.
+speak = true
+# How Jarvis addresses you, in his sentences and in Ask's answers. Letters,
+# spaces, . ' - (at most 20 characters); "" for no form of address.
+address = "sir"
+# A short, random, time-of-day greeting each time you open Jarvis (Start
+# menu, the hotkey, --open).
+greet = true
+# The greeting may add one short fact that is safe to say aloud: how many
+# proposals wait for your OK, or your next event within 3 hours. Never email.
+greeting_context = true
+# Speak Ask's answers (and a short "One moment, sir" while it plans).
+speak_replies = true
+# Speak what happened after an approved card was carried out ("Done, sir - ...").
+speak_results = true
+# true: the scheduled runs and the catch-up show the classic "Hear it now?"
+# prompt instead of announcing the briefing.
+scheduled_prompt = false

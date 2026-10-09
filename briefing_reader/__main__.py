@@ -54,7 +54,13 @@ PAGE_ID_MISSING = ("Notion page ID missing. Add BRIEFING_PAGE_ID to the .env fil
 TOKEN_AND_PAGE_ID_MISSING = ("Notion token and page ID missing. Add NOTION_TOKEN and BRIEFING_PAGE_ID "
                              "to the .env file in the project folder (see README).")
 ERROR_ALREADY_EXISTS = 183
-NOW_ACTIVATION = {"cmd": "activate", "run": None, "now": True}
+# The hotkey agent's message to a running app: open Jarvis (an older app reads "now": false as a
+# plain "come forward").
+OPEN_ACTIVATION = {"cmd": "activate", "run": None, "now": False, "open": True}
+# Launch kinds (as models.LAUNCH_*; spelled out here so this module never imports more than it must).
+LAUNCH_OPEN = "open"
+LAUNCH_READ = "read"
+LAUNCH_SCHEDULED = "scheduled"
 _PAGE_ID_RE = re.compile(r"[0-9a-f]{32}")
 _PACKAGE_PARENT = Path(__file__).resolve().parent.parent
 
@@ -89,24 +95,24 @@ def __getattr__(name: str) -> Any:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="py -3.13 -m briefing_reader",
-        description="Reads the twice-daily Notion email briefing aloud.",
-        epilog="Without options the app asks whether you want to hear the briefing now.",
+        description="Jarvis: your twice-daily Notion email briefing, read aloud on request, and Ask Jarvis.",
+        epilog="Without options Jarvis opens with a greeting; the briefing waits in its BRIEFING tab.",
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--run", type=str.lower, choices=("am", "pm"),
                       help="wait for this run's briefing: check Notion every minute for up to "
-                           "15 minutes until the page is from today and from this run "
-                           "(used by the scheduled tasks)")
+                           "15 minutes until the page is from today and from this run, then show it "
+                           "without taking the focus and announce it (used by the scheduled tasks)")
     mode.add_argument("--catch-up", action="store_true",
                       help="if a scheduled briefing passed in the last 3 hours and was not "
-                           "answered, ask about it like --run; otherwise exit at once "
-                           "(used by the catch-up task at logon and unlock)")
+                           "answered, announced or viewed, handle it like --run; otherwise exit at "
+                           "once (used by the catch-up task at logon and unlock)")
     mode.add_argument("--hotkey-agent", action="store_true",
                       help="listen for the global hotkey from [hotkey] in config.toml "
                            "(used by the hotkey task at logon)")
     mode.add_argument("--ask", action="store_true",
-                      help="Ask Jarvis: open the reading screen with the command bar ready, without playing "
-                           "the briefing ([ask] enabled = true in config.toml); a running app opens it there")
+                      help="open Jarvis with the command bar ready, like --open "
+                           "([ask] enabled = true in config.toml); a running app opens it there")
     mode.add_argument("--ask-check", action="store_true",
                       help="Ask Jarvis: check that your own Claude Code is installed and signed in to your "
                            "claude.ai plan, and print what Ask can use (no Claude request)")
@@ -118,8 +124,16 @@ def build_parser() -> argparse.ArgumentParser:
                              "(email text shown as counts) and stop; no Claude request")
     parser.add_argument("--slots", metavar="am=HH:MM,pm=HH:MM",
                         help="the times of the scheduled runs (default: [schedule] in config.toml)")
-    parser.add_argument("--now", action="store_true",
-                        help="skip the prompt: fetch the briefing and start reading immediately")
+    view = parser.add_mutually_exclusive_group()
+    view.add_argument("--open", action="store_true",
+                      help="open Jarvis: the assistant screen with a greeting; the briefing waits in its "
+                           "BRIEFING tab and nothing is read until you press Play (a running app comes "
+                           "forward)")
+    view.add_argument("--now", action="store_true",
+                      help="older name of --open, kept so existing shortcuts and hotkeys keep working; "
+                           "it no longer starts reading (use --read)")
+    view.add_argument("--read", action="store_true",
+                      help="open Jarvis and read the briefing aloud at once (what --now did before)")
     parser.add_argument("--from-file", metavar="PATH",
                         help="load a saved Notion API fixture instead of calling Notion")
     parser.add_argument("--debug", action="store_true", help="write detailed (debug) logging")
@@ -134,11 +148,39 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.ask_dry_run and args.ask_text is None:
         parser.error("--ask-dry-run needs --ask-text")
+    view = _view_flag(args)
+    if view:
+        for flag, used in (("--catch-up", args.catch_up), ("--hotkey-agent", args.hotkey_agent),
+                           ("--ask-check", args.ask_check), ("--ask-text", args.ask_text is not None)):
+            if used:
+                parser.error(f"{view} cannot be combined with {flag}")
+        if args.read and args.ask:
+            parser.error("--read cannot be combined with --ask (--ask opens Jarvis without reading)")
     try:
         return _run(args)
     except Exception:  # noqa: BLE001 - logged; no console is required to see it
         logger.exception("briefing-reader stopped because of an unexpected error")
         return 1
+
+
+def _view_flag(args: argparse.Namespace) -> str:
+    """"--open", "--now" or "--read" when one was given, else ""."""
+    for flag in ("open", "now", "read"):
+        if getattr(args, flag, False):
+            return f"--{flag}"
+    return ""
+
+
+def launch_kind(args: argparse.Namespace) -> str:
+    """How this launch asks for Jarvis: --read READ; --open, --now or --ask OPEN; --run (or a due
+    --catch-up, which sets run) SCHEDULED; nothing OPEN."""
+    if getattr(args, "read", False):
+        return LAUNCH_READ
+    if getattr(args, "open", False) or getattr(args, "now", False) or getattr(args, "ask", False):
+        return LAUNCH_OPEN
+    if getattr(args, "run", None) or getattr(args, "catch_up", False):
+        return LAUNCH_SCHEDULED
+    return LAUNCH_OPEN
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -148,10 +190,11 @@ def _run(args: argparse.Namespace) -> int:
     log_file = setup_logging(debug=args.debug, keep_open=not args.hotkey_agent)
     logger.info("%s %s starting (Python %s on %s)", APP_NAME, __version__,
                 platform.python_version(), platform.platform())
-    logger.info("Arguments: run=%s now=%s catch_up=%s hotkey_agent=%s ask=%s slots=%s from_file=%s debug=%s "
-                "detached=%s", args.run or "-", args.now, args.catch_up, args.hotkey_agent,
+    logger.info("Arguments: run=%s open=%s now=%s read=%s catch_up=%s hotkey_agent=%s ask=%s slots=%s "
+                "from_file=%s debug=%s detached=%s launch=%s", args.run or "-", bool(getattr(args, "open", False)),
+                args.now, bool(getattr(args, "read", False)), args.catch_up, args.hotkey_agent,
                 bool(getattr(args, "ask", False)), args.slots or "-", args.from_file or "-", args.debug,
-                args.detached)
+                args.detached, launch_kind(args))
     logger.info("Log file: %s", log_file)
 
     config = load_config()
@@ -174,13 +217,14 @@ def _run(args: argparse.Namespace) -> int:
             return 0
         args.run = run.lower()   # from here on exactly like --run <run>
     elif not _claim_single_instance(name):
-        return _forward_to_running(name, _run_name(args), args.now, ask=bool(getattr(args, "ask", False)))
+        return _forward_to_running(name, _run_name(args), launch=launch_kind(args),
+                                   ask=bool(getattr(args, "ask", False)))
     if _should_detach(args):
         _release_single_instance()   # the detached copy takes the lock
         if _start_detached_copy(args, slots):
             return 0
         if not _claim_single_instance(name):
-            return _forward_to_running(name, _run_name(args), args.now)
+            return _forward_to_running(name, _run_name(args), launch=launch_kind(args))
     return _run_app(args, config, name, _run_name(args), slots)
 
 
@@ -233,16 +277,19 @@ def _catch_up_run(slots: Mapping[str, str], data_dir: Path, name: str) -> str | 
                     _describe_slots(slots))
         return None
     state = RunState(data_dir / RUNSTATE_FILE)
-    if state.is_handled(slot.key):
-        how = (state.get(slot.key) or {}).get("how", "")
+    how = state.handled_how(slot.key)
+    if how in ("viewed", "announced"):
+        logger.info("Catch-up: the %s briefing was already %s; nothing to do", slot.key, how)
+        return None
+    if how:
         logger.info("Catch-up: the %s briefing was already answered (%s); nothing to do", slot.key, how)
         return None
     if not _claim_single_instance(name):
-        logger.info("Catch-up: the %s briefing is not answered yet, but the app is already running; "
-                    "leaving it alone", slot.key)
+        logger.info("Catch-up: the %s briefing is not answered, announced or viewed yet, but the app is "
+                    "already running; leaving it alone", slot.key)
         return None
-    logger.info("Catch-up: the %s briefing (%s) was not answered; asking about it like --run %s",
-                slot.key, slot.at.strftime("%H:%M"), slot.run.lower())
+    logger.info("Catch-up: the %s briefing (%s) was not answered, announced or viewed; handling it like "
+                "--run %s", slot.key, slot.at.strftime("%H:%M"), slot.run.lower())
     return slot.run
 
 
@@ -306,11 +353,13 @@ def _release_single_instance() -> None:
         logger.debug("Could not release the single-instance mutex: %s", exc)
 
 
-def _forward_to_running(name: str, run: str | None, now: bool, *, ask: bool = False) -> int:
+def _forward_to_running(name: str, run: str | None, *, launch: str, ask: bool = False) -> int:
+    """Ask the running app to come forward with this launch's kind (activation.forward_to_running_instance
+    builds the message: "open": true, "read": true, or a run alone for a scheduled launch)."""
     from .activation import forward_to_running_instance
     if ask:
-        return forward_to_running_instance(name, run, now, ask=True)
-    return forward_to_running_instance(name, run, now)
+        return forward_to_running_instance(name, run, launch=launch, ask=True)
+    return forward_to_running_instance(name, run, launch=launch)
 
 
 # --------------------------------------------------------------------------
@@ -334,8 +383,10 @@ def _detached_arguments(args: argparse.Namespace, slots: Mapping[str, str] | Non
     arguments = ["--run", str(args.run), "--detached"]
     if slots:
         arguments += ["--slots", format_slots(slots)]
-    if args.now:
-        arguments.append("--now")
+    if getattr(args, "read", False):
+        arguments.append("--read")
+    elif getattr(args, "open", False) or getattr(args, "now", False):
+        arguments.append("--open")
     if args.from_file:
         arguments += ["--from-file", str(Path(args.from_file).resolve())]
     if args.debug:
@@ -401,10 +452,10 @@ def _run_hotkey_agent(config: Any, slots: Mapping[str, str]) -> int:
         logger.info("Hotkey agent: [hotkey] enabled = false in config.toml; not listening")
         return 0
     name = _instance_name()
-    start_arguments = ["--now", "--slots", format_slots(slots)] if slots else ["--now"]
+    start_arguments = ["--open", "--slots", format_slots(slots)] if slots else ["--open"]
     dispatcher = hotkey.PressDispatcher(
         is_app_running=lambda: hotkey.mutex_exists(f"Local\\{name}"),
-        activate=lambda: hotkey.send_activation(name, NOW_ACTIVATION),
+        activate=lambda: hotkey.send_activation(name, OPEN_ACTIVATION),
         start_app=lambda: _start_detached(start_arguments, executable=_windowless_python()),
     )
     return hotkey.run_agent(config.hotkey.combo, dispatcher)
@@ -495,9 +546,11 @@ def _run_controller(args: argparse.Namespace, config: Any, name: str, run: str |
         return 2
     # A --from-file run is a test: it never records answers in the real run state.
     run_state = None if args.from_file else RunState(config.data_dir / RUNSTATE_FILE)
-    controller = ui.AppController(config, client, expected_run=run, now_mode=args.now,
+    launch = launch_kind(args)
+    controller = ui.AppController(config, client, expected_run=run, now_mode=launch == LAUNCH_READ,
                                   startup_error=startup_error, slots=slots, run_state=run_state,
-                                  on_shutdown=start_exit_watchdog, ask_mode=bool(getattr(args, "ask", False)))
+                                  on_shutdown=start_exit_watchdog, ask_mode=bool(getattr(args, "ask", False)),
+                                  launch=launch)
     server.set_handler(controller.handle_activation)
     controller.start()
     rc = app.exec()

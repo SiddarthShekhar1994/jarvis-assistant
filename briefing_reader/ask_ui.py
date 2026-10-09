@@ -14,6 +14,10 @@
                                      Ask refused before that (Claude Code missing or signed out, a
                                      limit) never pauses anything
         outcomeReady(object)         planner.AskOutcome of a finished Ask that was not cancelled
+        askStarted(int, str)         an Ask was accepted and queued (seq, the request as typed, whitespace
+                                     collapsed); never for a refused Enter (busy, empty, blocked). The
+                                     app shows the request in its conversation; it is never logged
+        askCancelled(int)            the Ask ``seq`` was cancelled: nothing was proposed
         chipChanged(str, str)        the header's ``claude`` chip: planner.CHIP_* and its tooltip
         mailSignInRequested(str)     the bar's link: sign this account in again so Ask may read its mail
 
@@ -186,6 +190,8 @@ class AskController(QObject):
 
     busyChanged = Signal(bool)
     outcomeReady = Signal(object)
+    askStarted = Signal(int, str)
+    askCancelled = Signal(int)
     chipChanged = Signal(str, str)
     mailSignInRequested = Signal(str)
 
@@ -292,6 +298,7 @@ class AskController(QObject):
         self._running = running
         logger.info("Ask %d started", running.seq)
         self._worker.put(_PlanJob(running.seq, text, briefing, tuple(page_ids), running.cancel))
+        self.askStarted.emit(running.seq, text)
         self.bar.set_running(True)
         self.bar.set_meta(RUNNING_META)
         self._show_stage()
@@ -343,6 +350,7 @@ class AskController(QObject):
             self._show_meta()
             if running.busy_sent:
                 self.busyChanged.emit(False)
+            self.askCancelled.emit(seq)
             self._update_chip()
             return
         if outcome.ok:

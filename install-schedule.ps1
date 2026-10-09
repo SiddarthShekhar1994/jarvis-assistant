@@ -19,17 +19,19 @@ The tasks start pythonw.exe of Python <PythonVersion> directly (found with
 after sleep the alias can take minutes to start Python. Rerun this script
 after installing or moving Python (or the folder) to find it again.
 
-The AM and PM tasks wake the computer if it is asleep and run on battery. The
-app hands its window to a separate process, so each task ends within seconds
-(it never keeps the PC awake and has no time limit to hit), and the app's own
-lock makes sure there is never a second copy: a start while the window is open
-brings that window forward.
+The AM and PM tasks wake the computer if it is asleep and run on battery.
+Each waits for its briefing, then shows Jarvis without taking the focus and
+announces it ("Sir, your AM briefing is ready to view."); nothing is read
+until you press Play. The app hands its window to a separate process, so each
+task ends within seconds (it never keeps the PC awake and has no time limit to
+hit), and the app's own lock makes sure there is never a second copy: a start
+while the window is open hands its run to that window.
 
-The catch-up task asks about a scheduled briefing that passed in the last 3
-hours without an answer (for example while the PC was asleep or locked); when
+The catch-up task announces a scheduled briefing of the last 3 hours that was
+not announced or viewed (for example while the PC was asleep or locked); when
 nothing is due, or the app is already open, it ends at once without showing
 anything. The hotkey task listens for the global hotkey ([hotkey] in
-config.toml, Ctrl+Alt+J by default) until you log off.
+config.toml, Ctrl+Alt+J by default) that opens Jarvis, until you log off.
 
 The script is safe to rerun: it overwrites the tasks. That is also how the
 app moves to another PC: copy the folder, install the packages, create .env,
@@ -542,7 +544,8 @@ foreach ($daily in @(@{ Name = "Briefing AM"; Run = "am"; Label = "AM"; Time = $
         Action = (New-PlanAction $taskProgram $arguments)
         Triggers = @(New-DailyTrigger $daily.Time); Time = $daily.Time
         When = ("daily at {0}, wakes the PC" -f (Format-TimeOfDay $daily.Time))
-        Description = ("briefing-reader: asks whether to read the $($daily.Label) email briefing from Notion aloud. " +
+        Description = ("briefing-reader: announces the $($daily.Label) email briefing from Notion when it is ready " +
+            "(nothing is read until you press Play). " +
             "Runs '$(Split-Path -Leaf $taskProgram) $arguments' in $ProjectRoot. $descriptionTail")
     }
 }
@@ -552,8 +555,8 @@ $plans += @{
     Action = (New-PlanAction $taskProgram $catchUpArguments)
     Triggers = @((New-LogonTrigger $userId $CatchUpDelay), (New-UnlockTrigger $userId $CatchUpDelay)); Time = $null
     When = $catchUpWhen
-    Description = ("briefing-reader: after logon or unlock, asks about a scheduled briefing of the last 3 hours " +
-        "that was not answered (nothing happens otherwise). " +
+    Description = ("briefing-reader: after logon or unlock, announces a scheduled briefing of the last 3 hours " +
+        "that was not announced or viewed (nothing happens otherwise). " +
         "Runs '$(Split-Path -Leaf $taskProgram) $catchUpArguments' in $ProjectRoot. $descriptionTail")
 }
 if ($installHotkey) {
@@ -564,7 +567,7 @@ if ($installHotkey) {
         Triggers = @(New-LogonTrigger $userId ""); Time = $null
         When = "at logon of $userId and right after installing; runs until logoff, one at a time; hotkey $hotkeyCombo"
         Description = ("briefing-reader: listens for the global hotkey ($hotkeyCombo, [hotkey] in config.toml) " +
-            "that reads the briefing. Runs '$(Split-Path -Leaf $agentProgram) $hotkeyArguments' in $ProjectRoot. " +
+            "that opens Jarvis. Runs '$(Split-Path -Leaf $agentProgram) $hotkeyArguments' in $ProjectRoot. " +
             $descriptionTail)
     }
 }
@@ -594,7 +597,8 @@ Write-Host "  process, so those tasks end within seconds and never keep the PC a
 if ($Console) {
     Write-Host "  -Console: the window stays inside the task, so the task runs until the window is closed."
 }
-Write-Host "  A run missed while the PC was asleep, off or locked is asked about by the catch-up task when you"
+Write-Host "  Each run announces its briefing when it is ready; nothing is read until you press Play."
+Write-Host "  A run missed while the PC was asleep, off or locked is announced by the catch-up task when you"
 Write-Host "  log on or unlock within 3 hours of it; later than that it is skipped."
 
 $failed = @()

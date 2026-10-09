@@ -11,7 +11,8 @@ Settings come from three places:
   Open may open, the undo countdown, the recipient domains that need no extra
   confirmation), account (``[accounts.<alias>]``: which service acts for
   "work" / "personal" and what it may do), schedule, hotkey,
-  agenda, display and Ask Jarvis (``[ask]``, off by default) options. Which Google account an alias is never goes
+  agenda, display, Ask Jarvis (``[ask]``, off by default) and assistant (``[assistant]``: how
+  Jarvis speaks on his own) options. Which Google account an alias is never goes
   here: the sign-ins live in %LOCALAPPDATA%\\briefing-reader.
 
 A bad setting never stops the app: invalid values are logged as warnings and
@@ -85,7 +86,7 @@ UNDO_SECONDS_RANGE = (3, 60)
 
 _MISSING = object()
 _KNOWN_TABLES = ("voice", "prompt", "polling", "sections", "notion", "calendar", "actions",
-                 "accounts", "schedule", "hotkey", "agenda", "display", "ask")
+                 "accounts", "schedule", "hotkey", "agenda", "display", "ask", "assistant")
 # Library loggers kept at WARNING, also under --debug. The Google sign-in libraries log the
 # authorization code, the access token and the refresh token at DEBUG (requests_oauthlib),
 # before Jarvis could register them for redaction, so they never get DEBUG here.
@@ -262,6 +263,23 @@ class AskConfig:
             object.__setattr__(self, "calendars", tuple(self.calendars))
 
 
+# How Jarvis addresses the owner: a letter, then letters, spaces, . ' - (20 characters at most).
+ADDRESS_RE = re.compile(r"[A-Za-z][A-Za-z .'-]{0,19}")
+
+
+@dataclass(frozen=True)
+class AssistantConfig:
+    """``[assistant]``: how Jarvis talks on his own. Bad values become the default with a warning."""
+
+    speak: bool = True             # false: never speaks on his own (the briefing still plays on Play)
+    address: str = "sir"           # "Good morning, sir."; "" for no form of address
+    greet: bool = True             # a short random greeting each time Jarvis is opened
+    greeting_context: bool = True  # the greeting may add one safe fact (proposals waiting, next event)
+    speak_replies: bool = True     # speak Ask's answers (and "One moment, sir" while it plans)
+    speak_results: bool = True     # speak what happened after an approved card was carried out
+    scheduled_prompt: bool = False   # true: scheduled runs show the classic "Hear it now?" prompt
+
+
 @dataclass(frozen=True)
 class Config:
     notion_token: str = field(repr=False)   # "" when missing; NEVER logged
@@ -286,6 +304,7 @@ class Config:
     agenda: AgendaConfig = field(default_factory=AgendaConfig)
     display: DisplayConfig = field(default_factory=DisplayConfig)
     ask: AskConfig = field(default_factory=AskConfig)
+    assistant: AssistantConfig = field(default_factory=AssistantConfig)
 
     @property
     def notion_url(self) -> str:
@@ -405,6 +424,7 @@ def load_config(project_root: Path | None = None, *,
         agenda=_parse_agenda(doc),
         display=_parse_display(doc),
         ask=_parse_ask(doc, environ),
+        assistant=_parse_assistant(doc),
     )
 
 
@@ -873,6 +893,17 @@ def _parse_ask(doc: Mapping[str, Any], environ: Mapping[str, str] | None = None)
         read_mail=r.boolean("read_mail", d.read_mail),
         **numbers,
     )
+
+
+def _parse_assistant(doc: Mapping[str, Any]) -> AssistantConfig:
+    """``[assistant]``: Jarvis's own voice (greeting, "ready to view", answers, results)."""
+    d = AssistantConfig()
+    r = _TableReader(doc, "assistant", _field_names(AssistantConfig))
+    flags = {key: r.boolean(key, getattr(d, key))
+             for key in ("speak", "greet", "greeting_context", "speak_replies", "speak_results",
+                         "scheduled_prompt")}
+    return AssistantConfig(address=r.string("address", d.address, allow_empty=True, pattern=ADDRESS_RE),
+                           **flags)
 
 
 def _parse_notion_version(doc: Mapping[str, Any]) -> str:

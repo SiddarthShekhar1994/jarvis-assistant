@@ -1,0 +1,530 @@
+"""Tests for the JARVIS / BRIEFING tabs (hud.TabStrip) and the conversation (hud.ConversationLog),
+and how the assistant screen (ui.ReadingView) holds them: the tab row above the centre panel, the
+two pages in the panel, the strip caption on JARVIS and SECTIONS on BRIEFING.
+
+Qt runs offscreen in this process with the bundled fonts and shows nothing; every text is invented.
+"""
+
+from __future__ import annotations
+
+import time
+import unittest
+from datetime import datetime
+
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import QFontMetricsF
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QLabel
+
+from briefing_reader import config, hud, ui
+
+_app: QApplication | None = None
+WHEN = datetime(2026, 10, 8, 14, 41)
+LONG_REPLY = ("Right, sir. I've lined up moving Project sync from Thursday at two to Friday at two, because it "
+              "clashes with your Studio Weekly Meeting and the Northwind review on Thursday afternoon, and I drafted "
+              "a short note to Ana Example letting her know about the change. Both are waiting for your OK under "
+              "NEEDS YOUR OK. One question before you approve: should the note also mention that the slides "
+              "will be shared on Friday morning? Note: the Northwind review has no room booked yet, so I left it "
+              "where it is; tell me if you want me to look for a slot next week instead, or leave it for "
+              "Ana to sort out. End of reply.")
+
+
+def setUpModule() -> None:
+    global _app
+    _app = QApplication.instance() or QApplication(["test_tabs", "-platform", "offscreen"])
+    hud.load_fonts(config.PROJECT_ROOT / "fonts")
+
+
+def settle(rounds: int = 4) -> None:
+    for _ in range(rounds):
+        QApplication.processEvents()
+
+
+class TabStripTests(unittest.TestCase):
+    def strip(self, width: int = 400) -> hud.TabStrip:
+        strip = hud.TabStrip()
+        self.addCleanup(strip.deleteLater)
+        strip.resize(width, hud.TabStrip.HEIGHT)
+        strip.show()
+        settle()
+        return strip
+
+    def test_starts_on_jarvis_and_switches(self) -> None:
+        strip = self.strip()
+        seen: list[int] = []
+        strip.currentChanged.connect(seen.append)
+        self.assertEqual(strip.current(), hud.TAB_JARVIS)
+        self.assertTrue(strip.tab(hud.TAB_JARVIS).isChecked())
+        QTest.mouseClick(strip.tab(hud.TAB_BRIEFING), Qt.MouseButton.LeftButton)
+        self.assertEqual(strip.current(), hud.TAB_BRIEFING)
+        self.assertTrue(strip.tab(hud.TAB_BRIEFING).isChecked())
+        self.assertFalse(strip.tab(hud.TAB_JARVIS).isChecked())
+        QTest.mouseClick(strip.tab(hud.TAB_BRIEFING), Qt.MouseButton.LeftButton)   # stays current
+        self.assertTrue(strip.tab(hud.TAB_BRIEFING).isChecked())
+        strip.set_current(hud.TAB_JARVIS)
+        strip.set_current(hud.TAB_JARVIS)
+        self.assertEqual(seen, [hud.TAB_BRIEFING, hud.TAB_JARVIS])
+        strip.set_current(7)   # not a tab: ignored
+        self.assertEqual(strip.current(), hud.TAB_JARVIS)
+
+    def test_left_and_right_move_between_focused_tabs(self) -> None:
+        strip = self.strip()
+        strip.tab(hud.TAB_JARVIS).setFocus(Qt.FocusReason.TabFocusReason)
+        QTest.keyClick(strip.tab(hud.TAB_JARVIS), Qt.Key.Key_Right)
+        self.assertEqual(strip.current(), hud.TAB_BRIEFING)
+        QTest.keyClick(strip.tab(hud.TAB_BRIEFING), Qt.Key.Key_Right)   # stays at the end
+        self.assertEqual(strip.current(), hud.TAB_BRIEFING)
+        QTest.keyClick(strip.tab(hud.TAB_BRIEFING), Qt.Key.Key_Left)
+        self.assertEqual(strip.current(), hud.TAB_JARVIS)
+
+    def test_new_badge_and_accessible_names(self) -> None:
+        strip = self.strip()
+        briefing = strip.tab(hud.TAB_BRIEFING)
+        self.assertEqual(briefing.accessibleName(), "Briefing transcript")
+        self.assertEqual(strip.tab(hud.TAB_JARVIS).accessibleName(), "Jarvis conversation")
+        plain = briefing.sizeHint().width()
+        strip.set_badge(True)
+        self.assertTrue(strip.badge())
+        self.assertEqual(briefing.accessibleName(), "Briefing transcript, new briefing")
+        self.assertIn("new briefing", briefing.toolTip())
+        self.assertGreater(briefing.sizeHint().width(), plain + 20)   # room for the NEW pill
+        badge = briefing.badge_rect()
+        self.assertFalse(badge.isEmpty())
+        self.assertGreater(badge.width(), badge.height())               # a pill, not a dot
+        strip.set_badge(False)
+        self.assertFalse(strip.badge())
+        self.assertTrue(briefing.badge_rect().isEmpty())
+        self.assertEqual(briefing.sizeHint().width(), plain)
+
+    def test_unread_dot_only_while_jarvis_is_not_current(self) -> None:
+        strip = self.strip()
+        strip.set_unread(True)
+        self.assertFalse(strip.unread())             # JARVIS is current: nothing to flag
+        strip.set_current(hud.TAB_BRIEFING)
+        strip.set_unread(True)
+        self.assertTrue(strip.unread())
+        self.assertIn("new entries", strip.tab(hud.TAB_JARVIS).accessibleName())
+        strip.set_current(hud.TAB_JARVIS)
+        self.assertFalse(strip.unread())             # cleared when JARVIS becomes current
+
+    def test_compact_below_220_px(self) -> None:
+        strip = self.strip(400)
+        strip.set_badge(True)
+        self.assertFalse(strip.is_compact())
+        wide = strip.tab(hud.TAB_BRIEFING).sizeHint().width()
+        strip.resize(200, hud.TabStrip.HEIGHT)
+        settle()
+        self.assertTrue(strip.is_compact())
+        badge = strip.tab(hud.TAB_BRIEFING).badge_rect()
+        self.assertEqual((badge.width(), badge.height()), (8.0, 8.0))   # the pill became a dot
+        self.assertLess(strip.tab(hud.TAB_BRIEFING).sizeHint().width(), wide)
+        self.assertIn("new briefing", strip.tab(hud.TAB_BRIEFING).accessibleName())
+        strip.set_compact(False)   # by hand: no longer follows the width
+        strip.resize(150, hud.TabStrip.HEIGHT)
+        settle()
+        self.assertFalse(strip.is_compact())
+
+    def test_focused_tab_keeps_space(self) -> None:
+        strip = self.strip()
+        self.assertTrue(ui._keeps_space(strip.tab(hud.TAB_BRIEFING)))
+
+    def test_painting(self) -> None:
+        strip = self.strip()
+        strip.set_badge(True)
+        strip.set_current(hud.TAB_BRIEFING)
+        strip.set_unread(True)
+        image = strip.grab().toImage()
+        self.assertFalse(image.isNull())
+        bottom = image.pixelColor(QPoint(strip.tab(hud.TAB_BRIEFING).geometry().center().x(), image.height() - 1))
+        self.assertGreater(bottom.blue(), 150)   # the current tab's accent underline
+
+
+class ConversationLogTests(unittest.TestCase):
+    def log(self, width: int = 320, height: int = 240) -> hud.ConversationLog:
+        log = hud.ConversationLog()
+        self.addCleanup(log.deleteLater)
+        log.resize(width, height)
+        log.show()
+        settle()
+        return log
+
+    def test_empty_state_and_roles(self) -> None:
+        log = self.log()
+        self.assertTrue(log.empty_label.isVisible())
+        self.assertEqual(log.empty_label.text(), hud.CONVERSATION_EMPTY_TEXT)
+        first = log.add(hud.ROLE_YOU, "move my sync to Friday", when=WHEN)
+        second = log.add(hud.ROLE_JARVIS, "Right, sir.", when=WHEN, sub="2 proposals")
+        settle()
+        self.assertFalse(log.empty_label.isVisible())
+        self.assertNotEqual(first, second)
+        self.assertEqual(log.entries(), [("you", "2:41 PM", "move my sync to Friday", ""),
+                                         ("jarvis", "2:41 PM", "Right, sir.", "2 proposals")])
+        widget = log.entry(second)
+        self.assertEqual(widget.role_label.text(), "JARVIS")
+        self.assertEqual(log.entry(first).role_label.text(), "YOU")
+        log.set_hour24(True)
+        log.add(hud.ROLE_JARVIS, "Later.", when=datetime(2026, 10, 8, 21, 5))
+        self.assertEqual(log.entries()[-1][1], "21:05")
+        log.clear()
+        self.assertEqual(log.entries(), [])
+        self.assertFalse(log.empty_label.isHidden())
+
+    def test_markup_stays_literal(self) -> None:
+        log = self.log()
+        text = '<b>bold</b> <img src="file://203.0.113.9/x.png"> & more'
+        entry = log.entry(log.add(hud.ROLE_JARVIS, text, when=WHEN))
+        self.assertEqual(entry.text_label.textFormat(), Qt.TextFormat.PlainText)
+        self.assertEqual(entry.text_label.text(), text)
+        self.assertEqual(log.entries()[0][2], text)
+
+    def test_a_600_character_reply_is_shown_whole(self) -> None:
+        self.assertGreaterEqual(len(LONG_REPLY), 600)
+        log = self.log(300, 200)
+        entry = log.entry(log.add(hud.ROLE_JARVIS, LONG_REPLY, when=WHEN, tone=hud.TONE_WARN))
+        settle(6)
+        label = entry.text_label
+        self.assertEqual(label.text(), LONG_REPLY)                         # never elided
+        self.assertTrue(label.wordWrap())
+        self.assertGreaterEqual(label.height(), label.heightForWidth(label.width()) - 1)
+        lines = label.height() / QFontMetricsF(label.font()).lineSpacing()
+        self.assertGreater(lines, 8)                                       # many lines, all of them shown
+        bar = log.verticalScrollBar()
+        self.assertGreater(bar.maximum(), 0)                               # the area scrolls
+        # Taller than the view: shown from its start (the "JARVIS  time" header at the top), the rest
+        # a scroll away; never cut off at the top.
+        self.assertLess(bar.value(), bar.maximum())
+        self.assertEqual(bar.value(), max(0, entry.y() - 6))
+        self.assertGreaterEqual(entry.role_label.mapTo(log.viewport(), entry.role_label.rect().topLeft()).y(), 0)
+        self.assertTrue(label.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByMouse)
+
+    def test_a_long_reply_after_others_is_followed_from_its_header(self) -> None:
+        log = self.log(300, 200)
+        for number in range(6):
+            log.add(hud.ROLE_YOU if number % 2 else hud.ROLE_JARVIS, f"Short entry {number}.", when=WHEN)
+        long_id = log.add(hud.ROLE_JARVIS, LONG_REPLY, when=WHEN)
+        settle(6)
+        bar = log.verticalScrollBar()
+        entry = log.entry(long_id)
+        self.assertGreater(entry.height(), log.viewport().height())
+        self.assertEqual(bar.value(), entry.y() - 6)                       # its header is the first line seen
+        self.assertTrue(log.following())
+        log.resize(300, 260)                                               # a taller view: still from its start
+        settle(6)
+        self.assertEqual(bar.value(), min(bar.maximum(), entry.y() - 6))
+        log.add(hud.ROLE_JARVIS, "Done, sir.", when=WHEN)                  # a short one: the bottom again
+        settle(6)
+        self.assertEqual(bar.value(), bar.maximum())
+
+    def test_tones(self) -> None:
+        log = self.log()
+        for tone, color in ((hud.TONE_DONE, hud.TEXT_BODY), (hud.TONE_WARN, hud.AMBER), (hud.TONE_ERROR, hud.RED),
+                            (hud.TONE_IDLE, hud.TEXT_MUTED), (hud.TONE_GOOD, hud.GREEN)):
+            with self.subTest(tone=tone):
+                entry = log.entry(log.add(hud.ROLE_JARVIS, "x", when=WHEN, tone=tone))
+                qcolor = hud.QColor(color)
+                rgba = f"rgba({qcolor.red()}, {qcolor.green()}, {qcolor.blue()}, 255)"
+                self.assertIn(rgba, entry.text_label.styleSheet())
+                self.assertEqual(entry.tone(), tone)
+        self.assertIn(hud.TONE_GOOD, hud.TONES)
+
+    def test_update_text_sub_and_link(self) -> None:
+        log = self.log()
+        entry_id = log.add(hud.ROLE_JARVIS, "Good morning, sir.", when=WHEN)
+        entry = log.entry(entry_id)
+        self.assertTrue(entry.link_button.isHidden())
+        self.assertTrue(log.update(entry_id, text="Good morning, sir. Your AM briefing is ready to view.",
+                                   link_text="View briefing", link_id="view-briefing"))
+        self.assertEqual(log.entries()[0][2], "Good morning, sir. Your AM briefing is ready to view.")
+        self.assertFalse(entry.link_button.isHidden())
+        self.assertEqual(entry.link(), ("View briefing", "view-briefing"))
+        clicked: list[str] = []
+        log.linkClicked.connect(clicked.append)
+        entry.link_button.click()
+        self.assertEqual(clicked, ["view-briefing"])
+        log.update(entry_id, sub="spoken")
+        self.assertEqual(log.entries()[0][3], "spoken")
+        self.assertFalse(log.update(9999, text="gone"))
+        log.update()   # QWidget.update(): a repaint, not an entry change
+        log.update(log.rect())
+
+    def test_cap_of_100_entries(self) -> None:
+        log = self.log()
+        first = log.add(hud.ROLE_JARVIS, "entry 0", when=WHEN)
+        for number in range(1, 105):
+            log.add(hud.ROLE_JARVIS, f"entry {number}", when=WHEN)
+        self.assertEqual(hud.ConversationLog.MAX_ENTRIES, 100)
+        self.assertEqual(len(log.entries()), 100)
+        self.assertEqual(log.entries()[0][2], "entry 5")
+        self.assertEqual(log.entries()[-1][2], "entry 104")
+        self.assertIsNone(log.entry(first))
+        self.assertFalse(log.update(first, text="gone"))
+
+    def test_follows_the_newest_entry_unless_the_owner_scrolled(self) -> None:
+        log = self.log(300, 160)
+        for number in range(12):
+            log.add(hud.ROLE_JARVIS, f"Entry number {number} with a few words to wrap.", when=WHEN)
+        settle(6)
+        bar = log.verticalScrollBar()
+        self.assertGreater(bar.maximum(), 0)
+        self.assertEqual(bar.value(), bar.maximum())
+        # The owner scrolls up: new entries do not pull the view down for 4 s.
+        bar.triggerAction(bar.SliderAction.SliderToMinimum)
+        settle()
+        self.assertEqual(bar.value(), 0)
+        self.assertFalse(log.following())
+        log.add(hud.ROLE_JARVIS, "Something new.", when=WHEN)
+        settle(6)
+        self.assertEqual(bar.value(), 0)
+        log._user_scrolled_at = time.monotonic() - 5   # the hold has passed
+        log.add(hud.ROLE_JARVIS, "And more.", when=WHEN)
+        settle(6)
+        self.assertEqual(bar.value(), bar.maximum())
+        self.assertTrue(log.following())
+
+    def test_entries_added_right_after_the_owner_scrolled_back_down_are_followed(self) -> None:
+        # The owner's scroll is judged a moment later (a queued call); entries added before that,
+        # not laid out yet, must not move the view first and make it look as if he scrolled away.
+        log = self.log(300, 160)
+        for number in range(10):
+            log.add(hud.ROLE_JARVIS, f"Entry number {number} with a few words to wrap.", when=WHEN)
+        settle(6)
+        bar = log.verticalScrollBar()
+        bar.triggerAction(bar.SliderAction.SliderToMinimum)
+        settle()
+        self.assertFalse(log.following())
+        bar.triggerAction(bar.SliderAction.SliderToMaximum)   # back down, judged after the adds below
+        log._user_scrolled_at = time.monotonic() - 5
+        for text in ("Done, sir.", "Sent, sir.", "Sorry, sir - I couldn't cancel it."):
+            log.add(hud.ROLE_JARVIS, text, when=WHEN)
+        settle(6)
+        self.assertTrue(log.following())
+        self.assertEqual(bar.value(), bar.maximum())
+
+    def test_long_words_can_break(self) -> None:
+        log = self.log(200, 200)
+        address = "firstname.lastname.longer@departments.example.edu"
+        entry = log.entry(log.add(hud.ROLE_JARVIS, f"Sent to {address}.", when=WHEN))
+        settle()
+        self.assertEqual(entry.text_label.text(), f"Sent to {address}.")
+        self.assertLessEqual(entry.text_label.sizeHint().width(), 200)
+
+
+class ReadingViewTabTests(unittest.TestCase):
+    def window(self, hour24: bool) -> ui.BriefingWindow:
+        window = ui.BriefingWindow(10, 30)
+        self.addCleanup(window.deleteLater)
+        window.set_hour24(hour24)
+        window.header.set_clock(lambda: datetime(2026, 10, 8, 13, 52))
+        for name in ("notion", "voice", "calendar"):
+            window.header.set_service(name, hud.STATUS_WARN)
+        window.reading.set_ask_available(True)
+        window.show_reading_view()
+        window.resize(ui.READING_MIN_SIZE)
+        window.show()
+        settle(6)
+        return window
+
+    def test_the_900_by_600_window_with_both_clocks(self) -> None:
+        for hour24 in (False, True):
+            with self.subTest(hour24=hour24):
+                window = self.window(hour24)
+                self.assertEqual((window.width(), window.height()), (900, 600))
+                reading = window.reading
+                reading.set_new_briefing(True, "Your AM briefing is ready to view")
+                settle(4)
+                tabs = reading.tabs
+                for index in (hud.TAB_JARVIS, hud.TAB_BRIEFING):
+                    tab = tabs.tab(index)
+                    self.assertTrue(tab.isVisible())
+                    right = tab.mapTo(reading, QPoint(tab.width(), 0)).x()
+                    self.assertLessEqual(right, reading.transcript_panel.mapTo(reading, QPoint(
+                        reading.transcript_panel.width(), 0)).x())
+                self.assertFalse(tabs.is_compact())
+                badge = tabs.tab(hud.TAB_BRIEFING).badge_rect()
+                self.assertGreater(badge.width(), badge.height())          # the whole NEW pill
+                self.assertLessEqual(badge.right(), tabs.tab(hud.TAB_BRIEFING).width())
+                # The tab row sits right above the panel, outside it.
+                bottom = tabs.mapTo(reading, QPoint(0, tabs.height())).y()
+                top = reading.transcript_panel.mapTo(reading, QPoint(0, 0)).y()
+                self.assertLessEqual(abs(bottom - top), 1)
+                self.assertFalse(reading.transcript_panel.isAncestorOf(tabs))
+                # JARVIS: the conversation and the caption; SECTIONS stays in the strip, hidden.
+                strip = reading.transcript_panel.strip
+                self.assertEqual(reading.current_tab(), hud.TAB_JARVIS)
+                self.assertTrue(strip.isAncestorOf(reading.sections_button))
+                self.assertFalse(reading.sections_button.isVisible())
+                self.assertFalse(reading.transcript_panel.steps.isVisible())
+                self.assertTrue(reading.strip_caption.isVisible())
+                # At 900 px the whole caption does not fit beside LIVE: "CONVERSATION" alone, never cut.
+                self.assertEqual(reading.strip_caption.text(), ui.STRIP_CAPTION_SHORT)
+                self.assertLessEqual(reading.strip_caption.sizeHint().width(), reading.strip_caption.width() + 1)
+                self.assertTrue(reading.conversation.isVisible())
+                self.assertFalse(reading.text.isVisible())
+                self.assertTrue(reading.transcript_panel.live.isVisible())
+                # BRIEFING: the transcript, the step chips and SECTIONS; no caption.
+                reading.set_tab(hud.TAB_BRIEFING)
+                settle(4)
+                self.assertTrue(reading.sections_button.isVisible())
+                self.assertTrue(strip.isAncestorOf(reading.sections_button))
+                self.assertTrue(reading.transcript_panel.steps.isVisible())
+                self.assertFalse(reading.strip_caption.isVisible())
+                self.assertTrue(reading.text.isVisible())
+                self.assertFalse(reading.conversation.isVisible())
+                # Every control row button still fits inside the window.
+                for button in (reading.play_button, reading.done_button):
+                    corner = button.mapTo(window, QPoint(button.width(), button.height()))
+                    self.assertLessEqual(corner.x(), window.width())
+                    self.assertLessEqual(corner.y(), window.height())
+                # With the command bar at 900 x 600 the transcript keeps a few lines (the tab row takes 28 px).
+                self.assertGreaterEqual(reading.text.height(), 40)
+                reading.set_tab(hud.TAB_JARVIS)
+                settle(4)
+                self.assertGreaterEqual(reading.conversation.height(), 90)
+                window.hide()
+
+    def test_a_small_screens_window_keeps_the_controls_whole(self) -> None:
+        # A window of 760 x 560 (as on an 808 px screen): the tab row takes 28 px, so the orb and the
+        # panel strip get smaller and every control and the briefing subtitle stay whole.
+        window = ui.BriefingWindow(10, 30)
+        self.addCleanup(window.deleteLater)
+        window.header.set_clock(lambda: datetime(2026, 10, 8, 13, 52))
+        window.show_reading_view()
+        window.setMinimumSize(700, 500)
+        window.resize(760, 560)
+        window.show()
+        reading = window.reading
+        reading.set_header("AM briefing", "Updated today at 10:04 AM")
+        reading.set_tab(hud.TAB_BRIEFING)
+        settle(8)
+        self.assertEqual(reading.orb.width(), ui._SHORT_ORB_PX)
+        for button in (reading.play_button, reading.skip_button, reading.everything_button, reading.notion_button):
+            with self.subTest(button=button.text()):
+                self.assertLessEqual(button.geometry().bottom(), button.parentWidget().height())
+        self.assertGreaterEqual(reading.subtitle.height() + 1, reading.subtitle.heightForWidth(reading.subtitle.width()))
+        window.resize(900, 600)   # the regular minimum: the tier's own orb and strip again
+        settle(8)
+        self.assertEqual(reading.orb.width(), 112)
+        self.assertEqual(reading.transcript_panel.strip_layout.contentsMargins().top(), 12)
+        window.hide()
+
+    def test_a_small_screens_window_with_ask_keeps_the_tab_row_put_on_both_tabs(self) -> None:
+        # 760 x 560 with the command bar: the controls wrap into four rows. The BRIEFING page folds its
+        # title line and rule, so it needs no more height than JARVIS: the tab row never covers the
+        # controls (Open in Notion) and stays where it is when the tab changes.
+        window = ui.BriefingWindow(10, 30)
+        self.addCleanup(window.deleteLater)
+        window.header.set_clock(lambda: datetime(2026, 10, 8, 13, 52))
+        window.reading.set_ask_available(True)
+        window.show_reading_view()
+        window.setMinimumSize(700, 500)
+        window.resize(760, 560)
+        window.show()
+        reading = window.reading
+        reading.set_header("AM briefing", "Updated today at 10:04 AM")
+        reading.set_speech("AM briefing")
+        reading.command_bar.set_hint("Ask Jarvis - nothing happens without your OK")   # idle, as at the start
+        reading.conversation.add(hud.ROLE_JARVIS, "Good afternoon, sir.", when=WHEN)
+        settle(8)
+        rows = {}
+        for index in (hud.TAB_JARVIS, hud.TAB_BRIEFING, hud.TAB_JARVIS):
+            reading.set_tab(index)
+            settle(8)
+            top = reading.tabs.mapTo(reading, QPoint(0, 0)).y()
+            rows.setdefault(index, set()).add(top)
+            for button in (reading.play_button, reading.skip_button, reading.everything_button,
+                           reading.notion_button, reading.done_button):
+                with self.subTest(tab=index, button=button.text()):
+                    self.assertLessEqual(button.mapTo(reading, QPoint(0, button.height())).y(), top)
+        self.assertEqual(len(rows[hud.TAB_JARVIS] | rows[hud.TAB_BRIEFING]), 1, rows)
+        self.assertTrue(reading.doc_header_folded())
+        reading.set_tab(hud.TAB_BRIEFING)
+        settle(4)
+        self.assertFalse(reading.title.isVisible())
+        self.assertTrue(reading.text.isVisible())
+        self.assertGreaterEqual(reading.text.height(), 54)
+        reading.set_header("AM briefing", "Updated today at 10:04 AM", "May be stale - updated yesterday")
+        settle(4)
+        self.assertTrue(reading.stale.isVisible())                         # the warning always shows
+        self.assertFalse(reading.title.isVisible())
+        window.resize(900, 600)                                            # the regular minimum: back
+        settle(8)
+        self.assertFalse(reading.doc_header_folded())
+        self.assertTrue(reading.title.isVisible() and reading.subtitle.isVisible())
+        window.hide()
+
+    def test_ctrl_1_and_ctrl_2(self) -> None:
+        window = self.window(False)
+        reading = window.reading
+        seen: list[int] = []
+        reading.tabChanged.connect(seen.append)
+        window.activateWindow()
+        settle()
+        QTest.keyClick(window, Qt.Key.Key_2, Qt.KeyboardModifier.ControlModifier)
+        settle()
+        QTest.keyClick(window, Qt.Key.Key_1, Qt.KeyboardModifier.ControlModifier)
+        settle()
+        self.assertEqual(seen, [hud.TAB_BRIEFING, hud.TAB_JARVIS])
+        keys = sorted(shortcut.key().toString() for shortcut in reading.findChildren(ui.QShortcut))
+        self.assertIn("Ctrl+1", keys)
+        self.assertIn("Ctrl+2", keys)
+
+    def test_speech_line_falls_back_to_ready_to_view_while_new(self) -> None:
+        window = self.window(False)
+        reading = window.reading
+        reading.set_header("AM briefing", "Updated today at 10:04 AM")
+        reading.set_speech("")
+        self.assertEqual(reading.speech.text(), "AM briefing")
+        reading.set_new_briefing(True, "Your AM briefing is ready to view")
+        self.assertEqual(reading.speech.text(), "Your AM briefing is ready to view")
+        self.assertTrue(reading.is_new_briefing())
+        reading.set_speech("Two new emails from the department.")
+        self.assertEqual(reading.speech.text(), "Two new emails from the department.")
+        reading.set_speech("")
+        self.assertEqual(reading.speech.text(), "Your AM briefing is ready to view")
+        reading.set_new_briefing(False)
+        self.assertEqual(reading.speech.text(), "AM briefing")
+        self.assertFalse(reading.tabs.badge())
+
+    def test_unread_and_window_activation_signal(self) -> None:
+        window = self.window(False)
+        reading = window.reading
+        reading.set_tab(hud.TAB_BRIEFING)
+        reading.mark_unread()
+        self.assertTrue(reading.tabs.unread())
+        reading.set_tab(hud.TAB_JARVIS)
+        self.assertFalse(reading.tabs.unread())
+        seen: list[bool] = []
+        window.activeChanged.connect(seen.append)
+        from PySide6.QtCore import QEvent
+        QApplication.sendEvent(window, QEvent(QEvent.Type.ActivationChange))
+        self.assertEqual(len(seen), 1)
+
+    def test_the_whole_caption_at_the_default_size(self) -> None:
+        window = self.window(False)
+        window.resize(ui.READING_SIZE)
+        settle(6)
+        caption = window.reading.strip_caption
+        self.assertEqual(caption.text(), ui.STRIP_CAPTION)
+        self.assertLessEqual(caption.sizeHint().width(), caption.width() + 1)
+
+    def test_conversation_hour24_follows_the_window(self) -> None:
+        window = self.window(True)
+        window.reading.conversation.add(hud.ROLE_JARVIS, "x", when=datetime(2026, 10, 8, 13, 5))
+        self.assertEqual(window.reading.conversation.entries()[0][1], "13:05")
+        self.assertIsInstance(window.reading.strip_caption, QLabel)
+
+
+class TelemetryValueColorTests(unittest.TestCase):
+    def test_value_color(self) -> None:
+        bar = hud.TelemetryBar("Updated", "today 10:04 AM")
+        self.addCleanup(bar.deleteLater)
+        self.assertEqual(bar.value_color().name(), hud.TEXT_BRIGHT)
+        dot = hud.MIDDLE_DOT
+        bar.set_value(f"new {dot} today 10:04 AM", 1.0, hud.AMBER, short=f"new {dot} 10:04 AM", value_color=hud.AMBER)
+        self.assertEqual(bar.value_color().name(), hud.AMBER)
+        bar.set_value("today 10:04 AM", 1.0, hud.TEXT_DIM)
+        self.assertEqual(bar.value_color().name(), hud.TEXT_BRIGHT)
+
+
+if __name__ == "__main__":
+    unittest.main()

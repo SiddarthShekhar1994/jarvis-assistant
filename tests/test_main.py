@@ -46,6 +46,39 @@ class ArgumentTests(unittest.TestCase):
                 with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
                     parser.parse_args(argv)
 
+    def test_open_now_and_read(self) -> None:
+        parser = entry.build_parser()
+        self.assertTrue(parser.parse_args(["--open"]).open)
+        self.assertTrue(parser.parse_args(["--read"]).read)
+        self.assertTrue(parser.parse_args(["--now"]).now)
+        args = parser.parse_args(["--run", "am", "--open", "--slots", "am=10:12"])
+        self.assertEqual((args.run, args.open), ("am", True))
+        self.assertTrue(parser.parse_args(["--ask", "--open"]).open)
+        for argv in (["--open", "--read"], ["--now", "--read"], ["--open", "--now"]):
+            with self.subTest(argv=argv):
+                with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+                    parser.parse_args(argv)
+        for argv in (["--open", "--catch-up"], ["--read", "--hotkey-agent"], ["--now", "--ask-check"],
+                     ["--open", "--ask-text", "x"], ["--read", "--ask"]):
+            with self.subTest(argv=argv):
+                with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+                    entry.main(argv)
+        help_text = " ".join(parser.format_help().split())
+        self.assertIn("Without options Jarvis opens with a greeting; the briefing waits in its BRIEFING tab.",
+                      help_text)
+        self.assertIn("older name of --open", help_text)
+        self.assertIn("read the briefing aloud at once (what --now did before)", help_text)
+        self.assertTrue(parser.format_help().isascii())
+
+    def test_launch_kind(self) -> None:
+        parser = entry.build_parser()
+        cases = {(): "open", ("--open",): "open", ("--now",): "open", ("--ask",): "open", ("--read",): "read",
+                 ("--run", "am"): "scheduled", ("--catch-up",): "scheduled", ("--run", "pm", "--open"): "open",
+                 ("--run", "pm", "--read"): "read", ("--run", "pm", "--now"): "open"}
+        for argv, kind in cases.items():
+            with self.subTest(argv=argv):
+                self.assertEqual(entry.launch_kind(parser.parse_args(list(argv))), kind)
+
     def test_ask_arguments(self) -> None:
         parser = entry.build_parser()
         self.assertTrue(parser.parse_args(["--ask-check"]).ask_check)
@@ -102,12 +135,37 @@ class ArgumentTests(unittest.TestCase):
                 self.assertLogs("briefing_reader", level="INFO"):
             self.assertEqual(entry.main(["--ask"]), 0)
         app.assert_not_called()
-        forward.assert_called_once_with(entry._instance_name(), None, False, ask=True)
+        forward.assert_called_once_with(entry._instance_name(), None, launch="open", ask=True)
 
-    def test_a_launch_without_ask_forwards_the_old_message(self) -> None:
+    def test_a_launch_forwards_its_kind(self) -> None:
         with mock.patch("briefing_reader.activation.forward_to_running_instance", return_value=0) as forward:
-            self.assertEqual(entry._forward_to_running("name", "AM", True), 0)
-        forward.assert_called_once_with("name", "AM", True)
+            self.assertEqual(entry._forward_to_running("name", "AM", launch="scheduled"), 0)
+            self.assertEqual(entry._forward_to_running("name", None, launch="read"), 0)
+        self.assertEqual(forward.call_args_list, [mock.call("name", "AM", launch="scheduled"),
+                                                  mock.call("name", None, launch="read")])
+
+    def test_each_launch_forwards_its_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = load_config(Path(tmp), environ={"LOCALAPPDATA": tmp})
+        cases = [([], "open", False), (["--open"], "open", False), (["--now"], "open", False),
+                 (["--read"], "read", False), (["--ask"], "open", True), (["--run", "pm"], "scheduled", False),
+                 (["--run", "am", "--open"], "open", False), (["--run", "am", "--read"], "read", False)]
+        for argv, launch, ask in cases:
+            with self.subTest(argv=argv):
+                with mock.patch("briefing_reader.config.setup_logging", return_value=Path("x.log")), \
+                        mock.patch("briefing_reader.config.load_config", return_value=config), \
+                        mock.patch.object(entry, "_claim_single_instance", return_value=False), \
+                        mock.patch.object(entry, "_should_detach", return_value=False), \
+                        mock.patch("briefing_reader.activation.forward_to_running_instance",
+                                   return_value=0) as forward, \
+                        mock.patch.object(entry, "_run_app") as app, \
+                        self.assertLogs("briefing_reader", level="INFO") as logs:
+                    self.assertEqual(entry.main(argv), 0)
+                app.assert_not_called()
+                run = "PM" if "pm" in argv else "AM" if "am" in argv else None
+                expected = {"launch": launch, "ask": True} if ask else {"launch": launch}
+                forward.assert_called_once_with(entry._instance_name(), run, **expected)
+                self.assertTrue(any(f"launch={launch}" in line for line in logs.output))
 
     def test_the_activation_message_carries_ask_only_when_asked(self) -> None:
         from briefing_reader import activation
@@ -121,10 +179,20 @@ class ArgumentTests(unittest.TestCase):
         with mock.patch.object(activation, "try_send", side_effect=fake_send), \
                 mock.patch.object(activation, "QCoreApplication"):   # no Qt application for a message
             self.assertEqual(activation.forward_to_running_instance("name", None, False, ask=True), 0)
-            self.assertEqual(activation.forward_to_running_instance("name", "PM", True), 0)
+            self.assertEqual(activation.forward_to_running_instance("name", "PM", True), 0)   # the older form
+            self.assertEqual(activation.forward_to_running_instance("name", None, launch="open"), 0)
+            self.assertEqual(activation.forward_to_running_instance("name", None, launch="open", ask=True), 0)
+            self.assertEqual(activation.forward_to_running_instance("name", "AM", launch="read"), 0)
+            self.assertEqual(activation.forward_to_running_instance("name", "PM", launch="scheduled"), 0)
         self.assertEqual(json.loads(sent[0]), {"cmd": "activate", "run": None, "now": False, "ask": True})
         self.assertEqual(json.loads(sent[1]), {"cmd": "activate", "run": "PM", "now": True})
+        self.assertEqual(json.loads(sent[2]), {"cmd": "activate", "run": None, "now": False, "open": True})
+        self.assertEqual(json.loads(sent[3]), {"cmd": "activate", "run": None, "now": False, "open": True,
+                                               "ask": True})
+        self.assertEqual(json.loads(sent[4]), {"cmd": "activate", "run": "AM", "now": False, "read": True})
+        self.assertEqual(json.loads(sent[5]), {"cmd": "activate", "run": "PM", "now": False})
         self.assertEqual(activation.parse_activation(sent[0])["ask"], True)
+        self.assertEqual(activation.parse_activation(sent[2])["open"], True)
 
     def test_resolve_slots(self) -> None:
         self.assertEqual(entry._resolve_slots(None, SLOTS), SLOTS)
@@ -133,6 +201,14 @@ class ArgumentTests(unittest.TestCase):
         with self.assertLogs(LOGGER, level="WARNING") as captured:
             self.assertEqual(entry._resolve_slots("am=noon", SLOTS), SLOTS)
         self.assertIn("--slots", "\n".join(captured.output))
+
+    def test_detached_arguments_carry_open_or_read(self) -> None:
+        base = {"run": "am", "from_file": None, "debug": False}
+        for flags, extra in (({"open": True}, ["--open"]), ({"now": True}, ["--open"]),
+                             ({"read": True}, ["--read"]), ({}, [])):
+            with self.subTest(flags=flags):
+                args = argparse.Namespace(**{"open": False, "now": False, "read": False, **base, **flags})
+                self.assertEqual(entry._detached_arguments(args), ["--run", "am", "--detached", *extra])
 
     def test_detached_arguments_carry_the_slots(self) -> None:
         args = argparse.Namespace(run="pm", now=False, from_file=None, debug=True)
@@ -179,6 +255,18 @@ class CatchUpDecisionTests(unittest.TestCase):
         run, line = self.decide()
         self.assertIsNone(run)
         self.assertIn("already answered (dismissed)", line)
+        self.claim.assert_not_called()
+
+    def test_announced_or_viewed_slot_is_left_alone(self) -> None:
+        state = RunState(self.data_dir / RUNSTATE_FILE)
+        state.mark_announced("2026-10-04 PM")
+        run, line = self.decide()
+        self.assertIsNone(run)
+        self.assertIn("2026-10-04 PM briefing was already announced", line)
+        state.mark_viewed("2026-10-04 PM")
+        run, line = self.decide()
+        self.assertIsNone(run)
+        self.assertIn("already viewed", line)
         self.claim.assert_not_called()
 
     def test_shown_but_unanswered_slot_is_asked_again(self) -> None:
@@ -254,10 +342,11 @@ class HotkeyAgentTests(unittest.TestCase):
             with self.assertLogs("briefing_reader.hotkey", level="INFO"):
                 dispatcher()
         exists.assert_called_once_with(f"Local\\{name}")
-        send.assert_called_once_with(name, {"cmd": "activate", "run": None, "now": True})
+        send.assert_called_once_with(name, {"cmd": "activate", "run": None, "now": False, "open": True})
+        self.assertEqual(entry.OPEN_ACTIVATION, {"cmd": "activate", "run": None, "now": False, "open": True})
         start.assert_not_called()
 
-    def test_agent_starts_the_app_with_now_and_slots(self) -> None:
+    def test_agent_starts_the_app_with_open_and_slots(self) -> None:
         with mock.patch.object(hotkey, "run_agent", return_value=0) as run_agent:
             entry._run_hotkey_agent(self.config(), SLOTS)
         dispatcher = run_agent.call_args.args[1]
@@ -267,7 +356,7 @@ class HotkeyAgentTests(unittest.TestCase):
                 mock.patch.object(entry, "_windowless_python", return_value="pythonw.exe"), \
                 self.assertLogs("briefing_reader.hotkey", level="INFO"):
             dispatcher()
-        start.assert_called_once_with(["--now", "--slots", "am=10:12,pm=23:42"], executable="pythonw.exe")
+        start.assert_called_once_with(["--open", "--slots", "am=10:12,pm=23:42"], executable="pythonw.exe")
 
 
 class SetupErrorTests(unittest.TestCase):

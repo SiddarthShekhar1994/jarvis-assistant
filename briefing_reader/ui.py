@@ -37,6 +37,7 @@ import logging
 import math
 import os
 import queue
+import random
 import re
 import shutil
 import sys
@@ -48,6 +49,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import shiboken6
 from PySide6.QtCore import (
     QCoreApplication,
     QEasingCurve,
@@ -209,6 +211,10 @@ from .models import (
     ITEM_NOTE,
     ITEM_OUTRO,
     ITEM_SUBHEADING,
+    LAUNCH_KINDS,
+    LAUNCH_OPEN,
+    LAUNCH_READ,
+    LAUNCH_SCHEDULED,
     Briefing,
     BriefingHeader,
     Freshness,
@@ -225,11 +231,33 @@ from .notion_client import (
     fetch_briefing,
     poll_for_briefing,
 )
+from .persona import (
+    OUTCOME_ERROR,
+    OUTCOME_GOOD,
+    OUTCOME_WARN,
+    Greeting,
+    announcement,
+    approvals_sentence,
+    ask_failure_speech,
+    ask_reply_speech,
+    compose_opening,
+    next_event_sentence,
+    not_sent_text,
+    outcome_text,
+    outcome_tone,
+    pick_ack,
+    pick_greeting,
+    salutation,
+    spoken_when,
+    with_address,
+)
 from .player import FINISHED, IDLE, PAUSED, PLAYING, WAITING, BriefingPlayer
+from .prefs import PREFS_FILE, AssistantPrefs
 from .recipients import NEW as RECIPIENT_NEW_KIND
 from .recipients import OWN as RECIPIENT_OWN_KIND
 from .recipients import classify
-from .runstate import RunState, handled_slot_key, slot_for
+from .runstate import ANSWER_MAX_AGE, RunState, briefing_key, handled_slot_key, slot_for
+from .speech import KIND_ACK, KIND_ANNOUNCE, KIND_GREETING, KIND_REPLY, KIND_RESULT, SayWorker, SilentVoice, Voice
 from .text_prep import ACTIONS_KEY, build_script, describe_updated, format_time, updated_label
 from .tts import SAPI, SpeechSynthesizer, TtsWorker
 
@@ -378,6 +406,38 @@ def show_without_activating(widget: QWidget) -> None:
         widget.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
         if handle is not None:
             handle.setProperty("_q_showWithoutActivating", False)
+
+
+_DESKTOP_SWITCHDESKTOP = 0x0100
+
+
+def session_locked() -> bool:
+    """True while the Windows session is locked (the lock screen owns the input desktop).
+
+    OpenInputDesktop fails, or SwitchDesktop to it fails, while the session is
+    locked (UAC's secure desktop reads as locked too, for a few seconds). Always
+    False elsewhere, under the offscreen test platform and when the check fails.
+    """
+    if not _native_windows():
+        return False
+    try:
+        from ctypes import wintypes
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.OpenInputDesktop.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        user32.OpenInputDesktop.restype = wintypes.HANDLE
+        user32.SwitchDesktop.argtypes = [wintypes.HANDLE]
+        user32.SwitchDesktop.restype = wintypes.BOOL
+        user32.CloseDesktop.argtypes = [wintypes.HANDLE]
+        desktop = user32.OpenInputDesktop(0, False, _DESKTOP_SWITCHDESKTOP)
+        if not desktop:
+            return True
+        try:
+            return not user32.SwitchDesktop(desktop)
+        finally:
+            user32.CloseDesktop(desktop)
+    except Exception as exc:  # noqa: BLE001 - an unknown answer never holds anything back
+        logger.debug("Could not check whether the session is locked: %s", exc)
+        return False
 
 
 def _restore_without_activating(widget: QWidget) -> None:
@@ -704,17 +764,30 @@ class _Tier:
 _TIERS = (_Tier(1320, 300, 372, 168), _Tier(1040, 260, 340, 168), _Tier(860, 230, 300, 112),
           _Tier(0, 190, 250, 96))
 _COMPACT_BAR_BELOW = 570   # a reading view shorter than this (a window under ~640 px) gets the compact bar
+# A reading view shorter than this (a window under ~580 px; with Ask's command bar, add its height)
+# gets a smaller orb, a 2-line spoken line and a tighter panel strip: room for the JARVIS / BRIEFING tabs.
+_SHORT_VIEW_BELOW = 520
+_SHORT_ORB_PX = 80
+_SHORT_STRIP_PAD = 6
+_SPEECH_LINES = 3          # the spoken line under the orb is cut to this many lines
+_SHORT_SPEECH_LINES = 2
+STRIP_CAPTION = f"Conversation {DOT} this session"   # the centre panel's strip on the JARVIS tab
+STRIP_CAPTION_SHORT = "Conversation"                 # ... when the whole caption does not fit
 
 
 class ReadingView(QWidget):
-    """The reading screen.
+    """The assistant screen (the reading screen of older versions).
 
     Left: compact STATUS telemetry, then one panel with the TODAY / TOMORROW
     agenda and the DEADLINES list (its Connect link emits
     ``connectCalendar``). Middle: the orb with its state, the line being
-    spoken, the controls and the transcript (with a moving highlight); the
-    SECTIONS button in the transcript's header strip opens the section list
-    (click a row to jump). Right: the NEEDS YOUR OK cards and the ACTIVITY log.
+    spoken, the command bar, the controls, the JARVIS / BRIEFING tabs and the
+    centre panel. JARVIS shows the conversation (``conversation``, a
+    hud.ConversationLog); BRIEFING the transcript (with a moving highlight) and,
+    in the panel's header strip, the step chips and the SECTIONS button that
+    opens the section list (click a row to jump). ``tabChanged(index)`` when the
+    current tab changes (a click, Ctrl+1 / Ctrl+2, ``set_tab``). Right: the
+    NEEDS YOUR OK cards and the ACTIVITY log.
     """
 
     playPause = Signal()
@@ -733,6 +806,7 @@ class ReadingView(QWidget):
     editAction = Signal(str)     # a card's Edit (tools row): the action id
     signInAccount = Signal(str)  # a card's Sign in (tools row): the action id
     connectCalendar = Signal()
+    tabChanged = Signal(int)     # hud.TAB_JARVIS / hud.TAB_BRIEFING became current
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -742,10 +816,14 @@ class ReadingView(QWidget):
         self._current = (-1, -1)
         self._user_scrolled_at = -math.inf
         self._speech_fallback = ""
+        self._speech_text = ""                # what set_speech was given ("" shows the fallback)
+        self._new_label = ""                  # "Your AM briefing is ready to view" while NEW
         self._rows: tuple[hud.SectionRowInfo, ...] = ()
         self._steps: list[tuple[str, str]] = []
         self._shown_section: int | None = None
         self._tier: _Tier | None = None
+        self._short = False                   # a very short view (_fit_short)
+        self._doc_folded = False              # ... on the narrowest tier: no title line on BRIEFING
         self._state_text: str | None = None   # the state label's own text (PLANNING), None for the state's
         self._make_status_column()
         self._make_center_column()
@@ -760,7 +838,12 @@ class ReadingView(QWidget):
         shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
         shortcut.setAutoRepeat(False)   # holding Space must not toggle over and over
         shortcut.activated.connect(lambda: self.playPause.emit())
+        for keys, index in (("Ctrl+1", hud.TAB_JARVIS), ("Ctrl+2", hud.TAB_BRIEFING)):
+            tab_shortcut = QShortcut(QKeySequence(keys), self)
+            tab_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+            tab_shortcut.activated.connect(lambda index=index: self.set_tab(index))
         self._build_layout()
+        self._show_tab_page(self.tabs.current())
 
     # ---- construction ----------------------------------------------------
 
@@ -795,7 +878,7 @@ class ReadingView(QWidget):
     def _make_center_column(self) -> None:
         self.orb = hud.Orb(168, hud.ORB_WORKING)
         self.state_label = hud.StateLabel(hud.ORB_WORKING)
-        self.speech = hud.SpeechLabel(max_lines=3)
+        self.speech = hud.SpeechLabel(max_lines=_SPEECH_LINES)
         self.speech.setObjectName("speech")
         self._make_buttons()
         self.title = _label(_caps(hud.display_font(15, 600, 0.12)), hud.TEXT_BRIGHT, name="title")
@@ -808,6 +891,7 @@ class ReadingView(QWidget):
         self.text = _Transcript(self._style)
         self.transcript_panel = hud.MainPanel()
         self.transcript_panel.steps.installEventFilter(self)   # re-fit the chips when it resizes
+        self.transcript_panel.strip.installEventFilter(self)   # and the JARVIS caption
         self._step_meter = hud.StepStrip(self)                # measures chips, never shown
         self._step_meter.setVisible(False)
         # Ask Jarvis's command bar (between the orb row and the controls); shown only while
@@ -819,6 +903,13 @@ class ReadingView(QWidget):
         holder.setSpacing(0)
         holder.addWidget(self.command_bar)
         self._command_holder.setVisible(False)
+        # The JARVIS / BRIEFING tabs above the centre panel, the conversation (JARVIS) and the
+        # strip's caption on the JARVIS page (where the step chips and SECTIONS are hidden).
+        self.tabs = hud.TabStrip()
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+        self.conversation = hud.ConversationLog()
+        self.strip_caption = _label(_caps(hud.mono_font(11, 400, 0.12)), hud.TEXT_DIM, name="stripCaption")
+        self.strip_caption.setText(STRIP_CAPTION)
 
     def _make_buttons(self) -> None:
         self.play_button = hud.HudButton("", hud.PRIMARY)
@@ -898,22 +989,45 @@ class ReadingView(QWidget):
         controls_layout.setSpacing(6)
         controls_layout.addWidget(flow_holder, 1)
         controls_layout.addLayout(done_column)
-        title_row = QHBoxLayout()
+        self._title_line = QWidget()
+        title_row = QHBoxLayout(self._title_line)
+        title_row.setContentsMargins(0, 0, 0, 0)
         title_row.setSpacing(8)
         title_row.addWidget(self.title, 0, Qt.AlignmentFlag.AlignVCenter)
         title_row.addWidget(self._title_dot, 0, Qt.AlignmentFlag.AlignVCenter)
         title_row.addWidget(self.subtitle, 1, Qt.AlignmentFlag.AlignVCenter)
-        doc_header = QWidget()
+        self._doc_rule = _DashedRule()
+        self._doc_header = doc_header = QWidget()
         doc_layout = QVBoxLayout(doc_header)
         doc_layout.setContentsMargins(_DOC_MARGIN_PX, 10, _DOC_MARGIN_PX, 2)
         doc_layout.setSpacing(4)
-        doc_layout.addLayout(title_row)
+        doc_layout.addWidget(self._title_line)
         doc_layout.addWidget(self.stale)
         doc_layout.addSpacing(4)
-        doc_layout.addWidget(_DashedRule())
-        self.transcript_panel.strip_layout.addWidget(self.sections_button, 0, Qt.AlignmentFlag.AlignVCenter)
-        self.transcript_panel.body_layout.addWidget(doc_header)
-        self.transcript_panel.body_layout.addWidget(self.text, 1)
+        doc_layout.addWidget(self._doc_rule)
+        strip = self.transcript_panel.strip_layout
+        strip.insertWidget(0, self.strip_caption, 1, Qt.AlignmentFlag.AlignVCenter)
+        strip.addWidget(self.sections_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        # As tall as the step chips and SECTIONS it stands in for: the strip (and the tab row above
+        # the panel) keeps its height when the tab changes.
+        self.strip_caption.setMinimumHeight(max(self.sections_button.sizeHint().height(),
+                                                self.transcript_panel.steps.sizeHint().height()))
+        self.briefing_page = QWidget()
+        briefing = QVBoxLayout(self.briefing_page)
+        briefing.setContentsMargins(0, 0, 0, 0)
+        briefing.setSpacing(0)
+        briefing.addWidget(doc_header)
+        briefing.addWidget(self.text, 1)
+        self._pages = _PageSwitch()
+        self._pages.addWidget(self.conversation)      # hud.TAB_JARVIS
+        self._pages.addWidget(self.briefing_page)     # hud.TAB_BRIEFING
+        self.transcript_panel.body_layout.addWidget(self._pages, 1)
+        # Folder tabs: left-aligned right above the panel, the current one's underline on its edge.
+        tab_row = QWidget()
+        tab_layout = QHBoxLayout(tab_row)
+        tab_layout.setContentsMargins(14, 0, 14, 0)
+        tab_layout.setSpacing(0)
+        tab_layout.addWidget(self.tabs, 1)
         center = QWidget()
         column = QVBoxLayout(center)
         column.setContentsMargins(0, 0, 0, 0)
@@ -921,6 +1035,7 @@ class ReadingView(QWidget):
         column.addWidget(top)
         column.addWidget(self._command_holder)
         column.addWidget(controls)
+        column.addWidget(tab_row)
         column.addWidget(self.transcript_panel, 1)
         return center
 
@@ -931,10 +1046,49 @@ class ReadingView(QWidget):
         self._tier = tier
         self._left.setFixedWidth(tier.left)
         self._right.setFixedWidth(tier.right)
-        self.orb.setFixedSize(tier.orb, tier.orb)
+        self._fit_short(self.height() if self.height() > 0 else READING_SIZE.height())
+
+    def _fit_short(self, height: int) -> None:
+        """The orb at its tier's size, the spoken line in up to 3 lines and the strip's padding; a
+        very short view (under about 520 px, plus the command bar's height when Ask is on: the
+        900 x 600 window with Ask, or a small screen's window) gets a smaller orb, 2 lines and a
+        tighter strip, so the controls and the tab row above the panel keep their room."""
+        tier = self._tier
+        if tier is None:
+            return
+        # The command bar (Ask on) takes its own height: such a view counts as short sooner.
+        bar = self._command_holder.sizeHint().height() if self.ask_available() else 0
+        short = height < _SHORT_VIEW_BELOW + bar
+        orb = min(tier.orb, _SHORT_ORB_PX) if short else tier.orb
+        if (self.orb.width(), self.orb.height()) != (orb, orb):
+            self.orb.setFixedSize(orb, orb)
+        if short != self._short:
+            self._short = short
+            self.speech.set_max_lines(_SHORT_SPEECH_LINES if short else _SPEECH_LINES)
         # A narrow transcript strip still needs room for a step chip beside SECTIONS.
         side = 20 if tier.orb >= 168 else 12
-        self.transcript_panel.strip_layout.setContentsMargins(side, 12, side, 12)
+        pad = _SHORT_STRIP_PAD if short else 12
+        self.transcript_panel.strip_layout.setContentsMargins(side, pad, side, pad)
+        # Short and narrow (a 760 px window: the controls wrap into four rows): the BRIEFING page's
+        # title line ("AM BRIEFING . UPDATED ...", also under STATUS and in the first spoken line) and
+        # its rule fold away, so both pages need the same height and the tab row stays put.
+        self._fold_doc_header(short and tier.orb < _TIERS[2].orb)
+
+    def _fold_doc_header(self, folded: bool) -> None:
+        if folded == self._doc_folded:
+            return
+        self._doc_folded = folded
+        self._sync_doc_header()
+
+    def _sync_doc_header(self) -> None:
+        """The BRIEFING page's header: the title line and the rule unless folded (_fit_short); the
+        amber stale line whenever there is one."""
+        self._title_line.setVisible(not self._doc_folded)
+        self._doc_rule.setVisible(not self._doc_folded)
+        self._doc_header.setVisible(not self._doc_folded or bool(self.stale.text()))
+
+    def doc_header_folded(self) -> bool:
+        return self._doc_folded
 
     # ---- header, status and controls ---------------------------------------
 
@@ -946,7 +1100,59 @@ class ReadingView(QWidget):
         self._title_dot.setVisible(bool(subtitle))
         self.stale.setText(stale_text)
         self.stale.setVisible(bool(stale_text))
+        self._sync_doc_header()
         self._speech_fallback = title
+        if not self._speech_text:
+            self.speech.setText(self._new_label or self._speech_fallback)
+
+    # ---- tabs ----------------------------------------------------------------------
+
+    def set_tab(self, index: int) -> None:
+        """Make JARVIS (hud.TAB_JARVIS) or BRIEFING (hud.TAB_BRIEFING) the current tab."""
+        self.tabs.set_current(index)
+
+    def current_tab(self) -> int:
+        return self.tabs.current()
+
+    def set_new_briefing(self, new: bool, label: str = "") -> None:
+        """A briefing nobody has viewed yet: the NEW badge on BRIEFING, and ``label`` ("Your AM
+        briefing is ready to view") as the speech line while nothing is being said."""
+        self.tabs.set_badge(new)
+        self._new_label = label if new else ""
+        if not self._speech_text:
+            self.speech.setText(self._new_label or self._speech_fallback)
+
+    def is_new_briefing(self) -> bool:
+        return self.tabs.badge()
+
+    def mark_unread(self) -> None:
+        """Something was added to the conversation: a dot on JARVIS unless it is the current tab."""
+        self.tabs.set_unread(True)
+
+    def _on_tab_changed(self, index: int) -> None:
+        self._show_tab_page(index)
+        self.tabChanged.emit(index)
+
+    def _show_tab_page(self, index: int) -> None:
+        """The panel's page for ``index``; on JARVIS the strip shows its caption instead of the step
+        chips and SECTIONS (both stay in the strip, hidden)."""
+        jarvis = index == hud.TAB_JARVIS
+        page = self._pages.widget(index)
+        if page is not None:
+            self._pages.setCurrentWidget(page)
+        self.strip_caption.setVisible(jarvis)
+        self.transcript_panel.steps.setVisible(not jarvis)
+        self.sections_button.setVisible(not jarvis)
+        if jarvis:
+            self.sections_popover.hide()
+        else:
+            QTimer.singleShot(0, self._after_briefing_page_shown)
+
+    def _after_briefing_page_shown(self) -> None:
+        if not shiboken6.isValid(self) or self.tabs.current() != hud.TAB_BRIEFING:
+            return
+        self._fit_steps()
+        self._apply_highlight(scroll_to=True)
 
     def set_status(self, text: str, is_error: bool = False) -> None:
         self.status.setText(text)
@@ -963,8 +1169,10 @@ class ReadingView(QWidget):
         self.everything_button.setToolTip(tooltip)
 
     def set_speech(self, text: str) -> None:
-        """The line being spoken (Sora Light 20 px); "" shows the briefing title."""
-        self.speech.setText(text or self._speech_fallback)
+        """The line being spoken (Sora Light 20 px); "" shows "Your AM briefing is ready to view"
+        while the briefing is NEW, else the briefing title."""
+        self._speech_text = text or ""
+        self.speech.setText(text or self._new_label or self._speech_fallback)
 
     def set_activity_state(self, state: str, live: bool, label: str | None = None) -> None:
         """Orb and state label (SPEAKING, STANDBY, WORKING, or ``label`` such as PLANNING) and the
@@ -978,6 +1186,8 @@ class ReadingView(QWidget):
     def set_ask_available(self, available: bool) -> None:
         """Show Ask Jarvis's command bar ([ask] enabled) or keep it out of the layout."""
         self._command_holder.setVisible(available)
+        if self.height() > 0:
+            self._fit_short(self.height())
 
     def ask_available(self) -> bool:
         return not self._command_holder.isHidden()
@@ -1065,7 +1275,21 @@ class ReadingView(QWidget):
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt override
         if watched is self.transcript_panel.steps and event.type() == QEvent.Type.Resize:
             self._fit_steps()
+        elif watched is self.transcript_panel.strip and event.type() == QEvent.Type.Resize:
+            self._fit_caption()
         return super().eventFilter(watched, event)
+
+    def _fit_caption(self) -> None:
+        """The JARVIS strip's caption in full, or "CONVERSATION" alone where it does not fit."""
+        strip = self.transcript_panel.strip
+        margins = strip.layout().contentsMargins()
+        live = self.transcript_panel.live
+        room = (strip.width() - margins.left() - margins.right() - live.sizeHint().width()
+                - strip.layout().spacing())
+        metrics = QFontMetricsF(self.strip_caption.font())
+        text = STRIP_CAPTION if metrics.horizontalAdvance(STRIP_CAPTION) + 2 <= room else STRIP_CAPTION_SHORT
+        if self.strip_caption.text() != text:
+            self.strip_caption.setText(text)
 
     def set_pending(self, pending: int, total: int) -> None:
         """Pending proposals: the panel's meta and the STATUS bar."""
@@ -1172,6 +1396,7 @@ class ReadingView(QWidget):
         super().resizeEvent(event)
         self._apply_tier(event.size().width())
         self._fit_command_bar(event.size().height())
+        self._fit_short(event.size().height())
         self._apply_highlight(scroll_to=False)   # line wrapping changed
 
     def _fit_command_bar(self, height: int) -> None:
@@ -1354,6 +1579,7 @@ class BriefingWindow(hud.HudWindowFrame):
 
     closeRequested = Signal()
     visibilityChanged = Signal()   # shown, hidden, minimized or restored
+    activeChanged = Signal(bool)   # the window became the active window (True) or stopped being it
 
     def __init__(self, short_minutes: int, long_minutes: int) -> None:
         super().__init__(margins=_PROMPT_MARGINS)
@@ -1371,6 +1597,11 @@ class BriefingWindow(hud.HudWindowFrame):
         self._stack.addWidget(self.reading)
         self.body_layout.addWidget(self._stack)
         self.set_glow_anchor(self.prompt.orb)
+        self._speaker_available = False   # [assistant] speak: the header's speaker button (assistant screen)
+        mute = QShortcut(QKeySequence("Ctrl+M"), self)
+        mute.setContext(Qt.ShortcutContext.WindowShortcut)
+        mute.setAutoRepeat(False)
+        mute.activated.connect(self._on_mute_shortcut)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt override
         event.ignore()   # the controller decides what closing means
@@ -1388,6 +1619,8 @@ class BriefingWindow(hud.HudWindowFrame):
         super().changeEvent(event)
         if event.type() == QEvent.Type.WindowStateChange:
             self.visibilityChanged.emit()
+        elif event.type() == QEvent.Type.ActivationChange:
+            self.activeChanged.emit(self.isActiveWindow())
 
     def event(self, event: QEvent) -> bool:
         # A Tab-focused button keeps Space (pressed, then clicked on release, as
@@ -1409,6 +1642,7 @@ class BriefingWindow(hud.HudWindowFrame):
         assert self.header is not None
         self.header.set_hour24(hour24)
         self.reading.activity.set_hour24(hour24)
+        self.reading.conversation.set_hour24(hour24)
 
     # ---- views and sizes ------------------------------------------------------
 
@@ -1421,10 +1655,28 @@ class BriefingWindow(hud.HudWindowFrame):
         self.fit_prompt(force=True)
 
     def _show_reading_chips(self, shown: bool) -> None:
-        """The header chips of the reading view only (``claude``: the narrow prompt has no room)."""
+        """The header chips of the reading view only (``claude``: the narrow prompt has no room), and
+        the speaker button (the assistant screen only)."""
         assert self.header is not None
         for name in READING_ONLY_CHIPS:
             self.header.set_service_visible(name, shown)
+        self._show_speaker()
+
+    def set_speaker_available(self, available: bool) -> None:
+        """``[assistant] speak``: the header's speaker button (mute Jarvis's own voice) exists; it shows
+        on the assistant screen only."""
+        self._speaker_available = bool(available)
+        self._show_speaker()
+
+    def _show_speaker(self) -> None:
+        assert self.header is not None
+        self.header.set_speaker_visible(self._speaker_available and self.is_reading_view())
+
+    def _on_mute_shortcut(self) -> None:
+        """Ctrl+M: the speaker button, while it shows."""
+        assert self.header is not None
+        if self.header.speaker_visible():
+            self.header.speaker_button.click()
 
     def fit_prompt(self, *, force: bool = False) -> None:
         """Fixed width; tall enough for the current text, at least the nominal height."""
@@ -1493,8 +1745,21 @@ class BriefingWindow(hud.HudWindowFrame):
 STATE_IDLE = "idle"
 STATE_PROMPT = "prompt"
 STATE_SNOOZED = "snoozed"
-STATE_READING = "reading"
+STATE_READING = "reading"        # the assistant screen (JARVIS / BRIEFING); not necessarily playing
+STATE_WAITING = "waiting"        # a scheduled run polls with the window hidden (tray icon only)
 STATE_QUITTING = "quitting"
+
+TRAY_TOOLTIP = "briefing-reader"
+VIEW_BRIEFING_TEXT = "View briefing"   # the announcement's link in the conversation
+VIEW_BRIEFING_LINK = "view-briefing"
+ASK_CANCELLED_ENTRY = "Cancelled; nothing was proposed."   # the conversation's entry for a cancelled Ask
+ASK_ACK_KEY = "ask-ack"                  # "One moment, sir." while an Ask plans (dropped when it ends first)
+# How the conversation shows what Jarvis says after a card was carried out (persona.outcome_tone).
+_RESULT_TONES = {OUTCOME_GOOD: hud.TONE_GOOD, OUTCOME_ERROR: hud.TONE_ERROR, OUTCOME_WARN: hud.TONE_WARN}
+_GREETING_WAIT_MS = 3000          # an opening greeting waits this long for the first fetch answer
+_GREETING_REPEAT_S = 120.0        # an open of a hidden or minimized window greets again after this
+_LOCK_RECHECK_MS = 5000           # a held announcement checks the lock screen again this often
+_NEXT_EVENT_WITHIN = timedelta(hours=3)   # the greeting may name an event starting this soon
 
 LOADING_TEXT = "Fetching your briefing from Notion..."
 ACTIONS_FILE = "actions.json"
@@ -1521,6 +1786,7 @@ _STAGE_WORKING = STAGE_WORKING
 _STAGE_SIGNIN = STAGE_SIGNIN
 _STAGE_SIGNED_IN = STAGE_SIGNED_IN
 _STAGE_COUNTDOWN = "countdown"           # "SENDING IN 9 S" + Undo: nothing has been sent yet
+_RESULT_KEY = "result"                   # the voice key of every "Done, sir" / "Sent, sir" sentence
 _SIGN_IN_CHECK = "sign-in check"         # action worker job: report which accounts are signed in
 _CARD_FOR_STATUS = {STATUS_CREATED: hud.CARD_ADDED, STATUS_EXISTS: hud.CARD_EXISTS,
                     STATUS_DENIED: hud.CARD_DENIED, STATUS_FAILED: hud.CARD_FAILED,
@@ -1726,6 +1992,7 @@ class _Bridge(QObject):
     eventPeek = Signal(int, object)                   # request id, {action id: (EventDetails | None, error | None)}
     agendaResult = Signal(int, object, str, str)      # request id, events | None, _PROBLEM_* or "", message
     accountConnect = Signal(str, str, str, str)       # alias, _CONNECT_* stage, failure message, PROBLEM_*
+    sayResult = Signal(int, object, object)           # utterance seq, SectionAudio | None, error | None ("tts-say")
 
 
 def _local_now() -> datetime:
@@ -2074,6 +2341,23 @@ def _normalize_run(value: Any) -> str | None:
     return text if text in ("AM", "PM") else None
 
 
+def _launch_kind(launch: str | None, *, now_mode: bool, ask_mode: bool, expected_run: str | None,
+                 classic: bool = False) -> str:
+    """``launch`` when it is one of LAUNCH_KINDS; else derived from the older arguments: ``now_mode``
+    READ, ``ask_mode`` OPEN, an expected run SCHEDULED, nothing OPEN (in the classic mode, where a
+    plain start used to show the prompt, nothing is SCHEDULED: the prompt without a run, as before).
+    The app always passes ``launch``; the derivation keeps older constructors working."""
+    if launch in LAUNCH_KINDS:
+        return str(launch)
+    if launch is not None:
+        logger.warning("Unknown launch kind %r; deriving it from the other arguments", str(launch)[:20])
+    if now_mode:
+        return LAUNCH_READ
+    if ask_mode:
+        return LAUNCH_OPEN
+    return LAUNCH_SCHEDULED if expected_run or classic else LAUNCH_OPEN
+
+
 def _ready_headline(run: str | None) -> str:
     return f"Your {run} briefing is ready. Hear it now?" if run else "Your briefing is ready. Hear it now?"
 
@@ -2245,18 +2529,27 @@ def _time_texts(action: ProposedAction, hour24: bool = False) -> tuple[str, str,
     return action.start.date().isoformat(), clock(action.start), clock(action.end)
 
 
-def _remove_audio_dir_after(worker: threading.Thread | None, audio_dir: Path) -> None:
-    """Delete ``audio_dir`` again once the TTS worker has finished the job it is running.
+def _remove_audio_dir_after(workers: threading.Thread | Sequence[threading.Thread] | None, audio_dir: Path) -> None:
+    """Delete ``audio_dir`` again once the speech workers (the briefing's "tts-worker" and Jarvis's
+    own "tts-say") have finished the job they are running.
 
-    After stop() the worker still completes its current section, which writes
+    After stop() a worker still completes its current job, which writes
     into (and may recreate) the folder after shutdown removed it, and the media
-    player can keep the last file open for a moment after it stopped. This
+    players can keep the last file open for a moment after they stopped. This
     non-daemon thread keeps the process alive for at most
     _AUDIO_CLEANUP_WAIT_S + _AUDIO_RELEASE_WAIT_S so no file outlives the app.
     """
+    if workers is None:
+        threads: list[threading.Thread] = []
+    elif isinstance(workers, threading.Thread):
+        threads = [workers]
+    else:
+        threads = list(workers)
+
     def run() -> None:
-        if worker is not None:
-            worker.join(_AUDIO_CLEANUP_WAIT_S)
+        deadline = time.monotonic() + _AUDIO_CLEANUP_WAIT_S
+        for worker in threads:
+            worker.join(max(0.0, deadline - time.monotonic()))
         deadline = time.monotonic() + _AUDIO_RELEASE_WAIT_S
         shutil.rmtree(audio_dir, ignore_errors=True)
         while audio_dir.exists() and time.monotonic() < deadline:
@@ -2328,6 +2621,22 @@ class AppController(QObject):
     (tests inject a fake; the app's runs the owner's own Claude Code).
     ``ask_mode`` (``--ask``): open the reading screen with the bar focused,
     without playing the briefing or settling a scheduled slot.
+
+    ``launch`` (models.LAUNCH_*) says how this start was asked for; None derives
+    it from the older arguments (``now_mode`` READ, ``ask_mode`` OPEN,
+    ``expected_run`` SCHEDULED, else OPEN). OPEN shows the assistant screen on
+    its JARVIS tab with a greeting; READ reads at once on the BRIEFING tab;
+    SCHEDULED waits invisibly (STATE_WAITING) for the run's fresh briefing,
+    then shows it without taking the focus and announces it once ("Sir, your
+    AM briefing is ready to view."), or with ``[assistant] scheduled_prompt``
+    shows the classic "Hear it now?" prompt. A briefing nobody has viewed is
+    NEW (badge, speech line, STATUS, tray) until its BRIEFING tab is seen in
+    the active window or it is played; announced and viewed briefings are
+    remembered in ``run_state`` (in memory without one). Jarvis's own words go
+    to the JARVIS conversation and to ``voice`` (speech.Voice: a SilentVoice
+    unless ``voice_factory(controller)`` builds one; the real voice is made by
+    ``start()`` only). ``locked()`` says whether the session is locked (an
+    announcement waits for the unlock).
     """
 
     def __init__(self, config: Config, client: NotionClient, *, expected_run: str | None,
@@ -2341,7 +2650,11 @@ class AppController(QObject):
                  run_state: RunState | None = None,
                  on_shutdown: Callable[[], Any] | None = None,
                  ask_factory: Callable[..., Any] | None = None,
-                 ask_mode: bool = False) -> None:
+                 ask_mode: bool = False,
+                 launch: str | None = None,
+                 voice_factory: Callable[[Any], Voice] | None = None,
+                 locked: Callable[[], bool] | None = None,
+                 prefs: AssistantPrefs | None = None) -> None:
         super().__init__()
         self.config = config
         self.client = client
@@ -2349,6 +2662,8 @@ class AppController(QObject):
         self.expected_run = _normalize_run(expected_run)
         self.now_mode = bool(now_mode)
         self.ask_mode = bool(ask_mode)
+        self.launch = _launch_kind(launch, now_mode=self.now_mode, ask_mode=self.ask_mode,
+                                   expected_run=self.expected_run, classic=config.assistant.scheduled_prompt)
         self.startup_error = startup_error
         self.state = STATE_IDLE
         self._minimized = False            # the window is minimized (_on_window_state)
@@ -2387,9 +2702,15 @@ class AppController(QObject):
         self._init_script_state()
         self._init_action_state()
         self._init_agenda_state()
+        self._init_talk_state(prefs, locked)
         self._init_timers()
         self._connect_signals()
         self.ask: Any = self._create_ask(ask_factory)   # ask_ui.AskController, or None while [ask] is off
+        # Jarvis's own voice: silent unless injected; start() builds the real one ([assistant] speak).
+        self._voice_injected = voice_factory is not None
+        self.voice: Voice = voice_factory(self) if voice_factory is not None else SilentVoice()
+        self.window.set_speaker_available(bool(config.assistant.speak))
+        self._sync_speaker()
 
     def _init_fetch_state(self) -> None:
         self._fetch_id = 0
@@ -2481,6 +2802,29 @@ class AppController(QObject):
         self._agenda_requested_at = -math.inf     # time.monotonic() of the last read
         self._page_deadlines: list[Deadline] = []  # the page's "Deadlines" section
 
+    def _init_talk_state(self, prefs: AssistantPrefs | None, locked: Callable[[], bool] | None) -> None:
+        """NEW / announced / viewed, the greeting and the conversation (memory only)."""
+        self._prefs = prefs                        # assistant.json; opened on first use (_prefs_store)
+        self._locked = locked or session_locked
+        self._rng = random.Random()
+        self._viewed_keys: set[str] = set()        # briefing keys viewed (also without a run state)
+        self._announced_keys: set[str] = set()     # briefing keys announced (also without a run state)
+        self._held_key: str | None = None          # an announcement waiting for the unlock
+        self._held_text = ""
+        self._held_kind = KIND_ANNOUNCE
+        self._announce_when_shown = False          # announce the next briefing rendered (late arrival)
+        self._arriving = False                     # a scheduled arrival is being shown (announces itself)
+        self._greeting_pending = False             # waiting for the first fetch answer (<= 3 s)
+        self._greeting_line: Greeting | None = None
+        self._greeting_entry: int | None = None
+        self._last_greeting_at = -math.inf         # time.monotonic() of this process's last greeting
+        self._background_run: str | None = None    # a run polled for while the assistant screen shows
+        self._pending_briefing: Briefing | None = None   # a newer briefing waiting for the reading to end
+        self._say_worker: SayWorker | None = None  # Jarvis's own speech worker ("tts-say"; start() only)
+        self._utterance = ""                       # what Jarvis is saying right now (orb SPEAKING, speech line)
+        self._briefing_speech = ""                 # the briefing's line for the speech line
+        self._last_ack = ""                        # the last "One moment, sir." template (never twice in a row)
+
     def _init_timers(self) -> None:
         self._ignore_timer = self._make_timer(self._on_prompt_ignored, single_shot=True)
         self._tick_timer = self._make_timer(self._update_countdown, single_shot=False, interval_ms=1000)
@@ -2493,6 +2837,11 @@ class AppController(QObject):
         # Only while a card counts down to its call to Google.
         self._countdown_timer = self._make_timer(self._on_countdown_tick, single_shot=False,
                                                  interval_ms=_COUNTDOWN_TICK_MS)
+        # The opening greeting waits at most this long for the first fetch answer.
+        self._greeting_timer = self._make_timer(self._finish_greeting, single_shot=True,
+                                                interval_ms=_GREETING_WAIT_MS)
+        # An announcement held while the session is locked looks again.
+        self._held_timer = self._make_timer(self._on_held_timer, single_shot=True, interval_ms=_LOCK_RECHECK_MS)
 
     def _make_timer(self, slot: Callable[[], None], *, single_shot: bool, interval_ms: int = 0) -> QTimer:
         timer = QTimer(self)
@@ -2536,9 +2885,13 @@ class AppController(QObject):
         reading.editAction.connect(self.edit_action)
         reading.signInAccount.connect(self.sign_in_account)
         reading.connectCalendar.connect(self.connect_calendar)
+        reading.tabChanged.connect(self._on_tab_changed)
+        reading.conversation.linkClicked.connect(self._on_conversation_link)
+        self.window.header.muteToggled.connect(self._on_mute_toggled)
         self.window.closeRequested.connect(self._on_close_requested)
         self.window.visibilityChanged.connect(self._sync_agenda_timer)
         self.window.visibilityChanged.connect(self._on_window_state)
+        self.window.activeChanged.connect(self._on_window_active)
 
     def _create_player(self) -> BriefingPlayer:
         player = BriefingPlayer(self, section_gap_ms=self.config.voice.section_gap_ms,
@@ -2611,27 +2964,109 @@ class AppController(QObject):
     # ---- startup ------------------------------------------------------------------
 
     def start(self) -> None:
-        logger.info("Controller starting (expected run: %s, read immediately: %s)",
-                    self.expected_run or "any", self.now_mode)
+        logger.info("Controller starting (launch: %s, expected run: %s, read immediately: %s)",
+                    self.launch, self.expected_run or "any", self.launch == LAUNCH_READ)
         self._run_started = self._scheduled_start(self.expected_run)
         self._audio_dir = self._prepare_audio_dir()
         self._store.prune()
+        self._adopt_older_answers()
         self._start_tts()
+        self._start_voice()
         self._create_tray()
         self._start_calendar()
         self._update_service_chips()
         if self.ask is not None:
             self.ask.start()   # checks Claude Code on the ask thread (no model request)
-        if self.ask_mode:
-            self.open_ask()
-            return
-        if self.now_mode:
+        if self.launch == LAUNCH_READ:
             self.enter_reading()
             force_foreground(self.window)
             return
-        if not self.startup_error:
-            self._start_fetch(self.expected_run)
-        self.show_prompt(take_focus=True)
+        if self.launch == LAUNCH_OPEN:
+            if self.expected_run and not self.startup_error and not self.ask_mode:
+                # --run X --open: the X briefing is waited for in the background and announced.
+                self._background_run = self.expected_run
+                self._start_fetch(self.expected_run)
+            self.open_assistant(ask_requested=self.ask_mode)
+            self._begin_greeting(wait=True)
+            return
+        if self._classic():
+            if not self.startup_error:
+                self._start_fetch(self.expected_run)
+            self.show_prompt(take_focus=True)
+            return
+        self._start_waiting()
+
+    def _adopt_older_answers(self) -> None:
+        """The first start of this version: a briefing an older version read through its prompt
+        (answered "read" / "done" in runstate.json) counts as viewed, so it is never announced as
+        "ready to view" after the update (assistant.json remembers that this was done)."""
+        if self.run_state is None:
+            return
+        prefs = self._prefs_store()
+        if prefs.answers_adopted:
+            return
+        self.run_state.adopt_heard_answers()
+        prefs.set_answers_adopted()
+
+    def _classic(self) -> bool:
+        """``[assistant] scheduled_prompt``: scheduled runs show the "Hear it now?" prompt."""
+        return bool(self.config.assistant.scheduled_prompt)
+
+    def _start_voice(self) -> None:
+        """Jarvis's own voice, only here (a controller that is never started never speaks): kept as
+        injected, else the real voice when ``[assistant] speak`` is on (``_create_voice``)."""
+        if self._voice_injected or not self.config.assistant.speak:
+            return
+        try:
+            voice = self._create_voice()
+        except Exception as exc:  # noqa: BLE001 - Jarvis then shows his words without speaking
+            logger.warning("Could not set up Jarvis's voice (%s); his words are shown only", type(exc).__name__)
+            voice = None
+        if voice is not None:
+            self.voice = voice
+        self._sync_speaker()
+
+    def _create_voice(self) -> Voice | None:
+        """The real voice: voice_ui.AssistantVoice with its own speech worker ("tts-say": the
+        module-level SpeechSynthesizer with the [voice] settings, so Ryan with the Windows voice as
+        fallback, writing into the session's "say" folder), its own player at the controller's
+        volume, and assistant.json's mute switch. None keeps the SilentVoice."""
+        from . import voice_ui
+
+        settings = self.config.voice
+        out_dir = (self._audio_dir if self._audio_dir is not None else self.config.audio_root) / "say"
+        bridge, closing = self._bridge, self._closing
+
+        def factory() -> SpeechSynthesizer:   # runs on the worker thread (SAPI/COM is thread-bound)
+            return SpeechSynthesizer(voice=settings.voice, rate=settings.rate, volume=settings.volume,
+                                     offline_voice=settings.offline_voice, out_dir=out_dir,
+                                     divider_pause_ms=settings.divider_pause_ms)
+
+        def on_result(seq: int, audio: SectionAudio | None, error: str | None) -> None:
+            _emit_from_worker(bridge, "sayResult", closing, seq, audio, error)
+
+        worker = SayWorker(factory, on_result)
+        player = voice_ui.UtterancePlayer(self, volume=self._volume)
+        voice = voice_ui.AssistantVoice(worker=worker, player=player, briefing_player=lambda: self.player,
+                                        countdown_active=lambda: self._countdown is not None,
+                                        prefs=self._prefs_store(), parent=self)
+        bridge.sayResult.connect(voice.on_audio, Qt.ConnectionType.QueuedConnection)
+        voice.speakingChanged.connect(self._on_voice_speaking)
+        worker.start()
+        self._say_worker = worker
+        logger.info("Jarvis's voice is ready (%s)", "muted" if voice.muted else "on")
+        return voice
+
+    def _start_waiting(self) -> None:
+        """A scheduled run (or the catch-up): wait invisibly for the run's fresh briefing; it is shown
+        without the focus and announced when it arrives (_arrive). A setup error shows at once."""
+        if self.startup_error:
+            self._arrive()
+            return
+        self.state = STATE_WAITING
+        self._start_fetch(self.expected_run)
+        self._update_tray()
+        logger.info("Waiting for the %s briefing with the window hidden", self.expected_run or "next")
 
     def _prepare_audio_dir(self) -> Path:
         root = self.config.audio_root
@@ -2694,7 +3129,7 @@ class AppController(QObject):
         self._tray_quit_action = menu.addAction("Dismiss")
         self._tray_quit_action.triggered.connect(self._on_tray_quit)
         tray = QSystemTrayIcon(app_icon(), self)
-        tray.setToolTip("briefing-reader")
+        tray.setToolTip(TRAY_TOOLTIP)
         tray.setContextMenu(menu)
         tray.activated.connect(self._on_tray_activated)
         tray.show()
@@ -2707,8 +3142,11 @@ class AppController(QObject):
             self._on_tray_show()
 
     def _on_tray_show(self) -> None:
+        """Show briefing (tray menu or a click): a restore, never an "open" - no greeting."""
         if self.state == STATE_SNOOZED:
             self.show_prompt(take_focus=True)
+        elif self.state == STATE_WAITING:
+            self._open_from_waiting(greet=False)
         elif self.state in (STATE_PROMPT, STATE_READING):
             force_foreground(self.window)
 
@@ -2718,13 +3156,24 @@ class AppController(QObject):
             self._record_done()
         elif self.state in (STATE_PROMPT, STATE_SNOOZED):
             self.record_answer("dismissed")   # the menu item says Dismiss there
-        self.quit()
+        self.quit()   # waiting (nothing shown yet): nothing is recorded
 
-    def _update_tray(self, tooltip: str = "briefing-reader") -> None:
+    def _update_tray(self, tooltip: str | None = None) -> None:
+        """The tray tooltip (``tooltip``, else the state's: waiting, "AM briefing ready to view"
+        while one is NEW, else the app's name) and the menu's Quit / Dismiss."""
         if self.tray is not None:
-            self.tray.setToolTip(tooltip)
+            self.tray.setToolTip(tooltip if tooltip is not None else self._tray_tooltip())
         if self._tray_quit_action is not None:
-            self._tray_quit_action.setText("Quit" if self.state == STATE_READING else "Dismiss")
+            quits = self.state in (STATE_READING, STATE_WAITING)
+            self._tray_quit_action.setText("Quit" if quits else "Dismiss")
+
+    def _tray_tooltip(self) -> str:
+        if self.state == STATE_WAITING:
+            return f"Jarvis: waiting for the {self.expected_run or 'next'} briefing"
+        if self._new_key() is not None:
+            run = self._run_label()
+            return f"Jarvis: {run + ' ' if run else ''}briefing ready to view"
+        return TRAY_TOOLTIP
 
     # ---- activity log and header chips -------------------------------------------------
 
@@ -2867,7 +3316,11 @@ class AppController(QObject):
                 self._activity(hud.TAG_WAIT, f"Waiting for the {self._fetch_poll_run} briefing",
                                f"checking Notion {self._interval_text()}")
             self._accept_briefing(briefing)
+            if self.state == STATE_WAITING and self._cached_is_fresh():
+                self._arrive()
         self._refresh_views()
+        if self._greeting_pending and self._fetch_attempts == 1:
+            self._finish_greeting()   # the first answer (a briefing or an error) is in: greet now
 
     def _log_fetch(self, briefing: Briefing) -> None:
         """One activity row per new page content (polling re-reads the same page every minute)."""
@@ -2888,7 +3341,10 @@ class AppController(QObject):
 
     def _accept_briefing(self, briefing: Briefing) -> None:
         if self._script is not None:
-            logger.info("Ignoring a newer briefing: the reading screen already shows one")
+            if self._is_newer_briefing(briefing):
+                self._newer_briefing(briefing)
+            else:
+                logger.info("Ignoring a newer briefing: the reading screen already shows one")
             return
         self._briefing = self._take_actions(briefing)
         if self.state == STATE_READING:
@@ -2903,9 +3359,17 @@ class AppController(QObject):
         logger.info("Fetching finished after %d attempt(s): %s", result.attempts, _describe_poll(result))
         if result.briefing is None and result.error is not None:
             self._fetch_error = result.error
+        if self.state == STATE_WAITING:
+            # Nothing new arrived in time (or Notion kept failing): nothing is shown or said; the
+            # slot stays open, so the catch-up looks again at the next logon or unlock.
+            logger.info("No new %s briefing arrived; nothing shown", self.expected_run or "")
+            self.quit()
+            return
+        background = self._background_run
+        self._background_run = None
         if result.timed_out and self.expected_run:
-            self._activity(hud.TAG_WAIT, f"No new {self.expected_run} briefing yet",
-                           "Read now plays the last one")
+            later = "the last one stays under BRIEFING" if background else "Read now plays the last one"
+            self._activity(hud.TAG_WAIT, f"No new {self.expected_run} briefing yet", later)
         if self.state == STATE_READING and self._script is None:
             if self._briefing is not None:
                 self._begin_reading()
@@ -3639,6 +4103,10 @@ class AppController(QObject):
             self._activity(hud.TAG_RUN, f"Sending in {seconds} s: {_action_phrase(action)}",
                            self._activity_sub(action))
         self._countdown_timer.start()
+        # An earlier card's "Done, sir" that has not started yet is dropped (its entry is shown):
+        # said after this approval it would sound like this card's result, which only comes later.
+        self._voice_call("cancel_key", _RESULT_KEY)
+        self._pump_voice()   # nothing Jarvis says starts during the countdown
 
     def _activity_sub(self, action: ProposedAction) -> str:
         """"MOVE \u00b7 WORK"; a Reply / Email adds its recipient count ("REPLY \u00b7 WORK \u00b7 2 recipients")."""
@@ -3677,6 +4145,7 @@ class AppController(QObject):
         """The countdown ran out: queue the one call (the worker saves "running" right before it)."""
         countdown, self._countdown = self._countdown, None
         self._countdown_timer.stop()
+        self._pump_voice()   # what waited for the countdown may be said now (never "Done": the result says that)
         if countdown is None:
             return
         action = countdown.action
@@ -3694,6 +4163,7 @@ class AppController(QObject):
                 self._hint(action.id, problem)
                 self._sync_card_locks()
                 self._refresh_actions_ui()
+                self._tell_not_sent(action)
                 return
         self._jobs[action.id] = _STAGE_WORKING
         self._running[action.id] = (action, True)
@@ -3728,6 +4198,7 @@ class AppController(QObject):
     def _cancel_countdown(self, reason: str) -> None:
         countdown, self._countdown = self._countdown, None
         self._countdown_timer.stop()
+        self._pump_voice()
         if countdown is None:
             return
         action_id = countdown.action.id
@@ -4102,6 +4573,7 @@ class AppController(QObject):
             else:
                 self._activity(hud.TAG_DONE, f"Added {title}", detail)
             self._request_agenda()   # the new event may be on today's agenda
+            self._tell_result(action, STATUS_EXISTS if status == STATUS_EXISTS else STATUS_CREATED)
         else:
             message = (str(error) if error is not None else "") or "unknown error"
             if not saved:
@@ -4111,6 +4583,7 @@ class AppController(QObject):
             else:
                 failed = f"Couldn't add a block for {title}" if block else f"Couldn't add {title}"
                 self._activity(hud.TAG_STOP, failed, _short(message))
+            self._tell_result(action, STATUS_UNKNOWN if status == STATUS_UNKNOWN else STATUS_FAILED)
 
     def _countdown_result(self, action: ProposedAction, result: ExecResult | None, error: ExecError | None,
                           status: str) -> None:
@@ -4126,9 +4599,11 @@ class AppController(QObject):
             self._activity(hud.TAG_DONE, f"{text}: {_kind_title(action)}", sub)
             if not mail and account_of(action) == DEFAULT_ACCOUNT:
                 self._request_agenda()   # the agenda may show the change
+            self._tell_result(action, STATUS_SENT)
             return
         message = (str(error) if error is not None else "") or "unknown error"
         problem = getattr(error, "problem", "") or ""
+        self._tell_result(action, STATUS_UNKNOWN if status == STATUS_UNKNOWN else STATUS_FAILED)
         if mail:   # the worker's sign-in check refreshes the accounts; the card says why
             if status == STATUS_UNKNOWN:
                 self._activity(hud.TAG_WAIT, f"Unknown: {_action_phrase(action)}", UNKNOWN_MAIL_CARD_TEXT)
@@ -4597,6 +5072,8 @@ class AppController(QObject):
                                           blocked=self._ask_blocked, calendars=self._calendars, parent=self)
         controller.busyChanged.connect(self._on_ask_busy)
         controller.outcomeReady.connect(self._on_ask_outcome)
+        controller.askStarted.connect(self._on_ask_started)
+        controller.askCancelled.connect(self._on_ask_cancelled)
         controller.chipChanged.connect(self._set_ask_chip)
         controller.mailSignInRequested.connect(self.sign_in_for_mail)
         reading.set_ask_available(True)
@@ -4636,17 +5113,79 @@ class AppController(QObject):
         return ""
 
     def _on_ask_busy(self, busy: bool) -> None:
-        """An Ask started (the briefing pauses; the orb shows PLANNING) or ended."""
+        """An Ask started (the briefing pauses; the orb shows PLANNING; Jarvis says "One moment,
+        sir.") or ended."""
         self._ask_busy = bool(busy)
-        if busy and self.state == STATE_READING and self.player.state in (PLAYING, WAITING):
-            self.player.pause()
+        if busy:
+            self._voice_call("owner_acted")   # the Ask holds the briefing now: the voice never resumes it
+            if self.state == STATE_READING and self.player.state in (PLAYING, WAITING):
+                self.player.pause()
+            self._say_ack()
         self._update_reading_controls()
+
+    def _say_ack(self) -> None:
+        """A short acknowledgement while an Ask plans (dropped if the answer is there first)."""
+        assistant = self.config.assistant
+        if not assistant.speak_replies:
+            return
+        self._last_ack = pick_ack(self._last_ack, self._rng)
+        self._say(KIND_ACK, with_address(self._last_ack, assistant.address), key=ASK_ACK_KEY)
+
+    def _on_ask_started(self, _seq: int, text: str) -> None:
+        """An Ask really started: the owner's words as a YOU entry, and the JARVIS tab comes up (it
+        shows the whole answer when it arrives)."""
+        if self.state == STATE_QUITTING:
+            return
+        self._you(text)
+        self.window.reading.set_tab(hud.TAB_JARVIS)
+
+    def _on_ask_cancelled(self, _seq: int) -> None:
+        if self.state == STATE_QUITTING:
+            return
+        self._voice_call("cancel_key", ASK_ACK_KEY)
+        self._jarvis(ASK_CANCELLED_ENTRY, tone=hud.TONE_IDLE)
+
+    def _converse_ask(self, outcome: Any) -> None:
+        """A finished Ask in the conversation: one JARVIS entry with the whole answer (the planner's
+        say and question and Jarvis's own note; the bar above keeps its short preview) or the whole
+        reason nothing was proposed; then what Jarvis says about it ([assistant] speak_replies)."""
+        from .ask_ui import _SOFT_KINDS, AskController
+
+        assistant = self.config.assistant
+        if outcome.ok:
+            decidable = sum(1 for card in outcome.cards if not card.error)
+            sub = [f"{_plural(decidable, 'proposal')} under NEEDS YOUR OK" if decidable else "no proposals"]
+            if outcome.runs:
+                sub.append(f"{outcome.duration_ms / 1000:.1f} s")
+            question_only = bool(outcome.question) and not outcome.cards
+            self._jarvis(AskController._answer(outcome), tone=hud.TONE_WARN if question_only else hud.TONE_DONE,
+                         sub=f" {DOT} ".join(sub))
+            if assistant.speak_replies:
+                reply = ask_reply_speech(outcome, assistant.address)
+                if reply.guarded:
+                    logger.info("Ask reply not spoken as written (it claimed something was done)")
+                self._say(KIND_REPLY, reply.text)
+            return
+        if outcome.kind in ("empty", "busy"):
+            return
+        if outcome.kind == "cancelled":
+            self._on_ask_cancelled(0)
+            return
+        self._jarvis(outcome.message or "Ask failed; nothing was proposed.",
+                     tone=hud.TONE_WARN if outcome.kind in _SOFT_KINDS else hud.TONE_ERROR)
+        spoken = ask_failure_speech(outcome.kind, assistant.address) if assistant.speak_replies else ""
+        if spoken:
+            self._say(KIND_REPLY, spoken)
+        else:
+            self._voice_call("cancel_key", ASK_ACK_KEY)
 
     def _on_ask_outcome(self, outcome: Any) -> None:
         """A finished Ask: its cards go under ASK (above the briefing's; a countdown on another
-        card goes on), and ACTIVITY gets one row of counts (never the request or the answer)."""
+        card goes on), the conversation gets the whole answer (and Jarvis says it), and ACTIVITY
+        gets one row of counts (never the request or the answer)."""
         if self.state == STATE_QUITTING:
             return
+        self._converse_ask(outcome)
         if outcome.ok:
             self._take_ask_cards(list(outcome.cards))
             decidable = sum(1 for card in outcome.cards if not card.error)
@@ -4690,21 +5229,518 @@ class AppController(QObject):
         self._start_sign_in(alias, force=True)
 
     def open_ask(self) -> None:
-        """``--ask``, or an activation with "ask": true: the reading screen with the command bar
-        focused. The briefing does not start playing and no scheduled slot is settled (Play does
-        both); a reading in progress just comes forward."""
+        """``--ask``, or an activation with "ask": true: the assistant screen with the command bar
+        focused (open_assistant; with [ask] off the status says so)."""
+        self.open_assistant(ask_requested=True)
+
+    def open_assistant(self, *, focus_bar: bool = True, ask_requested: bool = False) -> None:
+        """An OPEN launch: the assistant screen in front, the JARVIS tab when it was not showing,
+        the command bar focused. The briefing does not start playing and no scheduled slot is
+        settled (Play does both); a reading in progress just comes forward. The greeting and the
+        announcement are the caller's (start, handle_activation)."""
         if self.state == STATE_QUITTING:
             return
-        logger.info("Opening Ask Jarvis (%s)", "on" if self.ask is not None else "off")
+        if ask_requested:
+            logger.info("Opening Ask Jarvis (%s)", "on" if self.ask is not None else "off")
+        else:
+            logger.info("Opening the assistant screen")
         if self.state != STATE_READING:
             self.enter_reading(autoplay=False, settle=False)
         force_foreground(self.window)
-        if self.ask is not None:
+        if self.ask is not None and focus_bar:
             self.window.reading.command_bar.focus_input()
-        else:
+        elif self.ask is None and ask_requested:
             from .ask.planner import DISABLED_MESSAGE
 
             self._flash_note(DISABLED_MESSAGE)
+
+    # ---- the conversation and Jarvis's voice ----------------------------------------------
+
+    def _jarvis(self, text: str, *, tone: str = hud.TONE_DONE, sub: str = "",
+                link: tuple[str, str] = ("", "")) -> int:
+        """A JARVIS entry in the conversation (display only: never logged); its id for later updates.
+        A dot on the JARVIS tab tells the owner when another tab is current."""
+        reading = self.window.reading
+        entry = reading.conversation.add(hud.ROLE_JARVIS, text, when=self._now(), tone=tone, sub=sub,
+                                         link_text=link[0], link_id=link[1])
+        reading.mark_unread()
+        return entry
+
+    def _you(self, text: str) -> int:
+        """A YOU entry (the owner's request, as typed; display only, never logged)."""
+        return self.window.reading.conversation.add(hud.ROLE_YOU, text, when=self._now())
+
+    def _say(self, kind: str, text: str, *, key: str = "") -> bool:
+        """Hand ``text`` to Jarvis's voice; False when it will not be spoken (muted, off, failed, or
+        the app is closing)."""
+        if self.state == STATE_QUITTING:
+            return False
+        try:
+            return bool(self.voice.say(kind, text, key=key))
+        except Exception as exc:  # noqa: BLE001 - his words are on screen either way
+            logger.warning("Jarvis's voice failed (%s); shown only", type(exc).__name__)
+            return False
+
+    def _voice_call(self, name: str, *args: Any) -> None:
+        """``voice.<name>(*args)``; a broken voice never stops the app."""
+        try:
+            getattr(self.voice, name)(*args)
+        except Exception as exc:  # noqa: BLE001 - his words are on screen either way
+            logger.warning("Jarvis's voice failed (%s)", type(exc).__name__)
+
+    def _pump_voice(self) -> None:
+        """The voice looks again whether it may start the next utterance (a countdown started or
+        ended, the briefing's playback changed)."""
+        self._voice_call("pump")
+
+    def _owner_playback(self) -> None:
+        """The owner pressed Play, Pause, Skip, a section or Read everything: Jarvis stops talking at
+        once (his queue goes) and never resumes the briefing on his own; the owner's action wins."""
+        self._voice_call("owner_acted")
+        self._voice_call("stop")
+
+    def _on_voice_speaking(self, text: str) -> None:
+        """Jarvis started saying ``text`` (the orb says SPEAKING and the speech line shows his words)
+        or finished (""; the briefing's own state and line come back)."""
+        self._utterance = text or ""
+        if self.state != STATE_READING:
+            return
+        self.window.reading.set_speech(self._utterance or self._briefing_speech)
+        self._update_reading_controls()
+
+    def _set_briefing_speech(self, text: str) -> None:
+        """The speech line for the briefing (the line being read; "" for its fallback). While Jarvis
+        says something himself, his words stay until he is done."""
+        self._briefing_speech = text or ""
+        if not self._utterance:
+            self.window.reading.set_speech(self._briefing_speech)
+
+    def _on_mute_toggled(self, muted: bool) -> None:
+        """The header's speaker button (or Ctrl+M): Jarvis's own voice off or on (remembered in
+        assistant.json); the briefing still plays when you press Play."""
+        self._voice_call("set_muted", bool(muted))
+        self._sync_speaker()
+
+    def _sync_speaker(self) -> None:
+        """The speaker button shows the voice's mute state."""
+        try:
+            muted = bool(self.voice.muted)
+        except Exception:  # noqa: BLE001 - unknown: shown as on
+            muted = False
+        self.window.header.set_muted(muted)
+
+    # ---- what Jarvis says after a card was carried out ---------------------------------------
+
+    def _tell_result(self, action: ProposedAction | None, status: str) -> None:
+        """One sentence after the executor's result for an approved card (created / exists / sent,
+        failed, unknown): a JARVIS entry, spoken unless [assistant] speak_results is off. Never at
+        the click or during the countdown: only here. Titles and subjects only; never the error
+        message (the card says why), a body or a recipient."""
+        if action is None or self.state == STATE_QUITTING:
+            return
+        assistant = self.config.assistant
+        answer = action.field("answer") if action.kind == RSVP else ""
+        text = outcome_text(action.kind, status, action.title, when=self._spoken_when(action), answer=answer,
+                            address=assistant.address)
+        self._jarvis(text, tone=_RESULT_TONES.get(outcome_tone(status), hud.TONE_DONE))
+        spoken = assistant.speak_results and self._say(KIND_RESULT, text, key=_RESULT_KEY)
+        logger.info("Told the result of action %s (%s, %s)", action.id, outcome_tone(status),
+                    "spoken" if spoken else "text only")
+
+    def _tell_not_sent(self, action: ProposedAction) -> None:
+        """A Reply / Email not sent at the end of its countdown (the sending account changed)."""
+        if self.state == STATE_QUITTING:
+            return
+        assistant = self.config.assistant
+        text = not_sent_text(action.kind, action.title, assistant.address)
+        self._jarvis(text, tone=hud.TONE_WARN)
+        if assistant.speak_results:
+            self._say(KIND_RESULT, text, key=_RESULT_KEY)
+
+    def _spoken_when(self, action: ProposedAction) -> str:
+        """When an approved card's event is, said aloud: a Calendar event's start, a Todo's block, a
+        Move's new time ("tomorrow at 3 PM"); "" for the other kinds."""
+        try:
+            now = self._now()
+            if action.kind == CALENDAR:
+                if action.all_day_start is not None:
+                    return spoken_when(action.all_day_start, None, now, all_day=True)
+                return spoken_when(action.start, None, now)
+            if action.kind == TODO:
+                block = action.block_event()
+                return spoken_when(block.start, None, now) if block is not None else ""
+            if action.kind == MOVE:
+                return spoken_when(action.start, None, now)
+        except Exception as exc:  # noqa: BLE001 - the sentence goes on without the time
+            logger.debug("No spoken time for action %s (%s)", action.id, type(exc).__name__)
+        return ""
+
+    def _prefs_store(self) -> AssistantPrefs:
+        """assistant.json (mute, the recent greetings), opened on first use."""
+        if self._prefs is None:
+            self._prefs = AssistantPrefs(self.config.data_dir / PREFS_FILE)
+        return self._prefs
+
+    def _on_conversation_link(self, link_id: str) -> None:
+        if link_id == VIEW_BRIEFING_LINK:
+            self.window.reading.set_tab(hud.TAB_BRIEFING)
+
+    # ---- NEW briefings and viewing ---------------------------------------------------------
+
+    def _shown_key(self) -> str | None:
+        """The briefing key (runstate.briefing_key) of the briefing on the BRIEFING tab, or None
+        (nothing rendered yet, a setup error, or a page without an "Updated:" time)."""
+        if self.startup_error or self._script is None or self._briefing is None:
+            return None
+        return briefing_key(self._briefing.header, self.slots)
+
+    def _new_key(self) -> str | None:
+        """The shown briefing's key while it is NEW: not viewed, and at most 18 hours old."""
+        key = self._shown_key()
+        if key is None or self._is_viewed(key):
+            return None
+        updated = self._briefing.header.updated_at if self._briefing is not None else None
+        try:
+            if updated is None or self._now() - updated > ANSWER_MAX_AGE:
+                return None
+        except TypeError:   # naive and aware times mixed: not called new
+            return None
+        return key
+
+    def _is_viewed(self, key: str) -> bool:
+        return key in self._viewed_keys or (self.run_state is not None and self.run_state.is_viewed(key))
+
+    def _is_announced(self, key: str) -> bool:
+        return key in self._announced_keys or (self.run_state is not None and self.run_state.is_announced(key))
+
+    def _run_label(self) -> str:
+        """"AM" / "PM" of the shown briefing (its run, else the expected run), or ""."""
+        if self._script is not None and self._script.run_label in ("AM", "PM"):
+            return self._script.run_label
+        run = self._briefing.header.run if self._briefing is not None else None
+        return run if run in ("AM", "PM") else (self.expected_run or "")
+
+    def _window_active(self) -> bool:
+        """The window is the active one (the owner can see the BRIEFING tab); tests replace this."""
+        return self.window.isActiveWindow()
+
+    def _on_tab_changed(self, _index: int) -> None:
+        self._mark_viewed_if_seen()
+
+    def _on_window_active(self, _active: bool) -> None:
+        self._mark_viewed_if_seen()
+
+    def _show_briefing_tab(self) -> None:
+        """Play, Replay, a section or Read everything from the JARVIS tab: the transcript comes up."""
+        if self.window.reading.current_tab() != hud.TAB_BRIEFING:
+            self.window.reading.set_tab(hud.TAB_BRIEFING)
+
+    def _mark_viewed_if_seen(self) -> None:
+        """A NEW briefing counts as viewed once its BRIEFING tab is current in the active window."""
+        if self.state != STATE_READING:
+            return
+        key = self._new_key()
+        if key is None or self.window.reading.current_tab() != hud.TAB_BRIEFING:
+            return
+        try:
+            active = self._window_active()
+        except Exception:  # noqa: BLE001 - unknown: not seen yet
+            active = False
+        if active:
+            self._mark_viewed(key)
+
+    def _mark_viewed(self, key: str) -> None:
+        """The briefing ``key`` was viewed (or played): remembered, any announcement of it still to
+        come is dropped, and every NEW indicator goes."""
+        if key not in self._viewed_keys:
+            self._viewed_keys.add(key)
+            recorded = self.run_state.record_viewed(key) if self.run_state is not None else False
+            if not recorded:
+                logger.info("The %s briefing was viewed", key)
+        self.voice.cancel_key(f"announce:{key}")
+        if self._held_key == key:
+            self._held_key = None
+            self._held_timer.stop()
+        self._announce_when_shown = False
+        self._sync_new_indicators()
+
+    def _sync_new_indicators(self) -> None:
+        """NEW everywhere or nowhere: the BRIEFING tab's badge, the speech line while idle, STATUS
+        "Updated" and the tray tooltip."""
+        key = self._new_key()
+        run = self._run_label()
+        label = f"Your {run + ' ' if run else ''}briefing is ready to view"
+        self.window.reading.set_new_briefing(key is not None, label)
+        if self.state == STATE_READING:
+            self._update_telemetry()
+        if self.state in (STATE_READING, STATE_WAITING):
+            self._update_tray()
+
+    def _after_briefing_shown(self) -> None:
+        """A briefing was rendered on the BRIEFING tab: NEW indicators, viewing, and the late
+        announcement of an open whose greeting could not wait for it."""
+        self._sync_new_indicators()
+        self._mark_viewed_if_seen()
+        if self._announce_when_shown and not self._greeting_pending and not self._arriving:
+            self._announce_when_shown = False
+            self._announce()
+
+    # ---- greeting and announcement ---------------------------------------------------------
+
+    def _pick_greeting(self) -> Greeting:
+        """A random greeting for now that was not heard recently (never the last one); remembered."""
+        prefs = self._prefs_store()
+        line = pick_greeting(self._now(), prefs.recent_greetings, self._rng)
+        prefs.remember_greeting(line.id)
+        return line
+
+    def _begin_greeting(self, *, wait: bool) -> None:
+        """An OPEN (a new process, or an activation that restores a hidden or minimized window): the
+        greeting line goes into the conversation at once; it is spoken (with "Your AM briefing is
+        ready to view." and one safe fact folded in) once the first fetch answered, at most 3 s
+        later (``wait``), or at once when the briefing is already known."""
+        self._last_greeting_at = time.monotonic()
+        assistant = self.config.assistant
+        self._greeting_timer.stop()
+        self._greeting_line = self._pick_greeting() if assistant.greet else None
+        self._greeting_entry = None
+        if self._greeting_line is not None:
+            self._greeting_entry = self._jarvis(self._greeting_line.text(assistant.address))
+        self._greeting_pending = True
+        if wait and self._script is None and self.fetching and not self.startup_error:
+            self._greeting_timer.start(_GREETING_WAIT_MS)
+        else:
+            self._finish_greeting()
+
+    def _finish_greeting(self) -> None:
+        """Compose and say the greeting (at most three sentences); an announcement that could not
+        be folded in comes on its own (now, or when the briefing is rendered)."""
+        if not self._greeting_pending:
+            return
+        self._greeting_pending = False
+        self._greeting_timer.stop()
+        assistant = self.config.assistant
+        line = self._greeting_line
+        key = self._new_key()
+        if key is None and self._script is None and not self.startup_error:
+            self._announce_when_shown = True   # announced on its own once it is shown
+        fold = (key is not None and not self._is_announced(key) and key != self._held_key
+                and not self._locked_now())
+        if line is None:
+            if key is not None:
+                self._announce()
+            return
+        announce_text = announcement(self._run_label(), assistant.address, after_greeting=True) if fold else ""
+        context = self._greeting_context() if assistant.greeting_context else ""
+        # A question ("How can I help, sir?") or a second "ready" never comes before the rest.
+        text = compose_opening(line.text(assistant.address), announce_text, context,
+                               plain=salutation(self._now()).text(assistant.address))
+        if self._greeting_entry is not None:
+            link = (VIEW_BRIEFING_TEXT, VIEW_BRIEFING_LINK) if fold else (None, None)
+            self.window.reading.conversation.update(self._greeting_entry, text=text, link_text=link[0],
+                                                    link_id=link[1])
+        spoken = self._say(KIND_GREETING, text, key=f"announce:{key}" if fold else "")
+        logger.info("Greeting %s%s (%s)", line.id, " with the announcement" if fold else "",
+                    "spoken" if spoken else "text only")
+        if fold and key is not None:
+            self._set_announced(key, spoken)
+        elif key is not None:
+            self._announce()   # e.g. held while the session is locked
+
+    def _greeting_context(self) -> str:
+        """One fact that is safe to say aloud: proposals waiting for the owner's OK, else the next
+        timed event within 3 hours (only when the agenda is loaded; never waits for Google)."""
+        try:
+            pending = len(self._pending_actions())
+            if pending:
+                return approvals_sentence(pending)
+            if self._agenda_status != _AGENDA_OK or not self._agenda_events:
+                return ""
+            now = self._now()
+            upcoming = [event for event in self._agenda_events
+                        if event.start is not None and not event.all_day
+                        and now < event.start <= now + _NEXT_EVENT_WITHIN]
+            if not upcoming:
+                return ""
+            first = min(upcoming, key=lambda event: event.start)
+            start = first.start.astimezone(now.tzinfo) if now.tzinfo is not None else first.start
+            return next_event_sentence(first.title, start)
+        except Exception as exc:  # noqa: BLE001 - the greeting goes on without a fact
+            logger.debug("No greeting fact (%s)", type(exc).__name__)
+            return ""
+
+    def _locked_now(self) -> bool:
+        try:
+            return bool(self._locked())
+        except Exception:  # noqa: BLE001 - unknown: not locked
+            return False
+
+    def _announce(self, *, greeting: bool = False) -> bool:
+        """"Sir, your AM briefing is ready to view." once per briefing: a conversation entry with a
+        View briefing link and one utterance (with a greeting before it when ``greeting``). Never
+        for a viewed, old, placeholder or erroneous briefing. While the session is locked the entry
+        is added at once and the utterance waits for the unlock. True when it was announced or
+        held now."""
+        key = self._new_key()
+        if key is None or self._is_announced(key) or key == self._held_key:
+            return False
+        assistant = self.config.assistant
+        run = self._run_label()
+        # A scheduled arrival: the owner did not open Jarvis, so no "Welcome back" or "How can I
+        # help?" - the hour's plain "Good morning, sir." before the announcement.
+        line = salutation(self._now()) if greeting and assistant.greet else None
+        if line is not None:
+            self._prefs_store().remember_greeting(line.id)
+            self._last_greeting_at = time.monotonic()
+            text = compose_opening(line.text(assistant.address),
+                                   announcement(run, assistant.address, after_greeting=True))
+            kind = KIND_GREETING
+        else:
+            text, kind = announcement(run, assistant.address), KIND_ANNOUNCE
+        self._jarvis(text, link=(VIEW_BRIEFING_TEXT, VIEW_BRIEFING_LINK))
+        if line is not None:
+            logger.info("Greeting %s with the announcement", line.id)
+        if self._locked_now():
+            self._held_key, self._held_text, self._held_kind = key, text, kind
+            self._held_timer.start(_LOCK_RECHECK_MS)
+            logger.info("Announced the %s briefing (held: session locked)", key)
+            return True
+        self._set_announced(key, self._say(kind, text, key=f"announce:{key}"))
+        return True
+
+    def _set_announced(self, key: str, spoken: bool) -> None:
+        how = "spoken" if spoken else "text only"
+        self._announced_keys.add(key)
+        if self.run_state is not None:
+            self.run_state.record_announced(key, how)
+        logger.info("Announced the %s briefing (%s)", key, how)
+
+    def _on_held_timer(self) -> None:
+        """An announcement held while the session was locked: said after the unlock, if the
+        briefing is still NEW and unannounced."""
+        key = self._held_key
+        if key is None or self.state == STATE_QUITTING:
+            return
+        if self._locked_now():
+            self._held_timer.start(_LOCK_RECHECK_MS)
+            return
+        self._held_key = None
+        if self._new_key() != key or self._is_announced(key):
+            return
+        self._set_announced(key, self._say(self._held_kind, self._held_text, key=f"announce:{key}"))
+
+    # ---- scheduled arrival and newer briefings -----------------------------------------------
+
+    def _show_assistant(self, *, take_focus: bool) -> None:
+        """The assistant screen on its JARVIS tab: in front with the focus, or shown on top without
+        taking it (a scheduled arrival; a minimized window is restored where it was)."""
+        if self.state != STATE_READING:
+            self.enter_reading(autoplay=False, settle=False)
+        self.window.reading.set_tab(hud.TAB_JARVIS)
+        if take_focus:
+            force_foreground(self.window)
+        else:
+            show_without_activating(self.window)
+
+    def _arrive(self) -> None:
+        """The scheduled run's fresh briefing is here: shown without the focus and announced with a
+        greeting before it, unless it was announced or viewed already (then the process just ends).
+        A setup error is shown the same way, as text only."""
+        if self.startup_error:
+            self._arriving = True
+            try:
+                self._show_assistant(take_focus=False)
+            finally:
+                self._arriving = False
+            headline = _split_startup_error(self.startup_error)[0].rstrip(".")
+            self._jarvis(f"I can't reach your briefing: {headline}.", tone=hud.TONE_WARN)
+            logger.info("Showing the setup error without the focus (nothing is said)")
+            return
+        key = briefing_key(self._briefing.header, self.slots) if self._briefing is not None else None
+        if key is not None and (self._is_announced(key) or self._is_viewed(key)):
+            logger.info("The %s briefing was already announced; nothing to show", self.expected_run or key)
+            self.quit()
+            return
+        logger.info("The %s briefing arrived: showing it without the focus", self.expected_run or "new")
+        self._arriving = True
+        try:
+            self._show_assistant(take_focus=False)
+        finally:
+            self._arriving = False
+        self.record_shown()   # diagnostics: when its slot was first shown
+        self._announce(greeting=True)
+
+    def _open_from_waiting(self, *, greet: bool) -> None:
+        """WAITING -> the assistant screen with the focus (an OPEN activation, or the tray's Show);
+        the poll goes on in the background and its arrival is announced (no greeting)."""
+        if self.expected_run and self.fetching:
+            self._background_run = self.expected_run
+        self._show_assistant(take_focus=True)
+        if self.ask is not None:
+            self.window.reading.command_bar.focus_input()
+        if greet:
+            self._begin_greeting(wait=False)
+        else:
+            self._announce_when_shown = self._script is None
+
+    def _is_newer_briefing(self, briefing: Briefing) -> bool:
+        """While a briefing is shown: the run waited for in the background has its fresh one, and it
+        is another briefing (another key) than the one on screen."""
+        if self._background_run is None or not self._freshness(briefing).fresh:
+            return False
+        return briefing_key(briefing.header, self.slots) != self._shown_key()
+
+    def _newer_briefing(self, briefing: Briefing) -> None:
+        """Show the newer briefing at once when nothing is playing; never cut a listen short (it
+        shows when this reading ends; Done quits as usual)."""
+        run = self._background_run or self.expected_run or ""
+        self._background_run = None
+        self._stop_fetch()
+        if self.player.state in (IDLE, FINISHED):
+            self._replace_briefing(briefing)
+            return
+        logger.info("The %s briefing is ready; it shows when this reading ends", run)
+        self._pending_briefing = briefing
+        self._pending_run = run or "new"
+        self._flash_note(self._pending_note(), sticky=True)
+
+    def _replace_briefing(self, briefing: Briefing) -> None:
+        """The shown briefing gives way to a newer one: rendered from the top, NEW, announced."""
+        logger.info("Showing the newer %s briefing", briefing.header.run or "")
+        self._reset_reading("a newer briefing replaced the shown one")
+        self._autoplay = False
+        self._briefing = self._take_actions(briefing)
+        self._begin_reading()
+        if self.window.isVisible() and self.window.isMinimized():
+            show_without_activating(self.window)
+        self._announce()
+
+    def _reset_reading(self, reason: str) -> None:
+        """Clear the reading screen for another briefing (nothing is playing)."""
+        self._cancel_countdown(reason)   # never send from a card that goes away
+        if self._dialog is not None:
+            self._dialog.reject()
+        if self._account_dialog is not None:
+            self._account_dialog.reject()   # unanswered: asked again at the next Send or Approve
+        self._recheck_timer.stop()
+        self._note_timer.stop()
+        self._replace_player()
+        self._script = None
+        self._include_ignored = False
+        self._has_played = False
+        self._pending_run = None
+        self._pending_briefing = None
+        self._note = ""
+        self._sections_started = set()
+        self._last_section = None
+        self._read_slot = None
+        self._reading_settled = False
+        self._autoplay = True
+        reading = self.window.reading
+        reading.show_message("")   # the next briefing renders from the top
+        reading.set_sections([], "")
+        reading.set_steps([])
+        self._set_briefing_speech("")
 
     # ---- scripts and speech -------------------------------------------------------------
 
@@ -5053,7 +6089,9 @@ class AppController(QObject):
         self._autoplay = autoplay
         self._reading_settled = False
         if settle:
-            self._settle_reading()   # Read now, --now, or the hotkey
+            self._settle_reading()   # Read now, --read, or an older hotkey
+        # Reading at once shows the transcript; opening for the assistant shows the conversation.
+        self.window.reading.set_tab(hud.TAB_BRIEFING if autoplay else hud.TAB_JARVIS)
         self.window.show_reading_view()
         if not was_visible:
             self.window.place()
@@ -5106,8 +6144,11 @@ class AppController(QObject):
             # Take the first successful fetch now (freshness is still judged for the
             # note) instead of waiting out a polling interval after an error. A fetch
             # whose first attempt is still running (no briefing, no error) is left to
-            # finish: that attempt hands over whatever it finds.
-            self._start_fetch(None)
+            # finish: that attempt hands over whatever it finds. A run waited for in the
+            # background (a scheduled run the owner opened Jarvis into) keeps being
+            # waited for: its poll starts over at once instead of giving way.
+            keep = self._fetch_poll_run if self._background_run is not None and self._polling else None
+            self._start_fetch(keep)
 
     def _show_loading(self) -> None:
         reading = self.window.reading
@@ -5115,7 +6156,7 @@ class AppController(QObject):
         reading.set_header(f"{self.expected_run} briefing" if self.expected_run else "Briefing", "")
         reading.show_message(LOADING_TEXT)
         reading.set_status("Loading")
-        reading.set_speech("")
+        self._set_briefing_speech("")
         reading.set_controls("Play", False, False)
         reading.set_read_everything(False, "Available once the briefing has loaded")
         self._update_reading_controls()
@@ -5140,7 +6181,7 @@ class AppController(QObject):
             reading.set_header("Briefing", "")
         reading.show_message(message, is_error=True)
         reading.set_status("Couldn't load the briefing", is_error=True)
-        reading.set_speech("")
+        self._set_briefing_speech("")
         reading.set_controls("Retry", can_retry, False)
         reading.set_read_everything(False, "Available once the briefing has loaded")
         self._update_reading_controls()
@@ -5152,8 +6193,9 @@ class AppController(QObject):
         self._start_loading(restart=True)
 
     def _begin_reading(self) -> None:
-        """Freeze the briefing, render it and start playback."""
-        self._stop_fetch()
+        """Freeze the briefing, render it and start playback (unless it waits for Play)."""
+        if not self._keeps_polling():
+            self._stop_fetch()
         self._recheck_timer.stop()
         script = self._build_script(include_note=True)
         if self._prefetch is None or script.sections != self._prefetch.sections:
@@ -5169,6 +6211,12 @@ class AppController(QObject):
         self._render_reading()
         if self._autoplay:
             self._start_playback(script.section_indices(False))
+        self._after_briefing_shown()
+
+    def _keeps_polling(self) -> bool:
+        """A background wait for a run (--run X --open, a scheduled launch while the assistant screen
+        shows) goes on after a briefing is shown, until that run's fresh one is in."""
+        return self._background_run is not None and self._polling and not self._cached_is_fresh()
 
     def _render_reading(self) -> None:
         script, reading = self._script, self.window.reading
@@ -5177,7 +6225,7 @@ class AppController(QObject):
         stale = f"May be stale - {script.updated_label}" if script.stale else ""
         reading.set_header(title, script.updated_label, stale)
         reading.set_script(script, self._include_ignored)
-        reading.set_speech("")
+        self._set_briefing_speech("")
         self._update_read_everything()
         self._update_reading_controls()
 
@@ -5187,6 +6235,9 @@ class AppController(QObject):
         for index in self._failed:
             self.player.mark_failed(index)
         self._has_played = False
+        key = self._shown_key()
+        if key is not None:
+            self._mark_viewed(key)   # playing it is viewing it
         self.player.start(queue_)
         # Sections whose audio already failed while the prompt showed are skipped
         # at once; say so instead of silently jumping ahead (or straight to "Finished").
@@ -5215,7 +6266,9 @@ class AppController(QObject):
             return
         reading = self.window.reading
         if self._script is None:
-            if self._ask_busy:
+            if self._utterance:   # Jarvis is saying something himself
+                reading.set_activity_state(hud.ORB_SPEAKING, False)
+            elif self._ask_busy:
                 reading.set_activity_state(hud.ORB_WORKING, False, ASK_PLANNING_LABEL)
             else:
                 reading.set_activity_state(hud.ORB_STANDBY if self._reading_error else hud.ORB_WORKING, False)
@@ -5225,7 +6278,9 @@ class AppController(QObject):
         state = self.player.state
         reading.set_controls(_PRIMARY_LABELS.get(state, "Play"), True, state in (PLAYING, PAUSED, WAITING))
         reading.set_status(self._reading_status(state), is_error=bool(self._note))
-        if self._ask_busy and state != PLAYING:   # Ask is planning (Play during it speaks again)
+        if self._utterance:   # Jarvis is saying something himself (LIVE stays the briefing's)
+            reading.set_activity_state(hud.ORB_SPEAKING, state == PLAYING)
+        elif self._ask_busy and state != PLAYING:   # Ask is planning (Play during it speaks again)
             reading.set_activity_state(hud.ORB_WORKING, False, ASK_PLANNING_LABEL)
         else:
             reading.set_activity_state(_ORB_FOR_PLAYER.get(state, hud.ORB_STANDBY), state == PLAYING)
@@ -5257,7 +6312,11 @@ class AppController(QObject):
         self._update_reading_controls()
 
     def _pending_note(self) -> str:
-        return f"Your {self._pending_run} briefing is due" if self._pending_run else ""
+        if not self._pending_run:
+            return ""
+        if self._pending_briefing is not None:
+            return f"Your {self._pending_run} briefing is ready - it shows when this reading ends"
+        return f"Your {self._pending_run} briefing is due"
 
     # ---- sections, steps and telemetry ---------------------------------------------------
 
@@ -5354,8 +6413,15 @@ class AppController(QObject):
             now, hour24 = self._now(), self.config.display.hour24
             # In a narrow column the longer 12-hour values give way to "Mon 11:31 PM" / "Oct 2" (24-hour ones fit).
             short = "" if hour24 else _short_updated(briefing.header, now, compact=True)
-            reading.updated_bar.set_value(_short_updated(briefing.header, now, hour24), 1.0,
-                                          hud.AMBER if stale else hud.TEXT_DIM, short=short)
+            value = _short_updated(briefing.header, now, hour24)
+            if self._new_key() is not None:
+                # NEW: "new . today 10:04 AM" in amber ("new . 10:04 AM" when that does not fit).
+                updated = briefing.header.updated_at
+                clock = _clock_text(updated, now, hour24) if updated is not None else ""
+                reading.updated_bar.set_value(f"new {DOT} {value}", 1.0, hud.AMBER,
+                                              short=f"new {DOT} {clock}" if clock else "", value_color=hud.AMBER)
+            else:
+                reading.updated_bar.set_value(value, 1.0, hud.AMBER if stale else hud.TEXT_DIM, short=short)
 
     # ---- player signals --------------------------------------------------------------------
 
@@ -5364,7 +6430,7 @@ class AppController(QObject):
             return
         reading = self.window.reading
         reading.highlight(section_index, item_index)
-        reading.set_speech(self._item_text(section_index, item_index))
+        self._set_briefing_speech(self._item_text(section_index, item_index))
 
     def _item_text(self, section_index: int, item_index: int) -> str:
         script = self._script
@@ -5395,6 +6461,7 @@ class AppController(QObject):
         self._update_reading_controls()
 
     def _on_player_state(self, state: str) -> None:
+        self._pump_voice()
         if state == FINISHED and self.state == STATE_READING and self._last_section is not None:
             self._last_section = None
             self._activity(hud.TAG_DONE, "Finished the briefing",
@@ -5404,9 +6471,13 @@ class AppController(QObject):
             QTimer.singleShot(0, self._offer_pending_run)   # outside the player's signal
 
     def _offer_pending_run(self) -> None:
-        """The reading ended while a newer run was due: ask about that one now."""
+        """The reading ended while a newer run was due: show that briefing now (or, in the classic
+        mode, ask about it)."""
         if self.state == STATE_READING and self._pending_run and self.player.state == FINISHED:
-            self._back_to_prompt(self._pending_run, take_focus=False)
+            if self._pending_briefing is not None:
+                self._replace_briefing(self._pending_briefing)
+            else:
+                self._back_to_prompt(self._pending_run, take_focus=False)
 
     def _on_player_error(self, message: str) -> None:
         logger.warning("Playback problem: %s", message)
@@ -5423,17 +6494,22 @@ class AppController(QObject):
             if self._fetch_error is not None or not self.fetching:
                 self.retry()
             return
+        self._owner_playback()   # the owner's Play / Pause wins over anything Jarvis is saying
         if self.player.state in (FINISHED, IDLE):
             logger.info("Replay" if self._has_played or self.player.state == FINISHED else "Play")
             self._autoplay = True
+            self._show_briefing_tab()
             self._settle_reading()   # a reading screen opened for Ask: the briefing is heard now
             self._start_playback(self._script.section_indices(self._include_ignored))
         else:
+            if self.player.state == PAUSED:
+                self._show_briefing_tab()   # Play again from the JARVIS tab shows the transcript
             self.player.toggle()
 
     def skip_section(self) -> None:
         if self.state == STATE_READING and self._script is not None:
             logger.info("Skip section")
+            self._owner_playback()
             self._skip_pending = self.player.state in (PLAYING, PAUSED, WAITING)
             self.player.skip_section()
 
@@ -5446,7 +6522,12 @@ class AppController(QObject):
         if index not in order:
             return
         logger.info("Jump to section %d", index)
+        self._owner_playback()
         self._skip_pending = self._current_section() is not None
+        self._show_briefing_tab()
+        key = self._shown_key()
+        if key is not None:
+            self._mark_viewed(key)
         self.player.start([i for i in order if i >= index])
 
     def read_everything(self) -> None:
@@ -5456,7 +6537,12 @@ class AppController(QObject):
                 or self._include_ignored):
             return
         logger.info("Read everything")
+        self._owner_playback()
         self._include_ignored = True
+        self._show_briefing_tab()
+        key = self._shown_key()
+        if key is not None:
+            self._mark_viewed(key)
         self.window.reading.set_script(script, include_ignored=True)
         self._update_read_everything()
         self._activity(hud.TAG_RUN, "Reading everything", "skipped sections included")
@@ -5476,10 +6562,10 @@ class AppController(QObject):
 
     def done(self) -> None:
         logger.info("Done")
-        if self.state == STATE_READING and self._pending_run:
+        if self.state == STATE_READING and self._pending_run and self._pending_briefing is None:
             self._back_to_prompt(self._pending_run, take_focus=True)   # it said "briefing is due"
             return
-        self._record_done()
+        self._record_done()   # a newer briefing waiting to be shown is NEW at the next open
         self.quit()
 
     # ---- run state (catch-up) -------------------------------------------------------------------
@@ -5515,33 +6601,130 @@ class AppController(QObject):
     # ---- activation and shutdown ----------------------------------------------------------------
 
     def handle_activation(self, message: dict) -> None:
-        """A second launch asked this instance to come forward."""
+        """A second launch asked this instance to come forward.
+
+        ``read`` -> READ; ``open`` or ``ask`` -> OPEN; an older launcher's ``now`` alone -> READ
+        (its old meaning); a ``run`` alone -> SCHEDULED; nothing -> OPEN, or in the classic mode
+        while the prompt is up or snoozed the prompt comes forward as before."""
         message = message if isinstance(message, dict) else {}
         run = _normalize_run(message.get("run"))
         now = message.get("now") is True
         ask = message.get("ask") is True
-        logger.info("Another launch asked this instance to come forward (run=%s, now=%s, ask=%s, state=%s)",
-                    run or "-", now, ask, self.state)
+        if message.get("read") is True:
+            kind: str | None = LAUNCH_READ
+        elif message.get("open") is True or ask:
+            kind = LAUNCH_OPEN
+        elif now:
+            kind = LAUNCH_READ
+        elif run:
+            kind = LAUNCH_SCHEDULED
+        else:
+            kind = None
+        logger.info("Another launch asked this instance to come forward (run=%s, now=%s, ask=%s, launch=%s, "
+                    "state=%s)", run or "-", now, ask, kind or "-", self.state)
         if self.state in (STATE_QUITTING, STATE_IDLE):
             return
+        if self.state in (STATE_PROMPT, STATE_SNOOZED) and kind != LAUNCH_OPEN:
+            # The classic prompt answers as it always did; READ (--read, or an older now:true) reads.
+            self._legacy_activation(run, kind == LAUNCH_READ)
+            return
+        if kind is None:
+            kind = LAUNCH_OPEN
+        if self.state == STATE_WAITING:
+            self._activation_while_waiting(kind, run)
+        elif kind == LAUNCH_SCHEDULED:
+            self._scheduled_activation(run)
+        elif kind == LAUNCH_READ:
+            self._read_activation()
+        else:
+            self._open_activation(ask=ask)
+
+    def _legacy_activation(self, run: str | None, read: bool) -> None:
+        """The classic prompt (or its snooze) and a SCHEDULED or READ message: as before (``read``:
+        Read now, as the older ``now: true`` always did)."""
         if self.window.isVisible() and self.window.isMinimized():
             self.window.showNormal()   # laid out again as a normal window; brought forward below
-        if ask:
-            self.open_ask()
-            return
-        if self.state == STATE_READING:
-            self._activation_while_reading(run)
-            return
         if run and run != self.expected_run:
             self._switch_expected_run(run)
         elif run:
-            self._restart_run(poll=not now)
+            self._restart_run(poll=not read)
         # show_prompt / enter_reading look at Notion again when the copy we have is stale.
-        if now:
+        if read:
             self.enter_reading()
             force_foreground(self.window)
         else:
             self.show_prompt(take_focus=True)
+
+    def _activation_while_waiting(self, kind: str, run: str | None) -> None:
+        """WAITING (hidden, polling): OPEN shows the screen with a greeting, READ plays what is
+        there now, SCHEDULED for another run waits for that one instead."""
+        if kind == LAUNCH_SCHEDULED:
+            if run and run != self.expected_run:
+                self._switch_expected_run(run)
+            else:
+                logger.info("Already waiting for the %s briefing", self.expected_run or "next")
+            return
+        if kind == LAUNCH_READ:
+            self._stop_fetch()
+            self.enter_reading()
+            force_foreground(self.window)
+            return
+        self._open_from_waiting(greet=True)
+
+    def _open_activation(self, *, ask: bool) -> None:
+        """OPEN into a running app: the legacy prompt gives way to the assistant screen; a hidden or
+        minimized window is restored with a greeting (unless one was said in the last 2 minutes);
+        a visible one just comes forward, its tab unchanged. A NEW briefing is announced once."""
+        window = self.window
+        restored = self.state != STATE_READING or not window.isVisible() or window.isMinimized()
+        if window.isVisible() and window.isMinimized():
+            window.showNormal()   # laid out again as a normal window; brought forward below
+        if self.state != STATE_READING:
+            self._stop_prompt_timers()
+        self.open_assistant(ask_requested=ask)
+        if restored and self.state == STATE_READING:
+            self.window.reading.set_tab(hud.TAB_JARVIS)
+        greet = restored and time.monotonic() - self._last_greeting_at >= _GREETING_REPEAT_S
+        if greet:
+            self._begin_greeting(wait=False)
+        else:
+            self._announce()
+
+    def _read_activation(self) -> None:
+        """READ into the assistant screen: in front on the BRIEFING tab, playing when it was not."""
+        if self.window.isVisible() and self.window.isMinimized():
+            self.window.showNormal()
+        force_foreground(self.window)
+        self._show_briefing_tab()
+        if self._script is not None and self.player.state in (IDLE, FINISHED):
+            self.toggle_play()
+
+    def _scheduled_activation(self, run: str | None) -> None:
+        """SCHEDULED for ``run`` while the assistant screen is open. Classic mode: as before (a
+        newer run's prompt). Else nothing comes forward: when the shown briefing is not already that
+        run's fresh one, it is waited for in the background and replaces the shown one (5.3)."""
+        if self._classic():
+            if self.window.isVisible() and self.window.isMinimized():
+                self.window.showNormal()
+            self._activation_while_reading(run)
+            return
+        if not run:
+            return
+        briefing = self._briefing
+        if (self._script is not None and briefing is not None
+                and check_freshness(briefing.header, run, self._now(), run_started=self._run_start_for(run)).fresh):
+            logger.info("The %s briefing is already shown", run)
+            return
+        if self.startup_error:
+            return
+        if run != self.expected_run:
+            self._switch_expected_run(run)
+        else:
+            self._run_started = self._run_start_for(run)
+            if not self._polling:
+                self._start_fetch(run)
+        self._background_run = run
+        logger.info("Waiting for the %s briefing in the background", run)
 
     def _switch_expected_run(self, run: str) -> None:
         logger.info("Now waiting for the %s briefing", run)
@@ -5608,29 +6791,7 @@ class AppController(QObject):
     def _back_to_prompt(self, run: str, *, take_focus: bool) -> None:
         """Close the reading screen (nothing is playing) and ask about ``run``'s briefing."""
         logger.info("Leaving the reading screen to ask about the %s briefing", run)
-        self._cancel_countdown("the reading screen closed")   # never send from a hidden card
-        if self._dialog is not None:
-            self._dialog.reject()
-        if self._account_dialog is not None:
-            self._account_dialog.reject()   # unanswered: asked again at the next Send or Approve
-        self._recheck_timer.stop()
-        self._note_timer.stop()
-        self._replace_player()
-        self._script = None
-        self._include_ignored = False
-        self._has_played = False
-        self._pending_run = None
-        self._note = ""
-        self._sections_started = set()
-        self._last_section = None
-        self._read_slot = None
-        self._reading_settled = False
-        self._autoplay = True
-        reading = self.window.reading
-        reading.show_message("")   # the next briefing renders from the top
-        reading.set_sections([], "")
-        reading.set_steps([])
-        reading.set_speech("")
+        self._reset_reading("the reading screen closed")   # never send from a hidden card
         self.state = STATE_PROMPT
         self._switch_expected_run(run)
         self.show_prompt(take_focus=take_focus)
@@ -5657,7 +6818,8 @@ class AppController(QObject):
         self.state = STATE_QUITTING
         self._closing.set()
         for timer in (self._ignore_timer, self._tick_timer, self._snooze_timer, self._note_timer,
-                      self._recheck_timer, self._agenda_timer, self._countdown_timer):
+                      self._recheck_timer, self._agenda_timer, self._countdown_timer, self._greeting_timer,
+                      self._held_timer):
             timer.stop()
         countdown, self._countdown = self._countdown, None
         if countdown is not None:
@@ -5670,8 +6832,12 @@ class AppController(QObject):
         if self._account_dialog is not None:
             self._account_dialog.reject()
         # Hide first: the media player has (rarely) hung in stop(), and the window
-        # should be gone either way.
+        # should be gone either way. Jarvis's voice has a media player of its own.
         self.window.hide()
+        try:
+            self.voice.shutdown()   # stops speaking and drops what was queued
+        except Exception as exc:  # noqa: BLE001 - shutting down goes on
+            logger.debug("Jarvis's voice did not shut down cleanly (%s)", type(exc).__name__)
         self.player.stop()
         self._stop_fetch()
         if self._tts is not None:
@@ -5687,7 +6853,7 @@ class AppController(QObject):
             self.tray.hide()
         if self._audio_dir is not None:
             shutil.rmtree(self._audio_dir, ignore_errors=True)
-            busy = self._tts if self._tts is not None and self._tts.is_alive() else None
-            if busy is not None or self._audio_dir.exists():
-                _remove_audio_dir_after(busy, self._audio_dir)
+            busy = [worker for worker in (self._tts, self._say_worker) if worker is not None and worker.is_alive()]
+            if busy or self._audio_dir.exists():
+                _remove_audio_dir_after(busy, self._audio_dir)   # both speech workers ("tts-say" too)
         QCoreApplication.quit()

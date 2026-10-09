@@ -122,6 +122,62 @@ class FakePlayer(QObject):
         pass
 
 
+class RecordingVoice:
+    """speech.Voice that records what Jarvis was asked to say and never synthesizes or plays anything.
+
+    ``said`` holds (kind, text, key) for every accepted ``say``; ``speaks`` is what ``say`` answers
+    (False: as if speech were off or failed). Muted, nothing is recorded and ``say`` answers False.
+    """
+
+    def __init__(self, *, speaks: bool = True) -> None:
+        self.speaks = speaks
+        self.said: list[tuple[str, str, str]] = []
+        self.cancelled: list[str] = []
+        self.stops = 0
+        self.pumps = 0
+        self.owner_actions = 0
+        self.shut_down = False
+        self._muted = False
+
+    @property
+    def speaking(self) -> bool:
+        return False
+
+    @property
+    def muted(self) -> bool:
+        return self._muted
+
+    def say(self, kind: str, text: str, *, key: str = "") -> bool:
+        if self._muted:
+            return False
+        self.said.append((kind, text, key))
+        return self.speaks
+
+    def cancel_key(self, key: str) -> None:
+        self.cancelled.append(key)
+
+    def stop(self) -> None:
+        self.stops += 1
+
+    def pump(self) -> None:
+        self.pumps += 1
+
+    def owner_acted(self) -> None:
+        self.owner_actions += 1
+
+    def set_muted(self, muted: bool) -> None:
+        self._muted = bool(muted)
+
+    def shutdown(self) -> None:
+        self.shut_down = True
+
+    def kinds(self) -> list[str]:
+        return [kind for kind, _text, _key in self.said]
+
+    def texts(self) -> list[str]:
+        return [text for _kind, text, _key in self.said]
+
+
 def event(event_id: str, title: str, start: datetime, *, organizer_self: bool = True) -> EventDetails:
     return EventDetails(event_id=event_id, calendar_id="primary", title=title, start=start,
                         end=start + timedelta(hours=1), all_day_start=None, all_day_end=None, status="confirmed",
@@ -325,12 +381,13 @@ class AppHarness:
         self.factory = AskFactory(root, *runs, auth=auth, readers=readers, clock=engine_clock,
                                   max_per_hour=max_per_hour)
         self.store = ActionStore(root / "actions.json")
+        self.voice = RecordingVoice()   # Jarvis's own voice: recorded, never synthesized
         with mock.patch.object(ui, "BriefingPlayer", FakePlayer):
             self.c = ui.AppController(self.config, self.client, expected_run="AM", now_mode=False, volume=0.0,
                                       now_func=lambda: NOW, calendar_factory=lambda _cfg: self.calendars,
                                       sender_factory=lambda _cfg: self.senders, action_store=self.store,
                                       click_clock=_StepClock(), ask_factory=self.factory, ask_mode=ask_mode,
-                                      run_state=run_state)
+                                      run_state=run_state, voice_factory=lambda _controller: self.voice)
         self.c._start_fetch = lambda *args, **kwargs: None   # never Notion: the page is handed over below
         test.addCleanup(self.close)
 

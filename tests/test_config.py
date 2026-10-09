@@ -33,6 +33,7 @@ from briefing_reader.config import (
     ActionsConfig,
     AgendaConfig,
     AskConfig,
+    AssistantConfig,
     CalendarConfig,
     Config,
     DisplayConfig,
@@ -364,6 +365,7 @@ class ConfigFileTests(ProjectTestCase):
             "agenda": {f.name for f in dataclasses.fields(AgendaConfig)},
             "display": {f.name for f in dataclasses.fields(DisplayConfig)},
             "ask": {f.name for f in dataclasses.fields(AskConfig)},
+            "assistant": {f.name for f in dataclasses.fields(AssistantConfig)},
         }
         self.assertEqual(set(doc), set(expected_keys))
         for table, keys in expected_keys.items():
@@ -401,6 +403,11 @@ class ConfigFileTests(ProjectTestCase):
         ask_part = raw.decode("ascii").split("[ask]", 1)[1]
         self.assertNotIn("@", ask_part)
         self.assertNotIn("claude.exe", ask_part.casefold())
+        # Jarvis talks by default; the classic prompt is opt-in.
+        self.assertEqual(cfg.assistant, AssistantConfig())
+        self.assertTrue(cfg.assistant.speak)
+        self.assertFalse(cfg.assistant.scheduled_prompt)
+        self.assertIn("opens Jarvis", raw.decode("ascii").split("[hotkey]", 1)[1].split("[agenda]", 1)[0])
 
     def test_client_secret_is_gitignored(self) -> None:
         lines = (config.PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
@@ -873,6 +880,54 @@ class AskConfigTests(ProjectTestCase):
         self.write_config('[ask]\nenabled = true\napi_key = "sk-not-used"\n')
         cfg = self.load_warning("ask.api_key")
         self.assertTrue(cfg.ask.enabled)
+
+
+class AssistantConfigTests(ProjectTestCase):
+    def test_defaults_without_the_table(self) -> None:
+        self.write_config("")
+        cfg = self.load_quietly()
+        self.assertEqual(cfg.assistant, AssistantConfig(
+            speak=True, address="sir", greet=True, greeting_context=True, speak_replies=True,
+            speak_results=True, scheduled_prompt=False))
+
+    def test_every_key(self) -> None:
+        self.write_config('[assistant]\nspeak = false\naddress = "boss"\ngreet = false\n'
+                          'greeting_context = false\nspeak_replies = false\nspeak_results = false\n'
+                          'scheduled_prompt = true\n')
+        self.assertEqual(self.load_quietly().assistant, AssistantConfig(
+            speak=False, address="boss", greet=False, greeting_context=False, speak_replies=False,
+            speak_results=False, scheduled_prompt=True))
+
+    def test_addresses(self) -> None:
+        for value, expected in (('"sir"', "sir"), ('" Ma\'am "', "Ma'am"), ('"Mr. Smith"', "Mr. Smith"),
+                                ('"Dr Jones-Smith"', "Dr Jones-Smith"), ('""', ""), ('"  "', "")):
+            with self.subTest(value=value):
+                self.write_config(f"[assistant]\naddress = {value}\n")
+                self.assertEqual(self.load_quietly().assistant.address, expected)
+
+    def test_bad_addresses_fall_back_to_sir(self) -> None:
+        for value in ('"sir!"', '"-sir"', '"a.b@example.com"', '"twenty-one characters"', '"1st"',
+                      '"<b>sir</b>"', '"sir\\u0000"', "3", "true", '["sir"]'):
+            with self.subTest(value=value):
+                self.write_config(f"[assistant]\naddress = {value}\n")
+                self.assertEqual(self.load_warning("assistant.address").assistant.address, "sir")
+
+    def test_bad_flags_fall_back(self) -> None:
+        self.write_config('[assistant]\nspeak = "no"\ngreet = 0\nscheduled_prompt = "yes"\n')
+        cfg = self.load_warning("assistant.speak", "assistant.greet", "assistant.scheduled_prompt")
+        self.assertEqual(cfg.assistant, AssistantConfig())
+
+    def test_unknown_key_and_wrong_table_are_reported(self) -> None:
+        self.write_config('[assistant]\nspeak = false\nvoice = "Ryan"\n')
+        cfg = self.load_warning("assistant.voice")
+        self.assertFalse(cfg.assistant.speak)
+        self.write_config('assistant = "on"\n')
+        self.assertEqual(self.load_warning("[assistant]").assistant, AssistantConfig())
+
+    def test_address_pattern(self) -> None:
+        self.assertTrue(config.ADDRESS_RE.fullmatch("sir"))
+        self.assertTrue(config.ADDRESS_RE.fullmatch("A" * 20))
+        self.assertIsNone(config.ADDRESS_RE.fullmatch("A" * 21))
 
 
 # --------------------------------------------------------------------------
