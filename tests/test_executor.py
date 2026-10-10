@@ -861,6 +861,18 @@ class CheckEventTests(unittest.TestCase):
                 self.assertFalse(check.allowed)
                 self.assertIn(words, check.reason)
 
+    def test_googles_times_are_kept_for_the_live_picture(self) -> None:
+        check = check_event(example("Move"), details(), TODAY)
+        self.assertEqual((check.start, check.end), (datetime(2026, 10, 8, 12, 0, tzinfo=EDT),
+                                                    datetime(2026, 10, 8, 13, 0, tzinfo=EDT)))
+        self.assertEqual((check.all_day_start, check.all_day_end), (None, None))
+        all_day = check_event(example("Cancel"), details(all_day=True), TODAY)
+        self.assertEqual((all_day.start, all_day.all_day_start, all_day.all_day_end),
+                         (None, date(2026, 10, 8), date(2026, 10, 8)))
+        failed = check_failure(example("Move"), EventGone("gone", status=404))
+        self.assertEqual((failed.start, failed.end, failed.all_day_start), (None, None, None))
+        self.assertNotIn("2026-10-08", repr(failed))
+
     def test_long_title_is_shortened_on_the_line_only(self) -> None:
         long_title = "Quarterly planning review with the whole department and guests from the lab"
         check = check_event(example("Move", title=long_title), details(title=long_title), TODAY)
@@ -1843,6 +1855,39 @@ class LiveRunTests(MailTestCase):
         shown = self.step(task, live.ACTION_PAYLOAD)
         self.assertEqual((shown.status, shown.status_text), (live.STATUS_WARN, "CHECK"))
         self.assertEqual(shown.notes[0].text, "Not what the countdown showed: Message changed")
+
+    def test_a_mail_payload_carries_the_email_drawn_as_it_goes_out(self) -> None:
+        from briefing_reader import pictures
+
+        view = gmail.MailView("me@example.edu", "ana@example.edu", "cy@example.edu", "Re: Lunch", "<abc@example.com>",
+                              "<abc@example.com>", "18c0ffee00000001", "Hi Ana,\nThursday works.\n")
+        payload = executor.mail_payload(view, "work")
+        picture = payload.picture
+        self.assertEqual((picture.kind, picture.mail.account, picture.mail.body),
+                         (pictures.KIND_OUTGOING, "work", "Hi Ana,\nThursday works.\n"))
+        self.assertEqual((picture.mail.head.sender, picture.mail.head.to, picture.mail.head.cc),
+                         ("me@example.edu", "ana@example.edu", "cy@example.edu"))
+        self.assertEqual(executor.mail_payload(view).picture.mail.account, "")
+        # A Reply's preview has it, and what was sent replaces it with the message actually built.
+        action = example("Reply", cc="cy@example.edu")
+        run = self.mail_executor()
+        preview = run.preview(action)
+        self.assertEqual((preview.picture.kind, preview.picture.mail.account), (pictures.KIND_OUTGOING, "work"))
+        self.assertEqual(preview.picture.mail.head.subject, "Re: Thursday noon meeting")
+        task = self.task()
+        payload_step = task.step(live.ACTION_PAYLOAD, preview.title, status_text="PREVIEW")
+        payload_step.show(preview)
+        self.assertIs(self.step(task, live.ACTION_PAYLOAD).picture, preview.picture)
+        with self.assertLogs(EXECUTOR_LOGGER, level="INFO"), \
+                self.assertLogs("briefing_reader.recipients", level="INFO"):
+            self.run_mail(action, executor=run, live=task)
+        shown = self.step(task, live.ACTION_PAYLOAD)
+        (mail,) = self.senders["work"].sent
+        self.assertEqual(shown.picture.mail.head.to, gmail.mail_view(mail).to)
+        self.assertEqual(pictures.stamp(shown.picture, shown.status, shown.status_text), ("SENT", pictures.TONE_DONE))
+        # An Email's preview too; a calendar preview has none (the app draws its day).
+        self.assertEqual(run.preview(email_line()).picture.kind, pictures.KIND_OUTGOING)
+        self.assertIsNone(run.preview(example("Move")).picture)
 
     def test_calendar_kinds(self) -> None:
         cases = {"RSVP": ("Google Calendar: answer the invitation", "events.patch (your attendee entry only)",

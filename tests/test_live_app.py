@@ -11,15 +11,20 @@ from __future__ import annotations
 
 import dataclasses
 import time
+import types
 import unittest
+from datetime import date, datetime
 from unittest import mock
 
 from PySide6.QtWidgets import QApplication
 
-from briefing_reader import live, ui
+from briefing_reader import live, pictures, ui
 from briefing_reader.actions import SOURCE_ASK, STATUS_FAILED, parse_action_line
+from briefing_reader.gcal import CalendarEvent
 from briefing_reader.notion_client import NotionError, PollResult
-from tests.ui_fakes import EMAIL_LINE, GUEST, MOVE_LINE, AppHarness, fonts, settle, wait_for
+from tests import ui_fakes
+from tests.ui_fakes import (COMMAND, EMAIL_LINE, GUEST, MOVE_LINE, NOW, PDT, AppHarness, fonts, plan, settle,
+                            wait_for)
 
 _app: QApplication | None = None
 TRUSTED = "ana@example.edu"                 # a trusted-domain recipient: no Edit needed before Send
@@ -221,6 +226,202 @@ class ActionTaskTests(LiveAppCase):
         self.assertEqual(step_of(task, live.ACTION_COUNTDOWN).status, live.STATUS_CANCELLED)
         self.assertEqual(self.c.live.snapshot(), ())     # closed: nothing is kept
         self.assertFalse(self.c.live.enabled)
+
+
+CANCEL_LINE = ("Cancel: acct=work | event=jts0001aa | cal=primary | notify=all | title=Jarvis test sync | "
+               "at=2026-10-05 14:00-15:00 | link= | body=")
+PERSONAL_MOVE_LINE = ("Move: acct=personal | event=stg0001aa | cal=primary | when=2026-10-06 16:00-17:00 | "
+                      "notify=all | title=Study group | at=2026-10-05 10:00-11:00 | link= | body=")
+
+
+def at(day: int, hour: int, minute: int = 0) -> datetime:
+    return datetime(2026, 10, day, hour, minute, tzinfo=PDT)
+
+
+def roles(picture) -> list[tuple[str, int, int, int, str]]:
+    """(role, column, start minute, end minute, title) of a day picture's blocks."""
+    return [(block.role, block.column, block.start_min, block.end_min, block.title) for block in picture.day.blocks]
+
+
+def stamp_of(step: live.StepView) -> tuple[str, str]:
+    return pictures.stamp(step.picture, step.status, step.status_text)
+
+
+class PictureTests(LiveAppCase):
+    """The pictures of an approved card's payload: the email exactly as it goes out, a calendar
+    change on its day (other events only from what Jarvis already read), their stamps."""
+
+    def test_an_email_is_drawn_as_it_goes_out_and_stamped_sent(self) -> None:
+        mail = self.add_mail()
+        self.approve(mail)
+        payload = step_of(self.task(), live.ACTION_PAYLOAD)
+        picture = payload.picture
+        self.assertEqual((picture.kind, picture.state, picture.mail.account), (pictures.KIND_OUTGOING,
+                                                                              live.PICTURE_READY, "work"))
+        head = picture.mail.head
+        self.assertEqual((head.sender, head.to, head.cc, head.subject, head.when),
+                         ("me@example.edu", TRUSTED, "", "Jarvis test sync moved", ""))
+        self.assertEqual(picture.mail.body, "Hi Sam,\nMoved to Friday at 2 PM.\nThanks\n")
+        self.assertEqual(picture.mail.reply_line, "New email (a new thread)")
+        self.assertEqual(stamp_of(payload), ("WILL BE SENT", pictures.TONE_WILL))
+        self.assertTrue(payload.open_hint)
+        self.run_out()
+        self.wait_result(mail)
+        payload = step_of(self.task(), live.ACTION_PAYLOAD)
+        self.assertEqual(payload.picture.mail.head.to, TRUSTED)
+        self.assertEqual(stamp_of(payload), ("SENT", pictures.TONE_DONE))
+        self.assertGreater(self.c.live.picture_bytes(), 0)
+
+    def test_undo_stamps_the_email_undone(self) -> None:
+        mail = self.add_mail()
+        self.approve(mail)
+        self.c._countdown.started -= 5
+        self.c.undo_action(mail.id)
+        settle()
+        payload = step_of(self.task(), live.ACTION_PAYLOAD)
+        self.assertEqual(stamp_of(payload), ("UNDONE - NOT SENT", pictures.TONE_UNDONE))
+        self.assertEqual(self.app.senders["work"].sent, [])
+
+    def check(self, line: str):
+        card = ask_card(line)
+        self.c._take_ask_cards([card])
+        self.assertTrue(wait_for(lambda: card.id in self.c._checks, 5))
+        settle()
+        return card
+
+    def test_a_work_move_nobody_read_shows_only_its_own_blocks(self) -> None:
+        move = self.check(MOVE_LINE)
+        self.approve(move)
+        payload = step_of(self.task(), live.ACTION_PAYLOAD)
+        picture = payload.picture
+        self.assertEqual((picture.kind, picture.caption, picture.day.change),
+                         (pictures.KIND_DAY, pictures.CAPTION_DAY, pictures.CHANGE_MOVE))
+        self.assertEqual(picture.day.days, ("Mon Oct 5", "Fri Oct 9"))   # Google's time, then the new one
+        self.assertEqual(roles(picture), [(pictures.ROLE_BEFORE, 0, 14 * 60, 15 * 60, "Jarvis test sync"),
+                                          (pictures.ROLE_AFTER, 1, 14 * 60, 15 * 60, "Jarvis test sync")])
+        self.assertFalse(picture.day.others_shown)
+        self.assertEqual(picture.day.others_note,
+                         "Only this event is drawn: Jarvis has not read the rest of Mon Oct 5 or Fri Oct 9")
+        self.assertEqual(picture.day.account, "work")
+        self.assertEqual(stamp_of(payload), ("WILL MOVE", pictures.TONE_WILL))
+        self.run_out()
+        self.wait_result(move)
+        payload = step_of(self.task(), live.ACTION_PAYLOAD)
+        self.assertIs(payload.picture.kind, pictures.KIND_DAY)   # the drawn change stays, its stamp follows
+        self.assertEqual(stamp_of(payload), ("MOVED", pictures.TONE_DONE))
+
+    def test_a_move_draws_the_agendas_events_of_both_its_days(self) -> None:
+        personal = self.app.calendars["personal"]
+        personal.events["stg0001aa"] = ui_fakes.event("stg0001aa", "Study group", at(5, 10))
+        personal.list_events = lambda *_args, **_kwargs: [
+            CalendarEvent("Study group", start=at(5, 10), end=at(5, 11)),   # the event itself: only its ghost
+            CalendarEvent("Office hours", start=at(5, 13), end=at(5, 14)),
+            CalendarEvent("Lab session", start=at(6, 15), end=at(6, 16))]
+        self.assertTrue(wait_for(lambda: self.c._agenda_job is None, 5))
+        self.c._request_agenda()
+        self.assertTrue(wait_for(lambda: (self.c._known_days.lookup("personal", date(2026, 10, 6)) or _NONE).events, 5))
+        calls = list(personal.calls)
+        move = self.check(PERSONAL_MOVE_LINE)
+        self.approve(move)
+        payload = step_of(self.task(), live.ACTION_PAYLOAD)
+        picture = payload.picture
+        self.assertEqual((picture.day.change, picture.day.account, picture.day.days),
+                         (pictures.CHANGE_MOVE, "personal", ("Mon Oct 5", "Tue Oct 6")))
+        self.assertEqual(roles(picture), [(pictures.ROLE_OTHER, 0, 13 * 60, 14 * 60, "Office hours"),
+                                          (pictures.ROLE_OTHER, 1, 15 * 60, 16 * 60, "Lab session"),
+                                          (pictures.ROLE_BEFORE, 0, 10 * 60, 11 * 60, "Study group"),
+                                          (pictures.ROLE_AFTER, 1, 16 * 60, 17 * 60, "Study group")])
+        self.assertTrue(picture.day.others_shown)
+        self.assertEqual(picture.day.others_note, "Other events as Jarvis read them at 1:52 PM (today's agenda)")
+        self.assertEqual(stamp_of(payload), ("WILL MOVE", pictures.TONE_WILL))
+        # Drawing it listed nothing more from Google (only the card's own event check read it).
+        self.assertEqual([call for call in personal.calls[len(calls):] if call[0] in ("list", "briefs")], [])
+
+    def test_a_cancel_is_struck_through_and_undo_says_not_changed(self) -> None:
+        cancel = self.check(CANCEL_LINE)
+        self.approve(cancel)
+        payload = step_of(self.task(), live.ACTION_PAYLOAD)
+        self.assertEqual(roles(payload.picture), [(pictures.ROLE_CANCEL, 0, 14 * 60, 15 * 60, "Jarvis test sync")])
+        self.assertEqual(stamp_of(payload), ("WILL BE CANCELLED", pictures.TONE_WILL))
+        self.c._countdown.started -= 5
+        self.c.undo_action(cancel.id)
+        settle()
+        self.assertEqual(stamp_of(step_of(self.task(), live.ACTION_PAYLOAD)),
+                         ("UNDONE - NOT CHANGED", pictures.TONE_UNDONE))
+
+    def test_a_calendar_add_draws_the_agendas_events_of_its_day(self) -> None:
+        self.app.calendars["personal"].list_events = lambda *_args, **_kwargs: [
+            CalendarEvent("Lab session", start=at(6, 15), end=at(6, 16)),
+            CalendarEvent("Club general meeting", start=at(6, 17), end=at(6, 18)),   # already there: not drawn twice
+            CalendarEvent("Dinner", start=at(7, 19), end=at(7, 20))]
+        self.assertTrue(wait_for(lambda: self.c._agenda_job is None, 5))
+        self.c._request_agenda()
+        day = date(2026, 10, 6)
+        self.assertTrue(wait_for(lambda: (self.c._known_days.lookup("personal", day) or _NONE).events, 5))
+        calendar = next(action for action in self.c._actions if action.kind == "calendar")
+        self.approve(calendar)
+        payload = step_of(self.task(), live.ACTION_PAYLOAD)
+        picture = payload.picture
+        self.assertEqual((picture.day.change, picture.day.days), (pictures.CHANGE_ADD, ("Tue Oct 6",)))
+        self.assertEqual(roles(picture), [(pictures.ROLE_OTHER, 0, 15 * 60, 16 * 60, "Lab session"),
+                                          (pictures.ROLE_NEW, 0, 17 * 60, 18 * 60, "Club general meeting")])
+        self.assertTrue(picture.day.others_shown)
+        self.assertEqual(picture.day.others_note, "Other events as Jarvis read them at 1:52 PM (today's agenda)")
+        self.assertEqual(stamp_of(payload), ("WILL BE ADDED", pictures.TONE_WILL))
+        self.run_out()
+        self.wait_result(calendar)
+        self.assertEqual(stamp_of(step_of(self.task(), live.ACTION_PAYLOAD)), ("ADDED", pictures.TONE_DONE))
+        self.assertNotIn("Lab session", repr(self.c._known_days) + repr(self.c._known_days.lookup("personal", day)))
+
+
+_NONE = types.SimpleNamespace(events=())
+
+
+class AskReadPictureTests(unittest.TestCase):
+    """A Move an Ask proposed: the day picture draws the other events that Ask's calendar read
+    found (never a new Google call for it)."""
+
+    def test_the_asks_calendar_read_gives_the_other_events(self) -> None:
+        app = AppHarness(self, runs=(plan(lines=(MOVE_LINE,)),))
+        app.calendars["work"].events.update({
+            "std0001aa": ui_fakes.event("std0001aa", "Standup", at(5, 9)),
+            "dsg0001aa": ui_fakes.event("dsg0001aa", "Design review", at(9, 10)),
+            "far0001aa": ui_fakes.event("far0001aa", "Offsite", at(12, 10))})
+        app.reading(autoplay=False)
+        c = app.c
+        c.ask.start()
+        self.assertTrue(wait_for(lambda: c.ask.ready is not None, 5))
+        c.window.reading.command_bar.set_text(COMMAND)
+        c.window.reading.command_bar.input.returnPressed.emit()
+        self.assertTrue(wait_for(lambda: not c.ask.busy, 10))
+        settle()
+        move = next(action for action in c._actions if action.source == SOURCE_ASK and action.kind == "move")
+        self.assertTrue(wait_for(lambda: move.id in c._checks, 5))
+        settle()
+        lists = [call for call in app.calendars["work"].calls if call[0] in ("list", "briefs")]
+        c.window.reading.action_card(move.id).approve_button.click()
+        settle()
+        (task,) = [view for view in c.live.snapshot() if view.kind == live.TASK_ACTION]
+        picture = step_of(task, live.ACTION_PAYLOAD).picture
+        self.assertEqual(roles(picture), [(pictures.ROLE_OTHER, 0, 9 * 60, 10 * 60, "Standup"),
+                                          (pictures.ROLE_OTHER, 1, 10 * 60, 11 * 60, "Design review"),
+                                          (pictures.ROLE_BEFORE, 0, 14 * 60, 15 * 60, "Jarvis test sync"),
+                                          (pictures.ROLE_AFTER, 1, 14 * 60, 15 * 60, "Jarvis test sync")])
+        self.assertEqual(picture.day.others_note, "Other events as Jarvis read them at 1:52 PM (Ask's calendar read)")
+        # Drawing it read nothing more from Google.
+        self.assertEqual([call for call in app.calendars["work"].calls if call[0] in ("list", "briefs")], lists)
+
+
+class PicturesOffTests(LiveAppCase):
+    config_extra = "\n[live]\npictures = false\n"
+
+    def test_no_drawn_picture_and_no_read_kept(self) -> None:
+        self.assertFalse(self.c.live.pictures)
+        mail = self.add_mail()
+        self.approve(mail)
+        self.assertIsNone(step_of(self.task(), live.ACTION_PAYLOAD).picture)
+        self.assertTrue(wait_for(lambda: self.c._agenda_job is None, 5))
+        self.assertIsNone(self.c._known_days.lookup("personal", NOW.date()))
 
 
 class BriefingTaskTests(LiveAppCase):

@@ -80,6 +80,7 @@ from ..live import (
     elapsed_text,
 )
 from ..live import quiet as _quiet
+from ..pictures import CalendarRead, email_picture, week_picture
 from .context import (
     COMMAND_CAP,
     SOURCE_OWNER,
@@ -613,6 +614,9 @@ class AskOutcome:
     stats: tuple[RunStats, ...] = ()
     caps: CapCheck | None = None                 # what is left after this Ask
     research: ResearchReport | None = None       # a web research's answer and sources (shown; never logged)
+    # What this Ask read from the calendars (pictures.CalendarRead: the LIVE day pictures draw the
+    # other events of a day from it; memory only, never logged, never in summary()).
+    calendar_read: Any = field(default=None, repr=False, compare=False)
 
     def summary(self) -> str:
         """For the log: kinds and counts only."""
@@ -642,6 +646,10 @@ class DryRun:
 
 
 class AskPlanner:
+    # The app's snapshot_engine.PageSnapshotter ([live] page_snapshots; None: no page pictures). It is
+    # only handed the pages a research run read, for the LIVE view; nothing goes back to a run.
+    page_snapshots: Any = None
+
     def __init__(self, config: Config, engine: ClaudeEngine, sources: Sources, *, usage: UsageLog | None = None,
                  clock: Callable[[], datetime] | None = None, monotonic: Callable[[], float] = time.monotonic,
                  research: ResearchEngine | None = None) -> None:
@@ -659,6 +667,7 @@ class AskPlanner:
         self.research = research or ResearchEngine(research_config, engine)
         self._monotonic = monotonic
         self._busy = threading.Lock()
+        self._reads = threading.local()   # .calendar: this thread's last calendar read (plan() hands it on)
 
     # ---- context ------------------------------------------------------------------------------
 
@@ -686,7 +695,9 @@ class AskPlanner:
                 events[account.alias] = tuple(briefs)
             _calendar_account(calendar, account.alias, status, briefs if status == "yes" else None)
             updated.append(replace(account, calendar=status))
-        _calendar_done(calendar, events, updated, self._hour24(), cancelled=cancel is not None and cancel.is_set())
+        _calendar_done(calendar, events, updated, self._hour24(), cancelled=cancel is not None and cancel.is_set(),
+                       start=start, end=end, now=now)
+        self._reads.calendar = CalendarRead(start, end, tuple(events.items()), now)
         notes: list[str] = []
         threads: list[MailThread] = []
         readable = {account.alias for account in updated if account.read_mail == "yes"}
@@ -729,7 +740,7 @@ class AskPlanner:
             logger.warning("Ask: reading a %s thread failed unexpectedly (%s)", logged_alias(alias), type(exc).__name__)
             step.done(STATUS_FAILED, summary=f"unexpected error ({type(exc).__name__})")
             return None
-        _thread_read(step, thread)
+        _thread_read(step, thread, self._hour24())
         if thread is not None and threads_shown is not None and step is not NO_STEP:
             threads_shown[(alias, thread.thread_id)] = step
         return thread
@@ -786,6 +797,7 @@ class AskPlanner:
             task.step(ASK_CHECKS, CHECKS_TITLE, status=STATUS_BLOCKED, summary=BUSY_MESSAGE)
             return AskOutcome(False, "busy", BUSY_MESSAGE)
         started = self._monotonic()
+        self._reads.calendar = None
         try:
             outcome = self._plan(" ".join((command or "").split())[:COMMAND_CAP], briefing, page_ids, cancel,
                                  on_stage, task)
@@ -795,7 +807,9 @@ class AskPlanner:
             outcome = AskOutcome(False, "error", "Ask stopped because of an unexpected error; nothing was proposed")
         finally:
             self._busy.release()
-        outcome = replace(outcome, duration_ms=int((self._monotonic() - started) * 1000), caps=self.usage.check())
+        read, self._reads.calendar = getattr(self._reads, "calendar", None), None
+        outcome = replace(outcome, duration_ms=int((self._monotonic() - started) * 1000), caps=self.usage.check(),
+                          calendar_read=read)
         logger.info("Ask: %s", outcome.summary())
         return outcome
 
@@ -1056,23 +1070,34 @@ class AskPlanner:
 
     def _research_run(self, prompt: str, question: str, cancel: threading.Event | None,
                       live: LiveTask = NO_TASK) -> RunResult:
-        """The research run with its LIVE steps; counted (kind "research") only when it starts."""
+        """The research run with its LIVE steps; counted (kind "research") only when it starts.
+        With the LIVE view and ``page_snapshots`` (the app's snapshot_engine.PageSnapshotter), the
+        pages the run read are pictured on their web.fetch steps; the run is told nothing of it."""
         research = self._research_config()
         limits = self.research.limits
         step = research_live.run_step(live, model=research.model, prompt=prompt, limits=limits,
                                       timeout_s=research.timeout_seconds)
-        ready, refused = self.research.preflight()   # a run refused before it starts is not counted
-        if refused is not None:
-            research_live.run_skipped(step, refused.message)
-            return RunResult(failure=refused, started=False)
-        research_live.run_ready(step, self.research, ready)
+        web_steps = research_live.WebSteps(live, limits, snapshots=self.page_snapshots) if step is not NO_STEP \
+            else None
+        try:
+            ready, refused = self.research.preflight()   # a run refused before it starts is not counted
+            if refused is not None:
+                research_live.run_skipped(step, refused.message)
+                return RunResult(failure=refused, started=False)
+            research_live.run_ready(step, self.research, ready)
+            return self._research_started(prompt, question, cancel, live, step, web_steps)
+        finally:
+            if web_steps is not None:
+                web_steps.finished()   # no more page pictures for this run (also when it never started)
+
+    def _research_started(self, prompt: str, question: str, cancel: threading.Event | None, live: LiveTask,
+                          step: LiveStep, web_steps: research_live.WebSteps | None) -> RunResult:
         run = self.usage.start(kind=KIND_RESEARCH)
         result: RunResult | None = None
         try:
             extra: dict[str, Any] = {}
-            if step is not NO_STEP:   # only with the LIVE view
-                extra = {"progress": research_live.run_progress(step, research_live.WebSteps(live, limits)),
-                         "capture": True}
+            if web_steps is not None:   # only with the LIVE view
+                extra = {"progress": research_live.run_progress(step, web_steps), "capture": True}
             result = self.research.run(prompt, question=question, cancel=cancel, **extra)
             if result.limit is not None and result.limit.overage:
                 self._pause_for_overage(result.limit.resets_at)
@@ -1308,13 +1333,16 @@ def _calendar_account(step: LiveStep, alias: str, status: str, briefs: Sequence[
 
 @_quiet()
 def _calendar_done(step: LiveStep, events: Mapping[str, Sequence[EventBrief]], accounts: Sequence[AccountInfo],
-                   hour24: bool, *, cancelled: bool) -> None:
+                   hour24: bool, *, cancelled: bool, start: datetime | None = None, end: datetime | None = None,
+                   now: datetime | None = None) -> None:
     if step is NO_STEP:
         return
     listed = sorted(((brief, alias) for alias, briefs in events.items() for brief in briefs),
                     key=lambda pair: (_event_key(pair[0]), pair[1]))
     for brief, alias in listed:
         step.item(event_item(alias, brief, hour24))
+    if not cancelled and start is not None and end is not None and now is not None:
+        _week_picture(step, events, start, end, now, hour24)
     summary = f"{_count_words(len(listed), 'event')} read"
     if cancelled:
         step.done(STATUS_CANCELLED, summary=f"{summary}; Cancel clicked")
@@ -1322,6 +1350,13 @@ def _calendar_done(step: LiveStep, events: Mapping[str, Sequence[EventBrief]], a
         step.done(STATUS_WARN, summary=f"{summary}; a calendar answered with an error")
     else:
         step.done(STATUS_OK, summary=summary)
+
+
+@_quiet()
+def _week_picture(step: LiveStep, events: Mapping[str, Sequence[EventBrief]], start: datetime, end: datetime,
+                  now: datetime, hour24: bool) -> None:
+    """The LIVE picture of the calendar read: its 7 days from today (drawn from what was read)."""
+    step.picture(week_picture(events, start, end, now=now, hour24=hour24))
 
 
 @_quiet()
@@ -1349,7 +1384,13 @@ def _person_text(person: MailPerson) -> str:
 
 
 @_quiet()
-def _thread_read(step: LiveStep, thread: MailThread | None) -> None:
+def _thread_picture(step: LiveStep, thread: MailThread, hour24: bool) -> None:
+    """The LIVE picture of a thread read: its newest message drawn as an email, the older ones as lines."""
+    step.picture(email_picture(thread, hour24=hour24))
+
+
+@_quiet()
+def _thread_read(step: LiveStep, thread: MailThread | None, hour24: bool = False) -> None:
     if step is NO_STEP:
         return
     if thread is None:
@@ -1373,6 +1414,7 @@ def _thread_read(step: LiveStep, thread: MailThread | None) -> None:
     step.field("Subject", thread.subject or "(no subject)")
     step.field("People", shown or "none shown")
     step.field("Messages", messages)
+    _thread_picture(step, thread, hour24)
     step.done(STATUS_OK, summary=f"{_count_words(count, 'message')} read")
 
 

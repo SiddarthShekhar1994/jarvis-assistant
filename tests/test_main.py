@@ -550,6 +550,95 @@ class ExitWatchdogTests(unittest.TestCase):
         self.assertGreater(entry.SHUTDOWN_GRACE_S, 15.0)
 
 
+class RunAppTests(unittest.TestCase):
+    """_run_app sets the web engine's Qt attributes before it creates the QApplication."""
+
+    def test_prepare_application_comes_before_the_qapplication(self) -> None:
+        import PySide6.QtCore as qt_core
+        import PySide6.QtWidgets as qt_widgets
+
+        from briefing_reader import hud, snapshot_engine, ui
+
+        order: list[str] = []
+        app = mock.MagicMock(name="app")
+        app_class = mock.MagicMock(name="QApplication")
+        app_class.instance.side_effect = lambda: order.append("instance")
+        app_class.side_effect = lambda argv: order.append("QApplication") or app
+        with mock.patch.object(snapshot_engine, "prepare_application", side_effect=lambda: order.append("prepare")), \
+                mock.patch.object(qt_widgets, "QApplication", app_class), \
+                mock.patch.object(qt_core, "qInstallMessageHandler"), \
+                mock.patch.object(entry, "_set_app_user_model_id"), \
+                mock.patch.object(entry, "_run_controller", return_value=0) as controller, \
+                mock.patch.object(hud, "load_fonts"), \
+                mock.patch.object(ui, "apply_dark_theme"), \
+                mock.patch.object(ui, "app_icon", return_value=None):
+            rc = entry._run_app(argparse.Namespace(), SimpleNamespace(project_root=PROJECT_ROOT), "test", None)
+        self.assertEqual(rc, 0)
+        self.assertEqual(order, ["prepare", "instance", "QApplication"])
+        controller.assert_called_once()
+        self.assertIs(controller.call_args.args[4], app)
+
+    def test_prepare_application_never_raises_and_waits_for_no_app(self) -> None:
+        from briefing_reader import snapshot_engine
+
+        with mock.patch.object(snapshot_engine, "QCoreApplication") as core:
+            core.instance.return_value = None
+            core.setAttribute.side_effect = RuntimeError("boom")
+            snapshot_engine.prepare_application()
+            core.instance.side_effect = RuntimeError("boom")
+            snapshot_engine.prepare_application()
+        with mock.patch.object(snapshot_engine, "QCoreApplication") as core:
+            core.instance.return_value = object()   # too late: Qt would only warn
+            snapshot_engine.prepare_application()
+            core.setAttribute.assert_not_called()
+        with mock.patch.object(snapshot_engine, "QCoreApplication") as core:
+            core.instance.return_value = None
+            snapshot_engine.prepare_application()
+            attributes = [call.args[0] for call in core.setAttribute.call_args_list]
+        from PySide6.QtCore import Qt
+
+        self.assertEqual(attributes, [Qt.ApplicationAttribute.AA_ShareOpenGLContexts,
+                                      Qt.ApplicationAttribute.AA_DisableShaderDiskCache])
+
+
+class QtMessageTests(unittest.TestCase):
+    """activation.forward_qt_message: a web page's messages never reach the log with their text."""
+
+    MESSAGE = "Uncaught page-marker-41 at https://www.example.org/private?id=7"
+
+    def test_web_page_messages_are_logged_as_their_category_only(self) -> None:
+        from PySide6.QtCore import QtMsgType
+
+        from briefing_reader import activation
+
+        for category in ("js", "qt.webenginecontext", "qt.webengine.compositor"):
+            for mode in (QtMsgType.QtDebugMsg, QtMsgType.QtWarningMsg, QtMsgType.QtCriticalMsg):
+                with self.subTest(category=category, mode=mode):
+                    with self.assertLogs("qt", level="DEBUG") as logs:
+                        activation.forward_qt_message(mode, SimpleNamespace(category=category), self.MESSAGE)
+                    self.assertEqual([record.levelno for record in logs.records], [logging.DEBUG])
+                    self.assertIn(f"[{category}] a web page message (not logged)", logs.output[0])
+                    self.assertNotIn("page-marker-41", logs.output[0])
+                    self.assertNotIn("example.org", logs.output[0])
+
+    def test_other_qt_messages_are_still_logged(self) -> None:
+        from PySide6.QtCore import QtMsgType
+
+        from briefing_reader import activation
+
+        with self.assertLogs("qt", level="WARNING") as logs:
+            activation.forward_qt_message(QtMsgType.QtWarningMsg, SimpleNamespace(category="qt.qpa.fonts"),
+                                          "a font is missing")
+            activation.forward_qt_message(QtMsgType.QtWarningMsg, SimpleNamespace(category="default"),
+                                          "Release of profile requested")
+        self.assertIn("[qt.qpa.fonts] a font is missing", logs.output[0])
+        self.assertIn("Release of profile requested", logs.output[1])
+        for category in ("javascript", "qt.web", "jsx"):
+            with self.subTest(category=category), self.assertLogs("qt", level="WARNING") as logs:
+                activation.forward_qt_message(QtMsgType.QtWarningMsg, SimpleNamespace(category=category), "kept")
+            self.assertIn("kept", logs.output[0])
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.CRITICAL)
     unittest.main()

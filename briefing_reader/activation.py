@@ -186,12 +186,20 @@ QT_LEVELS = {
 }
 _FFMPEG_CHATTER_RE = re.compile(r"^\[\w+ @ (?:0x)?[0-9a-fA-F]+\]|ffmpeg", re.IGNORECASE)
 _qt_logger = logging.getLogger("qt")
+# A web page's console ("js") and the web engine's own messages ("qt.webengine...") may carry a
+# page's text or addresses: only the category is logged (page snapshots, snapshot_engine.py).
+_PAGE_CATEGORIES = ("js",)
+_PAGE_CATEGORY_PREFIX = "qt.webengine"
 
 
 def forward_qt_message(mode: QtMsgType, context: Any, message: str) -> None:
-    """Qt message handler: route Qt's own warnings into the log file."""
+    """Qt message handler: route Qt's own warnings into the log file (a web page's messages as
+    their category only, at DEBUG: the text is never logged)."""
     try:
         category = str(getattr(context, "category", "") or "")
+        if category in _PAGE_CATEGORIES or category.startswith(_PAGE_CATEGORY_PREFIX):
+            _qt_logger.debug("[%s] a web page message (not logged)", category)
+            return
         text = str(message or "")
         if category.startswith("qt.multimedia.ffmpeg") or _FFMPEG_CHATTER_RE.search(text):
             level = logging.DEBUG

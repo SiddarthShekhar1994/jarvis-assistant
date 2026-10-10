@@ -8,7 +8,8 @@ widget paints itself with QPainter; nothing here knows about briefings,
 Notion or Google, so ``ui.py`` composes the views from these parts. The
 imports from the package are the Qt-free clock formatter
 (``text_prep.clock_parts`` / ``format_time``), so every screen writes times
-the same way, and the LIVE view's Qt-free event types and words (``live``).
+the same way, the LIVE view's Qt-free event types and words (``live``) and its
+pictures as plain data (``pictures``).
 
 Public API
 ==========
@@ -206,7 +207,28 @@ Widgets
         column at most ``LIVE_CONTENT_MAX_PX`` wide; its timer ticks every
         250 ms during a countdown, every second while a step runs, never while
         hidden, minimized or idle; Tab walks the rows in the order they are
-        shown.
+        shown. A step with a picture shows it first in its details (a
+        thumbnail button: Enter, Space or a click opens it larger);
+        ``open_picture(step_id)`` shows a READY picture in the viewer,
+        ``picture_viewer()`` (None until one was opened); during a countdown a
+        short view shows the payload picture's changed part.
+    LIVE pictures (pictures.py's data, drawn in the HUD theme at the size
+        shown): ``picture_height(picture, width, stamp=, max_height=)``,
+        ``paint_picture(painter, rect, picture, stamp=, max_height=)``,
+        ``picture_pixmap(picture, width, dpr=, stamp=, max_height=)`` (a picture
+        taller than ``max_height`` is cut with a fade and "Enter: see all"),
+        ``picture_focus(...)`` (where a calendar change's changed blocks are),
+        ``week_label`` / ``week_labels`` (the week strip's day labels, one form
+        for all), ``picture_state_text(picture)``; the caps
+        ``LIVE_PICTURE_MAX_W``, ``LIVE_PICTURE_MAIL_MAX_PX``,
+        ``LIVE_PICTURE_DAY_MAX_PX``, ``LIVE_PICTURE_WEEK_MAX_PX``,
+        ``LIVE_PICTURE_PAGE_MAX_PX``, ``LIVE_PICTURE_PENDING_PX``.
+        ``PictureViewer(parent)``: a picture larger inside Jarvis (non-modal;
+        ``show_picture(step_id, picture, stamp, title)``, ``refresh``,
+        ``step_id()``, ``picture()``, ``closed(step_id)``; Esc / Enter / Space /
+        Ctrl+W close it; at most ``PICTURE_VIEWER_SCREEN`` of its screen, an
+        email or calendar picture at most ``PICTURE_VIEWER_MODEL_W`` wide, a page
+        at most ``PICTURE_VIEWER_PAGE_W``); it keeps nothing once closed.
     ``LiveStatus``: the LIVE page's tag in the strip (``set_state(LIVE_IDLE |
         LIVE_WORKING | LIVE_COUNTDOWN, text=None, since=, deadline=)``,
         ``text()``: "IDLE", "WORKING 0:12", "SENDING IN 7 S"); it blinks only
@@ -239,6 +261,7 @@ Notes for integration:
 
 from __future__ import annotations
 
+import dataclasses
 import html
 import logging
 import math
@@ -316,6 +339,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import live as live_events
+from . import pictures as live_pictures
 from .text_prep import clock_parts, format_time
 
 logger = logging.getLogger(__name__)
@@ -7448,6 +7472,20 @@ class _LiveFonts:
         self.link_underline = mono_font(11, 400, 0.04)
         self.link_underline.setUnderline(True)
         self.text = mono_font(11)
+        # The pictures (email, calendar change, week strip): drawn at the size they are shown.
+        self.pic_tag = mono_font(9, 700, 0.06)
+        self.pic_label = mono_font(10, 400, 0.08)
+        self.pic_value = body_font(12)
+        self.pic_subject = body_font(13, 600)
+        self.pic_body = mono_font(11)
+        self.pic_small = mono_font(10)
+        self.pic_tiny = mono_font(9)
+        self.pic_head = display_font(13, 600)
+        self.pic_headline = body_font(13, 500)
+        self.pic_block = body_font(11, 500)
+        self.pic_block_struck = body_font(11, 500)
+        self.pic_block_struck.setStrikeOut(True)
+        self.pic_sender = body_font(11, 500)
 
     @classmethod
     def get(cls) -> _LiveFonts:
@@ -8159,13 +8197,1178 @@ class _LiveBlock(QWidget):
         return widgets
 
 
-class _LiveDetails(QWidget):
-    """A step's details, made on its first open: the fields, the items, the notes ("+1.2 s  ..."),
-    the text blocks. Only what changed is redone (a block's text is set once per revision)."""
+# --------------------------------------------------------------------------
+# LIVE pictures (pictures.py's data), drawn by Jarvis in the HUD theme at the size they are shown:
+# plain text only, no email HTML, nothing loads, nothing inside reacts
+# --------------------------------------------------------------------------
 
-    def __init__(self, on_link: Callable[[str], None]) -> None:
+LIVE_PICTURE_MAX_W = 640          # a thumbnail is never wider
+LIVE_PICTURE_MAIL_MAX_PX = 300    # an email picture taller than this is cut with a fade ("Enter: see all")
+LIVE_PICTURE_DAY_MAX_PX = 440     # a calendar change is drawn to fit (its hours closer together)
+LIVE_PICTURE_WEEK_MAX_PX = 320
+LIVE_PICTURE_PAGE_MAX_PX = 400    # a page picture is scaled down to fit
+LIVE_PICTURE_PENDING_PX = 120
+PICTURE_VIEWER_SCREEN = 0.9       # the viewer is at most this much of its screen
+PICTURE_VIEWER_MODEL_W = 720      # an email / calendar picture is drawn at most this wide in the viewer
+PICTURE_VIEWER_PAGE_W = 960       # a page picture at its own width, at most this
+PICTURE_SEE_ALL = "Enter: see all"
+PICTURE_TAG = "PICTURE"
+PICTURE_HINT = "Enter: larger"
+PICTURE_TONE_COLORS = {
+    live_pictures.TONE_WILL: AMBER, live_pictures.TONE_DOING: ACCENT, live_pictures.TONE_DONE: GREEN,
+    live_pictures.TONE_FAILED: RED, live_pictures.TONE_UNDONE: TEXT_DIM, live_pictures.TONE_CHECK: AMBER,
+}
+_PICTURE_MAX = {
+    live_pictures.KIND_EMAIL: LIVE_PICTURE_MAIL_MAX_PX, live_pictures.KIND_OUTGOING: LIVE_PICTURE_MAIL_MAX_PX,
+    live_pictures.KIND_DAY: LIVE_PICTURE_DAY_MAX_PX, live_pictures.KIND_WEEK: LIVE_PICTURE_WEEK_MAX_PX,
+    live_pictures.KIND_PAGE: LIVE_PICTURE_PAGE_MAX_PX,
+}
+_RSVP_CHIP_COLORS = {"YES": GREEN, "NO": RED, "MAYBE": AMBER}
+_PIC_PAD = 12
+_PIC_FADE = 24
+_PIC_LABEL_W = 64
+_PIC_WIDE = 300            # header labels beside their values from this width (else above them)
+_PIC_HOUR_PX = 28.0        # a day picture's hour at its natural size ...
+_PIC_HOUR_MIN_PX = 8.0     # ... and at its most squeezed (a thumbnail; hour labels then every 4 h)
+_PIC_BLOCK_MIN_PX = 14.0   # a timed block's least height (30 minutes at the natural hour size)
+_PIC_STRIP_ROWS = 2        # a day thumbnail's all-day / "no time" rows per day; more fold into "+N more"
+_PIC_STRIP_TAGS = ("ALL DAY", "NO TIME")
+_WEEK_HOUR_PX = 12.0
+_NO_STAMP = ("", "")
+
+
+def _pic_draw(painter: QPainter | None, lines: _TextLines, x: float, y: float, color: str | QColor) -> None:
+    if painter is not None:
+        painter.setPen(QColor(color))
+        lines.draw(painter, QPointF(x, y))
+
+
+def _pic_rule(painter: QPainter | None, x: float, y: float, width: float) -> None:
+    if painter is not None:
+        painter.setPen(QPen(rgba(ACCENT, 0.18), 1))
+        painter.drawLine(QPointF(x, y + 0.5), QPointF(x + width, y + 0.5))
+
+
+def _pic_paragraphs(painter: QPainter | None, text: str, font_name: str, x: float, y: float, width: float,
+                    color: str | QColor, stop: float | None) -> float:
+    """``text`` with its line breaks kept, wrapped at ``width``; drawing stops past ``stop``. The y
+    after it."""
+    spacing = QFontMetricsF(getattr(_LiveFonts.get(), font_name)).lineSpacing()
+    for paragraph in text.split("\n"):
+        if stop is not None and y > stop:
+            break
+        if not paragraph.strip():
+            y += spacing
+            continue
+        lines = _TextLines(paragraph, font_name, width)
+        _pic_draw(painter, lines, x, y, color)
+        y += lines.height
+    return y
+
+
+def _pic_stamp(painter: QPainter | None, stamp: tuple[str, str], x: float, y: float, width: float,
+               left_room: float) -> float:
+    """The stamp pill at the right of a top bar (under it when the bar has no room): the bar's height."""
+    words, tone = stamp
+    if not words:
+        return 18.0
+    pill_w = _text_advance(_LiveFonts.get().word, words) + 14
+    if left_room + 8 + pill_w <= width:
+        rect, bar = QRectF(x + width - pill_w, y, pill_w, 18), 18.0
+    else:
+        rect, bar = QRectF(x, y + 22, min(pill_w, width), 18), 40.0
+    if painter is not None:
+        _paint_pill(painter, rect, words, _LiveFonts.get().word, PICTURE_TONE_COLORS.get(tone, AMBER), filled=False)
+    return bar
+
+
+def _pic_chip(painter: QPainter | None, text: str, x: float, y: float, width: float, color: str) -> float:
+    fonts = _LiveFonts.get()
+    chip_w = min(width, _text_advance(fonts.pic_tag, text) + 10)
+    if painter is not None:
+        _paint_pill(painter, QRectF(x, y + 1, chip_w, 16), text, fonts.pic_tag, color, filled=True)
+    return chip_w
+
+
+def _paint_mail(painter: QPainter | None, rect: QRectF, picture: Any, stamp: tuple[str, str],
+                limit: float | None = None) -> float:
+    """An email as a mail client shows it: the account (and the stamp of an outgoing one), From /
+    To / Cc / Date / Subject, the reply line, the text with its line breaks, the earlier messages as
+    short lines. Measures only without a painter; stops past ``limit`` (its height then exceeds it)."""
+    mail = picture.mail
+    fonts = _LiveFonts.get()
+    left, width, top = rect.left() + _PIC_PAD, max(40.0, rect.width() - 2 * _PIC_PAD), rect.top()
+    stop = None if limit is None else top + limit
+    y = top + 10
+    chip = (f"FROM {mail.account}" if mail.outgoing else (mail.account or "EMAIL")).upper()
+    chip_w = _pic_chip(painter, chip, left, y, width, ACCENT if mail.outgoing else TEXT_MUTED)
+    y += _pic_stamp(painter, stamp, left, y, width, chip_w) + 6
+    if not mail.outgoing:
+        caption = _TextLines(LIVE_UNTRUSTED_TEXT, "pic_small", width, max_lines=2)
+        _pic_draw(painter, caption, left, y, AMBER_META)
+        y += caption.height + 6
+    head = mail.head
+    # (label, value, font, most lines): To and Cc are never cut - every recipient shows (an outgoing
+    # email names at most 5, an incoming line is at most HEAD_CAP with its "+N more" count kept).
+    rows = [("FROM", head.sender, "pic_value", 4), ("TO", head.to or "(nobody)", "pic_value", 0)]
+    if head.cc:
+        rows.append(("CC", head.cc, "pic_value", 0))
+    if head.when:
+        rows.append(("DATE", head.when, "pic_value", 4))
+    rows.append(("SUBJECT", head.subject, "pic_subject", 4))
+    beside = width >= _PIC_WIDE
+    label_ascent = QFontMetricsF(fonts.pic_label).ascent()
+    for label, value, font_name, most in rows:
+        if beside:
+            label_lines = _TextLines(label, "pic_label", _PIC_LABEL_W, 1)
+            value_lines = _TextLines(value, font_name, width - _PIC_LABEL_W - 8, max_lines=most)
+            shift = max(0.0, QFontMetricsF(getattr(fonts, font_name)).ascent() - label_ascent)
+            _pic_draw(painter, label_lines, left, y + shift, TEXT_DIM)
+            _pic_draw(painter, value_lines, left + _PIC_LABEL_W + 8, y, TEXT_BRIGHT)
+            y += max(label_lines.height + shift, value_lines.height) + 3
+        else:
+            label_lines = _TextLines(label, "pic_label", width, 1)
+            _pic_draw(painter, label_lines, left, y, TEXT_DIM)
+            y += label_lines.height
+            value_lines = _TextLines(value, font_name, width, max_lines=most)
+            _pic_draw(painter, value_lines, left, y, TEXT_BRIGHT)
+            y += value_lines.height + 4
+    if mail.reply_line:
+        reply = _TextLines(mail.reply_line, "pic_small", width, max_lines=2)
+        _pic_draw(painter, reply, left, y + 2, TEXT_SUB)
+        y += reply.height + 2
+    y += 7
+    _pic_rule(painter, left, y, width)
+    y += 9
+    if not mail.body_kept:
+        lines = _TextLines(LIVE_NOT_KEPT_TEXT.format(chars=f"{mail.body_chars:,}"), "pic_small", width)
+        _pic_draw(painter, lines, left, y, TEXT_DIM)
+        y += lines.height
+    elif not mail.body.strip():
+        lines = _TextLines("(no text)", "pic_small", width)
+        _pic_draw(painter, lines, left, y, TEXT_DIM)
+        y += lines.height
+    else:
+        y = _pic_paragraphs(painter, mail.body, "pic_body", left, y, width, TEXT_SOFT, stop)
+        if stop is not None and y > stop:
+            return y - top
+        cut = (LIVE_CUT_TEXT.format(cut=f"{mail.body_cut:,}") if mail.body_cut
+               else "[Jarvis read a shortened text of this email]" if mail.shortened else "")
+        if cut:
+            lines = _TextLines(cut, "pic_small", width)
+            _pic_draw(painter, lines, left, y + 4, TEXT_DIM)
+            y += lines.height + 4
+    if mail.older or mail.older_more:
+        y += 10
+        _pic_rule(painter, left, y, width)
+        y += 8
+        heading = _TextLines("EARLIER IN THIS THREAD", "pic_tag", width, 1)
+        _pic_draw(painter, heading, left, y, TEXT_DIM)
+        y += heading.height + 4
+        for line in mail.older:
+            if stop is not None and y > stop:
+                return y - top
+            who = _TextLines(" - ".join(part for part in (line.sender, line.when) if part), "pic_sender", width, 1)
+            _pic_draw(painter, who, left, y, TEXT_BODY)
+            y += who.height
+            if line.snippet:
+                snippet = _TextLines(line.snippet, "pic_small", width, 1)
+                _pic_draw(painter, snippet, left, y, TEXT_SUB)
+                y += snippet.height
+            y += 5
+        if mail.older_more:
+            more = _TextLines(f"+{mail.older_more:,} earlier not shown", "pic_small", width, 1)
+            _pic_draw(painter, more, left, y, TEXT_DIM)
+            y += more.height
+    return y + 12 - top
+
+
+def _pic_block_colors(role: str) -> tuple[QColor, QColor, str, str]:
+    """(fill, border, title colour, tag) of a day picture's block."""
+    if role == live_pictures.ROLE_BEFORE:
+        return rgba(AMBER, 0.06), rgba(AMBER, 0.7), TEXT_MUTED, "was"
+    if role == live_pictures.ROLE_AFTER:
+        return rgba(ACCENT, 0.28), QColor(ACCENT), TEXT_BRIGHT, "new"
+    if role == live_pictures.ROLE_NEW:
+        return rgba(ACCENT, 0.34), QColor(ACCENT), TEXT_BRIGHT, "new"
+    if role == live_pictures.ROLE_CANCEL:
+        return rgba(RED_LINE, 0.25), QColor(RED_LINE), TEXT_SOFT, "cancel"
+    if role == live_pictures.ROLE_RSVP:
+        return rgba(ACCENT, 0.2), rgba(ACCENT, 0.6), TEXT_BRIGHT, ""
+    return rgba(SLATE, 0.35), rgba(SLATE, 0.6), TEXT_SOFT, ""
+
+
+def _paint_day_block(painter: QPainter, rect: QRectF, block: Any) -> None:
+    fonts = _LiveFonts.get()
+    fill, border, color, tag = _pic_block_colors(block.role)
+    painter.save()
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        path = chamfer_path(rect, min(4.0, rect.height() / 3), CUT_TL | CUT_BR)
+        if block.role == live_pictures.ROLE_NEW:   # a soft glow around the new block
+            painter.fillPath(chamfer_path(rect.adjusted(-3, -3, 3, 3), 5, CUT_TL | CUT_BR), rgba(ACCENT, 0.14))
+        if block.role != live_pictures.ROLE_OTHER:   # the change on solid ground: no other event shows through
+            painter.fillPath(path, PANEL_GROUND)
+        painter.fillPath(path, fill)
+        pen = QPen(border, 1.2 if block.role != live_pictures.ROLE_OTHER else 1)
+        if block.role == live_pictures.ROLE_BEFORE:
+            pen.setStyle(Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(chamfer_path(rect.adjusted(0.5, 0.5, -0.5, -0.5), min(4.0, rect.height() / 3),
+                                      CUT_TL | CUT_BR))
+        if block.role == live_pictures.ROLE_CANCEL:
+            painter.setPen(QPen(rgba(RED_LINE, 0.8), 1.2))
+            painter.drawLine(rect.topLeft() + QPointF(2, 2), rect.bottomRight() - QPointF(2, 2))
+        painter.setClipRect(rect.adjusted(1, 1, -1, -1))
+        inner = rect.adjusted(5, 2, -4, -2)
+        right = inner.right()
+        if block.chip:
+            chip_w = _text_advance(fonts.pic_tag, block.chip) + 10
+            if chip_w < inner.width() - 20:
+                _paint_pill(painter, QRectF(right - chip_w, inner.top() + 1, chip_w, 14), block.chip, fonts.pic_tag,
+                            _RSVP_CHIP_COLORS.get(block.chip, AMBER), filled=True)
+                right -= chip_w + 4
+        elif tag:
+            tag_w = _text_advance(fonts.pic_tiny, tag) + 2
+            if tag_w < inner.width() - 30:
+                painter.setFont(fonts.pic_tiny)
+                painter.setPen(QColor(border))
+                painter.drawText(QRectF(right - tag_w, inner.top(), tag_w, 14),
+                                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, tag)
+                right -= tag_w + 4
+        title_font = "pic_block_struck" if block.role == live_pictures.ROLE_CANCEL else "pic_block"
+        line = QFontMetricsF(fonts.pic_block).lineSpacing()
+        small = QFontMetricsF(fonts.pic_tiny).lineSpacing()
+        room = inner.height()
+        if room < line + small:   # one line: the title, then the time after it
+            title = _TextLines(f"{block.title}  {block.time_text}", title_font, max(8.0, right - inner.left()), 1)
+            _pic_draw(painter, title, inner.left(), inner.top() + max(0.0, (room - line) / 2) - 1, color)
+            return
+        max_lines = max(1, int((room - small) // line))
+        title = _TextLines(block.title, title_font, max(8.0, right - inner.left()), max_lines)
+        _pic_draw(painter, title, inner.left(), inner.top(), color)
+        time_lines = _TextLines(block.time_text, "pic_tiny", inner.width(), 1)
+        _pic_draw(painter, time_lines, inner.left(), inner.top() + title.height,
+                  TEXT_SUB if block.role == live_pictures.ROLE_OTHER else color)
+    finally:
+        painter.restore()
+
+
+_ARROW_GUTTER = 14.0   # a Move's day picture keeps this much room left of its columns for the arrow
+
+
+def _arrow_path(start: QRectF, end: QRectF) -> tuple[QPainterPath, QPointF, QPointF]:
+    """(path, the point before the tip, the tip) of a Move's arrow from ``start`` to ``end``: from
+    the side of the old block that faces the new one into the new one's facing side; blocks one
+    above the other (sharing their left edge) get a hook through the gutter on their left."""
+    if end.left() >= start.right() - 2:        # the new time is to the right (another day, another lane)
+        a, b = QPointF(start.right(), start.center().y()), QPointF(end.left(), end.center().y())
+        reach = max(8.0, min(28.0, abs(b.x() - a.x()) / 2 + 8))
+        c1, c2 = QPointF(a.x() + reach, a.y()), QPointF(b.x() - reach, b.y())
+    elif end.right() <= start.left() + 2:      # to the left
+        a, b = QPointF(start.left(), start.center().y()), QPointF(end.right(), end.center().y())
+        reach = max(8.0, min(28.0, abs(a.x() - b.x()) / 2 + 8))
+        c1, c2 = QPointF(a.x() - reach, a.y()), QPointF(b.x() + reach, b.y())
+    else:                                      # above / below each other: a hook on the left
+        a = QPointF(start.left(), start.center().y())
+        b = QPointF(end.left(), end.center().y())
+        hook = min(start.left(), end.left()) - _ARROW_GUTTER * 1.3
+        c1, c2 = QPointF(hook, a.y()), QPointF(hook, b.y())
+    path = QPainterPath(a)
+    path.cubicTo(c1, c2, b)
+    return path, c2, b
+
+
+def _paint_arrow(painter: QPainter, start: QRectF, end: QRectF) -> None:
+    """The amber arrow of a Move: from where the event is to where it goes (a dark halo under it, so
+    it reads over the grid and the blocks)."""
+    path, before, tip = _arrow_path(start, end)
+    dx, dy = tip.x() - before.x(), tip.y() - before.y()
+    length = math.hypot(dx, dy)
+    if length < 1e-6:
+        return
+    ux, uy = dx / length, dy / length
+    painter.save()
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        halo = QPen(rgba(GROUND, 0.85), 4.0)
+        halo.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(halo)
+        painter.drawPath(path)
+        pen = QPen(QColor(AMBER), 1.6)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.drawPath(path)
+        size = 7.0
+        left = QPointF(tip.x() - ux * size - uy * size * 0.55, tip.y() - uy * size + ux * size * 0.55)
+        right = QPointF(tip.x() - ux * size + uy * size * 0.55, tip.y() - uy * size - ux * size * 0.55)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(AMBER))
+        painter.drawPolygon(QPolygonF([tip, left, right]))
+    finally:
+        painter.restore()
+
+
+def _hour_text(minute: int, hour24: bool) -> str:
+    hour = (minute // 60) % 24
+    if hour24:
+        return f"{hour:02d}:00"
+    return f"{hour % 12 or 12} {'AM' if hour < 12 else 'PM'}"
+
+
+def _fold_strip(group: list[Any], rows: int) -> list[Any]:
+    """A day thumbnail's all-day (or "no time") blocks with at most ``rows`` rows a day: the change
+    always shows; other events beyond the room fold into one "+N more" row."""
+    folded: list[Any] = []
+    for column in sorted({block.column for block in group}):
+        blocks = [block for block in group if block.column == column]
+        changed = [block for block in blocks if block.role != live_pictures.ROLE_OTHER]
+        others = [block for block in blocks if block.role == live_pictures.ROLE_OTHER]
+        room = max(0, rows - len(changed))
+        if len(others) <= room:
+            folded.extend(others + changed)
+            continue
+        kept = others[:max(0, room - 1)]
+        rest = len(others) - len(kept)
+        folded.extend(kept + changed)
+        folded.append(dataclasses.replace(others[0], title=f"+{rest:,} more", time_text="", chip=""))
+    return folded
+
+
+def _paint_day(painter: QPainter | None, rect: QRectF, picture: Any, stamp: tuple[str, str],
+               max_height: float | None = None, marks: list[QRectF] | None = None) -> float:
+    """A calendar change on its day: the headline, the day(s) as columns with their hours, the
+    all-day and "time not known" rows, the blocks (other events, the ghost of where it is, the
+    new time, the struck-through cancel, the answer chip), the Move's arrow, the time now and how
+    many other events were not drawn (whose events these are is the picture's note, shown under a
+    thumbnail and above the viewer's picture). Squeezes its hours (and folds its all-day rows) to
+    fit ``max_height``; measures without a painter. ``marks`` gets the rectangles of the changed
+    blocks."""
+    day = picture.day
+    fonts = _LiveFonts.get()
+    left, width, top = rect.left() + _PIC_PAD, max(60.0, rect.width() - 2 * _PIC_PAD), rect.top()
+    y = top + 10
+    chip_w = _pic_chip(painter, f"{day.account} calendar".upper() if day.account else "CALENDAR", left, y, width,
+                       TEXT_MUTED)
+    y += _pic_stamp(painter, stamp, left, y, width, chip_w) + 6
+    headline = _TextLines(day.headline, "pic_headline", width, max_lines=2)
+    _pic_draw(painter, headline, left, y, TEXT_BRIGHT)
+    y += headline.height + 8
+    axis = max(_text_advance(fonts.pic_small, _hour_text(12 * 60, day.hour24)),
+               _text_advance(fonts.pic_small, _hour_text(10 * 60, day.hour24))) + 8
+    if any(block.all_day or block.timeless for block in day.blocks):   # room for "ALL DAY" / "NO TIME"
+        axis = max(axis, max(_text_advance(fonts.pic_tiny, tag) for tag in _PIC_STRIP_TAGS) + 8)
+    gutter = _ARROW_GUTTER if day.change == live_pictures.CHANGE_MOVE else 0.0
+    grid_left = left + axis + gutter
+    columns = max(1, len(day.days))
+    col_w = (left + width - grid_left) / columns
+    head_h = QFontMetricsF(fonts.pic_head).lineSpacing()
+    if painter is not None:
+        painter.setFont(fonts.pic_head)
+        painter.setPen(QColor(TEXT_BRIGHT))
+        for index, label in enumerate(day.days):
+            cell = QRectF(grid_left + index * col_w, y, col_w, head_h)
+            text = QFontMetricsF(fonts.pic_head).elidedText(label, Qt.TextElideMode.ElideRight, cell.width() - 4)
+            painter.drawText(cell, Qt.AlignmentFlag.AlignCenter, text)
+    y += head_h + 4
+    rects: dict[str, QRectF] = {}
+    strip = 20.0
+    for flag, label in zip(("all_day", "timeless"), _PIC_STRIP_TAGS):
+        group = [block for block in day.blocks if getattr(block, flag)]
+        if not group:
+            continue
+        if max_height is not None:
+            group = _fold_strip(group, _PIC_STRIP_ROWS)
+        rows: dict[int, int] = {}
+        if painter is not None:
+            tag = _TextLines(label, "pic_tiny", axis - 4, 1)
+            _pic_draw(painter, tag, left, y + 4, TEXT_DIM)
+        for block in group:
+            row = rows.get(block.column, 0)
+            rows[block.column] = row + 1
+            cell = QRectF(grid_left + block.column * col_w + 2, y + row * (strip + 2), col_w - 4, strip)
+            if painter is not None:
+                _paint_day_block(painter, cell, block)
+            rects.setdefault(block.role, cell)
+            if marks is not None and block.role != live_pictures.ROLE_OTHER:
+                marks.append(cell)
+        y += max(rows.values()) * (strip + 2) + 4
+    # Whose events these are (day.others_note) is the picture's note: the line under a thumbnail and
+    # the note above it in the viewer - not drawn in the picture a second time.
+    more = (_TextLines(f"+{day.others_more:,} more events that day not drawn", "pic_small", width, 1)
+            if day.others_more else None)
+    footer = 8 + (more.height if more is not None else 0) + 10
+    hours = max(1.0, (day.last_min - day.first_min) / 60)
+    pph = _PIC_HOUR_PX
+    label_h = QFontMetricsF(fonts.pic_small).lineSpacing()
+    if max_height is not None:
+        room = max_height - (y - top) - footer - label_h
+        pph = max(_PIC_HOUR_MIN_PX, min(_PIC_HOUR_PX, room / hours))
+    grid_top = y + label_h / 2
+    grid_h = hours * pph
+
+    def y_of(minute: int) -> float:
+        return grid_top + (minute - day.first_min) / 60 * pph
+
+    # The picture's lanes count a block as at least 30 minutes, its _PIC_BLOCK_MIN_PX at the natural
+    # hour size; squeezed (a thumbnail), that height stands for more: lanes for the scale drawn, so
+    # short neighbours never print over each other (the changed block included).
+    blocks = day.blocks
+    if pph < _PIC_HOUR_PX:
+        blocks = live_pictures.with_lanes(blocks, math.ceil(_PIC_BLOCK_MIN_PX * 60 / pph))
+    timed: list[tuple[Any, QRectF]] = []
+    for block in blocks:
+        if block.all_day or block.timeless:
+            continue
+        lane_w = col_w / max(1, block.lanes)
+        x = grid_left + block.column * col_w + block.lane * lane_w + 2
+        top_y = y_of(block.start_min)
+        cell = QRectF(x, top_y, max(8.0, lane_w - 4), max(_PIC_BLOCK_MIN_PX, y_of(block.end_min) - top_y))
+        timed.append((block, cell))
+        rects.setdefault(block.role, cell)
+        if marks is not None and block.role != live_pictures.ROLE_OTHER:
+            marks.append(cell)
+    if painter is not None:
+        every = 1 if pph >= 18 else 2 if pph >= 10 else 4
+        painter.setFont(fonts.pic_small)
+        for number, minute in enumerate(range(day.first_min, day.last_min + 1, 60)):
+            line_y = y_of(minute)
+            painter.setPen(QPen(rgba(ACCENT, 0.08), 1))
+            painter.drawLine(QPointF(left + axis, line_y + 0.5), QPointF(left + width, line_y + 0.5))
+            if number % every == 0:
+                painter.setPen(QColor(TEXT_TIME))
+                painter.drawText(QRectF(left, line_y - label_h / 2, axis - 6, label_h),
+                                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                                 _hour_text(minute, day.hour24))
+        for index in range(1, columns):
+            x = grid_left + index * col_w
+            painter.setPen(QPen(rgba(ACCENT, 0.16), 1))
+            painter.drawLine(QPointF(x + 0.5, grid_top), QPointF(x + 0.5, grid_top + grid_h))
+        for block, cell in timed:
+            _paint_day_block(painter, cell, block)
+        before, after = rects.get(live_pictures.ROLE_BEFORE), rects.get(live_pictures.ROLE_AFTER)
+        if before is not None and after is not None:
+            _paint_arrow(painter, before, after)
+        if day.now_column >= 0 and day.first_min <= day.now_min <= day.last_min:
+            now_y = y_of(day.now_min)
+            x = grid_left + day.now_column * col_w
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(QPen(QColor(RED_LINE), 1))
+            painter.drawLine(QPointF(x, now_y), QPointF(x + col_w, now_y))
+            painter.setBrush(QColor(RED_LINE))
+            painter.drawEllipse(QPointF(x, now_y), 2.5, 2.5)
+            painter.restore()
+    y = grid_top + grid_h + 8
+    if more is not None:
+        _pic_draw(painter, more, left, y, TEXT_DIM)
+        y += more.height
+    return y + 10 - top
+
+
+def _week_forms(label: str) -> list[str]:
+    """A week column's label in its three forms: "Thu 8", "T 8", "8"."""
+    parts = label.split()
+    return [label, f"{parts[0][:1]} {parts[1]}", parts[1]] if len(parts) == 2 else [label]
+
+
+def week_label(label: str, room: float, metrics: QFontMetricsF) -> str:
+    """A week column's day label that fits ``room`` px: "Thu 8", else "T 8", else "8" (the day of
+    the month always shows), elided only when even that does not fit."""
+    candidates = _week_forms(label)
+    for text in candidates:
+        if metrics.horizontalAdvance(text) <= room:
+            return text
+    return metrics.elidedText(candidates[-1], Qt.TextElideMode.ElideRight, max(1.0, room))
+
+
+def week_labels(labels: Sequence[str], room: float, metrics: QFontMetricsF) -> list[str]:
+    """The week strip's day labels in ONE form for all of them (the first of "Thu 8", "T 8", "8"
+    in which every label fits ``room`` px), so no day loses its letter while its neighbours keep
+    theirs; the last form elided when even that does not fit."""
+    forms = [_week_forms(label) for label in labels]
+    for index in range(3):
+        texts = [found[min(index, len(found) - 1)] for found in forms]
+        if all(metrics.horizontalAdvance(text) <= room for text in texts):
+            return texts
+    return [text if metrics.horizontalAdvance(text) <= room
+            else metrics.elidedText(text, Qt.TextElideMode.ElideRight, max(1.0, room))
+            for text in (found[-1] for found in forms)]
+
+
+def _paint_week(painter: QPainter | None, rect: QRectF, picture: Any, stamp: tuple[str, str],
+                max_height: float | None = None) -> float:
+    """The 7 days of an Ask's calendar read: day labels (today outlined), a faint hour grid, the
+    timed events as blocks, all-day counts, each day's count and (wide enough) its first titles."""
+    week = picture.week
+    fonts = _LiveFonts.get()
+    left, width, top = rect.left() + _PIC_PAD, max(60.0, rect.width() - 2 * _PIC_PAD), rect.top()
+    y = top + 10
+    chip_w = _pic_chip(painter, "WHAT ASK READ", left, y, width, TEXT_MUTED)
+    total = _TextLines(f"{week.total:,} event{'s' if week.total != 1 else ''} in "
+                       f"{', '.join(week.accounts) or 'the calendar'}", "pic_small", max(10.0, width - chip_w - 8), 1)
+    _pic_draw(painter, total, left + chip_w + 8, y + 1, TEXT_DIM)
+    y += 26
+    axis = _text_advance(fonts.pic_tiny, _hour_text(12 * 60, week.hour24)) + 6
+    columns = max(1, len(week.columns))
+    col_w = (width - axis) / columns
+    label_h = QFontMetricsF(fonts.pic_small).lineSpacing()
+    if painter is not None:
+        painter.setFont(fonts.pic_small)
+        metrics = QFontMetricsF(fonts.pic_small)
+        labels = week_labels([column.label for column in week.columns], col_w - 2, metrics)
+        for index, column in enumerate(week.columns):
+            painter.setPen(QColor(ACCENT if column.today else TEXT_SOFT))
+            cell = QRectF(left + axis + index * col_w, y, col_w, label_h)
+            painter.drawText(cell, Qt.AlignmentFlag.AlignCenter, labels[index])
+    y += label_h + 2
+    tiny = QFontMetricsF(fonts.pic_tiny).lineSpacing()
+    if any(column.all_day for column in week.columns):
+        if painter is not None:
+            painter.setFont(fonts.pic_tiny)
+            painter.setPen(QColor(TEXT_SUB))
+            for index, column in enumerate(week.columns):
+                if column.all_day:
+                    painter.drawText(QRectF(left + axis + index * col_w, y, col_w, tiny), Qt.AlignmentFlag.AlignCenter,
+                                     f"{column.all_day} all day")
+        y += tiny + 2
+    titled = col_w >= 84
+    title_rows = max((len(column.titles) for column in week.columns), default=0) if titled else 0
+    footer = 4 + label_h + title_rows * tiny + (tiny + 4 if week.later else 0) + 10
+    hours = max(1.0, (week.last_min - week.first_min) / 60)
+    pph = _WEEK_HOUR_PX if not titled else 16.0
+    if max_height is not None:
+        pph = max(6.0, min(pph, (max_height - (y - top) - footer - 4) / hours))
+    grid_top = y + 4
+    grid_h = hours * pph
+    if painter is not None:
+        painter.setFont(fonts.pic_tiny)
+        every = 2 if pph >= 10 else 4
+        for number, minute in enumerate(range(week.first_min, week.last_min + 1, 60)):
+            line_y = grid_top + (minute - week.first_min) / 60 * pph
+            painter.setPen(QPen(rgba(ACCENT, 0.06), 1))
+            painter.drawLine(QPointF(left + axis, line_y + 0.5), QPointF(left + width, line_y + 0.5))
+            if number % every == 0:
+                painter.setPen(QColor(TEXT_TIME))
+                painter.drawText(QRectF(left, line_y - tiny / 2, axis - 4, tiny),
+                                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                                 _hour_text(minute, week.hour24))
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for index, column in enumerate(week.columns):
+            x = left + axis + index * col_w
+            if column.today:
+                painter.setPen(QPen(rgba(ACCENT, 0.5), 1))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(QRectF(x + 1.5, grid_top - 1.5, col_w - 3, grid_h + 3))
+            for start, end in column.blocks:
+                first = max(start, week.first_min)
+                last = min(end, week.last_min)
+                if last <= first:
+                    continue
+                cell = QRectF(x + 4, grid_top + (first - week.first_min) / 60 * pph, col_w - 8,
+                              max(3.0, (last - first) / 60 * pph))
+                painter.fillRect(cell, rgba(ACCENT, 0.5))
+        painter.restore()
+    y = grid_top + grid_h + 4
+    if painter is not None:
+        painter.setFont(fonts.pic_small)
+        for index, column in enumerate(week.columns):
+            painter.setPen(QColor(TEXT_SOFT if column.count else TEXT_DIM))
+            painter.drawText(QRectF(left + axis + index * col_w, y, col_w, label_h), Qt.AlignmentFlag.AlignCenter,
+                             str(column.count))
+    y += label_h
+    if title_rows:
+        for index, column in enumerate(week.columns):
+            for row, title in enumerate(column.titles):
+                lines = _TextLines(title, "pic_tiny", col_w - 6, 1)
+                _pic_draw(painter, lines, left + axis + index * col_w + 3, y + row * tiny, TEXT_SUB)
+        y += title_rows * tiny
+    if week.later:
+        later = _TextLines(f"+{week.later:,} later in what Ask read", "pic_tiny", width, 1)
+        _pic_draw(painter, later, left, y + 4, TEXT_DIM)
+        y += tiny + 4
+    return y + 10 - top
+
+
+def _page_size(page: Any, width: float, max_height: float | None = None) -> tuple[float, float]:
+    """A page picture's size at most ``width`` wide (and ``max_height`` tall), its shape kept."""
+    if page is None or page.width <= 0 or page.height <= 0:
+        return 0.0, 0.0
+    w = float(min(width, page.width))
+    h = w * page.height / page.width
+    if max_height is not None and h > max_height:
+        h = float(max_height)
+        w = h * page.width / page.height
+    return w, h
+
+
+def picture_height(picture: Any, width: int, stamp: tuple[str, str] = _NO_STAMP,
+                   max_height: float | None = None) -> int:
+    """The natural height of a READY picture drawn ``width`` logical px wide (texts wrap at that
+    width in readable fonts, never a scaled-down bitmap). A day / week picture squeezes its hours to
+    fit ``max_height``; an email picture stops measuring past it (then it is taller); a page keeps
+    its shape. 0 for a picture that is not READY."""
+    if picture is None or picture.state != live_events.PICTURE_READY:
+        return 0
+    rect = QRectF(0, 0, max(1, width), 0)
+    kind = picture.kind
+    if picture.mail is not None and kind in (live_pictures.KIND_EMAIL, live_pictures.KIND_OUTGOING):
+        return math.ceil(_paint_mail(None, rect, picture, stamp, max_height))
+    if picture.day is not None and kind == live_pictures.KIND_DAY:
+        return math.ceil(_paint_day(None, rect, picture, stamp, max_height))
+    if picture.week is not None and kind == live_pictures.KIND_WEEK:
+        return math.ceil(_paint_week(None, rect, picture, stamp, max_height))
+    if picture.page is not None and kind == live_pictures.KIND_PAGE:
+        return math.ceil(_page_size(picture.page, width, max_height)[1])
+    return 0
+
+
+def picture_focus(picture: Any, width: int, stamp: tuple[str, str] = _NO_STAMP,
+                  max_height: float | None = None) -> tuple[float, float] | None:
+    """(top, bottom) of what a READY calendar change picture changes (the ghost and the new time,
+    the new block, the struck-through or answered event), drawn ``width`` px wide: what a short
+    view shows first during a countdown. None for other pictures."""
+    if picture is None or picture.state != live_events.PICTURE_READY or picture.day is None:
+        return None
+    marks: list[QRectF] = []
+    _paint_day(None, QRectF(0, 0, max(1, width), 0), picture, stamp, max_height, marks)
+    if not marks:
+        return None
+    return min(mark.top() for mark in marks), max(mark.bottom() for mark in marks)
+
+
+def paint_picture(painter: QPainter, rect: QRectF, picture: Any, stamp: tuple[str, str] = _NO_STAMP,
+                  max_height: float | None = None) -> None:
+    """Draw a READY picture into ``rect`` (an email / calendar picture on its card; a page's image
+    in a thin border)."""
+    if picture is None or picture.state != live_events.PICTURE_READY:
+        return
+    painter.save()
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        painter.setClipRect(rect)
+        if picture.kind == live_pictures.KIND_PAGE:
+            image = QImage.fromData(picture.page.image) if picture.page is not None and picture.page.image else QImage()
+            if not image.isNull():
+                painter.drawImage(rect, image)
+            painter.setPen(QPen(rgba(ACCENT, 0.3), 1))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(rect.adjusted(0.5, 0.5, -0.5, -0.5))
+            return
+        corners = CUT_TL | CUT_BR
+        painter.fillPath(chamfer_path(rect, 6, corners), rgba(ACCENT, 0.2))
+        painter.fillPath(chamfer_path(rect.adjusted(1, 1, -1, -1), 6, corners), PANEL_GROUND)
+        painter.fillPath(chamfer_path(rect.adjusted(1, 1, -1, -1), 6, corners), rgba(ACCENT, 0.025))
+        if picture.mail is not None:
+            _paint_mail(painter, rect, picture, stamp, rect.height())
+        elif picture.day is not None:
+            _paint_day(painter, rect, picture, stamp, max_height)
+        elif picture.week is not None:
+            _paint_week(painter, rect, picture, stamp, max_height)
+    finally:
+        painter.restore()
+
+
+def picture_pixmap(picture: Any, width: float, dpr: float = 1.0, stamp: tuple[str, str] = _NO_STAMP,
+                   max_height: float | None = None) -> QPixmap:
+    """``picture`` drawn ``width`` logical px wide into a pixmap of that size times ``dpr`` (crisp
+    at 150 %). With ``max_height`` a picture taller than that (an email; a calendar picture even
+    squeezed) is cut with a fade and "Enter: see all", never silently; a page is scaled down to fit."""
+    dpr = max(1.0, float(dpr or 1.0))
+    if picture is not None and picture.kind == live_pictures.KIND_PAGE:
+        w, h = _page_size(picture.page, width, max_height)
+        natural = h
+    else:
+        w = float(width)
+        natural = float(picture_height(picture, int(width), stamp, max_height))
+        h = natural if max_height is None else min(natural, float(max_height))
+    image = QImage(max(1, math.ceil(w * dpr)), max(1, math.ceil(h * dpr)), QImage.Format.Format_ARGB32_Premultiplied)
+    image.setDevicePixelRatio(dpr)
+    image.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(image)
+    try:
+        rect = QRectF(0, 0, w, h)
+        paint_picture(painter, rect, picture, stamp, max_height)
+        if natural > h + 0.5 and picture is not None and picture.kind != live_pictures.KIND_PAGE:
+            fade = QRectF(1, h - _PIC_FADE - 1, w - 2, _PIC_FADE)
+            gradient = QLinearGradient(fade.topLeft(), fade.bottomLeft())
+            gradient.setColorAt(0.0, rgba(GROUND, 0.0))
+            gradient.setColorAt(1.0, QColor(GROUND))
+            painter.fillRect(fade, QBrush(gradient))
+            fonts = _LiveFonts.get()
+            painter.setFont(fonts.pic_small)
+            painter.setPen(QColor(TEXT_MUTED))
+            painter.drawText(QRectF(_PIC_PAD, h - 18, w - 2 * _PIC_PAD, 14),
+                             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, PICTURE_SEE_ALL)
+    finally:
+        painter.end()
+    return QPixmap.fromImage(image)
+
+
+def picture_state_text(picture: Any) -> str:
+    """What a picture box says when it shows no picture (its note; "Picture unavailable" / "Picture
+    not kept" when it has none)."""
+    if picture is None:
+        return ""
+    if picture.note:
+        return picture.note
+    if picture.state == live_events.PICTURE_DROPPED:
+        return "Picture not kept"
+    if picture.state == live_events.PICTURE_PENDING:
+        return "Taking the picture..."
+    return "Picture unavailable"
+
+
+class _LivePicture(_LiveButton):
+    """A step's picture in LIVE (first in its details): a caption row (the PICTURE tag and the
+    caption), the thumbnail drawn to fit the column (at most LIVE_PICTURE_MAX_W wide; an email cut
+    with a fade at LIVE_PICTURE_MAIL_MAX_PX, a calendar picture squeezed to fit, a page scaled down)
+    and its note. PENDING: a dashed box with the blinking glyph; UNAVAILABLE: an amber box saying
+    why; DROPPED: a dim box saying why. Click, Space or Enter on a READY picture opens it larger
+    (``on_open``); nothing inside it reacts on its own."""
+
+    _CAPTION_H = 18
+    _GAP = 4
+
+    def __init__(self, on_open: Callable[[], None] | None = None) -> None:
+        super().__init__()
+        self._on_open = on_open
+        self._picture: Any = None
+        self._stamp: tuple[str, str] = _NO_STAMP
+        self._pixmaps: dict[tuple, QPixmap] = {}
+        self._heights: dict[int, int] = {}
+        self._thumbs: dict[int, tuple[float, float]] = {}
+        self.clicked.connect(self._clicked)
+
+    def picture(self) -> Any:
+        return self._picture
+
+    def stamp(self) -> tuple[str, str]:
+        return self._stamp
+
+    def ready(self) -> bool:
+        return self._picture is not None and self._picture.state == live_events.PICTURE_READY
+
+    def pending(self) -> bool:
+        return self._picture is not None and self._picture.state == live_events.PICTURE_PENDING
+
+    def set_picture(self, picture: Any, stamp: tuple[str, str] = _NO_STAMP) -> None:
+        stamp = (str(stamp[0]), str(stamp[1])) if stamp else _NO_STAMP
+        if picture is self._picture and stamp == self._stamp:
+            return
+        self._picture, self._stamp = picture, stamp
+        self._pixmaps.clear()
+        self._heights.clear()
+        self._thumbs.clear()
+        self.setCursor(Qt.CursorShape.PointingHandCursor if self.ready() else Qt.CursorShape.ArrowCursor)
+        self.setAccessibleName(self.accessible_text())
+        # Not READY: the note already ends the name (a screen reader would say it twice).
+        self.setAccessibleDescription(picture.note if picture is not None and self.ready() else "")
+        _sync_blink_clock(self, self.pending())
+        self.updateGeometry()
+        self.update()
+
+    def accessible_text(self) -> str:
+        picture = self._picture
+        if picture is None:
+            return ""
+        text = f"{picture.caption} picture: {picture.alt}" if picture.alt else f"{picture.caption} picture"
+        if self._stamp[0]:
+            text += f", {self._stamp[0]}"
+        if self.ready():
+            return text + ". Press Enter to see it larger"
+        return f"{text}. {picture_state_text(picture)}"
+
+    def _clicked(self) -> None:
+        if self.ready() and self._on_open is not None:
+            self._on_open()
+
+    # ---- geometry ----------------------------------------------------------------------------------
+
+    def _thumb(self, width: int) -> tuple[float, float]:
+        """(width, height) of the thumbnail at the widget's ``width`` (kept per width: every repaint
+        asks, and measuring lays the whole picture out)."""
+        cached = self._thumbs.get(width)
+        if cached is not None:
+            return cached
+        if len(self._thumbs) > 8:
+            self._thumbs.clear()
+        picture = self._picture
+        w = float(min(max(1, width), LIVE_PICTURE_MAX_W))
+        cap = _PICTURE_MAX.get(picture.kind, LIVE_PICTURE_PAGE_MAX_PX)
+        if picture.kind == live_pictures.KIND_PAGE:
+            size = _page_size(picture.page, w, cap)
+        else:
+            size = (w, float(min(cap, picture_height(picture, int(w), self._stamp, cap))))
+        self._thumbs[width] = size
+        return size
+
+    def focus_span(self) -> tuple[float, float] | None:
+        """(top, bottom) in this widget of what a calendar change picture changes (None for other
+        pictures): the part a short LIVE view shows during a countdown."""
+        if not self.ready() or self._picture.day is None:
+            return None
+        width = max(1, self.width())
+        w, h = self._thumb(width)
+        cap = _PICTURE_MAX.get(self._picture.kind, LIVE_PICTURE_PAGE_MAX_PX)
+        span = picture_focus(self._picture, int(w), self._stamp, cap)
+        if span is None:
+            return None
+        top = float(self._CAPTION_H + self._GAP)
+        return top + min(span[0], h), top + min(span[1], h)
+
+    def _note_lines(self, width: int) -> _TextLines | None:
+        picture = self._picture
+        if picture is None or not picture.note or not self.ready():
+            return None
+        return _TextLines(picture.note, "note", max(1, width), max_lines=3)
+
+    def _box_lines(self, width: int) -> _TextLines:
+        return _TextLines(picture_state_text(self._picture), "pic_small", max(1, min(width, LIVE_PICTURE_MAX_W) - 34),
+                          max_lines=4)
+
+    def _height_for(self, width: int) -> int:
+        cached = self._heights.get(width)
+        if cached is not None:
+            return cached
+        if len(self._heights) > 8:
+            self._heights.clear()
+        picture = self._picture
+        if picture is None:
+            return 0
+        height = float(self._CAPTION_H + self._GAP)
+        if self.ready():
+            height += self._thumb(width)[1]
+            note = self._note_lines(width)
+            if note is not None:
+                height += self._GAP + note.height
+        elif self.pending():
+            height += max(LIVE_PICTURE_PENDING_PX, self._box_lines(width).height + 24)
+        else:
+            height += self._box_lines(width).height + 16
+        result = self._heights[width] = math.ceil(height) + 2
+        return result
+
+    # ---- painting ------------------------------------------------------------------------------
+
+    def _pixmap(self, width: float, height: float) -> QPixmap:
+        picture = self._picture
+        dpr = self.devicePixelRatioF() or 1.0
+        cap = _PICTURE_MAX.get(picture.kind, LIVE_PICTURE_PAGE_MAX_PX)
+        key = (round(width, 2), round(dpr, 3), self._stamp, cap)
+        pixmap = self._pixmaps.get(key)
+        if pixmap is None:
+            if len(self._pixmaps) > 3:
+                self._pixmaps.clear()
+            pixmap = self._pixmaps[key] = picture_pixmap(picture, width, dpr, self._stamp, cap)
+        return pixmap
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        picture = self._picture
+        if picture is None:
+            return
+        fonts = _LiveFonts.get()
+        width = max(1, self.width())
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            tag_w = _text_advance(fonts.tag, PICTURE_TAG) + 10
+            _paint_pill(painter, QRectF(0, 1, tag_w, 15), PICTURE_TAG, fonts.tag, TEXT_MUTED, filled=True)
+            hint = PICTURE_HINT if self.ready() else ""
+            hint_w = _text_advance(fonts.note, hint) + 4 if hint else 0.0
+            room = min(width, LIVE_PICTURE_MAX_W) - tag_w - 8 - (hint_w + 8 if hint else 0)
+            if room < 60:
+                hint, room = "", min(width, LIVE_PICTURE_MAX_W) - tag_w - 8
+            painter.setFont(fonts.note)
+            painter.setPen(QColor(TEXT_SOFT))
+            caption = QFontMetricsF(fonts.note).elidedText(picture.caption, Qt.TextElideMode.ElideRight, max(1.0, room))
+            painter.drawText(QRectF(tag_w + 8, 0, max(1.0, room), self._CAPTION_H),
+                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, caption)
+            if hint:
+                painter.setPen(QColor(TEXT_DIM))
+                painter.drawText(QRectF(min(width, LIVE_PICTURE_MAX_W) - hint_w, 0, hint_w, self._CAPTION_H),
+                                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, hint)
+            top = float(self._CAPTION_H + self._GAP)
+            if self.ready():
+                w, h = self._thumb(width)
+                painter.drawPixmap(QPointF(0, top), self._pixmap(w, h))
+                if self.isEnabled() and (self.underMouse() or self.isDown()):
+                    painter.setPen(QPen(rgba(ACCENT, 0.55), 1))
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.drawRect(QRectF(0.5, top + 0.5, w - 1, h - 1))
+                note = self._note_lines(width)
+                if note is not None:
+                    painter.setPen(QColor(TEXT_SUB))
+                    note.draw(painter, QPointF(0, top + h + self._GAP))
+            else:
+                box_w = float(min(width, LIVE_PICTURE_MAX_W))
+                lines = self._box_lines(width)
+                if self.pending():
+                    box = QRectF(0.5, top + 0.5, box_w - 1, max(LIVE_PICTURE_PENDING_PX, lines.height + 24) - 1)
+                    pen = QPen(rgba(ACCENT, 0.4), 1)
+                    pen.setStyle(Qt.PenStyle.DashLine)
+                    color = TEXT_SOFT
+                    opacity = 1.0 if _BlinkClock.is_on() else 0.15
+                    paint_status_glyph(painter, QRectF(10, top + 12, 9, 9), live_events.STATUS_RUNNING, opacity)
+                elif picture.state == live_events.PICTURE_UNAVAILABLE:
+                    box = QRectF(0.5, top + 0.5, box_w - 1, lines.height + 15)
+                    pen, color = QPen(rgba(AMBER, 0.55), 1), AMBER
+                    painter.fillRect(box, rgba(AMBER, 0.05))
+                    paint_status_glyph(painter, QRectF(10, top + 9, 9, 9), live_events.STATUS_WARN)
+                else:
+                    box = QRectF(0.5, top + 0.5, box_w - 1, lines.height + 15)
+                    pen, color = QPen(rgba(OFF, 0.6), 1), TEXT_DIM
+                    paint_status_glyph(painter, QRectF(10, top + 9, 9, 9), live_events.STATUS_CANCELLED)
+                painter.setPen(pen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(box)
+                painter.setPen(QColor(color))
+                lines.draw(painter, QPointF(26, top + 8))
+            if self.focus_ring():
+                painter.setPen(QPen(QColor(ACCENT), 1))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5))
+        finally:
+            painter.end()
+
+    def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().showEvent(event)
+        _sync_blink_clock(self, self.pending())
+
+    def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().hideEvent(event)
+        _blink_clock().unregister(self)
+        self._pixmaps.clear()   # drawn again on the next paint; nothing kept while it is not seen
+
+
+class _PictureCanvas(QWidget):
+    """The viewer's picture: drawn once at its size (nothing in it reacts)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._pixmap = QPixmap()
+        self._source: tuple[Any, tuple[str, str], float] | None = None   # what is drawn, to draw it again
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
+
+    def set_picture(self, picture: Any, stamp: tuple[str, str], width: float) -> None:
+        self._source = (picture, stamp, width)
+        self._render()
+        size = self._pixmap.deviceIndependentSize()
+        self.setFixedSize(max(1, math.ceil(size.width())), max(1, math.ceil(size.height())))
+        self.setAccessibleName(picture.alt or picture.caption)
+        self.update()
+
+    def _render(self) -> None:
+        picture, stamp, width = self._source
+        self._pixmap = picture_pixmap(picture, width, self.devicePixelRatioF() or 1.0, stamp, None)
+
+    def pixmap(self) -> QPixmap:
+        return self._pixmap
+
+    def clear(self) -> None:
+        """Let the picture go (the viewer closed): nothing of it stays drawn in memory."""
+        self._pixmap = QPixmap()
+        self._source = None
+        self.setAccessibleName("")
+        self.update()
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        wanted = max(1.0, self.devicePixelRatioF() or 1.0)   # as picture_pixmap draws it
+        if self._source is not None and abs(self._pixmap.devicePixelRatio() - wanted) > 0.01:
+            self._render()   # on a screen with another scale now: drawn again, crisp there
+        painter = QPainter(self)
+        try:
+            painter.drawPixmap(QPointF(0, 0), self._pixmap)
+        finally:
+            painter.end()
+
+
+class PictureViewer(QDialog):
+    """A LIVE picture, larger, inside Jarvis (non-modal): the caption and its note on top, the
+    picture in a scroll area (an email or calendar picture drawn again at up to
+    PICTURE_VIEWER_MODEL_W px, a page at its own width), and Close. Nothing in it reacts to the
+    page or the email. Esc, Enter, Space and Ctrl+W close it; the arrows, Page Up / Down, Home and
+    End scroll. ``closed(step_id)`` when it closes. At most PICTURE_VIEWER_SCREEN of the screen,
+    centred on its parent window."""
+
+    closed = Signal(int)
+    _MARGIN = 16
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent, Qt.WindowType.Dialog)
+        self.setObjectName("PictureViewer")
+        self.setModal(False)
+        self.setWindowModality(Qt.WindowModality.NonModal)
+        self.setAutoFillBackground(True)
+        palette = self.palette()
+        palette.setColor(QPalette.ColorRole.Window, QColor(GROUND))
+        self.setPalette(palette)
+        self._step_id = 0
+        self._picture: Any = None
+        self._stamp: tuple[str, str] = _NO_STAMP
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(self._MARGIN, 14, self._MARGIN, 14)
+        layout.setSpacing(6)
+        self.caption_label = make_label("", mono_font(11, 600, 0.04), TEXT_BRIGHT, wrap=True)
+        self.note_label = make_label("", mono_font(10), TEXT_SUB, wrap=True)
+        self.scroll = QScrollArea(self)
+        self.scroll.setObjectName("hudScroll")
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setWidgetResizable(False)
+        self.scroll.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        self.scroll.viewport().setAutoFillBackground(False)
+        self.scroll.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.canvas = _PictureCanvas()
+        self.scroll.setWidget(self.canvas)
+        self.close_button = HudButton("Close", SECONDARY, compact=True)
+        self.close_button.setAccessibleName("Close")
+        self.close_button.clicked.connect(self.close)
+        buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 4, 0, 0)
+        buttons.addStretch(1)
+        buttons.addWidget(self.close_button)
+        layout.addWidget(self.caption_label)
+        layout.addWidget(self.note_label)
+        layout.addWidget(self.scroll, 1)
+        layout.addLayout(buttons)
+        self.finished.connect(lambda _result: self.closed.emit(self._step_id))
+        self.finished.connect(lambda _result: self._release())
+
+    def step_id(self) -> int:
+        return self._step_id
+
+    def picture(self) -> Any:
+        return self._picture
+
+    def stamp(self) -> tuple[str, str]:
+        return self._stamp
+
+    def _area(self) -> QRect | None:
+        parent = self.parentWidget()
+        screen = (parent.window().screen() if parent is not None else self.screen()) or QApplication.primaryScreen()
+        return screen.availableGeometry() if screen is not None else None
+
+    def _draw_width(self, picture: Any) -> float:
+        area = self._area()
+        room = (area.width() * PICTURE_VIEWER_SCREEN if area is not None else 1200) - 2 * self._MARGIN - 14
+        if picture.kind == live_pictures.KIND_PAGE and picture.page is not None:
+            return float(max(120, min(room, PICTURE_VIEWER_PAGE_W, picture.page.width or PICTURE_VIEWER_PAGE_W)))
+        return float(max(240, min(room, PICTURE_VIEWER_MODEL_W)))
+
+    def _set(self, picture: Any, stamp: tuple[str, str]) -> None:
+        self._picture, self._stamp = picture, stamp
+        caption = picture.caption + (f" - {stamp[0]}" if stamp and stamp[0] else "")
+        self.caption_label.setText(caption)
+        self.note_label.setText(picture.note)
+        self.note_label.setVisible(bool(picture.note))
+        self.setWindowTitle(f"{picture.caption} - Jarvis")
+        self.setAccessibleName(f"{picture.caption} picture, larger")
+        # The alt is said once: by the scroll area, which takes the focus when the viewer opens (a
+        # screen reader names it and reads the picture's description there). The dialog's own
+        # description stays empty, or the alt would be read twice as the dialog comes up.
+        self.setAccessibleDescription("")
+        self.scroll.setAccessibleName(f"{picture.caption} picture")
+        self.scroll.setAccessibleDescription(picture.alt)
+        self.canvas.set_picture(picture, stamp, self._draw_width(picture))
+
+    def show_picture(self, step_id: int, picture: Any, stamp: tuple[str, str] = _NO_STAMP, title: str = "") -> None:
+        """Show ``picture`` (step ``step_id``'s), sized to it and centred on the parent window."""
+        self._step_id = int(step_id)
+        self._set(picture, tuple(stamp) if stamp else _NO_STAMP)
+        if title:
+            self.caption_label.setToolTip(plain_tooltip(title))
+        self._fit()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.scroll.verticalScrollBar().setValue(0)
+        self.scroll.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _release(self) -> None:
+        """Closed: the picture and its drawing go (the viewer itself is kept for the next one)."""
+        self._picture, self._stamp = None, _NO_STAMP
+        self.canvas.clear()
+        self.caption_label.setText("")
+        self.note_label.setText("")
+        self.setAccessibleDescription("")
+        self.scroll.setAccessibleName("")
+        self.scroll.setAccessibleDescription("")
+
+    def refresh(self, picture: Any, stamp: tuple[str, str] = _NO_STAMP) -> None:
+        """The step's picture (or its stamp) changed while it shows."""
+        stamp = tuple(stamp) if stamp else _NO_STAMP
+        if picture is self._picture and stamp == self._stamp:
+            return
+        self._set(picture, stamp)
+
+    def _fit(self) -> None:
+        area = self._area()
+        self.ensurePolished()
+        canvas = self.canvas.size()
+        width = canvas.width() + 2 * self._MARGIN + 14
+        layout = self.layout()
+        layout.activate()
+        inner = width - 2 * self._MARGIN
+        chrome = (14 + 14 + self.caption_label.heightForWidth(inner) + 6
+                  + (self.note_label.heightForWidth(inner) + 6 if self.note_label.isVisibleTo(self) else 0)
+                  + self.close_button.sizeHint().height() + 10)
+        height = chrome + canvas.height() + 4
+        if area is not None:
+            width = min(width, int(area.width() * PICTURE_VIEWER_SCREEN))
+            height = min(height, int(area.height() * PICTURE_VIEWER_SCREEN))
+        self.resize(max(280, width), max(200, height))
+        parent = self.parentWidget()
+        if parent is not None:
+            window = parent.window()
+            center = window.mapToGlobal(QPoint(window.width() // 2, window.height() // 2))
+            x, y = center.x() - self.width() // 2, center.y() - self.height() // 2
+            if area is not None:
+                x = max(area.left(), min(x, area.right() + 1 - self.width()))
+                y = max(area.top(), min(y, area.bottom() + 1 - self.height()))
+            self.move(x, y)
+
+    def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        key = event.key()
+        if event.isAutoRepeat() and key in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            event.accept()   # the Enter held down that opened it: not a close
+            return
+        if key in (Qt.Key.Key_Escape, Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space) or (
+                key == Qt.Key.Key_W and event.modifiers() & Qt.KeyboardModifier.ControlModifier) \
+                or event.matches(QKeySequence.StandardKey.Close):
+            event.accept()
+            self.close()
+            return
+        bar = self.scroll.verticalScrollBar()
+        if key == Qt.Key.Key_Home:
+            bar.setValue(bar.minimum())
+        elif key == Qt.Key.Key_End:
+            bar.setValue(bar.maximum())
+        elif key in (Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_PageUp, Qt.Key.Key_PageDown):
+            bar.triggerAction({Qt.Key.Key_Up: bar.SliderAction.SliderSingleStepSub,
+                               Qt.Key.Key_Down: bar.SliderAction.SliderSingleStepAdd,
+                               Qt.Key.Key_PageUp: bar.SliderAction.SliderPageStepSub,
+                               Qt.Key.Key_PageDown: bar.SliderAction.SliderPageStepAdd}[key])
+        else:
+            super().keyPressEvent(event)
+            return
+        event.accept()
+
+
+class _LiveDetails(QWidget):
+    """A step's details, made on its first open: its picture first, then the fields, the items, the
+    notes ("+1.2 s  ..."), the text blocks. Only what changed is redone (a block's text is set once
+    per revision)."""
+
+    def __init__(self, on_link: Callable[[str], None], on_picture: Callable[[], None] | None = None) -> None:
         super().__init__()
         fonts = _LiveFonts.get()
+        self.picture = _LivePicture(on_picture)
         self.fields = _LiveFields(on_link)
         self.items = _LiveItems()
         self.notes = _LiveValue("", fonts.note, TEXT_SOFT)
@@ -8177,14 +9380,21 @@ class _LiveDetails(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(_LIVE_INDENT, 0, 4, 8)
         layout.setSpacing(6)
-        for widget in (self.fields, self.items, self.notes, self._blocks_box):
+        for widget in (self.picture, self.fields, self.items, self.notes, self._blocks_box):
             layout.addWidget(widget)
             widget.hide()
         self._notes_key: tuple = ()
 
     def apply(self, view: live_events.StepView) -> bool:
         """Show ``view``; True when focusable widgets came or went."""
-        changed = self.fields.set_fields(view.fields)
+        changed = False
+        picture = view.picture
+        # None too: a picture that went (a keyed step replaced) is let go, not kept hidden.
+        self.picture.set_picture(picture, live_pictures.stamp(picture, view.status, view.status_text))
+        if self.picture.isHidden() != (picture is None):
+            self.picture.setVisible(picture is not None)
+            changed = True
+        changed |= self.fields.set_fields(view.fields)
         self.fields.setVisible(bool(view.fields))
         self.items.set_items(view.items, view.items_more)
         self.items.setVisible(bool(view.items or view.items_more))
@@ -8222,8 +9432,15 @@ class _LiveDetails(QWidget):
         self._blocks_box.setVisible(bool(view.blocks))
         return changed
 
+    def sync_picture(self, view: live_events.StepView) -> None:
+        """The details are closed: the picture still follows the step (a picture the stream dropped
+        or replaced is let go here too, not kept hidden with its bytes and drawings)."""
+        picture = view.picture
+        self.picture.set_picture(picture, live_pictures.stamp(picture, view.status, view.status_text))
+
     def focusables(self) -> list[QWidget]:
-        widgets: list[QWidget] = list(self.fields.links())
+        widgets: list[QWidget] = [self.picture] if not self.picture.isHidden() else []
+        widgets.extend(self.fields.links())
         for block in self.blocks.values():
             widgets.extend(block.focusables())
         return widgets
@@ -8392,7 +9609,8 @@ class _LiveStep(QWidget):
 
     @staticmethod
     def has_details(view: live_events.StepView) -> bool:
-        return bool(view.fields or view.items or view.items_more or view.notes or view.blocks)
+        return bool(view.fields or view.items or view.items_more or view.notes or view.blocks
+                    or view.picture is not None)
 
     def is_open(self) -> bool:
         view = self.view
@@ -8407,16 +9625,18 @@ class _LiveStep(QWidget):
         changed = False
         if open_:
             if self.details is None:
-                self.details = _LiveDetails(self._log.linkClicked.emit)
+                self.details = _LiveDetails(self._log.linkClicked.emit, self._open_picture)
                 self._layout.addWidget(self.details)
                 changed = True
             changed |= self.details.apply(view)
             if self.details.isHidden():
                 self.details.show()
                 changed = True
-        elif self.details is not None and not self.details.isHidden():
-            self.details.hide()
-            changed = True
+        elif self.details is not None:
+            self.details.sync_picture(view)
+            if not self.details.isHidden():
+                self.details.hide()
+                changed = True
         self.row.set_view(view, now, open_, self.has_details(view))
         return changed
 
@@ -8426,6 +9646,19 @@ class _LiveStep(QWidget):
         self._user_open = not self.is_open()
         self.set_view(self.view, self._log.now())
         self._log._structure_changed()
+
+    def _open_picture(self) -> None:
+        if self.view is not None:
+            self._log.open_picture(self.view.id)
+
+    def picture_widget(self) -> _LivePicture | None:
+        """The picture in the details (None while they are closed or were never opened, or there is
+        none)."""
+        details = self.details
+        if (details is None or details.isHidden() or details.picture.isHidden()
+                or details.picture.picture() is None):
+            return None
+        return details.picture
 
     def set_open(self, open_: bool) -> None:
         if self.is_open() != bool(open_):
@@ -8765,6 +9998,7 @@ class LiveLog(QScrollArea):
     TICK_RUNNING_MS = 1000
     TICK_COUNTDOWN_MS = 250
     _GAP = 6
+    _CHANGE_MARGIN = 24   # px kept under a calendar picture's change when the countdown scrolls to it
 
     def __init__(self, parent: QWidget | None = None, *, clock: Callable[[], float] = time.monotonic) -> None:
         super().__init__(parent)
@@ -8790,6 +10024,9 @@ class LiveLog(QScrollArea):
         self._follow = True
         self._header_first = False
         self._tab_order_pending = False
+        self._viewer: PictureViewer | None = None   # made on the first picture opened larger (kept)
+        self._viewer_ring = False                   # the thumbnail had a keyboard focus ring when opened
+        self._viewer_restore = True                 # its close gives the focus back (False: Jarvis closed it unseen)
         self.apply_count = 0
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         bar = self.verticalScrollBar()
@@ -8840,6 +10077,7 @@ class LiveLog(QScrollArea):
         finally:
             self.setUpdatesEnabled(True)
         self._sync_timer()
+        self._sync_viewer()
         if any(view.id in created and view.kind == live_events.TASK_ACTION and view.status == live_events.STATUS_RUNNING
                for view in changes.tasks):
             # A card the owner just approved: its payload comes into view whatever the owner scrolled.
@@ -8851,11 +10089,77 @@ class LiveLog(QScrollArea):
             self._follow_newest()
 
     def clear(self) -> None:
-        """Empty the view (the stream is unchanged)."""
+        """Empty the view (the stream is unchanged); a picture shown larger closes."""
         for task_id in list(self._cards):
             self._remove(task_id)
         self._sync_empty()
         self._sync_timer()
+        self._close_viewer()
+
+    # ---- pictures ------------------------------------------------------------------------------
+
+    def picture_viewer(self) -> PictureViewer | None:
+        """The viewer of pictures shown larger (None until one was opened)."""
+        viewer = self._viewer
+        return viewer if viewer is not None and shiboken6.isValid(viewer) else None
+
+    def open_picture(self, step_id: int) -> bool:
+        """Show step ``step_id``'s READY picture larger in the viewer (inside Jarvis, its parent this
+        log's window: the main window or the pop-out). False when the step or a READY picture is
+        not there."""
+        step = self.step_widget(step_id)
+        view = step.view if step is not None else None
+        picture = view.picture if view is not None else None
+        if picture is None or picture.state != live_events.PICTURE_READY:
+            return False
+        thumbnail = step.picture_widget()
+        self._viewer_ring = thumbnail is not None and thumbnail.focus_ring()
+        viewer = self.picture_viewer()
+        if viewer is None or viewer.parentWidget() is not self.window():
+            if viewer is not None:
+                viewer.hide()
+                viewer.deleteLater()
+            viewer = self._viewer = PictureViewer(self.window())
+            viewer.closed.connect(self._viewer_closed)
+        viewer.show_picture(step_id, picture, live_pictures.stamp(picture, view.status, view.status_text), view.title)
+        return True
+
+    def _sync_viewer(self) -> None:
+        """The viewer follows its step: a new picture or stamp is shown again; it closes when the
+        step is gone or its picture is no longer READY."""
+        viewer = self.picture_viewer()
+        if viewer is None or not viewer.isVisible():
+            return
+        step = self.step_widget(viewer.step_id())
+        view = step.view if step is not None else None
+        picture = view.picture if view is not None else None
+        if picture is None or picture.state != live_events.PICTURE_READY:
+            self._close_viewer()
+            return
+        viewer.refresh(picture, live_pictures.stamp(picture, view.status, view.status_text))
+
+    def _close_viewer(self) -> None:
+        """Jarvis closes the viewer (its picture went, Clear): the focus goes back to the thumbnail
+        only when the owner was in the viewer - never taken from another window or app."""
+        viewer = self.picture_viewer()
+        if viewer is not None and viewer.isVisible():
+            self._viewer_restore = viewer.isActiveWindow()
+            try:
+                viewer.close()
+            finally:
+                self._viewer_restore = True
+
+    def _viewer_closed(self, step_id: int) -> None:
+        """Back to the thumbnail it was opened from (with its ring when it had one), when the owner
+        closed it or was in it."""
+        if not shiboken6.isValid(self) or not self._viewer_restore:
+            return
+        step = self.step_widget(step_id)
+        thumbnail = step.picture_widget() if step is not None else None
+        if thumbnail is not None and thumbnail.isVisible():
+            thumbnail.window().activateWindow()
+            reason = Qt.FocusReason.ShortcutFocusReason if self._viewer_ring else Qt.FocusReason.OtherFocusReason
+            thumbnail.setFocus(reason)
 
     def _sync_empty(self) -> None:
         """The empty-state text while no task but the pinned "Background reads" is shown (a pinned
@@ -9055,8 +10359,29 @@ class LiveLog(QScrollArea):
         if payload is not None and payload.isVisibleTo(self) and payload.height() > 0:
             top = payload.mapTo(content, QPoint(0, 0)).y()
             details = payload.details
+            picture = details.picture if details is not None else None
             fields = details.fields if details is not None else None
-            if fields is not None and fields.isVisibleTo(self) and fields.height() > 0:
+            if picture is not None and picture.isVisibleTo(self) and picture.height() > 0:
+                # What will be sent or changed, drawn: its top in view (the row above it when both fit);
+                # a calendar change in a view too short for it: the changed blocks themselves (they sit
+                # well below the picture's top, under the headline and the morning hours).
+                picture_top = picture.mapTo(content, QPoint(0, 0)).y()
+                if picture_top + picture.height() + self._GAP > top + view_height - self._GAP:
+                    top = picture_top
+                    span = picture.focus_span()
+                    if span is not None:
+                        # Only as far as the change needs: the picture's top (its stamp, headline and
+                        # day) stays in view when the changed blocks fit below it; else they are
+                        # centred, or shown from their top when taller than the view.
+                        first, last = span
+                        room = view_height - 2 * self._GAP
+                        if last - first > room:
+                            offset = float(first)
+                        else:
+                            lead = (room - (last - first)) / 2
+                            offset = min(first - lead, last + self._CHANGE_MARGIN - room)
+                        top = picture_top + max(0, int(offset))
+            elif fields is not None and fields.isVisibleTo(self) and fields.height() > 0:
                 fields_top = fields.mapTo(content, QPoint(0, 0)).y()
                 if fields_top + fields.height() + self._GAP > top + view_height - self._GAP:
                     top = fields_top   # a short view: from the first field (the strip says SENDING IN)

@@ -9,6 +9,7 @@ Notion or claude.exe; every name, address, id and text is invented.
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 import unittest
@@ -572,23 +573,45 @@ class LiveLogRenderTests(LogCase):
         self.assertFalse(card.expanded())
 
     def test_a_40_step_task_applies_quickly(self) -> None:
-        log = self.log(460, 600)
-        task = self.stream.task(live.TASK_ASK, "Forty steps")
-        for number in range(39):
-            task.step(live.CALENDAR_READ, f"Step {number}", status=live.STATUS_OK, summary="12 events read",
-                      fields=[("Window", "Tue Oct 6 to Tue Oct 20"), ("work", "12 events")])
-        running = task.step(live.PLANNER_RUN, "Planner run 1", fields=[("Model", "sonnet")])
-        running.note("Claude Code started")
-        changes = self.stream.changes(0)
-        best = None
-        for _ in range(3):   # the best of three (a busy test machine)
+        """A 40-step task is shown within 20 ms, and the cost grows with the steps, not faster.
+
+        Timing on a shared machine (another program busy for a moment) is noisy, so: the best of
+        5 to 15 tries (it stops once a try is within the limit), and a 10-step task timed between
+        the same tries - the machine's load hits both alike, so 4x the steps costing at most 4x
+        holds however busy the machine is (an apply that redoes every step per step would not)."""
+        def task_with(steps: int) -> tuple[hud.LiveLog, live.LiveChanges, int]:
+            clock = Clock()
+            source = stream(clock)
+            log = hud.LiveLog(clock=clock)
+            self.addCleanup(log.deleteLater)
+            log.resize(460, 600)
+            log.show()
+            task = source.task(live.TASK_ASK, f"{steps} steps")
+            for number in range(steps - 1):
+                task.step(live.CALENDAR_READ, f"Step {number}", status=live.STATUS_OK, summary="12 events read",
+                          fields=[("Window", "Tue Oct 6 to Tue Oct 20"), ("work", "12 events")])
+            running = task.step(live.PLANNER_RUN, "Planner run 1", fields=[("Model", "sonnet")])
+            running.note("Claude Code started")
+            return log, source.changes(0), task.id
+
+        def timed(log: hud.LiveLog, changes: live.LiveChanges) -> float:
             log.clear()
             started = time.perf_counter()
             log.apply(changes)
-            spent = time.perf_counter() - started
-            best = spent if best is None else min(best, spent)
-        self.assertEqual(len(log.task_widget(task.id).step_widgets()), 40)
-        self.assertLess(best, 0.020, f"{best * 1000:.1f} ms")
+            return time.perf_counter() - started
+
+        forty, ten = task_with(40), task_with(10)
+        settle()
+        best40 = best10 = math.inf
+        for attempt in range(15):
+            best10 = min(best10, timed(ten[0], ten[1]))
+            best40 = min(best40, timed(forty[0], forty[1]))
+            if attempt >= 4 and best40 < 0.020:
+                break
+        self.assertEqual(len(forty[0].task_widget(forty[2]).step_widgets()), 40)
+        self.assertEqual(len(ten[0].task_widget(ten[2]).step_widgets()), 10)
+        self.assertLess(best40, 0.020, f"{best40 * 1000:.1f} ms")
+        self.assertLess(best40 / best10, 4.0, f"40 steps {best40 * 1000:.1f} ms, 10 steps {best10 * 1000:.1f} ms")
 
     def test_hour24(self) -> None:
         log = self.log()
@@ -1064,6 +1087,48 @@ class PopOutTests(AppCase):
         settle()
         self.assertIsNone(self.c._live_window)
         self.assertTrue(self.c._prefs_store().live_popped_out)
+
+    def test_docking_empties_the_pop_out_and_closes_the_picture_it_showed(self) -> None:
+        self.make()
+        self.c.pop_out_live(activate=False)
+        window = self.c._live_window
+        mail = self.add_mail()
+        self.approve(mail)
+        self.drained()
+        task_id = self.c._countdown.task.id
+        card = window.log.task_widget(task_id)
+        payload = next(step for step in card.step_widgets() if step.view.kind == live.ACTION_PAYLOAD)
+        self.assertTrue(window.log.open_picture(payload.view.id))
+        viewer = window.log.picture_viewer()
+        self.assertTrue(viewer.isVisible())
+        self.assertIs(viewer.parentWidget(), window)
+        window.dock_button.click()
+        settle()
+        self.assertFalse(window.isVisible())
+        self.assertFalse(viewer.isVisible())          # the hidden pop-out shows no picture ...
+        self.assertIsNone(viewer.picture())           # ... and keeps none
+        self.assertTrue(viewer.canvas.pixmap().isNull())
+        self.assertEqual(window.log.task_ids(), [])   # nor any step of a task Clear may remove
+        self.assertIn(task_id, self.reading.live_log.task_ids())
+        self.c._countdown.started -= 5
+        self.c.undo_action(mail.id)
+        self.drained()
+        self.c.clear_live()
+        self.drained()
+        self.assertNotIn(task_id, self.reading.live_log.task_ids())
+        self.assertEqual(window.log.task_ids(), [])
+        self.assertFalse(viewer.isVisible())
+        mail2 = self.add_mail()   # popping out again shows the stream as it is now
+        self.approve(mail2)
+        self.drained()
+        self.c.pop_out_live(activate=False)
+        settle()
+        self.assertEqual(window.log.task_ids(), self.reading.live_log.task_ids())
+        self.assertIn(self.c._countdown.task.id, window.log.task_ids())
+        self.c._countdown.started -= 5
+        self.c.undo_action(mail2.id)
+        window.dock_button.click()
+        settle()
 
     def test_hour24_and_a_restored_pop_out(self) -> None:
         self.make(extra='\n[display]\nclock = "24h"\n')

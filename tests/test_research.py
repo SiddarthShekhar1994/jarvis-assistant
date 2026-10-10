@@ -1,5 +1,6 @@
 """Tests for briefing_reader.ask.research: routing, the isolated stdin, the URL rules, the init and
-web-step guards, the answer and one research run end to end.
+web-step guards, the answer and one research run end to end; and which of a run's web steps
+research_live.WebSteps hands to the page snapshotter (a recording fake: no Qt, no page).
 
 Every run is a recorded (hand-written, invented) stream from tests/fixtures/ask/research_*.jsonl
 played by a fake process on a fake clock: claude.exe is never started and nothing touches the
@@ -15,8 +16,11 @@ import threading
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
+from briefing_reader import live, pictures, snapshots
 from briefing_reader.ask import research as rs
+from briefing_reader.ask import research_live
 from briefing_reader.ask import stream as st
 from briefing_reader.ask.research import (
     FETCH,
@@ -746,6 +750,123 @@ class RunResearchTests(unittest.TestCase):
         later = NOW + timedelta(days=3)
         self.assertGreater(datetime(2026, 10, 10, 10, 0, tzinfo=NOW.tzinfo), NOW)
         self.assertLess(datetime(2026, 10, 10, 10, 0, tzinfo=NOW.tzinfo), later + timedelta(days=1))
+
+
+class RecordingSnapshots:
+    """snapshot_engine.PageSnapshotter's surface for WebSteps (no Qt, no page): records each call
+    and, like the real one, shows a PENDING picture or an unavailable one by the snapshot rules.
+    ``fail``: every call raises after it is recorded."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.calls: list[tuple] = []
+        self.fail = fail
+
+    def request(self, step: live.LiveStep, url: str, *, task_id: int) -> None:
+        view = step.view()
+        self.calls.append(("request", view.kind if view is not None else "", url, task_id))
+        if self.fail:
+            raise RuntimeError("a broken snapshotter")
+        reason = snapshots.snapshot_url_problem(url)
+        step.picture(pictures.page_unavailable(url, reason) if reason else pictures.page_pending(url))
+
+    def end_run(self, task_id: int) -> None:
+        self.calls.append(("end_run", task_id))
+        if self.fail:
+            raise RuntimeError("a broken snapshotter")
+
+
+class WebStepsPictureTests(unittest.TestCase):
+    """research_live.WebSteps and page pictures: only a page the run READ (WebFetch came back OK) is
+    handed to the snapshotter, with its web.fetch step and the run's LIVE task id; a search, a page
+    read that failed, was denied or redirected, and a call Jarvis stopped never are. finished()
+    ends the run's pictures. The snapshotter decides what may be opened; a broken one changes
+    nothing; without one the steps are exactly as before."""
+
+    PAGE = "https://www.example.org/visit"
+
+    def setUp(self) -> None:
+        self.stream = live.LiveStream()
+        self.task = self.stream.task(live.TASK_WEB, "web research")
+        self.snapper = RecordingSnapshots()
+
+    def web(self, snapper: RecordingSnapshots | None = None, task: live.LiveTask | None = None) -> research_live.WebSteps:
+        return research_live.WebSteps(task or self.task, ResearchLimits(), snapshots=snapper)
+
+    @staticmethod
+    def fetch(web: research_live.WebSteps, tool_id: str, url: str, status: str = rs.RESULT_OK, *,
+              code: int | None = 200, number: int = 1, **call: Any) -> None:
+        web.call(rs.WebCall(tool_id, FETCH, number, url=url, found_by=rs.FOUND_SEARCH, **call))
+        if call.get("over") or call.get("refused"):
+            return
+        web.result(rs.WebResult(tool_id, FETCH, status, text="The museum opens at 10 AM.", code=code,
+                                code_text="OK" if code == 200 else "Moved", size=1234, took_ms=800, final_url=url,
+                                redirect_to="https://www.example.net/new" if status == rs.RESULT_REDIRECT else "",
+                                message="no" if status in (rs.RESULT_ERROR, rs.RESULT_DENIED) else ""))
+
+    def view(self, tool_id: str) -> live.StepView:
+        return self.task.find(live.WEB_FETCH, key=f"web:{tool_id}").view()
+
+    def test_only_a_page_read_that_came_back_ok_is_pictured(self) -> None:
+        web = self.web(self.snapper)
+        web.call(rs.WebCall("toolu_s1", SEARCH, 1, query="museum hours"))
+        web.result(rs.WebResult("toolu_s1", SEARCH, rs.RESULT_OK, hits=(("Visit", self.PAGE),)))
+        self.fetch(web, "toolu_f1", self.PAGE)
+        self.fetch(web, "toolu_f2", "https://www.example.org/missing", rs.RESULT_ERROR, code=404, number=2)
+        self.fetch(web, "toolu_f3", "https://www.example.org/denied", rs.RESULT_DENIED, code=None, number=3)
+        self.fetch(web, "toolu_f4", "https://www.example.org/old", rs.RESULT_REDIRECT, code=301, number=4)
+        self.fetch(web, "toolu_f5", "https://www.example.org/unread", rs.RESULT_UNREAD, code=None, number=5)
+        self.fetch(web, "toolu_f6", "https://www.example.org/over", number=6, over=True)
+        self.fetch(web, "toolu_f7", "https://192.168.1.1/admin", number=7, refused="a local or private address")
+        self.assertEqual(self.snapper.calls, [("request", live.WEB_FETCH, self.PAGE, self.task.id)])
+        read = self.view("toolu_f1")
+        self.assertEqual((read.status, read.summary), (live.STATUS_OK, "200 - 1,234 bytes"))
+        self.assertEqual((read.picture.kind, read.picture.state), (pictures.KIND_PAGE, live.PICTURE_PENDING))
+        self.assertEqual(read.picture.note, snapshots.NOTE_OPENING)
+        self.assertTrue(read.open_hint)
+        for tool_id in ("toolu_f2", "toolu_f3", "toolu_f4", "toolu_f5", "toolu_f6", "toolu_f7"):
+            self.assertIsNone(self.view(tool_id).picture, tool_id)
+        search = self.task.find(live.WEB_SEARCH, key="web:toolu_s1").view()
+        self.assertIsNone(search.picture)
+        web.finished()
+        self.assertEqual(self.snapper.calls[-1], ("end_run", self.task.id))
+
+    def test_the_snapshotter_decides_what_may_be_opened(self) -> None:
+        web = self.web(self.snapper)
+        self.fetch(web, "toolu_f1", "http://www.example.org/plain")              # WebFetch may read http
+        self.fetch(web, "toolu_f2", "https://www.google.com/search?q=museum", number=2)
+        self.assertEqual([call[2] for call in self.snapper.calls],
+                         ["http://www.example.org/plain", "https://www.google.com/search?q=museum"])
+        plain, search = self.view("toolu_f1").picture, self.view("toolu_f2").picture
+        self.assertEqual(plain.state, live.PICTURE_UNAVAILABLE)
+        self.assertTrue(plain.note.startswith(pictures.UNAVAILABLE_PREFIX + snapshots.R_NOT_PUBLIC_HTTPS), plain.note)
+        self.assertEqual(search.note, pictures.UNAVAILABLE_PREFIX + snapshots.R_SEARCH_PAGE)
+        self.assertEqual(self.view("toolu_f1").status, live.STATUS_OK)        # the read itself is unchanged
+
+    def test_without_a_snapshotter_or_with_a_broken_one_the_steps_are_the_same(self) -> None:
+        def steps(snapper: RecordingSnapshots | None) -> tuple:
+            stream = live.LiveStream()
+            task = stream.task(live.TASK_WEB, "web research")
+            web = self.web(snapper, task)
+            self.fetch(web, "toolu_f1", self.PAGE)
+            web.finished()
+            return tuple((step.kind, step.status, step.summary, step.fields, step.blocks, step.picture)
+                         for step in stream.snapshot()[0].steps)
+
+        broken = RecordingSnapshots(fail=True)
+        with self.assertLogs("briefing_reader", level="DEBUG") as logs:
+            logging.getLogger("briefing_reader").debug("marker")
+            self.assertEqual(steps(broken), steps(None))
+        self.assertEqual([call[0] for call in broken.calls], ["request", "end_run"])
+        text = "\n".join(logs.output)
+        self.assertIn("RuntimeError", text)                                   # "Live view: ... failed (RuntimeError)"
+        self.assertNotIn("example", text)
+        self.web().finished()                                                 # no snapshotter: nothing to end
+
+    def test_a_disabled_live_view_never_asks(self) -> None:
+        disabled = live.LiveStream(enabled=False).task(live.TASK_WEB, "web research")
+        web = self.web(self.snapper, disabled)
+        self.fetch(web, "toolu_f1", self.PAGE)
+        self.assertEqual(self.snapper.calls, [])
 
 
 if __name__ == "__main__":

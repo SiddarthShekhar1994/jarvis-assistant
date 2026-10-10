@@ -15,7 +15,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from briefing_reader import live
+from briefing_reader import live, pictures
 from briefing_reader.actions import MOVE, REPLY, SOURCE_ASK, parse_action_line
 from briefing_reader.ask import commands, planner, research_live
 from briefing_reader.ask.context import AccountInfo, BriefingContext
@@ -531,6 +531,66 @@ class LiveTests(PlannerTestCase):
         self.assertIn("addresses Jarvis supplied, 0 you typed", self.fields(validate_step)["Checked against"])
         self.assertFalse(task.finished)   # the controller finishes the task
 
+    def test_pictures_of_the_threads_and_of_the_calendar_read(self) -> None:
+        self.reader.threads["thr0000778"] = second_thread()
+        self.reader.found = ["thr0000777", "thr0000778"]
+        ask = self.make(plan_stream(self.SEARCH), plan_stream({"say": "Done.", "lines": [self.REPLY_FROM_MAIL]}))
+        with self.assertLogs("briefing_reader", level="DEBUG") as logs:
+            outcome = ask.plan("reply to Ana's budget email saying it's confirmed", live=self.task())
+        self.assertTrue(outcome.ok, outcome)
+        # Each thread read: its newest message drawn as an email (headers, the text), the step open.
+        first, second = [step for step in self.steps() if step.kind == live.MAIL_THREAD]
+        picture = first.picture
+        self.assertEqual((picture.kind, picture.state, picture.caption),
+                         (pictures.KIND_EMAIL, live.PICTURE_READY, pictures.CAPTION_EMAIL))
+        head = picture.mail.head
+        self.assertEqual((head.sender, head.to, head.cc, head.subject),
+                         ("Ana Lima <ana@example.edu>", "you@example.edu", "Mallory <m@evil.example>",
+                          "Budget review"))
+        self.assertTrue(head.when)
+        self.assertEqual((picture.mail.account, picture.mail.outgoing, picture.mail.older), ("work", False, ()))
+        self.assertIn("Can you confirm the Q4 budget by Friday?", picture.mail.body)
+        self.assertTrue(first.open_hint)
+        self.assertEqual(second.picture.mail.head.sender, "Ben Ode <ben@example.edu>")
+        self.assertEqual(second.picture.mail.body, "Here are the budget numbers.\nLine two")
+        # The calendar read: its 7 days from today (Wed Oct 7), the event on Thu 8.
+        week = self.step(live.CALENDAR_READ).picture
+        self.assertEqual((week.kind, week.caption), (pictures.KIND_WEEK, pictures.CAPTION_WEEK))
+        self.assertEqual([column.label for column in week.week.columns],
+                         ["Wed 7", "Thu 8", "Fri 9", "Sat 10", "Sun 11", "Mon 12", "Tue 13"])
+        self.assertEqual([column.count for column in week.week.columns], [0, 1, 0, 0, 0, 0, 0])
+        self.assertEqual(week.week.columns[1].blocks, ((14 * 60, 15 * 60),))
+        self.assertEqual((week.week.total, week.week.later, week.week.accounts), (1, 0, ("personal", "work")))
+        # The outcome hands the read on (for the day pictures), never naming an event.
+        read = outcome.calendar_read
+        self.assertIsInstance(read, pictures.CalendarRead)
+        self.assertEqual(dict(read.events)["work"][0].title, "Project sync")
+        self.assertEqual(dict(read.events)["personal"], ())
+        self.assertEqual(read.at, NOW)
+        self.assertLessEqual(read.start, TOMORROW_2PM)
+        self.assertGreater(read.end, TOMORROW_2PM)
+        self.assertNotIn("Project sync", repr(outcome))          # (its cards name the reply, not the read)
+        for text in (outcome.summary(), repr(read), repr(week), repr(picture), repr(picture.mail), repr(first),
+                     "\n".join(logs.output)):
+            for marker in ("Project sync", "Budget review", "Q4 budget", "Ana Lima", "budget numbers"):
+                self.assertNotIn(marker, text)
+
+    def test_pictures_off_and_a_cancelled_calendar_read(self) -> None:
+        ask = self.make(plan_stream(self.SEARCH), plan_stream({"say": "Done.", "lines": []}))
+        self.reader.found = ["thr0000777"]
+        self.stream = live.LiveStream(pictures=False)
+        ask.plan("find Ana's budget email", live=self.stream.task(live.TASK_ASK, "request"))
+        self.assertTrue(all(step.picture is None for step in self.steps()))
+        self.assertTrue(any(step.kind == live.MAIL_THREAD for step in self.steps()))
+        # Cancel before the calendars: no week picture (the read stopped), nothing read is handed on.
+        cancel = threading.Event()
+        cancel.set()
+        outcome = self.make().plan(COMMAND, cancel=cancel, live=self.task())
+        self.assertEqual(outcome.kind, "cancelled")
+        calendar = self.step(live.CALENDAR_READ)
+        self.assertIsNone(calendar.picture)
+        self.assertEqual(outcome.calendar_read.events, ())
+
     def test_the_outcome_is_the_same_with_or_without_live(self) -> None:
         def run(with_live: bool) -> planner.AskOutcome:
             self.setUp()
@@ -568,6 +628,9 @@ class LiveTests(PlannerTestCase):
         block = thread.blocks[0]
         self.assertEqual((block.text, block.kept), ("", False))   # [live] text = false: the size only
         self.assertGreater(block.chars, 100)
+        mail = thread.picture.mail                                # the picture keeps the headers, not the text
+        self.assertEqual((mail.head.subject, mail.body, mail.body_kept), ("Budget review", "", False))
+        self.assertGreater(mail.body_chars, 0)
         run_step = next(step for step in steps if step.kind == live.PLANNER_RUN)
         self.assertTrue(all(not block.kept and block.text == "" for block in run_step.blocks))
         self.assertEqual([step.kind for step in steps],
@@ -1071,6 +1134,8 @@ class ResearchTests(PlannerTestCase):
         self.assertEqual(self.usage.counts(NOW, kind="research"), (1, 1))
         self.assertEqual(self.usage.counts(NOW, kind="plan"), (0, 0))
         self.assertEqual([step.kind for step in self.steps()], [live.ASK_CHECKS] + RESEARCH_KINDS)
+        self.assertIsNone(outcome.calendar_read)                  # nothing read: nothing for the day pictures
+        self.assertTrue(all(step.picture is None for step in self.steps()))   # no mail or calendar picture
         checks = self.step(live.ASK_CHECKS)
         self.assertEqual((checks.title, checks.status), ("Ready to research?", live.STATUS_OK))
         fields = self.fields(checks)
@@ -1350,6 +1415,140 @@ class ResearchTests(PlannerTestCase):
         self.assertIn("Research: 2 source(s) shown, 0 left out, 1 suggestion card(s), 0 dropped", text)
         self.assertIn("research: 2 source(s), 0 left out, 1 search(es), 1 page read(s)", text)
         self.assertIn("Research: run guard in", text)
+
+
+class Snapshots:
+    """The app's page snapshotter as the planner sees it (AskPlanner.page_snapshots): records the
+    calls and the thread, shows a PENDING picture like the real one; nothing is opened."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.calls: list[tuple] = []
+        self.threads: list[str] = []
+        self.fail = fail
+
+    def request(self, step: live.LiveStep, url: str, *, task_id: int) -> None:
+        self.calls.append(("request", step.view().kind, url, task_id))
+        self.threads.append(threading.current_thread().name)
+        if self.fail:
+            raise RuntimeError("a broken snapshotter")
+        step.picture(pictures.page_pending(url))
+
+    def end_run(self, task_id: int) -> None:
+        self.calls.append(("end_run", task_id))
+        if self.fail:
+            raise RuntimeError("a broken snapshotter")
+
+
+class PageSnapshotTests(PlannerTestCase):
+    """Page pictures of a web research (AskPlanner.page_snapshots, LIVE only): the pages a run READ
+    go to the snapshotter with the run's LIVE task id, then end_run - also when the run was stopped,
+    failed or never started. The research run is told nothing of it (its argv, stdin, environment
+    and folder are the same with or without); without the LIVE view nothing is asked."""
+
+    def task(self, kind: str = live.TASK_WEB) -> live.LiveTask:
+        self.stream = live.LiveStream()
+        return self.stream.task(kind, "request")
+
+    def steps(self, kind: str) -> list[live.StepView]:
+        return [step for step in self.stream.snapshot()[0].steps if step.kind == kind]
+
+    def planned(self, *runs: Any, command: str = FORCED_COMMAND, snapper: Snapshots | None = None,
+                kind: str = live.TASK_WEB, **kwargs: Any) -> tuple[planner.AskOutcome, live.LiveTask, Snapshots]:
+        snapper = snapper or Snapshots()
+        ask = self.make(*runs)
+        ask.page_snapshots = snapper
+        task = self.task(kind)
+        return ask.plan(command, live=task, **kwargs), task, snapper
+
+    def test_a_forced_research_pictures_the_page_it_read(self) -> None:
+        outcome, task, snapper = self.planned(stream("research_success"))
+        self.assertTrue(outcome.ok, outcome)
+        self.assertEqual(snapper.calls, [("request", live.WEB_FETCH, "https://www.example.org/visit", task.id),
+                                         ("end_run", task.id)])
+        (fetch,) = self.steps(live.WEB_FETCH)
+        self.assertEqual((fetch.status, fetch.picture.state), (live.STATUS_OK, live.PICTURE_PENDING))
+        self.assertIsNone(self.steps(live.WEB_SEARCH)[0].picture)                  # a search never is
+        self.assertTrue(all(step.picture is None for step in self.stream.snapshot()[0].steps
+                            if step.kind != live.WEB_FETCH))
+
+    def test_a_routed_research_uses_the_asks_task(self) -> None:
+        outcome, task, snapper = self.planned(plan_stream(WEB_PLAN), stream("research_success"),
+                                              command=ROUTED_COMMAND, kind=live.TASK_ASK)
+        self.assertTrue(outcome.ok, outcome)
+        self.assertEqual([call[0] for call in snapper.calls], ["request", "end_run"])
+        self.assertEqual({call[-1] for call in snapper.calls}, {task.id})
+
+    def test_redirected_failed_and_denied_reads_are_not_pictured(self) -> None:
+        cases = {"research_redirect": ["https://www.example.net/new"],   # the 301 is not; the page it led to is
+                 "research_fetch_error": [], "research_denied": [], "research_unread": []}
+        for name, pages in cases.items():
+            with self.subTest(name=name):
+                self.setUp()
+                _outcome, task, snapper = self.planned(stream(name))
+                self.assertEqual([call[2] for call in snapper.calls if call[0] == "request"], pages)
+                self.assertEqual(snapper.calls[-1], ("end_run", task.id))
+
+    def test_the_run_ends_its_pictures_however_it_ends(self) -> None:
+        # Stopped by Jarvis at a local page read (never pictured), timed out, cancelled.
+        _outcome, task, snapper = self.planned(stream("research_local_fetch"))
+        self.assertEqual(snapper.calls, [("end_run", task.id)])
+        self.setUp()
+        hang = FakeProcess(stream("research_success")[:5], clock=self.clock, hang=True)
+        outcome, task, snapper = self.planned(hang)
+        self.assertEqual(outcome.kind, "timeout")
+        self.assertEqual(snapper.calls, [("request", live.WEB_FETCH, "https://www.example.org/visit", task.id),
+                                         ("end_run", task.id)])
+        self.setUp()
+        cancel = threading.Event()
+        process = FakeProcess(stream("research_success")[:4], clock=self.clock, hang=True, cancel_after=6,
+                              cancel=cancel)
+        outcome, task, snapper = self.planned(process, cancel=cancel)
+        self.assertEqual(outcome.kind, "cancelled")
+        self.assertEqual(snapper.calls, [("end_run", task.id)])
+
+    def test_a_run_refused_right_before_it_starts_ends_too(self) -> None:
+        def sign_out(stage: str) -> None:
+            if stage == planner.STAGE_RESEARCH:
+                self.runner.auth = '{"loggedIn": true, "authMethod": "console", "apiProvider": "firstParty"}'
+                self.clock.t += 60
+
+        outcome, task, snapper = self.planned(plan_stream(WEB_PLAN), command=ROUTED_COMMAND, kind=live.TASK_ASK,
+                                              on_stage=sign_out)
+        self.assertEqual(outcome.kind, "not_signed_in")
+        self.assertEqual(snapper.calls, [("end_run", task.id)])
+
+    def test_the_research_run_is_told_nothing_of_it(self) -> None:
+        def run(snapper: Snapshots | None) -> tuple:
+            self.setUp()
+            ask = self.make(stream("research_success"))
+            ask.page_snapshots = snapper
+            with self.assertLogs("briefing_reader", level="DEBUG") as logs:
+                outcome = ask.plan(FORCED_COMMAND, live=self.task())
+            started = self.runner.started[0]
+            root = str(self.root)   # each run has its own temporary folder
+
+            def same(text: str) -> str:
+                return str(text).replace(root, "<root>")
+
+            views = tuple((step.kind, step.status, step.summary, step.fields, step.blocks)
+                          for step in self.stream.snapshot()[0].steps)
+            lines = [same(line) for line in logs.output if "Live view:" not in line]
+            return (outcome, [same(arg) for arg in started.argv], started.stdin,
+                    {key: same(value) for key, value in started.env.items()}, same(started.cwd), views, lines)
+
+        without = run(None)
+        for snapper in (Snapshots(), Snapshots(fail=True)):
+            with self.subTest(fail=snapper.fail):
+                self.assertEqual(run(snapper), without)
+                self.assertEqual([call[0] for call in snapper.calls], ["request", "end_run"])
+
+    def test_no_live_view_no_pictures(self) -> None:
+        snapper = Snapshots()
+        ask = self.make(stream("research_success"))
+        ask.page_snapshots = snapper
+        self.assertTrue(ask.plan(FORCED_COMMAND).ok)
+        self.assertEqual(snapper.calls, [])
+        self.assertIsNone(planner.AskPlanner.page_snapshots)                      # the class default: none
 
 
 class RefusalTests(PlannerTestCase):

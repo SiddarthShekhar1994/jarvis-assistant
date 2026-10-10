@@ -516,8 +516,11 @@ def _run_app(args: argparse.Namespace, config: Any, name: str, run: str | None,
 
     from . import hud, ui
     from .activation import forward_qt_message
+    from .snapshot_engine import prepare_application
 
     _set_app_user_model_id()
+    # Qt's attributes for the page snapshots' web engine: only before the QApplication exists.
+    prepare_application()
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(__version__)

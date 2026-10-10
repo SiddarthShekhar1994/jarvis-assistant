@@ -121,6 +121,7 @@ from PySide6.QtWidgets import (
 
 from . import hud
 from . import live as _live
+from . import pictures as _pictures
 from .actions import (
     CALENDAR,
     CANCEL,
@@ -3174,6 +3175,12 @@ class AppController(QObject):
     unless ``voice_factory(controller)`` builds one; the real voice is made by
     ``start()`` only). ``locked()`` says whether the session is locked (an
     announcement waits for the unlock).
+
+    Page pictures of web research (``[live] page_snapshots``, with ``[live]
+    enabled``): a snapshot_engine.PageSnapshotter, or what
+    ``snapshot_factory(controller)`` builds (tests inject a fake: no web
+    engine), is handed to the Ask planner; an Ask's Cancel stops its pictures,
+    LIVE's Clear drops the ones nobody would see, and quitting stops them all.
     """
 
     def __init__(self, config: Config, client: NotionClient, *, expected_run: str | None,
@@ -3191,11 +3198,13 @@ class AppController(QObject):
                  launch: str | None = None,
                  voice_factory: Callable[[Any], Voice] | None = None,
                  locked: Callable[[], bool] | None = None,
-                 prefs: AssistantPrefs | None = None) -> None:
+                 prefs: AssistantPrefs | None = None,
+                 snapshot_factory: Callable[[Any], Any] | None = None) -> None:
         super().__init__()
         self.config = config
         self.client = client
         self._on_shutdown = on_shutdown   # e.g. an exit watchdog (the app passes one; tests do not)
+        self._snapshot_factory = snapshot_factory   # tests: a fake page snapshotter (no web engine)
         self.expected_run = _normalize_run(expected_run)
         self.now_mode = bool(now_mode)
         self.ask_mode = bool(ask_mode)
@@ -3217,7 +3226,8 @@ class AppController(QObject):
         live_config = getattr(config, "live", None)
         self.live = _live.LiveStream(enabled=bool(getattr(live_config, "enabled", True)),
                                      keep_text=bool(getattr(live_config, "text", True)),
-                                     hour24=bool(config.display.hour24))
+                                     hour24=bool(config.display.hour24),
+                                     pictures=bool(getattr(live_config, "pictures", True)))
         self._volume = volume
         self.window = BriefingWindow(config.prompt.later_short_minutes, config.prompt.later_long_minutes)
         self.window.set_hour24(config.display.hour24)
@@ -3452,6 +3462,11 @@ class AppController(QObject):
         self._live_opened: list[int] = []          # tasks that already switched to LIVE (one switch each)
         self._ask_task_id = 0                      # the running (or last) Ask's LIVE task
         self._live_peeks = [0, 0, 0]               # event checks on their way: jobs, cards, problems
+        # The calendar days Jarvis already read (today's agenda, Ask's reads): a day picture draws a
+        # day's other events only from these (memory only; never a Google call for a picture).
+        self._known_days = _pictures.KnownDays()
+        # The pictures of the pages a web research read ([live] page_snapshots; None when off).
+        self._snapshots: Any = self._create_snapshotter(live_config)
         reading = self.window.reading
         reading.set_live_available(self.live.enabled)
         if self.live.enabled:
@@ -3461,6 +3476,37 @@ class AppController(QObject):
         reading.liveClear.connect(self.clear_live)
         reading.liveShowWindow.connect(self.show_live_window)
         reading.liveLink.connect(self._on_live_link)
+
+    def _create_snapshotter(self, live_config: Any) -> Any:
+        """The page snapshotter while LIVE and its page pictures are on (``snapshot_factory``'s
+        object, else the real one: QtWebEngine is loaded only at the first picture); None when off
+        or when it cannot be made (the research works the same without it)."""
+        if not self.live.enabled or not bool(getattr(live_config, "page_snapshots", True)):
+            return None
+        from . import snapshots as _snapshots
+
+        research = getattr(self.config, "research", None)
+        try:
+            fetches = int(getattr(research, "max_fetches", _snapshots.MAX_PER_RUN))
+        except (TypeError, ValueError):
+            fetches = _snapshots.MAX_PER_RUN
+        try:
+            if self._snapshot_factory is not None:
+                return self._snapshot_factory(self)
+            from .snapshot_engine import PageSnapshotter
+
+            return PageSnapshotter(self, keep_text=self.live.keep_text,
+                                   max_per_run=max(0, min(_snapshots.MAX_PER_RUN, fetches)))
+        except Exception as exc:  # noqa: BLE001 - pictures are optional
+            logger.warning("Page pictures could not be set up (%s)", type(exc).__name__)
+            return None
+
+    @_live.quiet()
+    def _snapshots_call(self, name: str, *args: Any) -> None:
+        """One call on the page snapshotter (when there is one); it never changes what Jarvis does."""
+        snapper = self._snapshots
+        if snapper is not None:
+            getattr(snapper, name)(*args)
 
     def _create_player(self) -> BriefingPlayer:
         player = BriefingPlayer(self, section_gap_ms=self.config.voice.section_gap_ms,
@@ -4748,7 +4794,10 @@ class AppController(QObject):
         task.step(_live.ACTION_APPROVED, "You approved", status=_live.STATUS_OK, fields=fields)
         preview = self._executor.preview(action)
         if preview is not None:
-            task.step(_live.ACTION_PAYLOAD, preview.title, status_text="PREVIEW").show(preview)
+            payload = task.step(_live.ACTION_PAYLOAD, preview.title, status_text="PREVIEW")
+            payload.show(preview)   # a Reply / Email's picture comes with it
+            if action.kind in (CALENDAR, TODO, MOVE, CANCEL, RSVP):
+                payload.picture(self._live_day_picture(action))
         task.step(_live.ACTION_COUNTDOWN, "Undo countdown", status_text="ADDING" if _adds_event(action) else "SENDING",
                   deadline=deadline, fields=[("Length", f"{seconds} s"), ("Undo", "on the card")])
         return task
@@ -5632,6 +5681,8 @@ class AppController(QObject):
         self._live_agenda_done(events, problem, message)
         if not problem:
             self._agenda_events, self._agenda_range = list(events or ()), (job.start, job.end)
+            self._remember_days(DEFAULT_ACCOUNT, _pictures.SOURCE_AGENDA, job.start, job.end, self._agenda_events,
+                                self._now())
             self._agenda_status, self._agenda_problem, self._connect_note = _AGENDA_OK, "", ""
             logger.debug("Agenda: %d event(s)", len(self._agenda_events))
             self._set_signed_in(True)
@@ -5749,6 +5800,28 @@ class AppController(QObject):
         else:
             step.done(_live.STATUS_WARN, summary=message or "not signed in - not read")
 
+    @_live.quiet()
+    def _remember_days(self, alias: str, source: str, start: datetime, end: datetime, events: Any,
+                       at: datetime) -> None:
+        """A calendar read Jarvis did anyway, kept for the LIVE day pictures (memory only; only while
+        LIVE keeps pictures)."""
+        if self.live.enabled and self.live.pictures:
+            self._known_days.remember(alias, source, start, end, events or (), at=at)
+
+    @_live.quiet()
+    def _remember_ask_read(self, outcome: Any) -> None:
+        read = getattr(outcome, "calendar_read", None)
+        if read is None:
+            return
+        for alias, briefs in read.events:
+            self._remember_days(alias, _pictures.SOURCE_ASK, read.start, read.end, briefs, read.at)
+
+    @_live.quiet(None)
+    def _live_day_picture(self, action: ProposedAction) -> Any:
+        """A calendar card's change drawn on its day (no network: what Jarvis already read)."""
+        return _pictures.day_change_picture(action, now=self._now(), hour24=self.config.display.hour24,
+                                            check=self._checks.get(action.id), known=self._known_days)
+
     @staticmethod
     def _live_peeks_title(count: int) -> str:
         cards = "1 card's" if count == 1 else f"{count} cards'"
@@ -5816,6 +5889,8 @@ class AppController(QObject):
         except Exception as exc:  # noqa: BLE001 - the briefing works without Ask
             logger.warning("Could not set up Ask Jarvis (%s)", type(exc).__name__)
             return None
+        if self._snapshots is not None and hasattr(planner, "page_snapshots"):
+            planner.page_snapshots = self._snapshots   # the pages a research read, pictured in LIVE
         reading = self.window.reading
         controller = ask_ui.AskController(self.config, planner, reading.command_bar, context=self._ask_context,
                                           blocked=self._ask_blocked, calendars=self._calendars, live=self.live,
@@ -5826,6 +5901,7 @@ class AppController(QObject):
         controller.askCancelled.connect(self._on_ask_cancelled)
         controller.chipChanged.connect(self._set_ask_chip)
         controller.mailSignInRequested.connect(self.sign_in_for_mail)
+        reading.command_bar.cancelRequested.connect(self._on_ask_cancel_clicked)   # after the controller's
         reading.set_ask_available(True)
         self._set_ask_chip(*controller.chip())
         return controller
@@ -5893,7 +5969,17 @@ class AppController(QObject):
         if not self._live_auto_open(kind, self._ask_task_id):
             self.window.reading.set_tab(hud.TAB_JARVIS)
 
+    def _on_ask_cancel_clicked(self) -> None:
+        """Cancel on the bar: the running Ask's page pictures stop at once (the run itself stops
+        within a second; _on_ask_cancelled follows)."""
+        ask = self.ask
+        task_id = ask.task_id if ask is not None and ask.busy else 0
+        if task_id:
+            self._snapshots_call("cancel_task", task_id)
+
     def _on_ask_cancelled(self, _seq: int) -> None:
+        if self._ask_task_id:
+            self._snapshots_call("cancel_task", self._ask_task_id)   # its queued and running pictures stop
         if self.state == STATE_QUITTING:
             return
         self._voice_call("cancel_key", ASK_ACK_KEY)
@@ -5979,6 +6065,7 @@ class AppController(QObject):
         gets one row of counts (never the request or the answer)."""
         if self.state == STATE_QUITTING:
             return
+        self._remember_ask_read(outcome)
         self._converse_ask(outcome)
         report = getattr(outcome, "research", None) if outcome.ok else None
         if report is not None:
@@ -6306,20 +6393,25 @@ class AppController(QObject):
 
     def dock_live(self) -> None:
         """Dock (the pop-out's close button, Alt+F4, Dock, or "Bring it back here"): the window hides
-        (it is kept, never quits) and the LIVE tab shows the steps again."""
+        (it is kept, never quits) and the LIVE tab shows the steps again. The hidden window's log is
+        emptied (no fed view keeps steps or pictures: Clear and the picture caps reach every view
+        that is seen) and a picture it showed larger closes; popping out again replays the stream."""
         window = self._live_window
         if window is not None and window.isVisible():
             self._remember_live_window(popped=False)
             window.hide()
             self._live_feed.detach(window.log)
+            window.log.clear()
             logger.info("LIVE docked")
         self.window.reading.set_live_popped(False)
         self._sync_live_dot()
 
     def clear_live(self) -> None:
         """Clear: every finished task leaves both views (a running one stays whole); nothing else
-        changes and nothing was saved."""
+        changes and nothing was saved. A page picture still to be taken for a step that went is not
+        taken (nobody would see it)."""
         self.live.clear()
+        self._snapshots_call("drop_cleared")
         self._live_unread = False
         self._sync_live_dot()
 
@@ -7889,6 +7981,7 @@ class AppController(QObject):
             _live_countdown_end(countdown, _live.STATUS_CANCELLED, "", "Jarvis closed - nothing was sent")
         if self.ask is not None:
             self.ask.shutdown()   # a running Ask is cancelled: nothing is proposed
+        self._snapshots_call("shutdown")   # no page is opened any more; the hidden view goes
         self._close_live_window()
         if self._dialog is not None:
             self._dialog.reject()
@@ -7912,7 +8005,8 @@ class AppController(QObject):
                 logger.info("The change on its way to Google %s", "finished" if finished
                             else "did not finish in time; it shows as unknown at the next start")
             self._calendar_worker.stop()
-        self.live.close()   # a worker that still records hits no-ops
+        self.live.close()   # a worker that still records hits no-ops (its pictures go too)
+        self._known_days.clear()
         if self.tray is not None:
             self.tray.hide()
         if self._audio_dir is not None:

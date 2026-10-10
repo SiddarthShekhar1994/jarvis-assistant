@@ -1,7 +1,8 @@
 """Fakes for the app-level Ask Jarvis tests (test_ask_controller, test_card_sources): an
 AppController offscreen with a player that only keeps its state, Google calendars and senders
-that never touch the network, and Ask's real planner over tests.ask_fakes' runner (claude.exe is
-never started). Every name, address, id and text is invented.
+that never touch the network, Ask's real planner over tests.ask_fakes' runner (claude.exe is
+never started), and a page snapshotter that opens no page (FakeSnapshotter: no web engine).
+Every name, address, id and text is invented.
 """
 
 from __future__ import annotations
@@ -335,6 +336,106 @@ class AskFactory:
         return self.planner
 
 
+def tiny_jpeg(width: int = 48, height: int = 30) -> bytes:
+    """A small JPEG drawn by QImage (two colour bands: not "blank") - a fake page picture."""
+    from PySide6.QtCore import QBuffer, QByteArray, QIODevice
+    from PySide6.QtGui import QColor, QImage
+
+    image = QImage(width, height, QImage.Format.Format_RGB32)
+    image.fill(QColor("#e9eef2"))
+    for y in range(height // 3):
+        for x in range(width):
+            image.setPixelColor(x, y, QColor("#2a6f97"))
+    data = QByteArray()
+    buffer = QBuffer(data)
+    buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+    image.save(buffer, "JPG", 80)
+    buffer.close()
+    return bytes(data.data())
+
+
+class FakeSnapshotter:
+    """snapshot_engine.PageSnapshotter's surface without a web engine: no page is ever opened.
+
+    ``request`` refuses what the real one refuses (shut down, text off, not public https, a search
+    results page, past ``max_per_run``, the same page again; an UNAVAILABLE picture) and otherwise
+    shows the PENDING picture, like the real one. Every request with a LIVE step is recorded in
+    ``requests`` as (url, task_id) and its step in ``steps``; ``complete(index, ok=True)`` delivers
+    request ``index``'s READY picture (a tiny JPEG drawn by QImage) or an unavailable one.
+    ``ended``, ``cancelled``, ``cleared`` and ``shutdowns`` record the other calls."""
+
+    def __init__(self, *, keep_text: bool = True, max_per_run: int = 4) -> None:
+        from briefing_reader import snapshots
+
+        self.keep_text = keep_text
+        self.max_per_run = max_per_run
+        self.requests: list[tuple[str, int]] = []
+        self.steps: list[Any] = []
+        self.pending: list[bool] = []       # per request: it got a PENDING picture (not refused)
+        self.ended: list[int] = []
+        self.cancelled: list[int] = []
+        self.cleared = 0
+        self.shutdowns = 0
+        self.threads: list[str] = []
+        self._budget = snapshots.RunBudget()
+        self._lock = threading.Lock()
+
+    def request(self, step: Any, url: str, *, task_id: int) -> None:
+        from briefing_reader import pictures, snapshots
+
+        if step is None or step.view() is None:
+            return
+        with self._lock:
+            self.requests.append((url, task_id))
+            self.steps.append(step)
+            self.threads.append(threading.current_thread().name)
+        if self.shutdowns:
+            reason = snapshots.R_SHUTDOWN
+        elif not self.keep_text:
+            reason = snapshots.R_TEXT_OFF
+        else:
+            reason = snapshots.snapshot_url_problem(url) or self._budget.admit(task_id, url, self.max_per_run)
+        with self._lock:
+            self.pending.append(not reason)
+        step.picture(pictures.page_unavailable(url, reason) if reason else pictures.page_pending(url))
+
+    def complete(self, index: int, ok: bool = True, reason: str = "", final_url: str = "") -> None:
+        """Request ``index``'s picture: READY (``final_url``: the page ended up there) or unavailable."""
+        from briefing_reader import pictures, snapshots
+
+        assert self.pending[index], "that request was refused: it has no picture to complete"
+        url, step = self.requests[index][0], self.steps[index]
+        if ok:
+            step.picture(pictures.page_ready(url, image=tiny_jpeg(), image_format="JPG", width=48, height=30,
+                                             final_url=final_url or url, took_ms=1500, still_loading=False,
+                                             blocked=1))
+        else:
+            step.picture(pictures.page_unavailable(url, reason or snapshots.R_LOAD_FAILED))
+
+    def end_run(self, task_id: int) -> None:
+        self._budget.end(task_id)
+        with self._lock:
+            self.ended.append(task_id)
+
+    def cancel_task(self, task_id: int) -> None:
+        self._budget.cancel(task_id)
+        with self._lock:
+            self.cancelled.append(task_id)
+
+    def drop_cleared(self) -> None:
+        self.cleared += 1
+
+    def shutdown(self) -> None:
+        self.shutdowns += 1
+
+    def idle(self) -> bool:
+        return True
+
+    def counts(self) -> dict[str, int]:
+        return {"requested": len(self.requests), "taken": 0, "unavailable": 0,
+                "refused": sum(1 for pending in self.pending if not pending)}
+
+
 def plan(say: str = SAY, question: str = "", lines: Sequence[str] = (MOVE_LINE, EMAIL_LINE)) -> list[str]:
     return plan_stream({"say": say, "question": question, "lines": list(lines)})
 
@@ -357,12 +458,16 @@ def page_fixture(root: Path, lines: Sequence[str]) -> Path:
 
 
 class AppHarness:
-    """One AppController (offscreen, nothing real reached) and what it was built with."""
+    """One AppController (offscreen, nothing real reached) and what it was built with.
+
+    Page pictures: ``snapshots`` is a FakeSnapshotter the controller gets (while [live]
+    page_snapshots is on) - no web engine, no page; ``snapshot_factory`` replaces it (a harness
+    passes the real snapshotter with local HTML)."""
 
     def __init__(self, test: Any, *, ask: bool = True, runs: Sequence[Any] = (), auth: str | None = None,
                  readers: dict | None = None, ask_mode: bool = False, run_state: Any = None,
                  lines: Sequence[str] = (B_CALENDAR, B_TODO), engine_clock: Any = None,
-                 max_per_hour: int = 20, config_extra: str = "") -> None:
+                 max_per_hour: int = 20, config_extra: str = "", snapshot_factory: Any = None) -> None:
         tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         test.addCleanup(tmp.cleanup)
         self.root = root = Path(tmp.name)
@@ -383,12 +488,16 @@ class AppHarness:
                                   max_per_hour=max_per_hour)
         self.store = ActionStore(root / "actions.json")
         self.voice = RecordingVoice()   # Jarvis's own voice: recorded, never synthesized
+        live_config = self.config.live
+        self.snapshots = FakeSnapshotter(keep_text=live_config.text,
+                                         max_per_run=max(0, min(4, self.config.research.max_fetches)))
         with mock.patch.object(ui, "BriefingPlayer", FakePlayer):
             self.c = ui.AppController(self.config, self.client, expected_run="AM", now_mode=False, volume=0.0,
                                       now_func=lambda: NOW, calendar_factory=lambda _cfg: self.calendars,
                                       sender_factory=lambda _cfg: self.senders, action_store=self.store,
                                       click_clock=_StepClock(), ask_factory=self.factory, ask_mode=ask_mode,
-                                      run_state=run_state, voice_factory=lambda _controller: self.voice)
+                                      run_state=run_state, voice_factory=lambda _controller: self.voice,
+                                      snapshot_factory=snapshot_factory or (lambda _controller: self.snapshots))
         self.c._start_fetch = lambda *args, **kwargs: None   # never Notion: the page is handed over below
         test.addCleanup(self.close)
 
@@ -410,6 +519,8 @@ class AppHarness:
         if c.ask is not None:
             c.ask.shutdown()
             c.ask.join(5)
+        if c._snapshots is not None:
+            c._snapshots.shutdown()   # a real snapshotter (a harness's) closes its hidden view
         for timer in (c._ignore_timer, c._tick_timer, c._snooze_timer, c._countdown_timer, c._agenda_timer):
             timer.stop()
         if c._calendar_worker is not None:

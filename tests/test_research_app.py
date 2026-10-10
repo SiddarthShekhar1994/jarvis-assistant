@@ -8,7 +8,8 @@ that click and only after the web rule is checked again (a tampered link is refu
 record the decision; a research Todo's block is added only after the undo countdown (Undo sends
 nothing). What the research found never reaches a later Ask (T-ISO-4). A request the planner hands
 over stays in its ASK task. The logs never hold the question, a query, an address, a site, a title
-or the answer.
+or the answer. A page the research read gets its picture in LIVE through the app's page
+snapshotter (tests.ui_fakes.FakeSnapshotter here: no web engine, no page is opened).
 
 Qt runs offscreen; fakes only: claude.exe is never started (tests.ask_fakes' runner and research
 streams), nothing reaches Google, Notion or the web, and every name, address and text is invented.
@@ -17,13 +18,14 @@ streams), nothing reaches Google, Notion or the web, and every name, address and
 from __future__ import annotations
 
 import dataclasses
+import sys
 import threading
 import unittest
 from unittest import mock
 
 from PySide6.QtWidgets import QApplication
 
-from briefing_reader import ask_ui, hud, live, ui
+from briefing_reader import ask_ui, hud, live, pictures, snapshots, ui
 from briefing_reader.actions import IDN_WARNING, SOURCE_ASK, STATUS_DENIED, STATUS_DONE
 from briefing_reader.ask import planner as ask_planner
 from briefing_reader.ask.research_validate import entry_text
@@ -471,6 +473,126 @@ class LogTests(ResearchAppCase):
             self.assertNotIn(secret, text)
         self.assertIn("Research: run ok", text)
         self.assertIn("Open the link of action", text)
+
+
+class PagePictureTests(ResearchAppCase):
+    """Page pictures ([live] page_snapshots): the app hands its snapshotter (here tests.ui_fakes'
+    FakeSnapshotter: no web engine, no page) to the planner; a "web:" run's page read gets its
+    picture on its LIVE step (PENDING, then READY), asked from the Ask's thread with the WEB task's
+    id; Cancel, Clear and quitting reach the snapshotter; with page_snapshots or text off there is
+    no page picture."""
+
+    def fetch_step(self, task_id: int):
+        card = self.reading.live_log.task_widget(task_id)
+        return next(step for step in card.step_widgets() if step.view.kind == live.WEB_FETCH)
+
+    def test_the_page_a_web_request_read_is_pictured_in_live(self) -> None:
+        self.make(research_run())
+        snaps = self.app.snapshots
+        self.assertIs(self.c._snapshots, snaps)
+        self.assertIs(self.c.ask.planner.page_snapshots, snaps)
+        self.submit()
+        task_id = self.c.ask.task_id
+        self.finish()
+        self.drained()
+        self.assertEqual(snaps.requests, [(VISIT_URL, task_id)])
+        self.assertEqual(snaps.ended, [task_id])
+        self.assertEqual(snaps.threads, ["ask"])                       # asked from the Ask's thread
+        step = self.fetch_step(task_id)
+        self.assertEqual((step.view.status, step.view.picture.state), (live.STATUS_OK, live.PICTURE_PENDING))
+        self.assertTrue(step.is_open())                                # a step with a picture starts open
+        thumbnail = step.picture_widget()
+        self.assertTrue(thumbnail is not None and thumbnail.isVisibleTo(self.reading.live_log) and thumbnail.pending())
+        self.assertIn(snapshots.NOTE_OPENING, thumbnail.accessibleName())
+        snaps.complete(0)
+        self.drained()
+        step = self.fetch_step(task_id)
+        self.assertEqual(step.view.picture.state, live.PICTURE_READY)
+        thumbnail = step.picture_widget()
+        self.assertTrue(thumbnail.ready())
+        self.assertEqual(thumbnail.picture().caption, pictures.page_caption("www.example.org"))
+        self.assertTrue(self.reading.live_log.open_picture(step.view.id))   # Enter / click: larger, inside Jarvis
+        viewer = self.reading.live_log.picture_viewer()
+        self.assertTrue(viewer is not None and viewer.isVisible())
+        viewer.close()
+        settle()
+        # Clear: the snapshotter drops what nobody would see any more.
+        self.c.clear_live()
+        self.assertEqual(snaps.cleared, 1)
+        with mock.patch.object(ui, "_remove_audio_dir_after"):
+            self.c.shutdown()
+        self.assertEqual(snaps.shutdowns, 1)
+
+    def test_cancel_stops_the_runs_pictures_at_once(self) -> None:
+        gate = threading.Event()
+        self.make(GatedProcess(research_run(), gate, after=2))     # held after the search call
+        self.submit()
+        task_id = self.c.ask.task_id
+        self.assertTrue(wait_for(lambda: self.tasks(live.TASK_WEB)
+                                 and any(step.kind == live.WEB_SEARCH for step in self.tasks(live.TASK_WEB)[0].steps)))
+        self.reading.command_bar.button.click()                       # Cancel
+        self.assertEqual(self.app.snapshots.cancelled, [task_id])     # before the run has even stopped
+        self.assertTrue(wait_for(lambda: not self.c.ask.busy, 5))
+        settle()
+        self.assertEqual(self.app.snapshots.cancelled, [task_id, task_id])   # and again once it has
+        self.assertEqual(self.app.snapshots.ended, [task_id])
+        self.assertEqual(self.app.snapshots.requests, [])
+
+    def test_page_snapshots_off_means_no_snapshotter(self) -> None:
+        self.make(research_run(), extra="\n[live]\npage_snapshots = false\n")
+        self.assertIsNone(self.c._snapshots)
+        self.assertIsNone(self.c.ask.planner.page_snapshots)
+        self.submit()
+        task_id = self.c.ask.task_id
+        self.finish()
+        self.drained()
+        self.assertEqual(self.app.snapshots.requests, [])
+        self.assertIsNone(self.fetch_step(task_id).view.picture)
+        self.c.clear_live()                                           # nothing to tell: no error
+        self.assertEqual(self.app.snapshots.cleared, 0)
+
+    def test_text_off_gives_no_page_picture(self) -> None:
+        # The snapshotter refuses (R_TEXT_OFF: no page is opened) and LIVE keeps no page picture at all
+        # with [live] text = false (a page picture is page text).
+        self.make(research_run(), extra="\n[live]\ntext = false\n")
+        self.assertFalse(self.app.snapshots.keep_text)
+        self.submit()
+        task_id = self.c.ask.task_id
+        self.finish()
+        self.drained()
+        self.assertEqual(self.app.snapshots.requests, [(VISIT_URL, task_id)])
+        self.assertEqual(self.app.snapshots.pending, [False])         # refused: nothing to open
+        self.assertIsNone(self.fetch_step(task_id).view.picture)
+
+    def test_live_off_means_no_snapshotter(self) -> None:
+        self.make(research_run(), extra="\n[live]\nenabled = false\n")
+        self.assertIsNone(self.c._snapshots)
+        self.submit()
+        self.finish()
+        self.assertEqual(self.app.snapshots.requests, [])
+
+    def test_the_app_builds_the_real_one_with_the_research_cap(self) -> None:
+        from briefing_reader import snapshot_engine
+
+        self.make(extra="\n[research]\nmax_fetches = 2\n")
+        self.c._snapshot_factory = None
+        real = self.c._create_snapshotter(self.c.config.live)
+        self.addCleanup(real.deleteLater)
+        self.addCleanup(real.shutdown)
+        self.assertIsInstance(real, snapshot_engine.PageSnapshotter)
+        self.assertIs(real.parent(), self.c)
+        self.assertEqual((real._max_per_run, real._keep_text), (2, True))
+        self.assertTrue(real.idle())                                  # nothing starts until a page is read
+        self.assertNotIn("PySide6.QtWebEngineCore", sys.modules)       # the web engine is not even loaded
+
+    def test_a_factory_that_fails_leaves_the_research_as_it_was(self) -> None:
+        def broken(_controller):
+            raise RuntimeError("no pictures today")
+
+        with self.assertLogs("briefing_reader.ui", level="WARNING") as logs:
+            app = AppHarness(self, runs=(research_run(),), snapshot_factory=broken)
+        self.assertIsNone(app.c._snapshots)
+        self.assertIn("Page pictures could not be set up (RuntimeError)", "\n".join(logs.output))
 
 
 class ControllerKindTests(unittest.TestCase):

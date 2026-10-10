@@ -323,6 +323,8 @@ class LiveConfig:
     auto_open: str = LIVE_OPEN_TAB   # "tab" | "window" | "off" (true -> "tab", false -> "off" accepted)
     background: bool = True        # the rolling "Background reads" row (agenda, event checks, sign-ins...)
     text: bool = True              # keep the text blocks (false: only their sizes)
+    pictures: bool = True          # email and calendar pictures in LIVE, drawn on this PC
+    page_snapshots: bool = True    # pictures of the pages a web research read: the only part that uses the network
 
 
 @dataclass(frozen=True)
@@ -989,7 +991,9 @@ def _parse_live(doc: Mapping[str, Any]) -> LiveConfig:
     else:
         auto_open = r.choice("auto_open", d.auto_open, LIVE_OPEN_CHOICES)
     return LiveConfig(enabled=r.boolean("enabled", d.enabled), auto_open=auto_open,
-                      background=r.boolean("background", d.background), text=r.boolean("text", d.text))
+                      background=r.boolean("background", d.background), text=r.boolean("text", d.text),
+                      pictures=r.boolean("pictures", d.pictures),
+                      page_snapshots=r.boolean("page_snapshots", d.page_snapshots))
 
 
 def _parse_notion_version(doc: Mapping[str, Any]) -> str:

@@ -256,4 +256,16 @@ background = true
 # Show the text Jarvis read and sent (email threads, the planner's input and
 # reply, the outgoing message). false: only their sizes (also of the message
 # text in the planner's proposals); subjects, names and addresses still show.
+# false also takes no page pictures and leaves the email texts out of the
+# pictures (their headers still show).
 text = true
+# Pictures in LIVE: an email Jarvis read or will send drawn as an email, a
+# calendar change drawn on its day (before and after), and an Ask's calendar
+# read as a 7-day strip. Drawn by Jarvis on this PC from the text he already
+# has: no email HTML, no images from the web.
+pictures = true
+# Page pictures of web research: each page a research read is opened again on
+# this PC in a private window (no sign-ins, nothing saved) and its first screen
+# shown. That is an ordinary page visit from this PC: the site sees your IP
+# address. false: no page is opened; the research works the same.
+page_snapshots = true

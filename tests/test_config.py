@@ -1041,6 +1041,29 @@ class LiveConfigTests(ProjectTestCase):
         self.write_config('live = "on"\n')
         self.assertEqual(self.load_warning("[live]").live, LiveConfig())
 
+    def test_pictures_and_page_snapshots(self) -> None:
+        self.write_config("")
+        cfg = self.load_quietly()
+        self.assertTrue(cfg.live.pictures)
+        self.assertTrue(cfg.live.page_snapshots)
+        self.write_config("[live]\npictures = false\npage_snapshots = false\n")
+        cfg = self.load_quietly()
+        self.assertEqual((cfg.live.pictures, cfg.live.page_snapshots), (False, False))
+        self.write_config("[live]\npictures = false\n")
+        self.assertEqual((self.load_quietly().live.pictures, self.load_quietly().live.page_snapshots), (False, True))
+        self.write_config('[live]\npictures = "no"\npage_snapshots = 0\n')
+        cfg = self.load_warning("live.pictures", "live.page_snapshots")
+        self.assertEqual((cfg.live.pictures, cfg.live.page_snapshots), (True, True))
+
+    def test_the_shipped_file_explains_both_picture_keys(self) -> None:
+        raw = (config.PROJECT_ROOT / "config.toml").read_bytes()
+        live_part = raw.decode("ascii").split("[live]", 1)[1].split("\n[", 1)[0]
+        self.assertIn("\npictures = true\n", live_part)
+        self.assertIn("\npage_snapshots = true\n", live_part)
+        self.assertIn("no email HTML, no images from the web", live_part)
+        self.assertIn("the site sees your IP\n# address", live_part)
+        self.assertIn("false: no page is opened", live_part)
+
 
 # --------------------------------------------------------------------------
 # Environment and .env

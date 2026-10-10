@@ -308,6 +308,12 @@ class EventCheck:
     identity: str = ""      # the address Google answered as (see EventDetails.account_email)
     link: str = ""          # Google's page of the event (htmlLink)
     tooltip: str = ""       # the whole check: Google's whole title, and what the briefing said
+    # Google's own times of the event (the LIVE day picture draws it there; shown, never logged).
+    # Not part of equality: ``text`` already names them.
+    start: datetime | None = field(default=None, compare=False)
+    end: datetime | None = field(default=None, compare=False)
+    all_day_start: date | None = field(default=None, compare=False)
+    all_day_end: date | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -688,7 +694,7 @@ class GmailBackend:
             view = mail_view(mail)
         except GmailError as exc:
             raise ExecError(str(exc) or type(exc).__name__, problem=exc.problem) from None
-        return mail_payload(view)
+        return mail_payload(view, action.account)
 
     def peek(self, action: ProposedAction) -> EventDetails:
         raise ExecError(NO_EVENT_MESSAGE)
@@ -1150,14 +1156,24 @@ def _when_words(item: Any, today: date) -> str:
     return when_text(item, today).replace(_SEPARATOR, " ")
 
 
-def mail_payload(view: MailView) -> Payload:
-    """A message as the LIVE view shows what will be / was sent (gmail.mail_view)."""
+def mail_payload(view: MailView, account: str = "") -> Payload:
+    """A message as the LIVE view shows what will be / was sent (gmail.mail_view), with its picture
+    (the email itself, drawn by Jarvis from the built message; ``account`` the alias it goes from)."""
     return Payload("Will send exactly this", (
         Field("From", view.from_addr or "(Gmail fills it in)", mono=True), Field("To", view.to),
         Field("Cc", view.cc or "none"), Field("Subject", view.subject),
         Field("In-Reply-To", view.in_reply_to or "none", mono=True),
         Field("References", view.references or "none", mono=True),
-        Field("Gmail thread", view.thread_id or "a new thread", mono=True)), "Message", view.body)
+        Field("Gmail thread", view.thread_id or "a new thread", mono=True)), "Message", view.body,
+        picture=_outgoing_picture(view, account))
+
+
+@quiet(None)
+def _outgoing_picture(view: MailView, account: str) -> Any:
+    """The LIVE picture of an outgoing message (None when it can't be drawn: the text stays)."""
+    from .pictures import outgoing_picture
+
+    return outgoing_picture(view, account=account)
 
 
 @quiet(NO_STEP)
@@ -1190,7 +1206,7 @@ def _show_mail(task: LiveTask, mail: OutgoingMail) -> LiveStep:
         step.done(LIVE_FAILED, status_text="NOT SENT",
                   summary="The message could not be put together, so nothing was sent")
         return step
-    return _show_payload(task, mail_payload(view))
+    return _show_payload(task, mail_payload(view, mail.account))
 
 
 @quiet(NO_STEP)
@@ -1574,7 +1590,8 @@ def check_event(action: ProposedAction, details: EventDetails, today: date) -> E
         said = [action.field("title"), when_text(stated, today) if stated is not None else ""]
         tips.append("The briefing says: " + _SEPARATOR.join(part for part in said if part))
     return EventCheck(text, allowed=not reason, reason=reason, mismatch=mismatch, title=details.title,
-                      identity=identity, link=details.link, tooltip="\n".join(tips))
+                      identity=identity, link=details.link, tooltip="\n".join(tips), start=details.start,
+                      end=details.end, all_day_start=details.all_day_start, all_day_end=details.all_day_end)
 
 
 MISMATCH_TITLE = "title"

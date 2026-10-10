@@ -5,7 +5,10 @@ its answer (research.validate).
 Memory only, on screen only. Every helper is quiet (live.quiet): whatever goes wrong in one, the
 research goes on exactly as without the LIVE view. Web text (search results, what a page read
 returned, the raw answer) is shown only in untrusted blocks and in plain-text items and fields;
-URLs are never links ([live] text = false keeps sizes only).
+URLs are never links ([live] text = false keeps sizes only). With page snapshots on ([live]
+page_snapshots), a page the run read gets a picture on its web.fetch step (WebSteps(snapshots=);
+snapshot_engine.PageSnapshotter decides and takes it on this PC): the research run itself never
+sees any of it.
 """
 
 from __future__ import annotations
@@ -199,11 +202,18 @@ def run_skipped(step: LiveStep, message: str) -> None:
 
 class WebSteps:
     """The web.search / web.fetch steps of one run, created and closed from its progress (each a
-    sibling after research.run, in arrival order, keyed "web:<tool id>")."""
+    sibling after research.run, in arrival order, keyed "web:<tool id>").
 
-    def __init__(self, live: LiveTask, limits: ResearchLimits) -> None:
+    ``snapshots`` (snapshot_engine.PageSnapshotter, or None): a page the run READ (WebFetch came
+    back OK) is pictured on its web.fetch step - the snapshotter decides whether it may be (public
+    https only, never a search results page, at most 4 per run) and shows "Opening..." at once;
+    searches never are. finished() says the run asks for no more pictures. LIVE side only: nothing
+    of this reaches the research run (its input, tools, command line and folder are unchanged)."""
+
+    def __init__(self, live: LiveTask, limits: ResearchLimits, snapshots: Any = None) -> None:
         self.live = live
         self.limits = limits
+        self.snapshots = snapshots
         self.steps: dict[str, LiveStep] = {}
         self.calls: dict[str, WebCall] = {}
         self.titles: dict[str, str] = {}      # normalized page -> the first search hit's title
@@ -311,10 +321,24 @@ class WebSteps:
         elif result.status in (RESULT_DENIED, RESULT_ERROR):
             self._failed(step, result, "WebFetch")
         elif result.status == RESULT_OK:
+            if call is not None:
+                self._picture(step, call.url)
             size = f" - {result.size:,} bytes" if result.size is not None else ""
             step.done(STATUS_OK, summary=f"{result.code if result.code is not None else 'read'}{size}")
         else:
             step.done(STATUS_WARN, summary="Jarvis could not read what came back")
+
+    @quiet()
+    def _picture(self, step: LiveStep, url: str) -> None:
+        """A page the run read: its picture (the snapshotter refuses what may not be opened)."""
+        if self.snapshots is not None and step is not NO_STEP:
+            self.snapshots.request(step, url, task_id=self.live.id)
+
+    @quiet()
+    def finished(self) -> None:
+        """The run is over (done, stopped, failed or never started): it asks for no more pictures."""
+        if self.snapshots is not None:
+            self.snapshots.end_run(self.live.id)
 
     def _failed(self, step: LiveStep, result: WebResult, tool: str) -> None:
         if result.message:

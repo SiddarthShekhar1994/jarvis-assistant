@@ -16,8 +16,12 @@ pop-out window (ui.py; hud.LiveLog renders it).
     LiveTask.step(kind, title, ...)   one thing Jarvis did (the step kinds below) -> LiveStep
     LiveTask.find / update / finish / note
     LiveStep.field / item / note / block / rename_block / update / done
+    LiveStep.picture(picture)         a picture of the step (pictures.Picture: an email, a calendar
+                                      change, a page); one per step, a new one replaces the old
     NO_TASK, NO_STEP                  handles whose every method does nothing
-    Payload                           what an approved card will send or change (executor.preview)
+    Payload                           what an approved card will send or change (executor.preview),
+                                      with its picture
+    PICTURE_PENDING / READY / UNAVAILABLE / DROPPED   a picture's states (pictures.py builds them)
     elapsed_text, status_word, notify_words, command_line_text, open_hint, clean_line, clean_block
 
 Rules (spec "LIVE view" sections 2 and 7):
@@ -34,6 +38,12 @@ Rules (spec "LIVE view" sections 2 and 7):
   anything; repr() / str() of every object here names ids, kinds and statuses only.
 - Bounded: LiveLimits caps the tasks, steps, items, notes, fields, block sizes and the total
   characters; RUNNING tasks are never dropped.
+- Pictures (pictures.py: an email drawn by Jarvis, a calendar change on its day, a page snapshot)
+  are memory only too: never written to a file and never logged. Their bytes are counted apart
+  from the characters (LiveLimits picture caps: one picture, one task, all); past the total the
+  oldest finished tasks' pictures are dropped first ("Picture not kept"); a RUNNING task keeps
+  its pictures. [live] pictures = false refuses the drawn ones; [live] text = false keeps no
+  email text in a picture and no page picture. Clear and close drop them with their tasks.
 
 Qt-free (standard library, config.redact, text_prep.format_time, actions.link_allowed).
 """
@@ -135,6 +145,16 @@ LINK_CAP = 2_000
 HIDDEN = "[hidden]"
 LINE_BREAK = " \u21b5 "
 
+# A picture's states (pictures.Picture.state).
+PICTURE_PENDING = "pending"          # being made (a page snapshot on its way)
+PICTURE_READY = "ready"              # there to see
+PICTURE_UNAVAILABLE = "unavailable"  # could not be made (its note says why)
+PICTURE_DROPPED = "dropped"          # not kept (the memory caps; its note says why)
+PICTURE_STATES = (PICTURE_PENDING, PICTURE_READY, PICTURE_UNAVAILABLE, PICTURE_DROPPED)
+PICTURE_TOO_BIG = "too large to keep in memory"
+PICTURE_TASK_CAP = "this task's pictures already use the memory set aside for one task"
+PICTURE_MEMORY = "dropped to save memory (older pictures go first)"
+
 
 @dataclass(frozen=True)
 class LiveLimits:
@@ -150,6 +170,10 @@ class LiveLimits:
     max_block_chars: int = MAX_BLOCK_CHARS
     max_total_chars: int = 2_000_000
     max_removed_log: int = 200
+    # Pictures, in bytes (apart from max_total_chars): one picture, one task's, all of them.
+    max_picture_bytes: int = 1_500_000
+    max_task_picture_bytes: int = 6_000_000
+    max_total_picture_bytes: int = 24_000_000
 
 
 # --------------------------------------------------------------------------
@@ -225,6 +249,7 @@ class Payload:
     body_label: str = ""                    # "Message" / "Description"
     body: str = ""
     start_open: bool = True                 # the outgoing body starts open in the view
+    picture: Any = None                     # a pictures.Picture of it (the email as it goes out)
 
     def values(self) -> dict[str, str]:
         """label -> value (for comparing a preview with what is actually sent)."""
@@ -267,6 +292,7 @@ class StepView:
     blocks: tuple[Block, ...]
     open_hint: bool
     revision: int
+    picture: Any = None                     # a pictures.Picture (None: no picture)
 
     def elapsed(self, now: float) -> float:
         """Seconds from the start to the end (or to ``now`` while it runs)."""
@@ -509,11 +535,13 @@ def command_line_text(argv: Sequence[str]) -> str:
     return " ".join(parts)
 
 
-def open_hint(kind: str, status: str, items: Iterable[Item] = ()) -> bool:
+def open_hint(kind: str, status: str, items: Iterable[Item] = (), picture: Any = None) -> bool:
     """Whether a step's details start open (spec 2.6): RUNNING, a final WARN / BLOCKED / FAILED,
     what will be / was sent (ACTION_PAYLOAD), a validation with an item that is not ok, the
-    Ask's answer and cards."""
+    Ask's answer and cards, a step with a picture (unless that picture was not kept)."""
     if status == STATUS_RUNNING or status in (STATUS_WARN, STATUS_BLOCKED, STATUS_FAILED):
+        return True
+    if picture is not None and getattr(picture, "state", PICTURE_DROPPED) != PICTURE_DROPPED:
         return True
     if kind in (ACTION_PAYLOAD, ASK_CARDS):
         return True
@@ -541,7 +569,7 @@ def _block_size(item: Block) -> int:
 class _Step:
     __slots__ = ("id", "task", "seq", "kind", "key", "title", "status", "status_text", "summary", "started",
                  "ended", "at", "deadline", "fields", "items", "items_more", "notes", "notes_more", "blocks",
-                 "revision", "size", "view")
+                 "revision", "size", "view", "picture", "picture_cost")
 
     def __init__(self, step_id: int, task: _Task, seq: int, kind: str, key: str, started: float,
                  at: datetime) -> None:
@@ -567,6 +595,8 @@ class _Step:
         self.revision = 0
         self.size = 0
         self.view: StepView | None = None
+        self.picture: Any = None        # a pictures.Picture
+        self.picture_cost = 0           # its bytes as counted (the LiveLimits picture caps)
 
     def build(self) -> StepView:
         if self.view is None or self.view.revision != self.revision:
@@ -576,13 +606,15 @@ class _Step:
                 ended=self.ended, at=self.at, deadline=self.deadline, fields=tuple(self.fields),
                 items=tuple(self.items), items_more=self.items_more, notes=tuple(self.notes),
                 notes_more=self.notes_more, blocks=tuple(self.blocks),
-                open_hint=open_hint(self.kind, self.status, self.items), revision=self.revision)
+                open_hint=open_hint(self.kind, self.status, self.items, self.picture), revision=self.revision,
+                picture=self.picture)
         return self.view
 
 
 class _Task:
     __slots__ = ("id", "kind", "title", "status", "status_text", "summary", "started", "ended", "at", "compact",
-                 "pinned", "key", "steps", "steps_more", "finished", "removed", "revision", "size", "view")
+                 "pinned", "key", "steps", "steps_more", "finished", "removed", "revision", "size", "view",
+                 "picture_bytes")
 
     def __init__(self, task_id: int, kind: str, started: float, at: datetime) -> None:
         self.id = task_id
@@ -604,6 +636,7 @@ class _Task:
         self.revision = 0
         self.size = 0
         self.view: TaskView | None = None
+        self.picture_bytes = 0          # its steps' pictures (bytes as counted)
 
     def live_status(self) -> str:
         """A rolling task is never finished: RUNNING while one of its steps runs, else OK."""
@@ -669,9 +702,12 @@ class LiveStream:
     def __init__(self, *, enabled: bool = True, keep_text: bool = True, hour24: bool = False,
                  clock: Callable[[], float] = time.monotonic,
                  wall: Callable[[], datetime] = lambda: datetime.now().astimezone(),
-                 redact: Callable[[str], str] = _config.redact, limits: LiveLimits | None = None) -> None:
+                 redact: Callable[[str], str] = _config.redact, limits: LiveLimits | None = None,
+                 pictures: bool = True) -> None:
         self._enabled = bool(enabled)
         self._keep_text = bool(keep_text)
+        self._pictures = bool(pictures)
+        self._picture_total = 0
         self.hour24 = bool(hour24)
         self._clock = clock
         self._wall = wall
@@ -701,8 +737,19 @@ class LiveStream:
         return self._keep_text
 
     @property
+    def pictures(self) -> bool:
+        """[live] pictures: the email and calendar pictures Jarvis draws are kept."""
+        return self._pictures
+
+    @property
     def version(self) -> int:
         return self._version
+
+    @_safe(0)
+    def picture_bytes(self) -> int:
+        """The bytes of every picture kept, as counted against the LiveLimits picture caps."""
+        with self._lock:
+            return self._picture_total
 
     def __repr__(self) -> str:
         return f"LiveStream(enabled={self.enabled}, tasks={len(self._tasks)}, version={self._version})"
@@ -757,6 +804,10 @@ class LiveStream:
         task.removed = True
         self._tasks.pop(task.id, None)
         self._total -= task.size
+        self._picture_total -= task.picture_bytes
+        task.picture_bytes = 0
+        for step in task.steps:   # the pictures go with the task (nothing keeps them alive)
+            step.picture, step.picture_cost = None, 0
         self._version += 1
         self._removed.append((self._version, task.id))
         while len(self._removed) > self.limits.max_removed_log:
@@ -876,6 +927,9 @@ class LiveStream:
                 if len(kept) == len(task.steps) and not task.steps_more:
                     continue
                 gone = sum(step.size for step in task.steps if step.status != STATUS_RUNNING)
+                for step in task.steps:
+                    if step.status != STATUS_RUNNING:
+                        self._release_picture(task, step)
                 task.steps = kept
                 task.steps_more = 0
                 self._resize(task, None, -gone)
@@ -896,8 +950,12 @@ class LiveStream:
             self._closed = True
             for task in list(self._tasks.values()):
                 task.removed = True
+                task.picture_bytes = 0
+                for step in task.steps:
+                    step.picture, step.picture_cost = None, 0
             self._tasks.clear()
             self._total = 0
+            self._picture_total = 0
 
     @_safe("")
     def when_text(self, moment: datetime, *, seconds: bool = False) -> str:
@@ -928,6 +986,7 @@ class LiveStream:
                 self._seq += 1
                 if existing is not None:   # a keyed step is replaced in place (same id, same row)
                     self._resize(task, existing, -existing.size)
+                    self._release_picture(task, existing)
                     record = _Step(existing.id, task, self._seq, kind, key, now, wall)
                     task.steps[task.steps.index(existing)] = record
                 else:
@@ -965,6 +1024,72 @@ class LiveStream:
                 self._trim()
         self._notify()
 
+    # ---- pictures (under the lock) ------------------------------------------------------------
+
+    def _release_picture(self, task: _Task, step: _Step) -> None:
+        """``step``'s picture goes (its bytes are no longer counted)."""
+        if step.picture_cost:
+            task.picture_bytes -= step.picture_cost
+            self._picture_total -= step.picture_cost
+        step.picture, step.picture_cost = None, 0
+
+    def _set_picture(self, task: _Task, step: _Step, picture: Any) -> None:
+        cost = _picture_cost(picture)
+        self._release_picture(task, step)
+        step.picture, step.picture_cost = picture, cost
+        task.picture_bytes += cost
+        self._picture_total += cost
+
+    def _admit_picture(self, task: _Task, step: _Step, picture: Any) -> Any:
+        """``picture`` as ``step`` may keep it (the LiveLimits picture caps): too big for one picture or
+        for this task's share -> not kept; over the total -> the READY pictures of the oldest finished,
+        unpinned other tasks go first, then this one if it still does not fit. A RUNNING task never
+        loses a picture."""
+        if picture.state == PICTURE_DROPPED:
+            return picture
+        limits = self.limits
+        cost = _picture_cost(picture)
+        if cost > limits.max_picture_bytes:
+            return picture.dropped(PICTURE_TOO_BIG)
+        if task.picture_bytes - step.picture_cost + cost > limits.max_task_picture_bytes:
+            return picture.dropped(PICTURE_TASK_CAP)
+
+        def over() -> bool:
+            return self._picture_total - step.picture_cost + cost > limits.max_total_picture_bytes
+
+        for other in list(self._tasks.values()):   # oldest first
+            if not over():
+                break
+            if other is task or not other.finished or other.pinned:
+                continue
+            touched = False
+            for record in other.steps:
+                held = record.picture
+                if held is None or held.state != PICTURE_READY:
+                    continue
+                self._set_picture(other, record, held.dropped(PICTURE_MEMORY))
+                self._touch(other, record)
+                touched = True
+                if not over():
+                    break
+            if touched:
+                self._touch(other)
+        return picture.dropped(PICTURE_MEMORY) if over() else picture
+
+    def _store_picture(self, task: _Task, step: _Step, picture: Any) -> None:
+        """Keep ``picture`` on ``step`` (the rules of LiveStep.picture)."""
+        with self._lock:
+            if self._closed or task.removed or step not in task.steps:
+                return
+            if task.finished:   # only a late picture for a step that waits for one (a page snapshot)
+                held = step.picture
+                if held is None or held.state != PICTURE_PENDING or held.kind != picture.kind:
+                    return
+            kept = self._admit_picture(task, step, picture)
+            self._set_picture(task, step, kept)
+            self._touch(task, step)
+        self._notify()
+
     def _finish(self, task: _Task, status: str, status_text: str, summary: str | None) -> None:
         now = self._clock()
         with self._lock:
@@ -995,6 +1120,14 @@ class LiveStream:
 
 def _status_or_blank(status: Any) -> str:
     return status if status in STATUSES else ""
+
+
+def _picture_cost(picture: Any) -> int:
+    """The bytes a picture is counted as (one that can't say counts as too big to keep)."""
+    try:
+        return max(0, int(picture.cost))
+    except Exception:  # noqa: BLE001
+        return 1 << 40
 
 
 def _status(status: Any, default: str = STATUS_RUNNING) -> str:
@@ -1035,6 +1168,11 @@ class LiveTask:
     @property
     def keep_text(self) -> bool:
         return self._stream is not None and self._stream.keep_text
+
+    @property
+    def pictures(self) -> bool:
+        """[live] pictures (the email and calendar pictures Jarvis draws are kept)."""
+        return self._stream is not None and self._stream.pictures
 
     def __repr__(self) -> str:
         return f"LiveTask(id={self.id}, kind={_safe_kind(self.kind)!r}, finished={self.finished})"
@@ -1293,6 +1431,29 @@ class LiveStep:
         self.update(status=final, status_text=status_text, summary=summary, deadline=None)
 
     @_safe()
+    def picture(self, picture: Any) -> None:
+        """A picture of this step (a pictures.Picture), shown first in its details; a new one replaces
+        the old. Nothing for NO_STEP, anything but a Picture, an email or calendar picture while
+        [live] pictures is off, a page picture while [live] text is off, or a step whose task
+        finished (except a late picture of the same kind for a step that waits for one: a page
+        snapshot). With [live] text = false an email picture keeps its headers only. Past the
+        memory caps it is kept as "Picture not kept: <why>"."""
+        stream, step = self._stream, self._step
+        if stream is None or step is None or picture is None:
+            return
+        from . import pictures as _pictures
+
+        if not isinstance(picture, _pictures.Picture) or picture.kind not in _pictures.KINDS:
+            return
+        if picture.kind in _pictures.MODEL_KINDS and not stream.pictures:
+            return
+        if picture.kind == _pictures.KIND_PAGE and not stream.keep_text:
+            return
+        if not stream.keep_text:
+            picture = picture.without_text()
+        stream._store_picture(step.task, step, picture)
+
+    @_safe()
     def view(self) -> StepView | None:
         """The step as the view shows it now (None for NO_STEP or a step that is gone)."""
         stream, step = self._stream, self._step
@@ -1347,6 +1508,8 @@ class LiveStep:
             return delta
 
         self._apply(change)
+        if payload.picture is not None:   # not part of "changed": the fields and the body say that
+            self.picture(payload.picture)
         return tuple(changed)
 
 

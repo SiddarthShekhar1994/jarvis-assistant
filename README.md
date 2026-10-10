@@ -109,8 +109,11 @@ glowing status orb (see [The look](#the-look-jarvis-hud)).
   sign-in, so nothing goes out from the wrong account.
 - **Isolated web research.** A separate run with only web search and web
   fetch: it never sees your calendar, mail, contacts, briefing or addresses,
-  and what it finds never goes back to the planner. Its pages open only on
-  your click, and only public https addresses.
+  and what it finds never goes back to the planner. Its pages open in your
+  browser only on your click, and only public https addresses. LIVE's page
+  pictures open the pages it read once more, in a hidden private window on
+  this PC ([Pictures in LIVE](#pictures-in-live); `[live] page_snapshots =
+  false` turns that off).
 - **A locked-down planner.** Claude Code runs with no tools, no MCP servers,
   no settings files and no saved session, in an empty folder of its own and an
   environment without API keys or Jarvis's secrets; right before every run
@@ -122,8 +125,8 @@ glowing status orb (see [The look](#the-look-jarvis-hud)).
 - **Nothing private logged.** The log has ids, kinds, counts, statuses and
   times, never the briefing text, subjects, addresses, email text, your
   requests or Jarvis's words, and secrets are redacted. LIVE keeps what it
-  shows in memory only. Notion access is read-only, and Google access is the
-  few permissions listed in setup step 8.
+  shows, pictures too, in memory only. Notion access is read-only, and Google
+  access is the few permissions listed in setup step 8.
 - **Gray zones, stated.** Driving your own signed-in Claude Code from your own
   app, when you ask, is personal use; sharing such a feature in a public
   project, and automated web searching and page reading on a consumer plan,
@@ -165,8 +168,10 @@ glowing status orb (see [The look](#the-look-jarvis-hud)).
  read for Ask       search and fetch
  Gmail: send what   only, gets only
  you approved;      your words + date
- read threads
- for Ask
+ read threads       (LIVE's page
+ for Ask            pictures: the app
+                    opens the pages it
+                    read once more)
 ```
 
 - **The routine** runs in the cloud on your schedule, reads your mail and
@@ -176,7 +181,10 @@ glowing status orb (see [The look](#the-look-jarvis-hud)).
   Its instructions tell it never to send or change anything itself.
 - **The desktop app** (this repository) reads that page through a read-only
   Notion integration, speaks with edge-tts (or the Windows voices) played by
-  QtMultimedia, and draws the HUD with PySide6 (Qt).
+  QtMultimedia, and draws the HUD with PySide6 (Qt). For LIVE's page pictures
+  it also opens the public pages a web research read once more, itself, in a
+  hidden private window (Qt's web engine; [Pictures in
+  LIVE](#pictures-in-live); `[live] page_snapshots = false` turns it off).
 - **Google** is called directly, with your own free OAuth client and no
   service in between: Google Calendar for TODAY, the cards' check lines, the
   changes you approve and, for Ask, the events it plans from (by default
@@ -251,11 +259,11 @@ not of this list.
 
 ## Roadmap
 
-Planned for later versions; none of it is built yet, and all of it will keep
-the same rules (proposals, your click, every step visible in LIVE):
+Built: **Visual snapshots in LIVE** - see [Pictures in LIVE](#pictures-in-live).
 
-- **Visual snapshots in LIVE**: a picture of the page, the email or the
-  calendar change a step is about, next to its text.
+Planned for later versions; none of these is built yet, and all of them will
+keep the same rules (proposals, your click, every step visible in LIVE):
+
 - **A live browser Jarvis drives**: he opens and fills in pages in a browser
   you can watch, and every submit waits for your click.
 - **Plan my day**: a proposed plan for the day from your calendar, deadlines
@@ -336,6 +344,9 @@ and the [license](#license).
 - For [Ask Jarvis](#ask-jarvis-optional) only (off by default), which also runs
   [web research](#web-research): Claude Code, installed and signed in with your
   own claude.ai plan (Pro or Max).
+- For the page pictures of web research in LIVE only: PySide6 6.8 or newer
+  (its web engine comes with the PySide6 package; see [Pictures in
+  LIVE](#pictures-in-live)).
 
 ## Setup
 
@@ -1067,10 +1078,13 @@ card, newest at the bottom:
   suggestion made into a card or left out, with the reason). See [Web
   research](#web-research).
 - **A card you approved**: what you approved, **what will be sent or changed,
-  exactly** (an email's From, To, Cc, subject and body as it will go out; an
-  event's id, the change and who Google emails) during the undo countdown
-  ("SENDING IN 7 S") - kept in view while the countdown runs, even if you had
-  scrolled the view -, the last checks, the one call to Google with the exact
+  exactly**, during the undo countdown ("SENDING IN 7 S"): first as a picture
+  (the email as it goes out, or the change drawn on its day; see [Pictures in
+  LIVE](#pictures-in-live)), then the exact fields under it (an email's From,
+  To, Cc, subject and body; an event's id, the change and who Google emails).
+  The picture stays in view while the countdown runs, even if you had scrolled
+  the view (in a short LIVE tab, the part of a calendar picture that changes);
+  with pictures off, the fields do. Then the last checks, the one call to Google with the exact
   request (for a calendar change its body, checked against what the countdown
   showed: a difference is marked CHECK) and what came back (Gmail's message id
   and a link to the thread, the event's id and link), or FAILED / UNKNOWN.
@@ -1086,7 +1100,9 @@ S), then **Pop out** and **Clear** (in a narrow window Clear is in the pop-out
 window only). Every step has a status (a blinking square while it runs, DONE,
 CHECK, BLOCKED, FAILED, CANCELLED) and its time. Click a step, or press Space or Enter on it, to
 show or hide its details; the steps that need a look (running, a warning, a
-refusal, what will be sent) open by themselves. The texts Jarvis read or sent
+refusal, what will be sent) and the steps with a picture (also a page that
+could not be pictured) open by themselves; a picture dropped to save memory
+("Picture not kept") does not open its step. The texts Jarvis read or sent
 are collapsed under "Show ..." links and, when opened, shown exactly, as plain
 text you can select and copy; text written by other people (email, the planner's
 input, search results and web pages) is labelled so and is never followed or
@@ -1114,13 +1130,84 @@ most about 960 px. **Clear** empties the view of finished work, including the
 finished rows of Background reads (what is still running stays); nothing else
 changes.
 
-LIVE is on screen only: it is never saved, never logged, and gone when Jarvis
-closes. `[live] text = false` keeps only the sizes of the long texts (email
-threads, the planner's input and reply, the outgoing message, the message
-text in the planner's proposal lines, and what a web search or page read
-returned); subjects, names, addresses, event titles and Jarvis's answer still
-show. `[live] enabled = false` removes the tab and
-records nothing.
+LIVE is on screen only, its pictures too: it is never saved, never logged, and
+gone when Jarvis closes. `[live] text = false` keeps only the sizes of the long
+texts (email threads, the planner's input and reply, the outgoing message, the
+message text in the planner's proposal lines, and what a web search or page
+read returned); subjects, names, addresses, event titles and Jarvis's answer
+still show; it also takes no page pictures and leaves the email texts out of
+the pictures. `[live] enabled = false` removes the tab and records nothing.
+
+#### Pictures in LIVE
+
+Some steps also show a picture, first in their details, so you see at a
+glance what Jarvis read or is about to change:
+
+- **An email Ask read**, drawn like a mail client: From, To, Cc, the date, the
+  subject, the text, and the thread's earlier messages as short lines.
+- **What a Reply or Email card will send**, exactly: the account it goes
+  from, To, Cc, the subject, the reply line and the text; SENT or UNDONE
+  afterwards.
+- **A calendar change on its day**: a Move shows where the event is and where
+  it goes, a Cancel is struck through, an Add or a to-do block is
+  highlighted, an RSVP shows your answer. The day's other events are drawn
+  only when Jarvis had already read that day (today's agenda, the Ask's
+  calendar read): he never reads your calendar just for a picture.
+- **A 7-day strip** of the calendar an Ask read.
+- **A picture of each page a web research read.**
+
+Email and calendar pictures are drawn by Jarvis on this PC from the text he
+already has: no email HTML, no images or fonts from the web, and nothing in a
+picture can be clicked; hidden characters show as `<U+...>`, as in the text.
+
+Page pictures are the one part of LIVE that uses the network. Only pages the
+research read, and only public https pages: never a link from your email, the
+briefing or a card, never a search results page; at most 4 per research, one
+at a time, at most 15 seconds each. Jarvis opens the page again on this PC in
+a private window you never see: none of your browsers' sign-ins or cookies,
+nothing saved, no pop-ups, downloads, camera, microphone, location,
+notifications, clipboard or Windows Hello, sound off. Every connection of
+that window goes through a small gate inside Jarvis that lets it reach only
+public IPv4 addresses on the https port, checked on the address a name
+actually leads to (never an IPv6 address: one may be this PC's own or a
+device's on your network), and the window looks up no name itself: the page's
+requests, and what a page can do without a request (pre-connections, WebRTC,
+WebTransport), reach nothing on this PC or your local network, also through a
+public name that leads there. A page cannot make this PC look up a local name
+(localhost, `.local`, a name without a dot ...); the gate looks up public names
+only, through this PC's usual DNS, as any visit does. **A page picture
+is an ordinary visit to that page from this PC: the site sees your IP
+address** (as when you open it in your browser, but without your cookies). A
+page may show a cookie banner or a bot check instead of its content; the
+picture then shows that. When settings in this PC's environment would undo
+any of this (the web engine's sandbox off, remote debugging, certificate
+errors ignored, a TLS key log such as `SSLKEYLOGFILE`, a trace or log file,
+automatic Windows sign-in to sites, a web engine flags value in double quotes
+or cut by a bare `--`, or any web engine flag Jarvis does not know), no page is
+opened: the step says "Picture unavailable"
+([Troubleshooting](#troubleshooting) says which settings).
+
+Click a picture, or press Enter on it, to see it larger inside Jarvis (Esc
+closes it). Pictures are on screen only: never saved or logged, gone with
+**Clear** or when Jarvis closes; when they would take too much memory, the
+oldest finished ones are dropped first ("Picture not kept").
+
+To turn them off, in `config.toml`:
+
+- `[live] pictures = false`: no email or calendar pictures.
+- `[live] page_snapshots = false`: no page is opened for a picture at all; the
+  research works the same.
+- `[live] text = false` also stops page pictures and leaves the email texts
+  out of the pictures (their headers still show).
+
+The first page picture of a session starts a web engine inside Jarvis: the
+window may pause for a second or a few. The engine then stays loaded (about
+50-80 MB of memory, no extra process, no CPU) until Jarvis closes. It is part
+of PySide6 (6.8 or newer); without it the step says "Picture unavailable".
+That first picture also starts Jarvis's network gate: a small proxy on this PC
+(127.0.0.1, a free port) that the hidden window must use. It too stays until
+Jarvis closes; any program on this PC that finds it reaches through it only
+what the window may: public https servers, under the same rules.
 
 ## TODAY and DEADLINES
 
@@ -1896,7 +1983,8 @@ it writes (an email, a reply, a move) is left out, and the LIVE tab says why.
 **Watching it.** The LIVE tab shows every step as it happens: the exact text
 Claude Code got, each web search with its exact query and results, each page
 read with its address, HTTP status, size and what came back, how long each
-took, and how Jarvis checked the answer.
+took, and how Jarvis checked the answer; and a picture of each page it read
+([Pictures in LIVE](#pictures-in-live)).
 
 **Limits.** At most 4 searches and 4 page reads per request (`[research]
 max_searches`, `max_fetches`): Jarvis stops a run that wants more (that step
@@ -1921,6 +2009,9 @@ an immediate stop if Claude Code says it would use extra usage.
 - To each website Claude reads: an ordinary request from your PC, so the site
   sees your IP address as with any visit. Claude Code may first check the site
   with Anthropic.
+- With page pictures on (`[live] page_snapshots`, the default): to each public
+  https page the research read, one more ordinary visit from your PC, in a
+  private window without your cookies, for its picture in LIVE.
 - Never: your calendar, mail, contacts, briefing, accounts or addresses, or
   anything from Jarvis's `.env`.
 
@@ -2379,7 +2470,9 @@ log. Changes apply the next time the app starts.
 | `[live] enabled` | `true` | The LIVE tab ([LIVE: watch Jarvis work](#live-watch-jarvis-work)): every step Jarvis takes for an Ask or a card you approved, on screen only. `false`: no LIVE tab, nothing recorded. |
 | `[live] auto_open` | `"tab"` | When Jarvis starts on an Ask or an approved card: `"tab"` brings up the LIVE tab (not while the briefing plays, not when the window is hidden or minimized), `"window"` shows the LIVE pop-out window without taking the focus, `"off"` never switches. `true` / `false` mean `"tab"` / `"off"`. |
 | `[live] background` | `true` | Also show the reads Jarvis does on his own (agenda, event checks, sign-ins, Claude Code checks) in one compact LIVE row. |
-| `[live] text` | `true` | Show the texts Jarvis read and sent in LIVE (email threads, the planner's input and reply, the outgoing message). `false`: only their sizes (also of the message text in the planner's proposal lines); subjects, names, addresses, event titles and Jarvis's answer still show. |
+| `[live] text` | `true` | Show the texts Jarvis read and sent in LIVE (email threads, the planner's input and reply, the outgoing message). `false`: only their sizes (also of the message text in the planner's proposal lines); subjects, names, addresses, event titles and Jarvis's answer still show. `false` also takes no page pictures and leaves the email texts out of the pictures (their headers still show). |
+| `[live] pictures` | `true` | Email and calendar pictures in LIVE ([Pictures in LIVE](#pictures-in-live)): an email Jarvis read or will send drawn as an email, a calendar change drawn on its day (before and after), an Ask's calendar as a 7-day strip. Drawn by Jarvis on this PC from the text he already has: no email HTML, no images from the web. `false`: none. |
+| `[live] page_snapshots` | `true` | Page pictures of web research: each public https page a research read is opened again on this PC in a private window (no sign-ins, nothing saved) and its first screen shown in LIVE. That is an ordinary page visit from this PC: the site sees your IP address. `false`: no page is opened; the research works the same. |
 
 The offline voice uses the same `rate` and `volume`: the rate scales Windows'
 default 200 words per minute, and a volume above `+0%` cannot get louder than
@@ -2523,7 +2616,14 @@ anything else he says or shows.
 The LIVE tab ([LIVE: watch Jarvis work](#live-watch-jarvis-work)) keeps
 everything it shows in memory only: none of it is logged or written to any
 file, and it is gone when Jarvis closes (its own failures are logged as
-`Live view: <what> failed (<error type>)` and nothing more).
+`Live view: <what> failed (<error type>)`, and nothing of what it shows is).
+Page pictures log only times, counts and one word for why a picture was not
+taken ("Page snapshots: web engine started in 1.1 s", "Page snapshot: taken in
+2.3 s (1 of 2 for this research, 3 requests blocked)", "Page snapshot:
+unavailable (timeout)", "Page snapshots: engine stopped", and a failure to set
+them up with its error type); never an address, a site, a title or anything of
+the page, and a page's own console messages are dropped. The web engine's own
+error lines are switched off too, so a console start shows none of them.
 
 Other files in `%LOCALAPPDATA%\briefing-reader`:
 
@@ -2590,6 +2690,20 @@ The app talks to these services, all free:
   research](#web-research): Anthropic (on your plan) and its web search get your
   words and the date; the websites Claude reads get a request from your PC.
 
+**Page pictures.** They are the one part of LIVE that uses the network: for the
+picture of each public https page a web research read, Jarvis visits that page
+once more from this PC, in a private window without your cookies or sign-ins
+(the site sees your IP address, as with any visit; its ads and analytics run
+as on any visit, and nothing of it is kept). That window reaches only public
+IPv4 addresses on the https port, checked where each name actually leads,
+never this PC or your local network, through Jarvis's network gate: a proxy
+on 127.0.0.1 that stays open from the first page picture until Jarvis closes
+(any program on this PC could use it too, to reach public https servers
+only). Email and calendar pictures are drawn from what
+Jarvis already has and send nothing. `[live] page_snapshots = false` (or
+`[live] text = false`) stops the page visits; see [Pictures in
+LIVE](#pictures-in-live).
+
 **Reading your calendar.** Once Google Calendar is connected on this PC, every
 time the reading screen opens the app reads your calendar events from the start
 of today through the next 14 days (`[agenda] deadline_days`; at least through
@@ -2623,11 +2737,12 @@ themselves.
 
 The LIVE tab shows on your screen what Jarvis read and sent - email text, the
 exact input he gave the planner, the message he will send and, for web
-research, the queries, the pages' addresses and what came back - and keeps
-none of it: nothing is saved, logged or sent anywhere, and it is gone when he
-closes.
-`[live] text = false` shows only the sizes of those texts (subjects, names and
-addresses still show).
+research, the queries, the pages' addresses and what came back, and the
+pictures of all of these - and keeps none of it: nothing is saved or logged,
+nothing it shows is sent anywhere (a page picture is one more visit to that
+page from this PC, see **Page pictures** above), and it is gone when he
+closes. `[live] text = false` shows only the sizes of those texts (subjects,
+names and addresses still show) and takes no page pictures.
 
 ## Fonts
 
@@ -2673,7 +2788,15 @@ tests (the stream, the LIVE tab, the pop-out, auto-open and a burst of steps
 that must never stall the window). Web research's tests play invented research
 runs the same way (`tests\fixtures\ask\research_*.jsonl`: searches, page reads
 and answers on example.org, example.net and example.com only); nothing reaches
-the web.
+the web. The page picture tests open only local HTML: the web engine runs in a
+separate Python process per case (offscreen, temporary folders, every network
+request blocked), and the app's tests use a fake snapshotter that opens no page
+at all. One case runs the real network settings through Jarvis's network gate
+with a stand-in name lookup and connection that reach only a listener of the
+test itself; the gate's own tests stay on 127.0.0.1 the same way. Others check
+that the web engine looks up no name itself (with "localhost" names only) and
+that inherited settings that would undo the private window are refused before
+the engine starts.
 
 The hotkey tests register Ctrl+Alt+Shift+F24 (a key no keyboard has) for a
 moment with a private agent lock, simulate a press without pressing anything,
@@ -2731,6 +2854,28 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
 - **Web research: "Jarvis stopped the web research: it wanted a fifth web
   search ..."**: the question needed more searches or page reads than
   `[research] max_searches` / `max_fetches` allow; ask a narrower question.
+- **LIVE: "Picture unavailable: this PC's PySide6 has no web engine
+  (QtWebEngine)"**: page pictures need PySide6 6.8 or newer with its web engine
+  (in PySide6-Addons): `py -3.13 -m pip install --upgrade PySide6`. The
+  per-page "Picture unavailable" reasons (not https, a search page, the 15 s
+  limit, a blank page, the page did not load) only mean there is no picture of
+  that page; the research is not affected. `[live] page_snapshots = false`
+  turns page pictures off.
+- **LIVE: "Picture unavailable: the web engine's sandbox is turned off on this
+  PC" or "... the web engine's safety settings are changed on this PC"** on
+  every page: an environment variable set for every program changes Qt's web
+  engine, and Jarvis opens no page with it: `QTWEBENGINE_DISABLE_SANDBOX`,
+  `QTWEBENGINE_REMOTE_DEBUGGING`, `SSLKEYLOGFILE` (a TLS key log), or a
+  `QTWEBENGINE_CHROMIUM_FLAGS` value with `--no-sandbox` / `--single-process`,
+  double quotes, a bare `--`, or any switch other than the few Jarvis accepts
+  (`--lang`, `--disable-gpu`, `--force-device-scale-factor`, the proxy
+  switches and a few more that only change how pages are drawn; remote
+  debugging, ignored certificate errors, host rules, a profile folder,
+  Chromium's log, trace or key log and automatic Windows sign-in are all
+  refused). Remove it (Start,
+  type "environment variables": your account's or the system's) and restart
+  Jarvis. **"... the private window could not be started"**: the log's
+  "Page snapshots: ..." line says why; the next page tries again.
 - **"Notion rejected the token (401)"**: the secret in `.env` is wrong or was
   regenerated. Copy it again from the integration page into `NOTION_TOKEN=`.
 - **"...not found or is not shared with the integration (404)"**: share the page
@@ -3018,9 +3163,13 @@ briefing_reader/ask/          Ask Jarvis (no Qt): Claude Code checks and runs (c
                               and its LIVE steps (research_live); ask/assets: the planner's and the research's
                               instructions, answer formats and settings
 briefing_reader/live.py       the LIVE view's event stream (no Qt): every step Jarvis takes, in memory only, bounded
+briefing_reader/pictures.py   LIVE's pictures as data (no Qt): an email, what a card sends, a calendar change on its day, the week, a page
+briefing_reader/snapshots.py  page pictures' rules (no Qt): which pages may be opened, what the hidden window may load, the per-research cap
+briefing_reader/snapshot_engine.py  page pictures on this PC: the hidden private window (QtWebEngine, loaded on first use) and LIVE's side of it
+briefing_reader/snapshot_gate.py  the hidden window's network gate (no Qt): every connection it makes, to public IPv4 addresses on port 443 only
 briefing_reader/tts.py        edge-tts synthesis, Windows SAPI fallback, highlight timing, background worker
 briefing_reader/player.py     QtMultimedia player that plays sections in order with pauses
-briefing_reader/hud.py        Jarvis HUD widget kit: colours, fonts, chamfered panels, orb, buttons, cards, agenda, command bar, tabs, conversation, the LIVE log
+briefing_reader/hud.py        Jarvis HUD widget kit: colours, fonts, chamfered panels, orb, buttons, cards, agenda, command bar, tabs, conversation, the LIVE log, its pictures and the picture viewer
 briefing_reader/ui.py         assistant screen (JARVIS / BRIEFING / LIVE tabs), the LIVE pop-out window, classic prompt, tray icon, approvals, TODAY / DEADLINES, app controller (launch kinds, NEW, greeting, announcement)
 briefing_reader/ask_ui.py     Ask Jarvis in the app: the command bar's controller and its "ask" thread (web: requests too)
 fonts/                        Chakra Petch, Sora and JetBrains Mono fonts with their OFL licences
