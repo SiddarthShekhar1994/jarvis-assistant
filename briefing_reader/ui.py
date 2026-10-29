@@ -3727,6 +3727,9 @@ TOAST_VIEW = "view"                    # the toast's View: the Briefing screen
 TOAST_PREP = "prep"                    # the toast's Prepare brief: Home with the prep offer's tile
 TOAST_TIMER = "timer"                  # P2.4: a Jarvis timer ended - its OK only puts the toast away
 TOAST_TIMER_TEXT = "OK"
+FOCUS_SPEECH_KEPT = 8                  # P2.5: sentences focus mode holds at most (memory only) ...
+FOCUS_SPEECH_SAID = 3                  # ... and says, newest last, when it ends
+FOCUS_TOAST_AFTER_MS = states_view.TOAST_MS + 250   # a held toast waits this long for the one showing as focus ends
 VIEW_BRIEFING_TEXT = "View briefing"   # the announcement's link in the conversation
 VIEW_BRIEFING_LINK = "view-briefing"
 ASK_CANCELLED_ENTRY = "Cancelled; nothing was proposed."   # the conversation's entry for a cancelled Ask
@@ -4904,7 +4907,10 @@ class AppController(QObject):
     their winwatch uses - None: winwatch's default). Before the owner's Turn on (THE CONSENT GATE, stored in
     assistant.json), the Dock's and the Find list's Desktop, the HUD key, a --hud start and a typed desktop request
     show the first-run "Jarvis on your desktop" card in the window instead (desktop_view.ConsentCard); Settings >
-    Desktop shows "Your OK" and has Turn off.
+    Desktop shows "Your OK" and has Turn off. P2.5's focus mode keeps Jarvis quiet while it runs (``_focus_quiet``):
+    his toasts and voice are held and the offers see no activity; when it ends - at its end, by the focus chip's Undo,
+    by Undo all or by a Turn off (``focusChanged``) - the newest toast and the last few sentences come back and the
+    offers tick again. The owner's own timers still end with their toast.
     """
 
     def __init__(self, config: Config, client: NotionClient, *, expected_run: str | None,
@@ -5072,6 +5078,12 @@ class AppController(QObject):
         surfaces something while the owner is elsewhere: the briefing's announcement, a prep offer that
         flashes the taskbar button, a Jarvis timer's end (P2.4: its OK only puts the toast away)."""
         if self.state == STATE_QUITTING or self._shut_down or not line:
+            return
+        if key != TOAST_TIMER and self._focus_quiet():
+            # P2.5: focus mode holds Jarvis's toasts (the owner's own timers still say they ended): the newest comes
+            # back when focus ends (_on_focus_changed), as a newer toast would have replaced it anyway.
+            self._focus_toast = (line, action, key)
+            logger.info("Toast held (focus mode)")
             return
         try:
             self._toast().post(line, action, key, look=self.window.reading.look())
@@ -5555,7 +5567,7 @@ class AppController(QObject):
         worker = SayWorker(factory, on_result)
         player = voice_ui.UtterancePlayer(self, volume=self._volume)
         voice = voice_ui.AssistantVoice(worker=worker, player=player, briefing_player=lambda: self.player,
-                                        hold_active=lambda: self._send_hold is not None,
+                                        hold_active=lambda: self._send_hold is not None or self._focus_quiet(),
                                         prefs=self._prefs_store(), parent=self)
         bridge.sayResult.connect(voice.on_audio, Qt.ConnectionType.QueuedConnection)
         voice.speakingChanged.connect(self._on_voice_speaking)
@@ -8911,6 +8923,8 @@ class AppController(QObject):
         from .desktop_view import DesktopSettingsPanel
 
         self.desktop: Any = None
+        self._focus_toast: tuple[str, str, str] | None = None     # P2.5: the newest toast focus mode held
+        self._focus_speech: list[tuple[str, str, str]] = []       # ... and what Jarvis would have said (memory only)
         desktop = getattr(self.config, "desktop", None)
         if not getattr(desktop, "enabled", False):
             return
@@ -8957,6 +8971,7 @@ class AppController(QObject):
         controller.consentNeeded.connect(self._show_desktop_consent)
         controller.consentChanged.connect(lambda _on: self._sync_desktop_settings())
         controller.timerEnded.connect(lambda line: self._post_toast(line, TOAST_TIMER_TEXT, TOAST_TIMER))
+        controller.focusChanged.connect(self._on_focus_changed)
         meetings = getattr(self, "meetings", None)
         if meetings is not None:
             meetings.pillCreated.connect(controller.set_rec_pill)
@@ -9010,6 +9025,39 @@ class AppController(QObject):
         closed). Meanwhile nothing comes forward by itself (SPEC hard rule 13)."""
         desktop = getattr(self, "desktop", None)
         return desktop is not None and desktop.is_hud()
+
+    def _focus_quiet(self) -> bool:
+        """P2.5: focus mode runs (desktop_ui.DesktopController.in_focus) - Jarvis keeps quiet: his offers, toasts and
+        voice are held until it ends; the owner's own timers still say they ended."""
+        desktop = getattr(self, "desktop", None)
+        try:
+            return desktop is not None and bool(desktop.in_focus())
+        except Exception:  # noqa: BLE001 - unknown: not quiet (nothing is lost either way)
+            return False
+
+    def _on_focus_changed(self, on: bool) -> None:
+        """P2.5: focus mode started - Jarvis quiet: the offers stop (the bundle sees no activity), his toasts and voice
+        are held - or ended (at its end, early by the owner's Undo, or turned off): what was held comes back - the
+        offers at their next tick, the last few sentences, and the newest toast (after the one showing, if any)."""
+        self._prod_call("sync")
+        if on:
+            logger.info("Focus mode: Jarvis keeps quiet")
+            return
+        toast, self._focus_toast = self._focus_toast, None
+        speech, self._focus_speech = list(self._focus_speech), []
+        logger.info("Focus mode over: %d toast(s) and %d sentence(s) held come back", int(toast is not None),
+                    min(len(speech), FOCUS_SPEECH_SAID))
+        if self.state == STATE_QUITTING or self._shut_down:
+            return
+        for kind, text, key in speech[-FOCUS_SPEECH_SAID:]:
+            self._say(kind, text, key=key)
+        self._pump_voice()
+        if toast is not None:
+            window = self._toast_window
+            if window is not None and window.isVisible():
+                QTimer.singleShot(FOCUS_TOAST_AFTER_MS, self, lambda held=toast: self._post_toast(*held))
+            else:
+                self._post_toast(*toast)
 
     # ---- the first-run "Jarvis on your desktop" card (hard rule 15; SPEC 10.3) ---------------------------------
 
@@ -9939,8 +9987,11 @@ class AppController(QObject):
     def _prod_activity(self) -> str:
         """"visible": the reading screen is up and in sight; "minimized": the reading screen minimized - or Jarvis on
         the desktop HUD (its offers take the toast path; Phase 2-3: none in focus mode or while in control); "off":
-        anything else (hidden WAITING, the prompt, quitting)."""
+        anything else (hidden WAITING, the prompt, quitting) - and while focus mode runs (P2.5: the offers are held,
+        back when it ends)."""
         window = self.window
+        if self._focus_quiet():
+            return "off"
         if self.state == STATE_READING and not self._shut_down and self._hud_active():
             return "minimized"
         if self.state != STATE_READING or self._shut_down or not window.isVisible():
@@ -11365,7 +11416,15 @@ class AppController(QObject):
         keeps to captions and text until it stops)."""
         if self.state == STATE_QUITTING:
             return False
-        if self._meeting_recording():
+        if self._focus_quiet():
+            # P2.5: focus mode holds Jarvis's voice - kept (memory only; an acknowledgement is pointless later) and
+            # said when focus ends; meanwhile his words show as text, as when muted.
+            held = getattr(self, "_focus_speech", None)
+            if held is not None and text and kind != KIND_ACK:
+                held[:] = [item for item in held if not (key and item[2] == key)] + [(kind, text, key)]
+                del held[:-FOCUS_SPEECH_KEPT]
+            said = False
+        elif self._meeting_recording():
             said = False
         else:
             try:
@@ -11379,8 +11438,9 @@ class AppController(QObject):
         return said
 
     def _voice_silent(self) -> bool:
-        """Jarvis's voice is muted or off, or a meeting records: what he would say shows as a caption only."""
-        if not self.config.assistant.speak or self._meeting_recording():
+        """Jarvis's voice is muted or off, a meeting records or focus mode runs (P2.5): what he would say shows as a
+        caption only."""
+        if not self.config.assistant.speak or self._meeting_recording() or self._focus_quiet():
             return True
         try:
             return bool(self.voice.muted)
@@ -11388,7 +11448,14 @@ class AppController(QObject):
             return False
 
     def _voice_call(self, name: str, *args: Any) -> None:
-        """``voice.<name>(*args)``; a broken voice never stops the app."""
+        """``voice.<name>(*args)``; a broken voice never stops the app. What focus mode holds goes the same way: a
+        cancelled key's sentence, or all of it when the voice is stopped (P2.5)."""
+        held = getattr(self, "_focus_speech", None)
+        if held:
+            if name == "cancel_key" and args:
+                held[:] = [item for item in held if item[2] != args[0]]
+            elif name == "stop":
+                held.clear()
         try:
             getattr(self.voice, name)(*args)
         except Exception as exc:  # noqa: BLE001 - his words are on screen either way

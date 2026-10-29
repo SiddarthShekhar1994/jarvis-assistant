@@ -29,6 +29,10 @@ there, one at a time, so nothing in it is shared with the GUI or the Ask thread.
   real Win32Pc in the app, a fake in the tests -, the app's TimerBook ``timers`` and [desktop] screenshots_dir): a
   local route to them is carried out like any other (``resolve(words, hud=)``: ``hud`` the HUD's windows, left out
   of a screenshot), and ``chime()`` plays a timer's end sound.
+* P2.5: focus mode through the same controls (``focus``: the app's FocusBook); ``undo_pc(changes, cancel=)`` puts the
+  HUD's instant changes back (the owner's click on a chip's Undo or on Undo all: PcControl.undo_changes, newest
+  first); ``dnd_state()`` reads Windows' Do Not Disturb back (read only) and ``open_dnd(cancel=)`` opens its settings
+  page on the owner's click (the one fixed call).
 
 Each job's ``cancel`` (anything with ``is_set()``) holds the app's stop and THE CONSENT GATE (desktop_ui: the owner's
 Turn off): the executor asks it before each step and right before each OS call - once it is set nothing opens, and
@@ -44,7 +48,8 @@ Public API
 ==========
 ``LOCAL``, ``PLANNER``, ``UNAVAILABLE``; ``Resolved(kind, run_id, route, run, context, seconds)``;
 ``DesktopService(folders=, extra_folders=, excluded=, backend_factory=, sites=, clock=, now=, hour24=,
-journal_folder=, undo_days=, pc_factory=, timers=, screenshots_dir=)``: ``backend()``, ``pc()``, ``chime()``,
+journal_folder=, undo_days=, pc_factory=, timers=, screenshots_dir=, focus=)``: ``backend()``, ``pc()``, ``chime()``,
+``undo_pc(changes, cancel=)``, ``dnd_state()``, ``open_dnd(cancel=)``,
 ``scope(fresh=)``, ``apps(fresh=)``, ``tree()``, ``route_context()``, ``resolve(words, planner=, override=, run_id=,
 cancel=, hud=)``, ``context_for(words)``, ``carry_out(plan, words, context, cancel)``, ``click(click, cancel)``,
 ``carry_out_card(card, sha=, ticked=, cancel=, on_start=, on_row=, stop_keys=, on_stop=)``, ``undo_card(run_id, seqs,
@@ -116,10 +121,11 @@ class DesktopService:
                  now: Callable[[], datetime] | None = None, hour24: bool = False,
                  journal_folder: Callable[[], Any] | None = None, undo_days: int = 7,
                  pc_factory: Callable[[], Any] | None = None, timers: pcctl.TimerBook | None = None,
-                 screenshots_dir: str = "") -> None:
+                 screenshots_dir: str = "", focus: pcctl.FocusBook | None = None) -> None:
         self._folders = tuple(folders)
         self._pc_factory = pc_factory or pcctl.Win32Pc          # refuses to be made while the tests run
         self._timers = timers
+        self._focus = focus
         self._screenshots_dir = str(screenshots_dir or "")
         self._pc: pcctl.PcControl | None = None
         self._extra = tuple(extra_folders)
@@ -197,12 +203,31 @@ class DesktopService:
         thread)."""
         if self._pc is None:
             self._pc = pcctl.PcControl(self._pc_factory, disk=self.backend, timers=self._timers,
-                                       screenshots_dir=self._screenshots_dir, clock=self._clock, now=self._now)
+                                       screenshots_dir=self._screenshots_dir, clock=self._clock, now=self._now,
+                                       focus=self._focus)
         return self._pc
 
     def chime(self) -> bool:
         """A timer's end sound (the app's toast says it too)."""
         return self.pc().chime()
+
+    def undo_pc(self, changes: Sequence[pcctl.PcChange], *,
+                cancel: Any = None) -> tuple[tuple[pcctl.PcChange, pcctl.PcChange], ...]:
+        """P2.5: the HUD's instant changes put back on the owner's click (pcctl.PcControl.undo_changes: newest first,
+        each checked against this PC as it is now; ``cancel`` - the app's stop and THE CONSENT GATE - asked right
+        before each OS call)."""
+        if cancel is not None and cancel.is_set():
+            return tuple((change, pcctl.PcChange(change.kind, pcctl.UNDO, pcctl.STOPPED, group=change.group))
+                         for change in reversed(list(changes)))
+        return self.pc().undo_changes(changes, cancel=cancel)
+
+    def dnd_state(self) -> str:
+        """P2.5: Windows' Do Not Disturb read back (read only; pcctl.DND_UNKNOWN when it can't be read)."""
+        return self.pc().dnd_state()
+
+    def open_dnd(self, *, cancel: Any = None) -> pcctl.PcChange:
+        """P2.5: Windows' notification settings opened on the owner's click on the HUD's chip (the one fixed page)."""
+        return self.pc().open_dnd(cancel=cancel)
 
     # ---- a request ----------------------------------------------------------------------------------
 

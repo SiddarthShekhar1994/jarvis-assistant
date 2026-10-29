@@ -168,9 +168,11 @@ class LocalRouteTests(ServiceCase):
         resolved = self.resolve("find my zebra notes")                         # nothing with every word
         self.assertEqual(resolved.kind, ds.PLANNER)
 
-    def test_a_later_phases_request_is_answered_not_yet(self) -> None:
-        resolved = self.resolve("focus mode for 45 minutes")
-        self.assertEqual((resolved.kind, resolved.route.code), (ds.LOCAL, dv.NOT_YET))
+    def test_focus_mode_without_its_book_is_refused_plainly(self) -> None:
+        resolved = self.resolve("focus mode for 45 minutes")                    # P2.5: a local route now
+        self.assertEqual((resolved.kind, resolved.route.code), (ds.LOCAL, ""))
+        self.assertEqual([(result.skill, result.code) for result in resolved.run.results],
+                         [(dv.FOCUS_MODE, "pc_unavailable")])                    # no FocusBook given: nothing starts
         self.assertEqual(self.fake.opened, [])
 
     def test_with_the_planner_off_no_context_is_built(self) -> None:

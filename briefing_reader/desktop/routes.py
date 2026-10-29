@@ -24,8 +24,9 @@ whitespace-collapsed text, in the style of ask.routes (an optional leading "jarv
   "turn it|the volume up|down"; "pause|play|resume|next|skip|previous" (also "... the music" / "next song");
   "(set|start a) timer (for) <n> minutes ..." and "remind me in <n> minutes ..." (the label is the rest); "cancel|
   stop|end the timer(s)" (cancel_timer: the only way to one before P2.5's chips); "(take a) screenshot" and "...
-  screenshot of the (active) window". Recognised and answered NOT_YET, nothing done, until P2.5: "focus (mode) for
-  <n> minutes".
+  screenshot of the (active) window".
+* Phase 2, part 5: "(start) focus (mode) for <n> minutes" (also "... for 2 hours", "... for an hour", "... for half
+  an hour"): focus mode (desktop.pcctl.PcControl.focus; 1 to 240 minutes - a longer one is refused there, said).
 
 The app carries a Phase 1 route out on the desktop thread (desktop.service, desktop.executor: re-checked right before
 its OS call) and says what came of it (desktop.executor.run_words); a PC control likewise (desktop.pcctl through
@@ -70,7 +71,7 @@ KNOWN_FOLDER_WORDS = {label.casefold(): key for key, label in ROOT_LABELS.items(
 WEB_ENDINGS = frozenset({"com", "org", "net", "edu", "gov", "uk", "io", "co", "us", "ca", "au", "nz", "ie", "eu",
                          "de", "fr", "nl", "es", "it", "jp", "in", "info", "app", "dev", "ai", "me", "tv", "ly",
                          "gg", "fm", "news", "online", "site", "tech", "blog"})
-NOT_YET_KINDS = frozenset({dv.FOCUS_MODE})        # P2.5 brings focus mode
+NOT_YET_KINDS: frozenset[str] = frozenset()        # P2.5 brought focus mode: no local route waits for a later part
 
 _PREFIX = r"(?:jarvis[,:]?\s+)?(?:please\s+)?"
 _SUFFIX = r"[.!]?"
@@ -88,7 +89,6 @@ _OPEN_HOST_RE = _pattern(r"open\s+(?P<host>(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9]
                          r"(?P<path>/\S*)?")
 _OPEN_SITE_RE = _pattern(r"open\s+(?:the\s+|my\s+)?(?P<site>\S.*)")
 _FIND_RE = _pattern(r"(?:find|where\s+is|where's|where\s+are)\s+(?:my\s+|the\s+)?(?P<words>\S.*?)\??")
-_MINUTES = r"\d{1,3}\s*(?:minutes?|mins?)"
 # P2.4: the PC's controls (desktop.pcctl), each a full match that needs no candidates.
 _PC = (
     (dv.VOLUME, _pattern(r"volume\s+(?:(?P<level>\d{1,3})\s*%?|(?P<action>up|down|mute|unmute))"
@@ -103,10 +103,12 @@ _PC = (
     (dv.CANCEL_TIMER, _pattern(r"(?:cancel|stop|end)\s+(?:the\s+|my\s+|all\s+(?:the\s+|my\s+)?)?timers?")),
     (dv.SCREENSHOT, _pattern(r"(?:take\s+a\s+)?(?:screen\s*shot|screen\s+grab)"
                              r"(?:\s+(?:of\s+)?(?:the\s+|this\s+|my\s+)?(?P<window>(?:active\s+)?window))?")),
+    # P2.5: focus mode for a number of minutes or hours ("an hour", "half an hour").
+    (dv.FOCUS_MODE, _pattern(r"(?:start\s+)?focus(?:\s+mode)?\s+for\s+(?:(?P<minutes>\d{1,3})\s*(?:minutes?|mins?)"
+                             r"|(?P<hours>\d{1,2})\s*(?:hours?|hrs?)|(?P<half>half\s+an)\s+hour"
+                             r"|(?P<one>an?|one)\s+hour)")),
 )
-_NOT_YET = (
-    (dv.FOCUS_MODE, _pattern(r"focus(?:\s+mode)?\s+for\s+" + _MINUTES)),
-)
+_NOT_YET: tuple[tuple[str, re.Pattern[str]], ...] = ()
 
 # ROUTE_DESKTOP's "clear desktop verbs" (ask.routes): opening ("open|launch|start <something>") unless it is about
 # Jarvis's own things, and finding ("find|locate|where is|look for|show me ...") only with a word that says file,
@@ -184,7 +186,8 @@ class LocalRoute:
 
 
 def pc_request(text: Any) -> pcctl.PcAsk | None:
-    """The PC control ``text`` asks for (P2.4: volume, music, a timer, cancelling the timers, a screenshot), or None.
+    """The PC control ``text`` asks for (P2.4: volume, music, a timer, cancelling the timers, a screenshot; P2.5:
+    focus mode), or None.
     Pure: the app asks it on the GUI thread too (a screenshot's HUD windows are handed over with the request)."""
     text = " ".join(str(text or "").split())
     for kind, pattern in _PC:
@@ -207,6 +210,10 @@ def pc_request(text: Any) -> pcctl.PcAsk | None:
                                label=pcctl.clean_label(groups["label"] or groups["label2"]))
         if kind == dv.CANCEL_TIMER:
             return pcctl.PcAsk(kind, pcctl.CANCEL)
+        if kind == dv.FOCUS_MODE:
+            minutes = (int(groups["minutes"]) if groups["minutes"] else int(groups["hours"]) * 60 if groups["hours"]
+                       else 30 if groups["half"] else 60)
+            return pcctl.PcAsk(kind, pcctl.SET, minutes=minutes)
         return pcctl.PcAsk(kind, pcctl.ACTIVE_WINDOW if groups["window"] else pcctl.SCREEN)
     return None
 
@@ -296,7 +303,7 @@ def route(text: Any, context: DesktopContext | None = None, *,
 
 UNDERSTOOD = "Understood: {what}. Nothing was opened yet, {sir}."
 UNDERSTOOD_PC = "Understood: {what}. Nothing was changed yet, {sir}."
-NOT_YET_WORDS = {dv.FOCUS_MODE: "start focus mode"}
+NOT_YET_WORDS: dict[str, str] = {}
 NOT_YET = "I can't {what} yet, {sir} - nothing was changed."
 _PC_WHAT = {(dv.VOLUME, "up"): "turn the volume up", (dv.VOLUME, "down"): "turn the volume down",
             (dv.VOLUME, "mute"): "mute the sound", (dv.VOLUME, "unmute"): "turn the sound back on",
@@ -310,9 +317,10 @@ _PC_WHAT = {(dv.VOLUME, "up"): "turn the volume up", (dv.VOLUME, "down"): "turn 
 def _pc_what(asked: pcctl.PcAsk) -> str:
     if asked.kind == dv.VOLUME and asked.action == "set":
         return f"set the volume to {asked.level}"
-    if asked.kind == dv.TIMER:
+    if asked.kind in (dv.TIMER, dv.FOCUS_MODE):
         minutes = asked.minutes or 0
-        return f"set a timer for {minutes} minute{'' if minutes == 1 else 's'}"
+        what = "set a timer" if asked.kind == dv.TIMER else "start focus mode"
+        return f"{what} for {minutes} minute{'' if minutes == 1 else 's'}"
     return _PC_WHAT.get((asked.kind, asked.action), "that")
 
 

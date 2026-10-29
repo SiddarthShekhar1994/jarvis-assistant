@@ -31,6 +31,19 @@ attribute marks each), before anything else happens.
   through the desktop backend (``save_png``: never over anything; a taken name gets " (2)"). A screenshot is never
   sent anywhere. Its Undo recycles the file if it is unchanged (its sha256) through desktop.fileops' Recycler seam -
   the Recycle Bin arrives in P2.6, so until then it says plainly that it can't be put back yet.
+* P2.5, focus mode (``PcControl.focus``; SPEC 2.1, 10.3; owner decision D4): Jarvis's own quiet for 1 to 240 minutes
+  (``FocusBook``: one session, kept in a small file next to the timers so a restart of Jarvis stays quiet until its
+  end; asked again while it runs, it starts again from now and keeps its id), the music paused - only through the
+  player's own controls, whose state is known: with the state unknown nothing is pressed (a blind play/pause key could
+  start the music) and Jarvis says he left it - and a louder volume turned down to ``FOCUS_VOLUME``. What focus changed
+  on this PC is kept as its own changes (``PcChange.group``: the session's id), so the HUD's chips and Undo put them
+  back. Windows' Do Not Disturb is the owner's switch: Jarvis only opens its settings page (``open_dnd``: the one
+  fixed call, guard.DND_OPENER_URI) and reads it back, read-only (``dnd_state``: DND_ON only when Windows says so -
+  a Windows focus session, else SHQueryUserNotificationState's quiet time; DND_UNKNOWN when neither can be read).
+* P2.5, Undo for the HUD's chips (``undo_changes``): changes put back newest first, each checked against the PC as it
+  is now ("changed since - left as it is"); a run of volume changes is put back with ONE change of the level (the
+  300 ms cap would refuse a second one at once), a run of the player's with one call; ``undo_summary`` says what came
+  back and, plainly, what did not.
 
 ``PcControl`` (the desktop thread's: desktop.service owns it) carries out a ``PcAsk`` (a local route's, from
 desktop.routes) and returns a ``PcChange``; ``change_words`` is Jarvis's own sentence for it (the HUD's caption:
@@ -41,7 +54,13 @@ only - never a label, a path or a window's title.
 Public API
 ==========
 ``PcBackend`` (Protocol): ``audio()``, ``set_level(level)``, ``set_mute(muted)``, ``media_state()``,
-``media_control(action)``, ``media_key(action)``, ``capture(mode, hud=())``, ``chime()``. ``Win32Pc()``;
+``media_control(action)``, ``media_key(action)``, ``capture(mode, hud=())``, ``chime()``, ``dnd_state()``,
+``open_notifications()``. P2.5: ``FocusSession``, ``FocusDone``, ``FocusBook(folder, now=)`` (``load()``,
+``active()``, ``start(minutes)``, ``end(focus_id="")``, ``take_due()``, ``seconds_left()``, ``clear()``);
+``PcControl(focus=)`` ``.focus(minutes)``, ``.undo_changes(changes)``, ``.dnd_state()``, ``.open_dnd()``;
+``focus_words``, ``focus_end_words``, ``chip_words(kind, changes)``, ``focus_chip_text``, ``dnd_chip_text``,
+``undo_summary(results)``, ``undo_note``; ``INSTANT_KINDS``, ``FOCUS_VOLUME``, ``DND_ON``/``DND_OFF``/``DND_UNKNOWN``.
+``Win32Pc()``;
 ``gsmtc()``; ``png_bytes(width, height, bgra)``. ``AudioState(level, muted)``, ``PcAsk(kind, action, level, step,
 minutes, label)``, ``Timer``, ``Shot``, ``PcChange``; ``NoDevice``, ``NoWindow``, ``HudShows``,
 ``MediaUnavailable``, ``TimersFull``. ``TimerBook(folder, now=)`` (``load()``, ``running()``, ``add(minutes,
@@ -83,7 +102,17 @@ from .backend import DRIVE_FIXED, PNG_SIGNATURE, RealBackendInTests, cloud_tag, 
 
 logger = logging.getLogger(__name__)
 
-PC_SKILLS = frozenset({dv.VOLUME, dv.MEDIA, dv.TIMER, dv.CANCEL_TIMER, dv.SCREENSHOT})
+PC_SKILLS = frozenset({dv.VOLUME, dv.MEDIA, dv.TIMER, dv.CANCEL_TIMER, dv.SCREENSHOT, dv.FOCUS_MODE})
+FOCUS_VOLUME = 20                    # focus mode turns a louder volume down to this (SPEC 10.3's "VOLUME 20%")
+FOCUS_FILE = "focus.json"
+DND = "dnd"                          # Windows' Do Not Disturb: its settings page and its read-back (no skill)
+DND_ON, DND_OFF, DND_UNKNOWN = "on", "off", "unknown"
+_QUNS_ACCEPTS_NOTIFICATIONS, _QUNS_QUIET_TIME = 5, 6     # SHQueryUserNotificationState's answers read here
+# The HUD's chips of instant changes (P2.5), one per kind, in this order; a timer set and timers cancelled share one.
+CHIP_FOCUS, CHIP_MUSIC, CHIP_VOLUME, CHIP_TIMERS, CHIP_SHOTS = "focus", "music", "volume", "timers", "shots"
+INSTANT_KINDS = (CHIP_FOCUS, CHIP_MUSIC, CHIP_VOLUME, CHIP_TIMERS, CHIP_SHOTS)
+_CHIP_OF = {dv.FOCUS_MODE: CHIP_FOCUS, dv.MEDIA: CHIP_MUSIC, dv.VOLUME: CHIP_VOLUME, dv.TIMER: CHIP_TIMERS,
+            dv.CANCEL_TIMER: CHIP_TIMERS, dv.SCREENSHOT: CHIP_SHOTS}
 VOLUME_STEP = 10                     # "louder", "volume up": this many points (the planner's step: 5-30)
 VOLUME_CAP_S = 0.3                   # at most one volume change per 300 ms (SPEC 2.1)
 TIMER_MINUTES = (1, 240)
@@ -222,8 +251,9 @@ class PcChange:
     """What came of a PC control: its skill and action; ``code`` "" when it was done, else why not (a refusal,
     OS_ERROR or STOPPED); ``changed`` whether anything changed on this PC (False: it was so already, or not done);
     ``undoable`` whether Undo all can put it back; the state before and after (AudioState; a player's state; a Timer
-    or the timers cancelled; a Shot); ``via`` how the music was reached (VIA_PLAYER, VIA_KEYS); a winerror. Memory
-    only; its repr names the kind, the action and the code."""
+    or the timers cancelled; a Shot); ``via`` how the music was reached (VIA_PLAYER, VIA_KEYS); a winerror; ``group``
+    the focus session's id when focus mode made it (P2.5: its Undo puts it back with focus). Memory only; its repr
+    names the kind, the action and the code."""
 
     kind: str
     action: str = ""
@@ -234,9 +264,37 @@ class PcChange:
     after: Any = field(default=None, repr=False)
     via: str = ""
     winerror: int = 0
+    group: str = ""
 
     def __repr__(self) -> str:
         return f"PcChange({self.kind}, {self.action}{', ' + self.code if self.code else ''})"
+
+
+@dataclass(frozen=True)
+class FocusSession:
+    """Focus mode (P2.5): its id (kept when it starts again while it runs), its minutes, when it was set and when it
+    ends (wall clock)."""
+
+    focus_id: str
+    minutes: int
+    set_at: datetime
+    ends_at: datetime
+
+    def __repr__(self) -> str:
+        return f"FocusSession({self.focus_id}, {self.minutes} min)"
+
+
+@dataclass(frozen=True)
+class FocusDone:
+    """What focus mode did as it started: its session, what it changed on this PC (``changes``: the music paused, the
+    volume turned down - each a PcChange of its own with the session's id as its group), how the music was found
+    (PAUSED: paused now; UNKNOWN: the player can't be asked, so it was left alone; "": nothing to pause) and whether
+    it started again while it ran (``restarted``). Memory only."""
+
+    session: FocusSession
+    changes: tuple[PcChange, ...] = ()
+    music: str = ""
+    restarted: bool = False
 
 
 # --------------------------------------------------------------------------
@@ -294,6 +352,14 @@ class PcBackend(Protocol):
         """A short sound (a timer's end)."""
         ...
 
+    def dnd_state(self) -> str:
+        """Windows' Do Not Disturb, read only: DND_ON, DND_OFF or DND_UNKNOWN (P2.5)."""
+        ...
+
+    def open_notifications(self) -> None:
+        """Open Windows' notification settings (guard.DND_OPENER_URI, the one fixed call) for the owner's own switch."""
+        ...
+
 
 class Win32Pc:
     """The real PC controls (Windows); see the module docstring. Every public method raises RealBackendInTests while
@@ -349,6 +415,16 @@ class Win32Pc:
     @_real
     def chime(self) -> None:
         _beep()
+
+    @_real
+    def dnd_state(self) -> str:
+        return _dnd_read()
+
+    @_real
+    def open_notifications(self) -> None:
+        from .backend import _shell_open
+
+        _shell_open(guard.DND_OPENER_URI)             # the one fixed page: never anything a plan or a name gives
 
 
 def _level(scalar: Any) -> int:
@@ -535,6 +611,42 @@ def _beep() -> None:
     import winsound
 
     winsound.MessageBeep(winsound.MB_ICONASTERISK)
+
+
+# ---- Do Not Disturb, read only (P2.5; D4: Windows gives apps no supported way to switch it) ----------------------
+
+_FOCUS_SHELL_MODULE = "winrt.windows.ui.shell"
+
+
+def _dnd_read() -> str:
+    """Windows' Do Not Disturb as far as it can be READ (nothing is ever written): a Windows focus session through
+    winrt's FocusSessionManager.IsFocusActive when that module can be imported and answers (Windows turns Do Not
+    Disturb on for a focus session), else SHQueryUserNotificationState (its quiet time: on; notifications accepted:
+    off). DND_UNKNOWN when neither says - the HUD's chip then never says "On"."""
+    import importlib
+
+    try:
+        module = importlib.import_module(_FOCUS_SHELL_MODULE)
+        manager_type = getattr(module, "FocusSessionManager", None)
+        if manager_type is not None and bool(manager_type.is_supported):
+            manager = manager_type.get_default()
+            if manager is not None and bool(manager.is_focus_active):
+                return DND_ON
+    except Exception as exc:  # noqa: BLE001 - not installed, not supported or refused: the next way
+        logger.debug("Desktop pc: no focus session read-back (%s)", type(exc).__name__)
+    try:
+        import ctypes
+
+        state = ctypes.c_int(0)
+        shell32 = ctypes.WinDLL("shell32")
+        if shell32.SHQueryUserNotificationState(ctypes.byref(state)) == 0:       # S_OK
+            if state.value == _QUNS_QUIET_TIME:
+                return DND_ON
+            if state.value == _QUNS_ACCEPTS_NOTIFICATIONS:
+                return DND_OFF
+    except Exception as exc:  # noqa: BLE001 - can't be read: unknown
+        logger.debug("Desktop pc: no notification state read-back (%s)", type(exc).__name__)
+    return DND_UNKNOWN
 
 
 # ---- screenshots: GDI, the HUD left out (D7), written as a PNG here ----------------------------------------------
@@ -917,6 +1029,132 @@ def _timer_from(entry: Any) -> Timer | None:
         return None
 
 
+class FocusBook:
+    """Focus mode's session (P2.5): at most one, in memory and in ``folder``/focus.json (ids, minutes and times only),
+    so that Jarvis started again stays quiet until its end (``load``: one whose end came while Jarvis was closed is
+    dropped). Safe to use from the desktop thread and the GUI thread. ``now()``: the wall clock."""
+
+    def __init__(self, folder: str | Path | None, *, now: Callable[[], datetime] | None = None) -> None:
+        self.folder = Path(folder) if folder else None
+        self._now = now or _utc_now
+        self._lock = threading.Lock()
+        self._session: FocusSession | None = None
+        self.saved = True
+
+    def now(self) -> datetime:
+        return self._now()
+
+    def load(self) -> FocusSession | None:
+        """The session kept in the file while it is still to end (else none, and the file is cleared)."""
+        session: FocusSession | None = None
+        path = self.folder / FOCUS_FILE if self.folder is not None else None
+        try:
+            if path is not None and path.is_file():
+                session = _focus_from(json.loads(path.read_text(encoding="utf-8")).get("focus"))
+        except (OSError, ValueError, AttributeError, TypeError) as exc:
+            logger.warning("Desktop pc: the saved focus could not be read (%s)", type(exc).__name__)
+        now = self._now()
+        with self._lock:
+            stale = session is not None and _like(session.ends_at, now) <= now
+            self._session = None if stale else session
+            if stale:
+                self._save()
+            return self._session
+
+    def active(self) -> FocusSession | None:
+        with self._lock:
+            return self._session
+
+    def start(self, minutes: int, focus_id: str = "") -> tuple[FocusSession, bool]:
+        """Focus for ``minutes`` (TIMER_MINUTES: else ValueError) from now, saved, with ``focus_id`` (a new one when
+        "" or not of 8 hex digits); one still running starts again from now and keeps its own id: (the session,
+        whether it started again)."""
+        if isinstance(minutes, bool) or not isinstance(minutes, int) \
+                or not TIMER_MINUTES[0] <= minutes <= TIMER_MINUTES[1]:
+            raise ValueError("focus runs 1 to 240 minutes")
+        if not re.fullmatch(r"[0-9a-f]{8}", str(focus_id or "")):
+            focus_id = uuid.uuid4().hex[:8]
+        now = self._now()
+        with self._lock:
+            current = self._session
+            again = current is not None and _like(current.ends_at, now) > now
+            focus_id = current.focus_id if again and current is not None else focus_id
+            self._session = FocusSession(focus_id, minutes, now, now + timedelta(minutes=minutes))
+            self._save()
+            return self._session, again
+
+    def end(self, focus_id: str = "") -> FocusSession | None:
+        """Focus over now (only that session's when ``focus_id`` is given): the session it was, or None."""
+        with self._lock:
+            current = self._session
+            if current is None or (focus_id and current.focus_id != focus_id):
+                return None
+            self._session = None
+            self._save()
+            return current
+
+    def take_due(self) -> tuple[FocusSession | None, float]:
+        """The session whose end has come, taken out, with how many seconds late it is noticed; (None, 0) else."""
+        now = self._now()
+        with self._lock:
+            current = self._session
+            if current is None:
+                return None, 0.0
+            late = (now - _like(current.ends_at, now)).total_seconds()
+            if late < 0:
+                return None, 0.0
+            self._session = None
+            self._save()
+            return current, late
+
+    def seconds_left(self) -> float | None:
+        """Seconds until focus ends (0 when it has; None without one)."""
+        session = self.active()
+        if session is None:
+            return None
+        now = self._now()
+        return max(0.0, (_like(session.ends_at, now) - now).total_seconds())
+
+    def clear(self) -> FocusSession | None:
+        return self.end()
+
+    def _save(self) -> None:
+        """The session to the file (a new file put in place). Called with the lock held."""
+        if self.folder is None:
+            return
+        session = self._session
+        entry = None if session is None else {"id": session.focus_id, "minutes": session.minutes,
+                                              "set_at": session.set_at.isoformat(),
+                                              "ends_at": session.ends_at.isoformat()}
+        try:
+            self.folder.mkdir(parents=True, exist_ok=True)
+            temp = self.folder / (FOCUS_FILE + ".new")
+            temp.write_text(json.dumps({"version": 1, "focus": entry}), encoding="utf-8")
+            os.replace(temp, self.folder / FOCUS_FILE)
+            self.saved = True
+        except OSError as exc:
+            self.saved = False
+            logger.warning("Desktop pc: focus could not be saved (%s %s)", type(exc).__name__,
+                           getattr(exc, "winerror", "") or "")
+
+
+def _focus_from(entry: Any) -> FocusSession | None:
+    if not entry:
+        return None
+    try:
+        minutes = entry["minutes"]
+        if isinstance(minutes, bool) or not isinstance(minutes, int) \
+                or not TIMER_MINUTES[0] <= minutes <= TIMER_MINUTES[1]:
+            return None
+        focus_id = str(entry["id"])
+        if not re.fullmatch(r"[0-9a-f]{8}", focus_id):
+            return None
+        return FocusSession(focus_id, minutes, datetime.fromisoformat(str(entry["set_at"])),
+                            datetime.fromisoformat(str(entry["ends_at"])))
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+
+
 # --------------------------------------------------------------------------
 # The controls (the desktop thread's)
 # --------------------------------------------------------------------------
@@ -941,17 +1179,18 @@ class PcControl:
     ``disk()``: the desktop backend (the screenshots folder's facts, its new file, a shot's hash for Undo);
     ``timers``: the TimerBook; ``screenshots_dir``: [desktop] screenshots_dir ("" = the default, D8); ``clock``: a
     monotonic clock (the volume's rate cap); ``now``: the wall clock (a shot's name); ``recycler``: desktop.fileops'
-    Recycle Bin seam (NoRecycleBin until P2.6)."""
+    Recycle Bin seam (NoRecycleBin until P2.6); ``focus``: focus mode's FocusBook (P2.5)."""
 
     def __init__(self, backend_factory: Callable[[], PcBackend], *, disk: Callable[[], Any] | None = None,
                  timers: TimerBook | None = None, screenshots_dir: str = "",
                  clock: Callable[[], float] = time.monotonic, now: Callable[[], datetime] | None = None,
-                 recycler: Any = None) -> None:
+                 recycler: Any = None, focus: FocusBook | None = None) -> None:
         self._factory = backend_factory
         self._backend: PcBackend | None = None
         self._failed = False
         self._disk = disk or (lambda: None)
         self.timers = timers
+        self.focus_book = focus
         self._shots_dir = str(screenshots_dir or "").strip()
         self._clock = clock
         self._now = now or _utc_now
@@ -995,6 +1234,8 @@ class PcControl:
             return self.cancel_timers(cancel=cancel)
         if kind == dv.SCREENSHOT:
             return self.screenshot(ask.action or SCREEN, hud=hud, cancel=cancel)
+        if kind == dv.FOCUS_MODE:
+            return self.focus(ask.minutes, cancel=cancel)
         return PcChange(kind, getattr(ask, "action", ""), dv.SHAPE)
 
     # ---- volume -----------------------------------------------------------------------------------
@@ -1027,11 +1268,11 @@ class PcControl:
         return self._set_audio(pc, action, before, after, cancel)
 
     def _set_audio(self, pc: PcBackend, action: str, before: AudioState, after: AudioState, cancel: Any,
-                   kind: str = dv.VOLUME) -> PcChange:
+                   kind: str = dv.VOLUME, group: str = "") -> PcChange:
         if after == before:
-            return PcChange(kind, action, "", False, False, before, before)
+            return PcChange(kind, action, "", False, False, before, before, group=group)
         if _stopped(cancel):                             # asked again right before the OS call
-            return PcChange(kind, action, STOPPED, before=before)
+            return PcChange(kind, action, STOPPED, before=before, group=group)
         self._last_volume = self._clock()                # the cap counts every change asked of Windows
         try:
             if after.level != before.level:
@@ -1039,10 +1280,11 @@ class PcControl:
             if after.muted != before.muted:
                 pc.set_mute(after.muted)
         except Exception as exc:  # noqa: BLE001 - Windows did not do it (all of it, or part)
-            return self._failed_change(PcChange(kind, action, OS_ERROR, before=before, winerror=_winerror(exc)), exc)
+            return self._failed_change(PcChange(kind, action, OS_ERROR, before=before, winerror=_winerror(exc),
+                                                group=group), exc)
         logger.info("Desktop pc: volume %s, %d -> %d%s", action, before.level, after.level,
                     "" if after.muted == before.muted else (", muted" if after.muted else ", unmuted"))
-        return self._keep(PcChange(kind, action, "", True, True, before, after))
+        return self._keep(PcChange(kind, action, "", True, True, before, after, group=group))
 
     # ---- music ------------------------------------------------------------------------------------
 
@@ -1225,6 +1467,107 @@ class PcControl:
                     max(1, len(data) // 1024))
         return self._keep(PcChange(dv.SCREENSHOT, mode, "", True, True, None, shot))
 
+    # ---- focus mode (P2.5) ------------------------------------------------------------------------
+
+    def focus(self, minutes: Any, *, cancel: Any = None) -> PcChange:
+        """Focus mode for ``minutes`` (1-240; see the module docstring): the music paused through the player's own
+        controls only, a louder volume turned down to FOCUS_VOLUME (each kept as a change of its own, its group the
+        session's id) and the session started - again from now when one runs (its id kept); the cancel asked again
+        right before each OS call. Its ``after`` is a FocusDone; without the PC's controls focus still starts (Jarvis's
+        own quiet needs none)."""
+        if isinstance(minutes, bool) or not isinstance(minutes, int) \
+                or not TIMER_MINUTES[0] <= minutes <= TIMER_MINUTES[1]:
+            return self._refused(PcChange(dv.FOCUS_MODE, SET, dv.SHAPE))
+        book = self.focus_book
+        if book is None:
+            return self._refused(PcChange(dv.FOCUS_MODE, SET, UNAVAILABLE))
+        if _stopped(cancel):
+            return PcChange(dv.FOCUS_MODE, SET, STOPPED)
+        current = book.active()
+        focus_id = current.focus_id if current is not None else uuid.uuid4().hex[:8]
+        changes: list[PcChange] = []
+        music = ""
+        pc = self.backend()
+        if pc is not None:
+            music, paused = self._focus_music(pc, focus_id, cancel)
+            lowered = self._focus_volume(pc, focus_id, cancel)
+            changes = [change for change in (paused, lowered) if change is not None]
+        if _stopped(cancel):
+            return PcChange(dv.FOCUS_MODE, SET, STOPPED)
+        session, again = book.start(minutes, focus_id)
+        logger.info("Desktop pc: focus mode %s, %d min (music %s, volume %s%s)", "again" if again else "on", minutes,
+                    music or "-", "down" if any(change.kind == dv.VOLUME for change in changes) else "as it was",
+                    "" if book.saved else ", not saved")
+        return self._keep(PcChange(dv.FOCUS_MODE, SET, "", True, True, current,
+                                   FocusDone(session, tuple(changes), music, again), group=session.focus_id))
+
+    def _focus_music(self, pc: PcBackend, focus_id: str, cancel: Any) -> tuple[str, PcChange | None]:
+        """Focus pauses what plays through the player's own controls only: (PAUSED and the change; PLAYING when the
+        player did not take it; UNKNOWN when its state can't be read - then nothing is pressed, as a blind play/pause
+        key could start the music; "" when nothing plays)."""
+        try:
+            state = pc.media_state()
+        except Exception as exc:  # noqa: BLE001 - the player's controls failed: left alone
+            logger.info("Desktop pc: the player's state could not be read (%s)", type(exc).__name__)
+            state = UNKNOWN
+        if state == UNKNOWN:
+            return UNKNOWN, None
+        if state != PLAYING or _stopped(cancel):
+            return "", None
+        try:
+            taken = pc.media_control("pause")
+        except Exception as exc:  # noqa: BLE001 - MediaUnavailable, or the player did not answer: left playing
+            logger.info("Desktop pc: focus could not pause the player (%s)", type(exc).__name__)
+            taken = False
+        if not taken:
+            return PLAYING, None
+        logger.info("Desktop pc: media pause through the player (focus)")
+        return PAUSED, self._keep(PcChange(dv.MEDIA, "pause", "", True, True, PLAYING, PAUSED, VIA_PLAYER,
+                                           group=focus_id))
+
+    def _focus_volume(self, pc: PcBackend, focus_id: str, cancel: Any) -> PcChange | None:
+        """Focus turns a volume louder than FOCUS_VOLUME down to it (a muted one, a quieter one, one changed less than
+        VOLUME_CAP_S ago or no speakers: left as it is)."""
+        if self._last_volume is not None and self._clock() - self._last_volume < VOLUME_CAP_S:
+            return None
+        try:
+            before = pc.audio()
+        except Exception as exc:  # noqa: BLE001 - NoDevice, or Windows did not say: left as it is
+            logger.info("Desktop pc: focus left the volume (%s)", type(exc).__name__)
+            return None
+        if before.muted or before.level <= FOCUS_VOLUME:
+            return None
+        change = self._set_audio(pc, "set", before, AudioState(FOCUS_VOLUME, False), cancel, group=focus_id)
+        return change if change.changed else None
+
+    def dnd_state(self) -> str:
+        """Windows' Do Not Disturb as read back (read only): DND_ON, DND_OFF or DND_UNKNOWN (no seam, or it can't be
+        read)."""
+        pc = self.backend()
+        if pc is None:
+            return DND_UNKNOWN
+        try:
+            state = str(pc.dnd_state())
+        except Exception as exc:  # noqa: BLE001 - can't be read: unknown
+            logger.info("Desktop pc: Do Not Disturb could not be read (%s)", type(exc).__name__)
+            return DND_UNKNOWN
+        return state if state in (DND_ON, DND_OFF) else DND_UNKNOWN
+
+    def open_dnd(self, *, cancel: Any = None) -> PcChange:
+        """Windows' notification settings opened for the owner's own switch (his click on the HUD's chip: the one fixed
+        page, guard.DND_OPENER_URI). Nothing on this PC is changed by Jarvis."""
+        pc = self.backend()
+        if pc is None:
+            return self._refused(PcChange(DND, "open", UNAVAILABLE))
+        if _stopped(cancel):
+            return PcChange(DND, "open", STOPPED)
+        try:
+            pc.open_notifications()
+        except Exception as exc:  # noqa: BLE001 - Windows did not open it
+            return self._failed_change(PcChange(DND, "open", OS_ERROR, winerror=_winerror(exc)), exc)
+        logger.info("Desktop pc: Windows' notification settings opened (the owner's click)")
+        return PcChange(DND, "open")
+
     # ---- Undo (P2.5's Undo all; the owner's click) -----------------------------------------------------
 
     def undo(self, change: PcChange, *, cancel: Any = None) -> PcChange:
@@ -1249,7 +1592,128 @@ class PcControl:
             return PcChange(kind, UNDO, "" if back else GONE, bool(back), after=back)
         if kind == dv.SCREENSHOT:
             return self._undo_shot(change)
+        if kind == dv.FOCUS_MODE:
+            return self._end_focus(change)
         return PcChange(kind, UNDO, CANT_UNDO)
+
+    def undo_changes(self, changes: Sequence[PcChange], *,
+                     cancel: Any = None) -> tuple[tuple[PcChange, PcChange], ...]:
+        """``changes`` (oldest first, as they were made) put back newest first, each checked against this PC as it is
+        now - and each comes back with its Undo, newest first (a PcChange of action UNDO: code "" when it was put back,
+        or was as it was already). A run of volume changes is put back with ONE change of the level and mute (the 300 ms
+        cap would refuse a second one at once), a run of the player's with one call; focus mode's ends its session."""
+        ordered = [change for change in reversed(list(changes)) if isinstance(change, PcChange)]
+        results: dict[int, PcChange] = {}
+        volumes = [change for change in ordered if change.kind == dv.VOLUME]
+        if volumes:
+            results.update(self._undo_volumes(volumes, cancel))
+        players = [change for change in ordered if change.kind == dv.MEDIA]
+        if players:
+            results.update(self._undo_players(players, cancel))
+        for change in ordered:
+            if id(change) not in results:
+                results[id(change)] = self.undo(change, cancel=cancel)
+        return tuple((change, results[id(change)]) for change in ordered)
+
+    def _undo_volumes(self, changes: list[PcChange], cancel: Any) -> dict[int, PcChange]:
+        """The volume's changes (newest first) put back with at most one change: each checked against the state the
+        newer ones leave behind (the PC's own state first) - one that does not match was changed since and is left."""
+        results: dict[int, PcChange] = {}
+        undoable: list[PcChange] = []
+        for change in changes:
+            if change.changed and change.undoable and isinstance(change.before, AudioState) \
+                    and isinstance(change.after, AudioState):
+                undoable.append(change)
+            else:
+                results[id(change)] = PcChange(dv.VOLUME, UNDO, CANT_UNDO, group=change.group)
+
+        def each(code: str, winerror: int = 0) -> dict[int, PcChange]:
+            for change in undoable:
+                results[id(change)] = PcChange(dv.VOLUME, UNDO, code, winerror=winerror, group=change.group)
+            return results
+
+        if not undoable:
+            return results
+        pc = self.backend()
+        if pc is None:
+            return each(UNAVAILABLE)
+        if self._last_volume is not None and self._clock() - self._last_volume < VOLUME_CAP_S:
+            return each(TOO_SOON)
+        try:
+            now = pc.audio()
+        except Exception as exc:  # noqa: BLE001 - can't tell: left as it is
+            return each(OS_ERROR, _winerror(exc))
+        state, back = now, []
+        for change in undoable:
+            if state == change.after:
+                state = change.before
+                back.append(change)
+            else:
+                results[id(change)] = PcChange(dv.VOLUME, UNDO, CHANGED, before=state, group=change.group)
+        code, winerror, changed = "", 0, False
+        if back and state != now:
+            done = self._set_audio(pc, UNDO, now, state, cancel)
+            if done.changed and self._changes and self._changes[-1] is done:
+                self._changes.pop()                      # an Undo is not itself a change to put back
+            code, winerror, changed = done.code, done.winerror, done.changed
+        for change in back:
+            results[id(change)] = PcChange(dv.VOLUME, UNDO, code, changed, before=now,
+                                           after=None if code else state, winerror=winerror, group=change.group)
+        return results
+
+    def _undo_players(self, changes: list[PcChange], cancel: Any) -> dict[int, PcChange]:
+        """The player's changes (newest first) put back with at most one call, checked as the volume's are; one made by
+        the media key can't be put back (its state was never known)."""
+        results: dict[int, PcChange] = {}
+        undoable: list[PcChange] = []
+        for change in changes:
+            if change.changed and change.undoable and change.via == VIA_PLAYER:
+                undoable.append(change)
+            else:
+                results[id(change)] = PcChange(dv.MEDIA, UNDO, CANT_UNDO, via=change.via, group=change.group)
+        if not undoable:
+            return results
+        pc = self.backend()
+        if pc is None:
+            for change in undoable:
+                results[id(change)] = PcChange(dv.MEDIA, UNDO, UNAVAILABLE, group=change.group)
+            return results
+        try:
+            now = pc.media_state()
+        except Exception:  # noqa: BLE001 - can't tell: each is then changed since, left as it is
+            now = UNKNOWN
+        state, back = now, []
+        for change in undoable:
+            if state == change.after:
+                state = change.before
+                back.append(change)
+            else:
+                results[id(change)] = PcChange(dv.MEDIA, UNDO, CHANGED, before=state, via=VIA_PLAYER,
+                                               group=change.group)
+        code, winerror, taken = "", 0, False
+        if back and state != now:
+            if _stopped(cancel):
+                code = STOPPED
+            else:
+                try:
+                    taken = bool(pc.media_control("play" if state == PLAYING else "pause"))
+                    code = "" if taken else NOT_TAKEN
+                except Exception as exc:  # noqa: BLE001 - the player did not answer: left as it is
+                    code, winerror = OS_ERROR, _winerror(exc) if isinstance(exc, OSError) else 0
+            if taken:
+                logger.info("Desktop pc: the player put back (%s -> %s)", now, state)
+        for change in back:
+            results[id(change)] = PcChange(dv.MEDIA, UNDO, code, taken, before=now, after=None if code else state,
+                                           via=VIA_PLAYER, winerror=winerror, group=change.group)
+        return results
+
+    def _end_focus(self, change: PcChange) -> PcChange:
+        """Focus mode over (Jarvis's own quiet: no OS call). The app ends it as the owner clicks, so it may be over
+        already - it is put back either way."""
+        done = change.after if isinstance(change.after, FocusDone) else None
+        if done is not None and self.focus_book is not None:
+            self.focus_book.end(done.session.focus_id)
+        return PcChange(dv.FOCUS_MODE, UNDO, "", True, group=change.group)
 
     def _undo_volume(self, change: PcChange, cancel: Any) -> PcChange:
         pc = self.backend()
@@ -1375,6 +1839,7 @@ _NOT_DONE_WORDS = {
 _SHAPE_WORDS = {
     dv.VOLUME: "The volume goes from 0 to 100, {sir} - nothing was changed.",
     dv.TIMER: "Timers run from 1 to 240 minutes, {sir} - nothing was set.",
+    dv.FOCUS_MODE: "Focus mode runs from 1 to 240 minutes, {sir} - nothing was changed.",
 }
 _FAILED_WORDS = {
     dv.VOLUME: "Windows didn't change the volume, {sir}.",
@@ -1417,9 +1882,184 @@ def change_words(change: PcChange | None, address: str = "sir") -> str:
     elif kind == dv.CANCEL_TIMER:
         count = len(change.before or ())
         template = "Timer cancelled, {sir}." if count == 1 else f"{count} timers cancelled, {{sir}}."
+    elif kind == dv.FOCUS_MODE and isinstance(change.after, FocusDone):
+        return focus_words(change.after, address)
     else:
         template = _DONE_WORDS.get((kind, action), "Done, {sir}.")
     return with_address(template, address)
+
+
+def focus_words(done: FocusDone, address: str = "sir") -> str:
+    """Focus mode's caption as it starts: "Focus mode is on, sir. I've paused the music and turned the volume down to
+    20. I'll tell you when the 30 minutes are up." - what it left alone said plainly; counts and levels only."""
+    did: list[str] = []
+    for change in done.changes:
+        if change.kind == dv.MEDIA:
+            did.append("paused the music")
+        elif change.kind == dv.VOLUME and isinstance(change.after, AudioState):
+            did.append(f"turned the volume down to {change.after.level}")
+    text = "Focus mode starts again, {sir}." if done.restarted else "Focus mode is on, {sir}."
+    if did:
+        text += f" I've {' and '.join(did)}."
+    if done.music == UNKNOWN:
+        text += " I can't tell if music is playing, so I left it."
+    elif done.music == PLAYING:
+        text += " The player didn't pause, so the music is still on."
+    minutes = done.session.minutes
+    text += " I'll tell you when the minute is up." if minutes == 1 else \
+        f" I'll tell you when the {minutes} minutes are up."
+    return with_address(text, address)
+
+
+def focus_end_words(session: FocusSession, late_s: float = 0.0, address: str = "sir", hour24: bool = False) -> str:
+    """The toast at focus mode's end: "Your 30-minute focus is up, sir." (noticed late: when it ended)."""
+    span = f"{session.minutes}-minute"
+    if late_s > LATE_WORDS_S:
+        return with_address(f"Your {span} focus ended at {clock_text(_local(session.ends_at), hour24)}, {{sir}}.",
+                            address)
+    return with_address(f"Your {span} focus is up, {{sir}}.", address)
+
+
+def focus_chip_text(session: FocusSession, hour24: bool = False) -> str:
+    """The HUD's focus chip: "Focus \u00b7 ends 10:30 AM" (static: no seconds ticking - only the orb loops)."""
+    return f"Focus \u00b7 ends {clock_text(_local(session.ends_at), hour24)}"
+
+
+def dnd_chip_text(state: str) -> str:
+    """The Do Not Disturb chip: "On" only when Windows was read back as on, else the opener's "Turn on"."""
+    return "Do Not Disturb \u00b7 On" if state == DND_ON else "Do Not Disturb \u00b7 Turn on"
+
+
+def chip_of(change: PcChange) -> str:
+    """The HUD chip a change shows on (INSTANT_KINDS; "" for none)."""
+    return _CHIP_OF.get(change.kind, "")
+
+
+_MUSIC_CHIP = {(VIA_PLAYER, "pause"): "Music \u00b7 paused", (VIA_PLAYER, "play"): "Music \u00b7 playing",
+               (VIA_KEYS, "pause"): "Music \u00b7 play/pause pressed",
+               (VIA_KEYS, "play"): "Music \u00b7 play/pause pressed"}
+
+
+def chip_words(kind: str, changes: Sequence[PcChange], hour24: bool = False) -> str:
+    """What a chip of instant changes says (its words, then the HUD's Undo): the newest change of its ``kind``
+    ("Volume \u00b7 20%", "Music \u00b7 paused", "Timer set \u00b7 10 min", "Screenshot \u00b7 saved", "Focus \u00b7
+    ends 10:30 AM"); "" when it has none. Levels, states and counts only - never a label or a path."""
+    mine = [change for change in changes if chip_of(change) == kind]
+    if not mine:
+        return ""
+    newest = mine[-1]
+    if kind == CHIP_FOCUS:
+        done = newest.after
+        return focus_chip_text(done.session, hour24) if isinstance(done, FocusDone) else "Focus"
+    if kind == CHIP_VOLUME:
+        after = newest.after if isinstance(newest.after, AudioState) else None
+        if after is None:
+            return "Volume"
+        return "Volume \u00b7 muted" if after.muted else f"Volume \u00b7 {after.level}%"
+    if kind == CHIP_MUSIC:
+        if newest.action in ("next", "previous"):
+            return f"Music \u00b7 {newest.action} track"
+        return _MUSIC_CHIP.get((newest.via, newest.action), "Music")
+    if kind == CHIP_TIMERS:
+        if newest.kind == dv.TIMER:
+            minutes = newest.after.minutes if isinstance(newest.after, Timer) else 0
+            return f"Timer set \u00b7 {minutes} min"
+        count = len(newest.before or ())
+        return "Timer cancelled" if count == 1 else f"{count} timers cancelled"
+    if kind == CHIP_SHOTS:
+        return "Screenshot \u00b7 saved" if len(mine) == 1 else f"{len(mine)} screenshots \u00b7 saved"
+    return ""
+
+
+def can_undo(change: PcChange) -> bool:
+    """Whether Undo may put ``change`` back (False: the media key's, whose state was never known)."""
+    return bool(change.changed and change.undoable)
+
+
+_PUT_BACK = {dv.MEDIA: "music", dv.VOLUME: "volume", dv.TIMER: "timer", dv.CANCEL_TIMER: "timers",
+             dv.SCREENSHOT: "screenshot"}
+_LEFT_WORDS = {
+    CHANGED: "The {noun} changed since - left as it is.",
+    TOO_SOON: "The volume changed a moment ago - try Undo again.",
+    UNAVAILABLE: "I can't reach this PC's controls right now.",
+    NOT_TAKEN: "The player didn't respond.",
+    STOPPED: "Stopped before the {noun}.",
+    GONE: "The {noun} had gone already.",
+}
+_GONE_WORDS = {dv.TIMER: "That timer had ended already.", dv.CANCEL_TIMER: "Those timers had ended already."}
+_CANT_WORDS = {dv.MEDIA: "What the media key did can't be put back."}
+_PART_ORDER = {dv.MEDIA: 0, dv.VOLUME: 1, dv.TIMER: 2, dv.CANCEL_TIMER: 3, dv.SCREENSHOT: 4}   # as SPEC 10.3 says it
+_OS_WORDS = {dv.VOLUME: "Windows didn't put the volume back.", dv.MEDIA: "Windows couldn't reach the player.",
+             dv.SCREENSHOT: "Windows couldn't put the screenshot in the Recycle Bin."}
+
+
+def _back_part(change: PcChange, result: PcChange) -> str:
+    """What a change put back is now, in a word or two ("music playing", "volume 60%", "timer cancelled")."""
+    if change.kind == dv.VOLUME:
+        state = result.after if isinstance(result.after, AudioState) else result.before
+        if not isinstance(state, AudioState):
+            return "volume"
+        return "sound muted" if state.muted else f"volume {state.level}%"
+    if change.kind == dv.MEDIA:
+        state = result.after if result.after in (PLAYING, PAUSED) else change.before
+        return "music playing" if state == PLAYING else "music paused"
+    if change.kind == dv.TIMER:
+        return "timer cancelled"
+    if change.kind == dv.CANCEL_TIMER:
+        count = len(result.after or ())
+        return "timer back" if count == 1 else f"{count} timers back"
+    if change.kind == dv.SCREENSHOT:
+        return "screenshot in the Recycle Bin"
+    return ""
+
+
+def undo_summary(results: Sequence[tuple[PcChange, PcChange]], address: str = "sir") -> str:
+    """Jarvis's words for an Undo of the HUD's chips (one chip's, or Undo all's): what came back - "Focus ended, sir.
+    Back as it was: music playing, volume 60%." - then, plainly, what did not ("The screenshot stays - the Recycle Bin
+    can't take it yet."). Kinds, levels and counts only."""
+    from . import fileops
+
+    focus_ended = any(change.kind == dv.FOCUS_MODE and not result.code for change, result in results)
+    parts: list[tuple[int, str]] = []
+    left: list[str] = []
+    for change, result in results:
+        if change.kind == dv.FOCUS_MODE:
+            continue
+        if not result.code:
+            part = _back_part(change, result)
+            if part and part not in (said for _rank, said in parts):
+                parts.append((_PART_ORDER.get(change.kind, 9), part))
+            continue
+        noun = _PUT_BACK.get(change.kind, "change")
+        if result.code in fileops.UNDO_WORDS and change.kind == dv.SCREENSHOT:
+            words = "The screenshot stays - the Recycle Bin can't take it yet." if result.code == fileops.R_NO_BIN \
+                else fileops.UNDO_WORDS[result.code]
+        elif result.code == CANT_UNDO:
+            words = _CANT_WORDS.get(change.kind, f"The {noun} can't be put back.")
+        elif result.code == OS_ERROR:
+            words = _OS_WORDS.get(change.kind, "Windows couldn't put it back.")
+        elif result.code == GONE and change.kind in _GONE_WORDS:
+            words = _GONE_WORDS[change.kind]
+        else:
+            words = _LEFT_WORDS.get(result.code, "The {noun} couldn't be put back.").format(noun=noun)
+        if words not in left:
+            left.append(words)
+    back = ", ".join(part for _rank, part in sorted(parts, key=lambda item: item[0]))   # music, volume, timers ...
+    if focus_ended:
+        text = "Focus ended, {sir}." + (f" Back as it was: {back}." if back else "")
+    elif back:
+        text = f"Back as it was, {{sir}}: {back}."
+    else:
+        text = "Nothing was put back, {sir}." if left else "Back as it was, {sir}."
+    if left:
+        text += " " + " ".join(left)
+    return with_address(text, address)
+
+
+def undo_note(change: PcChange, result: PcChange) -> str:
+    """An Undo's line in Live: "volume - put back" / "media - left: changed" (kinds and codes only)."""
+    kind = change.kind + (" (focus)" if change.group and change.kind != dv.FOCUS_MODE else "")
+    return f"{kind} - put back" if not result.code else f"{kind} - left: {result.code}"
 
 
 def undo_words(change: PcChange, address: str = "sir") -> str:
@@ -1483,4 +2123,14 @@ def live_note(change: Any) -> str:
         return f"{len(before or ())} cancelled"
     if change.kind == dv.SCREENSHOT and isinstance(after, Shot):
         return f"{'the screen' if after.mode == SCREEN else 'the active window'}, 1 file saved on this PC"
+    if change.kind == dv.FOCUS_MODE and isinstance(after, FocusDone):
+        notes = [f"{_minutes(after.session.minutes)}{' again' if after.restarted else ''}", "Jarvis quiet"]
+        for sub in after.changes:
+            if sub.kind == dv.MEDIA:
+                notes.append("the player paused")
+            elif isinstance(sub.before, AudioState) and isinstance(sub.after, AudioState):
+                notes.append(f"level {sub.before.level} -> {sub.after.level}")
+        if after.music == UNKNOWN:
+            notes.append("the player's state unknown - left alone")
+        return ", ".join(notes)
     return ""

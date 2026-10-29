@@ -441,8 +441,10 @@ class DryRunTests(PlannerTestCase):
         code, text = self.dry("volume 30")
         self.assertIn("Handled on this PC (no planner run): volume, instant\n", text)
         self.assertIn("Jarvis would say: Understood: set the volume to 30. Nothing was changed yet, sir.", text)
-        code, text = self.dry("focus mode for 45 minutes")
-        self.assertIn("Handled on this PC (no planner run): focus_mode, refused: not_yet\n", text)
+        code, text = self.dry("focus mode for 45 minutes")                    # P2.5: a local route of its own
+        self.assertIn("Handled on this PC (no planner run): focus_mode, instant\n", text)
+        self.assertIn("Jarvis would say: Understood: start focus mode for 45 minutes. Nothing was changed yet, sir.",
+                      text)
         code, text = self.dry("what's on today?")
         self.assertEqual((code, text), (2, commands.NOT_DESKTOP + "\n"))
 

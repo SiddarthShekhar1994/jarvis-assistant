@@ -917,8 +917,7 @@ class CaptionToneTests(ResultFlowCase):
         self.assertEqual(self.tone(), done)                                   # it opened
         self.fake.open_errors["open_folder"] = OSError(5, "Access is denied")
         for typed, words in (("open Downloads", "Windows couldn't open your Downloads folder, sir."),
-                             ("focus mode for 45 minutes", "I can't start focus mode yet, sir - nothing was "
-                                                           "changed.")):
+                             ("volume 150", "The volume goes from 0 to 100, sir - nothing was changed.")):
             self.type_on_hud(typed)
             self.answered()
             self.assertEqual((self.hud().caption_text(), self.tone()), (words, coral))   # failed / refused

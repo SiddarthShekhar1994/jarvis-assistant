@@ -567,9 +567,10 @@ class ExecutorStepTests(PcBase):
 _PC_CALLS: dict[str, tuple[tuple[Any, ...], dict[str, Any]]] = {
     "audio": ((), {}), "set_level": ((30,), {}), "set_mute": ((True,), {}), "media_state": ((), {}),
     "media_control": (("pause",), {}), "media_key": (("pause",), {}), "capture": ((pcctl.SCREEN,), {"hud": (1,)}),
-    "chime": ((), {}),
+    "chime": ((), {}), "dnd_state": ((), {}), "open_notifications": ((), {}),
 }
-_HELPERS = ("_endpoint", "_audio_types", "gsmtc", "_gsmtc_run", "_press_media_key", "_beep", "_grab", "_gdi")
+_HELPERS = ("_endpoint", "_audio_types", "gsmtc", "_gsmtc_run", "_press_media_key", "_beep", "_grab", "_gdi",
+            "_dnd_read")
 
 
 def _public(cls: type) -> set[str]:
@@ -651,6 +652,12 @@ class RealPcGuardTests(unittest.TestCase):
 
     def test_chime_raises_under_the_guard(self) -> None:
         self.call_refused("chime")
+
+    def test_dnd_state_raises_under_the_guard(self) -> None:
+        self.call_refused("dnd_state")
+
+    def test_open_notifications_raises_under_the_guard(self) -> None:
+        self.call_refused("open_notifications")
 
 
 if __name__ == "__main__":

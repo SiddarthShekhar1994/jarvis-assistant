@@ -28,7 +28,7 @@ from briefing_reader.ask.routes import (
     RouteFlags,
     route,
 )
-from briefing_reader.desktop import guard
+from briefing_reader.desktop import guard, pcctl
 from briefing_reader.desktop import routes as dr
 from briefing_reader.desktop import validate as dv
 from briefing_reader.desktop.context import AppItem, DesktopContext, SiteItem
@@ -148,14 +148,22 @@ class LocalRouteTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIsNone(dr.pc_request(text))
 
-    def test_focus_mode_is_recognised_and_not_yet(self) -> None:
-        for text in ("focus for 45 minutes", "focus mode for 30 mins"):
+    def test_focus_mode_is_an_instant_route(self) -> None:
+        cases = {"focus for 45 minutes": 45, "focus mode for 30 mins": 30, "Focus mode for 1 hour.": 60,
+                 "focus for 2 hours": 120, "focus for an hour": 60, "focus for half an hour": 30,
+                 "jarvis, start focus mode for 10 minutes": 10, "focus for 5 hours": 300}
+        for text, minutes in cases.items():
             with self.subTest(text=text):
                 found = self.local(text)
-                self.assertEqual((found.kind, found.code, found.tier), (dv.FOCUS_MODE, dv.NOT_YET, ""))
+                self.assertEqual((found.kind, found.code, found.tier), (dv.FOCUS_MODE, "", dv.INSTANT))
+                self.assertEqual((found.target.kind, found.target.action, found.target.minutes),
+                                 (dv.FOCUS_MODE, pcctl.SET, minutes))         # 300: refused by pcctl, said
                 self.assertTrue(dr.desktop_request(text))
                 self.assertEqual(self.local(text, context=None), found)
-        self.assertEqual(dr.NOT_YET_KINDS, frozenset({dv.FOCUS_MODE}))
+        for text in ("focus mode", "focus on my essay for 30 minutes", "focus for a while"):
+            with self.subTest(text=text):
+                self.assertIsNone(dr.pc_request(text))
+        self.assertEqual(dr.NOT_YET_KINDS, frozenset())
 
     def test_known_folders(self) -> None:
         downloads = self.context.places[3]
@@ -280,7 +288,7 @@ class LocalRouteTests(unittest.TestCase):
         self.assertEqual(repr(self.local("volume 30")), "LocalRoute(volume)")
         self.assertEqual(repr(self.local("remind me in 5 minutes to call Ana")), "LocalRoute(timer)")   # no label
         self.assertEqual(repr(self.local("remind me in 5 minutes to call Ana").target), "PcAsk(timer, set)")
-        self.assertEqual(repr(self.local("focus for 45 minutes")), "LocalRoute(focus_mode, not_yet)")
+        self.assertEqual(repr(self.local("focus for 45 minutes")), "LocalRoute(focus_mode)")
 
 
 class RouteWordsTests(unittest.TestCase):
@@ -314,7 +322,8 @@ class RouteWordsTests(unittest.TestCase):
              "Understood: set a timer for 1 minute. Nothing was changed yet, sir."),
             (dr.route("cancel the timer", context), "Understood: cancel your timers. Nothing was changed yet, sir."),
             (dr.route("take a screenshot", context), "Understood: take a screenshot. Nothing was changed yet, sir."),
-            (dr.route("focus for 45 minutes", context), "I can't start focus mode yet, sir - nothing was changed."),
+            (dr.route("focus for 45 minutes", context),
+             "Understood: start focus mode for 45 minutes. Nothing was changed yet, sir."),
         )
         for found, words in cases:
             with self.subTest(words=words):
@@ -325,7 +334,7 @@ class RouteWordsTests(unittest.TestCase):
         self.assertEqual(dr.route_words(dr.route("open Spotify", context), ""),
                          "Understood: open an app. Nothing was opened yet.")
         self.assertEqual(dr.route_words(dr.route("focus for 45 minutes", context), "boss"),
-                         "I can't start focus mode yet, boss - nothing was changed.")
+                         "Understood: start focus mode for 45 minutes. Nothing was changed yet, boss.")
         self.assertEqual(dr.route_words(dr.route("volume 30", context), "boss"),
                          "Understood: set the volume to 30. Nothing was changed yet, boss.")
 

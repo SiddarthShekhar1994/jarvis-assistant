@@ -361,10 +361,13 @@ class FakePc:
     whether it takes a play or a pause), a pretend screen (``capture`` returns a tiny real PNG; ``no_window`` /
     ``hud_refused`` raise as the real one would) and a chime counter. Every call is kept in ``calls`` (with the HUD
     windows a capture was given in ``captures``) and its thread in ``threads``; ``errors[method]`` raises instead.
-    Nothing reaches the real PC."""
+    P2.5: ``dnd`` is what Windows' Do Not Disturb reads back as (pcctl.DND_UNKNOWN by default) and
+    ``open_notifications`` opens nothing - it counts in ``settings_opened``. Nothing reaches the real PC."""
 
     def __init__(self, *, level: int = 50, muted: bool = False, media: str | None = "paused") -> None:
         self.level, self.muted, self.media = level, muted, media
+        self.dnd = "unknown"
+        self.settings_opened = 0
         self.device = True
         self.takes = True
         self.no_window = False
@@ -438,6 +441,14 @@ class FakePc:
     def chime(self) -> None:
         self._call("chime")
         self.chimes += 1
+
+    def dnd_state(self) -> str:
+        self._call("dnd_state")
+        return self.dnd
+
+    def open_notifications(self) -> None:
+        self._call("open_notifications")
+        self.settings_opened += 1
 
 
 class FakeRecycleBin:

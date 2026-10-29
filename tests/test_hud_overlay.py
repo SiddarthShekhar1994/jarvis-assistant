@@ -1198,5 +1198,125 @@ class SwitchTests(_OverlayTest):
         self.assertTrue(other.is_held())
 
 
+class InstantRowTests(_OverlayTest):
+    """P2.5: the instant row under the chips - one chip per kind of change with its Undo, Do Not Disturb's chip and
+    Undo all: a row (or two, wrapped) only while it shows, its glows in the layer and its pictures in the flight in the
+    same order, NoFocus and click-only."""
+
+    ROW = [("focus", f"Focus {DOT} ends 10:30 AM"), ("music", f"Music {DOT} paused"), ("volume", f"Volume {DOT} 20%")]
+
+    def test_its_keys_are_pcctls(self) -> None:
+        from briefing_reader.desktop import pcctl
+
+        self.assertEqual(tuple(hud_overlay.INSTANT_KEYS), tuple(pcctl.INSTANT_KINDS))
+
+    def test_it_adds_a_row_only_while_it_shows(self) -> None:
+        win = self.overlay().hud
+        win.place_in(QRect(0, 0, 1920, 1040))
+        before = win.geometry()
+        self.assertEqual(before.height(), hud_overlay.WINDOW_HEIGHT)
+        win.set_instant(self.ROW, dnd=f"Do Not Disturb {DOT} Turn on", undo_all=True)
+        self.assertEqual(win.instant_texts(), [f"Focus {DOT} ends 10:30 AM", f"Do Not Disturb {DOT} Turn on",
+                                               f"Music {DOT} paused", f"Volume {DOT} 20%", "Undo all"])
+        self.assertEqual(win.height(), hud_overlay.WINDOW_HEIGHT)            # no chips above: it takes their row
+        tops = {item.geometry().top() for item in win._instant_shown()}
+        self.assertEqual(tops, {win.bar_rect_local().bottom() + 1 + hud_overlay.CHIP_GAP})
+        win.set_briefing_ready(True)
+        self.assertEqual(win.height(), hud_overlay.WINDOW_HEIGHT + hud_overlay.CHIP_GAP + hud_overlay.CHIP_HEIGHT)
+        chip_top = win.chips[hud_overlay.CHIP_BRIEFING].geometry().bottom() + 1 + hud_overlay.CHIP_GAP
+        self.assertEqual({item.geometry().top() for item in win._instant_shown()}, {chip_top})
+        self.assertEqual(win.cut_texts(), [])
+        win.set_instant()
+        win.set_briefing_ready(False)
+        self.assertEqual((win.geometry(), win.instant_texts()), (before, []))  # as it was: nothing left showing
+
+    def test_it_wraps_on_a_small_screen_and_cuts_no_word(self) -> None:
+        win = self.overlay().hud
+        win.place_in(QRect(0, 0, 1280, 693))                                  # 1920 x 1040 at 150 %
+        win.set_briefing_ready(True)
+        win.set_pending(2)
+        win.set_timer(f"Timer {DOT} ends 10:32 AM")
+        win.set_instant([*self.ROW, ("timers", f"Timer set {DOT} 10 min"), ("shots", f"Screenshot {DOT} saved")],
+                        dnd=f"Do Not Disturb {DOT} Turn on", undo_all=True)
+        rows = win._instant_rows()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(win.height(), hud_overlay.WINDOW_HEIGHT + 2 * (hud_overlay.CHIP_GAP + hud_overlay.CHIP_HEIGHT))
+        self.assertLessEqual(win.geometry().right(), 1279)
+        self.assertEqual(win.cut_texts(), [])
+
+    def test_its_glows_and_flight_pictures_follow_it_in_order(self) -> None:
+        overlay = self.overlay()
+        win = overlay.hud
+        overlay.show_on(None)
+        win.set_pending(1)
+        win.set_instant(self.ROW, dnd=f"Do Not Disturb {DOT} On", undo_all=True)
+        settle()
+        glows = win.glows()
+        _panel, _inner, chips = win.flight_pictures(1.0)
+        self.assertEqual(len(glows), 1 + len(chips))
+        origin = win.geometry().topLeft()
+        for (_pixmap, rect), glow in zip(chips, glows[1:]):
+            self.assertEqual(glow.rect, rect.translated(origin))
+        self.assertEqual([glow.tone for glow in glows[1:]], [hud_overlay.TONE_AMBER] + [hud_overlay.TONE_CYAN] * 5)
+        scene = overlay.flight_scene()
+        self.assertEqual(len(scene.chips), len(chips))
+        for item in win._instant_shown():
+            self.assertTrue(win.occupied_rect().contains(item.geometry().translated(origin)))
+
+    def test_clicks_name_their_chip_and_take_no_focus(self) -> None:
+        other = QLineEdit()
+        self.addCleanup(other.deleteLater)
+        other.show()
+        other.activateWindow()
+        other.setFocus()
+        settle()
+        overlay = self.overlay()
+        win = overlay.hud
+        overlay.show_on(None)
+        win.set_instant(self.ROW, dnd=f"Do Not Disturb {DOT} Turn on", undo_all=True)
+        settle()
+        clicked: list[str] = []
+        win.instantUndo.connect(clicked.append)
+        win.undoAllClicked.connect(lambda: clicked.append("all"))
+        win.dndClicked.connect(lambda: clicked.append("dnd"))
+        win.chipClicked.connect(lambda key: clicked.append(f"chip {key}"))
+        for key in ("music", "focus"):
+            QTest.mouseClick(win.instant[key], Qt.MouseButton.LeftButton)    # the words: nothing
+            QTest.mouseClick(win.instant[key].undo, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(win.dnd_chip, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(win.undo_all, Qt.MouseButton.LeftButton)
+        hidden = win.instant["shots"]
+        QTest.mouseClick(hidden.undo, Qt.MouseButton.LeftButton)             # not showing: never answers
+        settle()
+        self.assertEqual(clicked, ["music", "focus", "dnd", "all"])
+        self.assertFalse(FocusTests._focus_in(overlay))                    # no HUD widget took the focus
+        win.set_instant()
+        QTest.mouseClick(win.undo_all, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(win.dnd_chip, Qt.MouseButton.LeftButton)
+        settle()
+        self.assertEqual(clicked, ["music", "focus", "dnd", "all"])
+
+
+    def test_giving_the_keyboard_back_drops_a_focus_still_on_its_way(self) -> None:
+        """The bar gives the keyboard back before the HUD's activation has landed (offscreen: activations are
+        asynchronous): the input stops being the window's focus child, so the late activation focuses nothing."""
+        overlay = self.overlay()
+        win = overlay.hud
+        overlay.show_on(None)
+        other = QLineEdit()
+        self.addCleanup(other.deleteLater)
+        other.show()
+        other.activateWindow()
+        other.setFocus()
+        settle()
+        self.assertFalse(win.isActiveWindow())
+        self.assertTrue(win.take_keyboard("click"))          # its activation is on its way (not landed yet)
+        self.assertIs(win.focusWidget(), win.bar.input)       # the input: the window's focus child already
+        self.assertTrue(win.give_back_keyboard(False, "test"))
+        self.assertIsNone(win.focusWidget())
+        settle()                                              # the activation lands now
+        self.assertFalse(win.bar.input.hasFocus())
+
+
 if __name__ == "__main__":
     unittest.main()

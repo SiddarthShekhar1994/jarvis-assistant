@@ -122,6 +122,25 @@ hook). It keeps the owner's rules:
   its toast) and a short sound on the desktop thread; while one runs the HUD shows its chip ("Timer - ends 10:32
   AM"). A Turn off drops them; shutdown() keeps them in their file for the next start.
 
+* P2.5, the instant chips, Undo all and focus mode (SPEC 2.1, 8.1, 10.3; owner decision D4). Each change a PC control
+  made at once in this run (``instant_changes()``: kept here, on the GUI thread) shows as a chip of the HUD's instant
+  row, one per kind ("Volume - 20%", "Music - paused", "Timer set - 10 min", "Screenshot - saved", "Focus - ends 10:30
+  AM"), each with its Undo, and Undo all after them: the owner's click puts them back on the desktop thread, newest
+  first, each checked against the PC as it is now (desktop.service.undo_pc: pcctl.PcControl.undo_changes) - after
+  THE CONSENT GATE, one desktop job at a time - and the caption says what came back and, plainly, what did not (the
+  media key's change, a screenshot until the Recycle Bin of P2.6). What was put back - or was changed since, or can
+  never be - leaves its chip; what failed for now stays. The chips are the HUD's view only: they go when the HUD goes
+  back to the window and come back (with the flight's chips) when it shows again; nothing of them ticks.
+  "focus (mode) for 30 minutes" is focus mode (``focus``: pcctl.FocusBook in the timers' folder): Jarvis quiet until
+  its end - ``in_focus()``, ``focusChanged(bool)``: the app holds his offers, toasts and voice and lets them go when
+  it ends - the music paused and a loud volume turned down (their own chips), its end checked with the timers (the
+  toast and the sound, ``timerEnded``; the PC is left as it is then: hard rule 1, nothing desktop-side happens on a
+  schedule - the chips' Undo puts the music and the volume back on his click). The focus chip's Undo ends it early and
+  puts back what it changed; asked again while it runs, it starts again from now. While it runs the "Do Not Disturb -
+  Turn on" chip opens Windows' notification settings on his click (the one fixed page; the switch is his) and says
+  "On" only when Windows is read back as on (read only: after his click and at each check). Turn off ends focus (the
+  app lets go of what it held) and drops the chips; a restart of Jarvis during focus stays quiet until its end.
+
 Logs: statuses, durations, screen numbers, run ids, skill kinds, counts and refusal codes only - never what was
 typed, a name or a path.
 """
@@ -148,6 +167,7 @@ from . import live as live_events
 from . import orb as orb_mod
 from .ask import desktop_mode
 from .desktop import executor as desktop_executor
+from .desktop import fileops as desktop_fileops
 from .desktop import results as card_results
 from .desktop import journal as desktop_journal
 from .desktop import pcctl
@@ -185,6 +205,19 @@ CARD_TASK_TITLE = "{button} - your click on a NEEDS YOUR OK card"     # P2.3: th
 UNDO_TASK_TITLE = "Undo - your click on the card's stamp"
 STOP_WORDS = {"esc": "Esc", "stop": "Stop on the card", "off": "Turned off"}
 TIDY_ID = "dsk:"                                   # the click guards' id namespace for desktop cards (SPEC 12)
+# P2.5: the instant chips' Undo, Undo all and Do Not Disturb's chip.
+PC_UNDO_TASK_TITLE = "{button} - your click on the HUD"
+UNDO_ALL_BUTTON = "Undo all"
+UNDO_CHIP_BUTTON = "Undo on the {kind} chip"
+DND_TASK_TITLE = "Do Not Disturb - your click on the HUD"
+DND_OPENED_TEXT = "Windows' notification settings are open, {sir} - Do Not Disturb is your switch there."
+DND_FAILED_TEXT = "Windows couldn't open its notification settings, {sir}."
+DND_READS_MS = (2000, 4000, 9000)                  # Do Not Disturb read back 2 s, 6 s and 15 s after the owner's click
+_CHIP_WORDS = {pcctl.CHIP_FOCUS: "focus", pcctl.CHIP_MUSIC: "music", pcctl.CHIP_VOLUME: "volume",
+               pcctl.CHIP_TIMERS: "timer", pcctl.CHIP_SHOTS: "screenshot"}
+# An Undo that failed for now keeps its chip (tried again on his next click); any other end leaves it.
+_UNDO_AGAIN = frozenset({pcctl.TOO_SOON, pcctl.UNAVAILABLE, pcctl.OS_ERROR, pcctl.STOPPED, pcctl.NOT_TAKEN,
+                         desktop_fileops.R_NO_BIN})
 
 
 def _real_backend() -> Any:
@@ -325,6 +358,54 @@ def _tidy_task(live: Any, button: str, state: Any, said: str, soft: bool, approv
     return task
 
 
+@live_events.quiet(None)
+def _pc_undo_task(live: Any, button: str, results: Any, said: str, soft: bool, approved_at: str) -> Any:
+    """P2.5: an instant chip's Undo (or Undo all) in LIVE (TASK_DESKTOP; SPEC 10.1): "Approved by your click 10:22
+    AM", each change put back or left (its kind and code) and Jarvis's words - kinds, levels and codes only. None
+    without the LIVE view."""
+    if live is None:
+        return None
+    task = live.task(live_events.TASK_DESKTOP, PC_UNDO_TASK_TITLE.format(button=button))
+    if task is live_events.NO_TASK:
+        return None
+    approved = APPROVED_TEXT.format(time=approved_at)
+    step = task.step(live_events.DESKTOP_REQUEST, "Your click", fields=[("You clicked", button),
+                                                                        ("Approved", approved)])
+    step.done(live_events.STATUS_OK, summary=approved)
+    work = task.step(live_events.DESKTOP_UNDO, "Putting it back",
+                     fields=[("Order", "newest first, each checked again"), ("Changes", str(len(results)))])
+    for change, result in results:
+        work.item(pcctl.undo_note(change, result),
+                  status=live_events.STATUS_OK if not result.code else live_events.STATUS_WARN)
+    work.done(live_events.STATUS_WARN if soft else live_events.STATUS_OK, summary=said)
+    end = task.step(live_events.DESKTOP_PLAN, "What Jarvis does with it", fields=[("Jarvis says", said)])
+    end.done(live_events.STATUS_WARN if soft else live_events.STATUS_OK, summary=said)
+    task.finish(live_events.STATUS_WARN if soft else live_events.STATUS_OK, summary=f"{approved} - {said}")
+    return task
+
+
+@live_events.quiet(None)
+def _dnd_task(live: Any, said: str, opened: bool, approved_at: str) -> Any:
+    """P2.5: the Do Not Disturb chip's click in LIVE: Windows' notification settings opened (the one fixed page) on
+    the owner's click - nothing of his settings is changed by Jarvis. None without the LIVE view."""
+    if live is None:
+        return None
+    task = live.task(live_events.TASK_DESKTOP, DND_TASK_TITLE)
+    if task is live_events.NO_TASK:
+        return None
+    approved = APPROVED_TEXT.format(time=approved_at)
+    step = task.step(live_events.DESKTOP_REQUEST, "Your click", fields=[("You clicked", "Do Not Disturb - Turn on"),
+                                                                        ("Approved", approved)])
+    step.done(live_events.STATUS_OK, summary=approved)
+    tone = live_events.STATUS_OK if opened else live_events.STATUS_WARN
+    work = task.step(live_events.DESKTOP_STEP, "Carrying it out",
+                     fields=[("Opened", "Windows' notification settings (the one fixed page)"),
+                             ("Changed", "nothing - Do Not Disturb is your switch")])
+    work.done(tone, summary=said)
+    task.finish(tone, summary=f"{approved} - {said}")
+    return task
+
+
 class _Either:
     """Set as soon as any of its events is (the executor only asks ``is_set()`` before each step and right before each
     OS call): the owner's Cancel, the app giving up waiting, or THE CONSENT GATE's no (``_Gate``)."""
@@ -373,6 +454,9 @@ class _Bridge(QObject):
     tidy_row = Signal(int, object, int, int)    # a row ended (desktop.tidy.RowEnd), rows ended, rows in all
     tidy_esc = Signal(int)                  # Esc was pressed during the job
     tidy_done = Signal(int, object)         # the job's Future (desktop.tidy.CardOutcome / UndoOutcome)
+    pc_undone = Signal(int, object)         # P2.5: an instant Undo's Future (pairs of change and its Undo)
+    dnd_opened = Signal(int, object)        # P2.5: the Do Not Disturb chip's click (its Future: a pcctl.PcChange)
+    dnd_read = Signal(int, object)          # P2.5: Do Not Disturb read back (its Future: pcctl.DND_*)
 
 
 def _deliver(bridge: _Bridge, seq: int, future: Future, signal: str = "resolved") -> None:
@@ -419,6 +503,7 @@ class DesktopController(QObject):
     consentChanged = Signal(bool)      # his Turn on (True) or Turn off (False) was stored
     waitingChanged = Signal(int)       # NEEDS YOUR OK cards of file steps waiting for him (P2.3: Approvals' reminder)
     timerEnded = Signal(str)           # P2.4: a Jarvis timer ended - the toast's line (the app posts it)
+    focusChanged = Signal(bool)        # P2.5: focus mode started (True: Jarvis quiet) or ended (False: let go)
 
     def __init__(self, config: Any, window: Any, overlay: hud_overlay.HudOverlay, *,
                  chip_screens: Mapping[str, int], home_screen: int,
@@ -485,6 +570,9 @@ class DesktopController(QObject):
         self._bridge.tidy_row.connect(self._on_tidy_row, Qt.ConnectionType.QueuedConnection)
         self._bridge.tidy_esc.connect(self._on_tidy_esc, Qt.ConnectionType.QueuedConnection)
         self._bridge.tidy_done.connect(self._on_tidy_done, Qt.ConnectionType.QueuedConnection)
+        self._bridge.pc_undone.connect(self._on_pc_undone, Qt.ConnectionType.QueuedConnection)
+        self._bridge.dnd_opened.connect(self._on_dnd_opened, Qt.ConnectionType.QueuedConnection)
+        self._bridge.dnd_read.connect(self._on_dnd_read, Qt.ConnectionType.QueuedConnection)
         self._request_seq = 0
         # The request being resolved: (number, words, planner, run id, its stop - set when the app stops waiting -,
         # THE CONSENT GATE as it stood when it started: set once the owner turns it off).
@@ -517,6 +605,9 @@ class DesktopController(QObject):
         hud.bringBackClicked.connect(self._on_bring_back)
         hud.chipClicked.connect(self._on_chip)
         hud.shapeChanged.connect(self._on_hud_shape)
+        hud.instantUndo.connect(self._on_instant_undo)
+        hud.undoAllClicked.connect(self._on_undo_all)
+        hud.dndClicked.connect(self._on_dnd_clicked)
         hud.installEventFilter(self)
         # P2.4: the PC's controls' seam (made on the desktop thread; None: the real one) and Jarvis's own timers - in
         # the app's data folder, checked against the wall clock (``timer_clock``: None, the real one).
@@ -527,6 +618,21 @@ class DesktopController(QObject):
         self._timer_check.setSingleShot(True)
         self._timer_check.setTimerType(Qt.TimerType.PreciseTimer)     # a coarse one may fire up to 5 % early
         self._timer_check.timeout.connect(self._on_timer_check)
+        # P2.5: the changes made at once in this run (the instant chips; oldest first), focus mode's session (next to
+        # the timers), the Undo job on the desktop thread (number, changes, button words, its stop, when clicked),
+        # Windows' Do Not Disturb as last read back and the read-backs after the owner's click on its chip.
+        self._instant: list[pcctl.PcChange] = []
+        self.focus = pcctl.FocusBook(self._timers_folder(), now=self._timer_now)
+        self._pc_job: tuple[int, tuple[pcctl.PcChange, ...], str, threading.Event, str] | None = None
+        self._pc_seq = 0
+        self._dnd = pcctl.DND_UNKNOWN
+        self._dnd_seq = 0
+        self._dnd_read_seq = 0
+        self._dnd_click: tuple[int, str] | None = None
+        self._dnd_reads: list[int] = []
+        self._dnd_timer = QTimer(self)
+        self._dnd_timer.setSingleShot(True)
+        self._dnd_timer.timeout.connect(self._on_dnd_timer)
         if self.consent_given():
             self._restore_timers()
 
@@ -642,6 +748,13 @@ class DesktopController(QObject):
         dropped = self.timers.clear()                        # P2.4: Jarvis's timers go (nothing ends after it)
         if dropped:
             logger.info("Desktop: %d timer(s) dropped (turned off)", dropped)
+        self._end_focus("turned off")                        # P2.5: the app lets go of what focus held
+        if self._instant:
+            logger.info("Desktop: %d instant change(s) dropped from the chips (turned off)", len(self._instant))
+        self._instant = []                                   # ... and the chips go: the PC is left as it is
+        self._dnd_reads = []
+        self._dnd_timer.stop()
+        self._sync_instant()
         self._arm_timers()
         return self._store_consent(False)
 
@@ -708,6 +821,8 @@ class DesktopController(QObject):
             self.overlay.hud.set_caption(self._caption)
             self._apply_neighbours()
             self.sync_glance()
+            if self.in_focus():
+                self._read_dnd()                             # P2.5: Do Not Disturb's chip as Windows has it now
             flying = self._fly_to_hud(screen)
             if not flying:
                 self.window.hide()                           # never close(): closing the window quits Jarvis
@@ -746,6 +861,7 @@ class DesktopController(QObject):
             if not flying:
                 self.overlay.hide()                          # the meetings pill is let go (back at its next tick)
                 self._hud = False
+                self._drop_instant_view()                    # P2.5: the chips go with the HUD (back as it shows)
                 self._left_frame = None
                 self.reading.hold_screens(None)
                 self.reading.set_tab(target)
@@ -940,6 +1056,7 @@ class DesktopController(QObject):
         self._hud = False
         self._left_frame = None                              # the way back's fallback: no longer needed
         self.results.clear()                                 # nothing of the HUD's - no card, no hook - in the window
+        self._drop_instant_view()                            # P2.5: nor its instant chips (back with the HUD)
         self.reading.hold_screens(None)
         if recorded is not None:
             self.reading.set_tab(recorded)
@@ -1008,8 +1125,10 @@ class DesktopController(QObject):
 
     def busy(self) -> bool:
         """A request is being resolved on the desktop thread (its search, a local route's open), a result card's click
-        is being carried out there, or a NEEDS YOUR OK card's rows are (or its Undo): no other may start."""
-        return self._looking is not None or self._clicking is not None or self._tidy_job is not None
+        is being carried out there, or a NEEDS YOUR OK card's rows are (or its Undo), or the instant chips' Undo
+        (P2.5): no other may start."""
+        return (self._looking is not None or self._clicking is not None or self._tidy_job is not None
+                or self._pc_job is not None)
 
     def _new_watch(self) -> winwatch.WindowWatch:
         """The result cards' window watcher, over the window seam given (``window_api``) or the default one."""
@@ -1033,7 +1152,7 @@ class DesktopController(QObject):
                 excluded=excluded, backend_factory=self._backend_factory, hour24=self._hour24,
                 journal_folder=self._journal_folder, undo_days=int(getattr(settings, "undo_days", 7) or 7),
                 pc_factory=self.pc_factory, timers=self.timers,
-                screenshots_dir=str(getattr(settings, "screenshots_dir", "") or ""))
+                screenshots_dir=str(getattr(settings, "screenshots_dir", "") or ""), focus=self.focus)
             self._worker = DesktopWorker()
         return self._worker, self._service
 
@@ -1076,6 +1195,11 @@ class DesktopController(QObject):
             clicking[5].set()
             self._stopped_click = clicking
             logger.warning("Desktop: a card's click took more than %d s; stopped", int(RESOLVE_TIMEOUT_S))
+            self.answered.emit(with_address(CLICK_TOO_LONG_TEXT, self._address), TONE_ERROR, "", False)
+        job, self._pc_job = self._pc_job, None
+        if job is not None and not self._shut:
+            job[3].set()                                     # P2.5: an Undo that hangs puts nothing more back
+            logger.warning("Desktop: an instant Undo took more than %d s; stopped", int(RESOLVE_TIMEOUT_S))
             self.answered.emit(with_address(CLICK_TOO_LONG_TEXT, self._address), TONE_ERROR, "", False)
         looking, self._looking = self._looking, None
         if looking is None or self._shut:
@@ -1140,7 +1264,8 @@ class DesktopController(QObject):
                         run.statuses_text() if run is not None else "nothing", resolved.seconds)
         _local_task(self.live, words, found, run, said, soft)
         self.answered.emit(said, tone, words, True)
-        if found.kind in (desktop_validate.TIMER, desktop_validate.CANCEL_TIMER):
+        self._kept_changes(found, run)                       # P2.5: the instant chips (and focus mode) follow
+        if found.kind in (desktop_validate.TIMER, desktop_validate.CANCEL_TIMER, desktop_validate.FOCUS_MODE):
             self._arm_timers()                               # P2.4: the next check and the HUD chip follow
         self._show_or_hold(run)
 
@@ -1576,21 +1701,27 @@ class DesktopController(QObject):
         count = self.timers.load()
         if count:
             logger.info("Desktop: %d timer(s) restored", count)
+        session = self.focus.load()                          # P2.5: focus mode set before a restart stays on
+        if session is not None and not any(change.kind == desktop_validate.FOCUS_MODE for change in self._instant):
+            self._instant.append(pcctl.PcChange(desktop_validate.FOCUS_MODE, pcctl.SET, "", True, True, None,
+                                                pcctl.FocusDone(session), group=session.focus_id))
+            logger.info("Desktop: focus mode restored (%d min left)", int((self.focus.seconds_left() or 0) // 60))
         self._arm_timers()
 
     def _arm_timers(self) -> None:
-        """The next check: at the first timer's end, and within pcctl.TIMER_CHECK_S at most (the wall clock is read
-        again then, so a timer whose end came while the PC slept ends at the first check after the resume); none
-        without a timer. The HUD chip follows."""
+        """The next check: at the first timer's end - or focus mode's (P2.5) - and within pcctl.TIMER_CHECK_S at most
+        (the wall clock is read again then, so a timer whose end came while the PC slept ends at the first check after
+        the resume); none without a timer or focus. The HUD chips follow."""
         if self._shut:
             return
-        left = self.timers.seconds_left()
-        if left is None:
+        lefts = [left for left in (self.timers.seconds_left(), self.focus.seconds_left()) if left is not None]
+        if not lefts:
             self._timer_check.stop()
         else:
-            self._timer_check.start(int(min(left, pcctl.TIMER_CHECK_S) * 1000) + 20)
+            self._timer_check.start(int(min(*lefts, pcctl.TIMER_CHECK_S) * 1000) + 20)
         if self._hud and shiboken6.isValid(self.overlay.hud):
             self.overlay.hud.set_timer(pcctl.chip_text(self.timers.running(), self._hour24))
+            self._sync_instant()
 
     def _on_timer_check(self) -> None:
         """The timers against the wall clock: each one that has ended says so once - the toast's line
@@ -1602,6 +1733,7 @@ class DesktopController(QObject):
             dropped = self.timers.clear()
             if dropped:
                 logger.info("Desktop: %d timer(s) dropped (not turned on)", dropped)
+            self._end_focus("not turned on")
             self._arm_timers()
             return
         ended, dropped = self.timers.take_due()
@@ -1610,8 +1742,18 @@ class DesktopController(QObject):
         for timer, late in ended:
             logger.info("Desktop: a %d-minute timer ended (%d s late)", timer.minutes, int(late))
             self.timerEnded.emit(pcctl.end_words(timer, late, self._address, self._hour24))
-        if ended:
+        session, late = self.focus.take_due()                # P2.5: focus mode's end - the PC is left as it is
+        if session is not None:
+            logger.info("Desktop: focus mode ended (%d min, %d s late)", session.minutes, int(late))
+            self._instant = [change for change in self._instant if change.kind != desktop_validate.FOCUS_MODE]
+            self._dnd_reads = []
+            self._dnd_timer.stop()
+            self.timerEnded.emit(pcctl.focus_end_words(session, late, self._address, self._hour24))
+            self.focusChanged.emit(False)                    # the app lets go of what it held
+        if ended or session is not None:
             self._chime()
+        elif self.in_focus() and self._hud:
+            self._read_dnd()                                 # Do Not Disturb read back at each check (read only)
         self._arm_timers()
 
     def _chime(self) -> None:
@@ -1637,6 +1779,224 @@ class DesktopController(QObject):
                 continue
         return tuple(found)
 
+    # ---- P2.5: the instant chips, Undo all and focus mode ------------------------------------------------------
+
+    def instant_changes(self) -> tuple[pcctl.PcChange, ...]:
+        """The changes made at once in this run that the HUD's instant chips show (oldest first; memory only)."""
+        return tuple(self._instant)
+
+    def in_focus(self) -> bool:
+        """Focus mode runs: Jarvis keeps quiet (the app holds his offers, toasts and voice until it ends)."""
+        return not self._shut and self.focus.active() is not None
+
+    def dnd_state(self) -> str:
+        """Windows' Do Not Disturb as last read back (pcctl.DND_*; read only)."""
+        return self._dnd
+
+    def _kept_changes(self, found: Any, run: Any) -> None:
+        """A PC control's local route was carried out: what it changed joins the instant chips - focus mode's own
+        changes first, then focus itself (one focus chip: a restart replaces it). Focus mode started: Jarvis goes
+        quiet (``focusChanged``) and Do Not Disturb is read back."""
+        if run is None or not getattr(run, "results", ()) or getattr(found, "code", ""):
+            return
+        change = getattr(run.results[0], "target", None)
+        if not isinstance(change, pcctl.PcChange) or change.code or not change.changed:
+            return
+        if change.kind == desktop_validate.FOCUS_MODE:
+            done = change.after if isinstance(change.after, pcctl.FocusDone) else None
+            self._instant = [kept for kept in self._instant if kept.kind != desktop_validate.FOCUS_MODE]
+            self._instant.extend(done.changes if done is not None else ())
+            self._instant.append(change)
+            if done is None or not done.restarted:
+                self.focusChanged.emit(True)
+            self._read_dnd()
+        else:
+            self._instant.append(change)
+        del self._instant[:-50]                              # memory only, bounded
+        self._sync_instant()
+
+    def _sync_instant(self) -> None:
+        """The HUD's instant row as the changes are now: one chip per kind (its newest change's words; each with its
+        Undo), Do Not Disturb's while focus mode runs and Undo all - only while the HUD shows (it is the HUD's view)."""
+        if self._shut or not self._hud or not shiboken6.isValid(self.overlay.hud):
+            return
+        items = [(kind, text) for kind in pcctl.INSTANT_KINDS
+                 if (text := pcctl.chip_words(kind, self._instant, self._hour24))]
+        dnd = pcctl.dnd_chip_text(self._dnd) if self.in_focus() else ""
+        self.overlay.hud.set_instant(items, dnd=dnd, undo_all=bool(items))
+
+    def _drop_instant_view(self) -> None:
+        """The HUD went back to the window: its instant chips go - the changes are kept and show again with the HUD -
+        and so do the read-backs of Do Not Disturb waiting: nothing of them is left running."""
+        self._dnd_reads = []
+        self._dnd_timer.stop()
+        if shiboken6.isValid(self.overlay.hud):
+            self.overlay.hud.set_instant()
+
+    def _on_instant_undo(self, key: str) -> None:
+        """An instant chip's Undo (the owner's click): its kind's changes put back, newest first; the focus chip's ends
+        focus mode at once and puts back what focus changed."""
+        if key == pcctl.CHIP_FOCUS:
+            groups = {change.group for change in self._instant if change.kind == desktop_validate.FOCUS_MODE}
+            changes = [change for change in self._instant
+                       if change.kind == desktop_validate.FOCUS_MODE or (change.group and change.group in groups)]
+        else:
+            changes = [change for change in self._instant if pcctl.chip_of(change) == key]
+        self._start_pc_undo(changes, UNDO_CHIP_BUTTON.format(kind=_CHIP_WORDS.get(key, "a")))
+
+    def _on_undo_all(self) -> None:
+        """Undo all (the owner's click): everything this run changed at once put back, newest first."""
+        self._start_pc_undo(list(self._instant), UNDO_ALL_BUTTON)
+
+    def _start_pc_undo(self, changes: list[pcctl.PcChange], button: str) -> None:
+        """The owner's click on an Undo of the instant row: only his click, after THE CONSENT GATE, one desktop job at
+        a time - then on the desktop thread (desktop.service.undo_pc), its stop and the gate asked right before each
+        OS call. Focus mode in it ends at once (Jarvis's own quiet: no OS call)."""
+        if not changes or self._shut or self._quitting:
+            return
+        if not self.consent_given():
+            logger.info("Desktop: an instant Undo was refused (not turned on)")
+            return
+        if self.busy():
+            logger.info("Desktop: an instant Undo while another desktop job runs; ignored")
+            return
+        if any(change.kind == desktop_validate.FOCUS_MODE for change in changes):
+            self._end_focus("undo")
+        worker, service = self._ensure_worker()
+        self._pc_seq += 1
+        seq, stop, batch = self._pc_seq, threading.Event(), tuple(changes)
+        self._pc_job = (seq, batch, button, stop, clock_text(datetime.now(), self._hour24))
+        future = worker.submit(service.undo_pc, batch, cancel=_Either(stop, self._gate()))
+        bridge = self._bridge
+        future.add_done_callback(lambda done, seq=seq: _deliver(bridge, seq, done, "pc_undone"))
+        self._resolve_timer.start(int(RESOLVE_TIMEOUT_S * 1000))
+        kinds = Counter(change.kind for change in batch)
+        logger.info("Desktop: Undo goes to the desktop thread (%s)",
+                    ", ".join(f"{kind}={count}" for kind, count in sorted(kinds.items())))
+
+    def _on_pc_undone(self, seq: int, future: Future) -> None:
+        """The instant Undo ended on the desktop thread: what was put back - or changed since, or can never be - leaves
+        its chip (what failed for now stays for the next click), the caption says what came back and what did not,
+        LIVE gets the task and the log the counts and codes."""
+        job = self._pc_job
+        if job is None or job[0] != seq:
+            return
+        self._pc_job = None
+        self._resolve_timer.stop()
+        if self._shut:
+            return
+        _seq, batch, button, _stop, approved_at = job
+        try:
+            results = tuple(future.result())
+        except CancelledError:
+            return
+        except Exception as exc:  # noqa: BLE001 - a bug on the desktop thread: nothing was put back
+            logger.error("Desktop: an instant Undo could not be carried out (%s)", type(exc).__name__)
+            results = tuple((change, pcctl.PcChange(change.kind, pcctl.UNDO, pcctl.UNAVAILABLE))
+                            for change in reversed(batch))
+        again = {id(change) for change, result in results
+                 if result.code in _UNDO_AGAIN and change.kind != desktop_validate.FOCUS_MODE}
+        settled = {id(change) for change, _result in results} - again
+        self._instant = [change for change in self._instant if id(change) not in settled]
+        codes = Counter(result.code or "put_back" for _change, result in results)
+        logger.info("Desktop: Undo ended (%s)", ", ".join(f"{code}={count}" for code, count in sorted(codes.items())))
+        said = pcctl.undo_summary(results, self._address)
+        soft = any(result.code for _change, result in results)
+        _pc_undo_task(self.live, button, results, said, soft, approved_at)
+        self._sync_instant()
+        self._arm_timers()                                   # a timer put back or cancelled: its chip follows
+        self.answered.emit(said, TONE_ERROR if soft else TONE_DONE, "", False)
+
+    def _end_focus(self, reason: str) -> bool:
+        """Focus mode ends now - the owner's Undo (or Undo all), a Turn off - and the app lets go of what it held
+        (``focusChanged(False)``). Nothing on the PC changes here. False when it was not on."""
+        session = self.focus.end()
+        self._instant = [change for change in self._instant if change.kind != desktop_validate.FOCUS_MODE]
+        self._dnd_reads = []
+        self._dnd_timer.stop()
+        self._dnd = pcctl.DND_UNKNOWN
+        if session is None:
+            self._sync_instant()
+            return False
+        logger.info("Desktop: focus mode ended early (%s)", reason)
+        self.focusChanged.emit(False)
+        self._sync_instant()
+        self._arm_timers()
+        return True
+
+    def _on_dnd_clicked(self) -> None:
+        """"Do Not Disturb - Turn on" (the owner's click; only while focus mode runs, after THE CONSENT GATE): Windows'
+        notification settings open on the desktop thread - the one fixed page; the switch there is his - and Do Not
+        Disturb is read back a few times after (read only)."""
+        if self._shut or self._quitting or not self.in_focus():
+            return
+        if not self.consent_given():
+            logger.info("Desktop: the Do Not Disturb chip's click was refused (not turned on)")
+            return
+        worker, service = self._ensure_worker()
+        self._dnd_seq += 1
+        seq = self._dnd_seq
+        self._dnd_click = (seq, clock_text(datetime.now(), self._hour24))
+        future = worker.submit(service.open_dnd, cancel=self._gate())
+        bridge = self._bridge
+        future.add_done_callback(lambda done, seq=seq: _deliver(bridge, seq, done, "dnd_opened"))
+        logger.info("Desktop: Do Not Disturb's chip - Windows' notification settings to open (the owner's click)")
+
+    def _on_dnd_opened(self, seq: int, future: Future) -> None:
+        click = self._dnd_click
+        if click is None or click[0] != seq or self._shut:
+            return
+        self._dnd_click = None
+        try:
+            change = future.result()
+        except CancelledError:
+            return
+        except Exception as exc:  # noqa: BLE001 - a bug on the desktop thread: not opened
+            logger.error("Desktop: the notification settings could not be opened (%s)", type(exc).__name__)
+            change = None
+        opened = isinstance(change, pcctl.PcChange) and not change.code
+        said = with_address(DND_OPENED_TEXT if opened else DND_FAILED_TEXT, self._address)
+        _dnd_task(self.live, said, opened, click[1])
+        self.answered.emit(said, TONE_DONE if opened else TONE_ERROR, "", False)
+        if opened and self.in_focus():
+            self._dnd_reads = list(DND_READS_MS)
+            self._next_dnd_read()
+
+    def _next_dnd_read(self) -> None:
+        if self._dnd_reads and not self._shut:
+            self._dnd_timer.start(self._dnd_reads.pop(0))
+
+    def _on_dnd_timer(self) -> None:
+        self._read_dnd()
+        self._next_dnd_read()
+
+    def _read_dnd(self) -> None:
+        """Windows' Do Not Disturb read back on the desktop thread (read only) while focus mode runs."""
+        if self._shut or self._quitting or not self.in_focus() or not self.consent_given():
+            return
+        worker, service = self._ensure_worker()
+        self._dnd_read_seq += 1
+        seq = self._dnd_read_seq
+        future = worker.submit(service.dnd_state)
+        bridge = self._bridge
+        future.add_done_callback(lambda done, seq=seq: _deliver(bridge, seq, done, "dnd_read"))
+
+    def _on_dnd_read(self, seq: int, future: Future) -> None:
+        """Do Not Disturb as read back: the chip says "On" only when Windows said so; anything else - off, unknown,
+        unreadable - keeps "Turn on"."""
+        if seq != self._dnd_read_seq or self._shut:
+            return
+        try:
+            state = str(future.result())
+        except Exception:  # noqa: BLE001 - CancelledError, or it could not be read: unknown
+            state = pcctl.DND_UNKNOWN
+        state = state if state in (pcctl.DND_ON, pcctl.DND_OFF) else pcctl.DND_UNKNOWN
+        if not self.in_focus() or state == self._dnd:
+            return
+        self._dnd = state
+        logger.info("Desktop: Do Not Disturb read back as %s", state)
+        self._sync_instant()
+
     def sync_glance(self) -> None:
         """While the HUD shows (and as it opens, its flight too): its chips and orb as the window has them - "Briefing
         ready" while a briefing is NEW, "N need your OK", REC with the time and its warning, and the orb's look with
@@ -1651,6 +2011,7 @@ class DesktopController(QObject):
         elapsed, warning = reading.recording_state()
         win.set_recording(elapsed, warning)
         win.set_timer(pcctl.chip_text(self.timers.running(), self._hour24))     # P2.4: while a timer runs
+        self._sync_instant()                                 # P2.5: the instant row as it is now
         win.orb.set_recording(bool(elapsed))
         base, muted, offline = reading.look()
         win.set_look(base, muted=muted, offline=offline)
@@ -1692,9 +2053,14 @@ class DesktopController(QObject):
         job, self._tidy_job = self._tidy_job, None
         if job is not None:
             job[2].set()                                     # ... and a card's batch stops at its next row
+        pc_job, self._pc_job = self._pc_job, None
+        if pc_job is not None:
+            pc_job[3].set()                                  # ... and an instant Undo puts nothing more back
         self._tidy = None
         self._resolve_timer.stop()
         self._timer_check.stop()                             # P2.4: the timers stay in their file for the next start
+        self._dnd_timer.stop()                               # P2.5: and focus mode in its own (quiet after a restart)
+        self._dnd_reads = []
         self._held = None
         self.results.clear()                                 # the cards, their brackets, hooks and timers go
         if self._worker is not None:
