@@ -462,10 +462,13 @@ _RUN_WORDS = {dx.DONE: "opened", dx.FOUND: "found", dx.WAITING: "waiting for you
 
 
 def run_summary(run: dx.DesktopRun | None) -> str:
-    """"1 opened, 1 waiting for you" ("nothing was opened" when nothing was carried out)."""
+    """"1 opened, 1 waiting for you" ("nothing was opened" when nothing was carried out; "1 done" for the PC's
+    controls, P2.4)."""
     if run is None or not run.results:
         return "nothing was opened"
-    return ", ".join(f"{count} {_RUN_WORDS.get(status, status)}" for status, count in run.counts().items())
+    controls = all(result.skill in dx.pcctl.PC_SKILLS for result in run.results)
+    return ", ".join(f"{count} {'done' if controls and status == dx.DONE else _RUN_WORDS.get(status, status)}"
+                     for status, count in run.counts().items())
 
 
 def run_step(task: Any, run: dx.DesktopRun) -> None:

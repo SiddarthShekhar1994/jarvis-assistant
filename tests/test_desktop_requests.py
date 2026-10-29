@@ -336,8 +336,8 @@ class HudBarTests(DesktopRequestApp):
         self.enter()
         hud_bar = self.hud().bar
         for typed, words, tone in ((DOWNLOADS_TYPED, DOWNLOADS_WORDS, hud.TONE_DONE),
-                                   ("volume 30", "I can't change the volume yet, sir - nothing was changed.",
-                                    hud.TONE_WARN)):
+                                   ("focus mode for 45 minutes", "I can't start focus mode yet, sir - nothing "
+                                    "was changed.", hud.TONE_WARN)):
             with self.subTest(typed=typed):
                 self.type_on_hud(typed)
                 self.answered()
@@ -347,7 +347,7 @@ class HudBarTests(DesktopRequestApp):
                 self.assertEqual(self.up(hud_bar), typed)
                 self.assertFalse(self.hud().holds_keyboard())               # Enter gave the keyboard back
         self.assertEqual(self.runs(), [])
-        self.assertEqual(self.fake.opened, [("open_folder", DOWNLOADS)])    # "volume 30" changed nothing
+        self.assertEqual(self.fake.opened, [("open_folder", DOWNLOADS)])    # focus mode (P2.5) changed nothing
         self.assertEqual(len(self.desktop_tasks()), 2)
 
     def test_the_caption_says_jarvis_is_looking_meanwhile(self) -> None:

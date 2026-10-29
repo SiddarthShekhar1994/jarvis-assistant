@@ -439,7 +439,10 @@ class DryRunTests(PlannerTestCase):
         self.assertIn("Jarvis would say: Understood: open your Downloads folder. Nothing was opened yet, sir.", text)
         self.assertNotIn("---- stdin ----", text)
         code, text = self.dry("volume 30")
-        self.assertIn("Handled on this PC (no planner run): volume, refused: not_yet\n", text)
+        self.assertIn("Handled on this PC (no planner run): volume, instant\n", text)
+        self.assertIn("Jarvis would say: Understood: set the volume to 30. Nothing was changed yet, sir.", text)
+        code, text = self.dry("focus mode for 45 minutes")
+        self.assertIn("Handled on this PC (no planner run): focus_mode, refused: not_yet\n", text)
         code, text = self.dry("what's on today?")
         self.assertEqual((code, text), (2, commands.NOT_DESKTOP + "\n"))
 

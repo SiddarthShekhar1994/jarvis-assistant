@@ -94,25 +94,68 @@ class LocalRouteTests(unittest.TestCase):
     def local(self, text: str, **kwargs) -> dr.LocalRoute | None:  # type: ignore[no-untyped-def]
         return dr.route(text, kwargs.pop("context", self.context), **kwargs)
 
-    def test_phase_two_shapes_are_recognised_and_not_yet(self) -> None:
+    def test_the_pcs_controls_are_instant_routes(self) -> None:
+        """P2.4: SPEC 2.2's shapes for the PC's controls are INSTANT local routes, each a desktop.pcctl.PcAsk."""
         cases = {
-            dv.VOLUME: ("volume 30", "volume 30%", "volume up", "volume down", "volume mute", "volume unmute", "louder",
-                        "quieter", "mute", "unmute", "turn the volume down", "turn it up"),
-            dv.MEDIA: ("pause", "play", "resume", "next", "skip", "previous", "play the music", "resume the music",
-                       "pause the video", "next song", "previous track", "skip the track"),
-            dv.TIMER: ("timer 10 minutes", "set a timer for 5 mins", "start a timer for 25 minutes",
-                       "remind me in 20 minutes", "remind me in 20 minutes to stretch"),
-            dv.SCREENSHOT: ("screenshot", "screen shot", "take a screenshot", "screen grab", "take a screen grab"),
-            dv.FOCUS_MODE: ("focus for 45 minutes", "focus mode for 30 mins"),
+            "volume 30": (dv.VOLUME, "set", 30, None, None, ""), "volume 30%": (dv.VOLUME, "set", 30, None, None, ""),
+            "volume 0": (dv.VOLUME, "set", 0, None, None, ""), "volume up": (dv.VOLUME, "up", None, 10, None, ""),
+            "volume down": (dv.VOLUME, "down", None, 10, None, ""), "volume mute": (dv.VOLUME, "mute", None, None,
+                                                                                   None, ""),
+            "volume unmute": (dv.VOLUME, "unmute", None, None, None, ""),
+            "louder": (dv.VOLUME, "up", None, 10, None, ""),
+            "quieter": (dv.VOLUME, "down", None, 10, None, ""), "mute": (dv.VOLUME, "mute", None, None, None, ""),
+            "unmute": (dv.VOLUME, "unmute", None, None, None, ""),
+            "turn the volume down": (dv.VOLUME, "down", None, 10, None, ""),
+            "turn it up": (dv.VOLUME, "up", None, 10, None, ""),
+            "pause": (dv.MEDIA, "pause", None, None, None, ""), "play": (dv.MEDIA, "play", None, None, None, ""),
+            "resume": (dv.MEDIA, "play", None, None, None, ""), "next": (dv.MEDIA, "next", None, None, None, ""),
+            "skip": (dv.MEDIA, "next", None, None, None, ""), "previous": (dv.MEDIA, "previous", None, None, None, ""),
+            "play the music": (dv.MEDIA, "play", None, None, None, ""),
+            "resume the music": (dv.MEDIA, "play", None, None, None, ""),
+            "pause the video": (dv.MEDIA, "pause", None, None, None, ""),
+            "next song": (dv.MEDIA, "next", None, None, None, ""),
+            "previous track": (dv.MEDIA, "previous", None, None, None, ""),
+            "skip the track": (dv.MEDIA, "next", None, None, None, ""),
+            "timer 10 minutes": (dv.TIMER, "set", None, None, 10, ""),
+            "set a timer for 5 mins": (dv.TIMER, "set", None, None, 5, ""),
+            "start a timer for 25 minutes": (dv.TIMER, "set", None, None, 25, ""),
+            "remind me in 20 minutes": (dv.TIMER, "set", None, None, 20, ""),
+            "remind me in 20 minutes to stretch": (dv.TIMER, "set", None, None, 20, "stretch"),
+            "timer 10 minutes for the pasta.": (dv.TIMER, "set", None, None, 10, "the pasta"),
+            "cancel the timer": (dv.CANCEL_TIMER, "cancel", None, None, None, ""),
+            "stop my timers": (dv.CANCEL_TIMER, "cancel", None, None, None, ""),
+            "end all the timers": (dv.CANCEL_TIMER, "cancel", None, None, None, ""),
+            "screenshot": (dv.SCREENSHOT, "screen", None, None, None, ""),
+            "screen shot": (dv.SCREENSHOT, "screen", None, None, None, ""),
+            "take a screenshot": (dv.SCREENSHOT, "screen", None, None, None, ""),
+            "screen grab": (dv.SCREENSHOT, "screen", None, None, None, ""),
+            "take a screen grab": (dv.SCREENSHOT, "screen", None, None, None, ""),
+            "screenshot of this window": (dv.SCREENSHOT, "active_window", None, None, None, ""),
+            "take a screenshot of the active window": (dv.SCREENSHOT, "active_window", None, None, None, ""),
+            "Jarvis, volume 30.": (dv.VOLUME, "set", 30, None, None, ""),
         }
-        for kind, texts in cases.items():
-            for text in texts:
-                with self.subTest(text=text):
-                    found = self.local(text)
-                    self.assertEqual((found.kind, found.code, found.tier), (kind, dv.NOT_YET, ""))
-                    self.assertTrue(dr.desktop_request(text))
-                    self.assertEqual(self.local(text, context=None), found)       # no candidates needed
-        self.assertEqual(dr.NOT_YET_KINDS, frozenset(cases))
+        for text, (kind, action, level, step, minutes, label) in cases.items():
+            with self.subTest(text=text):
+                found = self.local(text)
+                asked = found.target
+                self.assertEqual((found.kind, found.code, found.tier), (kind, "", dv.INSTANT))
+                self.assertEqual((asked.kind, asked.action, asked.level, asked.step, asked.minutes, asked.label),
+                                 (kind, action, level, step, minutes, label))
+                self.assertEqual(dr.pc_request(text), asked)
+                self.assertTrue(dr.desktop_request(text))
+                self.assertEqual(self.local(text, context=None), found)           # no candidates needed
+        for text in ("play Bohemian Rhapsody", "volume", "timer", "set the timer", "screenshot my essay"):
+            with self.subTest(text=text):
+                self.assertIsNone(dr.pc_request(text))
+
+    def test_focus_mode_is_recognised_and_not_yet(self) -> None:
+        for text in ("focus for 45 minutes", "focus mode for 30 mins"):
+            with self.subTest(text=text):
+                found = self.local(text)
+                self.assertEqual((found.kind, found.code, found.tier), (dv.FOCUS_MODE, dv.NOT_YET, ""))
+                self.assertTrue(dr.desktop_request(text))
+                self.assertEqual(self.local(text, context=None), found)
+        self.assertEqual(dr.NOT_YET_KINDS, frozenset({dv.FOCUS_MODE}))
 
     def test_known_folders(self) -> None:
         downloads = self.context.places[3]
@@ -234,7 +277,10 @@ class LocalRouteTests(unittest.TestCase):
     def test_repr_names_the_kind_only(self) -> None:
         found = self.local("open Spotify")
         self.assertEqual(repr(found), "LocalRoute(open_app)")
-        self.assertEqual(repr(self.local("volume 30")), "LocalRoute(volume, not_yet)")
+        self.assertEqual(repr(self.local("volume 30")), "LocalRoute(volume)")
+        self.assertEqual(repr(self.local("remind me in 5 minutes to call Ana")), "LocalRoute(timer)")   # no label
+        self.assertEqual(repr(self.local("remind me in 5 minutes to call Ana").target), "PcAsk(timer, set)")
+        self.assertEqual(repr(self.local("focus for 45 minutes")), "LocalRoute(focus_mode, not_yet)")
 
 
 class RouteWordsTests(unittest.TestCase):
@@ -257,10 +303,17 @@ class RouteWordsTests(unittest.TestCase):
              "Understood: look for files - 2 matches. Nothing was opened yet, sir."),
             (dr.route("find my budget", context, search=one.search),
              "Understood: look for files - 1 match. Nothing was opened yet, sir."),
-            (dr.route("volume 30", context), "I can't change the volume yet, sir - nothing was changed."),
-            (dr.route("pause", context), "I can't control music yet, sir - nothing was changed."),
-            (dr.route("set a timer for 10 minutes", context), "I can't set timers yet, sir - nothing was changed."),
-            (dr.route("take a screenshot", context), "I can't take screenshots yet, sir - nothing was changed."),
+            (dr.route("volume 30", context), "Understood: set the volume to 30. Nothing was changed yet, sir."),
+            (dr.route("louder", context), "Understood: turn the volume up. Nothing was changed yet, sir."),
+            (dr.route("mute", context), "Understood: mute the sound. Nothing was changed yet, sir."),
+            (dr.route("pause", context), "Understood: pause the music. Nothing was changed yet, sir."),
+            (dr.route("next song", context), "Understood: skip to the next track. Nothing was changed yet, sir."),
+            (dr.route("set a timer for 10 minutes", context),
+             "Understood: set a timer for 10 minutes. Nothing was changed yet, sir."),
+            (dr.route("remind me in 1 minute to stretch", context),
+             "Understood: set a timer for 1 minute. Nothing was changed yet, sir."),
+            (dr.route("cancel the timer", context), "Understood: cancel your timers. Nothing was changed yet, sir."),
+            (dr.route("take a screenshot", context), "Understood: take a screenshot. Nothing was changed yet, sir."),
             (dr.route("focus for 45 minutes", context), "I can't start focus mode yet, sir - nothing was changed."),
         )
         for found, words in cases:
@@ -271,8 +324,10 @@ class RouteWordsTests(unittest.TestCase):
                     self.assertNotIn(name, said)
         self.assertEqual(dr.route_words(dr.route("open Spotify", context), ""),
                          "Understood: open an app. Nothing was opened yet.")
+        self.assertEqual(dr.route_words(dr.route("focus for 45 minutes", context), "boss"),
+                         "I can't start focus mode yet, boss - nothing was changed.")
         self.assertEqual(dr.route_words(dr.route("volume 30", context), "boss"),
-                         "I can't change the volume yet, boss - nothing was changed.")
+                         "Understood: set the volume to 30. Nothing was changed yet, boss.")
 
 
 class DesktopKindsStayOutTests(unittest.TestCase):

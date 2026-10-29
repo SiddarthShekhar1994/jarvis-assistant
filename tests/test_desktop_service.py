@@ -169,7 +169,7 @@ class LocalRouteTests(ServiceCase):
         self.assertEqual(resolved.kind, ds.PLANNER)
 
     def test_a_later_phases_request_is_answered_not_yet(self) -> None:
-        resolved = self.resolve("volume 30")
+        resolved = self.resolve("focus mode for 45 minutes")
         self.assertEqual((resolved.kind, resolved.route.code), (ds.LOCAL, dv.NOT_YET))
         self.assertEqual(self.fake.opened, [])
 

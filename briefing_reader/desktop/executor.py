@@ -33,6 +33,11 @@ only on a CARD click (backend.open_script_document); a shortcut never opens itse
 document it names (``via``: the shortcut is re-checked and its target read again first - it must still name that
 document, unchanged).
 
+P2.4: a local route to the PC's controls (volume, music, a timer, cancelling the timers, a screenshot: INSTANT) is
+carried out by desktop.pcctl (``pc``: the desktop thread's PcControl; none: refused) - the cancel asked again right
+before its OS call, the HUD's windows (``hud``) left out of a screenshot - and its result's ``target`` is the
+pcctl.PcChange (what was before and after); its words are pcctl's own (change_words).
+
 A target that changed since it was listed is left as it is (``CHANGED``: SPEC 5.3's "Changed since - left as it
 is"); an OS call that fails is FAILED with its winerror. ``run_words`` is Jarvis's own sentence for a run (the HUD's
 caption): kinds and counts - a known folder's own label at most - never a name, a path, a title or an address.
@@ -45,8 +50,9 @@ Statuses ``DONE``, ``WAITING``, ``FOUND``, ``REFUSED``, ``FAILED``, ``CANCELLED`
 ``GUARD``, ``STOPPED`` (and desktop.validate's NEVER codes); ``StepResult``; ``DesktopRun`` (``done()``,
 ``waiting()``, ``found()``, ``not_done()``, ``counts()``, ``statuses_text()``; ``shown``: what the result cards show
 of it - desktop.results, P1.9; ``card``: its file steps' frozen plan, P2.2); ``FindQuery``; ``Executor(backend,
-scope=, apps=, find=, clock=, now=)`` (``run_plan(plan,
-words=, others_from=, cancel=)``, ``run_route(route, words=, run_id=)``, ``run_click(skill, target, granted=, ...)``,
+scope=, apps=, find=, clock=, now=, pc=)`` (``run_plan(plan,
+words=, others_from=, cancel=)``, ``run_route(route, words=, run_id=, cancel=, hud=)``, ``run_click(skill, target,
+granted=, ...)``,
 ``recheck(item)``); ``run_words(run, plan=None, address=)``; ``run_soft(run, plan=None)``; ``run_waits(run)``;
 ``describe(result)``; ``status_words(result)``; ``WAITING_NOUNS``; ``MAX_OTHERS``.
 """
@@ -64,7 +70,7 @@ from typing import Any
 from ..persona import with_address
 from . import apps as desktop_apps
 from . import cardplan
-from . import guard, paths
+from . import guard, paths, pcctl
 from . import validate as dv
 from .backend import DesktopBackend, FileIdentity
 from .context import AppItem, FileItem, Place, SiteItem
@@ -89,7 +95,8 @@ CODE_WORDS = {CHANGED: "it changed since I looked - left as it is",
 def code_words(code: str) -> str:
     """A refusal or failure code in Jarvis's own words (Live, the caption): validate's REASON_WORDS, the run's or a
     card row's (desktop.cardplan)."""
-    return CODE_WORDS.get(code) or dv.reason_words(code) or cardplan.row_words(code) or "it couldn't be done"
+    return (CODE_WORDS.get(code) or dv.reason_words(code) or cardplan.row_words(code) or pcctl.code_words(code)
+            or "it couldn't be done")
 
 
 @dataclass(frozen=True)
@@ -181,13 +188,14 @@ class Executor:
                  apps: Callable[[], Sequence[AppItem]],
                  find: Callable[[FindQuery], Sequence[Any]] | None = None,
                  clock: Callable[[], float] = time.monotonic,
-                 now: Callable[[], datetime] | None = None) -> None:
+                 now: Callable[[], datetime] | None = None, pc: pcctl.PcControl | None = None) -> None:
         self.backend = backend
         self._scope = scope
         self._apps = apps
         self._find = find
         self._clock = clock
         self._now = now or (lambda: datetime.now(timezone.utc))
+        self._pc = pc                                     # the PC's controls (P2.4; desktop.pcctl)
         self._cancel: Any = None                          # the run's cancel (anything with is_set())
 
     # ---- a planner's plan -------------------------------------------------------------------------
@@ -254,10 +262,11 @@ class Executor:
     # ---- a local route ------------------------------------------------------------------------------
 
     def run_route(self, route: Any, *, words: str = "", run_id: str = "",
-                  cancel: Any = None) -> DesktopRun:
+                  cancel: Any = None, hud: Sequence[int] = ()) -> DesktopRun:
         """A local route (desktop.routes.LocalRoute) carried out: an open (INSTANT: the owner named it exactly; a
-        bare web address is held for his click - ONE_CLICK, its flags kept), or a find whose files the route's search
-        found (checked as they were listed); nothing once ``cancel`` is set."""
+        bare web address is held for his click - ONE_CLICK, its flags kept), a find whose files the route's search
+        found (checked as they were listed), or a PC control (desktop.pcctl; ``hud``: the HUD's windows, left out of
+        a screenshot); nothing once ``cancel`` is set."""
         started = self._clock()
         self._cancel = cancel
         kind, tier = getattr(route, "kind", ""), getattr(route, "tier", "") or dv.INSTANT
@@ -265,6 +274,8 @@ class Executor:
             result = StepResult(0, kind, tier, CANCELLED, STOPPED)
         elif getattr(route, "code", ""):
             result = StepResult(0, kind, tier, REFUSED, route.code)
+        elif kind in pcctl.PC_SKILLS:
+            result = self._pc_step(0, kind, tier, getattr(route, "target", None), hud)
         elif kind == dv.FIND_FILES:
             hits = tuple(getattr(route, "hits", ()))
             result = StepResult(0, kind, tier, FOUND, found=hits)
@@ -274,6 +285,18 @@ class Executor:
         run = DesktopRun(run_id, (result,), round(self._clock() - started, 3))
         self._log(run)
         return run
+
+    def _pc_step(self, number: int, kind: str, tier: str, asked: Any, hud: Sequence[int]) -> StepResult:
+        """A PC control (P2.4) through desktop.pcctl: DONE (its PcChange as the target: what was before and after),
+        REFUSED with pcctl's code, FAILED (OS_FAILED) or CANCELLED - the cancel asked again right before the OS
+        call."""
+        if self._pc is None or not isinstance(asked, pcctl.PcAsk):
+            change = pcctl.PcChange(kind, getattr(asked, "action", ""), pcctl.UNAVAILABLE)
+        else:
+            change = self._pc.carry_out(asked, cancel=self._cancel, hud=hud)
+        status = DONE if not change.code else CANCELLED if change.code == STOPPED else \
+            FAILED if change.code == OS_FAILED else REFUSED
+        return StepResult(number, kind, tier, status, change.code, target=change, winerror=change.winerror)
 
     # ---- a click on a result card (P1.9) ---------------------------------------------------------------
 
@@ -468,8 +491,9 @@ class Executor:
         for result in run.done():
             skills[result.skill] = skills.get(result.skill, 0) + 1
         opened = ", ".join(f"{skill}={count}" for skill, count in skills.items()) or "none"
-        logger.info("Desktop %s: carried out: %s; opened %s (%.2f s)", run.run_id or "-", run.statuses_text(),
-                    opened, run.seconds)
+        verb = "did" if skills and all(skill in pcctl.PC_SKILLS for skill in skills) else "opened"
+        logger.info("Desktop %s: carried out: %s; %s %s (%.2f s)", run.run_id or "-", run.statuses_text(),
+                    verb, opened, run.seconds)
 
 
 class _Caps:
@@ -646,6 +670,11 @@ def run_words(run: DesktopRun | None, plan: dv.DesktopPlan | None = None, addres
     address, never Claude's text. "" when there is nothing to say (no step was carried out)."""
     if run is None or not run.results:
         return ""
+    if len(run.results) == 1 and run.results[0].skill in pcctl.PC_SKILLS:      # a PC control (P2.4): its own words
+        result = run.results[0]
+        change = result.target if isinstance(result.target, pcctl.PcChange) else \
+            pcctl.PcChange(result.skill, "", result.code or STOPPED)
+        return pcctl.change_words(change, address)
     sentences: list[str] = []
     done, waiting, found, not_done = run.done(), run.waiting(), run.found(), run.not_done()
     if done:
@@ -692,6 +721,8 @@ _STATUS_WORDS = {DONE: "opened", WAITING: "waiting for you", FOUND: "found", REF
 def status_words(result: StepResult) -> str:
     if result.status == DONE and result.skill == dv.SHOW_IN_FOLDER:
         return "shown in its folder"
+    if result.status == DONE and result.skill in pcctl.PC_SKILLS:
+        return "done"
     if result.status == FOUND:
         return f"found {len(result.found)}"
     return _STATUS_WORDS.get(result.status, result.status)
@@ -699,11 +730,15 @@ def status_words(result: StepResult) -> str:
 
 def describe(result: StepResult) -> str:
     """"Step 1 - open_file - instant - opened" / "Step 2 - open_app - one-click - waiting for you" / "Step 3 - open_url
-    - instant - refused: changed" (Live; never a name, a path or an address)."""
+    - instant - refused: changed" / "On this PC - volume - instant - done (level 30 -> 40)" (Live; never a name, a
+    path, an address or a label)."""
     head = f"Step {result.number}" if result.number else "On this PC"
     words = status_words(result)
     if result.code:
         words += f": {result.code}"
     if result.winerror:
         words += f" (Windows error {result.winerror})"
+    note = pcctl.live_note(result.target) if result.skill in pcctl.PC_SKILLS else ""
+    if note:
+        words += f" ({note})"
     return f"{head} - {result.skill} - {result.tier.replace('_', '-')} - {words}"

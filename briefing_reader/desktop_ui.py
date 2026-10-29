@@ -109,6 +109,19 @@ hook). It keeps the owner's rules:
   took - kinds, counts and codes only. ``journal_folder``: where the runs' journals go (the app's own folder by
   default; tests pass a temporary one). A new request drops a card that is not at work; Turn off drops it.
 
+* P2.4, the PC's controls (desktop.pcctl): "volume 30", "pause", "timer 10 minutes", "screenshot" ... are local
+  routes, carried out on the desktop thread like the others (INSTANT; THE CONSENT GATE asked right before the OS
+  call) - the caption says Jarvis's own words ("Volume 30, sir.", "Paused, sir.", "Timer set for 10 minutes, sir.")
+  and LIVE the step with its levels, states and counts. ``pc_factory`` makes the controls' seam on the desktop thread
+  (the real pcctl.Win32Pc by default, which refuses to be made while the tests run; tests set a fake). A screenshot's
+  request hands over the HUD's own windows (``_hud_windows``), which the capture leaves out of the picture. Jarvis's
+  own timers live in ``timers`` (pcctl.TimerBook in the app's data folder, config.data_dir - never the real one
+  while the tests run): restored at start (only after the owner's Turn on) and checked against the wall
+  clock (``timer_clock``; the tests' own) at each one's end and at least every pcctl.TIMER_CHECK_S - so one whose end
+  came while the PC slept ends at the first check after the resume. At its end ``timerEnded(line)`` (the app posts
+  its toast) and a short sound on the desktop thread; while one runs the HUD shows its chip ("Timer - ends 10:32
+  AM"). A Turn off drops them; shutdown() keeps them in their file for the next start.
+
 Logs: statuses, durations, screen numbers, run ids, skill kinds, counts and refusal codes only - never what was
 typed, a name or a path.
 """
@@ -122,7 +135,7 @@ from collections import Counter
 from collections.abc import Callable, Mapping
 from concurrent.futures import CancelledError, Future
 from concurrent.futures import TimeoutError as FutureTimeout
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import shiboken6
@@ -137,10 +150,12 @@ from .ask import desktop_mode
 from .desktop import executor as desktop_executor
 from .desktop import results as card_results
 from .desktop import journal as desktop_journal
+from .desktop import pcctl
 from .desktop import routes as desktop_routes
 from .desktop import service as desktop_service
 from .desktop import stopkeys
 from .desktop import tidy as desktop_tidy
+from .desktop import validate as desktop_validate
 from .desktop import winwatch
 from .desktop.context import DesktopContext
 from .desktop.worker import DesktopWorker
@@ -403,6 +418,7 @@ class DesktopController(QObject):
     consentNeeded = Signal(str)        # the owner asked to go onto the desktop before his Turn on: the first-run card
     consentChanged = Signal(bool)      # his Turn on (True) or Turn off (False) was stored
     waitingChanged = Signal(int)       # NEEDS YOUR OK cards of file steps waiting for him (P2.3: Approvals' reminder)
+    timerEnded = Signal(str)           # P2.4: a Jarvis timer ended - the toast's line (the app posts it)
 
     def __init__(self, config: Any, window: Any, overlay: hud_overlay.HudOverlay, *,
                  chip_screens: Mapping[str, int], home_screen: int,
@@ -502,6 +518,17 @@ class DesktopController(QObject):
         hud.chipClicked.connect(self._on_chip)
         hud.shapeChanged.connect(self._on_hud_shape)
         hud.installEventFilter(self)
+        # P2.4: the PC's controls' seam (made on the desktop thread; None: the real one) and Jarvis's own timers - in
+        # the app's data folder, checked against the wall clock (``timer_clock``: None, the real one).
+        self.pc_factory: Callable[[], Any] | None = None
+        self.timer_clock: Callable[[], datetime] | None = None
+        self.timers = pcctl.TimerBook(self._timers_folder(), now=self._timer_now)
+        self._timer_check = QTimer(self)
+        self._timer_check.setSingleShot(True)
+        self._timer_check.setTimerType(Qt.TimerType.PreciseTimer)     # a coarse one may fire up to 5 % early
+        self._timer_check.timeout.connect(self._on_timer_check)
+        if self.consent_given():
+            self._restore_timers()
 
     # ---- state ----------------------------------------------------------------------------------
 
@@ -595,7 +622,10 @@ class DesktopController(QObject):
     def turn_on(self) -> bool:
         """The owner's Turn on on the first-run card: stored in the app's prefs - it counts only once saved (False:
         it could not be saved, so nothing is turned on)."""
-        return self._store_consent(True)
+        saved = self._store_consent(True)
+        if self.consent_given():
+            self._restore_timers()
+        return saved
 
     def turn_off(self) -> bool:
         """Settings > Desktop's Turn off: the owner's OK goes (for this run even when it could not be saved; False
@@ -609,6 +639,10 @@ class DesktopController(QObject):
         self._held = None
         self._set_tidy(None)                                 # its card goes; a batch on its way stops at the next row
         self.pending, self.found = (), ()
+        dropped = self.timers.clear()                        # P2.4: Jarvis's timers go (nothing ends after it)
+        if dropped:
+            logger.info("Desktop: %d timer(s) dropped (turned off)", dropped)
+        self._arm_timers()
         return self._store_consent(False)
 
     def _gate(self) -> _Gate:
@@ -997,7 +1031,9 @@ class DesktopController(QObject):
                 folders=tuple(getattr(settings, "folders", ()) or ()),
                 extra_folders=tuple(getattr(settings, "extra_folders", ()) or ()),
                 excluded=excluded, backend_factory=self._backend_factory, hour24=self._hour24,
-                journal_folder=self._journal_folder, undo_days=int(getattr(settings, "undo_days", 7) or 7))
+                journal_folder=self._journal_folder, undo_days=int(getattr(settings, "undo_days", 7) or 7),
+                pc_factory=self.pc_factory, timers=self.timers,
+                screenshots_dir=str(getattr(settings, "screenshots_dir", "") or ""))
             self._worker = DesktopWorker()
         return self._worker, self._service
 
@@ -1020,8 +1056,10 @@ class DesktopController(QObject):
         self._request_seq += 1
         seq, run_id, stop, gate = self._request_seq, desktop_mode.new_run_id(), threading.Event(), self._gate()
         self._looking = (seq, words, bool(planner), run_id, stop, gate)
+        asked = desktop_routes.pc_request(words)
+        hud = self._hud_windows() if asked is not None and asked.kind == desktop_validate.SCREENSHOT else ()
         future = worker.submit(service.resolve, words, planner=bool(planner), override=self.context_source,
-                               run_id=run_id, cancel=_Either(stop, gate))
+                               run_id=run_id, cancel=_Either(stop, gate), hud=hud)
         bridge = self._bridge
         future.add_done_callback(lambda done, seq=seq: _deliver(bridge, seq, done))
         self._resolve_timer.start(int(RESOLVE_TIMEOUT_S * 1000))
@@ -1102,6 +1140,8 @@ class DesktopController(QObject):
                         run.statuses_text() if run is not None else "nothing", resolved.seconds)
         _local_task(self.live, words, found, run, said, soft)
         self.answered.emit(said, tone, words, True)
+        if found.kind in (desktop_validate.TIMER, desktop_validate.CANCEL_TIMER):
+            self._arm_timers()                               # P2.4: the next check and the HUD chip follow
         self._show_or_hold(run)
 
     def _leaving(self) -> bool:
@@ -1512,6 +1552,91 @@ class DesktopController(QObject):
 
     # ---- the chips and the neighbours ------------------------------------------------------------------
 
+    # ---- P2.4: Jarvis's own timers -----------------------------------------------------------------------
+
+    def _timers_folder(self) -> Any:
+        """The timers' folder in the app's data folder; None (memory only) without one - and for the real one while
+        the tests run (pcctl.timers_folder refuses it)."""
+        try:
+            return pcctl.timers_folder(getattr(self.config, "data_dir", None))
+        except Exception as exc:  # noqa: BLE001 - RealBackendInTests: the tests' own folder only
+            logger.info("Desktop: the timers are kept in memory only (%s)", type(exc).__name__)
+            return None
+
+    def _timer_now(self) -> datetime:
+        clock = self.timer_clock
+        return clock() if clock is not None else datetime.now(timezone.utc)
+
+    def _restore_timers(self) -> None:
+        """The timers kept in their file (Jarvis started, or turned on): back, and checked as soon as the event loop
+        runs (the app has heard ``timerEnded`` by then) - one whose end came while Jarvis was closed ends then (or is
+        dropped quietly when that was long ago)."""
+        if self._shut:
+            return
+        count = self.timers.load()
+        if count:
+            logger.info("Desktop: %d timer(s) restored", count)
+        self._arm_timers()
+
+    def _arm_timers(self) -> None:
+        """The next check: at the first timer's end, and within pcctl.TIMER_CHECK_S at most (the wall clock is read
+        again then, so a timer whose end came while the PC slept ends at the first check after the resume); none
+        without a timer. The HUD chip follows."""
+        if self._shut:
+            return
+        left = self.timers.seconds_left()
+        if left is None:
+            self._timer_check.stop()
+        else:
+            self._timer_check.start(int(min(left, pcctl.TIMER_CHECK_S) * 1000) + 20)
+        if self._hud and shiboken6.isValid(self.overlay.hud):
+            self.overlay.hud.set_timer(pcctl.chip_text(self.timers.running(), self._hour24))
+
+    def _on_timer_check(self) -> None:
+        """The timers against the wall clock: each one that has ended says so once - the toast's line
+        (``timerEnded``: the app posts it) and a short sound on the desktop thread - and the next check is set. None
+        once THE CONSENT GATE says no (fail-closed: they are dropped)."""
+        if self._shut:
+            return
+        if not self.consent_given():
+            dropped = self.timers.clear()
+            if dropped:
+                logger.info("Desktop: %d timer(s) dropped (not turned on)", dropped)
+            self._arm_timers()
+            return
+        ended, dropped = self.timers.take_due()
+        if dropped:
+            logger.info("Desktop: %d timer(s) ended long ago while Jarvis was closed; dropped", dropped)
+        for timer, late in ended:
+            logger.info("Desktop: a %d-minute timer ended (%d s late)", timer.minutes, int(late))
+            self.timerEnded.emit(pcctl.end_words(timer, late, self._address, self._hour24))
+        if ended:
+            self._chime()
+        self._arm_timers()
+
+    def _chime(self) -> None:
+        """A timer's end sound, played on the desktop thread (its seam is there)."""
+        try:
+            worker, service = self._ensure_worker()
+            worker.submit(service.chime)
+        except Exception as exc:  # noqa: BLE001 - the toast still says it
+            logger.info("Desktop: no timer sound (%s)", type(exc).__name__)
+
+    def _hud_windows(self) -> tuple[int, ...]:
+        """The native windows of the HUD shown now - its bar, cards and layers, and a flight - which a screenshot
+        leaves out of the picture (D7)."""
+        windows: list[Any] = list(self.overlay.windows())
+        if self._flight is not None:
+            windows.append(self._flight)
+        found: list[int] = []
+        for window in windows:
+            try:
+                if shiboken6.isValid(window) and window.isVisible() and int(window.internalWinId()):
+                    found.append(int(window.internalWinId()))
+            except (RuntimeError, TypeError, ValueError):
+                continue
+        return tuple(found)
+
     def sync_glance(self) -> None:
         """While the HUD shows (and as it opens, its flight too): its chips and orb as the window has them - "Briefing
         ready" while a briefing is NEW, "N need your OK", REC with the time and its warning, and the orb's look with
@@ -1525,6 +1650,7 @@ class DesktopController(QObject):
         win.set_pending(reading.pending_count() + self.waiting_count())    # a NEEDS YOUR OK card counts (P2.3)
         elapsed, warning = reading.recording_state()
         win.set_recording(elapsed, warning)
+        win.set_timer(pcctl.chip_text(self.timers.running(), self._hour24))     # P2.4: while a timer runs
         win.orb.set_recording(bool(elapsed))
         base, muted, offline = reading.look()
         win.set_look(base, muted=muted, offline=offline)
@@ -1568,6 +1694,7 @@ class DesktopController(QObject):
             job[2].set()                                     # ... and a card's batch stops at its next row
         self._tidy = None
         self._resolve_timer.stop()
+        self._timer_check.stop()                             # P2.4: the timers stay in their file for the next start
         self._held = None
         self.results.clear()                                 # the cards, their brackets, hooks and timers go
         if self._worker is not None:

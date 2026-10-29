@@ -321,7 +321,10 @@ class FocusTests(_OverlayTest):
         QTest.mouseClick(card.buttons()["open"], Qt.MouseButton.LeftButton)
         settle()
         self.assertEqual(clicked, [hud_overlay.CHIP_BRIEFING, hud_overlay.CHIP_APPROVALS, hud_overlay.CHIP_REC,
-                                   "back", "open"])
+                                   "back", "open"])                 # P2.4's timer chip, hidden, answers no click
+        win.set_timer("Timer \u00b7 ends 10:32 AM")
+        QTest.mouseClick(win.chips[hud_overlay.CHIP_TIMER], Qt.MouseButton.LeftButton)
+        self.assertEqual(clicked[-1], hud_overlay.CHIP_TIMER)        # ... and does once it shows
         self.assertFalse(self._focus_in(overlay))
         self.assertEqual(asked, [])
 
@@ -518,6 +521,8 @@ class ChipTests(_OverlayTest):
         win.set_briefing_ready(True)
         win.set_pending(3)
         win.set_recording("1:02:09")
+        win.set_timer("Timer \u00b7 ends 10:32 AM")                       # P2.4: a Jarvis timer runs
+        self.assertEqual(win.chip_texts()[-1], "Timer \u00b7 ends 10:32 AM")
         bar = win.bar_rect_local()
         x = bar.left() + hud_overlay.ORB_PAD
         for chip in win.chips.values():

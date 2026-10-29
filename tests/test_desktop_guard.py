@@ -577,6 +577,7 @@ _REAL_CALLS = {
     "zone_identifier": (("C:\\Users\\Owner\\Downloads\\a.pdf",), {}),
     "content_hash": (("C:\\Users\\Owner\\Downloads\\a.pdf",), {}),
     "free_space": (("C:\\Users\\Owner\\Documents",), {}),
+    "save_png": (("C:\\Users\\Owner\\Jarvis\\Screenshots\\a.png", dbk.PNG_SIGNATURE + b"\x00" * 8), {}),
 }
 
 
@@ -610,7 +611,7 @@ class RealBackendMethodTests(unittest.TestCase):
                                   "_assoc_string", "_link_path")]
         patches += [mock.patch.object(dfo, helper, trap(helper, getattr(dfo, helper)))
                     for helper in ("raw_move", "raw_copy", "raw_make_folder", "raw_remove_folder", "raw_write_zip",
-                                   "raw_zone", "raw_hash", "raw_free")]
+                                   "raw_zone", "raw_hash", "raw_free", "raw_new_file")]
         patches += [mock.patch.object(os, "lstat", trap("os.lstat", os.lstat)),
                     mock.patch.object(os, "scandir", trap("os.scandir", os.scandir)),
                     mock.patch.object(os.path, "realpath", trap("os.path.realpath", os.path.realpath)),
@@ -712,6 +713,9 @@ class RealBackendMethodTests(unittest.TestCase):
 
     def test_free_space_raises_under_the_guard(self) -> None:
         self.call_refused("free_space")
+
+    def test_save_png_raises_under_the_guard(self) -> None:
+        self.call_refused("save_png")
 
     def test_app_for_is_asked_only_a_type_or_https(self) -> None:
         for kind in (".docx", ".PDF", ".xlsm", "https"):

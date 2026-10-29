@@ -24,7 +24,11 @@ there, one at a time, so nothing in it is shared with the GUI or the Ask thread.
 * ``undo_card(run_id, seqs, cancel=, ...)`` (P2.3): the owner's Undo on the card's stamp - fileops.Undoer, item by
   item, newest first, each re-checked ("Moved since - left where it is."), for [desktop] undo_days only; recycling
   Jarvis's own copies and zips waits for the Recycle Bin (P2.6: refused plainly until then);
-* ``find(query)``: a find_files step's search.
+* ``find(query)``: a find_files step's search;
+* P2.4, the PC's controls (``pc()``: desktop.pcctl.PcControl, made here at the first use over ``pc_factory`` - the
+  real Win32Pc in the app, a fake in the tests -, the app's TimerBook ``timers`` and [desktop] screenshots_dir): a
+  local route to them is carried out like any other (``resolve(words, hud=)``: ``hud`` the HUD's windows, left out
+  of a screenshot), and ``chime()`` plays a timer's end sound.
 
 Each job's ``cancel`` (anything with ``is_set()``) holds the app's stop and THE CONSENT GATE (desktop_ui: the owner's
 Turn off): the executor asks it before each step and right before each OS call - once it is set nothing opens, and
@@ -40,11 +44,11 @@ Public API
 ==========
 ``LOCAL``, ``PLANNER``, ``UNAVAILABLE``; ``Resolved(kind, run_id, route, run, context, seconds)``;
 ``DesktopService(folders=, extra_folders=, excluded=, backend_factory=, sites=, clock=, now=, hour24=,
-journal_folder=, undo_days=)``: ``backend()``, ``scope(fresh=)``, ``apps(fresh=)``, ``tree()``, ``route_context()``,
-``resolve(words, planner=, override=, run_id=, cancel=)``, ``context_for(words)``, ``carry_out(plan, words, context,
-cancel)``, ``click(click, cancel)``, ``carry_out_card(card, sha=, ticked=, cancel=, on_start=, on_row=, stop_keys=,
-on_stop=)``, ``undo_card(run_id, seqs, cancel=, on_start=, stop_keys=, on_stop=)``, ``find(query)``, ``executor()``;
-``days_in(words)``; ``RECENT_FILES``.
+journal_folder=, undo_days=, pc_factory=, timers=, screenshots_dir=)``: ``backend()``, ``pc()``, ``chime()``,
+``scope(fresh=)``, ``apps(fresh=)``, ``tree()``, ``route_context()``, ``resolve(words, planner=, override=, run_id=,
+cancel=, hud=)``, ``context_for(words)``, ``carry_out(plan, words, context, cancel)``, ``click(click, cancel)``,
+``carry_out_card(card, sha=, ticked=, cancel=, on_start=, on_row=, stop_keys=, on_stop=)``, ``undo_card(run_id, seqs,
+cancel=, on_start=, stop_keys=, on_stop=)``, ``find(query)``, ``executor()``; ``days_in(words)``; ``RECENT_FILES``.
 """
 
 from __future__ import annotations
@@ -57,7 +61,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import apps as desktop_apps
-from . import cardplan, guard, paths, stopkeys, tidy
+from . import cardplan, guard, paths, pcctl, stopkeys, tidy
 from . import fileops as fo
 from . import results as desktop_results
 from . import routes as desktop_routes
@@ -110,8 +114,14 @@ class DesktopService:
                  backend_factory: Callable[[], DesktopBackend], sites: Sequence[SiteItem] = (),
                  clock: Callable[[], float] = time.monotonic,
                  now: Callable[[], datetime] | None = None, hour24: bool = False,
-                 journal_folder: Callable[[], Any] | None = None, undo_days: int = 7) -> None:
+                 journal_folder: Callable[[], Any] | None = None, undo_days: int = 7,
+                 pc_factory: Callable[[], Any] | None = None, timers: pcctl.TimerBook | None = None,
+                 screenshots_dir: str = "") -> None:
         self._folders = tuple(folders)
+        self._pc_factory = pc_factory or pcctl.Win32Pc          # refuses to be made while the tests run
+        self._timers = timers
+        self._screenshots_dir = str(screenshots_dir or "")
+        self._pc: pcctl.PcControl | None = None
         self._extra = tuple(extra_folders)
         self._excluded = tuple(str(path) for path in excluded if path)
         self._factory = backend_factory
@@ -180,7 +190,19 @@ class DesktopService:
         if backend is None:
             return None
         return Executor(backend, scope=lambda: self.scope(fresh=True), apps=lambda: self.apps(fresh=True),
-                        find=self.find, clock=self._clock, now=self._now)
+                        find=self.find, clock=self._clock, now=self._now, pc=self.pc())
+
+    def pc(self) -> pcctl.PcControl:
+        """The PC's controls (P2.4), made at the first call; their seam is made at their first use (on this
+        thread)."""
+        if self._pc is None:
+            self._pc = pcctl.PcControl(self._pc_factory, disk=self.backend, timers=self._timers,
+                                       screenshots_dir=self._screenshots_dir, clock=self._clock, now=self._now)
+        return self._pc
+
+    def chime(self) -> bool:
+        """A timer's end sound (the app's toast says it too)."""
+        return self.pc().chime()
 
     # ---- a request ----------------------------------------------------------------------------------
 
@@ -192,10 +214,11 @@ class DesktopService:
 
     def resolve(self, words: str, *, planner: bool = True,
                 override: Callable[[str], DesktopContext] | None = None, run_id: str = "",
-                cancel: Any = None) -> Resolved:
+                cancel: Any = None, hud: Sequence[int] = ()) -> Resolved:
         """A typed desktop request (see the module docstring). ``override(words)``: a context to use instead of this
         PC's (the tests' invented ones); ``planner``: whether the planner may run (Ask on); ``cancel``: once set (the
-        app stopped waiting, or the owner's Turn off), a local route opens nothing and nothing more is looked at."""
+        app stopped waiting, or the owner's Turn off), a local route opens nothing and nothing more is looked at;
+        ``hud``: the HUD's windows (left out of a screenshot)."""
         started = self._clock()
         if cancel is not None and cancel.is_set():
             return Resolved(UNAVAILABLE, run_id)            # stopped before it began: nothing looked at
@@ -209,7 +232,8 @@ class DesktopService:
             routes_context = DesktopContext()
         found = desktop_routes.route(words, routes_context, search=self._route_search)
         if found is not None:
-            run = self._shown(executor.run_route(found, words=words, run_id=run_id, cancel=cancel), executor, words)
+            run = self._shown(executor.run_route(found, words=words, run_id=run_id, cancel=cancel, hud=hud), executor,
+                              words)
             return Resolved(LOCAL, run_id, found, run, seconds=round(self._clock() - started, 3))
         if not planner:
             return Resolved(PLANNER, run_id, seconds=round(self._clock() - started, 3))

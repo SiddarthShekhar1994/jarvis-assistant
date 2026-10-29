@@ -16,25 +16,26 @@ the chips and the cards (``Glow``) as well as the brackets and tethers.
     Jarvis", the HUD key's keycaps - none while no key can work), Jarvis's caption line with the orb's state word, a
     hairline and "Bring Jarvis back"; under the bar the chips: "Briefing ready" (cyan), "N need your OK" (amber;
     ui.needs_ok_chip's words) and REC with a coral dot and the time (tabular figures: its width holds while the
-    seconds tick). The caption wraps as the prototype's ``.bcap`` does, to at most ``CAPTION_LINES`` lines - the bar
-    and the window grow with it, the chips move down - and only past that it is cut with an ellipsis, its whole text
-    the tooltip (``WA_AlwaysShowToolTips``: the HUD is never the active window). ``place_on(screen)`` /
+    seconds tick); P2.4: "Timer \u00b7 ends 10:32 AM" (cyan, static) while a Jarvis timer runs. The caption wraps
+    as the prototype's ``.bcap`` does, to at most ``CAPTION_LINES`` lines - the bar and the window grow with it, the
+    chips move down - and only past that it is cut with an ellipsis, its whole text the tooltip
+    (``WA_AlwaysShowToolTips``: the HUD is never the active window). ``place_on(screen)`` /
     ``place_in(area)``, ``area()``; ``set_caption(text)``; ``set_look(base, muted=, offline=)`` (the orb and the
-    state word); ``set_briefing_ready(bool)``, ``set_pending(count)``, ``set_recording(elapsed, warning="")`` (a chip
-    whose words did not change is not repainted); ``chip_texts()``; ``bar_rect()``, ``orb_center()``,
-    ``occupied_rect()`` (global); ``glows()`` (the bar's and the chips' ``Glow``, global); ``cut_texts()`` (words
-    cut or crowded: none at the sizes it is built for). Signals ``bringBackClicked()``, ``chipClicked(key)``
-    (``CHIP_BRIEFING``, ``CHIP_APPROVALS``, ``CHIP_REC``), ``shapeChanged()`` (the window, the bar or a chip moved
-    or changed size) and ``keyboardChanged(bool)``; the bar's own signals are on ``bar``. The bar's status (an answer,
-    a question, a problem, what Jarvis is doing - as Home's thinking line, without its seconds) shows in the caption
-    line without its technical readouts. The bar's keyboard (SPEC 8.3, P1.6): while idle the window keeps
-    ``WindowDoesNotAcceptFocus``; ``take_keyboard()`` (the HUD key, through the app) or a click in the input
-    remembers the window that has the keyboard, drops the flag on the NATIVE window (QWindow.setFlag; never
+    state word); ``set_briefing_ready(bool)``, ``set_pending(count)``, ``set_recording(elapsed, warning="")``,
+    ``set_timer(text)`` (a chip whose words did not change is not repainted); ``chip_texts()``; ``bar_rect()``,
+    ``orb_center()``, ``occupied_rect()`` (global); ``glows()`` (the bar's and the chips' ``Glow``, global);
+    ``cut_texts()`` (words cut or crowded: none at the sizes it is built for). Signals ``bringBackClicked()``,
+    ``chipClicked(key)`` (``CHIP_BRIEFING``, ``CHIP_APPROVALS``, ``CHIP_REC``, ``CHIP_TIMER``), ``shapeChanged()`` (the
+    window, the bar or a chip moved or changed size) and ``keyboardChanged(bool)``; the bar's own signals are on
+    ``bar``. The bar's status (an answer, a question, a problem, what Jarvis is doing - as Home's thinking line, without
+    its seconds) shows in the caption line without its technical readouts. The bar's keyboard (SPEC 8.3, P1.6): while
+    idle the window keeps ``WindowDoesNotAcceptFocus``; ``take_keyboard()`` (the HUD key, through the app) or a click in
+    the input remembers the window that has the keyboard, drops the flag on the NATIVE window (QWindow.setFlag; never
     QWidget.setWindowFlag, which recreates and hides it), activates it through the seam (never a synthetic key) and
-    focuses the input - its outline lit; Enter, or Esc in an empty bar, gives the keyboard back
-    (``give_back_keyboard``: the flag back, the remembered window activated again); Esc with text clears it and Esc
-    while a request runs cancels it (CommandBar's own); the owner going to another window, or the HUD hiding, gives it
-    back with nothing activated; ``holds_keyboard()``. Its
+    focuses the input - its outline lit; Enter, or Esc in an empty bar, gives the keyboard back (``give_back_keyboard``:
+    the flag back, the remembered window activated again); Esc with text clears it and Esc while a request runs cancels
+    it (CommandBar's own); the owner going to another window, or the HUD hiding, gives it back with nothing activated;
+    ``holds_keyboard()``. Its
     paint is one cached pixmap (the panel, the hairlines, the orb's dark disc): an orb frame repaints 104 px of it.
     ``flight_pictures(dpr)``: the panel and what is in the bar as pictures of the whole window, and the chips' - the
     switch flies them in and out (alive.WindowFlight), also while the window is hidden.
@@ -169,6 +170,7 @@ CHIP_BRIEFING = "briefing"
 CHIP_APPROVALS = "approvals"
 CHIP_REC = "rec"
 CHIP_KEYS = (CHIP_BRIEFING, CHIP_APPROVALS, CHIP_REC)
+CHIP_TIMER = "timer"                        # P2.4: while a Jarvis timer runs (after the others; P2.5's row follows)
 BRIEFING_READY_TEXT = "Briefing ready"
 BRING_BACK_TEXT = "Bring Jarvis back"
 _AMBER_CHEVRON = "#C9A46A"
@@ -612,6 +614,7 @@ _CHIP_LOOKS = {   # fill, border, hover border, text, dot, chevron
     CHIP_APPROVALS: (holo.TILE_AMBER, holo.alpha(holo.AMBER, 0.60), QColor(holo.AMBER), holo.AMBER_TX, holo.AMBER,
                      _AMBER_CHEVRON),
     CHIP_REC: (holo.RAISED, holo.alpha(holo.ALERT, 0.55), QColor(holo.ALERT), holo.INK_1, holo.ALERT, holo.INK_4),
+    CHIP_TIMER: (holo.TILE, holo.alpha(holo.HOLO, 0.42), QColor(holo.HOLO), holo.INK_1, holo.HOLO, holo.INK_4),
 }
 
 
@@ -654,6 +657,10 @@ class HudChip(QAbstractButton):
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
         return self.sizeHint()
+
+    def hitButton(self, pos: QPoint) -> bool:  # noqa: N802 - Qt override
+        """A chip that is not showing (P2.4's timer chip while no timer runs, a count at 0) never answers a click."""
+        return not self.isHidden() and super().hitButton(pos)
 
     def _chrome(self) -> float:
         """Everything but the words: the padding, the dot and the chevron with their gaps."""
@@ -806,7 +813,7 @@ class HudWindow(_OverlayWindow):
         self.back_button = _BackButton(BRING_BACK_TEXT, self)
         self.back_button.clicked.connect(self.bringBackClicked)
         self.chips: dict[str, HudChip] = {}
-        for key in CHIP_KEYS:
+        for key in (*CHIP_KEYS, CHIP_TIMER):
             chip = HudChip(key, self)
             chip.hide()
             chip.clicked.connect(partial(self.chipClicked.emit, key))
@@ -1023,6 +1030,14 @@ class HudWindow(_OverlayWindow):
             text = rec_text(self._recording) + (f" {hud.MIDDLE_DOT} {self._warning}" if self._warning else "")
             self.chips[CHIP_REC].setText(text)
         self._show_chip(CHIP_REC, bool(self._recording))
+
+    def set_timer(self, text: str = "") -> None:
+        """P2.4: "Timer \u00b7 ends 10:32 AM" while a Jarvis timer runs (desktop.pcctl.chip_text; "" when none).
+        Static: it never ticks."""
+        text = str(text or "")
+        if text:
+            self.chips[CHIP_TIMER].setText(text)
+        self._show_chip(CHIP_TIMER, bool(text))
 
     def chip_texts(self) -> list[str]:
         """The chips shown, left to right."""

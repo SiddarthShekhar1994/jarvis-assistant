@@ -386,8 +386,10 @@ class RouteTests(ExecutorCase):
         self.assertEqual(self.statuses(run), [(dv.FIND_FILES, dx.FOUND, "")])
         self.assertEqual([item.name for item in run.results[0].found], ["LING essay draft.docx",
                                                                         "LING essay draft (old).docx"])
-        run = self.executor.run_route(routes.route("volume 30", context))
-        self.assertEqual(self.statuses(run), [(dv.VOLUME, dx.REFUSED, dv.NOT_YET)])
+        run = self.executor.run_route(routes.route("focus mode for 45 minutes", context))
+        self.assertEqual(self.statuses(run), [(dv.FOCUS_MODE, dx.REFUSED, dv.NOT_YET)])
+        run = self.executor.run_route(routes.route("volume 30", context))          # P2.4: no PC controls given
+        self.assertEqual(self.statuses(run), [(dv.VOLUME, dx.REFUSED, "pc_unavailable")])
         self.assertEqual(len(self.fake.opened), 3)
 
 

@@ -60,7 +60,7 @@ undo_days=, now=, cancel=)`` (``undoable()``, ``undo(seqs=None)``), ``UndoResult
 ``os_reason(exc)``; reason codes ``R_*``,
 ``UNDO_WORDS``, ``STAMP_LABELS``; flags ``FLAG_*``; ``Stopped``, ``ChangedSince``; the raw calls ``raw_move``,
 ``raw_copy``, ``raw_make_folder``, ``raw_remove_folder``, ``raw_write_zip``, ``raw_zone``, ``raw_hash``,
-``raw_free``.
+``raw_free``; ``raw_new_file`` (P2.4: a screenshot's new file).
 """
 
 from __future__ import annotations
@@ -422,6 +422,38 @@ def raw_write_zip(members: Sequence[ZipMember], temp: str, cancel: Callable[[], 
     if zone:
         with open(_long(temp) + _ZONE_STREAM, "xb") as stream:
             stream.write(zone)
+
+
+def raw_new_file(path: str, data: bytes) -> None:
+    """A new file at ``path`` (CREATE_NEW: never over anything) holding ``data`` (P2.4: a screenshot). Until all of
+    it is written and flushed the file is marked for deletion (FileDispositionInfo), so a failure or a crash leaves
+    nothing behind - Windows removes it as its handle closes."""
+    import msvcrt
+
+    _temp_only(path)
+    win = _win32()
+    handle = win.k.CreateFileW(_long(path), _GENERIC_WRITE | _DELETE, 0, None, _CREATE_NEW, _FILE_ATTRIBUTE_NORMAL,
+                               None)
+    if handle is None or handle == win.invalid:
+        raise _last_error()
+
+    def dispose(delete: bool) -> None:
+        info = win.Disposition(delete)
+        if not win.k.SetFileInformationByHandle(handle, _FILE_DISPOSITION_INFO, win.ctypes.byref(info),
+                                                win.ctypes.sizeof(info)):
+            raise _last_error()
+
+    try:
+        dispose(True)
+        descriptor = msvcrt.open_osfhandle(handle, os.O_WRONLY)
+    except BaseException:
+        win.k.CloseHandle(handle)
+        raise
+    with os.fdopen(descriptor, "wb") as out:
+        out.write(bytes(data))
+        out.flush()
+        os.fsync(out.fileno())
+        dispose(False)                                     # all written: keep it
 
 
 def raw_zone(path: str) -> bytes | None:

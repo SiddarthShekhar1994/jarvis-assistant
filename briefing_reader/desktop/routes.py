@@ -19,15 +19,20 @@ whitespace-collapsed text, in the style of ask.routes (an optional leading "jarv
     the web page waits on a card for the owner's click, its host shown (ONE_CLICK, validate.FLAG_BARE_HOST);
   - "find|where is|where's <words>": when the local search (``search``: desktop.index on the desktop thread) finds
     at least one file with every word in its name.
-* Phase 2 (recognised, answered NOT_YET, nothing done): "volume <n>|up|down|mute|unmute", "louder", "quieter",
-  "mute", "unmute", "pause|play|resume|next|skip|previous" (also "... the music" / "next song"), "timer <n>
-  minutes", "remind me in <n> minutes ...", "screenshot", "focus (mode) for <n> minutes".
+* Phase 2, part 4 (the PC's controls, INSTANT, needing no candidates; the route's ``target`` is a desktop.pcctl
+  PcAsk that desktop.pcctl carries out): "volume <n>|up|down|mute|unmute", "louder", "quieter", "mute", "unmute",
+  "turn it|the volume up|down"; "pause|play|resume|next|skip|previous" (also "... the music" / "next song");
+  "(set|start a) timer (for) <n> minutes ..." and "remind me in <n> minutes ..." (the label is the rest); "cancel|
+  stop|end the timer(s)" (cancel_timer: the only way to one before P2.5's chips); "(take a) screenshot" and "...
+  screenshot of the (active) window". Recognised and answered NOT_YET, nothing done, until P2.5: "focus (mode) for
+  <n> minutes".
 
 The app carries a Phase 1 route out on the desktop thread (desktop.service, desktop.executor: re-checked right before
-its OS call) and says what came of it (desktop.executor.run_words). ``route_words(found, address)`` is Jarvis's own
-sentence for a route as understood - what it would do, and that nothing was opened yet (the --desktop-dry-run's
-words) - or that it can't be done yet (the HUD's caption for a later phase's request). Never a name: an app's, a
-site's or a file's name is other people's text; only the known folders' own labels are said.
+its OS call) and says what came of it (desktop.executor.run_words); a PC control likewise (desktop.pcctl through
+desktop.executor). ``route_words(found, address)`` is Jarvis's own sentence for a route as understood - what it
+would do, and that nothing was opened (or changed) yet (the --desktop-dry-run's words) - or that it can't be done
+yet (the HUD's caption for a later phase's request). Never a name: an app's, a site's or a file's name is other
+people's text; only the known folders' own labels are said (and never a timer's label).
 
 ``desktop_request(text)`` is ask.routes' ROUTE_DESKTOP test (clear desktop verbs only): the shapes above, an opening
 verb about something that is not Jarvis's own (mail, calendar, briefing, a screen), or a finding verb with a word that
@@ -36,8 +41,8 @@ says file, folder or place ("find my budget spreadsheet"; "find a time for lunch
 Public API
 ==========
 ``LocalRoute(kind, tier, code, target, hits, words, folder)``; ``route(text, context=None, search=None)``;
-``route_words(found, address="sir")``; ``desktop_request(text)``; ``KNOWN_FOLDER_WORDS``; ``WEB_ENDINGS``;
-``NOT_YET_KINDS``.
+``route_words(found, address="sir")``; ``desktop_request(text)``; ``pc_request(text)`` (the PC control the text
+asks for, or None: pure); ``KNOWN_FOLDER_WORDS``; ``WEB_ENDINGS``; ``NOT_YET_KINDS``.
 
 Pure: nothing is logged here; LocalRoute's repr names its kind only.
 """
@@ -51,7 +56,7 @@ from typing import Any
 
 from ..persona import with_address
 from . import apps as desktop_apps
-from . import guard
+from . import guard, pcctl
 from . import validate as dv
 from .context import DesktopContext, Place
 from .paths import ROOT_LABELS
@@ -65,7 +70,7 @@ KNOWN_FOLDER_WORDS = {label.casefold(): key for key, label in ROOT_LABELS.items(
 WEB_ENDINGS = frozenset({"com", "org", "net", "edu", "gov", "uk", "io", "co", "us", "ca", "au", "nz", "ie", "eu",
                          "de", "fr", "nl", "es", "it", "jp", "in", "info", "app", "dev", "ai", "me", "tv", "ly",
                          "gg", "fm", "news", "online", "site", "tech", "blog"})
-NOT_YET_KINDS = frozenset({dv.VOLUME, dv.MEDIA, dv.TIMER, dv.SCREENSHOT, dv.FOCUS_MODE})
+NOT_YET_KINDS = frozenset({dv.FOCUS_MODE})        # P2.5 brings focus mode
 
 _PREFIX = r"(?:jarvis[,:]?\s+)?(?:please\s+)?"
 _SUFFIX = r"[.!]?"
@@ -84,14 +89,22 @@ _OPEN_HOST_RE = _pattern(r"open\s+(?P<host>(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9]
 _OPEN_SITE_RE = _pattern(r"open\s+(?:the\s+|my\s+)?(?P<site>\S.*)")
 _FIND_RE = _pattern(r"(?:find|where\s+is|where's|where\s+are)\s+(?:my\s+|the\s+)?(?P<words>\S.*?)\??")
 _MINUTES = r"\d{1,3}\s*(?:minutes?|mins?)"
+# P2.4: the PC's controls (desktop.pcctl), each a full match that needs no candidates.
+_PC = (
+    (dv.VOLUME, _pattern(r"volume\s+(?:(?P<level>\d{1,3})\s*%?|(?P<action>up|down|mute|unmute))"
+                         r"|(?P<word>louder|quieter|mute|unmute)"
+                         r"|turn\s+(?:it|the\s+volume)\s+(?P<turn>up|down)")),
+    (dv.MEDIA, _pattern(r"(?P<action>pause|play|resume|next|skip|previous)"
+                        r"(?:\s+(?:the\s+)?(?:music|song|track|video))?"
+                        r"|(?P<which>next|previous)\s+(?:song|track)")),
+    (dv.TIMER, _pattern(r"(?:(?:set|start)\s+a\s+)?timer\s+(?:for\s+)?(?P<minutes>\d{1,3})\s*(?:minutes?|mins?)"
+                        r"(?:\s+(?P<label>\S.*?))?"
+                        r"|remind\s+me\s+in\s+(?P<minutes2>\d{1,3})\s*(?:minutes?|mins?)(?:\s+(?P<label2>\S.*?))?")),
+    (dv.CANCEL_TIMER, _pattern(r"(?:cancel|stop|end)\s+(?:the\s+|my\s+|all\s+(?:the\s+|my\s+)?)?timers?")),
+    (dv.SCREENSHOT, _pattern(r"(?:take\s+a\s+)?(?:screen\s*shot|screen\s+grab)"
+                             r"(?:\s+(?:of\s+)?(?:the\s+|this\s+|my\s+)?(?P<window>(?:active\s+)?window))?")),
+)
 _NOT_YET = (
-    (dv.VOLUME, _pattern(r"volume\s+(?:\d{1,3}\s*%?|up|down|mute|unmute)|louder|quieter|mute|unmute"
-                         r"|turn\s+(?:it|the\s+volume)\s+(?:up|down)")),
-    (dv.MEDIA, _pattern(r"(?:pause|play|resume|next|skip|previous)(?:\s+(?:the\s+)?(?:music|song|track|video))?"
-                        r"|(?:next|previous)\s+(?:song|track)")),
-    (dv.TIMER, _pattern(r"(?:(?:set|start)\s+a\s+)?timer\s+(?:for\s+)?" + _MINUTES + r"(?:\s+\S.*)?"
-                        r"|remind\s+me\s+in\s+" + _MINUTES + r"(?:\s+\S.*)?")),
-    (dv.SCREENSHOT, _pattern(r"(?:take\s+a\s+)?screen\s*shot|(?:take\s+a\s+)?screen\s+grab")),
     (dv.FOCUS_MODE, _pattern(r"focus(?:\s+mode)?\s+for\s+" + _MINUTES)),
 )
 
@@ -131,7 +144,7 @@ def desktop_request(text: Any) -> bool:
     text = " ".join(str(text or "").split())
     if not text:
         return False
-    if any(pattern.fullmatch(text) for _kind, pattern in _NOT_YET):
+    if any(pattern.fullmatch(text) for _kind, pattern in _PC + _NOT_YET):
         return True
     match = _OPENING_RE.fullmatch(text)
     if match:
@@ -170,6 +183,34 @@ class LocalRoute:
         return f"LocalRoute({self.kind}{', ' + self.code if self.code else ''})"
 
 
+def pc_request(text: Any) -> pcctl.PcAsk | None:
+    """The PC control ``text`` asks for (P2.4: volume, music, a timer, cancelling the timers, a screenshot), or None.
+    Pure: the app asks it on the GUI thread too (a screenshot's HUD windows are handed over with the request)."""
+    text = " ".join(str(text or "").split())
+    for kind, pattern in _PC:
+        match = pattern.fullmatch(text)
+        if match is None:
+            continue
+        groups = {key: (value or "") for key, value in match.groupdict().items()}
+        if kind == dv.VOLUME:
+            if groups["level"]:
+                return pcctl.PcAsk(kind, "set", level=int(groups["level"]))
+            word = (groups["action"] or groups["word"] or groups["turn"]).casefold()
+            action = {"louder": "up", "quieter": "down"}.get(word, word)
+            return pcctl.PcAsk(kind, action, step=pcctl.VOLUME_STEP if action in ("up", "down") else None)
+        if kind == dv.MEDIA:
+            word = (groups["action"] or groups["which"]).casefold()
+            return pcctl.PcAsk(kind, {"resume": "play", "skip": "next"}.get(word, word))
+        if kind == dv.TIMER:
+            minutes = int(groups["minutes"] or groups["minutes2"])
+            return pcctl.PcAsk(kind, pcctl.SET, minutes=minutes,
+                               label=pcctl.clean_label(groups["label"] or groups["label2"]))
+        if kind == dv.CANCEL_TIMER:
+            return pcctl.PcAsk(kind, pcctl.CANCEL)
+        return pcctl.PcAsk(kind, pcctl.ACTIVE_WINDOW if groups["window"] else pcctl.SCREEN)
+    return None
+
+
 def _same(a: str, b: str) -> bool:
     return " ".join(a.casefold().split()) == " ".join(b.casefold().split())
 
@@ -199,6 +240,9 @@ def route(text: Any, context: DesktopContext | None = None, *,
     text = " ".join(str(text or "").split())
     if not text:
         return None
+    asked = pc_request(text)
+    if asked is not None:
+        return LocalRoute(asked.kind, dv.INSTANT, target=asked)
     for kind, pattern in _NOT_YET:
         if pattern.fullmatch(text):
             return LocalRoute(kind, code=dv.NOT_YET)
@@ -251,16 +295,35 @@ def route(text: Any, context: DesktopContext | None = None, *,
 # --------------------------------------------------------------------------
 
 UNDERSTOOD = "Understood: {what}. Nothing was opened yet, {sir}."
-NOT_YET_WORDS = {dv.VOLUME: "change the volume", dv.MEDIA: "control music", dv.TIMER: "set timers",
-                 dv.SCREENSHOT: "take screenshots", dv.FOCUS_MODE: "start focus mode"}
+UNDERSTOOD_PC = "Understood: {what}. Nothing was changed yet, {sir}."
+NOT_YET_WORDS = {dv.FOCUS_MODE: "start focus mode"}
 NOT_YET = "I can't {what} yet, {sir} - nothing was changed."
+_PC_WHAT = {(dv.VOLUME, "up"): "turn the volume up", (dv.VOLUME, "down"): "turn the volume down",
+            (dv.VOLUME, "mute"): "mute the sound", (dv.VOLUME, "unmute"): "turn the sound back on",
+            (dv.MEDIA, "play"): "play the music", (dv.MEDIA, "pause"): "pause the music",
+            (dv.MEDIA, "next"): "skip to the next track", (dv.MEDIA, "previous"): "go back a track",
+            (dv.CANCEL_TIMER, pcctl.CANCEL): "cancel your timers",
+            (dv.SCREENSHOT, pcctl.SCREEN): "take a screenshot",
+            (dv.SCREENSHOT, pcctl.ACTIVE_WINDOW): "take a screenshot of the active window"}
+
+
+def _pc_what(asked: pcctl.PcAsk) -> str:
+    if asked.kind == dv.VOLUME and asked.action == "set":
+        return f"set the volume to {asked.level}"
+    if asked.kind == dv.TIMER:
+        minutes = asked.minutes or 0
+        return f"set a timer for {minutes} minute{'' if minutes == 1 else 's'}"
+    return _PC_WHAT.get((asked.kind, asked.action), "that")
 
 
 def route_words(found: LocalRoute, address: str = "sir") -> str:
-    """Jarvis's sentence for a local route: what was understood and that nothing was opened yet, or that it can't be
-    done yet. Only a known folder's own label is named; never an app's, a site's or a file's name."""
+    """Jarvis's sentence for a local route: what was understood and that nothing was opened (or changed) yet, or
+    that it can't be done yet. Only a known folder's own label is named; never an app's, a site's or a file's name,
+    never a timer's label."""
     if found.code == dv.NOT_YET:
         return with_address(NOT_YET.format(what=NOT_YET_WORDS.get(found.kind, "do that"), sir="{sir}"), address)
+    if isinstance(found.target, pcctl.PcAsk):
+        return with_address(UNDERSTOOD_PC.format(what=_pc_what(found.target), sir="{sir}"), address)
     if found.kind == dv.OPEN_FOLDER:
         what = f"open your {ROOT_LABELS.get(found.folder, 'folder')} folder"
     elif found.kind == dv.OPEN_APP:

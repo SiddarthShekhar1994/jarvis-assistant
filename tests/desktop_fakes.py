@@ -28,6 +28,8 @@ cancel and not-empty behaviour, inside the temporary folder only - the raw calls
 the system's temporary folder while the tests run); ``op_errors[method]`` raises instead (nothing done), ``volumes``
 reports another volume serial for a pretend folder, ``free`` sets the free space. ``FakeRecycleBin`` is fileops'
 Recycle Bin seam: it moves the item into a pretend bin inside ``base``.
+P2.4: ``save_png`` writes a screenshot's new file with fileops' own raw call (CREATE_NEW) on the pretend disk, and
+``FakePc`` is desktop.pcctl's seam: a pretend speaker, player (or none: winrt missing) and screen, and a chime counter.
 """
 
 from __future__ import annotations
@@ -344,6 +346,98 @@ class FakeDesktopBackend:
     def free_space(self, path: str) -> int:
         self._file_op("free_space", path)
         return self.free if self.free is not None else fileops.raw_free(self.real(path))
+
+    def save_png(self, path: str, data: bytes) -> None:
+        """P2.4: a screenshot's new file, through desktop.fileops' own raw call (CREATE_NEW) on the pretend disk."""
+        self._file_op("save_png", path)
+        if not path.casefold().endswith(".png") or bytes(data[:8]) != dbk.PNG_SIGNATURE:
+            raise ValueError("refused by the last guard")
+        fileops.raw_new_file(self.real(path), data)
+
+
+class FakePc:
+    """desktop.pcctl's seam for the tests (P2.4): a pretend speaker (``level``, ``muted``; ``device`` False: none), a
+    pretend player (``media``: its state, or None - winrt missing: UNKNOWN, so the media keys are pressed; ``takes``:
+    whether it takes a play or a pause), a pretend screen (``capture`` returns a tiny real PNG; ``no_window`` /
+    ``hud_refused`` raise as the real one would) and a chime counter. Every call is kept in ``calls`` (with the HUD
+    windows a capture was given in ``captures``) and its thread in ``threads``; ``errors[method]`` raises instead.
+    Nothing reaches the real PC."""
+
+    def __init__(self, *, level: int = 50, muted: bool = False, media: str | None = "paused") -> None:
+        self.level, self.muted, self.media = level, muted, media
+        self.device = True
+        self.takes = True
+        self.no_window = False
+        self.hud_refused = False
+        self.calls: list[tuple[str, Any]] = []
+        self.captures: list[tuple[str, tuple[int, ...]]] = []
+        self.keys: list[str] = []
+        self.chimes = 0
+        self.threads: list[str] = []
+        self.errors: dict[str, BaseException] = {}
+
+    def _call(self, method: str, argument: Any = None) -> None:
+        self.calls.append((method, argument))
+        self.threads.append(threading.current_thread().name)
+        error = self.errors.get(method)
+        if error is not None:
+            raise error
+
+    def methods(self) -> list[str]:
+        return [method for method, _argument in self.calls]
+
+    def audio(self) -> Any:
+        from briefing_reader.desktop import pcctl
+
+        self._call("audio")
+        if not self.device:
+            raise pcctl.NoDevice(0, "no default output")
+        return pcctl.AudioState(self.level, self.muted)
+
+    def set_level(self, level: int) -> None:
+        self._call("set_level", level)
+        self.level = level
+
+    def set_mute(self, muted: bool) -> None:
+        self._call("set_mute", muted)
+        self.muted = muted
+
+    def media_state(self) -> str:
+        from briefing_reader.desktop import pcctl
+
+        self._call("media_state")
+        return pcctl.UNKNOWN if self.media is None else self.media
+
+    def media_control(self, action: str) -> bool:
+        from briefing_reader.desktop import pcctl
+
+        self._call("media_control", action)
+        if self.media is None:
+            raise pcctl.MediaUnavailable("winrt is not installed")
+        if not self.takes or self.media == pcctl.NO_SESSION:
+            return False
+        if action in ("play", "pause"):
+            self.media = pcctl.PLAYING if action == "play" else pcctl.PAUSED
+        return True
+
+    def media_key(self, action: str) -> None:
+        self._call("media_key", action)
+        self.keys.append(action)
+
+    def capture(self, mode: str, hud: Any = ()) -> bytes:
+        from briefing_reader.desktop import pcctl
+
+        self._call("capture", mode)
+        self.captures.append((mode, tuple(hud)))
+        if self.no_window:
+            raise pcctl.NoWindow(0, "no active window")
+        if self.hud_refused:
+            raise pcctl.HudShows(0, "a HUD window can't be left out of capture")
+        return pcctl.png_bytes(2, 2, bytes([10, 20, 30, 255]) * 4)
+
+    def chime(self) -> None:
+        self._call("chime")
+        self.chimes += 1
 
 
 class FakeRecycleBin:

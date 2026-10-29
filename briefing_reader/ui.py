@@ -3725,6 +3725,8 @@ STATE_QUITTING = "quitting"
 TRAY_TOOLTIP = "Jarvis"
 TOAST_VIEW = "view"                    # the toast's View: the Briefing screen
 TOAST_PREP = "prep"                    # the toast's Prepare brief: Home with the prep offer's tile
+TOAST_TIMER = "timer"                  # P2.4: a Jarvis timer ended - its OK only puts the toast away
+TOAST_TIMER_TEXT = "OK"
 VIEW_BRIEFING_TEXT = "View briefing"   # the announcement's link in the conversation
 VIEW_BRIEFING_LINK = "view-briefing"
 ASK_CANCELLED_ENTRY = "Cancelled; nothing was proposed."   # the conversation's entry for a cancelled Ask
@@ -5068,7 +5070,7 @@ class AppController(QObject):
     def _post_toast(self, line: str, action: str, key: str) -> None:
         """Jarvis's own toast (never a Windows notification, never the focus), only where the app already
         surfaces something while the owner is elsewhere: the briefing's announcement, a prep offer that
-        flashes the taskbar button."""
+        flashes the taskbar button, a Jarvis timer's end (P2.4: its OK only puts the toast away)."""
         if self.state == STATE_QUITTING or self._shut_down or not line:
             return
         try:
@@ -5079,8 +5081,8 @@ class AppController(QObject):
     def _on_toast_action(self, key: str) -> None:
         """The toast's ONE action (the owner's click, so the focus may move): View opens the Briefing screen,
         Prepare brief opens Home with the prep offer's tile (its own click prepares anything). Nothing runs."""
-        if self.state != STATE_READING or self._shut_down:
-            return
+        if self.state != STATE_READING or self._shut_down or key == TOAST_TIMER:
+            return                                     # a timer's OK: the toast went; nothing else moves
         reading = self.window.reading
         if self._hud_active():
             # On the desktop HUD: the click brings the window back on the toast's screen (leave_hud comes forward on
@@ -8954,6 +8956,7 @@ class AppController(QObject):
         controller.plannerNeeded.connect(self._on_desktop_planner)
         controller.consentNeeded.connect(self._show_desktop_consent)
         controller.consentChanged.connect(lambda _on: self._sync_desktop_settings())
+        controller.timerEnded.connect(lambda line: self._post_toast(line, TOAST_TIMER_TEXT, TOAST_TIMER))
         meetings = getattr(self, "meetings", None)
         if meetings is not None:
             meetings.pillCreated.connect(controller.set_rec_pill)
