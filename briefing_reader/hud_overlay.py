@@ -128,7 +128,7 @@ from PySide6.QtGui import (
     QRegion,
     QScreen,
 )
-from PySide6.QtWidgets import QAbstractButton, QSizePolicy, QWidget
+from PySide6.QtWidgets import QAbstractButton, QApplication, QSizePolicy, QWidget
 
 from . import alive, holo, hud, offer_view, settings_view
 from . import orb as orb_mod
@@ -633,13 +633,15 @@ class HudChip(QAbstractButton):
     """A chip under the HUD bar (Switch.dc.html .hchip): 36 high, opaque, a dot, the words and a chevron. Static (no
     ping, no blinking dot: only the orb loops; words that did not change repaint nothing); REC's figures are tabular,
     so its width holds while the seconds tick (the window's REC readout does the same). NoFocus, a click emits
-    ``clicked``."""
+    ``clicked`` - but a ``read_only`` one (p2r-8: the timer's "Timer - ends 10:32 AM") is a plain label: the arrow
+    cursor, no hover, no chevron, never a click."""
 
     PAD = 12
 
-    def __init__(self, key: str, parent: QWidget | None = None) -> None:
+    def __init__(self, key: str, parent: QWidget | None = None, *, read_only: bool = False) -> None:
         super().__init__(parent)
         self._key = key if key in _CHIP_LOOKS else CHIP_BRIEFING
+        self._read_only = bool(read_only)
         self._hover = False
         self._font = hud.body_font(13, 500)
         if self._key == CHIP_REC:
@@ -647,12 +649,15 @@ class HudChip(QAbstractButton):
                 self._font.setFeature(QFont.Tag("tnum"), 1)      # as holo.font does for its tabular roles
             except (AttributeError, TypeError, ValueError):       # Qt before 6.7: proportional figures
                 pass
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setCursor(Qt.CursorShape.ArrowCursor if self._read_only else Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
     def key(self) -> str:
         return self._key
+
+    def read_only(self) -> bool:
+        return self._read_only
 
     def setText(self, text: str) -> None:  # noqa: N802 - Qt override
         if text == self.text():
@@ -670,12 +675,13 @@ class HudChip(QAbstractButton):
         return self.sizeHint()
 
     def hitButton(self, pos: QPoint) -> bool:  # noqa: N802 - Qt override
-        """A chip that is not showing (P2.4's timer chip while no timer runs, a count at 0) never answers a click."""
-        return not self.isHidden() and super().hitButton(pos)
+        """A chip that is not showing (a count at 0) never answers a click, nor a read-only one."""
+        return not self._read_only and not self.isHidden() and super().hitButton(pos)
 
     def _chrome(self) -> float:
-        """Everything but the words: the padding, the dot and the chevron with their gaps."""
-        return self.PAD + 7 + 8 + 8 + 14 + self.PAD
+        """Everything but the words: the padding, the dot and the chevron with their gaps (a read-only chip has no
+        chevron)."""
+        return self.PAD + 7 + 8 + (0 if self._read_only else 8 + 14) + self.PAD
 
     def shown_text(self) -> str:
         """The words as painted: cut with an ellipsis only when the chip is narrower than its words."""
@@ -684,13 +690,18 @@ class HudChip(QAbstractButton):
 
     def enterEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().enterEvent(event)
-        self._hover = True
-        self.update()
+        if not self._read_only:
+            self._hover = True
+            self.update()
 
     def leaveEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().leaveEvent(event)
-        self._hover = False
-        self.update()
+        if self._hover:
+            self._hover = False
+            self.update()
+
+    def hovered(self) -> bool:
+        return self._hover
 
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         fill, border, hover, ink, dot, chevron = _CHIP_LOOKS[self._key]
@@ -715,8 +726,9 @@ class HudChip(QAbstractButton):
             width = QFontMetricsF(self._font).horizontalAdvance(text)
             painter.drawText(QRectF(x, 0, width + 2, self.height()),
                              int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), text)
-            holo.paint_icon(painter, QRectF(x + width + 8, rect.center().y() - 7, 14, 14), "chevron",
-                            QColor(chevron), stroke=2.0)
+            if not self._read_only:
+                holo.paint_icon(painter, QRectF(x + width + 8, rect.center().y() - 7, 14, 14), "chevron",
+                                QColor(chevron), stroke=2.0)
         finally:
             painter.end()
 
@@ -994,6 +1006,7 @@ class HudWindow(_OverlayWindow):
     instantUndo = Signal(str)          # P2.5: an instant chip's Undo (its key, INSTANT_KEYS)
     undoAllClicked = Signal()          # P2.5: Undo all
     dndClicked = Signal()              # P2.5: "Do Not Disturb - Turn on" (Windows' settings page, the owner's switch)
+    tabToCard = Signal()               # p2r-10: Tab in the bar while it has the keyboard: into the newest card
 
     def __init__(self, *, hud_key: str = "", native: HudNative | None = None, hide_from_capture: bool = True) -> None:
         super().__init__(HUD_FLAGS, native, hide_from_capture)
@@ -1017,6 +1030,7 @@ class HudWindow(_OverlayWindow):
         self._holding = False                               # the bar was given the keyboard and has not given it back
         self._held_active = False                           # ... and this window has been the active one since
         self._remembered = 0                                # the window that had the keyboard before (0: none known)
+        self._lent = False                                  # p2r-10: lent to a card for the owner's Tab (kept held)
         self.orb = orb_mod.OrbWidget(ORB_PX, self)          # no ground: the window is translucent
         self.keycaps = _KeyCaps(hud_key, self)
         self.bar = hud.CommandBar(self)
@@ -1028,9 +1042,10 @@ class HudWindow(_OverlayWindow):
         self.back_button.clicked.connect(self.bringBackClicked)
         self.chips: dict[str, HudChip] = {}
         for key in (*CHIP_KEYS, CHIP_TIMER):
-            chip = HudChip(key, self)
+            chip = HudChip(key, self, read_only=key == CHIP_TIMER)     # p2r-8: the timer's chip only says when
             chip.hide()
-            chip.clicked.connect(partial(self.chipClicked.emit, key))
+            if not chip.read_only():
+                chip.clicked.connect(partial(self.chipClicked.emit, key))
             self.chips[key] = chip
         self.chips[CHIP_BRIEFING].setText(BRIEFING_READY_TEXT)
         # P2.5: the instant row under the chips - one chip per kind of change done at once (each with its Undo), Do
@@ -1390,13 +1405,15 @@ class HudWindow(_OverlayWindow):
         if not self._holding:
             self._remembered = int(self._native_call("foreground", 0) or 0)
             self._holding, self._held_active = True, self.isActiveWindow()
+        self._lent = False
         handle.setFlag(Qt.WindowType.WindowDoesNotAcceptFocus, False)
         self._native_call("activate", False, int(self.winId()))
         self.activateWindow()
         self.bar.input.setFocus(Qt.FocusReason.MouseFocusReason if reason == "click"
                                 else Qt.FocusReason.ShortcutFocusReason)
         self._update_lit()
-        logger.info("HUD: the bar takes the keyboard (%s)", "a click" if reason == "click" else "the HUD key")
+        logger.info("HUD: the bar takes the keyboard (%s)",
+                    {"click": "a click", "card": "back from a card"}.get(reason, "the HUD key"))
         self.keyboardChanged.emit(True)
         return True
 
@@ -1408,7 +1425,7 @@ class HudWindow(_OverlayWindow):
         if not self._holding:
             return False
         remembered, self._remembered = self._remembered, 0
-        self._holding = self._held_active = False
+        self._holding = self._held_active = self._lent = False
         # Cleared even before it has the focus (P2.5): an activation still on its way would otherwise hand the input
         # the focus after the keyboard was given back (QWidget.clearFocus also drops it as the window's focus child).
         self.bar.input.clearFocus()
@@ -1426,6 +1443,18 @@ class HudWindow(_OverlayWindow):
         """The bar has the keyboard: it was given it and has not given it back, and this window is the active one (the
         owner's keys reach the bar)."""
         return self._holding and self.isActiveWindow()
+
+    def lend_keyboard(self) -> bool:
+        """p2r-10: the owner's Tab hands the keyboard to a card for a while - the bar keeps holding it (the window
+        that had it before is still the one it goes back to after Enter or Esc), and this window losing activation to
+        that card gives nothing back. False when the bar does not hold it."""
+        if not self._holding:
+            return False
+        self._lent = True
+        return True
+
+    def lent(self) -> bool:
+        return self._lent
 
     def is_lit(self) -> bool:
         """The bar's outline is lit: it was given the keyboard."""
@@ -1449,10 +1478,17 @@ class HudWindow(_OverlayWindow):
         self.give_back_keyboard(True, "Esc")
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt override
-        """A click in the bar's input (or beside its text) takes the keyboard."""
+        """A click in the bar's input (or beside its text) takes the keyboard; Tab there while it has it moves into
+        the newest card (p2r-10, SPEC 8.1: ``tabToCard`` - never on a card's show, only on the owner's Tab)."""
         if (event.type() == QEvent.Type.MouseButtonPress and (watched is self.bar.input or watched is self.bar.field)
                 and not self.holds_keyboard()):
             self.take_keyboard("click")
+        if (event.type() == QEvent.Type.KeyPress and watched is self.bar.input and event.key() == Qt.Key.Key_Tab
+                and not event.modifiers() & (Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier
+                                             | Qt.KeyboardModifier.AltModifier)
+                and self._holding):
+            self.tabToCard.emit()
+            return True                                     # the bar's own focus never moves on Tab
         return super().eventFilter(watched, event)
 
     def changeEvent(self, event: QEvent) -> None:  # noqa: N802 - Qt override
@@ -1461,7 +1497,7 @@ class HudWindow(_OverlayWindow):
         if event.type() == QEvent.Type.ActivationChange and self._holding:
             if self.isActiveWindow():
                 self._held_active = True
-            elif self._held_active:
+            elif self._held_active and not self._lent:      # lent to a card (p2r-10): it comes back from there
                 self.give_back_keyboard(False, "the owner went to another window")
 
     def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
@@ -1629,11 +1665,20 @@ class CardContent:
     note_first: bool = False           # the note right under the meta (what happened), before the buttons
 
 
+# p2r-10: why a card gave the keyboard back (ResultCard.keyboardReturned).
+KEYS_ESC, KEYS_BACKTAB, KEYS_AWAY, KEYS_HID = "esc", "backtab", "away", "hid"
+
+
 class ResultCard(_OverlayWindow):
-    """A result beside the thing it is about; see the module docstring."""
+    """A result beside the thing it is about; see the module docstring. SPEC 8.1's keyboard path (p2r-10): only after
+    the owner's Tab in the HUD's bar (``take_keyboard``) the window accepts the focus for that time, its buttons (and a
+    tidy card's ticks) take Tab - Tab goes on between them, Space or Enter clicks the focused one - and Esc or
+    Shift+Tab gives the keyboard back (``give_back_keyboard``: ``keyboardReturned``, also when the owner goes to another
+    window or the card goes); then it never takes the focus again by itself."""
 
     buttonClicked = Signal(str)
     shapeChanged = Signal()            # it moved, changed size or changed tone (its shadow follows)
+    keyboardReturned = Signal(str)     # p2r-10: it gave the keyboard back - KEYS_ESC, KEYS_BACKTAB, KEYS_AWAY, KEYS_HID
 
     TITLE_LINES = 2
     META_LINES = 2
@@ -1655,7 +1700,99 @@ class ResultCard(_OverlayWindow):
         self._kicker_font = hud.mono_font(10, 500, 0.22)           # DesktopB .kick
         self._tag_font = hud.mono_font(10, 500, 0.2)
         self._rows: dict[str, QRectF] = {}
+        self._keyboard = False                                     # p2r-10: it has the keyboard (the owner's Tab)
+        self._keyboard_active = False                              # ... and has been the active window since
         self.setFixedSize(CARD_WIDTH, 120)
+
+    # ---- SPEC 8.1's keyboard path (p2r-10) ----------------------------------------------------------------
+
+    def keyboard_controls(self) -> list[QAbstractButton]:
+        """What Tab goes between while it has the keyboard: its shown, enabled buttons, in their order."""
+        return [button for button in [*self._buttons.values(), *self._row_buttons.values()]
+                if button.isVisibleTo(self) and button.isEnabled()]
+
+    def has_keyboard(self) -> bool:
+        return self._keyboard
+
+    def take_keyboard(self) -> bool:
+        """The owner's Tab in the HUD's bar: this window accepts the focus for now (QWindow.setFlag on its native
+        window, as the bar does), is activated through the native seam, and its first control takes the focus. False
+        (nothing changed) when it is not showing or has nothing to press."""
+        handle = self.windowHandle()
+        if handle is None or not self.isVisible() or not self.keyboard_controls():
+            return False
+        self._keyboard, self._keyboard_active = True, self.isActiveWindow()
+        handle.setFlag(Qt.WindowType.WindowDoesNotAcceptFocus, False)
+        self._keyboard_refresh(focus=True)
+        try:
+            self._native.activate(int(self.winId()))
+        except Exception as exc:  # noqa: BLE001 - Qt's own activation below
+            logger.debug("HUD: the card could not be activated natively (%s)", type(exc).__name__)
+        self.activateWindow()
+        self._keyboard_refresh(focus=True)
+        return True
+
+    def give_back_keyboard(self, why: str = KEYS_ESC) -> bool:
+        """The keyboard goes back (``why``: Esc, Shift+Tab, the owner went to another window, the card went): its
+        controls NoFocus again and WindowDoesNotAcceptFocus back on; ``keyboardReturned(why)``. False when it did not
+        have it."""
+        if not self._keyboard:
+            return False
+        self._keyboard = self._keyboard_active = False
+        for control in self.findChildren(QAbstractButton):
+            control.removeEventFilter(self)
+            control.clearFocus()
+            control.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        handle = self.windowHandle()
+        if handle is not None:
+            handle.setFlag(Qt.WindowType.WindowDoesNotAcceptFocus, True)
+        logger.info("HUD: a card gave the keyboard back (%s)", why)
+        self.keyboardReturned.emit(why)
+        return True
+
+    def _keyboard_refresh(self, *, focus: bool = False) -> None:
+        """While it has the keyboard: its controls (made anew as its content changed too) take Tab and their keys are
+        heard; the first takes the focus when ``focus`` or when the focused one went."""
+        if not self._keyboard:
+            return
+        controls = self.keyboard_controls()
+        for control in controls:
+            control.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+            control.removeEventFilter(self)
+            control.installEventFilter(self)
+        current = QApplication.focusWidget()
+        if controls and (focus or current is None or current not in controls):
+            controls[0].setFocus(Qt.FocusReason.TabFocusReason)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt override
+        """Its controls' keys while it has the keyboard: Esc and Shift+Tab give it back; Enter on a tick toggles it
+        (a button's own Enter and Space click it)."""
+        if self._keyboard and event.type() == QEvent.Type.KeyPress and isinstance(watched, QAbstractButton):
+            key = event.key()
+            if key == Qt.Key.Key_Escape:
+                self.give_back_keyboard(KEYS_ESC)
+                return True
+            if key == Qt.Key.Key_Backtab or (key == Qt.Key.Key_Tab
+                                             and event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+                self.give_back_keyboard(KEYS_BACKTAB)
+                return True
+            if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and watched.isCheckable() and watched.isEnabled():
+                watched.click()
+                return True
+        return super().eventFilter(watched, event)
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802 - Qt override
+        """The owner went to another window while it had the keyboard: it gives it back."""
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.ActivationChange and self._keyboard:
+            if self.isActiveWindow():
+                self._keyboard_active = True
+            elif self._keyboard_active:
+                self.give_back_keyboard(KEYS_AWAY)
+
+    def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        self.give_back_keyboard(KEYS_HID)
+        super().hideEvent(event)
 
     def content(self) -> CardContent:
         return self._content
@@ -1681,6 +1818,7 @@ class ResultCard(_OverlayWindow):
         self.setAccessibleName(content.title)
         self.setAccessibleDescription(" ".join(part for part in (content.kicker, content.meta, content.note) if part))
         self._relayout()
+        self._keyboard_refresh()                        # p2r-10: while it has the keyboard, the new ones take Tab
         self.shapeChanged.emit()                        # its tone (and its size) may have changed
 
     def _new_button(self, key: str, text: str, variant: str, size: int, name: str) -> holo.HoloButton:
@@ -2053,6 +2191,7 @@ class DesktopCard(ResultCard):
         self._desk = DeskContent("", "")
         self._ticks: dict[int, _TickBox] = {}
         self._desk_buttons: dict[str, holo.HoloButton] = {}
+        self._button_kinds: list[tuple[str, int]] = []      # (key, size) of the buttons now: kept while they stay
         self._name_font = hud.body_font(12)            # DesktopB .prow: 12.5 px
         self._to_font = hud.body_font(12)
         self._flag_font = hud.mono_font(9, 500, 0.12)
@@ -2072,6 +2211,12 @@ class DesktopCard(ResultCard):
 
     def row_buttons(self) -> dict[str, holo.HoloButton]:
         return {}
+
+    def keyboard_controls(self) -> list[QAbstractButton]:
+        """p2r-10: its ticks (by row) then its buttons and the Undo link - the shown, enabled ones."""
+        ticks = [self._ticks[number] for number in sorted(self._ticks)]
+        return [control for control in [*ticks, *self._desk_buttons.values()]
+                if control.isVisibleTo(self) and control.isEnabled()]
 
     def set_desk(self, content: DeskContent) -> None:
         self._desk = content
@@ -2095,21 +2240,35 @@ class DesktopCard(ResultCard):
                 box.setChecked(row.ticked)
                 box.blockSignals(False)
                 box.setAccessibleName(("Leave out " if row.ticked else "Include ") + row.name)
-        for button in self._desk_buttons.values():
-            button.hide()
-            button.deleteLater()
-        self._desk_buttons = {}
-        for spec in content.buttons:
-            button = self._new_button(spec.key, spec.text, spec.variant, holo.SIZE_MD, spec.text)
-            button.setEnabled(spec.enabled)
-            self._desk_buttons[spec.key] = button
+        wanted_buttons = [(spec.key, spec.text, spec.variant, holo.SIZE_MD, spec.enabled) for spec in content.buttons]
         if content.link is not None:
-            key, words = content.link
-            self._desk_buttons[key] = self._new_button(key, words, holo.LINK_CYAN, holo.SIZE_SM, words)
+            wanted_buttons.append((content.link[0], content.link[1], holo.LINK_CYAN, holo.SIZE_SM, True))
+        if [(key, size) for key, _text, _variant, size, _on in wanted_buttons] == self._button_kinds:
+            # The same buttons (a row ended while the batch runs): kept, changed in place - a click pressed on Stop
+            # before the refresh is still heard at its release (p2r-13).
+            for key, text, variant, _size, enabled in wanted_buttons:
+                button = self._desk_buttons[key]
+                if button.text() != text:
+                    button.setText(text)
+                    button.setAccessibleName(text)
+                    button.updateGeometry()
+                button.set_variant(variant)
+                button.setEnabled(enabled)
+        else:
+            for button in self._desk_buttons.values():
+                button.hide()
+                button.deleteLater()
+            self._desk_buttons = {}
+            for key, text, variant, size, enabled in wanted_buttons:
+                button = self._new_button(key, text, variant, size, text)
+                button.setEnabled(enabled)
+                self._desk_buttons[key] = button
+            self._button_kinds = [(key, size) for key, _text, _variant, size, _on in wanted_buttons]
         self.setAccessibleName(content.title)
         self.setAccessibleDescription(" ".join(part for part in (content.kicker, content.note, content.link_note)
                                                if part))
         self._relayout()
+        self._keyboard_refresh()                        # p2r-10: while it has the keyboard, new controls take Tab
         self.shapeChanged.emit()
 
     def _on_tick(self, number: int, checked: bool) -> None:

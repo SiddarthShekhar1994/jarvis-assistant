@@ -4,8 +4,9 @@ at a time and in the order they were given - never on the calendar's _ActionWork
 ``DesktopWorker.submit(fn, *args)`` queues a job and returns a concurrent.futures.Future for its result: the app's
 side (desktop_ui) turns a Future's end into a Qt signal for the GUI thread; the Ask thread, which carries a planner's
 plan out through the desktop (ask.desktop_mode.DesktopJob.carry_out), waits on its Future. The thread starts with the
-first job (never at start-up) and is a daemon, like the "ask" thread. ``stop()`` lets the job running finish and
-cancels every job still queued; nothing is accepted after it.
+first job (at start-up only for the journal's housekeeping, once the owner has turned the desktop on) and is a daemon,
+like the "ask" thread; between jobs it waits on its queue (nothing runs at idle). ``stop()`` lets the job running
+finish and cancels every job still queued; nothing is accepted after it.
 
 Logs carry exception types only.
 

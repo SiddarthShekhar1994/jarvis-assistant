@@ -40,14 +40,16 @@ codes ``UNAVAILABLE``, ``TURNED_OFF``, ``STOPPED_FIRST``; ``FLAG_WORDS``; ``Tidy
 ``counts()``), ``make_card(plan, scope, at=)``; ``RowEnd(number, state, reason, seq)``; ``CardOutcome``,
 ``UndoOutcome``; ``TidyState(card)`` (``toggle``, ``ticked_numbers``, ``waiting``, ``busy``, ``start``, ``started``,
 ``row_ended``, ``stop_asked``, ``finish``, ``undo_seqs``, ``undoable``, ``start_undo``, ``finish_undo``);
-``RowText``, ``TidyText``, ``tidy_text(state, hour24=)``; ``said(state, address=)``; ``place_words(path, scope)``.
+``RowText``, ``TidyText``, ``tidy_text(state, hour24=, undo_days=)``; ``said(state, address=)``;
+``place_words(path, scope)``; ``recalled(run_id, items, scope, undoable)`` (p2r-3: a past run's stamped card, rebuilt
+from its journal for the "undo" route); ``UNDO_DAYS_NOTE``.
 """
 
 from __future__ import annotations
 
 import ntpath
 from collections import Counter
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -122,6 +124,9 @@ LEFTOVER_UNDO_NOTE = "Puts the part-made copy in the Recycle Bin."
 LEFTOVER_WORDS = "A part-made copy was left - Undo puts it in the Recycle Bin."
 LEFTOVER_BINNED = "Its part-made copy is in the Recycle Bin."
 UNDO_EXPIRED_NOTE = "Too long ago to undo now."
+# p2r-3 (D9): the stamp says how long its Undo stays and how to bring the card back after a new request or a restart.
+UNDO_DAYS_NOTE = 'Undo stays for {days} - type "undo" to bring this back.'
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 NOT_NOW_TEXT = "Not now"
 STOP_TEXT = "Stop"
 NOTHING_TICKED = "Nothing ticked"
@@ -368,6 +373,7 @@ class TidyState:
         self.undone_at: datetime | None = None
         self.last_code = ""                  # a job that ran nothing and gave the card back (stopped first, ...)
         self.undo_expired = False            # its stamp is older than [desktop] undo_days: Undo is no longer offered
+        self.recalled = False                # p2r-3: rebuilt from its journal by the "undo" route (``recalled``)
 
     def __repr__(self) -> str:
         return f"TidyState({self.card.run_id}, {self.stage}, ticked={len(self._ticked)}, ended={self.ended})"
@@ -439,6 +445,16 @@ class TidyState:
             self.ends[end.number] = end
         self.ended = len(outcome.rows)
         self.stage = DONE
+
+    def expire(self, code: str, at: datetime) -> bool:
+        """p2r-15: its plan may no longer run (cardplan.CARD_EXPIRED; nothing ran): out of WAITING into REFUSED - the
+        expired stamp's own words, no commit button, not amber, no longer counted as a decision that waits."""
+        if self.stage != WAITING:
+            return False
+        self.outcome = CardOutcome(self.card.run_id, code or cp.CARD_EXPIRED)
+        self.at = at
+        self.stage = REFUSED
+        return True
 
     def done_numbers(self) -> tuple[int, ...]:
         return tuple(number for number in self.chosen
@@ -586,7 +602,8 @@ def _row_texts(state: TidyState) -> tuple[RowText, ...]:
                 texts.append(RowText(row.number, row.name, row.to, flags, MARK_FAIL, True, False, LEFTOVER_BINNED,
                                      MINT))                  # its part-made copy binned: the row itself was not done
             elif undo.state == UNDONE_STATE:
-                texts.append(RowText(row.number, row.name, row.to, flags, MARK_DONE, True, False, "Put back.", MINT))
+                words = fo.BACK_ALREADY_WORDS if undo.reason == fo.R_BACK_ALREADY else "Put back."
+                texts.append(RowText(row.number, row.name, row.to, flags, MARK_DONE, True, False, words, MINT))
             else:
                 words = fo.UNDO_WORDS.get(undo.reason, fo.DEFAULT_UNDO_WORDS)
                 texts.append(RowText(row.number, row.name, row.to, flags, MARK_FAIL, True, False, words, CORAL))
@@ -604,8 +621,19 @@ def _row_texts(state: TidyState) -> tuple[RowText, ...]:
     return tuple(texts)
 
 
-def tidy_text(state: TidyState, hour24: bool = False) -> TidyText:
-    """The card's copy and looks in its state (see the module docstring)."""
+def _when(state: TidyState, at: datetime | None, hour24: bool) -> str:
+    """The stamp's time (" <middle dot> 10:22 AM"); a recalled card's from another day has its date too ("29 Oct")."""
+    if at is None:
+        return ""
+    clock = clock_text(at, hour24)
+    if state.recalled and at.date() != datetime.now().date():
+        clock = f"{at.day} {_MONTHS[at.month - 1]}, {clock}"
+    return f"{SEP}{clock}"
+
+
+def tidy_text(state: TidyState, hour24: bool = False, undo_days: int | None = None) -> TidyText:
+    """The card's copy and looks in its state (see the module docstring); ``undo_days``: [desktop] undo_days - the
+    stamp with Undo says how long it stays and how to bring it back (UNDO_DAYS_NOTE)."""
     card = state.card
     rows = _row_texts(state)
     kind = _ticked_kind(state, state.chosen) if state.chosen else _kind_of(row.kind for row in card.ok_rows())
@@ -627,7 +655,7 @@ def tidy_text(state: TidyState, hour24: bool = False) -> TidyText:
             + " " + (NOTHING_DELETED_FOR_GOOD if binning else NOTHING_DELETED)
         buttons = ((STOP_KEY, STOP_TEXT, "quiet", True, stage == RUNNING),)
         return TidyText(kicker, card.title, CYAN, rows, note, CYAN, buttons)
-    when = f"{SEP}{clock_text(state.at, hour24)}" if state.at is not None else ""
+    when = _when(state, state.at, hour24)
     if stage == REFUSED:
         code = state.outcome.code if state.outcome is not None else UNAVAILABLE
         note = REFUSED_NOTES.get(code, REFUSED_NOTES[UNAVAILABLE]).format(past=_PAST[kind])
@@ -656,7 +684,10 @@ def tidy_text(state: TidyState, hour24: bool = False) -> TidyText:
                 link_note = LEFTOVER_UNDO_NOTE
             else:
                 link_note = UNDO_NOTE_KEPT if kept or state.leftover_numbers() else UNDO_NOTE
-            return TidyText(kicker, card.title, tone, rows, "", MINT, (), (UNDO_KEY, UNDO_TEXT), link_note)
+            days = "" if undo_days is None else _count(max(1, int(undo_days)), "day", "days")
+            note = UNDO_DAYS_NOTE.format(days=days) if days else ""
+            return TidyText(kicker, card.title, tone, rows, note, CYAN if note else MINT, (), (UNDO_KEY, UNDO_TEXT),
+                            link_note)
         if state.undo_expired:
             return TidyText(kicker, card.title, tone, rows, UNDO_EXPIRED_NOTE, CYAN)
         note = "" if done else f"Nothing was {_PAST[kind]}."
@@ -665,7 +696,7 @@ def tidy_text(state: TidyState, hour24: bool = False) -> TidyText:
     if undo is None or undo.code:
         return TidyText(f"NOT PUT BACK{when}", card.title, CORAL, rows,
                         "Jarvis couldn't put anything back right now - nothing was changed.", CORAL)
-    when = f"{SEP}{clock_text(state.undone_at, hour24)}" if state.undone_at is not None else ""
+    when = _when(state, state.undone_at, hour24)
     full = undo.put_back == len(undo.rows) and undo.rows
     left = len(undo.rows) - undo.put_back
     note = "Everything is back as it was." if full else \
@@ -717,6 +748,80 @@ def said(state: TidyState, address: str = "sir") -> str:
             return f"Put back, {address}. Everything is where it was."
         return f"Put back {undo.put_back} of {len(undo.rows)}, {address} - see the card for the rest."
     return ""
+
+
+TURNED_OFF_MID = "Stopped - you turned Jarvis on your desktop off."
+
+
+def turned_off_words(state: TidyState) -> str:
+    """p2r-2: the caption once a batch (or its Undo) that the owner's Turn off stopped has ended - its card went with
+    the Turn off: "Stopped - you turned Jarvis on your desktop off. 2 of 5 files were moved." (its Undo comes back
+    with "undo" once he turns it on again)."""
+    kind = _ticked_kind(state, state.chosen) if state.chosen else _kind_of(row.kind for row in state.card.ok_rows())
+    _verb, one, many = _BUTTONS[kind]
+    if state.stage in (UNDOING, UNDONE):
+        undo = state.undo
+        back, total = (undo.put_back, len(undo.rows)) if undo is not None else (0, 0)
+        if not back:
+            return f"{TURNED_OFF_MID} Nothing was put back."
+        return f"{TURNED_OFF_MID} {back} of {_count(total, one, many)} {'was' if back == 1 else 'were'} put back."
+    done, total = len(state.done_numbers()), len(state.chosen)
+    if not done:
+        return f"{TURNED_OFF_MID} Nothing was {_PAST[kind]}."
+    return f"{TURNED_OFF_MID} {done} of {_count(total, one, many)} {'was' if done == 1 else 'were'} {_PAST[kind]}."
+
+
+def recalled(run_id: str, items: Mapping[int, Any], scope: paths.Scope,
+             undoable: Collection[int]) -> TidyState | None:
+    """p2r-3 (D9's 7-day Undo): a past run's stamped card, rebuilt from its journal (``items``: journal.items()) for
+    the owner's "undo" - one row per item Undo may still put back (``undoable``: fileops.Undoer.undoable(), within
+    undo_days), numbered by its journal seq: its name and where it went, as the card first said them; the stamp's
+    time its newest; Undo offered. Nothing is put back here - only the owner's click on its Undo does that (the same
+    Undo as the card's). None when there is nothing to put back."""
+    wanted = sorted(seq for seq in set(undoable) if seq in items and items[seq].done is not None)
+    if not wanted:
+        return None
+    rows: list[TidyRow] = []
+    newest = 0.0
+    for seq in wanted:
+        item = items[seq]
+        done, first = item.done, item.first
+        src = first.src or done.src
+        dst = done.dst or first.dst
+        place = place_words(ntpath.dirname(dst), scope) if dst else ""
+        source_name, made = ntpath.basename(src.rstrip("\\")), ntpath.basename(dst.rstrip("\\"))
+        if item.kind == fo.RENAME:
+            name, to = source_name, _shown(made)
+        elif item.kind == fo.MKDIR:
+            name, to = made, f"{place} (new folder)" if place else "a new folder"
+        elif item.kind == fo.ZIP:
+            what = _count(len(first.inputs), "file", "files")
+            name, to = made or "a zip", f"{place} (a zip of {what})" if place else f"a zip of {what}"
+        elif item.kind == fo.COPY:
+            name, to = made or source_name, f"{place} (a copy)" if place else "a copy"
+        elif item.kind == fo.RECYCLE:
+            name, to = source_name, BIN_TO
+        else:
+            name, to = source_name or made, place
+        rows.append(TidyRow(seq, item.kind, _shown(name), to, frozenset(first.flags) | frozenset(done.flags), True, "",
+                            ntpath.dirname(src) if src else "", max(0, int(done.size or 0))))
+        newest = max(newest, float(done.at or 0.0))
+    folders = Counter(ntpath.normcase(row.folder) for row in rows if row.folder)
+    folder = ""
+    if folders:
+        common = folders.most_common(1)[0][0]
+        folder = next(row.folder for row in rows if row.folder and ntpath.normcase(row.folder) == common)
+    folder_name = place_words(folder, scope).split(CRUMB)[-1] if folder else ""
+    kinds = {row.kind for row in rows}
+    title = TIDY_TITLE.format(folder=folder_name) if kinds == {fo.MOVE} and folder and len(folders) == 1 else \
+        _TITLES[_kind_of(kinds)]
+    at = datetime.fromtimestamp(newest) if newest else None
+    state = TidyState(TidyCard(run_id, None, tuple(rows), title, folder, folder_name, at, ""))
+    state.stage, state.recalled, state.at = DONE, True, at
+    state.chosen = tuple(row.number for row in rows)
+    state.ends = {row.number: RowEnd(row.number, DONE_STATE, "", row.number) for row in rows}
+    state.ended = len(rows)
+    return state
 
 
 def ends_from(numbers: Sequence[int], results: Sequence[Any]) -> tuple[RowEnd, ...]:

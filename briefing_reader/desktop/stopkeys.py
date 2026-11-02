@@ -89,6 +89,19 @@ class NoStopKeys:
         return False
 
 
+class _Arming:
+    """One ``arm()``'s key thread as both sides see it (under ``lock``): whether it holds Esc and its thread id, and
+    whether ``arm()`` stopped waiting for it - a thread that registers Esc after that lets it go at once, so Esc is
+    only ever held by a thread ``disarm()`` can end."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.ready = threading.Event()
+        self.held = False
+        self.given_up = False
+        self.tid = 0
+
+
 class Win32StopKeys:
     """The real seam (ctypes; see the module docstring). Refused, and every method refused, while the tests run."""
 
@@ -126,30 +139,36 @@ class Win32StopKeys:
         with self._lock:
             if self._thread is not None:
                 return True
-            ready = threading.Event()
-            held: list[bool] = []
-            thread = threading.Thread(target=self._loop, args=(on_stop, ready, held), name="desktop-esc", daemon=True)
+            arming = _Arming()
+            thread = threading.Thread(target=self._loop, args=(on_stop, arming), name="desktop-esc", daemon=True)
             thread.start()
-            ready.wait(_READY_S)
-            if not held:
-                thread.join(_JOIN_S)                 # it ended by itself: nothing is registered
+            arming.ready.wait(_READY_S)
+            with arming.lock:
+                arming.given_up = not arming.held    # from now on a late key thread lets Esc go at once (p2r-16)
+            if arming.given_up:
+                thread.join(_JOIN_S)                 # it ended by itself: nothing stays registered
                 return False
-            self._thread = thread
+            self._thread, self._tid = thread, arming.tid
             return True
 
-    def _loop(self, on_stop: Callable[[], None], ready: threading.Event, held: list[bool]) -> None:
+    def _loop(self, on_stop: Callable[[], None], arming: _Arming) -> None:
         ctypes, user32 = self._ctypes, self._user32
         msg = self._msg_type()
         try:
             user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, _PM_NOREMOVE)    # this thread's queue, made now
-            self._tid = int(self._kernel32.GetCurrentThreadId())
+            tid = int(self._kernel32.GetCurrentThreadId())
             if not user32.RegisterHotKey(None, HOTKEY_ID, MOD_NOREPEAT, VK_ESCAPE):
                 logger.info("Desktop: Esc could not be held for the batch (winerror %d); its Stop only",
                             ctypes.get_last_error())
                 return
-            held.append(True)
+            with arming.lock:
+                if arming.given_up:                  # arm() stopped waiting: no one would ever let it go
+                    user32.UnregisterHotKey(None, HOTKEY_ID)
+                    logger.info("Desktop: Esc came too late for the batch; let go at once")
+                    return
+                arming.held, arming.tid = True, tid
         finally:
-            ready.set()
+            arming.ready.set()
         try:
             while True:
                 got = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)

@@ -35,7 +35,7 @@ from briefing_reader import orb as orb_mod
 from briefing_reader.config import DesktopConfig, HotkeyConfig
 from briefing_reader.desktop import backend as desktop_backend
 from briefing_reader.hud_overlay import Bracket, CardButton, CardContent, Tether
-from tests.ui_fakes import AppHarness, fonts, settle
+from tests.ui_fakes import AppHarness, fonts, settle, wait_for
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CAPTION = "Good morning. What shall I do, sir?"
@@ -323,10 +323,53 @@ class FocusTests(_OverlayTest):
         self.assertEqual(clicked, [hud_overlay.CHIP_BRIEFING, hud_overlay.CHIP_APPROVALS, hud_overlay.CHIP_REC,
                                    "back", "open"])                 # P2.4's timer chip, hidden, answers no click
         win.set_timer("Timer \u00b7 ends 10:32 AM")
-        QTest.mouseClick(win.chips[hud_overlay.CHIP_TIMER], Qt.MouseButton.LeftButton)
-        self.assertEqual(clicked[-1], hud_overlay.CHIP_TIMER)        # ... and does once it shows
+        timer = win.chips[hud_overlay.CHIP_TIMER]
+        settle()
+        self.assertTrue(timer.isVisibleTo(win) and timer.read_only())
+        QTest.mouseClick(timer, Qt.MouseButton.LeftButton)
+        QTest.mouseMove(timer, timer.rect().center())
+        settle()
+        self.assertEqual(clicked[-1], "open")                        # p2r-8: shown, it is a plain label - no click,
+        self.assertEqual(timer.cursor().shape(), Qt.CursorShape.ArrowCursor)    # ... the arrow, no hover,
+        self.assertFalse(timer.hovered())
+        self.assertFalse(timer.hitButton(timer.rect().center()))
+        clickable = hud_overlay.HudChip(hud_overlay.CHIP_TIMER, win)
+        clickable.setText(timer.text())
+        self.assertEqual(clickable.sizeHint().width() - timer.sizeHint().width(), 8 + 14)       # ... no chevron
+        clickable.deleteLater()
+        self.assertEqual(win.chips[hud_overlay.CHIP_BRIEFING].cursor().shape(), Qt.CursorShape.PointingHandCursor)
         self.assertFalse(self._focus_in(overlay))
         self.assertEqual(asked, [])
+
+    def test_a_result_card_takes_the_keyboard_only_when_asked_and_gives_it_back(self) -> None:
+        """p2r-10 (SPEC 8.1): a result card never takes the focus as it shows; asked (the owner's Tab in the bar) its
+        window accepts the focus, its buttons take Tab, Enter clicks the focused one, Esc gives it back."""
+        overlay = self.overlay()
+        card = self.card(overlay)
+        overlay.show_on(None)
+        overlay.show_card(card, QRect(80, 300, 200, 120))
+        settle()
+        flag = Qt.WindowType.WindowDoesNotAcceptFocus
+        self.assertTrue(card.windowHandle().flags() & flag)
+        clicked: list[str] = []
+        back: list[str] = []
+        card.buttonClicked.connect(clicked.append)
+        card.keyboardReturned.connect(back.append)
+        self.assertTrue(card.take_keyboard())
+        settle()
+        self.assertFalse(card.windowHandle().flags() & flag)
+        buttons = card.buttons()
+        self.assertIs(QApplication.focusWidget(), buttons["open"])
+        self.assertEqual(buttons["folder"].focusPolicy(), Qt.FocusPolicy.TabFocus)
+        QTest.keyClick(buttons["open"], Qt.Key.Key_Tab)
+        self.assertIs(QApplication.focusWidget(), buttons["folder"])
+        QTest.keyClick(buttons["folder"], Qt.Key.Key_Return)
+        self.assertTrue(wait_for(lambda: clicked == ["folder"]))
+        QTest.keyClick(buttons["folder"], Qt.Key.Key_Escape)
+        self.assertEqual(back, [hud_overlay.KEYS_ESC])
+        self.assertTrue(card.windowHandle().flags() & flag)
+        self.assertEqual({button.focusPolicy() for button in card.buttons().values()}, {Qt.FocusPolicy.NoFocus})
+        self.assertFalse(card.give_back_keyboard())                                # once only
 
     @staticmethod
     def _focus_in(overlay: hud_overlay.HudOverlay) -> bool:

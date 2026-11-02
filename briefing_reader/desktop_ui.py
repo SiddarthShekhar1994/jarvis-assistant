@@ -149,6 +149,7 @@ typed, a name or a path.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from collections import Counter
@@ -167,6 +168,7 @@ from . import alive, desktop_results, dock, holo, hud_overlay
 from . import live as live_events
 from . import orb as orb_mod
 from .ask import desktop_mode
+from .desktop import cardplan as desktop_cardplan
 from .desktop import executor as desktop_executor
 from .desktop import fileops as desktop_fileops
 from .desktop import results as card_results
@@ -199,13 +201,26 @@ CLICK_TOO_LONG_TEXT = "That took too long, {sir} - I stopped."
 TURNED_OFF_TEXT = "Jarvis on your desktop was turned off, {sir} - nothing was opened."   # a request on its way then
 # Where the owner asked to go onto the desktop from (the first-run card goes on to it after his Turn on).
 ENTRY_DOCK, ENTRY_KEY, ENTRY_START, ENTRY_REQUEST = "dock", "key", "start", "request"
-ENTRIES = (ENTRY_DOCK, ENTRY_KEY, ENTRY_START, ENTRY_REQUEST)
+ENTRY_UPDATE = "update"                            # p2r-6: Phase 2 asked for while the OK is Phase 1's card's
+ENTRIES = (ENTRY_DOCK, ENTRY_KEY, ENTRY_START, ENTRY_REQUEST, ENTRY_UPDATE)
+# p2r-6: the "Jarvis on your desktop" card's version now - 2 lists Phase 2's rows (files moved, renamed, zipped or
+# binned on a click, with Undo; music, volume, timers and screenshots at once, with Undo). A Turn on saved before
+# (Phase 1's card) is version 1: Phase 1's skills work on it, Phase 2's only after the owner turns this one on.
+CONSENT_VERSION = 2
+UPDATE_NEEDED_TEXT = "That needs your OK on the updated card first, {sir} - nothing was changed."
+UPDATE_NEEDED_HUD_TEXT = "That needs your OK on the updated card first, {sir} - Bring Jarvis back to read it."
+# p2r-3 (D9): the owner's "undo" brings the newest change within undo_days back as its stamped card (its Undo: his
+# click).
+RECALL_TEXT = "Here's your last change, {sir} - Undo on its card puts it back."
+NOTHING_TO_UNDO_TEXT = "Nothing to undo from the last {days}, {sir}."
+RECALL_UNAVAILABLE_TEXT = "I can't look at your last changes on this PC right now, {sir}."
 CLICK_TASK_TITLE = "{button} - your click on a result card"
 APPROVED_TEXT = "Approved by your click {time}"
 CARD_TASK_TITLE = "{button} - your click on a NEEDS YOUR OK card"     # P2.3: the tidy card's click in LIVE
 UNDO_TASK_TITLE = "Undo - your click on the card's stamp"
 STOP_WORDS = {"esc": "Esc", "stop": "Stop on the card", "off": "Turned off"}
 TIDY_ID = "dsk:"                                   # the click guards' id namespace for desktop cards (SPEC 12)
+ROW_REFRESH_S = 0.1                                # a running batch's card shows its rows at most this often
 # P2.5: the instant chips' Undo, Undo all and Do Not Disturb's chip.
 PC_UNDO_TASK_TITLE = "{button} - your click on the HUD"
 UNDO_ALL_BUTTON = "Undo all"
@@ -218,7 +233,8 @@ _CHIP_WORDS = {pcctl.CHIP_FOCUS: "focus", pcctl.CHIP_MUSIC: "music", pcctl.CHIP_
                pcctl.CHIP_TIMERS: "timer", pcctl.CHIP_SHOTS: "screenshot"}
 # An Undo that failed for now keeps its chip (tried again on his next click); any other end leaves it.
 _UNDO_AGAIN = frozenset({pcctl.TOO_SOON, pcctl.UNAVAILABLE, pcctl.OS_ERROR, pcctl.STOPPED, pcctl.NOT_TAKEN,
-                         desktop_fileops.R_NO_BIN})
+                         desktop_fileops.R_NO_BIN,
+                         desktop_fileops.R_BIN_STOPPED})       # p2r-14: not tried - its chip stays
 
 
 def _real_backend() -> Any:
@@ -458,6 +474,7 @@ class _Bridge(QObject):
     pc_undone = Signal(int, object)         # P2.5: an instant Undo's Future (pairs of change and its Undo)
     dnd_opened = Signal(int, object)        # P2.5: the Do Not Disturb chip's click (its Future: a pcctl.PcChange)
     dnd_read = Signal(int, object)          # P2.5: Do Not Disturb read back (its Future: pcctl.DND_*)
+    recalled = Signal(int, object)          # p2r-3: the owner's "undo" (its Future: desktop.service.Recalled)
 
 
 def _deliver(bridge: _Bridge, seq: int, future: Future, signal: str = "resolved") -> None:
@@ -536,6 +553,7 @@ class DesktopController(QObject):
                                                    parent=self)
         self.results.clickRequested.connect(self._on_card_click)
         self.results.tidyClicked.connect(self._on_tidy_click)
+        self.results.keyboardReturned.connect(self._on_card_keyboard_back)   # p2r-10
         self.results.tidyTicked.connect(self._on_tidy_tick)
         # P2.3: the NEEDS YOUR OK card of file steps - its state (the window is only its view), the job carrying it
         # out or putting it back (number, "batch" / "undo", its stop, THE CONSENT GATE, the button's words, when the
@@ -544,6 +562,18 @@ class DesktopController(QObject):
         self._tidy_job: list[Any] | None = None
         self._tidy_seq = 0
         self._approved_at = ""
+        # A fast batch's rows end quicker than a card needs showing: their refreshes come at most one per ROW_REFRESH_S
+        # (the last one always shows; a single shot, only while a batch runs).
+        self._row_shown = 0.0
+        self._row_timer = QTimer(self)
+        self._row_timer.setSingleShot(True)
+        self._row_timer.timeout.connect(self._refresh_tidy)
+        # p2r-15: a waiting card's plan expires (cardplan.CARD_TTL): a single shot at that moment takes it out of the
+        # waiting state (only while one waits; never a loop).
+        self._expiry_timer = QTimer(self)
+        self._expiry_timer.setSingleShot(True)
+        self._expiry_timer.setTimerType(Qt.TimerType.PreciseTimer)        # a coarse one may fire up to 5 % early
+        self._expiry_timer.timeout.connect(self._on_card_expiry)
         self._click_guard = click_guard
         self.stop_keys: Any = None
         self.journal_folder: Callable[[], Any] | None = None
@@ -574,6 +604,7 @@ class DesktopController(QObject):
         self._bridge.pc_undone.connect(self._on_pc_undone, Qt.ConnectionType.QueuedConnection)
         self._bridge.dnd_opened.connect(self._on_dnd_opened, Qt.ConnectionType.QueuedConnection)
         self._bridge.dnd_read.connect(self._on_dnd_read, Qt.ConnectionType.QueuedConnection)
+        self._bridge.recalled.connect(self._on_recalled, Qt.ConnectionType.QueuedConnection)
         self._request_seq = 0
         # The request being resolved: (number, words, planner, run id, its stop - set when the app stops waiting -,
         # THE CONSENT GATE as it stood when it started: set once the owner turns it off).
@@ -609,6 +640,7 @@ class DesktopController(QObject):
         hud.instantUndo.connect(self._on_instant_undo)
         hud.undoAllClicked.connect(self._on_undo_all)
         hud.dndClicked.connect(self._on_dnd_clicked)
+        hud.tabToCard.connect(self._on_tab_to_card)          # p2r-10: SPEC 8.1's keyboard path into the cards
         hud.installEventFilter(self)
         # P2.4: the PC's controls' seam (made on the desktop thread; None: the real one) and Jarvis's own timers - in
         # the app's data folder, checked against the wall clock (``timer_clock``: None, the real one).
@@ -637,8 +669,11 @@ class DesktopController(QObject):
         self._dnd_timer = QTimer(self)
         self._dnd_timer.setSingleShot(True)
         self._dnd_timer.timeout.connect(self._on_dnd_timer)
+        self._housekept: Any = None                          # the day the journal's housekeeping last ran (p2r-1)
         if self.consent_given():
-            self._restore_timers()
+            if self.consent_current():                       # p2r-6: Phase 2's timers and focus on today's OK only
+                self._restore_timers()
+            self._housekeep("start")
 
     # ---- state ----------------------------------------------------------------------------------
 
@@ -708,6 +743,33 @@ class DesktopController(QObject):
         """The HUD's bar has the keyboard (the next HUD key goes back to the window)."""
         return self._hud and self.overlay.is_shown() and self.overlay.hud.holds_keyboard()
 
+    def _on_tab_to_card(self) -> None:
+        """SPEC 8.1's keyboard path (p2r-10): the owner's Tab in the HUD's bar while it has the keyboard - the newest
+        card takes it (its window accepts the focus for that time; Tab goes between its buttons and ticks, Space or
+        Enter clicks the focused one) and Esc or Shift+Tab gives it back to the bar. Never as a card shows: only on
+        his Tab; nothing in control (Phase 3)."""
+        if self._shut or not self._hud or self.in_control() or self._leaving():
+            return
+        window = self.results.newest_window()
+        hud = self.overlay.hud
+        if window is None or not hud.lend_keyboard():
+            return
+        if window.take_keyboard():
+            logger.info("Desktop: the newest card takes the keyboard (the owner's Tab)")
+        else:
+            hud.take_keyboard("card")                        # nothing to press there: the bar keeps it
+
+    def _on_card_keyboard_back(self, why: str) -> None:
+        """A card gave the keyboard back (p2r-10): to the bar after Esc, Shift+Tab or the card going; the owner went to
+        another window - then nothing is activated, the bar lets it go too."""
+        if self._shut or not self._hud:
+            return
+        hud = self.overlay.hud
+        if why == hud_overlay.KEYS_AWAY or self._leaving() or not hud.lent():
+            hud.give_back_keyboard(False, "the owner went to another window")
+        else:
+            hud.take_keyboard("card")
+
     def _keyboard_on_show(self) -> None:
         """The HUD's windows have just shown: a HUD key pressed on the way in gives the bar the keyboard now."""
         if self._keyboard_wanted:
@@ -729,12 +791,48 @@ class DesktopController(QObject):
             logger.warning("Desktop: the owner's OK could not be read (%s); taken as no", type(exc).__name__)
             return False
 
+    def consent_version(self) -> int:
+        """The version of the card the owner turned on (p2r-6): 0 while THE CONSENT GATE says no, 1 for Phase 1's card
+        (a Turn on saved before it listed Phase 2's rows), CONSENT_VERSION for today's. Fail-closed: a version that
+        can't be read is Phase 1's."""
+        if not self.consent_given():
+            return 0
+        try:
+            store = self._consent_store() if self._consent_store is not None else None
+            version = getattr(store, "desktop_consent_version", 1)
+        except Exception as exc:  # noqa: BLE001 - unknown: Phase 1's card
+            logger.warning("Desktop: the owner's OK's version could not be read (%s); Phase 1's", type(exc).__name__)
+            return 1
+        return version if isinstance(version, int) and not isinstance(version, bool) and version >= 1 else 1
+
+    def consent_current(self) -> bool:
+        """The owner's OK covers today's card (CONSENT_VERSION): Phase 2's skills - moving, copying, renaming, zipping
+        or binning files, the PC's controls and focus mode - act only then (fail-closed)."""
+        return self.consent_version() >= CONSENT_VERSION
+
+    def needs_update(self, words: str) -> bool:
+        """``words`` ask for a PC control (a local route that acts at once: volume, music, a timer, a screenshot,
+        focus mode) while the owner's OK is Phase 1's card's: refused before anything runs, the updated card offered.
+        A planner's file steps are refused in the run itself (``_carry_out_for``)."""
+        return (self.consent_given() and not self.consent_current()
+                and (desktop_routes.pc_request(words) is not None or desktop_routes.undo_request(words)))
+
+    def _refuse_for_update(self, what: str) -> None:
+        """A Phase 2 skill asked for under Phase 1's OK (p2r-6): nothing is done, the caption says why and the updated
+        card is offered (shown in the window - at once when it is up, else when the owner brings it back)."""
+        logger.info("Desktop: %s refused (the updated card is not turned on)", what)
+        text = UPDATE_NEEDED_HUD_TEXT if self._hud else UPDATE_NEEDED_TEXT
+        self.answered.emit(with_address(text, self._address), TONE_ERROR, "", False)
+        self.consentNeeded.emit(ENTRY_UPDATE)
+
     def turn_on(self) -> bool:
-        """The owner's Turn on on the first-run card: stored in the app's prefs - it counts only once saved (False:
-        it could not be saved, so nothing is turned on)."""
+        """The owner's Turn on on the first-run card (today's: CONSENT_VERSION): stored in the app's prefs - it counts
+        only once saved (False: it could not be saved, so nothing is turned on, or Phase 1's OK stays as it was)."""
         saved = self._store_consent(True)
         if self.consent_given():
-            self._restore_timers()
+            if self.consent_current():
+                self._restore_timers()
+            self._housekeep("turned on")
         return saved
 
     def turn_off(self) -> bool:
@@ -773,7 +871,8 @@ class DesktopController(QObject):
         store = None
         try:
             store = self._consent_store() if self._consent_store is not None else None
-            saved = bool(store.set_desktop_turned_on(bool(on))) if store is not None else False
+            saved = (bool(store.set_desktop_turned_on(bool(on), version=CONSENT_VERSION if on else 0))
+                     if store is not None else False)
         except Exception as exc:  # noqa: BLE001 - not saved: fail-closed
             logger.warning("Desktop: the owner's OK could not be saved (%s)", type(exc).__name__)
             saved = False
@@ -1143,10 +1242,17 @@ class DesktopController(QObject):
         if self._worker is not None:
             self._worker.join(timeout)
 
+    def _ensure_thread(self) -> DesktopWorker:
+        """The desktop thread (it starts with its first job)."""
+        if self._worker is None:
+            self._worker = DesktopWorker()
+        return self._worker
+
     def _ensure_worker(self) -> tuple[DesktopWorker, desktop_service.DesktopService]:
         """The desktop thread and its service, made at the first request ([desktop] folders and extra_folders; the
         Jarvis project and its data folder never a place)."""
-        if self._worker is None or self._service is None:
+        worker = self._ensure_thread()
+        if self._service is None:
             settings = getattr(self.config, "desktop", None)
             excluded = [str(path) for path in (getattr(self.config, "project_root", None),
                                                getattr(self.config, "data_dir", None)) if path]
@@ -1158,8 +1264,22 @@ class DesktopController(QObject):
                 pc_factory=self.pc_factory, timers=self.timers,
                 screenshots_dir=str(getattr(settings, "screenshots_dir", "") or ""), focus=self.focus,
                 recycle_factory=self.recycle_factory)
-            self._worker = DesktopWorker()
-        return self._worker, self._service
+        return worker, self._service
+
+    def _housekeep(self, why: str) -> bool:
+        """The journal's housekeeping on the desktop thread (SPEC 6.1; p2r-1: desktop.service.housekeep - start-up
+        recovery, which only ever corrects records, never redoes, and the purge of runs older than 30 days): at
+        start-up, at the owner's Turn on and at the first desktop request of each new day - never on a timer, so
+        nothing runs at idle - and only while turned on (THE CONSENT GATE, asked again there). Queued like any job:
+        it never runs beside a batch that writes the journal. ``why``: the log's word."""
+        if self._shut or self._quitting or not self.consent_given():
+            return False
+        self._housekept = datetime.now().date()
+        service = self._service
+        backend = service.backend if service is not None else self._backend_factory
+        self._ensure_thread().submit(desktop_service.housekeep, self._journal_folder, backend, cancel=self._gate())
+        logger.info("Desktop: the journal's housekeeping goes to the desktop thread (%s)", why)
+        return True
 
     def request(self, words: str, *, planner: bool = True) -> bool:
         """A desktop request typed on the HUD (SPEC 3): it goes to the desktop thread (``busy`` meanwhile), which
@@ -1172,10 +1292,17 @@ class DesktopController(QObject):
         if not self.consent_given():
             logger.info("Desktop: a request was refused (not turned on)")
             return False
+        if self.needs_update(words):                         # p2r-6: the app's bars say why first (ui)
+            logger.info("Desktop: a request for a PC control was refused (the updated card is not turned on)")
+            return False
         self.results.clear()
         self._held = None                                    # the last request's cards that waited for the HUD too
         self._set_tidy(None)                                 # ... and a NEEDS YOUR OK card not at work
         self._before = self.results.snapshot()               # the window an open brings is the one not among these
+        if self._housekept != datetime.now().date():
+            self._housekeep("a new day")                     # p2r-1: daily, at the day's first request (queued first)
+        if desktop_routes.undo_request(words):
+            return self._recall(words)                       # p2r-3: the last change's card comes back
         worker, service = self._ensure_worker()
         self._request_seq += 1
         seq, run_id, stop, gate = self._request_seq, desktop_mode.new_run_id(), threading.Event(), self._gate()
@@ -1189,6 +1316,57 @@ class DesktopController(QObject):
         self._resolve_timer.start(int(RESOLVE_TIMEOUT_S * 1000))
         logger.info("Desktop %s: a request goes to the desktop thread", run_id)
         return True
+
+    def _undo_days(self) -> int:
+        return int(getattr(getattr(self.config, "desktop", None), "undo_days", 7) or 7)
+
+    def _recall(self, words: str) -> bool:
+        """p2r-3 (D9's 7-day Undo): the owner's "undo" goes to the desktop thread (desktop.service.recall_undo: the
+        journals read, nothing put back), ``busy`` meanwhile like a request; the newest change within undo_days comes
+        back as its stamped card with Undo - only his click on it puts anything back (voice never does)."""
+        worker, service = self._ensure_worker()
+        self._request_seq += 1
+        seq, stop, gate = self._request_seq, threading.Event(), self._gate()
+        self._looking = (seq, words, False, "undo", stop, gate)
+        future = worker.submit(service.recall_undo, cancel=_Either(stop, gate))
+        bridge = self._bridge
+        future.add_done_callback(lambda done, seq=seq: _deliver(bridge, seq, done, "recalled"))
+        self._resolve_timer.start(int(RESOLVE_TIMEOUT_S * 1000))
+        logger.info("Desktop: the undo route goes to the desktop thread")
+        return True
+
+    def _on_recalled(self, seq: int, future: Future) -> None:
+        """The owner's "undo" came back: its stamped card shows (the HUD; else with it), with Jarvis's words - or
+        that there is nothing to undo from the last undo_days."""
+        looking = self._looking
+        if looking is None or looking[0] != seq:
+            return
+        self._looking = None
+        self._resolve_timer.stop()
+        words, gate = looking[1], looking[5]
+        if self._shut:
+            return
+        try:
+            found = future.result()
+        except CancelledError:
+            return
+        except Exception as exc:  # noqa: BLE001 - a bug on the desktop thread: nothing shown
+            logger.error("Desktop: the undo route could not be carried out (%s)", type(exc).__name__)
+            found = desktop_service.Recalled(code=desktop_tidy.UNAVAILABLE)
+        if gate.is_set():
+            self.answered.emit(with_address(TURNED_OFF_TEXT, self._address), TONE_ERROR, words, False)
+            return
+        state = getattr(found, "state", None)
+        if isinstance(state, desktop_tidy.TidyState) and not self.busy():
+            self._set_tidy(state)
+            self.answered.emit(with_address(RECALL_TEXT, self._address), TONE_DONE, words, True)
+            return
+        if getattr(found, "code", ""):
+            self.answered.emit(with_address(RECALL_UNAVAILABLE_TEXT, self._address), TONE_ERROR, words, False)
+            return
+        days = self._undo_days()
+        said = NOTHING_TO_UNDO_TEXT.format(days="day" if days == 1 else f"{days} days", sir="{sir}")
+        self.answered.emit(with_address(said, self._address), TONE_DONE, words, True)
 
     def _on_resolve_timeout(self) -> None:
         """The desktop thread took too long (a search or the shell hanging): the app stops waiting - nothing opens for
@@ -1319,10 +1497,12 @@ class DesktopController(QObject):
         each OS call (fail-closed), and a Turn off after this job was made stops it for good (``_gate``)."""
         worker, service = self._ensure_worker()
         gate = self._gate()
+        organise = self.consent_current()                    # p2r-6: Phase 1's OK - its file steps are refused
 
         def carry_out(plan: Any, words: str, cancel: threading.Event | None = None) -> Any:
             stop = threading.Event()
-            future = worker.submit(service.carry_out, plan, words, context, _Either(stop, cancel, gate))
+            future = worker.submit(service.carry_out, plan, words, context, _Either(stop, cancel, gate),
+                                   organise=organise)
             try:
                 return future.result(timeout=CARRY_OUT_TIMEOUT_S)
             except FutureTimeout:
@@ -1435,6 +1615,9 @@ class DesktopController(QObject):
                     len(plan.accepted()), len(plan.refused()),
                     run.statuses_text() if run is not None else "nothing carried out")
         self._show_or_hold(run)                              # in the window meanwhile: they wait for the HUD
+        if run is not None and any(result.code == desktop_executor.NEEDS_UPDATE for result in run.results):
+            logger.info("Desktop %s: file steps refused (the updated card is not turned on)", plan.run_id or "-")
+            self.consentNeeded.emit(ENTRY_UPDATE)            # p2r-6: the caption says why; the card is offered
         return str(getattr(outcome, "message", "") or "")
 
     # ---- the NEEDS YOUR OK card of file steps (P2.3) ---------------------------------------------------------
@@ -1471,16 +1654,50 @@ class DesktopController(QObject):
         state = self._tidy
         if state is None or self._shut or not self._hud:
             return
-        self.results.show_tidy(state, desktop_tidy.tidy_text(state, self._hour24))
+        self.results.show_tidy(state, desktop_tidy.tidy_text(state, self._hour24, self._undo_days()))
 
     def _refresh_tidy(self) -> None:
+        self._row_timer.stop()
+        self._row_shown = time.monotonic()
         state = self._tidy
         if state is not None and self.results.tidy() is not None:
-            self.results.refresh_tidy(desktop_tidy.tidy_text(state, self._hour24))
+            self.results.refresh_tidy(desktop_tidy.tidy_text(state, self._hour24, self._undo_days()))
 
     def _tidy_changed(self) -> None:
+        self._arm_expiry()
         self.sync_glance()
         self.waitingChanged.emit(self.waiting_count())
+
+    def _arm_expiry(self) -> None:
+        """p2r-15: while a NEEDS YOUR OK card waits, a single shot at its plan's end (the earlier of its wall clock's
+        expires_at and CARD_TTL by the monotonic clock, as cardplan.verify reads them); none otherwise."""
+        self._expiry_timer.stop()
+        state = self._tidy
+        plan = getattr(state.card, "plan", None) if state is not None else None
+        if self._shut or state is None or not state.waiting() or not isinstance(plan, desktop_cardplan.CardPlan):
+            return
+        try:
+            left = min((plan.expires_at - datetime.now(timezone.utc)).total_seconds(),
+                       plan.mono + desktop_cardplan.CARD_TTL.total_seconds() - time.monotonic())
+        except (TypeError, ValueError):
+            left = 0.0
+        self._expiry_timer.start(max(0, math.ceil(left * 1000)) + 20)
+
+    def _on_card_expiry(self) -> None:
+        """p2r-15: the waiting card's plan may no longer run - out of waiting, in the expired stamp's own words (no
+        commit button, not amber); the chip and Approvals' reminder drop it. No caption: the owner may be elsewhere."""
+        state = self._tidy
+        if self._shut or state is None or not state.waiting():
+            return
+        code = state.card.plan.verify(datetime.now(timezone.utc), mono=time.monotonic())
+        if not code:
+            self._arm_expiry()                               # not yet (a clock slept or fired early): at its end
+            return
+        state.expire(code, datetime.now())
+        logger.info("Desktop %s: the NEEDS YOUR OK card stopped waiting (%s); nothing was done",
+                    state.card.run_id or "-", code)
+        self._refresh_tidy()
+        self._tidy_changed()
 
     def _on_tidy_tick(self, number: int, ticked: bool) -> None:
         state = self._tidy
@@ -1525,7 +1742,7 @@ class DesktopController(QObject):
             return
         if undo and not state.undoable():
             return
-        days = int(getattr(getattr(self.config, "desktop", None), "undo_days", 7) or 7)
+        days = self._undo_days()
         if undo and state.at is not None and datetime.now() - state.at > timedelta(days=days):
             state.undo_expired = True                        # offered for [desktop] undo_days only (D9)
             logger.info("Desktop %s: Undo refused (older than undo_days)", state.card.run_id or "-")
@@ -1538,6 +1755,9 @@ class DesktopController(QObject):
         if not self.consent_given():
             logger.info("Desktop %s: a NEEDS YOUR OK card's click was refused (not turned on)",
                         state.card.run_id or "-")
+            return
+        if not self.consent_current():
+            self._refuse_for_update("a NEEDS YOUR OK card's click")
             return
         if self._guarded(state):
             logger.info("Desktop %s: a NEEDS YOUR OK card's click was ignored (too soon or locked)",
@@ -1555,7 +1775,7 @@ class DesktopController(QObject):
         worker, service = self._ensure_worker()
         self._tidy_seq += 1
         seq, stop, gate = self._tidy_seq, threading.Event(), self._gate()
-        self._tidy_job = [seq, "undo" if undo else "batch", stop, gate, button, 0.0, ""]
+        self._tidy_job = [seq, "undo" if undo else "batch", stop, gate, button, 0.0, "", state]
         self._approved_at = clock_text(datetime.now(), self._hour24)
         bridge = self._bridge
 
@@ -1608,7 +1828,11 @@ class DesktopController(QObject):
         if job is None or job[0] != seq or state is None or not isinstance(end, desktop_tidy.RowEnd):
             return
         state.row_ended(end, ended)
-        self._refresh_tidy()
+        wait = ROW_REFRESH_S - (time.monotonic() - self._row_shown)
+        if wait <= 0:
+            self._refresh_tidy()
+        elif not self._row_timer.isActive():
+            self._row_timer.start(max(1, math.ceil(wait * 1000)))
 
     def _on_tidy_esc(self, seq: int) -> None:
         job = self._tidy_job
@@ -1622,8 +1846,13 @@ class DesktopController(QObject):
         if job is None or job[0] != seq:
             return
         self._tidy_job = None
-        _seq, kind, _stop, gate, button, asked, reason = job
+        _seq, kind, _stop, gate, button, asked, reason, kept = job
         state = self._tidy
+        # p2r-2: a Turn off took the card away while its job ran - the job's own state is kept until it ends, so what
+        # was done is still told (LIVE, the caption); no card and no Undo while turned off ("undo" brings it back).
+        dropped = state is None and isinstance(kept, desktop_tidy.TidyState)
+        if dropped:
+            state = kept
         run_id = state.card.run_id if state is not None else "-"
         undo = kind == "undo"
         try:
@@ -1644,7 +1873,7 @@ class DesktopController(QObject):
         stop_ms = int(round((time.monotonic() - asked) * 1000)) if reason and asked else 0
         self._log_tidy(run_id, undo, outcome, reason, stop_ms)
         if self._shut or state is None:
-            return                                       # turned off or closing meanwhile: its card is gone
+            return                                       # closing meanwhile: nothing more is said
         now = datetime.now()
         if undo:
             state.finish_undo(outcome, now)
@@ -1653,8 +1882,13 @@ class DesktopController(QObject):
             state.finish(outcome, now)
             soft = bool(outcome.code) or len(state.done_numbers()) != len(state.chosen)
         said = desktop_tidy.said(state, self._address)
+        if dropped:
+            said, soft = desktop_tidy.turned_off_words(state), True
         _tidy_task(self.live, button, state, said, soft, self._approved_at, reason,
                    stop_ms if reason and not outcome.code else 0, undo)
+        if dropped:
+            self.answered.emit(said, TONE_ERROR, "", False)
+            return
         self._refresh_tidy()
         self._tidy_changed()
         if said:
@@ -1862,6 +2096,9 @@ class DesktopController(QObject):
         if not self.consent_given():
             logger.info("Desktop: an instant Undo was refused (not turned on)")
             return
+        if not self.consent_current():
+            self._refuse_for_update("an instant Undo")
+            return
         if self.busy():
             logger.info("Desktop: an instant Undo while another desktop job runs; ignored")
             return
@@ -1937,6 +2174,9 @@ class DesktopController(QObject):
             return
         if not self.consent_given():
             logger.info("Desktop: the Do Not Disturb chip's click was refused (not turned on)")
+            return
+        if not self.consent_current():
+            self._refuse_for_update("the Do Not Disturb chip's click")
             return
         worker, service = self._ensure_worker()
         self._dnd_seq += 1
@@ -2063,6 +2303,8 @@ class DesktopController(QObject):
             pc_job[3].set()                                  # ... and an instant Undo puts nothing more back
         self._tidy = None
         self._resolve_timer.stop()
+        self._row_timer.stop()
+        self._expiry_timer.stop()
         self._timer_check.stop()                             # P2.4: the timers stay in their file for the next start
         self._dnd_timer.stop()                               # P2.5: and focus mode in its own (quiet after a restart)
         self._dnd_reads = []

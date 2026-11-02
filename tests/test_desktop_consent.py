@@ -168,9 +168,13 @@ class CardTests(ConsentApp):
         self.assertEqual(card.texts(),
                          ["DESKTOP \u00b7 NEEDS YOUR OK", "Jarvis on your desktop",
                           "I open files, apps, folders and sites you name.",
+                          "Music, volume, timers and screenshots happen at once - Undo puts them back.",
+                          "Moving, renaming, zipping or putting files in the Recycle Bin waits for your click on a "
+                          "card, with Undo. Nothing is deleted for good.",
                           "I only work in the folders and apps you allow.",
                           "To plan, file, folder and app names go to your Claude plan. They're never kept in logs.",
                           "You can turn it off again in Settings \u203a Desktop.", "Not now", "Turn on"])
+        self.assertEqual(card.new_rows(), [])                               # first time: nothing marked new
         self.assertEqual(card.not_now.variant(), desktop_view.holo.AMBER_GHOST)
         self.assertEqual(card.turn_on.variant(), desktop_view.holo.AMBER_COMMIT)
         self.assertLess(card.not_now.geometry().left(), card.turn_on.geometry().left())    # Not now left, Turn on right
@@ -360,7 +364,69 @@ class SettingsTests(ConsentApp):
         self.assertEqual(panel.problem.text(), desktop_view.TURN_OFF_NOT_SAVED_TEXT)
 
 
+class UpdatedCardTests(ConsentApp):
+    """p2r-6: the OK keeps the card's version - Phase 1's (version 1) or today's (desktop_ui.CONSENT_VERSION)."""
+
+    def test_phase_1_ok_shows_its_new_rows_marked_and_turn_on_stores_todays(self) -> None:
+        self.make_app(consent=1)
+        self.assertEqual((self.desktop.consent_given(), self.desktop.consent_version()), (True, 1))
+        self.assertFalse(self.desktop.consent_current())
+        settings = self.reading.settings_page
+        settings.select_group(settings_view.DESKTOP_GROUP)
+        self.assertEqual(dict(settings.rows())["Your OK"], settings_view.TURNED_ON_PHASE_1)
+        self.c._show_desktop_consent(desktop_ui.ENTRY_UPDATE)               # as a Phase 2 skill asked for it
+        settle()
+        card = self.card()
+        self.assertEqual(card.new_rows(), [desktop_view.CONSENT_ROWS[1], desktop_view.CONSENT_ROWS[2]])
+        self.assertEqual([row.accessibleName().startswith("NEW: ") for row in card.rows],
+                         [False, True, True, False, False])
+        QTest.mouseClick(card.turn_on, Qt.MouseButton.LeftButton)
+        settle()
+        self.assertEqual(self.stored().get("desktop_consent_version"), desktop_ui.CONSENT_VERSION)
+        self.assertTrue(self.desktop.consent_current())
+        self.assertTrue(self.desktop.is_hud())                               # on to where he asked from
+        self.back()
+        settings.select_group(settings_view.DESKTOP_GROUP)
+        self.assertEqual(dict(settings.rows())["Your OK"], settings_view.TURNED_ON)
+
+    def test_turn_off_clears_the_ok_and_its_version(self) -> None:
+        self.make_app(consent=True)
+        self.assertEqual(self.stored(), {**self.stored(), "desktop_turned_on": True,
+                                         "desktop_consent_version": desktop_ui.CONSENT_VERSION})
+        QTest.mouseClick(self.c._desktop_settings.turn_off, Qt.MouseButton.LeftButton)
+        settle()
+        self.assertNotIn("desktop_turned_on", self.stored())
+        self.assertNotIn("desktop_consent_version", self.stored())
+        self.assertEqual((self.desktop.consent_version(), self.desktop.consent_current()), (0, False))
+
+
 class PrefsTests(unittest.TestCase):
+    def test_the_cards_version_is_kept_with_the_ok(self) -> None:
+        """p2r-6: no version stored (Phase 1's Turn on) is version 1; a Turn on of today's card stores its version; a
+        Turn off clears both; a version that is not a small whole number is Phase 1's; an upgrade that can't be saved
+        leaves what was saved before."""
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            path = Path(tmp) / PREFS_FILE
+            path.write_text('{"desktop_turned_on": true}', encoding="utf-8")       # Phase 1's, as saved then
+            store = AssistantPrefs(path)
+            self.assertEqual((store.desktop_turned_on, store.desktop_consent_version), (True, 1))
+            with mock.patch.object(prefs, "_write_atomic", return_value=False):
+                self.assertFalse(store.set_desktop_turned_on(True, version=2))
+            self.assertEqual((store.desktop_turned_on, store.desktop_consent_version), (True, 1))
+            self.assertTrue(store.set_desktop_turned_on(True, version=2))
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["desktop_consent_version"], 2)
+            self.assertEqual(AssistantPrefs(path).desktop_consent_version, 2)
+            self.assertTrue(store.set_desktop_turned_on(False))
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"muted": False, "recent_greetings": []})
+            self.assertEqual(AssistantPrefs(path).desktop_consent_version, 0)
+            for version in ('"2"', "true", "0", "500", "2.0", "null"):
+                with self.subTest(version=version):
+                    path.write_text('{"desktop_turned_on": true, "desktop_consent_version": %s}' % version,
+                                    encoding="utf-8")
+                    self.assertEqual(AssistantPrefs(path).desktop_consent_version, 1)
+            path.write_text('{"desktop_consent_version": 2}', encoding="utf-8")       # a version alone: not on
+            self.assertEqual(AssistantPrefs(path).desktop_consent_version, 0)
+
     def test_the_desktop_ok_is_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             path = Path(tmp) / PREFS_FILE

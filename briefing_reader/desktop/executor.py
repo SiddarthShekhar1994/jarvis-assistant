@@ -71,6 +71,7 @@ from ..persona import with_address
 from . import apps as desktop_apps
 from . import cardplan
 from . import guard, paths, pcctl
+from . import journal as jn
 from . import validate as dv
 from .backend import DesktopBackend, FileIdentity
 from .context import AppItem, FileItem, Place, SiteItem
@@ -85,11 +86,13 @@ CHANGED = "changed"            # the target changed since it was listed: left as
 OS_FAILED = "os_error"         # Windows did not do it
 GUARD = "guard"                # the backend's own last guard refused it
 STOPPED = "cancelled"          # the owner cancelled before this step
+NEEDS_UPDATE = "needs_update"  # a file step while the owner's OK is Phase 1's card's (p2r-6): refused, no card
 MAX_OTHERS = 5                 # the other matches kept for "Open this instead" (D5; P1.9)
 CODE_WORDS = {CHANGED: "it changed since I looked - left as it is",
               OS_FAILED: "Windows couldn't open it",
               GUARD: "Jarvis's last check stopped it",
-              STOPPED: "you cancelled first"}
+              STOPPED: "you cancelled first",
+              NEEDS_UPDATE: "that needs your OK on the updated card first"}
 
 
 def code_words(code: str) -> str:
@@ -203,17 +206,18 @@ class Executor:
     # ---- a planner's plan -------------------------------------------------------------------------
 
     def run_plan(self, plan: dv.DesktopPlan, *, words: str = "", others_from: Sequence[FileItem] = (),
-                 cancel: Any = None) -> DesktopRun:
+                 cancel: Any = None, organise: bool = True) -> DesktopRun:
         """Every accepted step of ``plan`` (in order; the refused ones were never accepted), as the module docstring
         says. ``words``: the owner's typed words (the D5 other matches are ranked by them); ``others_from``: the
         files the planner was shown. The file steps (P2.2) change nothing here: their card's plan is made and frozen
-        (desktop.cardplan: every row checked as things are now) and they wait for the owner's click on it."""
+        (desktop.cardplan: every row checked as things are now) and they wait for the owner's click on it - or, not
+        ``organise`` (the owner's OK is Phase 1's card's; p2r-6), each is refused NEEDS_UPDATE and no card is made."""
         started = self._clock()
         self._cancel = cancel
         caps = _Caps()
         results: list[StepResult] = []
         card = None
-        if any(step.skill in dv.ORGANISE_SKILLS for step in plan.accepted()) and not (
+        if organise and any(step.skill in dv.ORGANISE_SKILLS for step in plan.accepted()) and not (
                 cancel is not None and cancel.is_set()):
             card = self._card(plan)
         for step in plan.accepted():
@@ -221,7 +225,8 @@ class Executor:
                 results.append(StepResult(step.number, step.skill, step.tier, CANCELLED, STOPPED, step.flags))
                 continue
             if step.skill in dv.ORGANISE_SKILLS:
-                results.append(_card_result(step, card))
+                results.append(_card_result(step, card) if organise else
+                               StepResult(step.number, step.skill, step.tier, REFUSED, NEEDS_UPDATE, step.flags))
                 continue
             result = self._plan_step(step, words, others_from, caps)
             results.append(result)
@@ -634,6 +639,29 @@ def _found_words(found: Sequence[StepResult]) -> str:
     return "Found " + _and(parts)
 
 
+# p2r-4: the waiting file steps said as the card counts them (its ticked rows: "Move 5 files"), never as steps.
+_CARD_GERUNDS = {jn.MOVE: ("Moving", "file", "files"), jn.COPY: ("Copying", "file", "files"),
+                 jn.RENAME: ("Renaming", "file", "files"), jn.ZIP: ("Making", "zip", "zips"),
+                 jn.MKDIR: ("Making", "folder", "folders"), jn.RECYCLE: ("Moving", "file", "files")}
+
+
+def _card_waiting_words(card: Any) -> str:
+    """What the NEEDS YOUR OK card waits for, counted as it shows it: its rows that may go and are ticked - "Moving 5
+    files needs your OK first", "Moving 3 files to the Recycle Bin ...", "6 changes need your OK first" for several
+    kinds; "" without such a row (the steps' own words then)."""
+    chosen = card.chosen() if isinstance(card, cardplan.CardPlan) else ()
+    if not chosen:
+        return ""
+    kinds = {row.kind for row in chosen}
+    count = len(chosen)
+    if len(kinds) == 1 and next(iter(kinds)) in _CARD_GERUNDS:
+        kind = next(iter(kinds))
+        verb, one, many = _CARD_GERUNDS[kind]
+        bin_ = " to the Recycle Bin" if kind == jn.RECYCLE else ""
+        return f"{verb} {count} {one if count == 1 else many}{bin_} needs your OK first"
+    return f"{count} {'change needs' if count == 1 else 'changes need'} your OK first"
+
+
 def _waiting_words(waiting: Sequence[StepResult]) -> str:
     cards = sum(1 for result in waiting if result.tier == dv.CARD)
     if len(waiting) == 1:
@@ -648,6 +676,8 @@ def _waiting_words(waiting: Sequence[StepResult]) -> str:
 
 
 def _not_done_words(results: Sequence[StepResult]) -> str:
+    if results and all(result.code == NEEDS_UPDATE for result in results):
+        return "That needs your OK on the updated card first - Bring Jarvis back to read it"
     if len(results) == 1:
         result = results[0]
         if result.skill in _CARD_NOUNS:
@@ -685,10 +715,15 @@ def run_words(run: DesktopRun | None, plan: dv.DesktopPlan | None = None, addres
     if found:
         sentences.append(_found_words(found))
     if waiting:
-        words = _waiting_words(waiting)
+        files = [result for result in waiting if result.skill in _CARD_NOUNS]
+        others = [result for result in waiting if result.skill not in _CARD_NOUNS]
+        card_words = _card_waiting_words(run.card) if files else ""      # p2r-4: as the card counts them
+        if card_words:
+            words = f"{card_words}. {_waiting_words(others)}" if others else card_words
+        else:
+            words = _waiting_words(waiting)
         if not done and not found:
-            files_only = all(result.skill in _CARD_NOUNS for result in waiting)
-            words += " - nothing has changed yet" if files_only else " - nothing was opened"
+            words += " - nothing has changed yet" if not others else " - nothing was opened"
         sentences.append(words)
     if not_done:
         sentences.append(_not_done_words(not_done))

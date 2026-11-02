@@ -15,6 +15,7 @@ import json
 import ntpath
 import os
 import tempfile
+import threading
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -28,8 +29,10 @@ from briefing_reader.desktop import executor as dx
 from briefing_reader.desktop import fileops as fo
 from briefing_reader.desktop import journal as jn
 from briefing_reader.desktop import paths
+from briefing_reader.desktop import tidy as dt
 from briefing_reader.desktop import validate as dv
 from briefing_reader.desktop.context import FileItem, Place
+from briefing_reader.desktop.service import DesktopService
 from tests.desktop_fakes import DOCS, DOWNLOADS, LING, desktop_context, desktop_disk
 
 NOW = datetime(2026, 10, 28, 10, 0, tzinfo=timezone.utc)
@@ -425,13 +428,13 @@ class ExecutorTests(CardCase):
         self.assertEqual(run.card.verify(NOW, mono=MONO), "")
         self.assertEqual(self.changes(), [])
         self.assertEqual(self.fake.opened, [("open_document", DOWNLOADS + "\\LING essay draft (old).docx")])
-        self.assertEqual(dx.run_words(run, plan), "Opened the file. 5 steps need your OK first, sir.")
+        self.assertEqual(dx.run_words(run, plan), "Opened the file. 5 changes need your OK first, sir.")  # p2r-4
 
     def test_the_words_for_one_step_and_for_none_that_can_go(self) -> None:
         plan = self.plan("tidy my Downloads into LING", move(["f8"], "d3"))
         run = self.executor().run_plan(plan)
-        self.assertEqual(dx.run_words(run, plan), "Moving the files needs your OK first - nothing has changed yet, "
-                                                  "sir.")
+        self.assertEqual(dx.run_words(run, plan), "Moving 1 file needs your OK first - nothing has changed yet, "
+                                                  "sir.")                       # p2r-4: as the card counts it
         self.assertTrue(dx.run_waits(run))                                     # amber: a decision waits
         with open(self.fake.real(DOWNLOADS + "\\LING essay draft (old).docx"), "ab") as handle:
             handle.write(b"edited")
@@ -454,6 +457,25 @@ class ExecutorTests(CardCase):
             run = self.executor().run_plan(plan)
         self.assertEqual([(result.status, result.code) for result in run.results], [(dx.REFUSED, dx.GUARD)])
         self.assertIn("the card's plan could not be made (RuntimeError)", "\n".join(logs.output))
+
+    def test_a_file_step_cancelled_after_an_open_never_comes_back_as_a_card(self) -> None:
+        """p2r-17: the owner's Cancel while the file opens - the move step is cancelled, its card's plan was made
+        before the steps ran, but no NEEDS YOUR OK card is shown for it (nothing amber, nothing to click)."""
+        words = "open my old essay draft and move it into LING"
+        plan = self.plan(words, {"skill": "open_file", "why": "x", "files": ["f8"]}, move(["f8"], "d3"))
+        cancel = threading.Event()
+        self.fake.on_call = lambda method, _argument: cancel.set() if method == "open_document" else None
+        service = DesktopService(folders=("documents", "downloads"), backend_factory=lambda: self.fake,
+                                 now=lambda: NOW)
+        run = service.carry_out(plan, words, None, cancel)
+        self.assertEqual([(result.skill, result.status) for result in run.results],
+                         [("open_file", dx.DONE), ("move_files", dx.CANCELLED)])
+        self.assertEqual([card for card in run.shown if isinstance(card, dt.TidyCard)], [])
+        self.assertFalse(dx.run_waits(run))
+        self.assertEqual(dx.run_words(run, plan), "Opened the file. Stopped - nothing was changed, sir.")
+        self.assertEqual(self.changes(), [])
+        waiting = service.carry_out(self.plan("tidy my Downloads into LING", move(["f8"], "d3")), "tidy", None)
+        self.assertEqual(len([card for card in waiting.shown if isinstance(card, dt.TidyCard)]), 1)   # it waits
 
 
 class CanaryTests(CardCase):

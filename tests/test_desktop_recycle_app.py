@@ -89,7 +89,7 @@ class BinCardTests(BinFlowCase):
         self.assertTrue(all(self.there(self.path(n)) for n in (1, 2, 3)))
         self.assertIn(hud_overlay.needs_ok_text(self.reading.pending_count() + 1), self.hud().chip_texts())
         self.assertEqual(self.hud().caption_text(),
-                         "Moving the files to the Recycle Bin needs your OK first - nothing has changed yet, sir.")
+                         "Moving 3 files to the Recycle Bin needs your OK first - nothing has changed yet, sir.")
 
     def test_the_click_bins_the_ticked_rows_on_the_desktop_thread_and_undo_takes_them_out(self) -> None:
         self.make_bin()

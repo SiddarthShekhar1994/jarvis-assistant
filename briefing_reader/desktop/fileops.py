@@ -155,6 +155,7 @@ R_NOT_RECYCLED = "not_recycled"          # Windows did not put it in the bin (Po
 R_BIN_STOPPED = "bin_stopped"            # the rows after one the bin did not take: never started
 R_BIN_EMPTIED = "bin_emptied"            # Undo: it is not in the Recycle Bin any more
 R_NOT_RESTORED = "not_restored"          # Undo: the bin's restore did not bring it back to its old place
+R_BACK_ALREADY = "back_already"          # Undo: the owner took it back out of the bin himself (p2r-11): put back
 R_RECYCLE_CAP = "recycle_cap"            # more than one card may bin (50 files, 2 GB)
 # A row the bin did not take stops the batch (SPEC 6.2: never another item after one that was not recycled).
 BIN_STOPS = frozenset({R_WOULD_NUKE, R_NOT_RECYCLED})
@@ -192,6 +193,7 @@ UNDO_WORDS = {
 }
 UNDO_WORDS.update({reason: "It holds something I never move - left where it is." for reason in _HOLDS})
 DEFAULT_UNDO_WORDS = "Not put back - left where it is."
+BACK_ALREADY_WORDS = "It's back in its place already."     # p2r-11: counted as put back
 # The partial stamp's words for each reason ("PUT BACK 4 OF 5 \u00b7 1 MOVED SINCE").
 STAMP_LABELS = {R_MOVED_SINCE: "MOVED SINCE", R_OCCUPIED: "SOMETHING NEW IN ITS PLACE", R_CHANGED: "CHANGED SINCE",
                 R_NOT_EMPTY: "NOT EMPTY", R_EXPIRED: "TOO OLD", R_CROSS_VOLUME: "ON ANOTHER DRIVE",
@@ -1310,8 +1312,11 @@ class UndoResult:
 
     @property
     def words(self) -> str:
-        """The card's line for an item left as it is ("" when it was put back)."""
-        return "" if self.state == UNDONE else UNDO_WORDS.get(self.reason, DEFAULT_UNDO_WORDS)
+        """The card's line for an item left as it is ("" when it was put back; BACK_ALREADY_WORDS when the owner had
+        taken it back out of the Recycle Bin himself)."""
+        if self.state == UNDONE:
+            return BACK_ALREADY_WORDS if self.reason == R_BACK_ALREADY else ""
+        return UNDO_WORDS.get(self.reason, DEFAULT_UNDO_WORDS)
 
 
 @dataclass(frozen=True)
@@ -1561,6 +1566,11 @@ class Undoer:
         if not same_place(back, old):
             return self._refuse(item, done, R_OLD_PLACE_GONE)       # its folder resolves somewhere else now
         if self.backend.exists(back):
+            if self._binned_item_at(back, done):
+                # p2r-11: the very item Jarvis binned (a restore keeps its volume and file id) is back in its place -
+                # the owner's own Restore: counted as put back, nothing more done.
+                self._save(replace(done, state=UNDONE, undo=True, reason_code=R_BACK_ALREADY, at=0.0))
+                return UndoResult(item.seq, item.kind, UNDONE, R_BACK_ALREADY)
             return self._refuse(item, done, R_OCCUPIED)
         doing = item.doing
         since = (doing.at if doing is not None and doing.at else done.at) - RESTORE_SLACK_S
@@ -1574,6 +1584,16 @@ class Undoer:
         if entry is None:
             return self._refuse(item, done, R_BIN_EMPTIED)
         return self._act(item, done, lambda: self.recycler.restore(entry, back))
+
+    def _binned_item_at(self, path: str, done: Record) -> bool:
+        """The item at ``path`` is the one this record binned: the same volume and file id (both saved)."""
+        if not done.volume_serial or not done.file_id:
+            return False
+        try:
+            now = self.backend.file_id(path)
+        except OSError:
+            return False
+        return (int(now.volume), int(now.file_id)) == (int(done.volume_serial), int(done.file_id))
 
     @staticmethod
     def _leftover(item: Item) -> Record | None:

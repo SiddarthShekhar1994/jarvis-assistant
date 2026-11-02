@@ -159,6 +159,11 @@ class AssetTests(unittest.TestCase):
 
     def test_the_fixed_command_and_the_owners_words(self) -> None:
         self.assertIn("one JSON plan", FIXED_COMMANDS[MODE_DESKTOP])
+        self.assertEqual(FIXED_COMMANDS[MODE_DESKTOP],                      # p2r-9: the Recycle Bin too (P2.6)
+                         "Plan what the owner asks for on his desktop as one JSON plan: only the ids given in "
+                         "<places>, <files>, <apps> and <sites>, only opening, showing and finding, and moving, "
+                         "copying, renaming, new folders, zips and putting files in the Recycle Bin as his own words "
+                         "ask, or ask one question.")
         text = prompt().text
         self.assertTrue(text.rstrip().endswith(
             f"<command>\n{FIXED_COMMANDS[MODE_DESKTOP]}\n{OWNER_WORDS}{TYPED}\n</command>"))

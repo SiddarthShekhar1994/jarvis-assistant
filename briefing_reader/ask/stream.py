@@ -36,7 +36,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -272,10 +272,18 @@ def check_event(event: Mapping[str, Any]) -> None:
 
 
 def _epoch_time(value: Any, now: Callable[[], datetime]) -> datetime | None:
+    """A Unix time in the owner's local time: with the PC's own clock (``now`` in this PC's zone) the offset in force
+    AT that moment - a summer-time change between now and then moves it, so "resets 12:30 PM" is the wall clock's
+    then, never now's offset applied to it; with a clock in another fixed zone (a test's) in that zone."""
     if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
         return None
     try:
-        return datetime.fromtimestamp(float(value)).astimezone(now().tzinfo)
+        moment = datetime.fromtimestamp(float(value), tz=timezone.utc)
+        current = now()
+        zone = current.tzinfo
+        if zone is None or zone.utcoffset(current) == current.astimezone().utcoffset():
+            return moment.astimezone()
+        return moment.astimezone(zone)
     except (OverflowError, OSError, ValueError):
         return None
 

@@ -1611,9 +1611,17 @@ class PcControl:
         players = [change for change in ordered if change.kind == dv.MEDIA]
         if players:
             results.update(self._undo_players(players, cancel))
+        from . import fileops
+
+        halted = False                       # p2r-14: the Recycle Bin didn't take a screenshot - none more goes to it
         for change in ordered:
-            if id(change) not in results:
-                results[id(change)] = self.undo(change, cancel=cancel)
+            if id(change) in results:
+                continue
+            if halted and change.kind == dv.SCREENSHOT:
+                results[id(change)] = PcChange(change.kind, UNDO, fileops.R_BIN_STOPPED, group=change.group)
+                continue
+            results[id(change)] = self.undo(change, cancel=cancel)
+            halted = halted or (change.kind == dv.SCREENSHOT and results[id(change)].code in fileops.BIN_STOPS)
         return tuple((change, results[id(change)]) for change in ordered)
 
     def _undo_volumes(self, changes: list[PcChange], cancel: Any) -> dict[int, PcChange]:

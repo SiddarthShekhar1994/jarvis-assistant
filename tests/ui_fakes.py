@@ -590,8 +590,8 @@ class AppHarness:
     seam of the result cards' winwatch (tests.desktop_fakes.FakeWinApi; None: winwatch's default, which
     does nothing while the tests run). ``desktop_consent``: the owner's Turn on on the first-run card is
     in the prefs already, as an earlier run would have left it (the default while [desktop] is on: the
-    desktop tests test what comes after it; the consent tests pass False). close() shuts the desktop
-    controller down (its thread ends).
+    desktop tests test what comes after it - today's card, desktop_ui.CONSENT_VERSION; 1: Phase 1's card;
+    the consent tests pass False). close() shuts the desktop controller down (its thread ends).
     ``launch`` (models.LAUNCH_*; None: derived as the app derives it) and ``desktop_launch`` (--hud)
     reach the controller for a test that calls its start()."""
 
@@ -602,7 +602,7 @@ class AppHarness:
                  clock: HarnessClock | None = None, productivity: bool = False, prod_extra: str = "",
                  prod_inline: bool = True, desktop_factory: Any = None, launch: str | None = None,
                  desktop_launch: bool = False, prepare: Any = None, desktop_backend: Any = None,
-                 desktop_window_api: Any = None, desktop_consent: bool = True) -> None:
+                 desktop_window_api: Any = None, desktop_consent: bool | int = True) -> None:
         tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         test.addCleanup(tmp.cleanup)
         self.root = root = Path(tmp.name)
@@ -630,7 +630,10 @@ class AppHarness:
         self.snapshots = FakeSnapshotter(keep_text=live_config.text,
                                          max_per_run=max(0, min(4, self.config.research.max_fetches)))
         if desktop_consent and getattr(self.config.desktop, "enabled", False):
-            AssistantPrefs(self.config.data_dir / PREFS_FILE).set_desktop_turned_on(True)
+            from briefing_reader.desktop_ui import CONSENT_VERSION
+
+            version = CONSENT_VERSION if desktop_consent is True else int(desktop_consent)   # 1: Phase 1's card
+            AssistantPrefs(self.config.data_dir / PREFS_FILE).set_desktop_turned_on(True, version=version)
         if prepare is not None:
             prepare(self.config)
         with mock.patch.object(ui, "BriefingPlayer", FakePlayer), mock.patch.object(ui, "PROD_INLINE", prod_inline):

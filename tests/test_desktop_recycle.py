@@ -466,6 +466,28 @@ class RestoreTests(BinCase):
         self.assertEqual([m for m, _a in self.bin.calls if m == "restore_entry"], [])   # never over anything
         self.assertEqual(self.fake.identity(OLD).size, len(b"something new"))
 
+    def test_when_the_owner_took_it_back_out_himself(self) -> None:
+        """p2r-11: the owner restored the binned file from the Recycle Bin himself (a restore keeps its volume and file
+        id), then clicks Undo: it is back in its place already - counted as put back, never "something new"."""
+        before = self.fake.identity(OLD)
+        self.bin_rows(OLD)
+        self.bin.restore_entry(self.bin.bin_entries(os.path.basename(OLD))[0], OLD)       # his own Restore
+        self.assertEqual((self.fake.identity(OLD).volume, self.fake.identity(OLD).file_id),
+                         (before.volume, before.file_id))
+        restores = len([m for m, _a in self.bin.calls if m == "restore_entry"])
+        undone = self.undoer().undo([1])
+        result = undone.results[0]
+        self.assertEqual((result.state, result.reason, result.words),
+                         (jn.UNDONE, fo.R_BACK_ALREADY, "It's back in its place already."))
+        self.assertEqual(undone.stamp(), "PUT BACK 1 OF 1")
+        self.assertEqual(len([m for m, _a in self.bin.calls if m == "restore_entry"]), restores)   # nothing more
+        self.assertEqual(self.journal.items()[1].state, jn.UNDONE)
+        self.assertEqual(self.undoer().undoable(), ())                                    # put back for good
+        self.fake.make_file(DOWNLOADS + "\\another.txt", b"x")                            # a different file there
+        self.bin_rows(DOWNLOADS + "\\another.txt")
+        self.fake.make_file(DOWNLOADS + "\\another.txt", b"something new")
+        self.assertEqual(self.undoer().undo([2]).results[0].reason, fo.R_OCCUPIED)
+
     def test_when_its_old_folder_has_gone_or_the_restore_fails(self) -> None:
         folder = self.fake.make_dir(DOWNLOADS + "\\Week 3")
         inside = self.fake.make_file(folder + "\\notes.txt")

@@ -27,6 +27,9 @@ whitespace-collapsed text, in the style of ask.routes (an optional leading "jarv
   screenshot of the (active) window".
 * Phase 2, part 5: "(start) focus (mode) for <n> minutes" (also "... for 2 hours", "... for an hour", "... for half
   an hour"): focus mode (desktop.pcctl.PcControl.focus; 1 to 240 minutes - a longer one is refused there, said).
+* P2.R (p2r-3, D9's 7-day Undo): "undo", "undo that", "undo it", "undo the last change" / "... my last change" /
+  "... the last one" (``undo_request``): the newest change within [desktop] undo_days comes back as its stamped card,
+  rebuilt from its journal (desktop.service.recall_undo) - nothing is put back but by the owner's click on its Undo.
 
 The app carries a Phase 1 route out on the desktop thread (desktop.service, desktop.executor: re-checked right before
 its OS call) and says what came of it (desktop.executor.run_words); a PC control likewise (desktop.pcctl through
@@ -43,7 +46,7 @@ Public API
 ==========
 ``LocalRoute(kind, tier, code, target, hits, words, folder)``; ``route(text, context=None, search=None)``;
 ``route_words(found, address="sir")``; ``desktop_request(text)``; ``pc_request(text)`` (the PC control the text
-asks for, or None: pure); ``KNOWN_FOLDER_WORDS``; ``WEB_ENDINGS``; ``NOT_YET_KINDS``.
+asks for, or None: pure); ``undo_request(text)``; ``KNOWN_FOLDER_WORDS``; ``WEB_ENDINGS``; ``NOT_YET_KINDS``.
 
 Pure: nothing is logged here; LocalRoute's repr names its kind only.
 """
@@ -109,6 +112,8 @@ _PC = (
                              r"|(?P<one>an?|one)\s+hour)")),
 )
 _NOT_YET: tuple[tuple[str, re.Pattern[str]], ...] = ()
+# p2r-3: the owner's own "undo" - the last change's card comes back (its Undo is still his click).
+_UNDO_RE = _pattern(r"undo(?:\s+(?:that|it|the\s+last\s+(?:change|one)|my\s+last\s+change))?")
 
 # ROUTE_DESKTOP's "clear desktop verbs" (ask.routes): opening ("open|launch|start <something>") unless it is about
 # Jarvis's own things, and finding ("find|locate|where is|look for|show me ...") only with a word that says file,
@@ -147,7 +152,7 @@ def desktop_request(text: Any) -> bool:
     text = " ".join(str(text or "").split())
     if not text:
         return False
-    if any(pattern.fullmatch(text) for _kind, pattern in _PC + _NOT_YET):
+    if any(pattern.fullmatch(text) for _kind, pattern in _PC + _NOT_YET) or _UNDO_RE.fullmatch(text):
         return True
     match = _OPENING_RE.fullmatch(text)
     if match:
@@ -217,6 +222,11 @@ def pc_request(text: Any) -> pcctl.PcAsk | None:
             return pcctl.PcAsk(kind, pcctl.SET, minutes=minutes)
         return pcctl.PcAsk(kind, pcctl.ACTIVE_WINDOW if groups["window"] else pcctl.SCREEN)
     return None
+
+
+def undo_request(text: Any) -> bool:
+    """``text`` is the owner's "undo" (p2r-3): "undo", "undo that", "undo it", "undo the last change" ... Pure."""
+    return _UNDO_RE.fullmatch(" ".join(str(text or "").split())) is not None
 
 
 def _same(a: str, b: str) -> bool:

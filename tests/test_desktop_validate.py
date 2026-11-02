@@ -696,6 +696,61 @@ class LicensingTests(unittest.TestCase):
         self.assertEqual(code({"skill": "recycle_files", "why": "x", "files": ["f8"]}, words="tidy my Downloads"),
                          dv.INTENT_NOT_LICENSED)
 
+    def test_a_negation_covers_the_whole_list_of_verbs_after_it(self) -> None:
+        """p2r-12: "don't move or delete the originals" negates both verbs - for every skill, up to the clause's break
+        (',', '.', ';', "but", "just", "only", "and then"); a comma inside the negated list goes on with it."""
+        cases = [
+            ("zip the photos in my Pictures folder, don't move or delete the originals", {"zip_files"}),
+            ("copy my essay files to Documents - don't move or remove them", {"copy_files"}),
+            ("tidy my Downloads folder but don't move or delete the PDFs", self.MOVING),
+            ("sort out my Downloads files, don't rename or delete any", self.MOVING),
+            ("find my essay file in Downloads but don't move or delete anything", self.OPENING),
+            ("don't move or delete anything in Downloads, just find my essay", self.OPENING),
+            ("do not tidy or delete anything, just open my essay", self.OPENING),
+            ("find my essay but don't touch, move or delete the rest", self.OPENING),
+            ("do not move or bin the old installers", set()),
+            ("zip the photos without deleting or moving the originals", {"zip_files"}),
+            ("zip the photos, never remove or rename them", {"zip_files"}),
+            ("don't remove, bin or trash anything", set()),
+            ("do not tidy, sort or move my files; open the essay", self.OPENING),
+            ("don't zip the photos and then move them", self.MOVING),           # "and then": a clause of its own
+            ("don't move anything, zip the photos", {"zip_files"}),            # an object: the clause ended
+            ("do not disturb for an hour and take a screenshot",                 # a licence, not a negation
+             {"focus_mode", "volume", "media", "timer", "screenshot"}),
+            ("zip the 1,000 photos, don't move them", {"zip_files"}),
+        ]
+        for words, wanted in cases:
+            with self.subTest(words=words):
+                self.assertEqual(dv.licensed_skills(words), frozenset(wanted))
+        for words in ("bin the old installers", "delete the old drafts", "remove the installers from Downloads"):
+            with self.subTest(words=words):
+                self.assertEqual(dv.licensed_skills(words), frozenset({"recycle_files"}))
+        refused = {"skill": "recycle_files", "why": "x", "files": ["f8"]}
+        self.assertEqual(code(refused, words="don't move or delete anything in Downloads, just find my essay"),
+                         dv.INTENT_NOT_LICENSED)
+        self.assertEqual(code(refused, words="zip the photos, don't move or delete the originals"),
+                         dv.INTENT_NOT_LICENSED)
+
+    def test_the_bin_is_never_licensed_after_a_negation_in_its_sentence(self) -> None:
+        """p2r-12's safety net: no Recycle Bin word counts after a negation anywhere earlier in its sentence, past any
+        comma or "just" - only a new sentence starts afresh."""
+        for words in ("don't keep them, just bin them", "don't move anything, just delete the old installers",
+                      "never mind the photos, but remove the drafts", "don't touch the PDFs; trash the rest",
+                      "don't zip them, get rid of the duplicates", "no, delete them"):
+            with self.subTest(words=words):
+                self.assertNotIn("recycle_files", dv.licensed_skills(words))
+        for words in ("Don't move anything. Bin the old installers.", "bin the old installers but don't move the PDFs",
+                      "delete the old drafts, don't touch the rest", "Leave the PDFs! Delete the rest"):
+            with self.subTest(words=words):
+                self.assertIn("recycle_files", dv.licensed_skills(words))
+
+    def test_a_name_never_takes_a_negation_or_its_clause_away(self) -> None:
+        """A listed name is one word: a name that swallows the owner's "don't" licenses nothing it negated, and a comma
+        inside a name ends no clause."""
+        self.assertNotIn("recycle_files", dv.licensed_skills("don't move or delete anything", ["Don't move"]))
+        self.assertNotIn("move_files", dv.licensed_skills("don't zip Smith, John CV or move it",
+                                                          ["Smith, John CV.docx"]))
+
     def test_nouns_are_not_verbs(self) -> None:
         for words in ("open the file named budget", "open the file with the name budget"):
             with self.subTest(words=words):

@@ -23,7 +23,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from briefing_reader import live, ui
+from briefing_reader import desktop_ui, desktop_view, live, ui
 from briefing_reader.desktop import pcctl
 from tests.desktop_fakes import FakeClock, FakePc
 from tests.test_desktop_requests import DesktopRequestApp
@@ -224,6 +224,38 @@ class ConsentTests(PcApp):
         self.clock.advance(3600)
         self.check_timers()
         self.assertEqual((self.toasts, self.pc.chimes), ([], 0))
+
+    def test_phase_1_ok_opens_as_before_but_a_control_waits_for_the_updated_card(self) -> None:
+        """p2r-6: the OK of Phase 1's card (version 1) still opens what the owner names; a PC control (Phase 2) does
+        nothing - the caption says why, the updated card (its new rows marked) shows as he brings the window back -
+        and works once he turns that card on."""
+        self.make_pc(desktop_consent=1)
+        self.enter()
+        self.assertEqual(self.say("open Downloads").split(",")[0], "Opened your Downloads folder")
+        self.assertEqual([method for method, _target in self.fake.opened], ["open_folder"])
+        self.assertEqual(self.say("volume 30"), desktop_ui.UPDATE_NEEDED_HUD_TEXT.format(sir="sir"))
+        self.assertEqual(self.hud().bar.text(), "volume 30")                       # the words stay
+        self.assertEqual((self.pc.calls, self.pc.level), ([], 50))                 # nothing was changed
+        self.assertFalse(self.desktop.request("screenshot"))                       # fail-closed at its root too
+        self.assertIsNone(self.c._desktop_consent_card)                            # the window is hidden: it waits
+        self.back()
+        settle()
+        card = self.c._desktop_consent_card
+        self.assertTrue(card is not None and card.is_open())
+        self.assertEqual(card.entry(), desktop_ui.ENTRY_UPDATE)
+        self.assertIn(desktop_ui.UPDATE_NEEDED_TEXT.format(sir="sir"), self.reading.command_bar.status())  # its words
+        self.assertEqual(card.new_rows(), [desktop_view.CONSENT_ROWS[1], desktop_view.CONSENT_ROWS[2]])
+        QTest.mouseClick(card.turn_on, Qt.MouseButton.LeftButton)
+        settle()
+        self.assertTrue(self.desktop.consent_current())
+        self.assertTrue(self.desktop.is_hud())
+        bar = self.hud().bar
+        self.assertEqual(bar.text(), "volume 30")                                  # still there: his Enter
+        QTest.mouseClick(bar.input, Qt.MouseButton.LeftButton)
+        QTest.keyClick(bar.input, Qt.Key.Key_Return)
+        self.answered()
+        self.assertEqual(self.hud().caption_text(), "Volume 30, sir.")
+        self.assertEqual(self.pc.level, 30)
 
 
 class CanaryTests(PcApp):

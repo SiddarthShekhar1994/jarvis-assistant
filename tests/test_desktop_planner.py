@@ -350,7 +350,7 @@ class FileSkillsTests(DesktopRunTests):
                              [("move", "", True), ("copy", "", True), ("mkdir", "", True), ("zip", "", True),
                               ("rename", "", True)])
             self.assertIn("to_onedrive", card.rows[0].flags)                   # Downloads into LING (OneDrive)
-            self.assertEqual(outcome.message, "5 steps need your OK first - nothing has changed yet, sir.")
+            self.assertEqual(outcome.message, "5 changes need your OK first - nothing has changed yet, sir.")
             changed = [call for call in fake.calls if call[0] in ("move_item", "copy_file", "make_folder",
                                                                   "remove_folder", "write_zip")]
             self.assertEqual(changed, [])                                    # nothing until the owner's click

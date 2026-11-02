@@ -38,6 +38,12 @@ there, one at a time, so nothing in it is shared with the GUI or the Ask thread.
   HUD's instant changes back (the owner's click on a chip's Undo or on Undo all: PcControl.undo_changes, newest
   first); ``dnd_state()`` reads Windows' Do Not Disturb back (read only) and ``open_dnd(cancel=)`` opens its settings
   page on the owner's click (the one fixed call).
+* ``recall_undo(cancel=)`` (p2r-3, D9's 7-day Undo): the owner's "undo" - the newest run within undo_days whose
+  items Undo may still put back (fileops.Undoer.undoable over each journal), rebuilt as its stamped card
+  (tidy.recalled); nothing is put back here (his click on its Undo goes through ``undo_card`` like any card's);
+* ``housekeep(...)`` (p2r-1; a function of its own - it needs no service): the journal's start-up recovery and its
+  purge of the runs older than 30 days, at start-up and at the owner's Turn on, then at the first desktop request of
+  each new day (desktop_ui; never on a timer).
 
 Each job's ``cancel`` (anything with ``is_set()``) holds the app's stop and THE CONSENT GATE (desktop_ui: the owner's
 Turn off): the executor asks it before each step and right before each OS call - once it is set nothing opens, and
@@ -59,7 +65,8 @@ journal_folder=, undo_days=, pc_factory=, timers=, screenshots_dir=, focus=, rec
 ``scope(fresh=)``, ``apps(fresh=)``, ``tree()``, ``route_context()``, ``resolve(words, planner=, override=, run_id=,
 cancel=, hud=)``, ``context_for(words)``, ``carry_out(plan, words, context, cancel)``, ``click(click, cancel)``,
 ``carry_out_card(card, sha=, ticked=, cancel=, on_start=, on_row=, stop_keys=, on_stop=)``, ``undo_card(run_id, seqs,
-cancel=, on_start=, stop_keys=, on_stop=)``, ``find(query)``, ``executor()``; ``days_in(words)``; ``RECENT_FILES``.
+cancel=, on_start=, stop_keys=, on_stop=)``, ``find(query)``, ``executor()``; ``days_in(words)``; ``RECENT_FILES``;
+``housekeep(journal_folder, backend, cancel=)`` -> ``Housekept``; ``recall_undo(cancel=)`` -> ``Recalled``.
 """
 
 from __future__ import annotations
@@ -74,6 +81,7 @@ from typing import Any
 from . import apps as desktop_apps
 from . import cardplan, guard, paths, pcctl, recycle, stopkeys, tidy
 from . import fileops as fo
+from . import journal as jn
 from . import results as desktop_results
 from . import routes as desktop_routes
 from . import validate as dv
@@ -337,14 +345,15 @@ class DesktopService:
         return context
 
     def carry_out(self, plan: dv.DesktopPlan, words: str, context: DesktopContext | None,
-                  cancel: Any = None) -> DesktopRun:
+                  cancel: Any = None, *, organise: bool = True) -> DesktopRun:
         """A planner's checked plan carried out (desktop.executor), the files it was shown kept for D5's other
-        matches."""
+        matches; ``organise`` False (the owner's OK is Phase 1's card's): its file steps are refused, no card."""
         executor = self.executor()
         if executor is None:
             return DesktopRun(plan.run_id)
         others = context.files if isinstance(context, DesktopContext) else ()
-        return self._shown(executor.run_plan(plan, words=words, others_from=others, cancel=cancel), executor, words)
+        return self._shown(executor.run_plan(plan, words=words, others_from=others, cancel=cancel,
+                                             organise=organise), executor, words)
 
     def click(self, click: desktop_results.Click, cancel: Any = None) -> DesktopRun:
         """The owner's click on a result card (desktop.results.Click): the card's own item re-checked and carried out
@@ -371,7 +380,8 @@ class DesktopService:
             logger.warning("Desktop %s: the result cards could not be made (%s)", run.run_id or "-",
                            type(exc).__name__)
             cards = ()
-        if isinstance(run.card, cardplan.CardPlan):
+        waits = any(result.skill in dv.ORGANISE_SKILLS and result.tier == dv.CARD for result in run.waiting())
+        if isinstance(run.card, cardplan.CardPlan) and waits:        # p2r-17: never for steps cancelled or refused
             try:
                 card = tidy.make_card(run.card, self.scope(), at=self._now())
             except Exception as exc:  # noqa: BLE001 - no card: nothing of its steps can be clicked
@@ -465,6 +475,42 @@ class DesktopService:
         rows = tuple(tidy.RowEnd(0, result.state, result.reason, result.seq) for result in report.results)
         return tidy.UndoOutcome(run_id, rows, report.stamp(), round(self._clock() - started, 3))
 
+    def recall_undo(self, *, cancel: Any = None) -> Recalled:
+        """The owner's "undo" (p2r-3): the newest run - by its newest change - whose items Undo may still put back
+        (within undo_days: fileops.Undoer.undoable, the card's own Undo's rule), rebuilt from its journal as its
+        stamped card (tidy.recalled). Only reads the journals: nothing is put back here. ``Recalled(None)``: nothing
+        to undo; ``code`` tidy.UNAVAILABLE: the journals or this PC can't be read now."""
+        if cancel is not None and cancel.is_set():
+            return Recalled()
+        backend = self.backend()
+        try:
+            folder = self._journal_folder()
+        except Exception as exc:  # noqa: BLE001 - RealBackendInTests in a test without a folder of its own
+            logger.info("Desktop: the undo route can't read the journals (%s)", type(exc).__name__)
+            return Recalled(code=tidy.UNAVAILABLE)
+        if backend is None:
+            return Recalled(code=tidy.UNAVAILABLE)
+        best: tuple[float, str, dict, tuple[int, ...]] | None = None
+        for path in jn.journal_files(folder):
+            if cancel is not None and cancel.is_set():
+                return Recalled()
+            run_id = path.name[:-len(jn.JOURNAL_SUFFIX)]
+            journal = Journal(folder, run_id)
+            seqs = fo.Undoer(backend, journal, scope=lambda: self.scope(fresh=True),
+                             undo_days=self._undo_days).undoable()
+            if not seqs:
+                continue
+            items = journal.items()
+            newest = max(float(items[seq].done.at or 0.0) for seq in seqs if items[seq].done is not None)
+            if best is None or newest > best[0]:
+                best = (newest, run_id, items, seqs)
+        if best is None:
+            logger.info("Desktop: the undo route found nothing to undo")
+            return Recalled()
+        state = tidy.recalled(best[1], best[2], self.scope(), best[3])
+        logger.info("Desktop %s: the undo route shows its card (%d item(s) to put back)", best[1], len(best[3]))
+        return Recalled(state)
+
     def find(self, query: FindQuery) -> tuple[Any, ...]:
         """A find_files step's search: the files (or, for kind "folder", the folders) its words find, checked."""
         backend = self.backend()
@@ -478,6 +524,54 @@ class DesktopService:
         search = LocalSearch(scope, backend, clock=self._clock, now=self._now)
         return search.search(query.words, folders=query.folders, kind=query.kind,
                              within_days=query.within_days).files
+
+
+@dataclass(frozen=True)
+class Recalled:
+    """What the owner's "undo" found (``DesktopService.recall_undo``): the stamped card's state (tidy.TidyState), or
+    None - nothing to undo, or ``code`` tidy.UNAVAILABLE."""
+
+    state: Any = field(default=None, repr=False)
+    code: str = ""
+
+
+@dataclass(frozen=True)
+class Housekept:
+    """What the journal's housekeeping came to (``housekeep``): whether it ran, the items recovery corrected and the
+    runs purged."""
+
+    ran: bool = False
+    corrected: int = 0
+    purged: int = 0
+
+
+def housekeep(journal_folder: Callable[[], Any], backend: Callable[[], DesktopBackend | None], *,
+              cancel: Any = None) -> Housekept:
+    """The journal's housekeeping (SPEC 6.1; p2r-1), on the desktop thread: start-up recovery - every item a crash left
+    "doing" corrected by looking where it is, never redone (journal.recover only adds records) - then the purge of
+    the runs older than journal.PURGE_DAYS. ``journal_folder()``: the journals' folder (the app's, a test's own);
+    ``backend()``: this PC's backend for the looks (none: recovery waits for a later run); ``cancel``: THE CONSENT GATE
+    (set: nothing runs). Logs carry counts and exception types only."""
+    if cancel is not None and cancel.is_set():
+        return Housekept()
+    try:
+        folder = journal_folder()
+    except Exception as exc:  # noqa: BLE001 - RealBackendInTests in a test without a folder of its own
+        logger.info("Desktop journal: no housekeeping (%s)", type(exc).__name__)
+        return Housekept()
+    corrected = purged = 0
+    try:
+        looks = backend()
+    except Exception as exc:  # noqa: BLE001 - no backend: nothing is looked at now
+        logger.info("Desktop journal: no recovery now (%s)", type(exc).__name__)
+        looks = None
+    try:
+        if looks is not None:
+            corrected = jn.recover(folder, looks).items
+        purged = jn.purge(folder)
+    except Exception as exc:  # noqa: BLE001 - a bug: logged by its type, tried again at the next housekeeping
+        logger.warning("Desktop journal: the housekeeping stopped (%s)", type(exc).__name__)
+    return Housekept(True, corrected, purged)
 
 
 class _LazyRecycler:

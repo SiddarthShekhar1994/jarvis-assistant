@@ -8,9 +8,11 @@ Nothing here turns anything on, stores anything or goes onto the desktop: every 
 ``ConsentCard(parent)``
     The first-run card, over the window's screen (the Find list's way: a ``void`` scrim and a panel in the middle):
     the kicker "DESKTOP <middle dot> NEEDS YOUR OK", the title "Jarvis on your desktop", what Jarvis will and won't do in this
-    phase (``CONSENT_ROWS``: SPEC 10.3's rows that are live in Phase 1), where it can be turned off again, and "Not now"
-    (ghost, left) / "Turn on" (amber, right; DesktopB's order). ``open_card(entry)`` shows it for an entry (the Dock's
-    Desktop, the HUD key, a --hud start or a typed request - desktop_ui.ENTRIES), ``close_card()``, ``is_open()``,
+    phase (``CONSENT_ROWS``: SPEC 10.3's rows that are live in Phase 2), where it can be turned off again, and "Not now"
+    (ghost, left) / "Turn on" (amber, right; DesktopB's order). ``open_card(entry, updated=)`` shows it for an entry
+    (the Dock's Desktop, the HUD key, a --hud start, a typed request or a Phase 2 skill asked for under Phase 1's OK -
+    desktop_ui.ENTRIES); ``updated``: the owner turned Phase 1's card on, so Phase 2's rows (``CONSENT_NEW``) are
+    marked "NEW" (``new_rows()``). ``close_card()``, ``is_open()``,
     ``entry()``, ``set_problem(text)`` (a line in coral: the OK could not be saved). The keyboard: the focus starts on
     Not now - Enter or Space there turns nothing on -, Tab and Shift+Tab stay between the two buttons, Esc and a click
     on the scrim are Not now; when it closes the focus goes back where it was. Signals ``turnOnClicked(entry)`` and
@@ -42,10 +44,16 @@ from .memory_view import body_label
 
 CONSENT_KICKER = "DESKTOP \u00b7 NEEDS YOUR OK"
 CONSENT_TITLE = "Jarvis on your desktop"
-# SPEC 10.3's first-run rows, only those live in Phase 1 (moving, timers, music and work inside apps come later).
+# SPEC 10.3's first-run rows, those live in Phase 2 (work inside apps and its control come in Phase 3); Phase 2's two
+# (p2r-6) are new since Phase 1's card: marked "NEW" for an owner who turned that one on.
 CONSENT_ROWS = ("I open files, apps, folders and sites you name.",
+                "Music, volume, timers and screenshots happen at once - Undo puts them back.",
+                "Moving, renaming, zipping or putting files in the Recycle Bin waits for your click on a card, with "
+                "Undo. Nothing is deleted for good.",
                 "I only work in the folders and apps you allow.",
                 "To plan, file, folder and app names go to your Claude plan. They're never kept in logs.")
+CONSENT_NEW = (1, 2)                   # the rows of CONSENT_ROWS new since Phase 1's card
+NEW_TAG_TEXT = "NEW"
 CONSENT_FOOT = "You can turn it off again in Settings \u203a Desktop."
 NOT_NOW_TEXT = "Not now"
 TURN_ON_TEXT = "Turn on"
@@ -142,17 +150,56 @@ class _Dot(QWidget):
             painter.end()
 
 
+class _NewTag(QWidget):
+    """p2r-6: "NEW" before a row the owner has not turned on yet - small amber caps in a hairline outline, on the
+    row's first line."""
+
+    PAD = 5
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._font = hud.mono_font(9, 500, 0.16)
+        metrics = QFontMetricsF(self._font)
+        self.setFixedSize(int(metrics.horizontalAdvance(NEW_TAG_TEXT) + 2 * self.PAD + 2), 20)
+        self.setAccessibleName(NEW_TAG_TEXT)
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            box = QRectF(0.5, 3.5, self.width() - 1.0, 13.0)
+            painter.setPen(QPen(holo.alpha(holo.AMBER, 0.70), 1.0))
+            painter.setBrush(holo.alpha(holo.AMBER, 0.12))
+            painter.drawRoundedRect(box, 3, 3)
+            painter.setFont(self._font)
+            painter.setPen(QColor(holo.AMBER))
+            painter.drawText(box, int(Qt.AlignmentFlag.AlignCenter), NEW_TAG_TEXT)
+        finally:
+            painter.end()
+
+
 class _Bullet(QWidget):
-    """One of the card's lines: a small amber dot and the line, wrapping."""
+    """One of the card's lines: a small amber dot and the line, wrapping; "NEW" before it when marked
+    (``set_new``)."""
 
     def __init__(self, text: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.label = body_label(text, "body_sm", holo.AMBER_TX2)
+        self.tag = _NewTag()
+        self.tag.hide()
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(10)
         row.addWidget(_Dot(), 0, Qt.AlignmentFlag.AlignTop)
+        row.addWidget(self.tag, 0, Qt.AlignmentFlag.AlignTop)
         row.addWidget(self.label, 1)
+
+    def is_new(self) -> bool:
+        return not self.tag.isHidden()
+
+    def set_new(self, new: bool) -> None:
+        self.tag.setVisible(bool(new))
+        self.setAccessibleName(f"{NEW_TAG_TEXT}: {self.label.text()}" if new else self.label.text())
 
 
 class ConsentCard(QWidget):
@@ -215,12 +262,15 @@ class ConsentCard(QWidget):
         """What the owner asked for when it opened (desktop_ui.ENTRIES)."""
         return self._entry
 
-    def open_card(self, entry: str) -> None:
-        """Show the card for ``entry`` over the window's screen, the focus on Not now (the one before kept)."""
+    def open_card(self, entry: str, *, updated: bool = False) -> None:
+        """Show the card for ``entry`` over the window's screen, the focus on Not now (the one before kept);
+        ``updated``: Phase 1's card was turned on, so its new rows are marked "NEW"."""
         if not self.isVisible():
             focus = self.window().focusWidget()
             self._opener = focus if focus is not None and not self.isAncestorOf(focus) else None
         self._entry = str(entry or "")
+        for index, row in enumerate(self.rows):
+            row.set_new(updated and index in CONSENT_NEW)
         self.set_problem("")
         self.setGeometry(self.parentWidget().rect())
         self._place_panel()
@@ -241,6 +291,10 @@ class ConsentCard(QWidget):
         self.problem.setVisible(bool(text))
         if self.isVisible():
             self._place_panel()
+
+    def new_rows(self) -> list[str]:
+        """The rows marked "NEW" (tests and the harness)."""
+        return [row.label.text() for row in self.rows if row.is_new()]
 
     def texts(self) -> list[str]:
         """Every text the card shows (tests and the harness)."""

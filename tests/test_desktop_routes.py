@@ -84,6 +84,20 @@ class DesktopRouteTests(unittest.TestCase):
         self.assertNotIn("LING", repr(found))
         self.assertEqual(found.payload, "open my LING essay")
 
+    def test_undo_is_the_desktops_own(self) -> None:
+        """p2r-3: the owner's "undo" (its few shapes) is a desktop request - the last change's card comes back - and
+        anything more is not."""
+        for text in ("undo", "Undo.", "undo that", "undo it", "undo the last change", "undo my last change",
+                     "undo the last one", "Jarvis, undo that", "please undo"):
+            with self.subTest(text=text):
+                self.assertTrue(dr.undo_request(text))
+                self.assertEqual(route(text, ON).kind, ROUTE_DESKTOP)
+                self.assertIsNone(dr.pc_request(text))
+        for text in ("undo the meeting", "undo my reply to Ana", "undone", "can you undo", "undo everything"):
+            with self.subTest(text=text):
+                self.assertFalse(dr.undo_request(text))
+                self.assertFalse(dr.desktop_request(text))
+
 
 class LocalRouteTests(unittest.TestCase):
     """desktop.routes.route: SPEC 2.2's full-match local routes (no planner run)."""

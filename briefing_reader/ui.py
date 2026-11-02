@@ -1373,6 +1373,7 @@ class ReadingView(QWidget):
         self._activity = hud.ORB_WORKING
         self._typing = False
         self._pending = 0
+        self._desktop_waiting = 0              # p2r-5: NEEDS YOUR OK cards waiting on the desktop HUD
         self._offers = 0
         self._muted_look = False
         self._offline_voice = False
@@ -2320,14 +2321,15 @@ class ReadingView(QWidget):
         offer = self._offers > 0
         answer = resting and not offer and bool(self._answer[0])
         briefing = resting and not (offer or answer) and self._new_briefing
-        approvals = resting and not (offer or answer or briefing) and self._pending > 0
+        needs_ok = self._pending + self._desktop_waiting          # p2r-5: the HUD's chip says the same total
+        approvals = resting and not (offer or answer or briefing) and needs_ok > 0
         # Without a chip: when Jarvis checks for the briefing he waits for, else the Windows voice's badge.
         quiet_row = resting and not (offer or answer or briefing or approvals)
         readout = quiet_row and self._waiting and bool(self._waiting_readout)
         self.waiting_readout.setVisible(readout)
         self.voice_badge.setVisible(quiet_row and not readout and self._offline_voice)
         for chip, shown, text in ((self.answer_chip, answer, self._answer[0]),
-                                  (self.approvals_chip, approvals, needs_ok_chip(self._pending))):
+                                  (self.approvals_chip, approvals, needs_ok_chip(needs_ok))):
             if shown and chip.text() != text:
                 chip.setText(text)
                 chip.updateGeometry()
@@ -2866,13 +2868,25 @@ class ReadingView(QWidget):
         self.briefing_stage.set_proposals(pending)
         self.approvals_bar.set_value(str(pending), pending / total if total else 0.0)
         self._pending = max(0, int(pending))
-        self.dock.set_approvals(self._pending)
+        self.dock.set_approvals(self._pending + self._desktop_waiting)
         self._sync_chip()
         self._sync_look()                       # ... and the desktop HUD's "N need your OK" (glanceChanged)
 
     def pending_count(self) -> int:
-        """Proposals waiting for the owner's OK (``set_pending``: the Dock's amber count, Home's chip)."""
+        """Proposals waiting for the owner's OK (``set_pending``; with ``set_desktop_waiting``'s cards: the Dock's
+        amber count, Home's chip)."""
         return self._pending
+
+    def set_desktop_waiting(self, count: int) -> None:
+        """p2r-5: the NEEDS YOUR OK cards waiting on the desktop HUD (desktop_ui.waitingChanged) count with the
+        proposals in Home's "N need your OK" chip and the Dock's amber Approvals count - the same total as the HUD's
+        chip (which adds them to ``pending_count`` itself)."""
+        count = max(0, int(count))
+        if count == self._desktop_waiting:
+            return
+        self._desktop_waiting = count
+        self.dock.set_approvals(self._pending + count)
+        self._sync_chip()
 
     # ---- approval cards ------------------------------------------------------
 
@@ -4946,6 +4960,7 @@ class AppController(QObject):
         # run; tests and the harness pass a fake over pretend windows).
         self._desktop_window_api = desktop_window_api
         self._desktop_consent_card: Any = None        # the first-run "Jarvis on your desktop" card (made at first use)
+        self._desktop_consent_later = ""              # p2r-6: the updated card asked for on the HUD: at the way back
         self._desktop_settings: Any = None            # Settings > Desktop's own part (Turn off)
         self._snapshot_factory = snapshot_factory   # tests: a fake page snapshotter (no web engine)
         self.expected_run = _normalize_run(expected_run)
@@ -8936,7 +8951,8 @@ class AppController(QObject):
         reading.settings_page.add_group(settings_view.DESKTOP_GROUP, settings_view.DESKTOP_TITLE,
                                         note=settings_view.DESKTOP_NOTE, how=settings_view.DESKTOP_HOW,
                                         rows=lambda: settings_view.desktop_rows(
-                                            self.config, turned_on=self._desktop_turned_on()),
+                                            self.config, turned_on=self._desktop_turned_on(),
+                                            current=self._desktop_ok_current()),
                                         extra=self._desktop_settings)
         self.desktop = self._create_desktop(factory)
         if self.desktop is not None:
@@ -9012,6 +9028,8 @@ class AppController(QObject):
         self._desktop_waiting = waiting
         self.desktop.waitingChanged.connect(waiting.set_count)
         waiting.set_count(self.desktop.waiting_count())
+        self.desktop.waitingChanged.connect(reading.set_desktop_waiting)     # p2r-5: Home's chip, the Dock's badge
+        reading.set_desktop_waiting(self.desktop.waiting_count())
 
     def _on_desktop_show_me(self) -> None:
         """Approvals' "Show me": onto the HUD, where the NEEDS YOUR OK card waits (the owner's click)."""
@@ -9066,17 +9084,45 @@ class AppController(QObject):
         desktop = getattr(self, "desktop", None)
         return desktop is not None and desktop.consent_given()
 
+    def _desktop_ok_current(self) -> bool:
+        """p2r-6: the owner's OK covers today's card (desktop_ui.CONSENT_VERSION: Phase 2's rows too)."""
+        desktop = getattr(self, "desktop", None)
+        return desktop is not None and desktop.consent_current()
+
+    def _desktop_update_needed(self, text: str, *, on_hud: bool) -> bool:
+        """p2r-6: ``text`` asks for a PC control while the owner's OK is Phase 1's card's - nothing runs: the bar says
+        why in coral (the words stay) and the updated card shows (in the window now, or when he brings it back from
+        the HUD). False when it may go on."""
+        from .desktop_ui import ENTRY_REQUEST, ENTRY_UPDATE, UPDATE_NEEDED_HUD_TEXT, UPDATE_NEEDED_TEXT
+
+        desktop = getattr(self, "desktop", None)
+        if desktop is None or not desktop.needs_update(text):
+            return False
+        said = with_address(UPDATE_NEEDED_HUD_TEXT if on_hud else UPDATE_NEEDED_TEXT, self.config.assistant.address)
+        if self.ask is not None:
+            self.ask.show_note(said, hud.TONE_ERROR, hud_text=said)
+        else:
+            desktop.bar().set_status(said, hud.TONE_ERROR)
+        logger.info("Desktop: a request for a PC control waits for the updated card")
+        self._show_desktop_consent(ENTRY_UPDATE if on_hud else ENTRY_REQUEST)
+        return True
+
     def _show_desktop_consent(self, entry: str) -> None:
         """Before the owner's Turn on, the Dock's Desktop (and the Find list's), the HUD key, a --hud start and a typed
         desktop request show the first-run card in the window instead (desktop_view.ConsentCard, over the screen
         shown). It never brings the window forward by itself: the Dock and the Find list are clicked in it, the HUD
         key and a --hud start bring it forward as the window key does (the owner's own key) before this, and a request
         is typed in it. Nothing is stored until his Turn on."""
+        from .desktop_ui import ENTRY_UPDATE
+
         desktop = getattr(self, "desktop", None)
         window = self.window
         if desktop is None or self._shut_down or not window.isVisible() or not window.is_reading_view():
             logger.info("Desktop: the first-run card waits (the window is not up)")
+            if desktop is not None and entry == ENTRY_UPDATE:
+                self._desktop_consent_later = entry          # p2r-6: it shows as the owner brings the window back
             return
+        self._desktop_consent_later = ""
         reading = window.reading
         card = self._desktop_consent_card
         if card is None:
@@ -9088,8 +9134,20 @@ class AppController(QObject):
             window.visibilityChanged.connect(self._on_window_visibility_for_desktop)
             self._desktop_consent_card = card
         reading.find_overlay.close_list(restore_focus=False)
-        card.open_card(entry)
+        card.open_card(entry, updated=desktop.consent_given() and not desktop.consent_current())
         logger.info("Desktop: the first-run card shows (%s)", entry)
+
+    def _show_desktop_consent_later(self) -> None:
+        """p2r-6: the updated card asked for on the HUD shows now the window is back (once; not when turned on by
+        then)."""
+        from .desktop_ui import UPDATE_NEEDED_TEXT
+
+        entry, self._desktop_consent_later = self._desktop_consent_later, ""
+        desktop = getattr(self, "desktop", None)
+        if entry and desktop is not None and desktop.consent_given() and not desktop.consent_current():
+            if self.ask is not None:                         # the HUD's "Bring Jarvis back to read it" is done with
+                self.ask.show_note(with_address(UPDATE_NEEDED_TEXT, self.config.assistant.address), hud.TONE_ERROR)
+            self._show_desktop_consent(entry)
 
     def _on_consent_turn_on(self, entry: str) -> None:
         """The owner's Turn on: stored first (it counts only once saved - else the card says so and nothing is on),
@@ -9262,6 +9320,8 @@ class AppController(QObject):
             wanted = route(text, RouteFlags(desktop=True)).kind == ROUTE_DESKTOP
         except Exception as exc:  # noqa: BLE001 - the note below instead
             logger.warning("Desktop: a request typed with Ask off could not be read (%s)", type(exc).__name__)
+        if wanted and self._desktop_update_needed(text, on_hud=True):
+            return                                            # p2r-6: Phase 1's OK - the updated card first
         if wanted and desktop.request(text, planner=False):
             bar.set_status(LOOKING_TEXT, hud.TONE_WORKING)    # the words stay until it is handled
             return
@@ -9292,6 +9352,8 @@ class AppController(QObject):
         if desktop.busy():
             ask.show_note(BUSY_TEXT, hud.TONE_ERROR)  # one at a time: the words stay (not done: coral)
             return None
+        if self._desktop_update_needed(text, on_hud=self._hud_active()):
+            return None                              # p2r-6: Phase 1's OK - the updated card first
         if not self._hud_active():
             window_bar = self.window.reading.command_bar
             if not desktop.consent_given():
@@ -9388,6 +9450,8 @@ class AppController(QObject):
             QTimer.singleShot(0, self._offer_pending_run)
         if not entered and self._account_ask_later is not None:
             QTimer.singleShot(0, self._ask_account_later)
+        if not entered and self._desktop_consent_later:
+            QTimer.singleShot(0, self._show_desktop_consent_later)
 
     def _on_about_to_quit(self) -> None:
         """The application quits while Jarvis may be on the desktop HUD: Windows ends the session (sign-out, shut

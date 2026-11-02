@@ -504,6 +504,30 @@ class ScreenshotTests(PcBase):
         Path(self.disk.real(changed.after.path)).write_bytes(b"edited")
         self.assertEqual(pc.undo(changed).code, pcctl.CHANGED)
 
+    def test_undo_all_stops_binning_after_the_bin_deleted_one_for_good(self) -> None:
+        """p2r-14: once a screenshot's Undo comes back with a bin-stop code (Windows deleted it instead of recycling
+        it), no later screenshot is asked to the bin - each is marked not tried, as the card's Undo does - while the
+        changes that don't go to the bin are still put back."""
+        bin_ = FakeRecycleBin(self.disk)
+        pc = self.control(recycler=bin_)
+        shots = []
+        for _ in range(3):
+            shots.append(pc.carry_out(dr.pc_request("screenshot")))
+            self.later(2.0)
+        volume = pc.carry_out(dr.pc_request("volume 30"))
+        self.later(1.0)
+        bin_.nuke = True                                          # PostDeleteItem: no new item in the bin
+        results = pc.undo_changes([*shots, volume])
+        codes = {id(change): result.code for change, result in results}
+        self.assertEqual([codes[id(shot)] for shot in reversed(shots)],
+                         [dfo.R_NOT_RECYCLED, dfo.R_BIN_STOPPED, dfo.R_BIN_STOPPED])
+        self.assertEqual(len(bin_.nuked), 1)                      # the one Windows took; none more asked
+        self.assertEqual(codes[id(volume)], "")
+        self.assertEqual(self.fake.level, 50)
+        self.assertTrue(all(os.path.exists(self.disk.real(shot.after.path)) for shot in shots[:2]))
+        self.assertIn("Not put back - I stopped after the Recycle Bin didn't take one.",
+                      pcctl.undo_summary(results))
+
     def test_the_png(self) -> None:
         data = pcctl.png_bytes(2, 1, bytes([1, 2, 3, 255, 4, 5, 6, 255]))
         self.assertTrue(data.startswith(dbk.PNG_SIGNATURE))
