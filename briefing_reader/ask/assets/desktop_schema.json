@@ -27,14 +27,14 @@
           "skill": {
             "type": "string",
             "enum": ["find_files", "open_file", "show_in_folder", "open_folder", "open_app", "open_url",
-                     "move_files", "copy_files", "rename_file", "make_folder", "zip_files"]
+                     "move_files", "copy_files", "rename_file", "make_folder", "zip_files", "recycle_files"]
           },
           "why": {"type": "string", "maxLength": 120, "description": "A few words: why this step."},
           "files": {
             "type": "array",
             "maxItems": 200,
             "items": {"type": "string", "pattern": "^f[0-9]{1,4}$"},
-            "description": "f ids: one to open, show or rename; else the files to move, copy or zip."
+            "description": "f ids: one to open, show or rename; else the files to move, copy, zip or bin."
           },
           "place": {
             "type": "string",

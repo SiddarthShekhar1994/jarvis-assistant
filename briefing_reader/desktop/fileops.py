@@ -33,13 +33,21 @@ temporary name the same way), and journalled "done" (with the result's identity,
 hash) or "failed" with a reason code: a sharing violation (32, 33) is ``R_IN_USE``, a stop ``R_STOPPED``. The card's
 row flags come with each result (``FLAG_*``: uploads to / leaves OneDrive, online-only, pinned, hidden characters).
 
+P2.6 adds the Recycle Bin row (``RECYCLE``: recycle_files, the owner's own words only): its item re-checked as a
+copy's would be (an online-only file, or a folder holding one, would skip the bin: ``R_ONLINE_ONLY``; a folder walked
+first), then the ``Recycler``'s own pre-checks (desktop.recycle: a fixed drive, the bin on for it and room for the
+item) and its one call. A row Windows did not put in the bin (``BIN_STOPS``: it would have been deleted for good, or
+it was not recycled) stops the batch: the rows after it are skipped (``R_BIN_STOPPED``).
+
 ``Undoer`` puts a run's items back on the owner's click (SPEC 6.3), one item at a time, in reverse order, each one
 re-checked and journalled the same way: a move or a rename goes back when the same file is still where Jarvis put it
 and its old place is free ("Moved since - left where it is.", "Something new is in its old place - left where it
-is."); a copy or a zip is recycled - through the ``Recycler`` seam: the Recycle Bin arrives in P2.6, until then
-``NoRecycleBin`` refuses cleanly - only when it is Jarvis's own output, unchanged (its hash); a folder Jarvis made is
-removed only when it is empty; anything older than [desktop] undo_days is refused. ``UndoReport.stamp()`` is the
-card's partial stamp ("PUT BACK 4 OF 5 \u00b7 1 MOVED SINCE").
+is."); a copy, a zip or a screenshot is recycled through the ``Recycler`` seam (desktop.recycle.RecycleBin in the
+app; ``NoRecycleBin`` refuses cleanly) only when it is Jarvis's own output, unchanged (its hash); a folder Jarvis made
+is removed only when it is empty; an item Jarvis put in the Recycle Bin is taken back out when its old place is free
+and the bin still has it ("Can't be put back - the Recycle Bin was emptied."); a copy or a zip that stopped part-way
+has its part-made output (under its temporary ``.jarvis-part`` name) put in the bin; anything older than [desktop]
+undo_days is refused. ``UndoReport.stamp()`` is the card's partial stamp ("PUT BACK 4 OF 5 \u00b7 1 MOVED SINCE").
 
 The raw Windows calls (``raw_*``) are reached only through Win32Backend's guarded methods - and, while the tests run,
 through the test fake on a temporary folder: under the test guard every raw call refuses any path outside the
@@ -50,11 +58,12 @@ kinds, states, reason codes, counts, exception types and winerrors only - never 
 Public API
 ==========
 ``FileOp(kind, sources, folder, name, key)``, ``Check``, ``OpResult``, ``BatchReport``, ``FileOps(backend, journal,
-scope=, cancel=, clock=, caps=, progress=)`` (``check(op, pending=)`` - ``pending``: a card's new folders not made
-yet, P2.2 -, ``run(ops)``; ``progress(result, ended, total)`` after each row, P2.3); ``Undoer(backend, journal,
-scope=, recycler=,
-undo_days=, now=, cancel=)`` (``undoable()``, ``undo(seqs=None)``), ``UndoResult`` (``words``), ``UndoReport``
-(``put_back``, ``total``, ``refused()``, ``stamp()``); ``Recycler``, ``NoRecycleBin``, ``RecycleUnavailable``;
+scope=, cancel=, clock=, caps=, progress=, recycler=)`` (``check(op, pending=)`` - ``pending``: a card's new folders
+not made yet, P2.2 -, ``run(ops)``; ``progress(result, ended, total)`` after each row, P2.3); ``Undoer(backend,
+journal, scope=, recycler=, undo_days=, now=, cancel=)`` (``undoable()``, ``undo(seqs=None)``), ``UndoResult``
+(``words``), ``UndoReport`` (``put_back``, ``total``, ``refused()``, ``stamp()``); ``Recycler`` (``check(path,
+size=)``, ``recycle(path, identity=)``, ``find(original, size=, is_dir=, since=, until=)``, ``restore(entry,
+original)``), ``NoRecycleBin``, ``RecycleUnavailable(reason, stop=)``, ``BIN_STOPS``, ``RESTORE_SLACK_S``;
 ``walk_subtree(folder, scope, backend, content=)``, ``Subtree``, ``SubtreeCaps``, ``SUBTREE_CAPS``,
 ``tree_digest(folder, backend)``, ``free_name(folder, name, backend, taken=)``, ``fold_name(name)``,
 ``os_reason(exc)``; reason codes ``R_*``,
@@ -86,12 +95,12 @@ from .backend import (FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCE
                       FILE_ATTRIBUTE_REPARSE_POINT, MAX_LISTED, DesktopBackend, DirEntry, FileIdentity,
                       RealBackendInTests, ZipMember, cloud_tag, real_backend_blocked)
 from .context import Place
-from .journal import (COPY, DONE, DOING, FAILED, MKDIR, MOVE, PLANNED, RENAME, SCREENSHOT, SKIPPED, UNDO_REFUSED,
-                      UNDONE, ZIP, Item, Journal, JournalError, Record, same_place)
+from .journal import (COPY, DONE, DOING, FAILED, MKDIR, MOVE, PLANNED, RECYCLE, RENAME, SCREENSHOT, SKIPPED,
+                      UNDO_REFUSED, UNDONE, ZIP, Item, Journal, JournalError, Record, same_place)
 
 logger = logging.getLogger(__name__)
 
-OP_KINDS = (MOVE, RENAME, COPY, MKDIR, ZIP)
+OP_KINDS = (MOVE, RENAME, COPY, MKDIR, ZIP, RECYCLE)
 
 # Reason codes (safe to log: a word, never a path). The checks' (each refuses before a card shows, and again right
 # before the OS call):
@@ -133,9 +142,23 @@ R_OCCUPIED = "occupied"                  # something new is in its old place
 R_NOT_EMPTY = "not_empty"                # a folder Jarvis made holds something now
 R_EXPIRED = "expired"                    # older than [desktop] undo_days
 R_OLD_PLACE_GONE = "old_place_gone"      # the folder it came from is gone
-R_NO_BIN = "recycle_unavailable"         # the Recycle Bin can't take it (until P2.6: never)
+R_NO_BIN = "recycle_unavailable"         # the Recycle Bin can't be reached (no Recycler, or it can't be made)
 R_NOT_UNDOABLE = "not_undoable"          # nothing of it was done, or it is put back already
 R_NOT_YET = "not_yet"                    # a kind whose Undo comes in a later part
+# The Recycle Bin's (P2.6; desktop.recycle checks them before its one call, and the card shows them first).
+R_BIN_OFF = "bin_off"                    # the bin is off for that drive (or Windows' policy turns it off)
+R_BIN_FULL = "bin_too_small"             # bigger than the room the bin has left: never pushed out, never too big
+R_BIN_UNKNOWN = "bin_unknown"            # the bin's size could not be read: never guessed
+R_NO_BIN_HERE = "no_bin_here"            # a removable or network drive: it has no Recycle Bin
+R_WOULD_NUKE = "would_delete"            # Windows would have deleted it for good: stopped before (it is still there)
+R_NOT_RECYCLED = "not_recycled"          # Windows did not put it in the bin (PostDeleteItem: no item in the bin)
+R_BIN_STOPPED = "bin_stopped"            # the rows after one the bin did not take: never started
+R_BIN_EMPTIED = "bin_emptied"            # Undo: it is not in the Recycle Bin any more
+R_NOT_RESTORED = "not_restored"          # Undo: the bin's restore did not bring it back to its old place
+R_RECYCLE_CAP = "recycle_cap"            # more than one card may bin (50 files, 2 GB)
+# A row the bin did not take stops the batch (SPEC 6.2: never another item after one that was not recycled).
+BIN_STOPS = frozenset({R_WOULD_NUKE, R_NOT_RECYCLED})
+RESTORE_SLACK_S = 120.0                  # Undo finds a binned item deleted within this long of its journal's times
 _HOLDS = (R_HOLDS_PLACE, R_HOLDS_CODE, R_HOLDS_SECRET_FOLDER, R_HOLDS_EXCLUDED, R_HOLDS_SECRET_FILE, R_HOLDS_LINK,
           R_WALK_CAP, R_UNREADABLE)
 
@@ -150,13 +173,22 @@ UNDO_WORDS = {
     R_IN_USE: "In use - left where it is.",
     R_ONLINE_ONLY: "It would skip your PC's Recycle Bin - left for you.",
     R_OLD_PLACE_GONE: "Its old folder has gone - left where it is.",
-    R_NO_BIN: "The Recycle Bin can't take it yet - left as it is.",
+    R_NO_BIN: "The Recycle Bin can't be reached right now - left as it is.",
     R_OUTSIDE: "Outside the folders I may use now - left where it is.",
     R_EXCLUDED: "Somewhere I never touch now - left where it is.",
     R_ACCESS: "Windows didn't allow it - left where it is.",
     R_NOT_YET: "Can't be put back yet - left as it is.",
     R_NOT_UNDOABLE: "Nothing to put back.",
     R_STOPPED: "Not put back - you stopped it.",
+    R_BIN_OFF: "The Recycle Bin is off for that drive - left as it is.",
+    R_BIN_FULL: "It's bigger than the Recycle Bin has room for - left as it is.",
+    R_BIN_UNKNOWN: "I can't tell how much the Recycle Bin can take - left as it is.",
+    R_NO_BIN_HERE: "That drive has no Recycle Bin - left as it is.",
+    R_WOULD_NUKE: "Windows would have deleted it for good, so I stopped - it's still there.",
+    R_NOT_RECYCLED: "Windows didn't put it in the Recycle Bin - I stopped there.",
+    R_BIN_STOPPED: "Not put back - I stopped after the Recycle Bin didn't take one.",
+    R_BIN_EMPTIED: "Can't be put back - the Recycle Bin was emptied.",
+    R_NOT_RESTORED: "Windows didn't put it back - it's still in the Recycle Bin.",
 }
 UNDO_WORDS.update({reason: "It holds something I never move - left where it is." for reason in _HOLDS})
 DEFAULT_UNDO_WORDS = "Not put back - left where it is."
@@ -164,7 +196,10 @@ DEFAULT_UNDO_WORDS = "Not put back - left where it is."
 STAMP_LABELS = {R_MOVED_SINCE: "MOVED SINCE", R_OCCUPIED: "SOMETHING NEW IN ITS PLACE", R_CHANGED: "CHANGED SINCE",
                 R_NOT_EMPTY: "NOT EMPTY", R_EXPIRED: "TOO OLD", R_CROSS_VOLUME: "ON ANOTHER DRIVE",
                 R_IN_USE: "IN USE", R_ONLINE_ONLY: "ONLINE-ONLY", R_OLD_PLACE_GONE: "OLD FOLDER GONE",
-                R_NO_BIN: "BIN NOT READY", R_STOPPED: "STOPPED"}
+                R_NO_BIN: "BIN NOT REACHED", R_STOPPED: "STOPPED", R_BIN_OFF: "BIN OFF",
+                R_BIN_FULL: "TOO BIG FOR THE BIN", R_BIN_UNKNOWN: "BIN SIZE UNKNOWN", R_NO_BIN_HERE: "NO BIN THERE",
+                R_WOULD_NUKE: "BIN REFUSED", R_NOT_RECYCLED: "NOT BINNED", R_BIN_STOPPED: "STOPPED",
+                R_BIN_EMPTIED: "BIN EMPTIED", R_NOT_RESTORED: "STILL IN THE BIN"}
 STAMP_OTHER = "NOT PUT BACK"
 STAMP_DOT = " \u00b7 "
 
@@ -199,7 +234,14 @@ class ChangedSince(Exception):
 
 
 class RecycleUnavailable(Exception):
-    """The Recycle Bin can't take the item (P2.6 brings the real one; until then it never can)."""
+    """The Recycle Bin didn't take the item, or can't give it back: ``reason`` a reason code (R_NO_BIN when it can't
+    be reached at all; R_BIN_OFF, R_BIN_FULL ... from desktop.recycle's pre-checks, before any call), ``stop`` True
+    when the batch must stop there (``BIN_STOPS``: Windows would have deleted it for good, or did not recycle it)."""
+
+    def __init__(self, reason: str = R_NO_BIN, *, stop: bool = False) -> None:
+        super().__init__(reason)
+        self.reason = reason or R_NO_BIN
+        self.stop = bool(stop) or self.reason in BIN_STOPS
 
 
 # --------------------------------------------------------------------------
@@ -666,20 +708,46 @@ def _zone_id(data: bytes) -> int:
 
 
 # --------------------------------------------------------------------------
-# The Recycle Bin seam (P2.6 brings the real one)
+# The Recycle Bin seam (desktop.recycle.RecycleBin in the app)
 # --------------------------------------------------------------------------
 
 class Recycler(Protocol):
-    def recycle(self, path: str) -> None:
-        """Send ``path`` to the Recycle Bin (never anywhere else). RecycleUnavailable when it can't."""
+    def check(self, path: str, *, size: int) -> str:
+        """The bin's own pre-checks for ``path`` (``size`` bytes), nothing changed: "" when it can take it, else the
+        reason (a fixed drive, the bin on for it, room for the item)."""
+        ...
+
+    def recycle(self, path: str, identity: FileIdentity | None = None) -> None:
+        """Send ``path`` (still ``identity``, when given) to the Recycle Bin - never anywhere else, never deleted for
+        good. RecycleUnavailable (with its reason) when it didn't; OSError when Windows refused."""
+        ...
+
+    def find(self, original: str, *, size: int, is_dir: bool, since: float, until: float) -> Any:
+        """The item binned from ``original`` between ``since`` and ``until`` (seconds since the epoch) with that
+        size, as the bin lists it now; None when the bin doesn't have it (emptied, or taken out since)."""
+        ...
+
+    def restore(self, entry: Any, original: str) -> None:
+        """The bin's own restore of ``entry`` (back to ``original``), confirmed there; RecycleUnavailable when it
+        didn't come back."""
         ...
 
 
 class NoRecycleBin:
-    """The Recycle Bin until P2.6: it refuses cleanly, so an Undo that would recycle leaves the item as it is."""
+    """No Recycle Bin to reach (none given, or it can't be made here - while the tests run, say): it refuses cleanly,
+    so nothing is binned and an Undo that would recycle leaves the item as it is."""
 
-    def recycle(self, path: str) -> None:
-        raise RecycleUnavailable("the Recycle Bin arrives in a later part")
+    def check(self, path: str, *, size: int) -> str:
+        return R_NO_BIN
+
+    def recycle(self, path: str, identity: FileIdentity | None = None) -> None:
+        raise RecycleUnavailable(R_NO_BIN)
+
+    def find(self, original: str, *, size: int, is_dir: bool, since: float, until: float) -> Any:
+        raise RecycleUnavailable(R_NO_BIN)
+
+    def restore(self, entry: Any, original: str) -> None:
+        raise RecycleUnavailable(R_NO_BIN)
 
 
 # --------------------------------------------------------------------------
@@ -776,12 +844,13 @@ class FileOps:
     """Carries a card's rows out (see the module docstring). ``scope`` gives the scope as it is now (paths.Scope);
     ``cancel`` is the run's stop flag (Esc, Stop): asked before each row and during a copy or a zip; ``progress``
     (P2.3's card: "Moving 2 of 5") hears each row's result as it ends - (the result, rows ended, rows in all); what it
-    raises is ignored."""
+    raises is ignored. ``recycler``: the Recycle Bin seam a RECYCLE row goes through (P2.6; NoRecycleBin when none)."""
 
     def __init__(self, backend: DesktopBackend, journal: Journal, *, scope: Callable[[], paths.Scope],
                  cancel: Callable[[], bool] | None = None, clock: Callable[[], float] = time.monotonic,
                  caps: SubtreeCaps = SUBTREE_CAPS,
-                 progress: Callable[[OpResult, int, int], None] | None = None) -> None:
+                 progress: Callable[[OpResult, int, int], None] | None = None,
+                 recycler: Recycler | None = None) -> None:
         self.backend = backend
         self.journal = journal
         self._scope = scope
@@ -789,6 +858,7 @@ class FileOps:
         self._clock = clock
         self._caps = caps
         self._progress = progress
+        self.recycler: Recycler = recycler if recycler is not None else NoRecycleBin()
         self._made: dict[str, Place] = {}          # a mkdir row's key -> the folder it made
 
     # ---- checking a row ------------------------------------------------------------------------------
@@ -800,6 +870,10 @@ class FileOps:
         scope, the drive, OneDrive, the space) and nothing can be in it yet."""
         if not isinstance(op, FileOp) or op.kind not in OP_KINDS:
             return Check(R_SHAPE)
+        if op.kind == RECYCLE:
+            if len(op.sources) != 1 or op.folder is not None or op.name:
+                return Check(R_SHAPE)
+            return self._check_recycle(op)
         wanted = {MKDIR: 0, ZIP: len(op.sources) or -1}.get(op.kind, 1)
         if len(op.sources) != wanted or (op.kind in (RENAME, MKDIR, ZIP) and not op.name) \
                 or (op.kind == RENAME) != (op.folder is None):
@@ -862,6 +936,26 @@ class FileOps:
                 return Check(R_NO_SPACE)
         flags = _flags(op.kind, sources, folder_flags)
         return Check("", frozenset(flags), dst, folder, tuple(sources), members, size)
+
+    def _check_recycle(self, op: FileOp) -> Check:
+        """A row to the Recycle Bin (P2.6): its item re-checked as a copy's would be - the path check now, the same
+        item, never a root or a secret file, a folder walked first (never one holding a scope place, a code marker, a
+        secret, a link ...), an online-only file or a folder holding one refused (it would skip the bin) -, then the
+        bin's own pre-checks for it (desktop.recycle: a fixed drive, the bin on, room for it)."""
+        reason, source = self._source(op.sources[0], self._scope(), content=True, zipping=False)
+        if reason:
+            return Check(R_ONLINE_ONLY if reason == R_HOLDS_ONLINE_ONLY else reason)
+        size = source.subtree.bytes if source.subtree is not None else max(0, int(source.identity.size))
+        try:
+            reason = self.recycler.check(source.path, size=size)
+        except Exception as exc:  # noqa: BLE001 - a bin that can't be asked takes nothing
+            logger.info("Desktop files %s: the Recycle Bin could not be asked (%s)",
+                        getattr(self.journal, "run_id", "-"), type(exc).__name__)
+            reason = R_NO_BIN
+        if reason:
+            return Check(reason)
+        flags = _flags(RECYCLE, (source,), frozenset())
+        return Check("", frozenset(flags), "", ntpath.dirname(source.path), (source,), (), size)
 
     def _source(self, item: Any, scope: paths.Scope, *, content: bool, zipping: bool) -> tuple[str, Any]:
         """A card's source re-checked: the path check now, the same final path, the same identity; never a secret
@@ -962,6 +1056,8 @@ class FileOps:
                 result = self._carry_out(seq, op)
                 if result.reason == R_JOURNAL:
                     halted = R_JOURNAL                     # nothing more is done while the journal can't be saved
+                elif result.reason in BIN_STOPS:
+                    halted = R_BIN_STOPPED                 # the bin didn't take one: nothing after it starts
             results.append(result)
             self._tell(result, len(results), len(ops))
         report = BatchReport(self.journal.run_id, tuple(results))
@@ -1019,6 +1115,8 @@ class FileOps:
             return self._skip(seq, op, check.reason, check)
         if self._cancel():
             return self._skip(seq, op, R_STOPPED, check)
+        if op.kind == RECYCLE:
+            return self._recycle_row(seq, check)
         source = check.sources[0] if check.sources else None
         is_dir = op.kind == MKDIR or (source is not None and source.identity.is_dir and op.kind != ZIP)
         tmp = ""
@@ -1055,6 +1153,31 @@ class FileOps:
         if op.kind == MKDIR and op.key:
             self._made[op.key] = Place(check.dst, (), made)
         return OpResult(seq, op.kind, DONE, "", 0, check.flags, check.dst, made)
+
+    def _recycle_row(self, seq: int, check: Check) -> OpResult:
+        """A row to the Recycle Bin: "doing" saved first (the item's old place and identity: Undo finds it in the bin
+        by them), then the Recycler's one call - it checks everything again right before it - and "done" or "failed"
+        with its reason (a stop reason halts the batch: ``run``)."""
+        source = check.sources[0]
+        doing = Record(seq, RECYCLE, DOING, src=source.path, is_dir=source.identity.is_dir,
+                       flags=tuple(sorted(check.flags))).with_identity(source.identity, source.attributes)
+        try:
+            self.journal.append(doing)
+        except JournalError:
+            return OpResult(seq, RECYCLE, SKIPPED, R_JOURNAL, flags=check.flags)     # nothing done
+        try:
+            self.recycler.recycle(source.path, source.identity)
+        except RecycleUnavailable as exc:
+            reason, winerror = exc.reason, 0
+        except OSError as exc:
+            reason, winerror = os_reason(exc), _winerror(exc)
+        else:
+            self._save(replace(doing, state=DONE, reason_code="", at=0.0))
+            return OpResult(seq, RECYCLE, DONE, "", 0, check.flags, "", source.identity)
+        self._save(replace(doing, state=FAILED, reason_code=reason, at=0.0))
+        logger.info("Desktop files %s: row %d recycle failed: %s (%s)", self.journal.run_id, seq, reason,
+                    winerror or "-")
+        return OpResult(seq, RECYCLE, FAILED, reason, winerror, check.flags)
 
     def _there(self, path: str) -> bool:
         try:
@@ -1159,8 +1282,8 @@ def _flags(kind: str, sources: Sequence[_Source], folder_flags: frozenset[str]) 
     to_onedrive = paths.FLAG_ONEDRIVE in folder_flags
     if to_onedrive and (kind in (COPY, ZIP, MKDIR) or (kind == MOVE and not from_onedrive)):
         flags.add(FLAG_TO_ONEDRIVE)
-    if kind == MOVE and from_onedrive and not to_onedrive:
-        flags.add(FLAG_LEAVES_ONEDRIVE)
+    if (kind == MOVE and from_onedrive and not to_onedrive) or (kind == RECYCLE and from_onedrive):
+        flags.add(FLAG_LEAVES_ONEDRIVE)              # binned from OneDrive: OneDrive removes it everywhere too
     for source in sources:
         if source.verdict is not None and FLAG_HIDDEN_CHARS in source.verdict.flags:
             flags.add(FLAG_HIDDEN_CHARS)
@@ -1226,9 +1349,13 @@ _UNDOABLE = (DONE, UNDO_REFUSED)
 _UNDO_ERRORS = {R_NAME_CLASH: R_OCCUPIED, R_CHANGED: R_MOVED_SINCE, R_STOPPED: R_OS}
 
 
+_LEFTOVER_RE = re.compile(r".+\.[0-9a-f]{8}" + re.escape(TEMP_SUFFIX), re.IGNORECASE)
+
+
 class Undoer:
-    """Puts a run's items back (see the module docstring). ``recycler``: the Recycle Bin seam (NoRecycleBin until
-    P2.6); ``undo_days``: [desktop] undo_days (1-30); ``now``: seconds since the epoch; ``cancel``: the stop flag."""
+    """Puts a run's items back (see the module docstring). ``recycler``: the Recycle Bin seam (desktop.recycle's
+    RecycleBin in the app; NoRecycleBin when none); ``undo_days``: [desktop] undo_days (1-30); ``now``: seconds since
+    the epoch; ``cancel``: the stop flag."""
 
     def __init__(self, backend: DesktopBackend, journal: Journal, *, scope: Callable[[], paths.Scope],
                  recycler: Recycler | None = None, undo_days: int = 7, now: Callable[[], float] = time.time,
@@ -1250,20 +1377,29 @@ class Undoer:
                      if item.state in _UNDOABLE and item.done is not None and not self._expired(item.done))
 
     def undo(self, seqs: Iterable[int] | None = None) -> UndoReport:
-        """Put the items back - all that may be (``seqs`` None) or those - in reverse order, each on its own."""
+        """Put the items back - all that may be (``seqs`` None) or those - in reverse order, each on its own; a copy or
+        a zip that stopped part-way, when asked for by its seq, has its part-made output binned. After an item the
+        Recycle Bin did not take (``BIN_STOPS``) nothing more is tried (``R_BIN_STOPPED``)."""
         known = self.journal.items()
         chosen = sorted(set(seqs) if seqs is not None else
                         {seq for seq, item in known.items() if item.state in _UNDOABLE}, reverse=True)
         results: list[UndoResult] = []
+        halted = False
         for seq in chosen:
             item = known.get(seq)
-            if item is None or item.state not in _UNDOABLE or item.done is None:
+            leftover = self._leftover(item) if item is not None else None
+            if item is None or (leftover is None and (item.state not in _UNDOABLE or item.done is None)):
                 results.append(UndoResult(seq, item.kind if item else "", UNDO_REFUSED, R_NOT_UNDOABLE))
+                continue
+            if halted:
+                results.append(self._refuse(item, leftover or item.done, R_BIN_STOPPED))
                 continue
             if self._cancel():
                 results.append(UndoResult(seq, item.kind, UNDO_REFUSED, R_STOPPED))
                 continue
-            results.append(self._undo_item(item))
+            result = self._bin_leftover(item, leftover) if leftover is not None else self._undo_item(item)
+            results.append(result)
+            halted = result.reason in BIN_STOPS
         report = UndoReport(self.journal.run_id, tuple(results))
         logger.info("Desktop undo %s: put back %d of %d (%s)", self.journal.run_id, report.put_back, report.total,
                     _count_text(report.refused()))
@@ -1283,6 +1419,8 @@ class Undoer:
             return self._remove_made_folder(item, done)
         if item.kind in (COPY, ZIP, SCREENSHOT):
             return self._recycle_output(item, done)
+        if item.kind == RECYCLE:
+            return self._restore(item, done)
         return self._refuse(item, done, R_NOT_YET)
 
     def _refuse(self, item: Item, done: Record, reason: str, winerror: int = 0) -> UndoResult:
@@ -1318,8 +1456,10 @@ class Undoer:
             return UndoResult(item.seq, item.kind, UNDO_REFUSED, R_JOURNAL)        # nothing done
         try:
             call()
-        except RecycleUnavailable:
-            reason, winerror = R_NO_BIN, 0
+        except RecycleUnavailable as exc:
+            reason, winerror = exc.reason, 0
+            logger.info("Desktop undo %s: row %d %s not put back: %s", self.journal.run_id, item.seq, item.kind,
+                        reason)
         except OSError as exc:
             reason = os_reason(exc)
             reason, winerror = _UNDO_ERRORS.get(reason, reason), _winerror(exc)
@@ -1402,4 +1542,78 @@ class Undoer:
             return self._refuse(item, done, os_reason(exc), _winerror(exc))
         if not done.sha256 or digest != done.sha256:
             return self._refuse(item, done, R_CHANGED)
-        return self._act(item, done, lambda: self.recycler.recycle(verdict.path))
+        return self._act(item, done, lambda: self.recycler.recycle(verdict.path, now))
+
+    def _restore(self, item: Item, done: Record) -> UndoResult:
+        """An item Jarvis put in the Recycle Bin, taken back out (SPEC 6.3): its old folder still there and allowed,
+        its old place free ("Something new is in its old place - left where it is."), the item found in the bin by its
+        old path, when it was binned and its size ("Can't be put back - the Recycle Bin was emptied." when it isn't
+        there), then the bin's own restore - confirmed at its old place."""
+        old = done.src
+        if not old or paths.lexical_problem(old):
+            return self._refuse(item, done, R_OLD_PLACE_GONE)
+        parent = paths.check_path(ntpath.dirname(old), self._scope(), self.backend)
+        if parent.reason == paths.R_MISSING:
+            return self._refuse(item, done, R_OLD_PLACE_GONE)
+        if not parent.ok:
+            return self._refuse(item, done, parent.code or R_OUTSIDE)
+        back = parent.path.rstrip("\\") + "\\" + ntpath.basename(old)
+        if not same_place(back, old):
+            return self._refuse(item, done, R_OLD_PLACE_GONE)       # its folder resolves somewhere else now
+        if self.backend.exists(back):
+            return self._refuse(item, done, R_OCCUPIED)
+        doing = item.doing
+        since = (doing.at if doing is not None and doing.at else done.at) - RESTORE_SLACK_S
+        try:
+            entry = self.recycler.find(old, size=done.size, is_dir=done.is_dir, since=since,
+                                       until=done.at + RESTORE_SLACK_S)
+        except RecycleUnavailable as exc:
+            return self._refuse(item, done, exc.reason)
+        except OSError as exc:
+            return self._refuse(item, done, os_reason(exc), _winerror(exc))
+        if entry is None:
+            return self._refuse(item, done, R_BIN_EMPTIED)
+        return self._act(item, done, lambda: self.recycler.restore(entry, back))
+
+    @staticmethod
+    def _leftover(item: Item) -> Record | None:
+        """A copy or a zip that failed part-way (stopped, ...) leaving its part-made output under Jarvis's own
+        temporary name next to where it was going (``TEMP_SUFFIX``): its "failed" line - Undo bins that output on the
+        owner's click. None for anything else (or once it has been binned)."""
+        if item.kind not in (COPY, ZIP) or item.done is not None or item.state not in (FAILED, UNDO_REFUSED):
+            return None
+        return next((record for record in reversed(item.records)
+                     if record.state == FAILED and not record.undo and record.tmp and record.dst), None)
+
+    def _bin_leftover(self, item: Item, failed: Record) -> UndoResult:
+        """A part-made copy or zip binned: only Jarvis's own temporary name beside its destination, the same item when
+        its identity was saved, a folder walked first; then the Recycler's one call, journalled as an Undo."""
+        if self._expired(failed):
+            return self._refuse(item, failed, R_EXPIRED)
+        tmp = failed.tmp
+        if not _LEFTOVER_RE.fullmatch(ntpath.basename(tmp)) or not same_place(ntpath.dirname(tmp),
+                                                                              ntpath.dirname(failed.dst)) \
+                or not ntpath.basename(tmp).casefold().startswith(ntpath.basename(failed.dst).casefold() + "."):
+            return self._refuse(item, failed, R_NOT_UNDOABLE)
+        scope = self._scope()
+        verdict = paths.check_path(tmp, scope, self.backend)
+        if verdict.reason == paths.R_MISSING:
+            return self._refuse(item, failed, R_NOT_UNDOABLE)        # gone already: nothing to bin
+        if not verdict.ok:
+            return self._refuse(item, failed, verdict.code or R_OUTSIDE)
+        if not same_place(verdict.path, tmp):
+            return self._refuse(item, failed, R_MOVED_SINCE)
+        try:
+            now = self.backend.file_id(verdict.path)
+        except OSError:
+            return self._refuse(item, failed, R_MOVED_SINCE)
+        if failed.sha256 and failed.identity is not None and (now.volume, now.file_id) != (failed.volume_serial,
+                                                                                            failed.file_id):
+            return self._refuse(item, failed, R_MOVED_SINCE)         # whole, its id saved: only that item
+        if now.is_dir:
+            walk = walk_subtree(verdict.path, scope, self.backend, content=True, caps=self._caps, clock=self._clock)
+            if walk.reason:
+                return self._refuse(item, failed, R_ONLINE_ONLY if walk.reason == R_HOLDS_ONLINE_ONLY
+                                    else walk.reason)
+        base = replace(failed, src="", dst=verdict.path, tmp="", sha256="", reason_code="").with_identity(now)
+        return self._act(item, base, lambda: self.recycler.recycle(verdict.path, now))

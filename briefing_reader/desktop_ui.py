@@ -128,9 +128,10 @@ hook). It keeps the owner's rules:
   AM"), each with its Undo, and Undo all after them: the owner's click puts them back on the desktop thread, newest
   first, each checked against the PC as it is now (desktop.service.undo_pc: pcctl.PcControl.undo_changes) - after
   THE CONSENT GATE, one desktop job at a time - and the caption says what came back and, plainly, what did not (the
-  media key's change, a screenshot until the Recycle Bin of P2.6). What was put back - or was changed since, or can
-  never be - leaves its chip; what failed for now stays. The chips are the HUD's view only: they go when the HUD goes
-  back to the window and come back (with the flight's chips) when it shows again; nothing of them ticks.
+  media key's change; a screenshot the Recycle Bin didn't take, with why). What was put back - or was changed
+  since, or can never be - leaves its chip; what failed for now stays. The chips are the HUD's view only: they go
+  when the HUD goes back to the window and come back (with the flight's chips) when it shows again; nothing of them
+  ticks.
   "focus (mode) for 30 minutes" is focus mode (``focus``: pcctl.FocusBook in the timers' folder): Jarvis quiet until
   its end - ``in_focus()``, ``focusChanged(bool)``: the app holds his offers, toasts and voice and lets them go when
   it ends - the music paused and a loud volume turned down (their own chips), its end checked with the timers (the
@@ -612,6 +613,9 @@ class DesktopController(QObject):
         # P2.4: the PC's controls' seam (made on the desktop thread; None: the real one) and Jarvis's own timers - in
         # the app's data folder, checked against the wall clock (``timer_clock``: None, the real one).
         self.pc_factory: Callable[[], Any] | None = None
+        # P2.6: the Recycle Bin's Windows side (made on the desktop thread; None: the real desktop.recycle
+        # Win32RecycleBin, which refuses to be made while the tests run - then nothing is binned, said plainly).
+        self.recycle_factory: Callable[[], Any] | None = None
         self.timer_clock: Callable[[], datetime] | None = None
         self.timers = pcctl.TimerBook(self._timers_folder(), now=self._timer_now)
         self._timer_check = QTimer(self)
@@ -1152,7 +1156,8 @@ class DesktopController(QObject):
                 excluded=excluded, backend_factory=self._backend_factory, hour24=self._hour24,
                 journal_folder=self._journal_folder, undo_days=int(getattr(settings, "undo_days", 7) or 7),
                 pc_factory=self.pc_factory, timers=self.timers,
-                screenshots_dir=str(getattr(settings, "screenshots_dir", "") or ""), focus=self.focus)
+                screenshots_dir=str(getattr(settings, "screenshots_dir", "") or ""), focus=self.focus,
+                recycle_factory=self.recycle_factory)
             self._worker = DesktopWorker()
         return self._worker, self._service
 

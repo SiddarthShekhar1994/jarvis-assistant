@@ -36,7 +36,8 @@ The checks, in this order; the first problem wins and its code goes to Live (``R
    named the app exactly, else ONE_CLICK; open_url INSTANT for a saved site or an address the owner typed word for
    word, https:// and all, else ONE_CLICK (its host shown: one Claude suggested, or one typed without its https:// -
    "logo.ai" may be a file's name). An online-only file is flagged, not promoted (D5: files open at once).
-   The file skills (P2.2: move_files, copy_files, rename_file, make_folder, zip_files) are always CARD - a NEEDS
+   The file skills (P2.2: move_files, copy_files, rename_file, make_folder, zip_files; P2.6: recycle_files - the
+   Recycle Bin only, at most 50 files and ``RECYCLE_MAX_BYTES`` a step, ``CAP``) are always CARD - a NEEDS
    YOUR OK card with ticks, its plan frozen (desktop.cardplan) - never INSTANT: a blocked type is never zipped and a
    shortcut never copied (``BLOCKED_TYPE``); a move stays on its drive (``CROSS_VOLUME``: refused in v1; the card's
    check compares the volumes themselves); flags say what the card must show (``FLAG_INSTALLER``: a program or an
@@ -55,8 +56,8 @@ The checks, in this order; the first problem wins and its code goes to Live (``R
    one-word name or such a run starts there ("move the essay into Move").
 8. The suspect rule: a step touching an item whose name reads like instructions (refs.Ref.suspect, guard's
    scanner) is refused unless the owner's own words name that item (``SUSPECT_ITEM``).
-9. The skills shipped so far (``SHIPPED_SKILLS``: Phase 1's and the file skills): any other is refused
-   (``NOT_YET``; recycle_files until P2.6).
+9. The skills shipped so far (``SHIPPED_SKILLS``: Phase 1's and the file skills, recycle_files with them since
+   P2.6): any other is refused (``NOT_YET``: the PC's controls are local routes only, work inside apps is Phase 3).
 
 Then the rate caps over the steps that passed, in order: at most ``MAX_OPENS`` opens and ``MAX_URLS`` web pages a
 request (``CAP``); a refused step uses none.
@@ -136,7 +137,7 @@ REASON_WORDS = {
     SENSITIVE_FIELD: "Jarvis never fills that kind of box",
     PAYMENT_PAGE: "Jarvis never works on payment pages",
     NOT_YET: "Jarvis can't do that yet",
-    CAP: "it's more than one request may open",
+    CAP: "it's more than one request may do at once",
     CROSS_VOLUME: "it would go to another drive - Jarvis moves files within one drive only",
 }
 
@@ -155,6 +156,7 @@ FLAG_MANY = "many"                     # more than MANY_FILES files
 FLAG_TYPE_CHANGED = "type_changed"     # a rename to another type (only when the owner's words asked for it)
 MANY_FILES = 50
 BIG_BYTES = 1024 ** 3
+RECYCLE_MAX_BYTES = 2 * 1024 ** 3      # SPEC 2.1: recycle_files at most 50 files / 2 GB (a card: desktop.cardplan)
 
 
 def promote(tier: str, to: str) -> str:
@@ -177,10 +179,10 @@ SKILL_PHASES = {FIND_FILES: 1, OPEN_FILE: 1, SHOW_IN_FOLDER: 1, OPEN_FOLDER: 1, 
                 MOVE_FILES: 2, COPY_FILES: 2, RENAME_FILE: 2, MAKE_FOLDER: 2, ZIP_FILES: 2, RECYCLE_FILES: 2,
                 VOLUME: 2, MEDIA: 2, TIMER: 2, CANCEL_TIMER: 2, SCREENSHOT: 2, FOCUS_MODE: 2, FILL_FIELDS: 3}
 PHASE_1_SKILLS = tuple(skill for skill, phase in SKILL_PHASES.items() if phase == 1)
-# Phase 2's file skills (P2.2): always a NEEDS YOUR OK card (desktop.cardplan freezes its plan).
-ORGANISE_SKILLS = (MOVE_FILES, COPY_FILES, RENAME_FILE, MAKE_FOLDER, ZIP_FILES)
-# The skills shipped so far: the schema's enum; any other is refused NOT_YET (recycle_files until P2.6, the PC's
-# controls until P2.4, work inside apps until Phase 3).
+# Phase 2's file skills (P2.2; recycle_files P2.6): always a NEEDS YOUR OK card (desktop.cardplan freezes its plan).
+ORGANISE_SKILLS = (MOVE_FILES, COPY_FILES, RENAME_FILE, MAKE_FOLDER, ZIP_FILES, RECYCLE_FILES)
+# The skills shipped so far: the schema's enum; any other is refused NOT_YET (the PC's controls are local routes only,
+# work inside apps comes in Phase 3).
 SHIPPED_SKILLS = PHASE_1_SKILLS + ORGANISE_SKILLS
 # Every step key of SPEC 4.3's outline (any phase): plan_from refuses the whole answer for any other key.
 STEP_KEYS = ("skill", "why", "files", "place", "to", "id", "name", "query", "kind", "within_days", "app", "site",
@@ -739,7 +741,7 @@ def _check_step(step: PlannedStep, number: int, run: _Run) -> CheckedStep:
         if made_in is not None:
             run.new_places[step.id] = made_in.path
     run.targets.update(_destinations(step, targets))
-    if step.skill in (MOVE_FILES, RENAME_FILE):
+    if step.skill in (MOVE_FILES, RENAME_FILE, RECYCLE_FILES):
         run.gone.update(_target_key(ref) for ref in targets if ref.kind == FILE)
     return CheckedStep(number, step.skill, "", tier, flags, targets, step)
 
@@ -1056,6 +1058,8 @@ def _organise(step: PlannedStep, targets: tuple[Ref, ...], run: _Run, flags: set
         return BLOCKED_TYPE                               # blocked types are never zipped
     if skill == COPY_FILES and any(guard.suffix(item.name) in guard.NEVER_CREATE_TYPES for item in items):
         return BLOCKED_TYPE                               # a copy would make a new shortcut: never (SPEC 2.4)
+    if skill == RECYCLE_FILES and sum(max(0, item.size) for item in items) > RECYCLE_MAX_BYTES:
+        return CAP                                        # SPEC 2.1: at most 2 GB to the Recycle Bin a step
     if skill == MOVE_FILES:
         place = _place_of(targets, step.to)
         where = place.path if place is not None else run.new_places.get(step.to, "")

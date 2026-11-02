@@ -117,10 +117,11 @@ _OPENING_RE = _pattern(r"(?:open|launch|start)\s+(?P<what>\S.*?)\??")
 _FINDING_RE = _pattern(r"(?:find|locate|look\s+for|where\s+(?:is|are|did\s+i\s+(?:put|save|leave))|where's"
                        r"|show\s+(?:me\s+)?)\s*(?P<what>\S.*?)\??")
 # P2.3: organising (SPEC 4.5's verbs of the file skills: tidy / organise / sort / file / move / put, rename, zip /
-# compress, copy / duplicate) only with a word that says file, folder or place - "move my Project sync to Friday"
-# and "copy Ana's email" stay Asks. Removing (recycle) comes with the Recycle Bin (P2.6).
+# compress, copy / duplicate; P2.6: delete / remove / bin / trash / get rid of - the Recycle Bin) only with a word that
+# says file, folder or place - "move my Project sync to Friday", "copy Ana's email" and "delete the meeting" stay Asks.
 _ORGANISING_RE = _pattern(r"(?:tidy(?:\s+up)?|organi[sz]e|sort(?:\s+out)?|file(?:\s+away)?|move|put|rename|"
-                          r"zip(?:\s+up)?|compress|copy|duplicate)\s+(?P<what>\S.*?)[.!?]?")
+                          r"zip(?:\s+up)?|compress|copy|duplicate|delete|remove|bin|trash|get\s+rid\s+of)"
+                          r"\s+(?P<what>\S.*?)[.!?]?")
 # Jarvis's own things and screens: never a desktop request.
 _JARVIS_THINGS_RE = re.compile(
     r"\b(?:e-?mails?|g?mail|inbox|messages?|threads?|repl(?:y|ies)|calendar|events?|meetings?|invites?|"

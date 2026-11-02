@@ -22,8 +22,13 @@ there, one at a time, so nothing in it is shared with the GUI or the Ask thread.
   LOCALAPPDATA one, a test's temporary one), each row re-checked right before its OS call; Esc held only while the
   batch acts (desktop.stopkeys); each row's end heard as it comes (the card's "Moving 2 of 5");
 * ``undo_card(run_id, seqs, cancel=, ...)`` (P2.3): the owner's Undo on the card's stamp - fileops.Undoer, item by
-  item, newest first, each re-checked ("Moved since - left where it is."), for [desktop] undo_days only; recycling
-  Jarvis's own copies and zips waits for the Recycle Bin (P2.6: refused plainly until then);
+  item, newest first, each re-checked ("Moved since - left where it is."), for [desktop] undo_days only - Jarvis's own
+  copies and zips (unchanged) go to the Recycle Bin, items it binned come back out of it;
+* P2.6, the Recycle Bin (``recycler()``: desktop.recycle.RecycleBin over this PC's backend and the bin's Windows side,
+  made here at the first use over ``recycle_factory`` - the real Win32RecycleBin in the app, a fake in the tests; none
+  to reach: fileops.NoRecycleBin, which bins nothing): a card's rows to the bin are checked by it before the card
+  shows and carried out through it on the click, and every Undo that bins (a copy, a zip, a screenshot, a part-made
+  copy) or restores goes through it;
 * ``find(query)``: a find_files step's search;
 * P2.4, the PC's controls (``pc()``: desktop.pcctl.PcControl, made here at the first use over ``pc_factory`` - the
   real Win32Pc in the app, a fake in the tests -, the app's TimerBook ``timers`` and [desktop] screenshots_dir): a
@@ -48,7 +53,8 @@ Public API
 ==========
 ``LOCAL``, ``PLANNER``, ``UNAVAILABLE``; ``Resolved(kind, run_id, route, run, context, seconds)``;
 ``DesktopService(folders=, extra_folders=, excluded=, backend_factory=, sites=, clock=, now=, hour24=,
-journal_folder=, undo_days=, pc_factory=, timers=, screenshots_dir=, focus=)``: ``backend()``, ``pc()``, ``chime()``,
+journal_folder=, undo_days=, pc_factory=, timers=, screenshots_dir=, focus=, recycle_factory=)``: ``backend()``,
+``recycler()``, ``pc()``, ``chime()``,
 ``undo_pc(changes, cancel=)``, ``dnd_state()``, ``open_dnd(cancel=)``,
 ``scope(fresh=)``, ``apps(fresh=)``, ``tree()``, ``route_context()``, ``resolve(words, planner=, override=, run_id=,
 cancel=, hud=)``, ``context_for(words)``, ``carry_out(plan, words, context, cancel)``, ``click(click, cancel)``,
@@ -66,7 +72,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import apps as desktop_apps
-from . import cardplan, guard, paths, pcctl, stopkeys, tidy
+from . import cardplan, guard, paths, pcctl, recycle, stopkeys, tidy
 from . import fileops as fo
 from . import results as desktop_results
 from . import routes as desktop_routes
@@ -121,8 +127,11 @@ class DesktopService:
                  now: Callable[[], datetime] | None = None, hour24: bool = False,
                  journal_folder: Callable[[], Any] | None = None, undo_days: int = 7,
                  pc_factory: Callable[[], Any] | None = None, timers: pcctl.TimerBook | None = None,
-                 screenshots_dir: str = "", focus: pcctl.FocusBook | None = None) -> None:
+                 screenshots_dir: str = "", focus: pcctl.FocusBook | None = None,
+                 recycle_factory: Callable[[], Any] | None = None) -> None:
         self._folders = tuple(folders)
+        self._recycle_factory = recycle_factory or recycle.Win32RecycleBin   # refuses to be made while the tests run
+        self._recycler: Any = None
         self._pc_factory = pc_factory or pcctl.Win32Pc          # refuses to be made while the tests run
         self._timers = timers
         self._focus = focus
@@ -191,12 +200,30 @@ class DesktopService:
             self._tree = (now, folder_tree(self.scope(), backend, clock=self._clock))
         return self._tree[1]
 
+    def recycler(self) -> Any:
+        """The Recycle Bin (P2.6): desktop.recycle.RecycleBin over the backend and the bin's Windows side, made at the
+        first call (on this thread); fileops.NoRecycleBin - nothing is binned - when either can't be made (logged by its
+        type once)."""
+        if self._recycler is None:
+            backend = self.backend()
+            if backend is None:
+                return fo.NoRecycleBin()
+            try:
+                seam = self._recycle_factory()
+            except Exception as exc:  # noqa: BLE001 - RealBackendInTests in the tests; anything else: no bin
+                logger.warning("Desktop: the Recycle Bin can't be reached (%s)", type(exc).__name__)
+                self._recycler = fo.NoRecycleBin()
+            else:
+                self._recycler = recycle.RecycleBin(backend, seam, scope=lambda: self.scope(fresh=True),
+                                                    clock=self._clock)
+        return self._recycler
+
     def executor(self) -> Executor | None:
         backend = self.backend()
         if backend is None:
             return None
         return Executor(backend, scope=lambda: self.scope(fresh=True), apps=lambda: self.apps(fresh=True),
-                        find=self.find, clock=self._clock, now=self._now, pc=self.pc())
+                        find=self.find, clock=self._clock, now=self._now, pc=self.pc(), recycler=self.recycler())
 
     def pc(self) -> pcctl.PcControl:
         """The PC's controls (P2.4), made at the first call; their seam is made at their first use (on this
@@ -204,7 +231,7 @@ class DesktopService:
         if self._pc is None:
             self._pc = pcctl.PcControl(self._pc_factory, disk=self.backend, timers=self._timers,
                                        screenshots_dir=self._screenshots_dir, clock=self._clock, now=self._now,
-                                       focus=self._focus)
+                                       focus=self._focus, recycler=_LazyRecycler(self.recycler))
         return self._pc
 
     def chime(self) -> bool:
@@ -402,7 +429,8 @@ class DesktopService:
                 on_row(tidy.RowEnd(numbers[ended - 1], result.state, result.reason, result.seq), ended, total)
 
         ops = fo.FileOps(backend, journal, scope=lambda: self.scope(fresh=True),
-                         cancel=cancel.is_set if cancel is not None else None, clock=self._clock, progress=heard)
+                         cancel=cancel.is_set if cancel is not None else None, clock=self._clock, progress=heard,
+                         recycler=self.recycler())
         with stopkeys.held(stop_keys, on_stop or (lambda: None)) as esc:
             if on_start is not None:
                 on_start(esc)
@@ -418,8 +446,8 @@ class DesktopService:
                   on_stop: Callable[[], None] | None = None) -> tidy.UndoOutcome:
         """The owner's Undo on a card's stamp: the run's items ``seqs`` put back through fileops.Undoer - newest first,
         one at a time, each re-checked (moved since, something new in its old place, changed, too old: left as it
-        is, in the card's words) - with Esc held meanwhile, as for the batch. Recycling Jarvis's own copies and zips
-        waits for the Recycle Bin (P2.6): until then they are left, said plainly."""
+        is, in the card's words) - with Esc held meanwhile, as for the batch. Jarvis's own copies and zips go to the
+        Recycle Bin (unchanged only), what it binned comes back out of it, and a part-made copy is binned (P2.6)."""
         started = self._clock()
         if cancel is not None and cancel.is_set():
             return tidy.UndoOutcome(run_id, code=tidy.STOPPED_FIRST)
@@ -428,7 +456,8 @@ class DesktopService:
         if backend is None or journal is None:
             return tidy.UndoOutcome(run_id, code=tidy.UNAVAILABLE)
         undoer = fo.Undoer(backend, journal, scope=lambda: self.scope(fresh=True), undo_days=self._undo_days,
-                           cancel=cancel.is_set if cancel is not None else None, clock=self._clock)
+                           cancel=cancel.is_set if cancel is not None else None, clock=self._clock,
+                           recycler=self.recycler())
         with stopkeys.held(stop_keys, on_stop or (lambda: None)) as esc:
             if on_start is not None:
                 on_start(esc)
@@ -449,3 +478,22 @@ class DesktopService:
         search = LocalSearch(scope, backend, clock=self._clock, now=self._now)
         return search.search(query.words, folders=query.folders, kind=query.kind,
                              within_days=query.within_days).files
+
+
+class _LazyRecycler:
+    """The Recycle Bin handed to the PC's controls (a screenshot's Undo), made only when one is first needed."""
+
+    def __init__(self, make: Callable[[], Any]) -> None:
+        self._make = make
+
+    def check(self, path: str, *, size: int) -> str:
+        return self._make().check(path, size=size)
+
+    def recycle(self, path: str, identity: Any = None) -> None:
+        self._make().recycle(path, identity)
+
+    def find(self, original: str, *, size: int, is_dir: bool, since: float, until: float) -> Any:
+        return self._make().find(original, size=size, is_dir=is_dir, since=since, until=until)
+
+    def restore(self, entry: Any, original: str) -> None:
+        self._make().restore(entry, original)

@@ -26,8 +26,9 @@ P2.1's file operations (``move_item``, ``copy_file``, ``make_folder``, ``remove_
 own raw Windows calls there (MoveFileExW, CopyFileExW, CreateDirectoryW ...: the real no-overwrite, fail-if-exists,
 cancel and not-empty behaviour, inside the temporary folder only - the raw calls themselves refuse anything outside
 the system's temporary folder while the tests run); ``op_errors[method]`` raises instead (nothing done), ``volumes``
-reports another volume serial for a pretend folder, ``free`` sets the free space. ``FakeRecycleBin`` is fileops'
-Recycle Bin seam: it moves the item into a pretend bin inside ``base``.
+reports another volume serial for a pretend folder, ``free`` sets the free space. ``FakeRecycleBin`` (P2.6) is the
+Recycle Bin's Windows side (desktop.recycle.BinSeam) over a pretend bin inside ``base`` - and, handed to fileops as
+its Recycler, it goes through desktop.recycle.RecycleBin, the app's own logic.
 P2.4: ``save_png`` writes a screenshot's new file with fileops' own raw call (CREATE_NEW) on the pretend disk, and
 ``FakePc`` is desktop.pcctl's seam: a pretend speaker, player (or none: winrt missing) and screen, and a chime counter.
 """
@@ -451,23 +452,145 @@ class FakePc:
         self.settings_opened += 1
 
 
+@dataclass
+class _Binned:
+    pretend: str                                   # where it was (its pretend path)
+    slot: str                                      # where it is in the pretend bin (a real path inside base)
+    entry: Any = None                              # its recycle.BinEntry
+
+
 class FakeRecycleBin:
-    """desktop.fileops' Recycle Bin seam for the tests (the real one is P2.6's): ``recycle`` moves the item into a
-    pretend bin inside the fake's temporary folder and keeps its pretend path in ``recycled``; with ``error`` set it
-    raises that instead and nothing moves."""
+    """The Recycle Bin for the tests (P2.6): desktop.recycle's BinSeam - the real one, recycle.Win32RecycleBin, is
+    never made while the tests run - over a pretend bin inside the fake's temporary folder. Nothing outside it is ever
+    touched, and nothing is ever deleted: an item "deleted for good" goes to ``base\\_gone``.
 
-    def __init__(self, fake: FakeDesktopBackend) -> None:
+    * ``bin_state(drive)``: ``states[drive]`` ("C:\\" -> recycle.BinState; by default on, 10 GB, empty);
+    * ``recycle_item(path)`` reports what IFileOperation's sink would and moves the item as Windows would: into the
+      pretend bin (recycled: ``recycled`` keeps its pretend path); with ``nuke`` set, deleted instead - moved to
+      ``_gone``, no item in the bin (psiNewlyCreated NULL; ``nuked``); with ``refuse`` set, PreDeleteItem without
+      TSF_DELETE_RECYCLE_IF_POSSIBLE (the sink stops it: nothing moves); with ``hresult`` set, PostDeleteItem fails
+      with it (nothing moves); with ``silent`` set, no event at all and PerformOperations fails (nothing moves);
+    * ``bin_entries(name)`` lists the pretend bin; ``clear_bin()`` empties it (as the owner might);
+      ``restore_entry(entry, original)`` moves it back (os.rename: never over anything), unless ``restore_fails``.
+
+    ``calls``: (method, argument) of every seam call, in order. Handed to desktop.fileops as its Recycler
+    (``check``, ``recycle``, ``find``, ``restore``) it goes through desktop.recycle.RecycleBin over the fake backend and
+    itself - the logic the app uses (``scope``: the folder walk's scope, none by default); with ``error`` set,
+    ``recycle`` raises it instead and nothing moves."""
+
+    def __init__(self, fake: FakeDesktopBackend, *, scope: Callable[[], Any] | None = None,
+                 clock: Callable[[], float] | None = None) -> None:
+        from briefing_reader.desktop import recycle
+
+        self._recycle = recycle
         self.fake = fake
+        self.scope = scope
+        self.clock = clock or __import__("time").time
+        self.calls: list[tuple[str, str]] = []
         self.recycled: list[str] = []
+        self.nuked: list[str] = []
         self.error: BaseException | None = None
+        self.states: dict[str, Any] = {}
+        self.nuke = False
+        self.refuse = False
+        self.hresult = 0
+        self.silent = False
+        self.restore_fails = False
+        self.binned: list[_Binned] = []
 
-    def recycle(self, path: str) -> None:
+    # ---- desktop.recycle.BinSeam --------------------------------------------------------------------
+
+    def state(self, drive: str = "C:\\") -> Any:
+        return self.states.get(drive.upper(), self._recycle.BinState(True, 10 * 1024 ** 3, 0, 0))
+
+    def bin_state(self, drive: str) -> Any:
+        self.calls.append(("bin_state", drive))
+        return self.state(drive)
+
+    def _size(self, real: str) -> int:
+        if os.path.isdir(real):
+            return sum(os.path.getsize(os.path.join(folder, name)) for folder, _dirs, files in os.walk(real)
+                       for name in files)
+        return os.path.getsize(real)
+
+    def recycle_item(self, path: str) -> Any:
+        self.calls.append(("recycle_item", path))
+        recycle = self._recycle
+        if self.silent:
+            return recycle.SinkReport(perform_hr=0x80070005)
+        if self.refuse:
+            return recycle.SinkReport(pre_flags=0, perform_hr=0x80004004, aborted=True)
+        if self.hresult:
+            return recycle.SinkReport(pre_flags=recycle.TSF_DELETE_RECYCLE_IF_POSSIBLE, post_hr=self.hresult,
+                                      in_bin=False, perform_hr=self.hresult)
+        real = self.fake.real(path)
+        size = self._size(real)
+        if self.nuke:
+            gone = os.path.join(self.fake.base, "_gone", str(len(self.nuked)))
+            os.makedirs(gone)
+            os.rename(real, os.path.join(gone, ntpath.basename(path)))
+            self.nuked.append(path)
+            return recycle.SinkReport(pre_flags=recycle.TSF_DELETE_RECYCLE_IF_POSSIBLE, post_hr=0, in_bin=False,
+                                      perform_hr=0x80004004, aborted=True)
+        slot = os.path.join(self.fake.base, "_bin", str(len(self.recycled)))
+        os.makedirs(slot)
+        slot = os.path.join(slot, ntpath.basename(path))
+        os.rename(real, slot)
+        self.recycled.append(path)
+        drive = path[:3].upper()
+        state = self.state(drive)
+        self.states[drive] = replace(state, used=state.used + size, items=state.items + 1)
+        entry = recycle.BinEntry(ntpath.dirname(path), ntpath.basename(path), float(self.clock()), size, slot)
+        self.binned.append(_Binned(path, slot, entry))
+        return recycle.SinkReport(pre_flags=recycle.TSF_DELETE_RECYCLE_IF_POSSIBLE, post_hr=0, in_bin=True)
+
+    def bin_entries(self, name: str) -> list[Any]:
+        self.calls.append(("bin_entries", name))
+        wanted = {name.casefold(), ntpath.splitext(name)[0].casefold()}
+        return [item.entry for item in self.binned if item.entry.name.casefold() in wanted]
+
+    def restore_entry(self, entry: Any, original: str) -> None:
+        self.calls.append(("restore_entry", original))
+        found = next((item for item in self.binned if item.entry is entry or item.slot == entry.key), None)
+        if found is None:
+            raise OSError(2, "not in the pretend bin")
+        if self.restore_fails:
+            return
+        os.rename(found.slot, self.fake.real(original))
+        self.binned.remove(found)
+
+    def asked_to_bin(self) -> list[str]:
+        """The paths the one recycle call was asked for (the pre-checks passed), in order."""
+        return [argument for method, argument in self.calls if method == "recycle_item"]
+
+    def clear_bin(self, *pretend: str) -> None:
+        """The pretend bin emptied (its items to _gone) - or only the items binned from ``pretend`` paths: what Undo
+        then finds of them is nothing."""
+        keys = {ntpath.normcase(path) for path in pretend}
+        for item in [item for item in self.binned if not keys or ntpath.normcase(item.pretend) in keys]:
+            gone = os.path.join(self.fake.base, "_gone", "bin" + str(len(self.nuked)) + "_" + str(id(item)))
+            os.makedirs(gone)
+            os.rename(item.slot, os.path.join(gone, ntpath.basename(item.slot)))
+            self.binned.remove(item)
+
+    # ---- desktop.fileops' Recycler, through the app's own logic ---------------------------------------
+
+    def logic(self) -> Any:
+        return self._recycle.RecycleBin(self.fake, self, scope=self.scope)
+
+    def check(self, path: str, *, size: int) -> str:
+        return self.logic().check(path, size=size)
+
+    def recycle(self, path: str, identity: Any = None) -> None:
         if self.error is not None:
             raise self.error
-        bin_folder = os.path.join(self.fake.base, "_bin", str(len(self.recycled)))
-        os.makedirs(bin_folder)
-        os.rename(self.fake.real(path), os.path.join(bin_folder, "item"))
-        self.recycled.append(path)
+        self.logic().recycle(path, identity)
+
+    def find(self, original: str, *, size: int, is_dir: bool, since: float, until: float) -> Any:
+        return self.logic().find(original, size=size, is_dir=is_dir, since=since, until=until)
+
+    def restore(self, entry: Any, original: str) -> None:
+        self.logic().restore(entry, original)
 
 
 class FakeClock:

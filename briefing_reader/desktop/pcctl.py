@@ -29,8 +29,8 @@ attribute marks each), before anything else happens.
   windows are left out of the picture: the app hands their window numbers over and the capture makes sure each is
   excluded from capture for the grab (D7; restored after) - if one can't be, nothing is taken. The file is written
   through the desktop backend (``save_png``: never over anything; a taken name gets " (2)"). A screenshot is never
-  sent anywhere. Its Undo recycles the file if it is unchanged (its sha256) through desktop.fileops' Recycler seam -
-  the Recycle Bin arrives in P2.6, so until then it says plainly that it can't be put back yet.
+  sent anywhere. Its Undo puts the file in the Recycle Bin if it is unchanged (its sha256), through desktop.fileops'
+  Recycler seam (P2.6: desktop.recycle.RecycleBin - every pre-check of the bin first; refused, it says why plainly).
 * P2.5, focus mode (``PcControl.focus``; SPEC 2.1, 10.3; owner decision D4): Jarvis's own quiet for 1 to 240 minutes
   (``FocusBook``: one session, kept in a small file next to the timers so a restart of Jarvis stays quiet until its
   end; asked again while it runs, it starts again from now and keeps its id), the music paused - only through the
@@ -1179,7 +1179,8 @@ class PcControl:
     ``disk()``: the desktop backend (the screenshots folder's facts, its new file, a shot's hash for Undo);
     ``timers``: the TimerBook; ``screenshots_dir``: [desktop] screenshots_dir ("" = the default, D8); ``clock``: a
     monotonic clock (the volume's rate cap); ``now``: the wall clock (a shot's name); ``recycler``: desktop.fileops'
-    Recycle Bin seam (NoRecycleBin until P2.6); ``focus``: focus mode's FocusBook (P2.5)."""
+    Recycle Bin seam (desktop.recycle.RecycleBin in the app; NoRecycleBin when none); ``focus``: focus mode's
+    FocusBook (P2.5)."""
 
     def __init__(self, backend_factory: Callable[[], PcBackend], *, disk: Callable[[], Any] | None = None,
                  timers: TimerBook | None = None, screenshots_dir: str = "",
@@ -1572,9 +1573,9 @@ class PcControl:
 
     def undo(self, change: PcChange, *, cancel: Any = None) -> PcChange:
         """``change`` put back if it can be and nothing changed since: the volume and mute as they were, the player
-        as it was (its own controls only), a timer cancelled, cancelled timers back, a screenshot recycled (unchanged;
-        through the Recycler seam - none until P2.6, said plainly). A PcChange of action UNDO: its code "" when it was
-        put back."""
+        as it was (its own controls only), a timer cancelled, cancelled timers back, a screenshot put in the Recycle
+        Bin (unchanged; through the Recycler seam - its reason said plainly when the bin didn't take it). A PcChange
+        of action UNDO: its code "" when it was put back."""
         kind = change.kind
         if not change.changed or not change.undoable:
             return PcChange(kind, UNDO, CANT_UNDO)
@@ -1765,8 +1766,8 @@ class PcControl:
                 return PcChange(dv.SCREENSHOT, UNDO, CHANGED)
             recycler = self._recycler if self._recycler is not None else fileops.NoRecycleBin()
             recycler.recycle(shot.path)
-        except fileops.RecycleUnavailable:
-            return PcChange(dv.SCREENSHOT, UNDO, fileops.R_NO_BIN)
+        except fileops.RecycleUnavailable as exc:
+            return PcChange(dv.SCREENSHOT, UNDO, exc.reason)
         except Exception as exc:  # noqa: BLE001 - left as it is
             return PcChange(dv.SCREENSHOT, UNDO, OS_ERROR, winerror=_winerror(exc))
         return PcChange(dv.SCREENSHOT, UNDO, "", True)
@@ -1987,6 +1988,7 @@ _LEFT_WORDS = {
     GONE: "The {noun} had gone already.",
 }
 _GONE_WORDS = {dv.TIMER: "That timer had ended already.", dv.CANCEL_TIMER: "Those timers had ended already."}
+NO_BIN_SHOT_WORDS = "The screenshot stays - the Recycle Bin can't be reached right now."
 _CANT_WORDS = {dv.MEDIA: "What the media key did can't be put back."}
 _PART_ORDER = {dv.MEDIA: 0, dv.VOLUME: 1, dv.TIMER: 2, dv.CANCEL_TIMER: 3, dv.SCREENSHOT: 4}   # as SPEC 10.3 says it
 _OS_WORDS = {dv.VOLUME: "Windows didn't put the volume back.", dv.MEDIA: "Windows couldn't reach the player.",
@@ -2016,7 +2018,7 @@ def _back_part(change: PcChange, result: PcChange) -> str:
 def undo_summary(results: Sequence[tuple[PcChange, PcChange]], address: str = "sir") -> str:
     """Jarvis's words for an Undo of the HUD's chips (one chip's, or Undo all's): what came back - "Focus ended, sir.
     Back as it was: music playing, volume 60%." - then, plainly, what did not ("The screenshot stays - the Recycle Bin
-    can't take it yet."). Kinds, levels and counts only."""
+    can't be reached right now."). Kinds, levels and counts only."""
     from . import fileops
 
     focus_ended = any(change.kind == dv.FOCUS_MODE and not result.code for change, result in results)
@@ -2032,8 +2034,7 @@ def undo_summary(results: Sequence[tuple[PcChange, PcChange]], address: str = "s
             continue
         noun = _PUT_BACK.get(change.kind, "change")
         if result.code in fileops.UNDO_WORDS and change.kind == dv.SCREENSHOT:
-            words = "The screenshot stays - the Recycle Bin can't take it yet." if result.code == fileops.R_NO_BIN \
-                else fileops.UNDO_WORDS[result.code]
+            words = NO_BIN_SHOT_WORDS if result.code == fileops.R_NO_BIN else fileops.UNDO_WORDS[result.code]
         elif result.code == CANT_UNDO:
             words = _CANT_WORDS.get(change.kind, f"The {noun} can't be put back.")
         elif result.code == OS_ERROR:
@@ -2063,8 +2064,8 @@ def undo_note(change: PcChange, result: PcChange) -> str:
 
 
 def undo_words(change: PcChange, address: str = "sir") -> str:
-    """An Undo's words: "Put back, sir." or why not (a screenshot until P2.6: "The Recycle Bin can't take it yet -
-    left as it is.")."""
+    """An Undo's words: "Put back, sir." or why not (a screenshot the bin didn't take: "The Recycle Bin is off for
+    that drive - left as it is.")."""
     from . import fileops
 
     if not change.code:

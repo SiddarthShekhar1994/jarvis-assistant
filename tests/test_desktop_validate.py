@@ -142,7 +142,8 @@ class OrderTests(unittest.TestCase):
             (open_file("f7"), tidy, dv.INTENT_NOT_LICENSED),               # 7 before 8 (suspect)
             ({"skill": "recycle_files", "why": "x", "files": ["f7"]}, "delete the old drafts",
              dv.SUSPECT_ITEM),                                            # 8 before 9
-            ({"skill": "recycle_files", "why": "x", "files": ["f8"]}, "delete the old draft", dv.NOT_YET),   # 9
+            ({"skill": "volume", "why": "x", "action": "set", "level": 30}, "volume 30", dv.NOT_YET),   # 9
+            ({"skill": "recycle_files", "why": "x", "files": ["f8"]}, "delete the old draft", dv.CARD),  # P2.6
             (move(["f8"], "d3"), tidy, dv.CARD),                           # P2.2: shipped, always a card
         ]
         for step, words, wanted in cases:
@@ -256,9 +257,11 @@ class ShapeTests(unittest.TestCase):
                                              "open_url"))
         for fields in dv.SKILL_FIELDS.values():
             self.assertTrue(fields <= set(dv.STEP_KEYS))
-        self.assertEqual(dv.ORGANISE_SKILLS, ("move_files", "copy_files", "rename_file", "make_folder", "zip_files"))
-        self.assertEqual(dv.SHIPPED_SKILLS, dv.PHASE_1_SKILLS + dv.ORGANISE_SKILLS)     # P2.2: no recycle_files yet
-        self.assertNotIn("recycle_files", dv.SHIPPED_SKILLS)
+        self.assertEqual(dv.ORGANISE_SKILLS, ("move_files", "copy_files", "rename_file", "make_folder", "zip_files",
+                                              "recycle_files"))                   # P2.6: the Recycle Bin with them
+        self.assertEqual(dv.SHIPPED_SKILLS, dv.PHASE_1_SKILLS + dv.ORGANISE_SKILLS)
+        self.assertIn("recycle_files", dv.SHIPPED_SKILLS)
+        self.assertEqual(dv.RECYCLE_MAX_BYTES, 2 * 1024 ** 3)
 
 
 class RefTests(unittest.TestCase):
@@ -800,6 +803,7 @@ class PhaseGateTests(unittest.TestCase):
             ({"skill": "rename_file", "why": "x", "files": ["f1"], "name": "Final.docx"}, "rename my essay"),
             ({"skill": "make_folder", "why": "x", "id": "n1", "place": "d4", "name": "Old"}, "tidy Downloads"),
             ({"skill": "zip_files", "why": "x", "files": ["f1"], "name": "Essay.zip"}, "zip my essay"),
+            ({"skill": "recycle_files", "why": "x", "files": ["f8"]}, "delete the old draft"),     # P2.6
         ]
         for step, words in cases:
             with self.subTest(skill=step["skill"]):
@@ -808,7 +812,6 @@ class PhaseGateTests(unittest.TestCase):
 
     def test_later_phases_are_not_yet(self) -> None:
         cases = [
-            ({"skill": "recycle_files", "why": "x", "files": ["f8"]}, "delete the old draft"),
             ({"skill": "volume", "why": "x", "action": "set", "level": 30}, "volume 30"),
             ({"skill": "media", "why": "x", "action": "pause"}, "pause"),
             ({"skill": "timer", "why": "x", "minutes": 10, "label": "tea"}, "set a timer for 10 minutes"),

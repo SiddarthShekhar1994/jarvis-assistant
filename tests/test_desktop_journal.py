@@ -291,9 +291,10 @@ class RecoveryTests(unittest.TestCase):
         for seq, after in ((4, True), (5, False)):
             original = bin_.recycle
 
-            def crashing(path: str, after: bool = after, original=original) -> None:  # type: ignore[no-untyped-def]
+            def crashing(path: str, identity: object = None, after: bool = after,  # type: ignore[no-untyped-def]
+                         original=original) -> None:
                 if after:
-                    original(path)
+                    original(path, identity)
                 raise _Crash()
 
             bin_.recycle = crashing                                          # type: ignore[method-assign]

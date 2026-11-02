@@ -440,6 +440,10 @@ _SHELL_WORDS = re.compile(r"\b(?:cmd|powershell|pwsh|wscript|cscript|wsl|bash|ms
                           r"conhost|wt)(?:\.exe)?\b|\brunas\b|\bCreateProcess\w*|\bWinExec\b", re.IGNORECASE)
 _COMMAND_LINE = re.compile(r"\.exe\s+[/-]|\b(?:cmd|powershell|pwsh|explorer|wsl|wscript|cscript)\s+[/-]\w",
                            re.IGNORECASE)
+# P2.6: the two settings keys desktop.recycle READS (the Recycle Bin's own settings and Windows' policy) name the
+# Explorer key of the registry - exactly these two texts, nothing else, and never as a command line.
+_SETTINGS_KEYS = frozenset({"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\BitBucket\\Volume",
+                            "Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer"})
 
 
 def shell_problems(source: str, *, data_module: bool = False) -> list[str]:
@@ -473,7 +477,7 @@ def shell_problems(source: str, *, data_module: bool = False) -> list[str]:
             text = node.value
             if _COMMAND_LINE.search(text):
                 problems.append(f"command line {text[:40]!r}")
-            elif not data_module and _SHELL_WORDS.search(text):
+            elif not data_module and _SHELL_WORDS.search(text) and text not in _SETTINGS_KEYS:
                 problems.append(f"shell word {text[:40]!r}")
             elif data_module and _SHELL_WORDS.search(text) and not re.fullmatch(r"[\w .+-]+", text):
                 problems.append(f"not a bare name {text[:40]!r}")
@@ -508,6 +512,13 @@ class NoShellTests(unittest.TestCase):
                 self.assertNotEqual(shell_problems(source), [])
         self.assertNotEqual(shell_problems("NAMES = ('explorer.exe /e,x',)", data_module=True), [])
         self.assertEqual(shell_problems("NAMES = frozenset({'cmd.exe', 'explorer.exe'})", data_module=True), [])
+        # P2.6: only desktop.recycle's two settings keys, exactly, may name the registry's Explorer key.
+        from briefing_reader.desktop import recycle
+
+        self.assertEqual(_SETTINGS_KEYS, {recycle.BITBUCKET_KEY, recycle.POLICY_KEY})
+        self.assertEqual(shell_problems(f"KEY = {recycle.BITBUCKET_KEY!r}"), [])
+        self.assertNotEqual(shell_problems(f"KEY = {recycle.BITBUCKET_KEY + 'x'!r}"), [])
+        self.assertNotEqual(shell_problems("KEY = 'Software\\\\Explorer'"), [])
         self.assertEqual(shell_problems('"""No subprocess, no shell, no explorer."""\nimport os\nos.startfile'), [])
 
 

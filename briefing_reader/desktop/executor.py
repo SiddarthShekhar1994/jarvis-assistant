@@ -50,7 +50,7 @@ Statuses ``DONE``, ``WAITING``, ``FOUND``, ``REFUSED``, ``FAILED``, ``CANCELLED`
 ``GUARD``, ``STOPPED`` (and desktop.validate's NEVER codes); ``StepResult``; ``DesktopRun`` (``done()``,
 ``waiting()``, ``found()``, ``not_done()``, ``counts()``, ``statuses_text()``; ``shown``: what the result cards show
 of it - desktop.results, P1.9; ``card``: its file steps' frozen plan, P2.2); ``FindQuery``; ``Executor(backend,
-scope=, apps=, find=, clock=, now=, pc=)`` (``run_plan(plan,
+scope=, apps=, find=, clock=, now=, pc=, recycler=)`` (``run_plan(plan,
 words=, others_from=, cancel=)``, ``run_route(route, words=, run_id=, cancel=, hud=)``, ``run_click(skill, target,
 granted=, ...)``,
 ``recheck(item)``); ``run_words(run, plan=None, address=)``; ``run_soft(run, plan=None)``; ``run_waits(run)``;
@@ -188,7 +188,8 @@ class Executor:
                  apps: Callable[[], Sequence[AppItem]],
                  find: Callable[[FindQuery], Sequence[Any]] | None = None,
                  clock: Callable[[], float] = time.monotonic,
-                 now: Callable[[], datetime] | None = None, pc: pcctl.PcControl | None = None) -> None:
+                 now: Callable[[], datetime] | None = None, pc: pcctl.PcControl | None = None,
+                 recycler: Any = None) -> None:
         self.backend = backend
         self._scope = scope
         self._apps = apps
@@ -196,6 +197,7 @@ class Executor:
         self._clock = clock
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._pc = pc                                     # the PC's controls (P2.4; desktop.pcctl)
+        self._recycler = recycler                         # the Recycle Bin's pre-checks for a card's rows (P2.6)
         self._cancel: Any = None                          # the run's cancel (anything with is_set())
 
     # ---- a planner's plan -------------------------------------------------------------------------
@@ -232,7 +234,7 @@ class Executor:
         be made: logged by type)."""
         try:
             return cardplan.build_card(plan, self.backend, self._scope(), now=self._now(), mono=self._clock(),
-                                       clock=self._clock)
+                                       clock=self._clock, recycler=self._recycler)
         except Exception as exc:  # noqa: BLE001 - no card: its steps can't wait for a click
             logger.warning("Desktop %s: the card's plan could not be made (%s)", plan.run_id or "-",
                            type(exc).__name__)
@@ -575,7 +577,8 @@ _NOUNS = {dv.OPEN_FILE: ("the file", "{n} files"), dv.OPEN_FOLDER: ("the folder"
           dv.SHOW_IN_FOLDER: ("the file", "{n} files"), dv.FIND_FILES: ("the search", "{n} searches")}
 # A file step (P2.2) that waits for the owner's OK on its card, or could not.
 _CARD_NOUNS = {dv.MOVE_FILES: "moving the files", dv.COPY_FILES: "copying the files", dv.RENAME_FILE: "the new name",
-               dv.MAKE_FOLDER: "the new folder", dv.ZIP_FILES: "the zip"}
+               dv.MAKE_FOLDER: "the new folder", dv.ZIP_FILES: "the zip",
+               dv.RECYCLE_FILES: "moving the files to the Recycle Bin"}
 # What waits for the owner, by why its tier went up (the first that applies).
 WAITING_NOUNS = ((dv.FLAG_SCRIPT, "a file that can run macros or scripts"), (dv.FLAG_SHORTCUT, "a shortcut"),
                  (dv.FLAG_HIDDEN_CHARS, "a file with hidden characters in its name"),

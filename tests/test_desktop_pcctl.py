@@ -25,6 +25,7 @@ import threading
 import types
 import unittest
 import zlib
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -483,14 +484,21 @@ class ScreenshotTests(PcBase):
 
     def test_undo_recycles_it_once_the_bin_is_there(self) -> None:
         change = self.ask("screenshot")
-        back = self.pc.undo(change)                       # NoRecycleBin until P2.6: said plainly
+        back = self.pc.undo(change)                       # no Recycle Bin to reach: said plainly, left as it is
         self.assertEqual((back.code, pcctl.undo_words(back)),
-                         (dfo.R_NO_BIN, "The Recycle Bin can't take it yet - left as it is."))
+                         (dfo.R_NO_BIN, "The Recycle Bin can't be reached right now - left as it is."))
         self.assertTrue(os.path.exists(self.disk.real(change.after.path)))
         bin_ = FakeRecycleBin(self.disk)
         pc = self.control(recycler=bin_)
+        bin_.states["C:\\"] = replace(bin_.state(), on=False)       # P2.6: the bin's own pre-checks come first
+        off = pc.undo(change)
+        self.assertEqual((off.code, pcctl.undo_words(off)),
+                         (dfo.R_BIN_OFF, "The Recycle Bin is off for that drive - left as it is."))
+        self.assertEqual(bin_.asked_to_bin(), [])
+        bin_.states.clear()
         self.assertEqual(pc.undo(change).code, "")
         self.assertFalse(os.path.exists(self.disk.real(change.after.path)))
+        self.assertEqual(bin_.recycled, [change.after.path])
         self.assertEqual(pc.undo(change).code, pcctl.GONE)
         changed = self.ask("screenshot")
         Path(self.disk.real(changed.after.path)).write_bytes(b"edited")

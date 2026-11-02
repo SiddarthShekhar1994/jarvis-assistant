@@ -115,7 +115,7 @@ class InstantChipTests(FocusApp):
         self.assertEqual(self.undo("timers"), "Back as it was, sir: timer cancelled.")
         self.assertEqual((self.desktop.timers.running(), self.timer_chip()), ((), ""))
         self.assertEqual(self.undo("shots"), "Nothing was put back, sir. The screenshot stays - the Recycle Bin "
-                                             "can't take it yet.")
+                                             "can't be reached right now.")       # no bin while the tests run
         self.assertEqual(self.row(), [f"Screenshot{DOT}saved", "Undo all"])   # it stays: still there, said so
         self.assertEqual([tone for _said, tone in self.said[-4:]], [hud.TONE_DONE] * 3 + [hud.TONE_ERROR])
         task = self.tasks_titled("Undo on the volume chip")[-1]
@@ -139,7 +139,7 @@ class InstantChipTests(FocusApp):
         self.pc.calls.clear()
         said = self.undo_all()
         self.assertEqual(said, "Back as it was, sir: music playing, volume 50%. The screenshot stays - the Recycle "
-                               "Bin can't take it yet. What the media key did can't be put back.")   # newest first
+                               "Bin can't be reached right now. What the media key did can't be put back.")
         self.assertEqual(self.pc.methods(), ["audio", "set_level", "media_state", "media_control"])   # ONE each
         self.assertEqual((self.pc.level, self.pc.media), (50, pcctl.PLAYING))
         self.assertEqual(self.row(), [f"Screenshot{DOT}saved", "Undo all"])

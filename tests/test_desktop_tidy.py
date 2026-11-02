@@ -285,7 +285,7 @@ class CardWordsTests(TidyCase):
         self.assertEqual(done.stage, dt.DONE)
         self.assertEqual(dt.said(done), "Nothing was put back, sir - I can't change files on this PC right now.")
 
-    def test_copies_and_zips_say_plainly_that_undo_cant_bin_them_yet(self) -> None:
+    def test_copies_and_zips_are_undone_through_the_recycle_bin(self) -> None:
         steps = [{"skill": "copy_files", "why": "x", "files": ["f1", "f2"], "to": "d3"}]
         state = dt.TidyState(self.card(steps, "copy my Downloads files into LING"))
         self.assertEqual(dt.tidy_text(state).kicker, f"COPY FILES {DOT} NEEDS YOUR OK")
@@ -293,10 +293,12 @@ class CardWordsTests(TidyCase):
         state.start()
         state.finish(dt.CardOutcome("t1", "", (dt.RowEnd(1, jn.DONE, "", 1), dt.RowEnd(2, jn.DONE, "", 2))), NOW)
         text = dt.tidy_text(state)
-        self.assertFalse(state.undoable())
-        self.assertIsNone(text.link)
-        self.assertEqual(text.note, "Undo can't take back copies or zips yet - that needs the Recycle Bin, which comes "
-                                    "in a later update.")
+        self.assertTrue(state.undoable())                                     # P2.6: the bin takes Jarvis's copies
+        self.assertEqual((text.link, text.link_note), (("undo", "Undo"), "Puts every file back where it was. Copies "
+                                                                         "and zips Jarvis made go to the Recycle Bin."))
+        state.undo_expired = True
+        text = dt.tidy_text(state)
+        self.assertEqual((text.link, text.note), (None, "Too long ago to undo now."))
 
 
 # --------------------------------------------------------------------------

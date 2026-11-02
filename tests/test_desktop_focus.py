@@ -264,7 +264,7 @@ class UndoTests(FocusBase):
                          [(shot, dfo.R_NO_BIN), (timer, "")])
         self.assertEqual(self.book.running(), ())
         self.assertEqual(pcctl.undo_summary(results), "Back as it was, sir: timer cancelled. The screenshot stays - "
-                                                      "the Recycle Bin can't take it yet.")
+                                                      "the Recycle Bin can't be reached right now.")
         self.book.add(10)
         cancelled = self.focus("cancel the timers")
         results = self.undo([cancelled])
