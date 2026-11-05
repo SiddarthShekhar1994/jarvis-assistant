@@ -287,6 +287,14 @@ def gate_counts() -> dict[str, int]:
         return {}
 
 
+def seal_gate(sealed: bool) -> None:
+    """The network gate refuses every new connection while sealed (snapshot_gate.ConnectGate.seal): agent.browser, while
+    a page the agent wrote is open. Before the gate started, and on a test platform, there is nothing to seal."""
+    gate = _ENGINE.gate
+    if gate is not None:
+        gate.seal(sealed)
+
+
 def _judged_environ() -> Mapping[str, str]:
     """The environment the inherited-settings checks judge (snapshots.sandbox_problem /
     engine_flags_problem): os.environ, but with QTWEBENGINE_CHROMIUM_FLAGS as Jarvis inherited it
@@ -574,13 +582,7 @@ class PageCamera(QObject):
             shot.target = target
         view = self._view
         if view is None:
-            view = classes.QWebEngineView()
-            view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
-            view.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            view.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-            view.setAccessibleName("")
-            view.resize(*snapshots.VIEWPORT)
-            self._view = view
+            view = self._view = self._new_view(classes)
         page = classes.Page(profile, view)
         shot.page = page
         self._connect(page, shot)
@@ -597,6 +599,17 @@ class PageCamera(QObject):
         self._timeout.start(self._timeout_ms)
         seed.load(QUrl("about:blank"))
         return ""
+
+    def _new_view(self, classes: Any) -> Any:
+        """The view the pages show on: here a hidden one, never on screen (agent.browser's is in the window Jarvis
+        reads in)."""
+        view = classes.QWebEngineView()
+        view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+        view.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        view.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        view.setAccessibleName("")
+        view.resize(*snapshots.VIEWPORT)
+        return view
 
     # ---- the sandboxed window (GUI thread) ---------------------------------------------------
 

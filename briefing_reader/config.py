@@ -453,7 +453,7 @@ class AgentConfig:
     max_turns: int = 60            # a task's budget: reaching it asks "Keep going?" (5..1000)
     max_minutes: int = 20          # ... and so does this, in minutes of work (1..240)
     tasks_per_day: int = 20        # tasks started in the last 24 hours (1..200)
-    search_engine: str = "duckduckgo"              # where web_search goes (a later part)
+    search_engine: str = "duckduckgo"              # where web_search goes first; then the others (agent.web)
     workspace: str = field(default="", repr=False)   # "" = Jarvis\Workspace in your user folder; never under OneDrive
 
 

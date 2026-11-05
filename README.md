@@ -2432,9 +2432,40 @@ then restart Jarvis. It also needs [Jarvis on your desktop](#jarvis-on-your-desk
 (turned on, on its card) and [Ask](#ask-jarvis-optional). Off, nothing of it runs and
 not a word of it reaches Claude.
 
-**This version** is the engine: a plan, short spoken lines, questions, and text
-files in the task's own folder. Reading the web and your own data come in later
-versions; until then he says plainly when a task needs them.
+**This version** is the engine and the web: a plan, short spoken lines, questions, text
+files in the task's own folder, and a real browser you can watch. Your own data comes in a
+later version; until then he says plainly when a task needs it.
+
+**The window you can watch.** At his first search or page a window opens, on a second
+screen if you have one, else on the right of the main screen, clear of the HUD: the real
+page, under a thin strip with "Jarvis is reading", the site and the last few sites. What he
+reads is what it shows. It never takes the focus and ignores your mouse and keyboard: it is
+his to drive. When the task ends the page goes at once and the window about 10 seconds
+later; after a Stop or a Turn off it goes at once.
+
+**What goes where.** A search opens the real results page of `[agent] search_engine`
+(DuckDuckGo unless you change it; if it gives nothing, or shows a captcha, a consent page or
+a block, he tries Bing and Google, and he never answers one or clicks through), so the words
+of each search go from this PC to that engine, with no sign-in and no cookies kept. Pages
+open in the same private web engine as the [page pictures](#pictures-in-live):
+a new private profile for every page, public https addresses only, no sign-in, typing, form,
+download, pop-up or permission, and every connection through the same network gate (public
+IPv4 addresses, port 443). What a page says is only ever data to him; LIVE flags lines that
+read like orders.
+
+**A page he wrote.** He can open a page, a picture or a text from the task's own folder in
+the window, to look over what he made. It may show the folder's other files and run its own
+inline script, and it can reach nothing else: while such a page is open the network gate
+refuses everything, so a page picture in LIVE that falls in those moments fails, and says so.
+
+**Your private data and the web.** A task starts clean, knowing only your words. Once a
+private tool has given him something (the next version's mail, calendar, contacts and files),
+a search that carries those words, an address he was not given or a search that looks encoded
+waits for your click on a card with the exact words: "Allow" lets that one call go and clears
+those words for the task; "Don't", or no answer, and it never goes and he carries on without
+it. Nothing you type or say counts as that click. The honest limit: matching words can't
+catch a determined paraphrase. The address rule and his having no way to type into a page are
+the strong parts.
 
 **One task at a time.** The first planner run decides that a request is a task; it
 starts from your own words, whatever the planner wrote, and with nothing else.
@@ -2457,9 +2488,10 @@ under OneDrive): text-like files only (.md .txt .csv .tsv .json .html .htm .css 
 .yaml .yml .log), never a program or a script, 5 MB a file and 50 MB and 200 files a task.
 A restart ends a task; its files stay.
 
-**LIVE** shows each task with one step per tool call (on screen and in memory only; it
-never opens LIVE by itself). **Logs** carry ids, kinds, counts, states, reason codes and
-durations only - never your words, a file name, a tool's arguments or a token.
+**LIVE** shows each task with one step per tool call, a web step with a picture of the
+window on it (on screen and in memory only; it never opens LIVE by itself). **Logs** carry
+ids, kinds, counts, states, reason codes and durations only - never your words, a search, an
+address, a page's words, a file name, a tool's arguments or a token.
 
 ## TODAY and DEADLINES
 
@@ -3914,7 +3946,7 @@ log. Changes apply the next time the app starts.
 | `[agent] model`, `effort` | `"opus"`, `""` | The tasks' model and effort (`"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`; `""` = Claude Code's default). Quick replies stay on `[ask] model`. |
 | `[agent] max_turns`, `max_minutes` | `60`, `20` | A task's budget (5-1000 turns, 1-240 minutes of work); reaching one asks "Keep going?". |
 | `[agent] tasks_per_day` | `20` | How many tasks may start in 24 hours (1-200). |
-| `[agent] search_engine` | `"duckduckgo"` | Where his searches will go: `"duckduckgo"`, `"bing"` or `"google"` (a later version; nothing uses it yet). |
+| `[agent] search_engine` | `"duckduckgo"` | Where his searches go first: `"duckduckgo"`, `"bing"` or `"google"`, then the others if a page gives nothing or shows a wall. The words of each search go there. |
 | `[agent] workspace` | `""` | The tasks' folder: `""` = `Jarvis\Workspace` in your user folder, else a full folder path. Never under OneDrive: a task refuses to start there. |
 
 The offline voice uses the same `rate` and `volume`: the rate scales Windows'

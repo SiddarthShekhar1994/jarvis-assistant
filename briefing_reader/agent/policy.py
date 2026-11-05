@@ -12,9 +12,9 @@
     yes_or_no(words)            the owner's typed answer to "Keep going?"
     gate(tool, args, firewall)  the check before every tool call
 
-THE FIREWALL IS NOT HERE YET (SPEC section 6; parts A2 and A4). This version offers no tool that reaches the web or the
-owner's private data, so there is nothing for one to guard. ``Firewall`` is the seam it plugs into, and the rule until
-then is a refusal, not a stand-in: a web, private, card or instant tool with no firewall behind it is refused outright.
+The firewall (SPEC section 6) plugs in at ``Firewall``: part A2's agent.firewall.WebFirewall guards the web tools, and
+part A4 adds the private ones. With none behind it, a web, private, card or instant tool is refused outright: never a
+stand-in.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ TASKS_FILE = "agent_tasks.json"
 DAY = timedelta(days=1)
 # What this version offers. A later part adds its tier here when it adds its tools and its firewall.
 OFFERED_TIERS = frozenset({agent_tools.TIER_SHOW, agent_tools.TIER_WAIT, agent_tools.TIER_END,
-                           agent_tools.TIER_WORKSPACE})
+                           agent_tools.TIER_WORKSPACE, agent_tools.TIER_WEB})
 # Tiers that reach outside Jarvis's own show, end and workspace tools: never without a firewall.
 GUARDED_TIERS = frozenset({agent_tools.TIER_WEB, agent_tools.TIER_PRIVATE, agent_tools.TIER_CARD,
                            agent_tools.TIER_INSTANT})
@@ -65,7 +65,7 @@ def offered(_config: Any = None, tools: Sequence[agent_tools.Tool] = agent_tools
 
 
 class Firewall(Protocol):
-    """Parts A2 and A4: asked before every web, private, card and instant call."""
+    """Asked before every web, private, card and instant call (agent.firewall.WebFirewall)."""
 
     def check(self, tool: agent_tools.Tool, args: Mapping[str, Any]) -> agent_tools.ToolResult | None:
         """None: the call may go ahead. A result: it does not, and this goes back to the model instead."""

@@ -561,6 +561,21 @@ def _build_client(args: argparse.Namespace, config: Any) -> tuple[Any, Any, str 
     return NotionClient("", session=session, notion_version=config.notion_version), config, None
 
 
+def _prepare_agent_window(config: Any) -> None:
+    """While tasks are on: Jarvis's address scheme for a task's files, which the web engine must know before the
+    QApplication exists. Off: nothing of it is imported. Never stops the app."""
+    if getattr(getattr(config, "agent", None), "enabled", False) is not True:
+        return
+    try:
+        from .agent.browser import register_scheme
+        from .agent.policy import agent_on
+
+        if agent_on(config):
+            register_scheme()
+    except Exception as exc:  # noqa: BLE001 - Jarvis works without it
+        logger.info("Tasks: the window's scheme was not set up (%s)", type(exc).__name__)
+
+
 def _run_app(args: argparse.Namespace, config: Any, name: str, run: str | None,
              slots: Mapping[str, str] | None = None) -> int:
     from PySide6.QtCore import qInstallMessageHandler
@@ -573,6 +588,7 @@ def _run_app(args: argparse.Namespace, config: Any, name: str, run: str | None,
     _set_app_user_model_id()
     # Qt's attributes for the page snapshots' web engine: only before the QApplication exists.
     prepare_application()
+    _prepare_agent_window(config)
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(__version__)

@@ -9653,7 +9653,8 @@ class AppController(QObject):
         planner = self.ask.planner
         try:
             controller = (factory or agent_ui.AgentController)(self.config, planner, live=self.live,
-                                                               consent=desktop.consent_given, parent=self)
+                                                               consent=desktop.consent_given, parent=self,
+                                                               window_avoid=self._hud_reach)
         except Exception as exc:  # noqa: BLE001 - Jarvis works without tasks
             logger.warning("Could not set up tasks (%s)", type(exc).__name__)
             return None
@@ -9667,6 +9668,11 @@ class AppController(QObject):
         logger.info("Agent: tasks are on (model %s; at most %d a day)", self.config.agent.model,
                     self.config.agent.tasks_per_day)
         return controller
+
+    def _hud_reach(self) -> Any:
+        """Where the HUD is, while it shows: the window Jarvis reads in keeps clear of it."""
+        overlay = getattr(getattr(self, "desktop", None), "overlay", None)
+        return overlay.hud.occupied_rect() if overlay is not None and overlay.is_shown() else None
 
     def _start_agent(self, words: str) -> None:
         """A first planner run handed the request to a task: it starts with the owner's own words."""
@@ -9695,9 +9701,11 @@ class AppController(QObject):
 
     def _on_agent_question(self, question: Any) -> None:
         """A question for the owner: on the caption and in the conversation, in amber (a decision waits); what he types
-        next is its answer (AgentController.take_request). Part A3 gives it a card."""
-        self._agent_words(question.text, hud.TONE_WARN)
-        self._jarvis(question.text, tone=hud.TONE_WARN, context=False)
+        next is its answer (AgentController.take_request). Part A3 gives it a card. The firewall's (kind "web") is never
+        said aloud or kept on this PC, and only a click on A3's card answers it: its words may be private."""
+        web_card = question.kind == "web"
+        self._agent_words(question.text, hud.TONE_WARN, speak=not web_card)
+        self._jarvis(question.text, tone=hud.TONE_WARN, keep=not web_card, context=False)
 
     def _on_agent_ended(self, end: Any) -> None:
         """The task ended: its report (or Jarvis's own words) on the caption, in the conversation and said aloud, and

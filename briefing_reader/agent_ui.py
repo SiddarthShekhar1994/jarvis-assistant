@@ -1,4 +1,4 @@
-"""Jarvis, a true agent, in the app: the controller of the one task that may run (SPEC 5, D4, R1, R8; part A1).
+"""Jarvis, a true agent, in the app: the controller of the one task that may run (SPEC 5, D4, R1, R8; parts A1, A2).
 
     AgentController(config, planner, live=, consent=, ...)     made by the app only while agent.policy.agent_on(config)
         offered()              may a first planner run hand a request to a task now? (any thread: on, the owner's
@@ -24,8 +24,13 @@
         taskEnded(object)      a runner.AgentEnd, its {sir} filled in
 
 Events come from the run's threads through a queued signal; a Stop drops what is still on its way. Live: a TASK_AGENT
-task, with one step per tool call (the words in it stay on screen and in memory: D11), and it never opens LIVE by
-itself. Logs: run ids, kinds, states and counts only, never what was typed.
+task, with one step per tool call (the words in it stay on screen and in memory: D11), a web step with the picture of
+the page in the window on it, and it never opens LIVE by itself. Logs: run ids, kinds, states and counts only, never
+what was typed, searched for or read.
+
+The web (part A2): each run has its own browser client (agent.browser), session and firewall. The window comes only with
+the first web or show step; when a run ends its page goes at once and the window a little later, at once after a Stop or
+a Turn off; a new run first ends what an older one left, and shutdown leaves nothing.
 """
 
 from __future__ import annotations
@@ -42,10 +47,15 @@ from PySide6.QtCore import QObject, Qt, Signal
 
 from . import hud
 from . import live as live_events
+from . import pictures
+from .agent import firewall as agent_firewall
 from .agent import policy
 from .agent import runner as agent_runner
+from .agent import web
+from .agent.browser import BrowserClient
 from .agent.runner import AgentEnd, AgentEngine, AgentEvent, AgentRun, OwnerQuestion, Timing
 from .agent.tools import OUTCOME_DONE, OUTCOME_FAILED, Registry, Tool
+from .agent.web import WebSession
 from .agent.workspace import TaskFolder, WorkspaceRefused, workspace_root
 from .ask.stream import LIMIT
 from .persona import with_address
@@ -58,6 +68,8 @@ REQUEST_STEP = "Your request"
 TOOLS_TEXT = "{count} - Jarvis's own, on this PC; nothing else"
 BUDGET_TEXT = "{turns} turns and {minutes} minutes, then it asks you"
 HELD_STATUS = "HELD"
+WAITING_STATUS = "WAITING"
+FILE_NOTE = "Opened on this PC from the task's own folder"
 RUNNING_TEXT = "A task is running already, {sir}; say stop first if you want another."
 LIMIT_TEXT = "That's the most tasks for one day ({count}), {sir}; nothing was started."
 HOLD_TEXT = "Tasks are paused until your plan's limit resets, {sir}: Claude Code said a run would use extra usage."
@@ -69,7 +81,16 @@ END_WORDS = {OUTCOME_DONE: "done", OUTCOME_FAILED: "failed", agent_runner.OUTCOM
 PARTLY = "partly done"
 CODE_WORDS = {agent_runner.HELD: "held - the task is waiting or stopping",
               "too_long": "took too long and was given up on", "bad_input": "refused: its input did not fit",
-              "rate": "refused: too soon after the last one", "raised": "failed", "refused": "refused"}
+              "rate": "refused: too soon after the last one", "raised": "failed", "refused": "refused",
+              agent_firewall.DECLINED: "you did not allow it", agent_firewall.CARD_BUSY: "a question waits already",
+              web.W_NOT_PUBLIC: "refused: not a public https page", web.W_NO_PAGE: "no page is open",
+              web.W_NO_RESULTS: "no search page gave results", web.W_NOT_LOADED: "the page did not load",
+              web.W_TOO_SLOW: "it took too long", web.W_NO_ANSWER: "the page stopped answering",
+              web.W_STOPPED: "stopped", web.W_BUSY: "the window was busy",
+              web.W_NO_NUMBER: "no address has that number",
+              web.W_CRASHED: "the page crashed", web.W_NO_ENGINE: "this PC has no web engine",
+              web.W_TOO_BIG: "the picture would not fit", web.W_NO_WINDOW: "the window is not available",
+              web.W_TEST_RUN: "no page is opened in a test run"}
 
 
 def stop_words(text: str) -> bool:
@@ -118,12 +139,29 @@ class _Feed:
             return
         for label, value in result.fields:
             step.field(label, value)
+        self._picture(step, result.live_picture)
         if result.code == agent_runner.HELD:
             step.done(live_events.STATUS_WARN, status_text=HELD_STATUS, summary=result.note or CODE_WORDS[result.code])
+        elif result.code == agent_firewall.WAITING:
+            step.done(live_events.STATUS_WARN, status_text=WAITING_STATUS, summary=result.note)
         elif result.is_error:
             step.done(live_events.STATUS_WARN, summary=result.note or CODE_WORDS.get(result.code, result.code))
         else:
-            step.done(live_events.STATUS_OK, summary=result.note)
+            step.done(live_events.STATUS_WARN if result.warn else live_events.STATUS_OK, summary=result.note)
+
+    @staticmethod
+    def _picture(step: Any, shot: Any) -> None:
+        """A web step's picture, grabbed from the window (the model never gets it unless it asked to look)."""
+        if shot is None:
+            return
+        address, taken = shot
+        picture = pictures.page_ready(address, image=taken.image, image_format=taken.image_format, width=taken.width,
+                                      height=taken.height, final_url=taken.final_url, took_ms=taken.took_ms,
+                                      blocked=taken.blocked)
+        if not address.startswith("https://"):     # a file of the task's own folder (show_file)
+            name = live_events.clean_line(address, 120)
+            picture = replace(picture, caption=f"File: {name}", note=FILE_NOTE, alt=f"Picture of the file {name}")
+        step.picture(picture)
 
     @live_events.quiet()
     def note(self, text: str) -> None:
@@ -132,7 +170,7 @@ class _Feed:
 
     @live_events.quiet()
     def asked(self, question: OwnerQuestion) -> None:
-        if question.kind != agent_runner.Q_TASK:   # the ask_owner tool has its own step
+        if question.kind not in (agent_runner.Q_TASK, agent_runner.Q_WEB):   # those have their tool's own step
             step = self.task.step(live_events.AGENT_TOOL, "Asked you", fields=[("Question", question.text)])
             step.done(live_events.STATUS_WARN, status_text="WAITING", summary="waiting for you")
 
@@ -173,7 +211,9 @@ class AgentController(QObject):
     def __init__(self, config: Any, planner: Any, *, live: Any = None, consent: Callable[[], bool] = lambda: False,
                  environ: Mapping[str, str] | None = None, clock: Callable[[], float] = time.monotonic,
                  now: Callable[[], datetime] = lambda: datetime.now().astimezone(), timing: Timing = Timing(),
-                 tools: Sequence[Tool] | None = None, parent: QObject | None = None) -> None:
+                 tools: Sequence[Tool] | None = None, parent: QObject | None = None,
+                 window_avoid: Callable[[], Any] | None = None,
+                 browser_factory: Callable[..., Any] | None = None) -> None:
         super().__init__(parent)
         self.config = config
         self.planner = planner
@@ -189,6 +229,10 @@ class AgentController(QObject):
         self._address = str(getattr(getattr(config, "assistant", None), "address", "sir"))
         self._bridge = _Bridge(self)
         self._bridge.event.connect(self._on_event, Qt.ConnectionType.QueuedConnection)
+        self._window_avoid = window_avoid
+        self._browser_factory = browser_factory
+        self._browser: Any = None         # this run's (or, while its window lingers, the last run's) browser client
+        self.firewall: agent_firewall.WebFirewall | None = None
         self._run: AgentRun | None = None
         self._seq = 0
         self._feed: _Feed | None = None
@@ -241,6 +285,8 @@ class AgentController(QObject):
         self._seq += 1
         seq = self._seq
         registry = Registry(self._tools if self._tools is not None else policy.offered(self.config))
+        session = self._new_session()
+        self.firewall = agent_firewall.WebFirewall(session.book)
         self._feed = _Feed(self.live, words, self.config, folder.path.name, len(registry))
         self._stopping = False
         self.last_folder = folder
@@ -252,12 +298,29 @@ class AgentController(QObject):
                 pass                      # the bridge went with the app: nothing to tell
 
         run = AgentRun(words, engine=self._engine, registry=registry, folder=folder, on_event=on_event,
-                       clock=self._clock, now=self._now, timing=self.timing, on_overage=self._pause_for_overage)
+                       clock=self._clock, now=self._now, timing=self.timing, on_overage=self._pause_for_overage,
+                       firewall=self.firewall, web=session)
         self._run = run
         logger.info("Agent %s: a task starts", run.run_id)
         run.start()
         self.taskStarted.emit(run.run_id)
         return True
+
+    def _new_session(self) -> WebSession:
+        """This run's use of the window. One window at a time: what the last run left goes first. Nothing of the web
+        engine starts until the first web step."""
+        self._close_browser()
+        make = self._browser_factory or BrowserClient
+        desktop = getattr(self.config, "desktop", None)
+        self._browser = make(self, avoid=self._window_avoid,
+                             hide_from_capture=bool(getattr(desktop, "hide_from_capture", True)))
+        return WebSession(self._browser, self.config.agent.search_engine)
+
+    def _close_browser(self) -> None:
+        browser, self._browser = self._browser, None
+        if browser is not None:
+            browser.close_now()
+            browser.deleteLater()
 
     def _refusal(self) -> str:
         if self._run is not None:
@@ -294,15 +357,19 @@ class AgentController(QObject):
 
     def stop(self, reason: str = "stop") -> None:
         run = self._run
-        if run is None:
-            return
-        self._stopping = True             # what is still on its way to this thread is dropped
-        run.stop(reason)
+        if run is not None:
+            self._stopping = True         # what is still on its way to this thread is dropped
+            run.stop(reason)
+        if self._browser is not None:
+            self._browser.stop()          # R8: a load is released at once, the page and the window go
 
     def shutdown(self) -> None:
         """Jarvis closes: nothing starts after this, the process is gone and the task stamped."""
         self._shut = True
         run = self._run
+        browser, self._browser = self._browser, None
+        if browser is not None:
+            browser.shutdown()            # a load is released at once; no page, no renderer, no window
         if run is None:
             return
         self._stopping = True
@@ -344,7 +411,9 @@ class AgentController(QObject):
             feed.note(self._words(event.text))
             self.noticed.emit(self._words(event.text), hud.TONE_WARN if event.code == LIMIT else hud.TONE_DONE)
         elif kind == agent_runner.E_QUESTION and event.question is not None:
-            question = replace(event.question, text=self._words(event.question.text))
+            # The firewall's card shows the exact words or address, whatever they are.
+            question = (event.question if event.question.kind == agent_runner.Q_WEB
+                        else replace(event.question, text=self._words(event.question.text)))
             feed.asked(question)
             self.questionAsked.emit(question)
         elif kind == agent_runner.E_QUESTION_GONE:
@@ -357,6 +426,8 @@ class AgentController(QObject):
             return
         end = replace(end, summary=self._words(end.summary)) if end.own_words else end
         self.last_end = end
+        if self._browser is not None:     # its page goes now; its window a little later, unless he stopped it
+            self._browser.end_run(linger=end.outcome != agent_runner.OUTCOME_STOPPED)
         if self.last_folder is not None:
             self.last_folder.discard_if_empty()   # a task that wrote nothing leaves nothing
         feed, self._feed = self._feed, None

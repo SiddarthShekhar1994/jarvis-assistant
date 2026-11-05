@@ -4,7 +4,7 @@
                                        lies under OneDrive (WorkspaceRefused, in plain words)
     task_folder_name(goal, when)       "<date>-<slug>": the slug sanitised, at most 40 characters
     TaskFolder.create(root, goal, when)   a new folder for one task
-    TaskFolder.write / read / listing / exists   the workspace tools' work; only inside this folder
+    TaskFolder.write / read / body / listing / exists   the workspace tools' work; only inside this folder
     check_name(name)                   a file's name relative to the task folder, as parts, or WorkspaceRefused
 
 What a name may be: relative to the task folder, in parts split at / or \\. Never "..", an absolute path, a drive
@@ -305,6 +305,22 @@ class TaskFolder:
                                        ) from exc
         text = body.decode("utf-8", "replace")
         return shown, text[:READ_CAP], len(text) > READ_CAP
+
+    def body(self, name: object) -> bytes:
+        """The whole of the file ``name``, as it is on disk (show_file's scheme handler), or WorkspaceRefused."""
+        parts = check_name(name)
+        with self._lock:
+            target = self._inside(parts)
+            if "/".join(parts).casefold() not in self._files():
+                raise WorkspaceRefused(R_NOT_FOUND, "There is no such file in the task folder: list_files shows them.")
+            try:
+                if os.path.getsize(target) > MAX_FILE_BYTES:
+                    raise WorkspaceRefused(R_FILE_CAP, f"That file is over {megabytes(MAX_FILE_BYTES)}.")
+                with open(target, "rb") as handle:
+                    return handle.read(MAX_FILE_BYTES + 1)
+            except OSError as exc:
+                raise WorkspaceRefused(R_OS, f"That file could not be read ({exc.strerror or type(exc).__name__})."
+                                       ) from exc
 
     def listing(self) -> list[tuple[str, int]]:
         """Every file: (its name, its bytes), by name."""

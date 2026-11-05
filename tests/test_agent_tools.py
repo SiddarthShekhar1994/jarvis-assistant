@@ -288,7 +288,8 @@ class RegistryTests(Temp):
         return self.registry.call(name, args, self.reports.context)
 
     def test_the_one_source(self) -> None:
-        names = ("update_plan", "say", "ask_owner", "finish", "write_file", "read_file", "list_files")
+        names = ("update_plan", "say", "ask_owner", "finish", "write_file", "read_file", "list_files", "web_search",
+                 "open_page", "read_more", "look_at_page", "show_file")
         self.assertEqual(self.registry.names(), names)
         self.assertEqual(self.registry.allowed(), ",".join("mcp__jarvis__" + name for name in names))
         self.assertEqual(self.registry.expected(), {"mcp__jarvis__" + name for name in names})
@@ -303,13 +304,13 @@ class RegistryTests(Temp):
             Registry([policy.offered()[0], policy.offered()[0]])
 
     def test_a_later_part_only_adds_entries(self) -> None:
-        extra = tools.Tool("web_search", "Search.", {"type": "object", "properties": {}, "additionalProperties": False},
-                           tools.TIER_WEB, lambda _args, _ctx: tools.ToolResult("ok"))
+        extra = tools.Tool("mail_search", "Search.", {"type": "object", "properties": {}, "additionalProperties": False},
+                           tools.TIER_PRIVATE, lambda _args, _ctx: tools.ToolResult("ok"))
         self.assertEqual(policy.offered(tools=(*tools.TOOLS, extra)), tools.TOOLS)   # not offered until its tier is on
-        with mock.patch.object(policy, "OFFERED_TIERS", policy.OFFERED_TIERS | {tools.TIER_WEB}):
+        with mock.patch.object(policy, "OFFERED_TIERS", policy.OFFERED_TIERS | {tools.TIER_PRIVATE}):
             offered = policy.offered(tools=(*tools.TOOLS, extra))
         self.assertIn(extra, offered)
-        self.assertIn("mcp__jarvis__web_search", Registry(offered).allowed())
+        self.assertIn("mcp__jarvis__mail_search", Registry(offered).allowed())
 
     def test_every_bad_input_gets_a_clear_error_and_never_its_value(self) -> None:
         secret = "Sam-private-words"
@@ -548,15 +549,15 @@ class PolicyTests(Temp):
 
 
 class FirewallSeamTests(unittest.TestCase):
-    """The firewall arrives in A2 and A4. Until then nothing that reaches outside is offered, and no such tool can run:
-    it is refused, not waved through by something that looks like protection."""
+    """The firewall guards the web tools since A2, and part A4's private ones join it. Nothing else that reaches outside is
+    offered, and with no firewall behind it no such tool can run: it is refused, not waved through by something that looks
+    like protection."""
 
     def tool(self, tier: str) -> tools.Tool:
         return tools.Tool("t", "T.", {"type": "object"}, tier, lambda _args, _ctx: tools.ToolResult("ran"))
 
-    def test_nothing_guarded_is_offered(self) -> None:
-        for tool in policy.offered():
-            self.assertNotIn(tool.tier, policy.GUARDED_TIERS)
+    def test_of_the_guarded_tiers_only_the_web_is_offered(self) -> None:
+        self.assertEqual({tool.tier for tool in policy.offered()} & policy.GUARDED_TIERS, {tools.TIER_WEB})
         self.assertEqual(policy.GUARDED_TIERS, {tools.TIER_WEB, tools.TIER_PRIVATE, tools.TIER_CARD, tools.TIER_INSTANT})
 
     def test_a_guarded_tool_with_no_firewall_is_refused(self) -> None:
@@ -564,7 +565,7 @@ class FirewallSeamTests(unittest.TestCase):
             refused = policy.gate(self.tool(tier), {}, None)
             self.assertTrue(refused is not None and refused.is_error)
             self.assertEqual(refused.code, policy.NO_FIREWALL)
-        for tier in policy.OFFERED_TIERS:
+        for tier in policy.OFFERED_TIERS - policy.GUARDED_TIERS:
             self.assertIsNone(policy.gate(self.tool(tier), {}, None))
 
     def test_the_firewall_decides_when_there_is_one(self) -> None:

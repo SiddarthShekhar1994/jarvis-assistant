@@ -16,7 +16,9 @@
 The process keeps its stdin open and Jarvis feeds it messages: the first one holds the goal, in the owner's own words,
 and goes in once the process has connected to the endpoint (its init then shows the tools; connect_s at most).
 A wait ends the turn (D5): ask_owner returns at once with "end your turn", the ``result`` event means the model is idle
-(it uses nothing then), and the answer goes in as the next message. A ``result`` with no wait pending and no finish gets
+(it uses nothing then), and the answer goes in as the next message. The firewall's card waits the same way (kind Q_WEB),
+but only a click answers it: answer(id, "Allow"). What is typed meanwhile goes in as the owner's words and allows
+nothing; no answer in time is a refusal, and the task goes on. A ``result`` with no wait pending and no finish gets
 one prompt to carry on or finish, and after another one the task ends as partial. A message sent mid-run is delivered by
 Claude Code after the running tool returns (``--replay-user-messages`` shows when; a ``result`` while one is on its way
 is not idle).
@@ -76,12 +78,13 @@ OUTCOME_STOPPED = "stopped"            # AgentEnd.outcome: the owner's Stop, a T
 E_STARTED, E_PLAN, E_SAY, E_TOOL_START, E_TOOL_END, E_QUESTION, E_QUESTION_GONE, E_NOTICE, E_TEXT, E_USAGE, E_ENDED = (
     "started", "plan", "say", "tool_start", "tool_end", "question", "question_gone", "notice", "text", "usage", "ended")
 # Whose question it is (OwnerQuestion.kind).
-Q_TASK, Q_KEEP_GOING, Q_RESUME = "task", "keep_going", "resume"
+Q_TASK, Q_KEEP_GOING, Q_RESUME, Q_WEB = "task", "keep_going", "resume", "web"
 # Why it ended (AgentEnd.code: fixed words, safe to log).
 C_FINISHED, C_STOPPED, C_NO_FINISH, C_NO_ANSWER, C_OWNER_NO, C_MAX_TURNS, C_OVERAGE = (
     "finished", "stopped", "no_finish", "no_answer", "owner_no", "max_turns", "overage")
 C_TEST_GUARD, C_INTERNAL, C_EXIT, C_GARBLED = "test_guard", "internal", "exit", "garbled"
 HELD = "held"                          # a tool result's code: the call was not made, the model is told to end its turn
+WEB_ALLOW_WORD = "Allow"               # the one word on the firewall's card that allows anything
 STOPPED_CODE = "stopped"
 
 OWNER_LABEL = "The owner says: "
@@ -98,6 +101,11 @@ WRAP_UP_SILENT = ("Jarvis: the owner did not answer, so the task stops here. Cal
 PAUSED_TEXT = ("Jarvis has paused the task: it has reached its budget and the owner is being asked whether to keep "
                "going. End your turn now with one short sentence. His answer will come to you as your next message.")
 WRAP_UP_TOOL_TEXT = "The task is stopping. Call finish now, and nothing else."
+WEB_ALLOWED_TEXT = "Jarvis: the owner allowed that one web call. Make it again now, exactly as it was."
+WEB_DECLINED_TEXT = ("Jarvis: the owner said no, so that web call was not made. Do not try it again: carry on without "
+                     "it, find another way, or say so in your report.")
+WEB_UNANSWERED_TEXT = ("Jarvis: the owner did not answer, so that web call was not made. Do not try it again: carry on "
+                       "without it, find another way, or say so in your report.")
 ALREADY_FINISHED_TEXT = "The task has finished. End your turn now."
 STOPPED_TOOL_TEXT = "The task was stopped."
 
@@ -190,6 +198,7 @@ class Timing:
     init_s: float = 60.0                # no init event within this: the guard stops it
     question_s: float = 30 * 60.0       # the owner's answer to a question
     keep_going_s: float = 10 * 60.0     # ... to "Keep going?"
+    web_card_s: float = 10 * 60.0       # ... to the firewall's card: then that one call is refused and the task goes on
     wrap_up_s: float = 60.0             # told to report and finish: this long, then it ends as partial
     after_finish_s: float = 20.0        # finish recorded: this long for its last words
     replay_s: float = 5.0               # a message sent never showed as delivered and nothing came: idle after all
@@ -290,6 +299,7 @@ def _count(value: Any) -> int:
 class _Wait:
     question: OwnerQuestion
     deadline: float
+    on_answer: Callable[[bool], None] | None = None     # the firewall's card: told of the click, or of no answer
 
 
 # --------------------------------------------------------------------------
@@ -304,7 +314,7 @@ class AgentRun:
                  on_event: Callable[[AgentEvent], None], clock: Callable[[], float] = time.monotonic,
                  now: Callable[[], datetime] = lambda: datetime.now().astimezone(), timing: Timing = Timing(),
                  firewall: policy.Firewall | None = None, run_id: str = "",
-                 on_overage: Callable[[datetime | None], None] | None = None) -> None:
+                 on_overage: Callable[[datetime | None], None] | None = None, web: Any = None) -> None:
         self.run_id = run_id or secrets.token_hex(3)
         self.goal = goal
         self.engine = engine
@@ -348,7 +358,12 @@ class AgentRun:
         self._held_owner: list[str] = []    # the owner's words while the limit holds
         self._garbage = 0
         self._context = RunContext(run_id=self.run_id, folder=folder, clock=clock, on_plan=self._tool_plan,
-                                   on_say=self._tool_say, on_question=self._tool_question, on_finish=self._tool_finish)
+                                   on_say=self._tool_say, on_question=self._tool_question, on_finish=self._tool_finish,
+                                   web=web, tool_s=timing.tool_s)
+        attach = getattr(firewall, "attach", None)
+        if callable(attach):
+            attach(self.ask_web)
+        self._note_owner(goal)
 
     def __repr__(self) -> str:              # never the goal
         return f"AgentRun({self.run_id})"
@@ -376,6 +391,12 @@ class AgentRun:
         wait = self._wait
         return wait.question if wait is not None else None
 
+    def _note_owner(self, words: str) -> None:
+        """The owner's own words: the firewall never counts them as private, and addresses in them as seen."""
+        heard = getattr(self._firewall, "owner_said", None)
+        if callable(heard):
+            heard(words)
+
     def stop(self, reason: str = C_STOPPED) -> None:
         """Kills at once (R8): whatever a tool still comes back with is dropped. ``reason``: the log's word."""
         logger.info("Agent %s: stopped (%s)", self.run_id, reason)
@@ -387,8 +408,9 @@ class AgentRun:
         with self._lock:
             if self._end is not None or self._stop.is_set() or self._finished is not None:
                 return "refused"
+            self._note_owner(text)
             wait = self._wait
-            if wait is not None:
+            if wait is not None and wait.question.kind != Q_WEB:   # words never answer the firewall's card
                 self.answer(wait.question.id, text)
                 return "answered"
             if self._paused:
@@ -413,6 +435,12 @@ class AgentRun:
             question = wait.question
             self._emit(AgentEvent(E_QUESTION_GONE, question=question))
             logger.info("Agent %s: question %s answered", self.run_id, question.kind)
+            if question.kind == Q_WEB:
+                allowed = text == WEB_ALLOW_WORD
+                _tell(wait, allowed)
+                self._deliver(WEB_ALLOWED_TEXT if allowed else WEB_DECLINED_TEXT)
+                return True
+            self._note_owner(text)
             if question.kind == Q_TASK:
                 self._deliver(owner_message(text, ANSWER_LABEL))
                 return True
@@ -596,7 +624,11 @@ class AgentRun:
                     self._wait = None
                     self._emit(AgentEvent(E_QUESTION_GONE, question=wait.question))
                     logger.info("Agent %s: no answer to question %s", self.run_id, wait.question.kind)
-                    self._start_wrap_up(C_NO_ANSWER, WRAP_UP_SILENT)
+                    if wait.question.kind == Q_WEB:
+                        _tell(wait, False)
+                        self._deliver(WEB_UNANSWERED_TEXT)
+                    else:
+                        self._start_wrap_up(C_NO_ANSWER, WRAP_UP_SILENT)
                 return
             if self._paused:
                 until = self._paused_until
@@ -629,9 +661,10 @@ class AgentRun:
         logger.info("Agent %s: budget reached (%s)", self.run_id, reached)
         self._ask(Q_KEEP_GOING, KEEP_GOING_WORDS.replace("{what}", what), KEEP_GOING_CHOICES, self.timing.keep_going_s)
 
-    def _ask(self, kind: str, text: str, choices: tuple[str, ...], wait_s: float) -> None:
+    def _ask(self, kind: str, text: str, choices: tuple[str, ...], wait_s: float,
+             on_answer: Callable[[bool], None] | None = None) -> None:
         question = OwnerQuestion(f"{self.run_id}-{next(self._question_ids)}", kind, text, choices)
-        self._wait = _Wait(question, self._clock() + wait_s)
+        self._wait = _Wait(question, self._clock() + wait_s, on_answer)
         logger.info("Agent %s: question %s for the owner", self.run_id, kind)
         self._emit(AgentEvent(E_QUESTION, question=question))
 
@@ -905,7 +938,7 @@ class AgentRun:
             return ToolResult(WRAP_UP_TOOL_TEXT, code=HELD, note="the task is stopping")
         if not ends:
             wait = self._wait
-            if wait is not None and wait.question.kind != Q_TASK:
+            if wait is not None and wait.question.kind not in (Q_TASK, Q_WEB):
                 return ToolResult(PAUSED_TEXT, code=HELD, note="waiting for you")
             reached = self.budget.reached() if wait is None and not self._paused else ""
             if reached:
@@ -926,6 +959,15 @@ class AgentRun:
             self._ask(Q_TASK, text, choices, self.timing.question_s)
             return True
 
+    def ask_web(self, text: str, choices: tuple[str, ...], on_answer: Callable[[bool], None]) -> bool:
+        """The firewall's card (any thread): False, and nothing shown, when another question waits or the task has
+        stopped. ``on_answer(allowed)`` hears the click, or False when no answer came."""
+        with self._lock:
+            if self._wait is not None or self._stop.is_set():
+                return False
+            self._ask(Q_WEB, text, choices, self.timing.web_card_s, on_answer)
+            return True
+
     def _tool_finish(self, outcome: str, summary: str, outputs: tuple[str, ...]) -> None:
         with self._lock:
             if self._wrap_up_code and outcome == OUTCOME_DONE:
@@ -935,6 +977,14 @@ class AgentRun:
             wait, self._wait = self._wait, None
             if wait is not None:
                 self._emit(AgentEvent(E_QUESTION_GONE, question=wait.question))
+
+
+def _tell(wait: _Wait, allowed: bool) -> None:
+    if wait.on_answer is not None:
+        try:
+            wait.on_answer(allowed)
+        except Exception as exc:  # noqa: BLE001 - no call goes out on an answer that was not heard
+            logger.warning("Agent: the firewall did not hear an answer (%s)", type(exc).__name__)
 
 
 def _close_stdin(process: Any) -> None:

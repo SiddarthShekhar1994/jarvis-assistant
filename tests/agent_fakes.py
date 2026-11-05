@@ -21,6 +21,8 @@ from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlsplit
 
+from briefing_reader import snapshots
+from briefing_reader.agent import web
 from briefing_reader.agent.runner import AgentEngine, Timing
 from briefing_reader.ask import cli
 from briefing_reader.ask.planner import ClaudeEngine
@@ -287,6 +289,110 @@ class FakeEngine(FakeProcess):
         return "\n".join(block.get("text", "") for block in result.get("content", ()) if isinstance(block, Mapping))
 
 
+class FakePage:
+    """A page FakeBrowser "opens": what its scripts would read. ``fails``: the load's reason (snapshots.R_*)."""
+
+    def __init__(self, title: str = "A page", text: str = "Its words.", links: Sequence[tuple[str, str]] = (),
+                 results: Sequence[tuple[str, str, str]] = (), final: str = "", fails: str = "",
+                 still_loading: bool = False, reads: Sequence[str] = ()) -> None:
+        self.title, self.text, self.links, self.results = title, text, list(links), list(results)
+        self.final, self.fails, self.still_loading = final, fails, still_loading
+        self.reads = list(reads)              # later reads of it see these texts in turn (a page that grows)
+
+
+class FakeBrowser:
+    """agent.web's Browser seam with no web engine: pages by address, scripts answered as the real ones would be.
+    Records every call. ``before(name)``: called first in each call (a test holds it there). Nothing here reaches
+    anything."""
+
+    PICTURE = b"\xff\xd8fake-picture"
+
+    def __init__(self, pages: Mapping[str, FakePage] | None = None, *, ready: bool = True,
+                 before: Callable[[str], None] | None = None) -> None:
+        self.pages = dict(pages or {})
+        self.ready = ready
+        self.before = before
+        self.loads: list[str] = []
+        self.files: list[str] = []
+        self.scrolls: list[float] = []
+        self.pictures: list[tuple[int, int]] = []
+        self.current: FakePage | None = None
+        self.gone = False                     # script() and picture() see no page from now on
+        self.stopped = self.ended = self.closed = self.shut = 0
+        self.lingers: list[bool] = []
+
+    # ---- the Browser seam -----------------------------------------------------------------------------
+
+    def scheme_ready(self) -> bool:
+        return self.ready
+
+    def load(self, url: str, *, timeout_s: float, cancelled: Callable[[], bool]) -> snapshots.ShotResult:
+        self.loads.append(url)
+        if self.before is not None:
+            self.before("load")
+        page = self.pages.get(url)
+        if page is None:
+            self.current = None
+            return snapshots.ShotResult(False, snapshots.R_LOAD_FAILED)
+        if page.fails:
+            self.current = None
+            return snapshots.ShotResult(False, page.fails)
+        self.current = page
+        return snapshots.ShotResult(True, final_url=page.final or url, still_loading=page.still_loading, took_ms=5)
+
+    def load_file(self, name: str, folder: Any, *, timeout_s: float, cancelled: Callable[[], bool]) -> snapshots.ShotResult:
+        self.files.append(name)
+        if self.before is not None:
+            self.before("load_file")
+        body = folder.body(name).decode("utf-8", "replace")
+        self.current = FakePage(title=name, text=body)
+        return snapshots.ShotResult(True, final_url=name, took_ms=5)
+
+    def script(self, source: str, *, timeout_s: float, cancelled: Callable[[], bool]) -> Any:
+        if self.before is not None:
+            self.before("script")
+        page = self.current
+        if page is None or self.gone:
+            return web.NO_PAGE
+        if "scrollTo" in source:
+            self.scrolls.append(float(source.split("* ")[1].split(")")[0]))
+            return json.dumps({"top": 100, "height": 1000})
+        address = page.final or (self.loads[-1] if self.loads else "")
+        if "marks" in source:
+            return json.dumps({"title": page.title, "url": address, "text": page.text,
+                               "results": [list(row) for row in page.results]})
+        if page.reads:
+            page.text = page.reads.pop(0)
+        return json.dumps({"title": page.title, "url": address, "length": len(page.text),
+                           "text": page.text[:web.TEXT_KEEP], "links": [list(row) for row in page.links]})
+
+    def picture(self, max_width: int, max_bytes: int, *, timeout_s: float,
+                cancelled: Callable[[], bool]) -> snapshots.ShotResult:
+        self.pictures.append((max_width, max_bytes))
+        if self.current is None or self.gone:
+            return snapshots.ShotResult(False, snapshots.R_LOAD_FAILED)
+        return snapshots.ShotResult(True, image=self.PICTURE, width=min(max_width, 960), height=600,
+                                    final_url=self.current.final or (self.loads[-1] if self.loads else ""))
+
+    # ---- what the controller calls ----------------------------------------------------------------------
+
+    def stop(self) -> None:
+        self.stopped += 1
+
+    def end_run(self, *, linger: bool = True) -> None:
+        self.ended += 1
+        self.lingers.append(linger)
+
+    def close_now(self) -> None:
+        self.closed += 1
+
+    def shutdown(self) -> None:
+        self.shut += 1
+
+    def deleteLater(self) -> None:  # noqa: N802 - Qt's name
+        pass
+
+
 class FakeEngineRunner(FakeRunner):
     """FakeRunner with its queue holding FakeEngines too (its start() hands them what they were started with): Claude
     Code's quick commands answer like 2.1.293's."""
@@ -305,5 +411,5 @@ def agent_engine(root: Path, runner: Any, **agent: Any) -> AgentEngine:
     return AgentEngine(replace(AgentConfig(enabled=True), **agent), base_engine(root, runner))
 
 
-__all__ = ["AUTH_OK", "FAST", "FIXTURES", "FakeEngine", "FakeEngineRunner", "Killed", "agent_engine", "base_engine",
-           "init_event", "rate_limit_event", "result_event"]
+__all__ = ["AUTH_OK", "FAST", "FIXTURES", "FakeBrowser", "FakeEngine", "FakeEngineRunner", "FakePage", "Killed",
+           "agent_engine", "base_engine", "init_event", "rate_limit_event", "result_event"]

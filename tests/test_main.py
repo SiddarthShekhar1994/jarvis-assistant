@@ -719,6 +719,45 @@ class RunAppTests(unittest.TestCase):
         controller.assert_called_once()
         self.assertIs(controller.call_args.args[4], app)
 
+    def test_tasks_on_the_window_s_scheme_comes_before_the_qapplication_too(self) -> None:
+        import PySide6.QtCore as qt_core
+        import PySide6.QtWidgets as qt_widgets
+
+        from briefing_reader import hud, snapshot_engine, ui
+        from briefing_reader.agent import browser
+        from briefing_reader.config import AgentConfig
+
+        order: list[str] = []
+        app_class = mock.MagicMock(name="QApplication")
+        app_class.instance.side_effect = lambda: order.append("instance")
+        app_class.side_effect = lambda argv: order.append("QApplication") or mock.MagicMock(name="app")
+        on = SimpleNamespace(project_root=PROJECT_ROOT, agent=AgentConfig(enabled=True),
+                             desktop=SimpleNamespace(enabled=True), ask=SimpleNamespace(enabled=True))
+        off = SimpleNamespace(project_root=PROJECT_ROOT, agent=AgentConfig(enabled=False))
+        for config, expected in ((on, ["prepare", "scheme", "instance", "QApplication"]),
+                                 (off, ["prepare", "instance", "QApplication"])):
+            order.clear()
+            with mock.patch.object(snapshot_engine, "prepare_application", side_effect=lambda: order.append("prepare")), \
+                    mock.patch.object(browser, "register_scheme", side_effect=lambda: order.append("scheme")), \
+                    mock.patch.object(qt_widgets, "QApplication", app_class), \
+                    mock.patch.object(qt_core, "qInstallMessageHandler"), \
+                    mock.patch.object(entry, "_set_app_user_model_id"), \
+                    mock.patch.object(entry, "_run_controller", return_value=0), \
+                    mock.patch.object(hud, "load_fonts"), \
+                    mock.patch.object(ui, "apply_dark_theme"), \
+                    mock.patch.object(ui, "app_icon", return_value=None):
+                self.assertEqual(entry._run_app(argparse.Namespace(), config, "test", None), 0)
+            self.assertEqual(order, expected)
+
+    def test_a_scheme_that_can_t_be_set_up_never_stops_the_app(self) -> None:
+        from briefing_reader.agent import browser
+        from briefing_reader.config import AgentConfig
+
+        on = SimpleNamespace(agent=AgentConfig(enabled=True), desktop=SimpleNamespace(enabled=True),
+                             ask=SimpleNamespace(enabled=True))
+        with mock.patch.object(browser, "register_scheme", side_effect=RuntimeError("no")):
+            entry._prepare_agent_window(on)
+
     def test_prepare_application_never_raises_and_waits_for_no_app(self) -> None:
         from briefing_reader import snapshot_engine
 
