@@ -24,24 +24,25 @@ SAY = "Right. I'll compare them and write a table."
 TASK_PLAN = {"say": SAY, "question": "", "lines": [], "agent_task": {"goal": MODEL_GOAL, "why": "several steps"}}
 DESKTOP_TASK = {"say": "Words about LING essay.", "steps": [], "agent_task": {"goal": MODEL_GOAL, "why": "several steps"}}
 PLAIN = {"say": "It's at two.", "question": "", "lines": []}
-# As at f1f0216: sha256 of each file, byte for byte. Off, these reach Claude Code exactly as before.
-OFF_FILES = {cli.PROMPT_FILE: "4f6b53e2f4cb29007a4af0726868a8b6c0bead2c37d2a6542e17d528ae02f290",
+# As on the branch without the agent (undo-from-bin-fix, 233febd): sha256 of each file, byte for byte. Off, these reach
+# Claude Code exactly as they would there.
+OFF_FILES = {cli.PROMPT_FILE: "414ae0a32c0a75e0bf0d3e7de8f0511b7d7862531755cf83bc6e0b19c678aae3",
              cli.DESKTOP_PROMPT_FILE: "1f599172c03bf2f631b984cbaa58947a4a3873d8fdfedbde022074ca9f541521",
-             cli.SCHEMA_FILE: "682417489955249a0d2c00e58e1d5bbedf872e3c89f67d2981c856dc94b9eac2",
+             cli.SCHEMA_FILE: "70a7c8842f3d3c339d824bebc3dcedf30f84946c69e1e6a0cb6a1a7f259f20b4",
              cli.DESKTOP_SCHEMA_FILE: "a7f840a4251b93d04fb0b5f2c6e9131c52e43c6528421b3e098c71caa8890b84"}
-# schema_text() and mode_schema_text("desktop") off: (length, sha256), as at f1f0216.
+# schema_text() and mode_schema_text("desktop") off: (length, sha256), as on that branch.
 OFF_SCHEMAS = {(False, False): (927, "f9935a6fa5705643e92e1265ac0ee5cfc2584ebcbbc60c64f126d9436187c467"),
-               (False, True): (1370, "8310a0319e69140eddd5f91f9992cf15618d23583370b2c876f133be3a6f9c66"),
+               (False, True): (1614, "af94ec50b76b53ad1273886a76e0bed84e87d1b3d103cb20e63f23376769f3ae"),
                (True, False): (1423, "dcad9d43c86bf0ae741bc3a0c6a2c1e0115239cc334789689fbf5a1c92b5cbb6"),
-               (True, True): (1866, "e1f3c83ded6ec70f727c95f11a8dd0acb0716eab962d1f29e67894ff11d178d4")}
+               (True, True): (2110, "f4ad0fa87f26eaf0290ef85fe047f505967fcbf045bca064a30b6074917d045b")}
 OFF_DESKTOP_SCHEMA = (2276, "6d485a1f2ab170678b9283be41e7fe69edc75d6bb6e168c70029fc4d63d1070c")
 # On: only here do they change.
 ON_SCHEMAS = {(False, False): (1394, "246ba12b23f8140b5aa1ea7f09527bd4858265a061d359110c5d81efe3db1f18"),
-              (False, True): (1837, "f6c9285057fe2a18e66868aae5dea4a5eea8aee48bd130c96a032512648925fe"),
+              (False, True): (2081, "89f3b91344ffe1180388fc89b5b8000e49dcd6efd5e231dd0428e4359044e1ae"),
               (True, False): (1890, "5d5c6d76cd329cc5b3f91371537b019b7ccaf95cb6c688983b8ff3188e76623d"),
-              (True, True): (2333, "253ec07c09bdb3f4dc2044749d0ef9ec0a03664e91555183e5af01ef6c1dd09d")}
+              (True, True): (2577, "fbca4a1497a9e44e942961e65fa98eaedaccb254d2544f921017007c7c92ce5e")}
 ON_DESKTOP_SCHEMA = (2743, "f9e3f8f1e7462fc1e8cd2efbed0944bbc138c22f340690c2fc6cab51c289c682")
-ON_PROMPTS = {cli.PROMPT_FILE_AGENT: "6cee487bc8732a27935efbcf3fd4f27741f0106438915d6e57d8b1a24fd686c9",
+ON_PROMPTS = {cli.PROMPT_FILE_AGENT: "4297492fcbac2087256f990a81c9b146218db649241d7d72f4c99589f2b80765",
               cli.DESKTOP_PROMPT_FILE_AGENT: "ab5ff7b795a52772ec77d768c4643704869e4c7abe3818b552fcac2573b9b921"}
 
 

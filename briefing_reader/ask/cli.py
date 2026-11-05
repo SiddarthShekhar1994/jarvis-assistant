@@ -862,6 +862,11 @@ def forget_probes() -> None:
 REMEMBER_PROPERTY = {"type": "array", "maxItems": 1, "items": {"type": "string", "maxLength": 160},
                      "description": "At most one short fact worth keeping in the owner's memory (see REMEMBER); "
                                     "usually empty."}
+# Added in code to "say"'s description of a run that has web_research in its schema: the one place the model reads
+# before it starts on "say" that is only there when the web really is available.
+SAY_WITH_WEB = ("You can look things up on the web in this reply: when the answer needs it, say you will look it up and "
+                "fill web_research, or ask in question for the one detail the search needs. Never say you can't check "
+                "the web or have no web access.")
 
 # Added in code too (no schema file changes) to a first planner run while the agent is on: it may hand the request to a
 # task. Jarvis starts the task with the owner's own words, whatever "goal" says.
@@ -887,6 +892,10 @@ def schema_text(*, allow_search: bool, allow_web: bool = False, allow_remember: 
         data.get("properties", {}).pop("gmail_search", None)
     if not allow_web:
         data.get("properties", {}).pop("web_research", None)
+    else:
+        say = data.get("properties", {}).get("say")
+        if say is not None:                 # the model writes "say" first, before it reaches web_research
+            say["description"] = f"{say.get('description', '')} {SAY_WITH_WEB}"
     if allow_remember:
         data.setdefault("properties", {})["remember"] = dict(REMEMBER_PROPERTY)
     if allow_agent:
