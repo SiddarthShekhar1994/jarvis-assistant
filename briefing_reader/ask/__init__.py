@@ -6,7 +6,10 @@ through the same click, Undo and executor.run_action path as the briefing's.
                  child environment from an allowlist, builds the argv; SubprocessRunner (no
                  window, Job Object, timeout, Cancel) and the Runner protocol tests replace
     stream.py    reads the stream-json events: the init guard, the rate-limit guard (extra usage
-                 or the plan's limit stops the run), then the result -> Plan or a failure
+                 or the plan's limit stops the run), then the result -> Plan or a failure; SayWatch hears the
+                 reply's "say" as it is written (the final plan stays the source of truth)
+    prestart.py  one idle Claude Code ahead of the question (nothing sent, so no model request): used once
+                 and replaced, refused when anything differs from the cold path, recycled, killed at shutdown
     mail.py      Gmail thread text for the planner: parsing, quoted-history and HTML stripping
                  (linear), size caps, and the check of a search the planner asks for (only what
                  the owner typed)

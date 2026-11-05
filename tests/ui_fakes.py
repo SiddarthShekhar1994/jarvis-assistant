@@ -137,6 +137,7 @@ class RecordingVoice:
         self.speaks = speaks
         self.said: list[tuple[str, str, str]] = []
         self.cancelled: list[str] = []
+        self.stopped_keys: list[str] = []
         self.stops = 0
         self.pumps = 0
         self.owner_actions = 0
@@ -159,6 +160,9 @@ class RecordingVoice:
 
     def cancel_key(self, key: str) -> None:
         self.cancelled.append(key)
+
+    def stop_key(self, key: str) -> None:
+        self.stopped_keys.append(key)
 
     def stop(self) -> None:
         self.stops += 1

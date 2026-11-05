@@ -49,6 +49,51 @@ def plan_stream(plan: Mapping[str, Any]) -> list[str]:
     return [lines[0], json.dumps(call), lines[2], json.dumps(result_event(dict(plan)))]
 
 
+def without_stream_flags(argv: Sequence[str]) -> list[str]:
+    """``argv`` as the plain path has it: without the three items of cli.build_argv(streaming=True)."""
+    if cli.INPUT_FORMAT_FLAG not in argv:
+        return list(argv)
+    at = list(argv).index(cli.INPUT_FORMAT_FLAG)
+    return [*argv[:at], *argv[at + 3:]]
+
+
+def partial_event(inner: Mapping[str, Any], *, parent: str | None = None) -> str:
+    """One --include-partial-messages line (the recorded shape of a run with the flag)."""
+    return json.dumps({"type": "stream_event", "event": dict(inner), "session_id": "00000000-0000-4000-8000-00000000a5c1",
+                       "parent_tool_use_id": parent, "uuid": "55555555-5555-4555-8555-555555555555"})
+
+
+def tool_chunks(json_text: str, *, size: int | Sequence[int] = 7, name: str = "StructuredOutput", index: int = 0,
+                parent: str | None = None) -> list[str]:
+    """A tool call's input as it is written: the block's start, ``json_text`` in chunks of ``size`` characters
+    (or of each of a list of sizes, the rest in one), the block's stop."""
+    chunks: list[str] = []
+    if isinstance(size, int):
+        chunks = [json_text[at:at + size] for at in range(0, len(json_text), size)]
+    else:
+        at = 0
+        for step in size:
+            chunks.append(json_text[at:at + step])
+            at += step
+        chunks.append(json_text[at:])
+    block = {"type": "tool_use", "id": "toolu_fake01", "name": name, "input": {}}
+    lines = [partial_event({"type": "content_block_start", "index": index, "content_block": block}, parent=parent)]
+    lines += [partial_event({"type": "content_block_delta", "index": index,
+                             "delta": {"type": "input_json_delta", "partial_json": chunk}}, parent=parent)
+              for chunk in chunks if chunk]
+    lines.append(partial_event({"type": "content_block_stop", "index": index}, parent=parent))
+    return lines
+
+
+def words_stream(plan: Mapping[str, Any], *, size: int = 7) -> list[str]:
+    """plan_stream with its StructuredOutput written as it comes (--include-partial-messages): the message's start, the
+    tool's input in chunks, the whole assistant message, its tool result and the result. "say" is first, as written."""
+    lines = plan_stream(plan)
+    start = partial_event({"type": "message_start", "message": {"id": "msg_fake01", "role": "assistant", "content": []}})
+    stop = partial_event({"type": "message_stop"})
+    return [lines[0], start, *tool_chunks(json.dumps(dict(plan)), size=size), stop, *lines[1:]]
+
+
 class FakeClock:
     """time.monotonic stand-in that moves only when a fake process waits."""
 
@@ -74,6 +119,23 @@ class FakeProcess:
         self.cancel_after = cancel_after
         self.cancel = cancel
         self.too_long_at = too_long_at
+        self.sent: list[str] = []         # what send() wrote to its stdin, in order
+        self.stdin_closed = False
+        self.on_send: Callable[[str], None] | None = None
+
+    def send(self, text: str) -> bool:
+        if not self.alive():
+            return False
+        self.sent.append(text)
+        if self.on_send is not None:
+            self.on_send(text)
+        return True
+
+    def close_stdin(self) -> None:
+        self.stdin_closed = True
+
+    def alive(self) -> bool:
+        return not self.killed and not self.closed
 
     def read_line(self, timeout: float) -> str | None:
         self.reads += 1
@@ -104,12 +166,22 @@ class FakeProcess:
         self.closed = True
 
 
+def message_text(stdin_text: str) -> str:
+    """The prompt inside one stream-json user message (cli.stream_message); "" for none."""
+    if not stdin_text:
+        return ""
+    event = json.loads(stdin_text)
+    assert event["type"] == "user" and event["message"]["role"] == "user" and stdin_text.endswith("\n")
+    return event["message"]["content"]
+
+
 @dataclass
 class Started:
     argv: list[str]
-    stdin: str
+    stdin: str         # the prompt (a stream-json run's: the text of its one user message)
     env: dict[str, str]
     cwd: Path
+    raw: str = ""      # exactly what the runner got as stdin_text
 
 
 class FakeRunner:
@@ -128,12 +200,20 @@ class FakeRunner:
         self.processes: list[FakeProcess] = []
 
     def start(self, argv: Sequence[str], *, stdin_text: str, env: Mapping[str, str], cwd: Path) -> FakeProcess:
-        self.started.append(Started(list(argv), stdin_text, dict(env), Path(cwd)))
+        stream_input = cli.holds_stdin(argv)
+        started = Started(list(argv), message_text(stdin_text) if stream_input else stdin_text, dict(env), Path(cwd),
+                          stdin_text)
+        self.started.append(started)
         if not self.runs:
             raise AssertionError("an unexpected planner run")
         item = self.runs.pop(0)
         process = item if isinstance(item, FakeProcess) else FakeProcess(item, clock=self.clock)
         self.processes.append(process)
+
+        def sent_later(text: str) -> None:   # a process started ahead gets its prompt after it started
+            started.raw, started.stdin = text, message_text(text)
+
+        process.on_send = sent_later
         return process
 
     def run(self, argv: Sequence[str], *, env: Mapping[str, str], cwd: Path | None, timeout: float) -> cli.Completed:
@@ -347,6 +427,28 @@ class FakeScanReader(FakeReader):
 
 
 Clock = Callable[[], datetime]
+
+
+class StagedProcess(FakeProcess):
+    """A CLI run whose lines wait at given places: ``stops`` maps a line's position to the Event it waits for (a run "in
+    progress" stopped wherever a test wants it: after the say's first words, after the say, before the result)."""
+
+    def __init__(self, lines: Sequence[str], stops: Mapping[int, threading.Event], *,
+                 clock: FakeClock | None = None) -> None:
+        super().__init__(lines, clock=clock)
+        self.stops = dict(stops)
+        self.given = 0
+
+    def read_line(self, timeout: float) -> str | None:
+        if self.killed:
+            return None
+        stop = self.stops.get(self.given)
+        if stop is not None and not stop.is_set():
+            stop.wait(min(timeout, 0.05))
+            if not stop.is_set():
+                return ""
+        self.given += 1
+        return super().read_line(timeout)
 
 
 class GatedProcess(FakeProcess):

@@ -28,6 +28,14 @@ Public API
     silent caption holds ``HOLD_MUTED_MS``). Times on a page (``10:30 AM``, the hour in "at 10") are
     ``holo``; amber never appears. ``state()`` is one of ``RESTING``, ``THINKING``, ``SPEAKING``,
     ``HOLDING``; ``stateChanged(str)``.
+    ``stream(text, complete=False, spoken=True)``: an answer's words as they are written, ``text`` always the whole
+    line so far (pages that never change as it grows: ``stream_pages``); no pace of its own: each word shows as it
+    comes. A later ``say`` of the same words - the voice begins - takes the line over where it stands: nothing is typed
+    again and nothing flickers, only the page turns and the words not shown yet follow the voice. ``complete`` with
+    ``spoken`` False: no voice is coming (the muted pace from here). Written whole, it waits ``VOICE_WAIT_MS`` for its
+    voice, and ``finish()`` (another utterance ending) does not end it meanwhile. ``correct(text, alert=False,
+    spoken=True)``: the line was wrong (the final plan differs, the run failed): ``text`` replaces it at once and whole,
+    in coral with ``alert``; its voice takes it over the same way. ``stream("")`` or ``clear()``: withdrawn at once.
 
 ``HoloHeader``
     The 52 px title bar of the main window (drag area): the ``J.A.R.V.I.S.`` wordmark and the state
@@ -114,6 +122,10 @@ RISE_PX = 10.0
 SWAP_OUT_MS = 160
 FADE_OUT_MS = 600
 _FRAME_MS = 33
+STREAM_CLAUSE_WORDS = 8    # a page being written may end at a clause mark from this many words on
+STREAM_WORD_MS = 35        # words that arrive together appear one after another, this far apart
+VOICE_WAIT_MS = 15000      # a line written whole waits this long for the voice that says it (a failed one never comes)
+_GLIDE = 0.35              # a growing line re-centres gently: this share of the way each frame
 
 RESTING = "resting"
 THINKING = "thinking"
@@ -220,6 +232,27 @@ def paginate(text: str, max_words: int = CAPTION_WORDS) -> list[str]:
     return pages
 
 
+_ENDS_SENTENCE = re.compile(r"[.!?][\"')\]]*$")
+
+
+def stream_pages(line: str, max_words: int = CAPTION_WORDS) -> list[str]:
+    """Caption pages of a line still being written: unlike ``paginate``, a page never changes as more words come (so
+    nothing already on screen moves to another page). A page ends at a sentence's end, at a clause mark once it has
+    ``STREAM_CLAUSE_WORDS`` words, or at ``max_words``."""
+    pages: list[str] = []
+    current: list[str] = []
+    for word in (line or "").split():
+        current.append(word)
+        clause = word in _DASHES or word.endswith((",", ";", ":"))
+        if (_ENDS_SENTENCE.search(word) or len(current) >= max_words
+                or (clause and len(current) >= STREAM_CLAUSE_WORDS)):
+            pages.append(" ".join(current))
+            current = []
+    if current:
+        pages.append(" ".join(current))
+    return pages
+
+
 def thinking_line(text: str) -> str:
     """The working status as a thinking line: no seconds counter, at most 8 words."""
     text = _SECONDS.sub("", " ".join((text or "").split())).strip()
@@ -300,6 +333,17 @@ class CaptionView(QWidget):
         self._frame = QTimer(self)
         self._frame.setInterval(_FRAME_MS)
         self._frame.timeout.connect(self._on_frame)
+        self._streamed = False              # this line came through stream() or correct(): its voice takes it over
+        self._writing = False               # ... and its words are still being written
+        self._awaiting = False              # ... or it is whole and its voice has not started yet
+        self._alert = False                 # coral: it says a run failed (correct())
+        self._page_from = 0.0               # when the page came up (monotonic)
+        self._glides: dict[Any, float] = {}   # a growing line's places as painted (row, or "top")
+        self._gliding = False
+        self._voice_wait = QTimer(self)
+        self._voice_wait.setSingleShot(True)
+        self._voice_wait.setInterval(VOICE_WAIT_MS)
+        self._voice_wait.timeout.connect(self._no_voice_came)
 
     # ---- API ---------------------------------------------------------------------------
 
@@ -340,7 +384,14 @@ class CaptionView(QWidget):
         pages = paginate(text)
         if not pages:
             return
-        self._full = " ".join(pages)
+        full = " ".join(pages)
+        if self.holds_line(full):
+            self._take_over(full, spoken, duration_ms, timeline, position)   # never typed again
+            return
+        self._streamed = self._writing = self._awaiting = self._alert = False
+        self._voice_wait.stop()
+        self._glides.clear()
+        self._full = full
         self._offsets, count = [], 0
         for page in pages:
             self._offsets.append(count)
@@ -353,17 +404,160 @@ class CaptionView(QWidget):
         self._page_timer.stop()
         self._pages = pages
         self._spoken = bool(spoken)
-        steps = sum(len(page.split()) for page in pages) + len(pages) - 1   # each word, and a beat per page
-        low, high = WORD_MS_RANGE
-        self._pace_ms = max(low, min(high, round(duration_ms / steps))) if spoken and duration_ms > 0 else 0
+        self._pace_ms = self._pace_of(duration_ms, spoken)
         self._finished = not spoken
         self._fade, self._fade_from = 1.0, 0.0
         self._set_state(SPEAKING)
         self._show_page(0)
 
+    def stream(self, text: str, *, complete: bool = False, spoken: bool = True) -> None:
+        """The line so far as it is written (see the module docstring). A line that is not what is on the band plus
+        more words (a new answer, or a retry that changed its words) starts afresh."""
+        line = " ".join((text or "").split())
+        if not line:
+            if self._streamed:
+                self.clear()
+            return
+        if not (self._streamed and self._state in (SPEAKING, HOLDING) and self._continues(line)):
+            self._begin_stream()
+        self._set_line(line)
+        self._writing = not complete
+        self._awaiting = bool(complete and spoken)
+        self._spoken = bool(spoken) if complete else True
+        self._finished = bool(complete and not spoken)
+        self._hold_timer.stop()
+        self._fade, self._fade_from = 1.0, 0.0
+        self._set_state(SPEAKING)
+        if self._awaiting and not self._voice_wait.isActive():
+            self._voice_wait.start()
+        self._stream_sync()
+
+    def correct(self, text: str, *, alert: bool = False, spoken: bool = True) -> None:
+        """The line on the band was wrong: ``text`` replaces it at once and whole (``alert``: in coral; ``spoken``: its
+        voice is coming and takes it over, as stream's does)."""
+        line = " ".join(paginate(text))
+        if not line:
+            self.clear()
+            return
+        self._begin_stream()
+        self._set_line(line, paginate(line))
+        self._alert = bool(alert)
+        self._writing, self._awaiting = False, bool(spoken)
+        self._spoken, self._finished = bool(spoken), not spoken
+        self._set_state(SPEAKING)
+        if self._awaiting:
+            self._voice_wait.start()
+        self._show_page(0, reveal_all=True)
+        self._stream_sync()
+
+    def streamed(self) -> bool:
+        """The line on the band came through ``stream`` or ``correct``."""
+        return self._streamed and self._state in (SPEAKING, HOLDING)
+
+    def holds_line(self, text: str) -> bool:
+        """``text`` is the line on the band (its voice would take it over, not type it again)."""
+        words = " ".join(paginate(text)).split()
+        return self.streamed() and bool(words) and words[:len(self._full.split())] == self._full.split()
+
+    def waits_for_words(self) -> bool:
+        """The line is still being written, or is whole and waits for its voice: another utterance leaves it alone."""
+        return self._writing or self._awaiting
+
+    def is_alert(self) -> bool:
+        return self._alert
+
+    def _pace_of(self, duration_ms: int, spoken: bool) -> int:
+        pages = self._pages
+        steps = sum(len(page.split()) for page in pages) + len(pages) - 1   # each word, and a beat per page
+        low, high = WORD_MS_RANGE
+        return max(low, min(high, round(duration_ms / max(1, steps)))) if spoken and duration_ms > 0 else 0
+
+    def _continues(self, line: str) -> bool:
+        """``line`` is the line on the band plus more words (the last word may have got its punctuation)."""
+        old, new = self._full.split(), line.split()
+        if not old or len(new) < len(old) or new[:len(old) - 1] != old[:-1]:
+            return False
+        return new[len(old) - 1].rstrip(".,;:!?") == old[-1].rstrip(".,;:!?")
+
+    def _begin_stream(self) -> None:
+        for timer in (self._word_timer, self._page_timer, self._hold_timer, self._voice_wait):
+            timer.stop()
+        self._streamed, self._alert = True, False
+        self._full, self._pages, self._page, self._words, self._revealed_at = "", [], 0, [], []
+        self._times, self._offsets, self._position, self._pace_ms = [], [], None, 0
+        self._fade, self._fade_from, self._swap_from = 1.0, 0.0, 0.0
+        self._page_from = time.monotonic()
+        self._glides.clear()
+
+    def _set_line(self, line: str, pages: list[str] | None = None) -> None:
+        self._full = line
+        self._pages = stream_pages(line) if pages is None else pages
+        self._offsets, count = [], 0
+        for page in self._pages:
+            self._offsets.append(count)
+            count += len(page.split())
+        self._page = min(self._page, len(self._pages) - 1)
+        self.setAccessibleDescription(line)
+
+    def _stream_sync(self) -> None:
+        """The page shows every word that came, one right after the other (where captions show whole pages only: once
+        the page is whole, so a growing line never jumps); a page that is whole turns after its reading time; with no
+        voice coming the rest goes at the muted pace."""
+        if not self._pages:
+            return
+        self._words = self._pages[self._page].split()
+        last_page = self._page >= len(self._pages) - 1
+        now = time.monotonic()
+        still = _caption_still()
+        if not still or not last_page or not self._writing:
+            at = self._revealed_at[-1] if self._revealed_at else now - STREAM_WORD_MS / 1000.0
+            while len(self._revealed_at) < len(self._words):
+                at = now if still else max(now, at + STREAM_WORD_MS / 1000.0)
+                self._revealed_at.append(at)
+        self._word_timer.stop()
+        if self._writing or self._awaiting:
+            if not last_page and not self._page_timer.isActive():
+                reading = self._interval_ms() * max(1, len(self._words)) / 1000.0
+                self._page_timer.start(max(0, int((self._page_from + reading - now) * 1000)))
+        elif self._finished:
+            self._page_done()
+        self._sync_frame()
+        self.update()
+
+    def _take_over(self, full: str, spoken: bool, duration_ms: int, timeline: voice_fx.VoiceTimeline | None,
+                   position: Callable[[], int] | None) -> None:
+        """The voice (or the note that there is none) takes over the line where it stands; only the page turns and the
+        words not shown yet follow it."""
+        self._voice_wait.stop()
+        self._writing = self._awaiting = False
+        if full.split() != self._full.split():
+            self._set_line(full)
+            self._words = self._pages[self._page].split()
+        timed = bool(spoken) and timeline is not None and position is not None
+        self._times = voice_fx.word_times(self._full.split(), timeline) if timed else []
+        self._position = position if timed else None
+        self._spoken = bool(spoken)
+        self._finished = not spoken
+        self._pace_ms = self._pace_of(duration_ms, spoken)
+        self._hold_timer.stop()
+        self._page_timer.stop()
+        self._fade, self._fade_from = 1.0, 0.0
+        self._set_state(SPEAKING)
+        if len(self._revealed_at) >= len(self._words):
+            self._page_done()
+        else:
+            self._next_word()
+        self._sync_frame()
+        self.update()
+
+    def _no_voice_came(self) -> None:
+        self._awaiting = False
+        self.finish()
+
     def finish(self) -> None:
-        """The voice stopped: the last page shows whole, holds, then the band rests."""
-        if self._state != SPEAKING:
+        """The voice stopped: the last page shows whole, holds, then the band rests. A line still being written, or
+        waiting for its own voice, is not what stopped."""
+        if self._state != SPEAKING or self._writing or self._awaiting:
             return
         self._finished = True
         self._page_timer.stop()
@@ -378,6 +572,10 @@ class CaptionView(QWidget):
         self._word_timer.stop()
         self._page_timer.stop()
         self._hold_timer.stop()
+        self._voice_wait.stop()
+        self._streamed = self._writing = self._awaiting = self._alert = False
+        self._glides.clear()
+        self._gliding = False
         self._pages, self._page, self._words, self._revealed_at = [], -1, [], []
         self._full, self._times, self._offsets, self._position = "", [], [], None
         self._fade, self._fade_from = 1.0, 0.0
@@ -446,8 +644,13 @@ class CaptionView(QWidget):
         self._words = self._pages[index].split()
         self._revealed_at = []
         now = time.monotonic()
+        self._page_from = now
         self._swap_from = now if index > 0 and not _caption_still() else 0.0
-        if reveal_all or _caption_still():
+        if self._glides:
+            self._glides.clear()
+        if not reveal_all and (self._writing or self._awaiting):
+            self._stream_sync()
+        elif reveal_all or _caption_still():
             self._reveal_all()
             if not reveal_all:
                 self._page_done()
@@ -526,6 +729,8 @@ class CaptionView(QWidget):
 
     def _advance_page(self) -> None:
         if self._state == SPEAKING and self._page < len(self._pages) - 1:
+            if self._writing or self._awaiting:
+                self.pageShown.emit(self.page_text())
             self._show_page(self._page + 1)
 
     def _start_fade(self) -> None:
@@ -540,7 +745,7 @@ class CaptionView(QWidget):
     def _animating(self, now: float) -> bool:
         if _caption_still() or not self.isVisible():
             return False
-        if self._fade_from:
+        if self._fade_from or self._gliding:
             return True
         if self._swap_from and now - self._swap_from < (SWAP_OUT_MS + REVEAL_MS) / 1000.0:
             return True
@@ -639,14 +844,29 @@ class CaptionView(QWidget):
         gradient.setColorAt(1.0, holo.alpha(holo.HOLO, 0.0))
         painter.fillRect(QRectF(scan.left() + 44, scan.top(), 88, 1), gradient)   # still: only the orb loops
 
+    def _glide(self, place: Any, target: float, still: bool) -> float:
+        """Where ``place`` (a line's row, or "top") is painted: a line that is growing re-centres gently; a line that
+        does not grow is exactly where it belongs."""
+        if still or not (self._writing or self._glides):
+            return target
+        at = self._glides.get(place)
+        at = target if at is None else at + (target - at) * _GLIDE
+        if abs(target - at) < 0.5:
+            at = target
+        else:
+            self._gliding = True
+        self._glides[place] = at
+        return at
+
     def _paint_page(self, painter: QPainter, left: float, width: float) -> None:
         font = holo.font("caption")
         metrics = QFontMetricsF(font)
         line_h = holo.line_height("caption")
         lines = self._lines(font, width)
-        top = (self.height() - line_h * len(lines)) / 2
         now = time.monotonic()
         still = _caption_still()
+        self._gliding = False
+        top = self._glide("top", (self.height() - line_h * len(lines)) / 2, still)
         lively = not still and holo.motion_level() == holo.MOTION_LIVELY
         marks = self._highlights()
         newest = len(self._revealed_at) - 1
@@ -657,7 +877,7 @@ class CaptionView(QWidget):
         space = metrics.horizontalAdvance(" ")
         for row, indices in enumerate(lines):
             line_w = sum(metrics.horizontalAdvance(self._words[i]) for i in indices) + space * (len(indices) - 1)
-            x = left + (width - line_w) / 2
+            x = self._glide(row, left + (width - line_w) / 2, still)
             baseline = top + row * line_h + (line_h - metrics.height()) / 2 + metrics.ascent()
             for i in indices:
                 word = self._words[i]
@@ -666,8 +886,8 @@ class CaptionView(QWidget):
                     p = 1.0 if still else (now - self._revealed_at[i]) / (REVEAL_MS / 1000.0)
                     opacity = _ease_out(p) * self._fade * swap
                     rise = 0.0 if still else RISE_PX * (1.0 - _ease_out(p))
-                    color = QColor(holo.HOLO if i in marks else holo.INK_1)
-                    if i != newest and i not in marks:
+                    color = QColor(holo.ALERT_TX if self._alert else holo.HOLO if i in marks else holo.INK_1)
+                    if i != newest and i not in marks and not self._alert:
                         color.setAlphaF(0.9)
                     blur = (1.0 - _ease_out(p)) if lively else 0.0
                     _draw_word(painter, QPointF(x, baseline + rise), word, color, opacity, blur)

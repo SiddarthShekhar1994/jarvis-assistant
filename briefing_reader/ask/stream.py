@@ -13,11 +13,22 @@
                              a run is never retried. ``read(result_event, init)`` turns the result
                              into a value (a Plan -> RunResult.plan, anything else ->
                              RunResult.answer) or an AskFailure. ``progress(what, value)`` hears
-                             "started", "init" (InitSummary), "turn" (n), "result" and "stopped"
+                             "started" (True: a process started ahead of the question got the prompt),
+                             "init" (InitSummary), "turn" (n), "result" and "stopped"
                              (AskFailure) as they happen (for the LIVE view; a callback that raises
-                             changes nothing); ``capture`` keeps the raw reply in RunResult.reply
+                             changes nothing); ``capture`` keeps the raw reply in RunResult.reply;
+                             a command line that holds its stdin (cli.holds_stdin) gets the prompt as one
+                             stream-json message and its stdin is closed at the result; ``process`` is
+                             a CLI started ahead (ask.prestart) that gets the prompt instead of a new one
+                             (it ended before any output: failure detail PRESTART_DIED, and the engine
+                             runs cold, the same counted run); ``after_start`` is called once the prompt
+                             is on its way
+    SayWatch(on_words)       the words of the StructuredOutput tool's "say" as its JSON is written (the
+                             stream_event chunks of --include-partial-messages): only that tool's input
+                             counts, nothing else is ever shown. ``on_words(text, complete)``; the final
+                             validated plan stays the source of truth
     run_planner(...)         run_cli with the planner's checks and read_result (web research uses
-                             run_cli with its own: ask.research.run_research)
+                             run_cli with its own: ask.research.run_research); ``on_words`` feeds a SayWatch
 
 Failure kinds (AskFailure.kind): not_signed_in, limit, max_turns, schema_retries, timeout,
 cancelled, guard, garbled, cli_unsupported, error, research_cap. Their messages are Jarvis's own words (the only
@@ -35,12 +46,12 @@ import re
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .cli import OutputTooLong, Runner
+from .cli import OutputTooLong, Process, Runner, holds_stdin, stream_message
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +101,13 @@ MESSAGES = {
 }
 OVERAGE = "overage"           # AskFailure.detail: Claude Code said this run uses extra usage
 REJECTED = "rejected"         # AskFailure.detail: Claude Code said the plan's limit is reached
+PRESTART_DIED = "prestart_died"   # AskFailure.detail: a process started ahead ended before any output (run cold)
+NO_INIT = "no_init"           # AskFailure.detail: no init event in time
+# How a run's process came (RunResult.start; the per-Ask log line says it).
+START_AHEAD = "prestarted"
+START_COLD = "cold"
+START_FELL_BACK = "cold after a prestarted one failed"
+STREAM_EXIT_S = 1.5           # after the result a CLI that held its stdin has this long to end before it is killed
 OVERAGE_MESSAGE = ("Turn usage credits off at claude.ai/settings/usage: Claude Code said this request would use "
                    "them (extra usage), so Ask stopped it; " + NOTHING)
 
@@ -196,6 +214,9 @@ class RunResult:
     # ResearchAnswer, built from web text: shown, never logged).
     answer: Any = field(default=None, repr=False)
     web: Any = None                    # web research: the run's research.WebLog (its repr is counts only)
+    start: str = ""                    # START_*: how its process came ("": the plain path, no prestart seam)
+    first_words_s: float | None = None     # seconds from the prompt's send to the say's first words (None: none came)
+    say_complete_s: float | None = None    # ... and to the say written whole
 
     @property
     def outcome(self) -> str:
@@ -260,7 +281,8 @@ def check_init(event: Mapping[str, Any]) -> InitSummary:
 
 
 def check_event(event: Mapping[str, Any]) -> None:
-    """Any later event: a tool call other than StructuredOutput trips the guard."""
+    """Any later event: a tool call other than StructuredOutput trips the guard. A ``stream_event`` (a chunk of
+    --include-partial-messages) is normal: the whole message it belongs to still comes as an ``assistant`` event."""
     if event.get("type") != "assistant":
         return
     message = event.get("message")
@@ -505,6 +527,237 @@ def read_result(event: Mapping[str, Any], init: InitSummary | None, *, allow_sea
 
 
 # --------------------------------------------------------------------------
+# The reply's words as they are written
+# --------------------------------------------------------------------------
+
+_JSON_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+_REPLACEMENT = "\ufffd"
+SAY_KEY = "say"
+
+
+class _JsonString:
+    """One JSON string's body, a character at a time (an escape or a surrogate pair may be split anywhere between
+    chunks); ``text()`` is what is decoded so far: half of a surrogate pair waits for its other half."""
+
+    def __init__(self) -> None:
+        self._chars: list[str] = []
+        self._escape = False
+        self._hex: str | None = None    # the digits of a \uXXXX so far
+        self._high = 0                  # a high surrogate waiting for its low half
+
+    def text(self) -> str:
+        return "".join(self._chars)
+
+    def push(self, char: str) -> bool:
+        """One more character; True at the closing quote."""
+        if self._hex is not None:
+            self._hex += char
+            if len(self._hex) == 4:
+                digits, self._hex = self._hex, None
+                try:
+                    self._unit(int(digits, 16))
+                except ValueError:
+                    self._flush_high()
+                    self._chars.append(_REPLACEMENT)
+            return False
+        if self._escape:
+            self._escape = False
+            if char == "u":
+                self._hex = ""
+            else:
+                self._flush_high()
+                self._chars.append(_JSON_ESCAPES.get(char, char))
+            return False
+        if char == "\\":
+            self._escape = True
+            return False
+        if char == '"':
+            self._flush_high()
+            return True
+        self._unit(ord(char))           # a raw half of a pair too: a chunk may end between the two
+        return False
+
+    def _unit(self, unit: int) -> None:
+        if 0xD800 <= unit <= 0xDBFF:
+            self._flush_high()
+            self._high = unit
+        elif 0xDC00 <= unit <= 0xDFFF:
+            if self._high:
+                self._chars.append(chr(0x10000 + ((self._high - 0xD800) << 10) + (unit - 0xDC00)))
+                self._high = 0
+            else:
+                self._chars.append(_REPLACEMENT)
+        else:
+            self._flush_high()
+            self._chars.append(chr(unit))
+
+    def _flush_high(self) -> None:
+        if self._high:
+            self._high = 0
+            self._chars.append(_REPLACEMENT)
+
+
+class _SayScanner:
+    """Walks one JSON object as it is written and decodes its top-level "say" (any other key's value is skipped,
+    whatever it holds). Anything that is not the JSON it expects ends the walk (``broken``): nothing more is shown,
+    and the final plan decides. ``done``: the say's closing quote came."""
+
+    _START, _KEY_OR_END, _KEY, _COLON, _VALUE, _SAY, _SKIP_STRING, _SKIP_ATOM, _SKIP_NESTED = range(9)
+
+    def __init__(self) -> None:
+        self.done = False
+        self.broken = False
+        self._state = self._START
+        self._key = _JsonString()
+        self._say: _JsonString | None = None
+        self._depth = 0                 # how deep inside a skipped object or list
+        self._skip_escape = False
+
+    def text(self) -> str:
+        return self._say.text() if self._say is not None else ""
+
+    def feed(self, chunk: str) -> None:
+        for char in chunk:
+            if self.done or self.broken:
+                return
+            self._step(char)
+
+    def _step(self, char: str) -> None:
+        state = self._state
+        if state == self._SAY:
+            assert self._say is not None
+            self.done = self._say.push(char)
+        elif state == self._START:
+            if char == "{":
+                self._state = self._KEY_OR_END
+            elif not char.isspace():
+                self.broken = True
+        elif state == self._KEY_OR_END:
+            if char == '"':
+                self._key = _JsonString()
+                self._state = self._KEY
+            elif char != "," and not char.isspace():
+                self.broken = True      # the object ended (or is not JSON) with no say: nothing more to find
+        elif state == self._KEY:
+            if self._key.push(char):
+                self._state = self._COLON
+        elif state == self._COLON:
+            if char == ":":
+                self._state = self._VALUE
+            elif not char.isspace():
+                self.broken = True
+        elif state == self._VALUE:
+            self._value(char)
+        elif state == self._SKIP_STRING:
+            if self._skip_escape:
+                self._skip_escape = False
+            elif char == "\\":
+                self._skip_escape = True
+            elif char == '"':
+                self._state = self._SKIP_NESTED if self._depth else self._KEY_OR_END
+        elif state == self._SKIP_ATOM:
+            if char == ",":
+                self._state = self._KEY_OR_END
+            elif char == "}":
+                self.broken = True
+        elif state == self._SKIP_NESTED:
+            if char == '"':
+                self._state = self._SKIP_STRING
+            elif char in "{[":
+                self._depth += 1
+            elif char in "}]":
+                self._depth -= 1
+                if not self._depth:
+                    self._state = self._KEY_OR_END
+
+    def _value(self, char: str) -> None:
+        if char.isspace():
+            return
+        if char == '"':
+            if self._key.text() == SAY_KEY:
+                self._say = _JsonString()
+                self._state = self._SAY
+            else:
+                self._state = self._SKIP_STRING
+        elif char in "{[":
+            self._depth = 1
+            self._state = self._SKIP_NESTED
+        else:
+            self._state = self._SKIP_ATOM   # a number, true, false, null (a "say" that is one is no say)
+
+
+class SayWatch:
+    """The words of the reply's "say" as its JSON is written, from a run's ``stream_event`` chunks (feed, for
+    run_cli's ``watch``). Only the input of a StructuredOutput tool call of the main conversation counts: another
+    tool's input, a text block or a sub-agent's chunk is never looked at.
+
+    ``on_words(text, complete)`` hears the words so far, one line (as stream.Plan.say has them; a space at the end
+    says the last word has ended), each time they grow, and once ``complete`` when the closing quote came. A second
+    call of the tool (the CLI's retry after its schema check) starts over, heard only from where its words differ from
+    the first's (the same words again: nothing new). More than SAY_CAP characters is no say a plan can have: nothing
+    more is heard. ``first_at`` / ``complete_at``: ``clock()`` when the first words came and the say was whole. A
+    callback that raises changes nothing."""
+
+    def __init__(self, on_words: Callable[[str, bool], None], *, clock: Callable[[], float] = time.monotonic) -> None:
+        self._on_words = on_words
+        self._clock = clock
+        self._scan: _SayScanner | None = None
+        self._index: Any = None
+        self._earlier = ""              # what an earlier call of the tool wrote whole
+        self._heard = ("", False)
+        self.first_at: float | None = None
+        self.complete_at: float | None = None
+
+    def feed(self, event: Mapping[str, Any]) -> None:
+        if event.get("type") != "stream_event" or event.get("parent_tool_use_id"):
+            return
+        inner = event.get("event")
+        if not isinstance(inner, Mapping):
+            return
+        kind = inner.get("type")
+        if kind == "content_block_delta":
+            self._delta(inner)
+        elif kind == "content_block_start":
+            block = inner.get("content_block")
+            if isinstance(block, Mapping) and block.get("type") == "tool_use" and block.get("name") == STRUCTURED_TOOL:
+                self._index, self._scan = inner.get("index"), _SayScanner()
+            else:
+                self._scan = None
+        elif kind == "message_start" or (kind == "content_block_stop" and inner.get("index") == self._index):
+            self._scan = None
+
+    def _delta(self, inner: Mapping[str, Any]) -> None:
+        scan = self._scan
+        delta = inner.get("delta")
+        if scan is None or inner.get("index") != self._index or not isinstance(delta, Mapping):
+            return
+        chunk = delta.get("partial_json")
+        if delta.get("type") != "input_json_delta" or not isinstance(chunk, str) or scan.done or scan.broken:
+            return
+        scan.feed(chunk)
+        raw = scan.text()
+        text = _one_line(raw)
+        if not text or len(text) > SAY_CAP:
+            return
+        complete = scan.done
+        if self._earlier and (text == self._earlier if complete else self._earlier.startswith(text)):
+            return                      # the tool called again: the same words so far
+        shown = text + " " if not complete and raw[-1:].isspace() else text
+        if (shown, complete) == self._heard:
+            return
+        self._heard = (shown, complete)
+        if self.first_at is None:
+            self.first_at = self._clock()
+        if complete:
+            self.complete_at = self._clock()
+            self._earlier = text
+        try:
+            self._on_words(shown, complete)
+        except Exception:  # noqa: BLE001 - a broken callback never changes the run
+            pass
+
+
+# --------------------------------------------------------------------------
 # The engine loop
 # --------------------------------------------------------------------------
 
@@ -539,21 +792,48 @@ def raw_reply(event: Mapping[str, Any] | None) -> str:
 Reader = Callable[[Mapping[str, Any], InitSummary | None], Any]   # (result event, init) -> value or AskFailure
 
 
+def _close_stdin(process: Process) -> None:
+    """End of input for a process that holds its stdin (a runner's process without the method has none to hold)."""
+    closer = getattr(process, "close_stdin", None)
+    if callable(closer):
+        try:
+            closer()
+        except OSError:
+            pass
+
+
+def _discard_quietly(process: Process) -> None:
+    try:
+        process.kill()
+        process.close()
+    except OSError:
+        pass
+
+
 def run_planner(runner: Runner, argv: Sequence[str], prompt: str, *, env: Mapping[str, str], cwd: Path,
                 timeout_s: float, allow_search: bool, cancel: threading.Event | None = None,
                 clock: Callable[[], float] = time.monotonic, init_timeout_s: float = INIT_TIMEOUT_S,
                 poll_s: float = POLL_S,
                 now: Callable[[], datetime] = lambda: datetime.now().astimezone(),
                 progress: Progress | None = None, capture: bool = False, allow_web: bool = False,
-                allow_remember: bool = False) -> RunResult:
+                allow_remember: bool = False, on_words: Callable[[str, bool], None] | None = None,
+                process: Process | None = None, after_start: Callable[[], None] | None = None) -> RunResult:
     """One planner run (run_cli with check_init, check_event and read_result). ``allow_search`` /
     ``allow_web`` / ``allow_remember``: the run may ask to read mail / for web research / suggest a
-    note to remember."""
-    return run_cli(runner, argv, prompt, env=env, cwd=cwd, timeout_s=timeout_s,
-                   read=lambda event, init: read_result(event, init, allow_search=allow_search, allow_web=allow_web,
-                                                        now=now, allow_remember=allow_remember),
-                   cancel=cancel, clock=clock, init_timeout_s=init_timeout_s, poll_s=poll_s, now=now,
-                   progress=progress, capture=capture)
+    note to remember. ``on_words``: the say's words as they are written (SayWatch; the result's first_words_s
+    and say_complete_s say when, from the send). ``process`` / ``after_start``: run_cli's."""
+    watch = SayWatch(on_words, clock=clock) if on_words is not None else None
+    sent = clock()
+    result = run_cli(runner, argv, prompt, env=env, cwd=cwd, timeout_s=timeout_s,
+                     read=lambda event, init: read_result(event, init, allow_search=allow_search, allow_web=allow_web,
+                                                          now=now, allow_remember=allow_remember),
+                     cancel=cancel, clock=clock, init_timeout_s=init_timeout_s, poll_s=poll_s, now=now,
+                     progress=progress, capture=capture, watch=watch.feed if watch is not None else None,
+                     process=process, after_start=after_start)
+    if watch is None or watch.first_at is None:
+        return result
+    return replace(result, first_words_s=watch.first_at - sent,
+                   say_complete_s=watch.complete_at - sent if watch.complete_at is not None else None)
 
 
 def run_cli(runner: Runner, argv: Sequence[str], prompt: str, *, env: Mapping[str, str], cwd: Path,
@@ -563,25 +843,44 @@ def run_cli(runner: Runner, argv: Sequence[str], prompt: str, *, env: Mapping[st
             clock: Callable[[], float] = time.monotonic, init_timeout_s: float = INIT_TIMEOUT_S,
             poll_s: float = POLL_S,
             now: Callable[[], datetime] = lambda: datetime.now().astimezone(),
-            progress: Progress | None = None, capture: bool = False) -> RunResult:
+            progress: Progress | None = None, capture: bool = False,
+            watch: Callable[[Mapping[str, Any]], None] | None = None, process: Process | None = None,
+            after_start: Callable[[], None] | None = None) -> RunResult:
     """Start the CLI with ``prompt`` on stdin and read its events until the result, a guard trip
     or stop, the timeout or Cancel (the process is killed then). Never raises for the CLI's
     behaviour. ``init_check`` checks the first event (InitSummary, or GuardTrip / RunStop),
     ``event_check`` every later one (GuardTrip / RunStop stop the run), ``read`` the result
-    event. ``progress`` / ``capture``: see the module docs (neither changes the run)."""
+    event. ``progress`` / ``capture``: see the module docs (neither changes the run). ``watch`` hears
+    every stream_event that passed the checks (a callback that raises changes nothing). ``process``: a CLI
+    started ahead of this question gets the prompt instead of a new one; ``after_start``: called once the prompt
+    is on its way (either way)."""
     started = clock()
-    try:
-        process = runner.start(argv, stdin_text=prompt, env=env, cwd=cwd)
-    except OSError as exc:
-        logger.warning("Ask: Claude Code could not be started (%s)", type(exc).__name__)
-        return RunResult(failure=failure(ERROR, "start"))
-    _report(progress, "started")
+    stream_input = holds_stdin(argv)
+    payload = stream_message(prompt) if stream_input else prompt
+    ahead = process is not None
+    if process is not None:
+        if not process.send(payload):   # it ended while it waited: nothing was sent
+            _discard_quietly(process)
+            return RunResult(failure=failure(ERROR, PRESTART_DIED))
+    else:
+        try:
+            process = runner.start(argv, stdin_text=payload, env=env, cwd=cwd)
+        except OSError as exc:
+            logger.warning("Ask: Claude Code could not be started (%s)", type(exc).__name__)
+            return RunResult(failure=failure(ERROR, "start"))
+    _report(progress, "started", True if ahead else None)
+    if after_start is not None:
+        try:
+            after_start()
+        except Exception as exc:  # noqa: BLE001 - only prepares the next request
+            logger.warning("Ask: the next Claude Code could not be prepared (%s)", type(exc).__name__)
     init: InitSummary | None = None
     result_event: Mapping[str, Any] | None = None
     stop: AskFailure | None = None
     limit: LimitSignal | None = None
     garbage = 0
     turns = 0
+    output = False       # an event other than Claude Code's own start came
     try:
         while True:
             if cancel is not None and cancel.is_set():
@@ -592,7 +891,7 @@ def run_cli(runner: Runner, argv: Sequence[str], prompt: str, *, env: Mapping[st
                 stop = failure(TIMEOUT, "timeout")
                 break
             if init is None and elapsed >= init_timeout_s:
-                stop = failure(GUARD, "no_init")
+                stop = failure(GUARD, NO_INIT)
                 break
             wait = min(poll_s, max(0.0, timeout_s - elapsed))
             if init is None:
@@ -630,6 +929,15 @@ def run_cli(runner: Runner, argv: Sequence[str], prompt: str, *, env: Mapping[st
             except RunStop as stopped:
                 stop = stopped.failure
                 break
+            if event.get("type") != "system":
+                output = True
+            if event.get("type") == "stream_event":
+                if watch is not None:
+                    try:
+                        watch(event)
+                    except Exception:  # noqa: BLE001 - what is shown never changes the run
+                        pass
+                continue
             if event.get("type") == "assistant":
                 turns += 1
                 _report(progress, "turn", turns)
@@ -638,10 +946,11 @@ def run_cli(runner: Runner, argv: Sequence[str], prompt: str, *, env: Mapping[st
                 _report(progress, "result")
                 break
     finally:
+        _close_stdin(process)   # read until the result, then close it: a CLI that holds its stdin ends now
         if stop is not None:
             process.kill()
             _report(progress, "stopped", stop)
-        exit_code = process.wait(5.0 if stop is None else 2.0)
+        exit_code = process.wait((STREAM_EXIT_S if stream_input else 5.0) if stop is None else 2.0)
         if exit_code is None:
             process.kill()
             exit_code = process.wait(2.0)
@@ -654,6 +963,9 @@ def run_cli(runner: Runner, argv: Sequence[str], prompt: str, *, env: Mapping[st
         return RunResult(failure=stop, init=init, stats=RunStats(duration_ms=measured, exit_code=exit_code),
                          limit=limit)
     if result_event is None:
+        if ahead and not output:   # started ahead, it ended before any output: the engine runs cold
+            return RunResult(failure=failure(ERROR, PRESTART_DIED), init=init,
+                             stats=RunStats(duration_ms=measured, exit_code=exit_code))
         if _UNKNOWN_OPTION_RE.search(tail):
             found = failure(CLI_UNSUPPORTED, "unknown_option")
         else:

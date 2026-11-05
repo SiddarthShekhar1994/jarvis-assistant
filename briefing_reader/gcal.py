@@ -530,6 +530,7 @@ class GoogleCalendar:
         self._service: Any = None
         self._service_generation = -1
         self._timezone: str | None = None
+        self.mutations = 0     # moves on with every change Jarvis asks of this calendar (see _execute)
 
     @property
     def calendar_id(self) -> str:
@@ -695,11 +696,14 @@ class GoogleCalendar:
         """Run one API request, mapping every failure to a CalendarError.
 
         ``mutation``: the request changes something (never retried; a 5xx or a lost answer is
-        CalendarUnknownOutcome). ``event_call``: it names one event, so 404 / 410 mean
-        EventGone and a 403 about that event means NotAllowed (the token stays).
+        CalendarUnknownOutcome; ``mutations`` moves on before and after it, whatever came of it, so a read kept
+        from before it is never reused: planner.GoogleSources.recent_event_briefs). ``event_call``: it names one
+        event, so 404 / 410 mean EventGone and a 403 about that event means NotAllowed (the token stays).
         """
         from googleapiclient.errors import HttpError
 
+        if mutation:
+            self.mutations += 1
         try:
             result = request.execute(num_retries=retries)
         except HttpError as exc:
@@ -707,6 +711,9 @@ class GoogleCalendar:
                                    event_call=event_call) from None
         except Exception as exc:  # noqa: BLE001 - socket/ssl/httplib2 errors share no base
             raise self._transport_error(exc, what, mutation=mutation) from None
+        finally:
+            if mutation:
+                self.mutations += 1
         if self._creds is not None:
             _register_credentials(self._creds)   # the library may have refreshed the token
         return result

@@ -323,8 +323,11 @@ from .persona import (
     Greeting,
     announcement,
     ask_failure_speech,
+    ask_final_shown,
     ask_reply_note_speech,
+    ask_reply_rest,
     ask_reply_speech,
+    ask_say_speech,
     brief_ready_text,
     clock_text,
     compose_opening,
@@ -2291,6 +2294,23 @@ class ReadingView(QWidget):
         """The voice stopped: the last page holds, then the band rests."""
         self.captions.finish()
 
+    def stream_caption(self, text: str, *, complete: bool = False, spoken: bool = True) -> None:
+        """An answer's words as they are written, as Home's caption (home.CaptionView.stream): the voice takes the line
+        over without typing it again."""
+        self.captions.stream(text, complete=complete, spoken=spoken)
+        self._sync_echo()
+
+    def correct_caption(self, text: str, *, alert: bool = False, spoken: bool = True) -> None:
+        """The words on the band were wrong: ``text`` replaces them at once (``alert``: in coral)."""
+        self.captions.correct(text, alert=alert, spoken=spoken)
+        self._sync_echo()
+
+    def clear_stream_caption(self) -> None:
+        """An answer's words leave the band at once (never a line of the briefing's or anything else's)."""
+        if self.captions.streamed():
+            self.captions.clear()
+        self._sync_echo()
+
     def show_request(self, text: str) -> None:
         """The owner's request just made, as the YOU echo under the orb (until the band rests again);
         the last answer's chip goes."""
@@ -3748,6 +3768,8 @@ VIEW_BRIEFING_TEXT = "View briefing"   # the announcement's link in the conversa
 VIEW_BRIEFING_LINK = "view-briefing"
 ASK_CANCELLED_ENTRY = "Cancelled; nothing was proposed."   # the conversation's entry for a cancelled Ask
 ASK_ACK_KEY = "ask-ack"                  # "One moment, sir." while an Ask plans (dropped when it ends first)
+ASK_ACK_HOLD_MS = 1500                   # ... said only when no word of the answer has come by this long after the request
+ASK_SAY_KEY = "ask-say"                  # an Ask's say, spoken as soon as it is written (Stop, a new request: it goes)
 # Memory (the productivity bundle): the conversation's links and texts (shown only; never logged).
 MEMORY_UNDO_LINK = "mem-undo:"           # + an opaque counter: Undo a note saved or forgotten
 MEMORY_SAVE_LINK = "mem-save:"           # + an opaque counter: Remember this (a suggestion)
@@ -4825,6 +4847,18 @@ def _live_exec_finished(task: Any, action: ProposedAction, outcome: Any) -> None
         task.finish(_live.STATUS_FAILED, summary=str(outcome.error or "") or "it did not happen")
 
 
+@dataclasses.dataclass
+class _SayStream:
+    """One Ask's say as it is written (memory only, never logged): its run, what the band shows of it, what Jarvis began
+    saying the moment it was whole ("" when nothing was) and whether it is whole."""
+
+    seq: int
+    number: int = 0
+    shown: str = dataclasses.field(default="", repr=False)
+    early: str = dataclasses.field(default="", repr=False)
+    complete: bool = False
+
+
 class AppController(QObject):
     """State machine behind the window: prompt -> (snoozed ->) reading -> quit.
 
@@ -5280,6 +5314,8 @@ class AppController(QObject):
         self._briefing_caption = ""                # ... and what the voice says for it (Home's caption)
         self._briefing_caption_ms = 0              # ... and how long its audio says it (0: unknown)
         self._last_ack = ""                        # the last "One moment, sir." template (never twice in a row)
+        self._say_stream: _SayStream | None = None   # the running or last Ask's say as it was written
+        self._ack_timer = self._make_timer(self._say_ack, single_shot=True)
 
     def _init_timers(self) -> None:
         self._ignore_timer = self._make_timer(self._on_prompt_ignored, single_shot=True)
@@ -8281,6 +8317,8 @@ class AppController(QObject):
         controller.outcomeReady.connect(self._on_ask_outcome)
         controller.askStarted.connect(self._on_ask_started)
         controller.askCancelled.connect(self._on_ask_cancelled)
+        controller.sayWritten.connect(self._on_ask_say)
+        controller.askStopping.connect(self._on_ask_stopping)
         controller.chipChanged.connect(self._set_ask_chip)
         controller.mailSignInRequested.connect(self.sign_in_for_mail)
         controller.memoryRequested.connect(self._on_memory_route)
@@ -8331,9 +8369,11 @@ class AppController(QObject):
         return ""
 
     def _on_ask_busy(self, busy: bool) -> None:
-        """An Ask started (the briefing pauses; the orb shows PLANNING; Jarvis says "One moment,
-        sir.") or ended."""
+        """An Ask started (the briefing pauses; the orb shows PLANNING at once; "One moment, sir." only if
+        no word of the answer has come ASK_ACK_HOLD_MS after the request: it never delays the reply) or ended."""
         self._ask_busy = bool(busy)
+        if not busy:
+            self._ack_timer.stop()
         if busy and self.ask is not None and self.ask.running_mode in (MODE_MEETING, MODE_DESKTOP):
             # A meeting summary runs in the background, a desktop request on the HUD (its caption says what Jarvis
             # is doing): nothing pauses or is said.
@@ -8343,13 +8383,13 @@ class AppController(QObject):
             self._voice_call("owner_acted")   # the Ask holds the briefing now: the voice never resumes it
             if self.state == STATE_READING and self.player.state in (PLAYING, WAITING):
                 self.player.pause()
-            self._say_ack()
+            self._ack_timer.start(ASK_ACK_HOLD_MS)
         self._update_reading_controls()
 
     def _say_ack(self) -> None:
-        """A short acknowledgement while an Ask plans (dropped if the answer is there first)."""
+        """A short acknowledgement while a slow Ask plans (dropped if the answer is there first)."""
         assistant = self.config.assistant
-        if not assistant.speak_replies:
+        if not assistant.speak_replies or not self._ask_busy or self.state == STATE_QUITTING:
             return
         self._last_ack = pick_ack(self._last_ack, self._rng)
         self._say(KIND_ACK, with_address(self._last_ack, assistant.address), key=ASK_ACK_KEY)
@@ -8361,6 +8401,8 @@ class AppController(QObject):
         screen "tab" brings LIVE up (a "web:" request's WEB task as an Ask's), else Home comes up."""
         if self.state == STATE_QUITTING:
             return
+        if self.ask is None or self.ask.running_mode != MODE_MEETING:
+            self._end_say_stream()              # a new request: what the last answer was still saying goes
         self._ask_desktop = bool(self.ask is not None and self.ask.running_mode == MODE_DESKTOP)
         if self.ask is not None and self.ask.running_mode in (MODE_MEETING, MODE_DESKTOP):
             # A meeting summary the owner asked for (the start card's tick, or Summarise), or a desktop request on the
@@ -8388,8 +8430,64 @@ class AppController(QObject):
         if task_id:
             self._snapshots_call("cancel_task", task_id)
 
+    def _end_say_stream(self) -> None:
+        """An Ask's say stops here and now: it leaves the band (never another line) and its utterance goes, playing or
+        waiting. Nothing it wrote later shows (the controller drops it)."""
+        if self._say_stream is None:
+            return
+        self._say_stream = None
+        self._voice_call("stop_key", ASK_SAY_KEY)
+        self.window.reading.clear_stream_caption()
+
+    def _on_ask_stopping(self, _seq: int) -> None:
+        """Stop (the bar's Cancel, Esc, a Turn off): no acknowledgement and no more words, at once; the run itself ends
+        within a second (_on_ask_cancelled follows)."""
+        self._ack_timer.stop()
+        self._voice_call("cancel_key", ASK_ACK_KEY)
+        self._end_say_stream()
+
+    def _on_ask_say(self, seq: int, number: int, text: str, shown: str, complete: bool, mail: bool) -> None:
+        """The planner's say as it is written (AskController.sayWritten; never logged). Home's caption shows the words
+        (``shown``) as they come; the voice starts as soon as the say is whole - it does not wait for the cards' lines -,
+        through the same guards as the final reply (persona.ask_say_speech: one that claims something was done or
+        repeats a memory note waits for the final answer's own words). The final plan stays the source of truth
+        (_converse_ask). A second run's say replaces the first's on the band; what the first still has to say and has
+        not started goes."""
+        if self.state == STATE_QUITTING:
+            return
+        stream = self._say_stream
+        if stream is None or stream.seq != seq:
+            stream = self._say_stream = _SayStream(seq)
+            self._ack_timer.stop()                       # the first words are here: no acknowledgement
+            self._voice_call("cancel_key", ASK_ACK_KEY)
+        if number != stream.number:
+            if stream.early:
+                self._voice_call("cancel_key", ASK_SAY_KEY)
+            stream.number, stream.early, stream.complete = number, "", False
+        before, stream.shown = stream.shown, shown
+        reading = self.window.reading
+        on_screen = self.state == STATE_READING
+        if not complete:
+            if on_screen:
+                reading.stream_caption(shown)
+            return
+        assistant = self.config.assistant
+        early = (ask_say_speech(text, read_mail=mail, address=assistant.address, notes=self._memory_spoken_guard())
+                 if assistant.speak_replies else "")
+        if stream.complete and stream.early == early and before == shown:
+            return
+        if stream.early:                                 # the tool was called again with other words
+            self._voice_call("stop_key", ASK_SAY_KEY)
+        stream.early, stream.complete = early, True
+        if on_screen:
+            reading.stream_caption(shown, complete=True, spoken=bool(early))
+        if early and not self._say(KIND_REPLY, early, key=ASK_SAY_KEY) and on_screen:
+            reading.stream_caption(shown, complete=True, spoken=False)   # no voice is coming: the muted pace
+
     def _on_ask_cancelled(self, _seq: int) -> None:
         self._offer_running = 0
+        self._ack_timer.stop()
+        self._end_say_stream()
         if self._ask_task_id:
             self._snapshots_call("cancel_task", self._ask_task_id)   # its queued and running pictures stop
         if self.state == STATE_QUITTING:
@@ -8424,8 +8522,15 @@ class AppController(QObject):
             link = (SEE_STEPS_TEXT, f"live:{task_id}") if self.live.enabled and task_id else ("", "")
             self._jarvis(AskController._answer(outcome), tone=hud.TONE_WARN if question_only else hud.TONE_DONE,
                          sub=f" {DOT} ".join(sub), link=link)
+            stream = self._say_stream if self._say_stream is not None and self._say_stream.number == outcome.runs else None
             if assistant.speak_replies:
-                spoken = ask_reply_note_speech(outcome, assistant.address, notes=self._memory_spoken_guard())
+                notes = self._memory_spoken_guard()
+                early = stream.early if stream is not None else ""
+                rest = ask_reply_rest(outcome, early, assistant.address, notes=notes) if early else None
+                if rest is not None:   # it was said as it was written: only its question is left
+                    self._say_rest(early, rest)
+                    return
+                spoken = ask_reply_note_speech(outcome, assistant.address, notes=notes)
                 if spoken:
                     logger.info("Ask reply not spoken as written (it repeats a memory note)")
                 else:
@@ -8433,7 +8538,10 @@ class AppController(QObject):
                     if reply.guarded:
                         logger.info("Ask reply not spoken as written (it claimed something was done)")
                     spoken = reply.text
+                self._correct_say(stream, spoken)
                 self._say(KIND_REPLY, spoken)
+            elif stream is not None and stream.shown != ask_final_shown(outcome):
+                self.window.reading.correct_caption(ask_final_shown(outcome), spoken=False)
             return
         if outcome.kind in ("empty", "busy"):
             return
@@ -8443,10 +8551,43 @@ class AppController(QObject):
         self._jarvis(outcome.message or "Ask failed; nothing was proposed.",
                      tone=hud.TONE_WARN if outcome.kind in _SOFT_KINDS else hud.TONE_ERROR)
         spoken = ask_failure_speech(outcome.kind, assistant.address) if assistant.speak_replies else ""
+        self._say_failed(spoken or outcome.message or "Ask failed; nothing was proposed.", bool(spoken))
         if spoken:
             self._say(KIND_REPLY, spoken)
         else:
             self._voice_call("cancel_key", ASK_ACK_KEY)
+
+    def _say_rest(self, early: str, rest: str) -> None:
+        """The final answer is what was written: only its question is left to say. With no voice the band shows it
+        after the say, with the say's own line kept."""
+        if not rest:
+            return
+        if self._voice_silent() and self.state == STATE_READING:
+            self.window.reading.say_caption(f"{early} {rest}", spoken=False)
+            if self._focus_quiet():
+                self._hold_for_focus(KIND_REPLY, rest, "")   # the say is held already (under its key)
+        else:
+            self._say(KIND_REPLY, rest, key=ASK_SAY_KEY)
+
+    def _correct_say(self, stream: _SayStream | None, spoken: str) -> None:
+        """The final answer is not what was written: what was being said of it goes and the band says the final words at
+        once (their voice takes them over from there)."""
+        if stream is None or not (stream.shown or stream.early):
+            return
+        self._voice_call("stop_key", ASK_SAY_KEY)
+        if self.state == STATE_READING:
+            self.window.reading.correct_caption(spoken, spoken=not self._voice_silent())
+
+    def _say_failed(self, words: str, spoken: bool) -> None:
+        """The run failed after its words were out: they go, and the band says so in coral (the bar's status line and
+        the conversation entry say why, as always)."""
+        stream = self._say_stream
+        if stream is None or not (stream.shown or stream.early):
+            return
+        self._say_stream = None
+        self._voice_call("stop_key", ASK_SAY_KEY)
+        if self.state == STATE_READING:
+            self.window.reading.correct_caption(words, alert=True, spoken=spoken and not self._voice_silent())
 
     def _converse_research(self, outcome: Any) -> None:
         """A web research's answer in the conversation: one JARVIS entry with the answer and its
@@ -8458,6 +8599,7 @@ class AppController(QObject):
         from .ask_ui import research_proposals
 
         assistant = self.config.assistant
+        self._say_stream = None     # run 1's words said it would look it up: they stand
         report = outcome.research
         text = entry_text(report)
         # Jarvis's own notes the entry does not already show (a thread the planner could not read,
@@ -9191,7 +9333,8 @@ class AppController(QObject):
     def _on_desktop_turn_off(self) -> None:
         """Settings > Desktop's Turn off: the owner's OK goes (for this run even when it couldn't be saved - then the
         panel says it will be on again after a restart), and what is on its way stops at once - the desktop's own jobs
-        (desktop_ui.turn_off: nothing opens after it) and a desktop request's planner run (cancelled)."""
+        (desktop_ui.turn_off: nothing opens after it), a desktop request's planner run and an Ask whose words are
+        coming (cancelled)."""
         from .desktop_view import TURN_OFF_NOT_SAVED_TEXT
 
         desktop = getattr(self, "desktop", None)
@@ -9202,6 +9345,11 @@ class AppController(QObject):
         if ask is not None and ask.running_mode == MODE_DESKTOP:
             logger.info("Desktop: turned off while a desktop request's planner run was on its way; cancelled")
             ask.cancel()
+        elif ask is not None and ask.busy and not ask.running_mode and ask.running_kind == _live.TASK_ASK:
+            logger.info("Desktop: turned off while an Ask was being answered; cancelled")
+            ask.cancel()               # its words stop at once too (AskController.askStopping)
+        if ask is not None:
+            ask.forget_desktop_ahead()  # no Claude Code waits for a desktop request that can't come
         self._sync_desktop_settings("" if saved else TURN_OFF_NOT_SAVED_TEXT)
 
     def _sync_desktop_settings(self, problem: str = "") -> None:
@@ -11481,12 +11629,7 @@ class AppController(QObject):
         if self.state == STATE_QUITTING:
             return False
         if self._focus_quiet():
-            # P2.5: focus mode holds Jarvis's voice - kept (memory only; an acknowledgement is pointless later) and
-            # said when focus ends; meanwhile his words show as text, as when muted.
-            held = getattr(self, "_focus_speech", None)
-            if held is not None and text and kind != KIND_ACK:
-                held[:] = [item for item in held if not (key and item[2] == key)] + [(kind, text, key)]
-                del held[:-FOCUS_SPEECH_KEPT]
+            self._hold_for_focus(kind, text, key)
             said = False
         elif self._meeting_recording():
             said = False
@@ -11500,6 +11643,14 @@ class AppController(QObject):
             # Muted (or no voice): the same words as Home's caption, text only (HOLOGRAM_SPEC 14.7).
             self.window.reading.say_caption(scrub_for_speech(text), spoken=False)
         return said
+
+    def _hold_for_focus(self, kind: str, text: str, key: str) -> None:
+        """P2.5: focus mode holds Jarvis's voice - kept (memory only; an acknowledgement is pointless later) and said
+        when focus ends; meanwhile his words show as text, as when muted."""
+        held = getattr(self, "_focus_speech", None)
+        if held is not None and text and kind != KIND_ACK:
+            held[:] = [item for item in held if not (key and item[2] == key)] + [(kind, text, key)]
+            del held[:-FOCUS_SPEECH_KEPT]
 
     def _voice_silent(self) -> bool:
         """Jarvis's voice is muted or off, a meeting records or focus mode runs (P2.5): what he would say shows as a
@@ -11516,7 +11667,7 @@ class AppController(QObject):
         cancelled key's sentence, or all of it when the voice is stopped (P2.5)."""
         held = getattr(self, "_focus_speech", None)
         if held:
-            if name == "cancel_key" and args:
+            if name in ("cancel_key", "stop_key") and args:
                 held[:] = [item for item in held if item[2] != args[0]]
             elif name == "stop":
                 held.clear()
@@ -11548,9 +11699,11 @@ class AppController(QObject):
         reading = self.window.reading
         reading.set_speech(self._utterance or self._briefing_speech)
         if text:
-            # Home's caption: what he says now, each word as he says it; the orb's spikes follow his voice
+            # Home's caption: what he says now, each word as he says it; the orb's spikes follow his voice. An
+            # answer's line being written, or waiting for its own voice, is left alone by anything else he says.
             timeline = self._voice_timeline()
-            reading.say_caption(text, timeline=timeline, position=self._voice_position)
+            if not reading.captions.waits_for_words() or reading.captions.holds_line(text):
+                reading.say_caption(text, timeline=timeline, position=self._voice_position)
             reading.set_voice(timeline, self._voice_position)
             self._show_context_tiles()             # the greeting's tiles fly out as he starts the line
         else:
@@ -13595,7 +13748,7 @@ class AppController(QObject):
         self._closing.set()
         for timer in (self._ignore_timer, self._tick_timer, self._snooze_timer, self._note_timer,
                       self._recheck_timer, self._agenda_timer, self._send_hold_timer, self._undo_timer,
-                      self._greeting_timer, self._held_timer):
+                      self._greeting_timer, self._held_timer, self._ack_timer):
             timer.stop()
         self._undos.clear()
         if self.ask is not None:

@@ -77,6 +77,10 @@ class Voice(Protocol):
         """Drop a queued utterance with this ``key`` that has not started (e.g. "announce:<K>")."""
         ...
 
+    def stop_key(self, key: str) -> None:
+        """The utterance with this ``key`` goes, playing or waiting; anything else keeps its place."""
+        ...
+
     def stop(self) -> None:
         """Stop the current utterance now and drop the queue (the owner pressed Play, mute)."""
         ...
@@ -118,6 +122,9 @@ class SilentVoice:
         return False
 
     def cancel_key(self, key: str) -> None:
+        return None
+
+    def stop_key(self, key: str) -> None:
         return None
 
     def stop(self) -> None:

@@ -1209,8 +1209,9 @@ voice when the online one cannot be reached), politely and to the point:
 
 - **When you open him**: the greeting and, once per briefing, "Your AM
   briefing is ready to view." (see [Using it](#using-it)).
-- **Ask** (see [Ask Jarvis](#ask-jarvis-optional)): "One moment, sir." while it
-  plans (left out when the answer is quicker), then the planner's answer and
+- **Ask** (see [Ask Jarvis](#ask-jarvis-optional)): the planner's answer as soon
+  as it is written, before the cards are ready ("One moment, sir." only when no
+  word of it has come about 1.5 s after your request), then
   its question back, for example "Right, sir. I've lined up moving Project sync
   to Friday at two. It's waiting for your OK." Never Jarvis's own note, a mail
   search or a card's text. His question back is always said whole; a long
@@ -3023,6 +3024,20 @@ is not a claude.ai subscription (see [Privacy and cost](#privacy-and-cost)).
 Runs are capped: 20 an hour and 60 a day by default (`[ask] max_per_hour`,
 `max_per_day`), counted in `ask_usage.json` for every Jarvis process together
 (the app and `--ask-text` from a terminal share the count).
+
+**How it answers quickly.** The caption shows Jarvis's words as Claude writes
+them and his voice starts as soon as the answer is written; the proposals follow
+when the plan is whole and checked, and the checked plan has the last word (if it
+differs, or the run fails, the caption is corrected). While Ask is on, the app keeps
+one idle `claude.exe` ready with the exact command line a request would use, so a
+request does not wait for Claude Code to start: it gets nothing and makes no
+Claude request until you ask, is used for one request only and replaced, is
+replaced after 30 idle minutes or when its files change, and ends with Jarvis. It
+is checked and counted like any other run, when your request is sent. As you start
+typing Jarvis also reads the calendars your request would need; a read at most 60
+seconds old is used, never one from before a change Jarvis made. It answers
+facts only from what it was given (web research for what can change); what it
+can't see or check, it says so.
 
 **Setup (about 45 minutes, once).**
 

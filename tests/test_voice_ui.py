@@ -206,6 +206,52 @@ class SpeakingTests(VoiceTestCase):
         self.player.end()
         self.assertEqual(self.player.played[-1], reply)
 
+    def test_a_reply_whose_audio_is_ready_ends_a_playing_ack(self) -> None:
+        """The acknowledgement never delays the answer."""
+        ack = self.say(KIND_ACK, "One moment, sir.")
+        self.assertEqual(self.player.played, [ack])
+        reply = self.say(KIND_REPLY, "Friday has your sync at two.", synthesized=False)
+        self.assertEqual(self.player.played, [ack])                # its audio is not here yet: nothing to say instead
+        self.assertEqual(self.player.stops, 0)
+        self.voice.on_audio(reply, audio(reply), None)
+        self.assertEqual(self.player.played, [ack, reply])         # now, not after the acknowledgement
+        self.assertEqual(self.spoken, ["One moment, sir.", "", "Friday has your sync at two."])
+        self.assertEqual(self.voice.current().seq, reply)
+
+    def test_only_a_reply_ends_an_ack_and_an_ack_ends_nothing(self) -> None:
+        ack = self.say(KIND_ACK, "One moment, sir.")
+        result = self.say(KIND_RESULT, "Done, sir.")
+        self.assertEqual(self.player.played, [ack])
+        self.player.end()
+        self.assertEqual(self.player.played, [ack, result])
+        self.player.end()
+        reply = self.say(KIND_REPLY, "Right, sir.")
+        self.say(KIND_ACK, "On it, sir.")
+        self.assertEqual(self.player.played[-1], reply)
+        self.assertEqual(self.voice.current().seq, reply)
+
+    def test_stop_key_ends_that_utterance_playing_and_the_next_goes_on(self) -> None:
+        say = self.say(KIND_REPLY, "Friday has your sync.", key="ask-say")
+        other = self.say(KIND_RESULT, "Done, sir.")
+        self.assertEqual(self.player.played, [say])
+        self.voice.stop_key("ask-say")
+        self.assertEqual(self.player.played, [say, other])
+        self.assertEqual(self.spoken, ["Friday has your sync.", "", "Done, sir."])
+
+    def test_stop_key_drops_it_waiting_and_leaves_the_one_playing(self) -> None:
+        playing = self.say(KIND_RESULT, "Done, sir.")
+        waiting = self.say(KIND_REPLY, "Friday has your sync.", key="ask-say", synthesized=False)
+        self.voice.stop_key("ask-say")
+        self.assertIn(waiting, self.worker.forgotten)
+        self.assertEqual(self.voice.current().seq, playing)
+        self.assertEqual(self.player.stops, 0)
+        self.voice.stop_key("")                                    # no key: nothing
+        self.assertEqual(self.voice.current().seq, playing)
+
+    def test_the_silent_voice_has_stop_key_too(self) -> None:
+        self.assertIsNone(speech.SilentVoice().stop_key("ask-say"))
+        self.assertIsInstance(speech.SilentVoice(), speech.Voice)
+
     def test_audio_for_a_dropped_utterance_is_ignored(self) -> None:
         seq = self.say(KIND_ANNOUNCE, "Sir, your AM briefing is ready to view.", key="k", synthesized=False)
         self.voice.cancel_key("k")
