@@ -2417,6 +2417,50 @@ long stopping took). On the HUD LIVE never opens by itself.
 **Logs** carry run ids, kinds, counts, statuses and refusal codes only - never a
 file name, a path, a window title, an app's name or what you typed.
 
+### Tasks: Jarvis works it through
+
+Give Jarvis a task that takes more than one answer or one card - looking things
+up, comparing, building or organising - and he works out the steps himself: he
+shows a plan, works through it, checks what he did, changes approach when something
+fails, and reports what he produced and what he could not do. Your own Claude
+Code does the thinking, on your plan, over tools only Jarvis serves on this PC. A
+plain question still gets a plain answer through Ask.
+
+**Turning it on.** It is off in the public `config.toml` (`[agent] enabled =
+false`). Turn it on for this PC with the line `JARVIS_AGENT_ENABLED=true` in `.env`,
+then restart Jarvis. It also needs [Jarvis on your desktop](#jarvis-on-your-desktop-the-hud)
+(turned on, on its card) and [Ask](#ask-jarvis-optional). Off, nothing of it runs and
+not a word of it reaches Claude.
+
+**This version** is the engine: a plan, short spoken lines, questions, and text
+files in the task's own folder. Reading the web and your own data come in later
+versions; until then he says plainly when a task needs them.
+
+**One task at a time.** The first planner run decides that a request is a task; it
+starts from your own words, whatever the planner wrote, and with nothing else.
+While it runs, what you type goes to it as your message, and "stop" or "cancel" ends it
+at once: the process is killed and anything it was still doing is dropped. A question
+he asks shows on the caption and waits for what you type next.
+
+**Its budget.** After `[agent] max_turns` turns or `max_minutes` minutes of work he asks
+"Keep going?" (the clock rests while he waits for you). No, or no answer, and he reports
+where things stand and stops. If your plan's limit is reached the task pauses, says
+when it resets and asks you then; a run that would use extra usage is killed at once.
+`tasks_per_day` limits how many start in 24 hours.
+
+**Safe by design.** Claude Code runs with no tool of its own: its only tools are served
+by Jarvis on `127.0.0.1`, behind a token that exists for that run alone and never goes
+on a command line. Every start of a run is checked (only these tools, no skills, the
+one server connected) and anything else kills it. He may write only in the task's own
+folder, `Jarvis\Workspace\<date>-<slug>` in your user folder (`[agent] workspace`, never
+under OneDrive): text-like files only (.md .txt .csv .tsv .json .html .htm .css .svg .xml
+.yaml .yml .log), never a program or a script, 5 MB a file and 50 MB and 200 files a task.
+A restart ends a task; its files stay.
+
+**LIVE** shows each task with one step per tool call (on screen and in memory only; it
+never opens LIVE by itself). **Logs** carry ids, kinds, counts, states, reason codes and
+durations only - never your words, a file name, a tool's arguments or a token.
+
 ## TODAY and DEADLINES
 
 The **Day view** (click the header clock; Esc closes it) shows your day.
@@ -3749,8 +3793,9 @@ research](#web-research) and the productivity bundle ([Memory](#memory-the-memor
 on or off for this PC, whatever `[ask] enabled`, `[research] enabled` and
 `[productivity] enabled` say; `JARVIS_DESKTOP_ENABLED` does the same for
 [Jarvis on your desktop](#jarvis-on-your-desktop-the-hud) (`[desktop] enabled`),
-which then still waits for your **Turn on** on its first-run card. Variables
-already set in the environment win over `.env`.
+which then still waits for your **Turn on** on its first-run card, and
+`JARVIS_AGENT_ENABLED` for [tasks](#tasks-jarvis-works-it-through) (`[agent]
+enabled`). Variables already set in the environment win over `.env`.
 
 **`google_client_secret.json`** (next to this README, optional): the Google OAuth
 client for calendar actions (setup step 8).
@@ -3865,6 +3910,12 @@ log. Changes apply the next time the app starts.
 | `[desktop] screenshots_dir` | `""` | Where screenshots go: `""` = `Jarvis\Screenshots` in your user folder, else a full folder path. |
 | `[desktop] undo_days` | `7` | How long Undo is offered for a change to your files (1-30 days); "undo" looks this far back. |
 | `[desktop] apps` | `false` | Work inside apps you allow (a later version); nothing uses it yet. |
+| `[agent] enabled` | `false` | [Tasks](#tasks-jarvis-works-it-through): Jarvis works a task through step by step. Turn it on for this PC with `JARVIS_AGENT_ENABLED=true` in `.env` (it overrides this key both ways); it also needs `[desktop]` and `[ask]` on. |
+| `[agent] model`, `effort` | `"opus"`, `""` | The tasks' model and effort (`"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`; `""` = Claude Code's default). Quick replies stay on `[ask] model`. |
+| `[agent] max_turns`, `max_minutes` | `60`, `20` | A task's budget (5-1000 turns, 1-240 minutes of work); reaching one asks "Keep going?". |
+| `[agent] tasks_per_day` | `20` | How many tasks may start in 24 hours (1-200). |
+| `[agent] search_engine` | `"duckduckgo"` | Where his searches will go: `"duckduckgo"`, `"bing"` or `"google"` (a later version; nothing uses it yet). |
+| `[agent] workspace` | `""` | The tasks' folder: `""` = `Jarvis\Workspace` in your user folder, else a full folder path. Never under OneDrive: a task refuses to start there. |
 
 The offline voice uses the same `rate` and `volume`: the rate scales Windows'
 default 200 words per minute, and a volume above `+0%` cannot get louder than
@@ -4101,6 +4152,8 @@ Other files in `%LOCALAPPDATA%\briefing-reader`:
 | `accounts.json` | Which Google account each account name is (its address and Google's account id), written by the first sign-in that says so, and whether you confirmed it ("confirmed", after "Signed in as ... - is that right?"; nothing is sent or changed for a name until then). **No, use another account** removes the entry; or delete an entry, or the file, to bind a name to another Google account (setup step 8, "Disconnecting"). A name with a saved sign-in but no entry Jarvis can read (deleted, or the file is not valid JSON) sends and changes nothing until it signs in again. |
 | `recipients.json` | The addresses Jarvis sent replies and emails to, as one-way hashes (never the addresses), with the time; at most 5000. An address in it needs no NEW RECIPIENT confirmation. Delete it to confirm every address again. |
 | `ask_usage.json` | Ask Jarvis's planner runs of the last two days, for the hourly and daily caps (shared by every Jarvis process): a random id per run, when it started, how long it took, its turns and token counts and the outcome (web research runs carry `"kind": "research"` and count against both the Ask caps and the research caps; day plans carry `"kind": "plan_day"`, meeting briefs `"prep"` and drafts `"nudge"`, and count against both the Ask caps and `[productivity] max_runs_per_day`); and, after Claude Code reported extra usage, until when Ask is paused (`hold_until`). Never a request or anything the planner wrote. Delete it to reset the counts and the pause (`ask_usage.json.lock` next to it only takes turns between processes). |
+| `agent_tasks.json` | When [tasks](#tasks-jarvis-works-it-through) started in the last 24 hours, for `[agent] tasks_per_day`: times only, never a word of a task. |
+| `agent\`, `agent-runs\` | The empty folder Claude Code runs in for a task (it refuses to run while anything is in it), and each running task's own folder, with the MCP config that holds its one-run token, deleted when the task ends. |
 | `ask\` | The empty folder Claude Code runs in for Ask. Ask refuses to run while anything is in it (a `CLAUDE.md` or `.mcp.json` there would add instructions or tools). |
 | `research\` | The empty folder Claude Code runs in for web research; research refuses to run while anything is in it. |
 | `runstate.json` | Per scheduled briefing: when it was first shown, when it was announced (`announced_at`) and first viewed (`viewed_at`), when and how a classic prompt was answered (read, dismissed, done), and (the productivity bundle) when the plan offer was posted for it (`plan_offered_at`) and when its day was planned (`planned_at`; an evening "plan tomorrow" marks tomorrow's AM slot), kept for 14 days. The catch-up task uses it, and it keeps a briefing from being announced twice; see [Catch-up and the hotkey](#catch-up-and-the-hotkey). Safe to delete (a briefing may then be announced once more). |
@@ -4833,6 +4886,8 @@ briefing_reader/tts.py        edge-tts synthesis, Windows SAPI fallback, highlig
 briefing_reader/player.py     QtMultimedia player that plays sections in order with pauses
 briefing_reader/hud.py        Jarvis HUD widget kit: colours, fonts, chamfered panels, orb, buttons, cards, agenda, command bar, tabs, conversation, the LIVE log, its pictures and the picture viewer
 briefing_reader/ui.py         assistant screen (JARVIS / BRIEFING / LIVE / MEMORY tabs), the LIVE pop-out window, classic prompt, tray icon, approvals, TODAY / DEADLINES, app controller (launch kinds, NEW, greeting, announcement)
+briefing_reader/agent/        Tasks (no Qt): the tool registry (tools), the task's own folder (workspace), the local MCP endpoint (endpoint), budgets and what is offered (policy), one run (runner), its prompt and settings (assets)
+briefing_reader/agent_ui.py   Tasks in the app: the controller of the one task that may run, its LIVE task, its words on the caption and in the voice
 briefing_reader/ask_ui.py     Ask Jarvis in the app: the command bar's controller and its "ask" thread (web: requests too)
 fonts/                        Chakra Petch, Sora and JetBrains Mono fonts with their OFL licences
 tests/                        unit tests and saved fake Notion pages (tests/fixtures)

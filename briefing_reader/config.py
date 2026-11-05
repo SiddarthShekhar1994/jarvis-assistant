@@ -94,7 +94,7 @@ UNDO_SECONDS_RANGE = (3, 30)
 _MISSING = object()
 _KNOWN_TABLES = ("voice", "prompt", "polling", "sections", "notion", "calendar", "actions",
                  "accounts", "schedule", "hotkey", "agenda", "display", "ask", "research", "assistant", "live",
-                 "productivity", "ui", "meetings", "desktop")
+                 "productivity", "ui", "meetings", "desktop", "agent")
 # Library loggers kept at WARNING, also under --debug. The Google sign-in libraries log the
 # authorization code, the access token and the refresh token at DEBUG (requests_oauthlib),
 # before Jarvis could register them for redaction, so they never get DEBUG here.
@@ -435,6 +435,28 @@ class DesktopConfig:
                 object.__setattr__(self, name, tuple(value))
 
 
+# Jarvis, a true agent ([agent]): a task worked out step by step by the owner's Claude Code over Jarvis's own tools.
+AGENT_RANGES = {"max_turns": (5, 1000), "max_minutes": (1, 240), "tasks_per_day": (1, 200)}
+AGENT_EFFORTS = ("", "low", "medium", "high", "xhigh", "max")      # "" = Claude Code's default
+AGENT_SEARCH_ENGINES = ("duckduckgo", "bing", "google")
+
+
+@dataclass(frozen=True)
+class AgentConfig:
+    """``[agent]``: Jarvis working through a task (off by default; JARVIS_AGENT_ENABLED overrides ``enabled``; it also
+    needs [desktop] and [ask] on: agent.policy.agent_on). Off means no endpoint, nothing started and no new word in any
+    prompt or schema. Bad values become the default with a warning; the workspace's warnings never name its value."""
+
+    enabled: bool = False
+    model: str = "opus"            # judgement matters more than speed in a task; quick replies stay on [ask] model
+    effort: str = ""               # one of AGENT_EFFORTS
+    max_turns: int = 60            # a task's budget: reaching it asks "Keep going?" (5..1000)
+    max_minutes: int = 20          # ... and so does this, in minutes of work (1..240)
+    tasks_per_day: int = 20        # tasks started in the last 24 hours (1..200)
+    search_engine: str = "duckduckgo"              # where web_search goes (a later part)
+    workspace: str = field(default="", repr=False)   # "" = Jarvis\Workspace in your user folder; never under OneDrive
+
+
 @dataclass(frozen=True)
 class Config:
     notion_token: str = field(repr=False)   # "" when missing; NEVER logged
@@ -466,6 +488,7 @@ class Config:
     ui: UiConfig = field(default_factory=UiConfig)
     meetings: MeetingsConfig = field(default_factory=MeetingsConfig)
     desktop: DesktopConfig = field(default_factory=DesktopConfig)
+    agent: AgentConfig = field(default_factory=AgentConfig)
 
     @property
     def notion_url(self) -> str:
@@ -593,6 +616,7 @@ def load_config(project_root: Path | None = None, *,
         ui=_parse_ui(doc),
         meetings=_parse_meetings(doc, environ),
         desktop=_parse_desktop(doc, environ, hotkey.combo),
+        agent=_parse_agent(doc, environ),
     )
 
 
@@ -1221,6 +1245,33 @@ def _parse_desktop(doc: Mapping[str, Any], environ: Mapping[str, str] | None = N
                          hide_from_capture=r.boolean("hide_from_capture", d.hide_from_capture),
                          screenshots_dir=screenshots, undo_days=r.integer("undo_days", d.undo_days, *UNDO_DAYS_RANGE),
                          hud_key=hud_key, apps=r.boolean("apps", d.apps))
+
+
+AGENT_ENABLED_ENV = "JARVIS_AGENT_ENABLED"
+
+
+def _parse_agent(doc: Mapping[str, Any], environ: Mapping[str, str] | None = None) -> AgentConfig:
+    """``[agent]`` from config.toml; ``JARVIS_AGENT_ENABLED`` (e.g. in the gitignored ``.env``) overrides ``enabled``
+    both ways, like JARVIS_DESKTOP_ENABLED. Bad values fall back to the defaults. A workspace that is not a full local
+    folder is refused here; whether it lies under OneDrive is checked when a task starts (agent.workspace). The
+    warnings about the workspace (and a [agent] that is not a table) name the setting only: it may be a folder path."""
+    d = AgentConfig()
+    r = _TableReader(doc, "agent", _field_names(AgentConfig), echo=False)
+    enabled = _enabled_override(r.boolean("enabled", d.enabled), environ, AGENT_ENABLED_ENV, "agent.enabled")
+    raw = r._get("workspace")
+    workspace = d.workspace
+    if isinstance(raw, str) and (not raw.strip() or _absolute_folder(raw.strip())):
+        workspace = raw.strip()
+    elif raw is not _MISSING:
+        logger.warning("config.toml: agent.workspace is not a full folder path; using the default (Jarvis\\Workspace "
+                       "in your user folder)")
+    return AgentConfig(enabled=enabled, model=r.string("model", d.model, pattern=_MODEL_RE),
+                       effort=r.choice("effort", d.effort, AGENT_EFFORTS),
+                       max_turns=r.integer("max_turns", d.max_turns, *AGENT_RANGES["max_turns"]),
+                       max_minutes=r.integer("max_minutes", d.max_minutes, *AGENT_RANGES["max_minutes"]),
+                       tasks_per_day=r.integer("tasks_per_day", d.tasks_per_day, *AGENT_RANGES["tasks_per_day"]),
+                       search_engine=r.choice("search_engine", d.search_engine, AGENT_SEARCH_ENGINES),
+                       workspace=workspace)
 
 
 def _parse_assistant(doc: Mapping[str, Any]) -> AssistantConfig:

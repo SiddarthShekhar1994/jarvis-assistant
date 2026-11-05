@@ -375,6 +375,7 @@ class ConfigFileTests(ProjectTestCase):
             "ui": {f.name for f in dataclasses.fields(config.UiConfig)},
             "meetings": {f.name for f in dataclasses.fields(config.MeetingsConfig)},
             "desktop": {f.name for f in dataclasses.fields(config.DesktopConfig)},
+            "agent": {f.name for f in dataclasses.fields(config.AgentConfig)},
         }
         self.assertEqual(set(doc), set(expected_keys))
         for table, keys in expected_keys.items():
@@ -439,6 +440,13 @@ class ConfigFileTests(ProjectTestCase):
         self.assertIn("JARVIS_DESKTOP_ENABLED=true", desktop_part)
         self.assertIn("\nenabled = false\n", desktop_part)
         self.assertNotIn(":\\", desktop_part)
+        # Tasks ship off, with every default (switched on per PC from .env); no path in them.
+        self.assertEqual(cfg.agent, config.AgentConfig())
+        self.assertFalse(cfg.agent.enabled)
+        agent_part = raw.decode("ascii").split("[agent]", 1)[1]
+        self.assertIn("JARVIS_AGENT_ENABLED=true", agent_part)
+        self.assertIn("\nenabled = false\n", agent_part)
+        self.assertNotIn(":\\", agent_part)
 
     def test_client_secret_is_gitignored(self) -> None:
         lines = (config.PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()

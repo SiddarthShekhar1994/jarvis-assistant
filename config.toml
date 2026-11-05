@@ -363,3 +363,18 @@ screenshots_dir = ""          # where screenshots go; "" = the Jarvis\Screenshot
 undo_days = 7                 # how long Undo is offered, in days (1..30)
 hud_key = "ctrl+alt+h"        # switches between the window and the HUD; never the [hotkey] combo
 apps = false                  # work inside the apps you allow (filling forms): a later version, and off until then
+
+[agent]
+# Jarvis, a true agent: give him a task and he works out the steps himself - he shows a plan, works through it with
+# his own tools, checks what he did and reports what he produced and what he could not do. Your own Claude Code does
+# the thinking on your claude.ai plan, over tools only Jarvis serves on this PC. He writes only inside his workspace
+# (text-like files, never a program or a script); anything else waits for your click, as ever. Off here; turn it on for
+# this PC with JARVIS_AGENT_ENABLED=true in .env. It also needs [desktop] and [ask] on.
+enabled = false
+model = "opus"                # the tasks' model; quick replies stay on [ask] model
+effort = ""                   # "low", "medium", "high", "xhigh" or "max"; "" = Claude Code's default
+max_turns = 60                # a task's budget; reaching it asks "Keep going?" (5..1000)
+max_minutes = 20              # ... and so does this many minutes of work (1..240)
+tasks_per_day = 20            # how many tasks may start in 24 hours (1..200)
+search_engine = "duckduckgo"  # where his searches go: "duckduckgo", "bing" or "google" (the words of each search go there)
+workspace = ""                # his files; "" = the Jarvis\Workspace folder in your user folder; never under OneDrive

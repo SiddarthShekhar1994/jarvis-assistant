@@ -259,6 +259,7 @@ class DesktopAnswer:
     question: str = field(default="", repr=False)
     steps: tuple[PlannedStep, ...] = ()
     via_fallback: bool = False
+    agent: Any = field(default=None, repr=False)   # ask.stream.AgentRequest: a task (only when the run was offered it)
 
     def __repr__(self) -> str:
         return f"DesktopAnswer({len(self.steps)} step(s), question: {bool(self.question)})"

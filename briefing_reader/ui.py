@@ -4981,7 +4981,8 @@ class AppController(QObject):
                  desktop_factory: Callable[[Any], Any] | None = None,
                  desktop_launch: bool = False,
                  desktop_backend: Callable[[], Any] | None = None,
-                 desktop_window_api: Any = None) -> None:
+                 desktop_window_api: Any = None,
+                 agent_factory: Callable[..., Any] | None = None) -> None:
         super().__init__()
         self.config = config
         self.client = client
@@ -5061,6 +5062,7 @@ class AppController(QObject):
         self.productivity: Any = self._create_productivity()   # the bundle's day read and offers (needs Ask)
         self.meetings: Any = self._create_meetings()    # [meetings]: the meeting recorder, or None while it is off
         self._init_desktop(desktop_factory)             # [desktop]: the Dock's Desktop, Settings > Desktop, the HUD
+        self.agent: Any = self._create_agent(agent_factory)   # [agent]: a task worked through, or None while it is off
         self.window.reading.set_find_actions(self.productivity is not None)   # offers' links in the Find list
         # Jarvis's own voice: silent unless injected; start() builds the real one ([assistant] speak).
         self._voice_injected = voice_factory is not None
@@ -8515,6 +8517,8 @@ class AppController(QObject):
         if outcome.ok:
             decidable = sum(1 for card in outcome.cards if not card.error)
             sub = [f"{_plural(decidable, 'proposal')} under NEEDS YOUR OK" if decidable else "no proposals"]
+            if getattr(outcome, "agent_task", ""):
+                sub = ["a task: Live has its steps"]
             if outcome.runs:
                 sub.append(f"{outcome.duration_ms / 1000:.1f} s")
             question_only = bool(outcome.question) and not outcome.cards
@@ -8655,6 +8659,10 @@ class AppController(QObject):
             return
         self._offer_running = 0
         self._converse_ask(outcome)
+        if outcome.ok and getattr(outcome, "agent_task", ""):
+            self._activity(hud.TAG_ASK, "Handed to a task", f"{outcome.duration_ms / 1000:.1f} s")
+            self._start_agent(outcome.agent_task)
+            return
         if outcome.ok and getattr(outcome, "suggestion", ""):
             self._offer_memory_suggestion(outcome.suggestion)
         report = getattr(outcome, "research", None) if outcome.ok else None
@@ -9341,6 +9349,8 @@ class AppController(QObject):
         if desktop is None:
             return
         saved = desktop.turn_off()
+        if getattr(self, "agent", None) is not None:
+            self.agent.stop("turned off")    # R8: a task ends at once, and none is offered while it is off
         ask = self.ask
         if ask is not None and ask.running_mode == MODE_DESKTOP:
             logger.info("Desktop: turned off while a desktop request's planner run was on its way; cancelled")
@@ -9563,6 +9573,10 @@ class AppController(QObject):
         row of counts (never the request, a name or Claude's text). No conversation entry: the HUD answers."""
         self._ask_desktop = False
         self._voice_call("cancel_key", ASK_ACK_KEY)
+        if outcome.ok and getattr(outcome, "agent_task", ""):
+            self._activity(hud.TAG_ASK, "Desktop: handed to a task", f"{outcome.duration_ms / 1000:.1f} s")
+            self._start_agent(outcome.agent_task)      # the HUD's bar says Jarvis's own words for it
+            return
         desktop = getattr(self, "desktop", None)
         if desktop is not None:
             desktop.report_plan(outcome)
@@ -9620,6 +9634,85 @@ class AppController(QObject):
         tray's Quit - "done" recorded, then quit - never back to the prompt over the HUD."""
         self._record_done()
         self.quit()
+
+    # ---- a task Jarvis works through ([agent]) ----------------------------------------------------------
+
+    def _create_agent(self, factory: Callable[..., Any] | None) -> Any:
+        """agent_ui.AgentController while [agent] is on, with [desktop] and [ask] (agent.policy.agent_on). Off: None,
+        and nothing of it is imported, offered or started: no endpoint, no new word in any prompt or schema."""
+        if not getattr(getattr(self.config, "agent", None), "enabled", False):
+            return None
+        from .agent.policy import agent_on
+
+        desktop = getattr(self, "desktop", None)
+        if not agent_on(self.config) or self.ask is None or desktop is None or not hasattr(self.ask.planner, "engine"):
+            logger.info("Agent: [agent] is on, but it needs [desktop] and [ask] on; nothing is offered")
+            return None
+        from . import agent_ui
+
+        planner = self.ask.planner
+        try:
+            controller = (factory or agent_ui.AgentController)(self.config, planner, live=self.live,
+                                                               consent=desktop.consent_given, parent=self)
+        except Exception as exc:  # noqa: BLE001 - Jarvis works without tasks
+            logger.warning("Could not set up tasks (%s)", type(exc).__name__)
+            return None
+        controller.said.connect(self._on_agent_said)
+        controller.noticed.connect(self._on_agent_noticed)
+        controller.acknowledged.connect(lambda text: self._agent_words(text, hud.TONE_DONE, speak=False))
+        controller.questionAsked.connect(self._on_agent_question)
+        controller.taskEnded.connect(self._on_agent_ended)
+        self.ask.set_agent_gate(controller.take_request)   # D4: what is typed while a task runs goes to it
+        planner.agent_allowed = controller.offered         # the first planner run may hand a request to a task
+        logger.info("Agent: tasks are on (model %s; at most %d a day)", self.config.agent.model,
+                    self.config.agent.tasks_per_day)
+        return controller
+
+    def _start_agent(self, words: str) -> None:
+        """A first planner run handed the request to a task: it starts with the owner's own words."""
+        agent = getattr(self, "agent", None)
+        if agent is not None and self.state != STATE_QUITTING:
+            agent.start(words)
+
+    def _agent_words(self, text: str, tone: str, *, speak: bool = True) -> None:
+        """Words about the task on the caption line of the bar Ask is bound to (the HUD's, or the window's status line)
+        and Home's caption, and said aloud. The status line never while a request runs: the bar belongs to it then."""
+        if self.state == STATE_QUITTING or not text:
+            return
+        shown = scrub_for_speech(text)
+        if self.ask is not None:
+            self.ask.show_note(shown, tone, hud_text=shown)
+        if speak and self.config.assistant.speak_replies:
+            self._say(KIND_REPLY, text)
+        elif self.state == STATE_READING:
+            self.window.reading.say_caption(shown, spoken=False)
+
+    def _on_agent_said(self, text: str) -> None:
+        self._agent_words(text, hud.TONE_DONE)
+
+    def _on_agent_noticed(self, text: str, tone: str) -> None:
+        self._agent_words(text, tone)
+
+    def _on_agent_question(self, question: Any) -> None:
+        """A question for the owner: on the caption and in the conversation, in amber (a decision waits); what he types
+        next is its answer (AgentController.take_request). Part A3 gives it a card."""
+        self._agent_words(question.text, hud.TONE_WARN)
+        self._jarvis(question.text, tone=hud.TONE_WARN, context=False)
+
+    def _on_agent_ended(self, end: Any) -> None:
+        """The task ended: its report (or Jarvis's own words) on the caption, in the conversation and said aloud, and
+        one row of counts in ACTIVITY. Never given to a later Ask as the conversation: it may hold what pages said."""
+        from .agent.tools import OUTCOME_DONE, OUTCOME_FAILED
+
+        if self.state == STATE_QUITTING:
+            return
+        tone = {OUTCOME_FAILED: hud.TONE_ERROR, "stopped": hud.TONE_IDLE}.get(end.outcome, hud.TONE_DONE)
+        words = {OUTCOME_DONE: "done", OUTCOME_FAILED: "failed", "stopped": "stopped"}.get(end.outcome, "partly done")
+        self._agent_words(end.summary, tone, speak=end.outcome != "stopped")
+        files = f"\nFiles: {', '.join(end.outputs)}" if end.outputs else ""
+        sub = [f"task {words}", _plural(end.tools, "step"), _live.elapsed_text(end.worked_s)]
+        self._jarvis(end.summary + files, tone=tone, sub=f" {DOT} ".join(sub), context=False)
+        self._activity(hud.TAG_ASK, f"Task: {words}", f" {DOT} ".join(sub[1:]))
 
     # ---- offers (the productivity bundle) ----------------------------------------------------------
 
@@ -13751,6 +13844,8 @@ class AppController(QObject):
                       self._greeting_timer, self._held_timer, self._ack_timer):
             timer.stop()
         self._undos.clear()
+        if getattr(self, "agent", None) is not None:
+            self.agent.shutdown()  # a running task is killed and stamped: no process is left
         if self.ask is not None:
             self.ask.shutdown()   # a running Ask is cancelled: nothing is proposed
         if self.productivity is not None:

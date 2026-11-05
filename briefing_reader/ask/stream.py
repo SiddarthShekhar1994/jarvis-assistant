@@ -79,6 +79,7 @@ LINE_CAP = 12000
 QUERY_CAP = 200
 WHY_CAP = 200
 WEB_QUESTION_CAP = 200
+AGENT_GOAL_CAP = 200
 REMEMBER_CAP = 160                 # one suggested note (cli.REMEMBER_PROPERTY)
 REMEMBER_ITEMS = 1
 ACCOUNT_CAP = 24
@@ -162,6 +163,15 @@ class WebRequest:
 
 
 @dataclass(frozen=True)
+class AgentRequest:
+    """The first run's request to work through a task (planner text: shown to the owner, never logged; Jarvis starts the
+    task with the owner's own words, never these)."""
+
+    goal: str
+    why: str
+
+
+@dataclass(frozen=True)
 class Plan:
     say: str
     question: str
@@ -170,6 +180,7 @@ class Plan:
     via_fallback: bool = False   # read from the result text (StructuredOutput was not available)
     web: WebRequest | None = None   # web_research (only when the run was allowed to ask for it)
     remember: tuple[str, ...] = ()  # a suggested note (only when the run was allowed to suggest one)
+    agent: AgentRequest | None = None   # agent_task (only when the run was allowed to ask for it)
 
 
 @dataclass(frozen=True)
@@ -388,6 +399,21 @@ def _web_request(wanted: Any) -> WebRequest | None:
     return WebRequest(question, _one_line(why)) if question else None
 
 
+NOT_A_TASK = AgentRequest("", "")   # agent_task that does not fit the schema: the answer is garbled
+
+
+def agent_request(wanted: Any) -> AgentRequest | None:
+    """An agent_task value as the schema allows it; None for an empty goal (no task asked: the rest of the answer
+    stands, as with an empty web_research); NOT_A_TASK when it does not fit (the whole answer is then garbled)."""
+    if not isinstance(wanted, dict):
+        return NOT_A_TASK
+    goal, why = wanted.get("goal"), wanted.get("why", "")
+    if not isinstance(goal, str) or not isinstance(why, str) or len(goal) > AGENT_GOAL_CAP or len(why) > WHY_CAP:
+        return NOT_A_TASK
+    goal = _one_line(goal)
+    return AgentRequest(goal, _one_line(why)) if goal else None
+
+
 def _remember(wanted: Any) -> tuple[str, ...] | None:
     """A ``remember`` value as the schema allows it (a list of at most one string of at most 160
     characters; empty ones dropped); None when it does not fit (the whole answer is then garbled)."""
@@ -399,9 +425,9 @@ def _remember(wanted: Any) -> tuple[str, ...] | None:
 
 
 def _plan_from(data: Any, *, allow_search: bool, allow_web: bool = False, fallback: bool = False,
-               allow_remember: bool = False) -> Plan | None:
-    """structured_output (or the fallback's JSON) shape-checked locally; None when it does not fit.
-    ``gmail_search`` / ``web_research`` / ``remember`` are read only when allowed (ignored otherwise)."""
+               allow_remember: bool = False, allow_agent: bool = False) -> Plan | None:
+    """structured_output (or the fallback's JSON) shape-checked locally; None when it does not fit. ``gmail_search`` /
+    ``web_research`` / ``remember`` / ``agent_task`` are read only when allowed (ignored otherwise)."""
     if not isinstance(data, dict):
         return None
     say, question, lines = data.get("say", ""), data.get("question", ""), data.get("lines")
@@ -434,12 +460,17 @@ def _plan_from(data: Any, *, allow_search: bool, allow_web: bool = False, fallba
         if found is None:
             return None
         remember = found
+    agent = None
+    if allow_agent and data.get("agent_task") is not None:
+        agent = agent_request(data.get("agent_task"))
+        if agent is NOT_A_TASK:
+            return None
     kept = tuple(line.strip() for line in lines if line.strip())
-    return Plan(say, question, kept, search, fallback, web, remember)
+    return Plan(say, question, kept, search, fallback, web, remember, agent)
 
 
 def _fallback_plan(text: str, *, allow_search: bool, allow_web: bool = False,
-                   allow_remember: bool = False) -> Plan | None:
+                   allow_remember: bool = False, allow_agent: bool = False) -> Plan | None:
     """Only when init showed no StructuredOutput: the result text as JSON (code fences dropped),
     else its lines that start with a known kind."""
     text = text or ""
@@ -449,13 +480,18 @@ def _fallback_plan(text: str, *, allow_search: bool, allow_web: bool = False,
     except ValueError:
         data = None
     plan = _plan_from(data, allow_search=allow_search, allow_web=allow_web, fallback=True,
-                      allow_remember=allow_remember) if data is not None else None
+                      allow_remember=allow_remember, allow_agent=allow_agent) if data is not None else None
     if plan is not None:
         return plan
     found = [line.strip() for line in text.splitlines() if line.strip().startswith(KIND_PREFIXES)]
     if not found:
         return None
     return Plan("", "", tuple(found[:LINES_CAP]), None, True)
+
+
+def limit_reset_words(text: str, *, now: Callable[[], datetime] = lambda: datetime.now().astimezone()) -> str:
+    """"3pm (Europe/London)" from a usage-limit text, sanitized ("" when it names no time)."""
+    return _reset_words(text, now)
 
 
 def _reset_words(text: str, now: Callable[[], datetime]) -> str:
@@ -508,9 +544,10 @@ def result_failure(event: Mapping[str, Any], init: InitSummary | None, *,
 
 def read_result(event: Mapping[str, Any], init: InitSummary | None, *, allow_search: bool, allow_web: bool = False,
                 now: Callable[[], datetime] = lambda: datetime.now().astimezone(),
-                allow_remember: bool = False) -> Plan | AskFailure:
+                allow_remember: bool = False, allow_agent: bool = False) -> Plan | AskFailure:
     """The result event -> Plan or AskFailure. A plan needs a checked init first. ``remember`` is
-    read only with ``allow_remember`` (a run that was offered it in its schema)."""
+    read only with ``allow_remember``, ``agent_task`` only with ``allow_agent`` (a run that was offered it in its
+    schema)."""
     found = result_failure(event, init, now=now)
     if found is not None:
         return found
@@ -518,11 +555,13 @@ def read_result(event: Mapping[str, Any], init: InitSummary | None, *, allow_sea
     text = event.get("result") if isinstance(event.get("result"), str) else ""
     data = event.get("structured_output")
     if data is not None:
-        plan = _plan_from(data, allow_search=allow_search, allow_web=allow_web, allow_remember=allow_remember)
+        plan = _plan_from(data, allow_search=allow_search, allow_web=allow_web, allow_remember=allow_remember,
+                          allow_agent=allow_agent)
         return plan if plan is not None else failure(GARBLED, "shape")
     if init.structured_tool:
         return failure(GARBLED, "no_structured_output")
-    plan = _fallback_plan(text, allow_search=allow_search, allow_web=allow_web, allow_remember=allow_remember)
+    plan = _fallback_plan(text, allow_search=allow_search, allow_web=allow_web, allow_remember=allow_remember,
+                          allow_agent=allow_agent)
     return plan if plan is not None else failure(GARBLED, "fallback")
 
 
@@ -817,16 +856,18 @@ def run_planner(runner: Runner, argv: Sequence[str], prompt: str, *, env: Mappin
                 now: Callable[[], datetime] = lambda: datetime.now().astimezone(),
                 progress: Progress | None = None, capture: bool = False, allow_web: bool = False,
                 allow_remember: bool = False, on_words: Callable[[str, bool], None] | None = None,
-                process: Process | None = None, after_start: Callable[[], None] | None = None) -> RunResult:
+                process: Process | None = None, after_start: Callable[[], None] | None = None,
+                allow_agent: bool = False) -> RunResult:
     """One planner run (run_cli with check_init, check_event and read_result). ``allow_search`` /
-    ``allow_web`` / ``allow_remember``: the run may ask to read mail / for web research / suggest a
-    note to remember. ``on_words``: the say's words as they are written (SayWatch; the result's first_words_s
-    and say_complete_s say when, from the send). ``process`` / ``after_start``: run_cli's."""
+    ``allow_web`` / ``allow_remember`` / ``allow_agent``: the run may ask to read mail / for web research / suggest a
+    note to remember / work through a task. ``on_words``: the say's words as they are written (SayWatch; the result's
+    first_words_s and say_complete_s say when, from the send). ``process`` / ``after_start``: run_cli's."""
     watch = SayWatch(on_words, clock=clock) if on_words is not None else None
     sent = clock()
     result = run_cli(runner, argv, prompt, env=env, cwd=cwd, timeout_s=timeout_s,
                      read=lambda event, init: read_result(event, init, allow_search=allow_search, allow_web=allow_web,
-                                                          now=now, allow_remember=allow_remember),
+                                                          now=now, allow_remember=allow_remember,
+                                                          allow_agent=allow_agent),
                      cancel=cancel, clock=clock, init_timeout_s=init_timeout_s, poll_s=poll_s, now=now,
                      progress=progress, capture=capture, watch=watch.feed if watch is not None else None,
                      process=process, after_start=after_start)
@@ -834,6 +875,15 @@ def run_planner(runner: Runner, argv: Sequence[str], prompt: str, *, env: Mappin
         return result
     return replace(result, first_words_s=watch.first_at - sent,
                    say_complete_s=watch.complete_at - sent if watch.complete_at is not None else None)
+
+
+def exit_failure(tail: str, exit_code: int | None, *,
+                 now: Callable[[], datetime] = lambda: datetime.now().astimezone()) -> AskFailure:
+    """Why a process that ended with no result ended, from its stderr's tail and exit code (stderr itself never
+    leaves here: AskFailure holds Jarvis's own words)."""
+    if _UNKNOWN_OPTION_RE.search(tail):
+        return failure(CLI_UNSUPPORTED, "unknown_option")
+    return classify_text(tail, now=now) or failure(ERROR, f"exit {exit_code}" if exit_code is not None else "no_result")
 
 
 def run_cli(runner: Runner, argv: Sequence[str], prompt: str, *, env: Mapping[str, str], cwd: Path,
@@ -966,11 +1016,7 @@ def run_cli(runner: Runner, argv: Sequence[str], prompt: str, *, env: Mapping[st
         if ahead and not output:   # started ahead, it ended before any output: the engine runs cold
             return RunResult(failure=failure(ERROR, PRESTART_DIED), init=init,
                              stats=RunStats(duration_ms=measured, exit_code=exit_code))
-        if _UNKNOWN_OPTION_RE.search(tail):
-            found = failure(CLI_UNSUPPORTED, "unknown_option")
-        else:
-            found = classify_text(tail, now=now) or failure(ERROR, f"exit {exit_code}" if exit_code is not None
-                                                            else "no_result")
+        found = exit_failure(tail, exit_code, now=now)
         return RunResult(failure=found, init=init, stats=RunStats(duration_ms=measured, exit_code=exit_code))
     stats = stats_of(result_event, measured_ms=measured, exit_code=exit_code)
     outcome = read(result_event, init)

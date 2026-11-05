@@ -23,6 +23,10 @@
     build_research_argv(...)    web research's: the same, but its only tools are WebSearch and
                                 WebFetch (--tools and --allowedTools), its own prompt, schema and
                                 settings (ask.research)
+    build_agent_argv(...)       a task's (agent.runner): no tool but Jarvis's own over the local MCP endpoint, which
+                                --mcp-config names in a file (the bearer token never goes on a command line), its own
+                                prompt and settings, stream-json both ways; agent_env: the clean environment and the MCP
+                                tool timeout; agent_mcp_config: that file's text
     prepare_work_folder(path)   %LOCALAPPDATA%\\briefing-reader\\ask (web research: ...\\research),
                                 created empty; anything in it (a CLAUDE.md, .mcp.json, .claude)
                                 refuses the run
@@ -79,6 +83,23 @@ MEETING_SCHEMA_FILE = ASSETS / "meeting_schema.json"
 # Jarvis on your desktop (P1.7): a desktop request's plan of refs (ask.desktop_mode; its skills grow per phase).
 DESKTOP_PROMPT_FILE = ASSETS / "desktop_prompt.md"
 DESKTOP_SCHEMA_FILE = ASSETS / "desktop_schema.json"
+# Jarvis, a true agent (briefing_reader.agent): a task's own prompt, settings and folders. The two *_agent prompts are
+# the first planner run's prompts with the words on agent_task after them, used only while the agent is on (off, the
+# prompt files are the same bytes as ever); tests/test_agent_router.py holds them to that.
+AGENT_ASSETS = ASSETS.parent.parent / "agent" / "assets"
+AGENT_PROMPT_FILE = AGENT_ASSETS / "agent_prompt.md"
+AGENT_SETTINGS_FILE = AGENT_ASSETS / "agent_settings.json"
+AGENT_WORK_FOLDER = "agent"                 # where a task's Claude Code runs: empty, like the others
+AGENT_RUNS_FOLDER = "agent-runs"            # each run's own folder: its MCP config, deleted when the run ends
+PROMPT_FILE_AGENT = ASSETS / "planner_prompt_agent.md"
+DESKTOP_PROMPT_FILE_AGENT = ASSETS / "desktop_prompt_agent.md"
+AGENT_SERVER = "jarvis"
+AGENT_TOOL_PREFIX = f"mcp__{AGENT_SERVER}__"
+AGENT_MAX_TURNS = 1000      # --max-turns: only a backstop, Jarvis keeps a task's budget itself (agent.policy.Budget)
+AGENT_TOOL_TIMEOUT_MS = "120000"   # MCP_TOOL_TIMEOUT: a margin; every tool returns within 45 s (the endpoint's rule)
+AGENT_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+_AGENT_TOOLS_RE = re.compile(rf"{re.escape(AGENT_TOOL_PREFIX)}[a-z][a-z0-9_]{{0,63}}"
+                             rf"(?:,{re.escape(AGENT_TOOL_PREFIX)}[a-z][a-z0-9_]{{0,63}})*")
 MODE_PROMPTS = {"plan": PLAN_PROMPT_FILE, "prep": PREP_PROMPT_FILE, "nudge": NUDGE_PROMPT_FILE,
                 "meeting": MEETING_PROMPT_FILE, "desktop": DESKTOP_PROMPT_FILE}
 MODE_SCHEMAS = {"plan": PLAN_SCHEMA_FILE, "prep": PREP_SCHEMA_FILE, "nudge": NUDGE_SCHEMA_FILE,
@@ -103,6 +124,9 @@ RESEARCH_FLAGS = ("--allowedTools",)
 # the whole reply at the end, with the prompt as plain stdin). The prompt never goes into argv either way.
 INPUT_FORMAT_FLAG = "--input-format"
 STREAM_FLAGS = (INPUT_FORMAT_FLAG, "--include-partial-messages")
+# Flags a task needs (probed; Ask stays ok without them, a task is refused).
+AGENT_FLAGS = ("--allowedTools", "--mcp-config", INPUT_FORMAT_FLAG, "--include-partial-messages",
+               "--replay-user-messages", "--restricted")
 # Never passed, whatever a later version offers: --bare reads API keys only, the others resume
 # saved sessions, write debug files or skip permissions.
 FORBIDDEN_FLAGS = ("--bare", "--resume", "--continue", "-c", "-r", "--debug", "--debug-file",
@@ -166,6 +190,7 @@ class Probe:
     message: str = ""                         # why not ok (safe to show and log)
     research_missing: tuple[str, ...] = ()    # RESEARCH_FLAGS --help does not list (Ask stays ok)
     streaming: bool = True                    # --help lists every STREAM_FLAGS (else the plain path, as before)
+    agent_missing: tuple[str, ...] = ()       # AGENT_FLAGS --help does not list (Ask stays ok)
 
 
 @dataclass(frozen=True)
@@ -364,6 +389,52 @@ def build_research_argv(exe: Path | str, *, model: str, max_turns: int, schema: 
     if set(argv) & set(FORBIDDEN_FLAGS):   # never, whatever changes above
         raise ValueError("a forbidden flag")
     return argv
+
+
+def build_agent_argv(exe: Path | str, *, model: str, allowed_tools: str, mcp_config_file: Path | str, effort: str = "",
+                     prompt_file: Path = AGENT_PROMPT_FILE, settings_file: Path = AGENT_SETTINGS_FILE,
+                     max_turns: int = AGENT_MAX_TURNS) -> list[str]:
+    """A task's exact command line (spikes on Claude Code 2.1.294): no built-in tool (``--tools ""``), one MCP server -
+    Jarvis's own, on this PC - from a config FILE (``mcp_config_file``, in the run's own folder: it holds the bearer
+    token, which never goes on a command line), no settings files but Jarvis's own, no slash commands, nothing saved,
+    stream-json both ways. ``allowed_tools``: the registry's one comma list (agent.tools.Registry.allowed); dontAsk
+    denies everything else. --max-turns is a high backstop: Jarvis keeps the budget.
+
+    --safe-mode is left out on purpose: it removes MCP servers (proven: init then shows no tools), so a task could not
+    work with it. --restricted stays, and --strict-mcp-config, --setting-sources "" and the checks of every init event
+    (agent.runner.check_agent_init) do the rest. The goal goes to stdin, never into argv."""
+    if not model or model.startswith("-") or any(char.isspace() for char in model):
+        raise ValueError("not a model name")
+    if effort and effort not in AGENT_EFFORTS:
+        raise ValueError("not an effort level")
+    if not _AGENT_TOOLS_RE.fullmatch(allowed_tools or ""):
+        raise ValueError("not a list of Jarvis's tools")
+    config_file = str(mcp_config_file)
+    if not config_file.endswith(".json") or config_file.lstrip().startswith("{"):   # never inline: it holds the token
+        raise ValueError("not an MCP config file")
+    argv = [str(exe), "-p", "--output-format", "stream-json", "--verbose", INPUT_FORMAT_FLAG, "stream-json",
+            "--include-partial-messages", "--replay-user-messages", "--model", model]
+    if effort:
+        argv += ["--effort", effort]
+    argv += ["--system-prompt-file", str(prompt_file), "--tools", "", "--mcp-config", config_file,
+             "--strict-mcp-config", "--setting-sources", "", "--settings", str(settings_file),
+             "--disable-slash-commands", "--permission-mode", "dontAsk", "--permission-prompts", "none",
+             "--allowedTools", allowed_tools,
+             "--max-turns", str(int(max_turns)), "--no-session-persistence", "--restricted"]
+    if set(argv) & set(FORBIDDEN_FLAGS):   # never, whatever changes above
+        raise ValueError("a forbidden flag")
+    return argv
+
+
+def agent_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """A task's environment: clean_env, plus the MCP tool timeout (a margin: no tool is held open for a click)."""
+    return {**clean_env(environ), "MCP_TOOL_TIMEOUT": AGENT_TOOL_TIMEOUT_MS}
+
+
+def agent_mcp_config(url: str, token: str) -> str:
+    """The text of a run's MCP config file: the one server, Jarvis's own, with its bearer token."""
+    return compact_json({"mcpServers": {AGENT_SERVER: {"type": "http", "url": url,
+                                                       "headers": {"Authorization": f"Bearer {token}"}}}})
 
 
 def prepare_work_folder(path: Path, *, what: str = "Ask", folder: str = WORK_FOLDER) -> str:
@@ -685,11 +756,13 @@ def check_help(help_text: str, version: str) -> Probe:
     hardening = all(flag in flags for flag in HARDENING_FLAGS)
     research_missing = tuple(flag for flag in RESEARCH_FLAGS if flag not in flags)
     streaming = all(flag in flags for flag in STREAM_FLAGS)
+    agent_missing = tuple(flag for flag in AGENT_FLAGS if flag not in flags)
     if missing:
         return Probe(False, version, missing, hardening,
                      f"Claude Code {version or '(unknown version)'} is not supported by Ask yet (it lacks "
-                     f"{', '.join(missing)})", research_missing, streaming)
-    return Probe(True, version, (), hardening, research_missing=research_missing, streaming=streaming)
+                     f"{', '.join(missing)})", research_missing, streaming, agent_missing)
+    return Probe(True, version, (), hardening, research_missing=research_missing, streaming=streaming,
+                 agent_missing=agent_missing)
 
 
 def probe(exe: Path, runner: Runner, env: Mapping[str, str], cwd: Path | None = None) -> Probe:
@@ -766,14 +839,25 @@ REMEMBER_PROPERTY = {"type": "array", "maxItems": 1, "items": {"type": "string",
                      "description": "At most one short fact worth keeping in the owner's memory (see REMEMBER); "
                                     "usually empty."}
 
+# Added in code too (no schema file changes) to a first planner run while the agent is on: it may hand the request to a
+# task. Jarvis starts the task with the owner's own words, whatever "goal" says.
+AGENT_TASK_PROPERTY = {"type": "object", "additionalProperties": False, "required": ["goal", "why"],
+                       "properties": {"goal": {"type": "string", "maxLength": 200},
+                                      "why": {"type": "string", "maxLength": 200}},
+                       "description": "Only when the request is a task of several steps - looking things up, "
+                                      "comparing, building or organising - that one answer or one card cannot do: a "
+                                      "few of the owner's words for it. Jarvis then works through it with his own "
+                                      "tools. Give no lines or steps when you use it."}
+
 
 def schema_text(*, allow_search: bool, allow_web: bool = False, allow_remember: bool = False,
-                path: Path = SCHEMA_FILE) -> str:
+                path: Path = SCHEMA_FILE, allow_agent: bool = False) -> str:
     """The --json-schema value: schema.json compact; without ``allow_search`` the gmail_search
     property is removed (the second planner run may not ask to read mail again), without
     ``allow_web`` the web_research property (only the first run may hand a request to web
     research, and only when [research] allows it); ``allow_remember`` adds REMEMBER_PROPERTY as
-    "remember" (without it the text is exactly as before)."""
+    "remember" (without it the text is exactly as before), ``allow_agent`` AGENT_TASK_PROPERTY as "agent_task" (the
+    same)."""
     data = json.loads(path.read_text(encoding="utf-8"))
     if not allow_search:
         data.get("properties", {}).pop("gmail_search", None)
@@ -781,20 +865,24 @@ def schema_text(*, allow_search: bool, allow_web: bool = False, allow_remember: 
         data.get("properties", {}).pop("web_research", None)
     if allow_remember:
         data.setdefault("properties", {})["remember"] = dict(REMEMBER_PROPERTY)
+    if allow_agent:
+        data.setdefault("properties", {})["agent_task"] = dict(AGENT_TASK_PROPERTY)
     return compact_json(data)
 
 
-def mode_schema_text(mode: str, *, allow_remember: bool = False) -> str:
+def mode_schema_text(mode: str, *, allow_remember: bool = False, allow_agent: bool = False) -> str:
     """A planner mode's --json-schema value (MODE_SCHEMAS, compact): never gmail_search or
     web_research (a mode never searches mail or the web, so it has no second run and no hand-off);
-    ``allow_remember`` adds REMEMBER_PROPERTY as "remember" (a run whose stdin has no <mail>).
-    KeyError for a mode without a schema."""
+    ``allow_remember`` adds REMEMBER_PROPERTY as "remember" (a run whose stdin has no <mail>), ``allow_agent``
+    AGENT_TASK_PROPERTY as "agent_task" (a desktop run while the agent is on). KeyError for a mode without a schema."""
     data = json.loads(MODE_SCHEMAS[mode].read_text(encoding="utf-8"))
     properties = data.setdefault("properties", {})
     properties.pop("gmail_search", None)
     properties.pop("web_research", None)
     if allow_remember:
         properties["remember"] = dict(REMEMBER_PROPERTY)
+    if allow_agent:
+        properties["agent_task"] = dict(AGENT_TASK_PROPERTY)
     return compact_json(data)
 
 

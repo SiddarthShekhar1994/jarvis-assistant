@@ -1,0 +1,10 @@
+{
+  "disableAllHooks": true,
+  "disableClaudeAiConnectors": true,
+  "autoMemoryEnabled": false,
+  "permissions": {
+    "allow": ["mcp__jarvis__*"],
+    "deny": ["Bash", "PowerShell", "Edit", "Write", "Read", "Glob", "Grep", "NotebookEdit",
+             "WebFetch", "WebSearch", "Agent", "Task"]
+  }
+}
