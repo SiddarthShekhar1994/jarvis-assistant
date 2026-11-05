@@ -91,6 +91,9 @@ AGENT_PROMPT_FILE = AGENT_ASSETS / "agent_prompt.md"
 AGENT_SETTINGS_FILE = AGENT_ASSETS / "agent_settings.json"
 AGENT_WORK_FOLDER = "agent"                 # where a task's Claude Code runs: empty, like the others
 AGENT_RUNS_FOLDER = "agent-runs"            # each run's own folder: its MCP config, deleted when the run ends
+AGENT_FETCH_WORK_FOLDER = "agent-fetch"     # where fetch_text's short runs start: empty, like the others
+AGENT_FETCH_PROMPT_FILE = AGENT_ASSETS / "fetch_prompt.md"
+AGENT_FETCH_MAX_TURNS = 4                   # the page, a try again, the answer and one spare
 PROMPT_FILE_AGENT = ASSETS / "planner_prompt_agent.md"
 DESKTOP_PROMPT_FILE_AGENT = ASSETS / "desktop_prompt_agent.md"
 AGENT_SERVER = "jarvis"
@@ -379,6 +382,27 @@ def build_research_argv(exe: Path | str, *, model: str, max_turns: int, schema: 
     argv = [str(exe), "-p", "--output-format", "stream-json", "--verbose", "--model", model,
             "--system-prompt-file", str(prompt_file), "--json-schema", schema,
             "--tools", tools, "--allowedTools", tools,
+            "--mcp-config", EMPTY_MCP_CONFIG, "--strict-mcp-config",
+            "--setting-sources", "", "--settings", str(settings_file),
+            "--disallowedTools", "mcp__*", "--disable-slash-commands",
+            "--permission-mode", "dontAsk", "--permission-prompts", "none",
+            "--max-turns", str(int(max_turns)), "--no-session-persistence"]
+    if hardened:
+        argv += list(HARDENING_FLAGS)
+    if set(argv) & set(FORBIDDEN_FLAGS):   # never, whatever changes above
+        raise ValueError("a forbidden flag")
+    return argv
+
+
+def build_fetch_argv(exe: Path | str, *, model: str, hardened: bool, prompt_file: Path = AGENT_FETCH_PROMPT_FILE,
+                     settings_file: Path = RESEARCH_SETTINGS_FILE, max_turns: int = AGENT_FETCH_MAX_TURNS) -> list[str]:
+    """fetch_text's exact command line: research's (build_research_argv), with WebFetch as the only tool, its own short
+    system prompt and no answer schema: the answer is plain text. The address and the question go to stdin, never into
+    argv."""
+    if not model or model.startswith("-") or any(char.isspace() for char in model):
+        raise ValueError("not a model name")
+    argv = [str(exe), "-p", "--output-format", "stream-json", "--verbose", "--model", model,
+            "--system-prompt-file", str(prompt_file), "--tools", WEB_FETCH_TOOL, "--allowedTools", WEB_FETCH_TOOL,
             "--mcp-config", EMPTY_MCP_CONFIG, "--strict-mcp-config",
             "--setting-sources", "", "--settings", str(settings_file),
             "--disallowedTools", "mcp__*", "--disable-slash-commands",

@@ -7752,6 +7752,7 @@ class CommandBar(QWidget):
         self._holo = False           # the hologram pill (set_holo): no meta line, only what needs the owner
         self._hud = False            # the desktop HUD's row (set_hud): no status line either
         self._typing = False
+        self._escape_hook: Any = None   # asked at Esc in the empty field (a task's Stop on the HUD's bar)
         self._last_request = ""      # the last request accepted from here, as typed (Up brings it back)
         self.input = _CommandInput()
         self.field = _CommandField(self.input)
@@ -8025,6 +8026,11 @@ class CommandBar(QWidget):
             return
         self.submitted.emit(text)
 
+    def set_escape_hook(self, hook: Any) -> None:
+        """``hook()`` is called at Esc in the empty field, before the last answer is put away (agent_feed: Esc stops a
+        task while the HUD's bar has the keyboard). None: nothing is called."""
+        self._escape_hook = hook
+
     def _on_escape(self) -> None:
         if self._running:
             if self.button.isEnabled():
@@ -8032,6 +8038,8 @@ class CommandBar(QWidget):
         elif self.input.text():
             self.input.clear()
         else:
+            if self._escape_hook is not None:
+                self._escape_hook()
             self.statusDismissed.emit()
 
     def _on_button(self) -> None:

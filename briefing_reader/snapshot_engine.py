@@ -345,6 +345,31 @@ def _start_engine() -> str:
     return ""
 
 
+def warm_up(*, test_platform: bool = False) -> float:
+    """Chromium started now, on the GUI thread (GUI thread only): the first profile is what takes the time, about a
+    second or more, and a task does this as it starts, before the switch and the panel move, so its first web step does
+    not freeze them. No page, no renderer and no window come of it. Its seconds; 0.0 when it did nothing: started
+    already, the settings or the engine say no (a page's shot will say why), or a test platform (unless
+    ``test_platform``)."""
+    if _ENGINE.started or (_test_platform() and not test_platform) or QCoreApplication.instance() is None:
+        return 0.0
+    began = time.monotonic()
+    try:
+        environ = _judged_environ()
+        if snapshots.sandbox_problem(environ) or snapshots.engine_flags_problem(environ) or _start_engine():
+            return 0.0
+        profile = _classes().QWebEngineProfile()
+        if profile.isOffTheRecord():
+            _ENGINE.started = True
+        profile.deleteLater()
+    except Exception as exc:  # noqa: BLE001 - the first page will try again and say why
+        logger.debug("Page snapshots: the web engine was not started ahead (%s)", type(exc).__name__)
+        return 0.0
+    seconds = time.monotonic() - began
+    logger.info("Page snapshots: web engine started ahead in %.1f s", seconds)
+    return seconds
+
+
 def _quietly(step: Callable[[], Any]) -> None:
     """Run one teardown step; a failure (an object already gone) never stops the next one."""
     try:

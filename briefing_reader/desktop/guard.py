@@ -546,6 +546,63 @@ def _reads_like_an_order(text: str) -> bool:
     return False
 
 
+# The strong signals (strong_order): what an ordinary page does not say. A web page is full of opening order verbs
+# ("Find a store", "Open all day"), of "you must" and of "System: Windows 11": those are left to the names and labels
+# above.
+_STRONG_PHRASE_RE = re.compile(
+    r"\bsystem\s+prompt\b|\bdo\s+anything\s+now\b|\bjailbreak\s+mode\b|\bdeveloper\s+mode\s+(?:enabled|activated)\b"
+    r"|\b(?:your|these\s+are\s+your)\s+(?:new|real|actual|updated|true)\s+instructions?\b"
+    r"|\b(?:new|updated|real|hidden|secret)\s+instructions?\s*:"
+    r"|\byou\s+are\s+now\s+(?:in\s+)?(?:developer|admin|god|jailbreak|unrestricted|dan)\b")
+_STRONG_ROLE_RE = re.compile(
+    r"(?:^|[\n\[(<{|>\"'])\s*(?:system|assistant|human|user|developer)\s*:\s*"
+    r"(?:you\b|your\b|ignore\b|disregard\b|forget\b|from\s+now\b|always\b|never\b|do\s+not\b|don't\b|please\b|send\b"
+    r"|email\b|search\b|open\b|fetch\b|go\s+to\b|visit\b|tell\b|reveal\b)"
+    r"|</?(?:system|assistant|human|developer)\s*>|\[/?(?:system|assistant|human)\]")
+_STRONG_TEMPLATE_RE = re.compile(
+    r"\[/?inst\]|<\|?im_(?:start|end)\|?>|<\|(?:system|user|assistant|endoftext)\|>|<</?sys>>"
+    r"|###\s*(?:instructions?|system)\s*:?\s*$")
+_STRONG_NAME_RE = re.compile(
+    r"^\W*(?:important\W+|urgent\W+|attention\W+|hey\s+|dear\s+|note\s+to\s+|message\s+to\s+)*(?:the\s+)?"
+    r"(?:jarvis|claude|chatgpt|gemini|copilot|ai\s+assistant|ai\s+agent|ai\s+model|llm|language\s+model)\s*[,:]"
+    r"|\bjarvis\b\W+(?:please\s+)?(?:" + "|".join(sorted(_VERBS)) + r")\b"
+    r"|\bif\s+you\s+are\s+an?\s+(?:ai|llm|language\s+model|assistant|agent|bot)\b"
+    r"|\b(?:assistants?|agents?|models?|bots?|llms?|ais?)\s+"
+    r"(?:reading|viewing|summari[sz]ing|processing|browsing|visiting)\s+this\b")
+_TAG_RUN_MIN = 8                 # tag characters in a row spelling this much are a hidden message (a flag emoji has fewer)
+
+
+def hidden_message(text: Any) -> bool:
+    """True when ``text`` holds a run of invisible tag characters long enough to spell something (a hidden or look-alike
+    trick; a flag emoji's few are not one). Read before such characters are stripped for showing."""
+    if not isinstance(text, str) or text.isascii():
+        return False
+    run = 0
+    for char in text:
+        run = run + 1 if _TAG_FIRST <= ord(char) <= _TAG_LAST else 0
+        if run >= _TAG_RUN_MIN:
+            return True
+    return False
+
+
+def strong_order(text: Any) -> bool:
+    """For web pages, whose ordinary words are full of opening order verbs: True only on a strong signal - an
+    instruction override, a role or prompt marker, a model's template, words addressed by name to Jarvis or a model, a
+    long run of hidden tag characters, or a word mixing Latin letters with a look-alike. ``suspect_text`` stays as it is
+    for short names and labels, whose bar is lower."""
+    if not isinstance(text, str) or not text.strip():
+        return False
+    if hidden_message(text):
+        return True
+    plain = unicodedata.normalize("NFKC", strip_hidden(text))
+    for word in _WORD_RE.findall(plain):
+        if any(char in _LOOKALIKE_CHARS for char in word) and any(char.isascii() and char.isalpha() for char in word):
+            return True
+    lowered = plain.translate(_LOOKALIKES).casefold()
+    return any(pattern.search(lowered) for pattern in (_OVERRIDE_RE, _STRONG_PHRASE_RE, _STRONG_ROLE_RE,
+                                                       _STRONG_TEMPLATE_RE, _STRONG_NAME_RE))
+
+
 # Every NEVER constant; each one has its own unit test (tests/test_desktop_guard.py: test_never_<name>).
 NEVER_CONSTANTS = (
     "UIA_IS_PASSWORD_PROPERTY", "SENSITIVE_WORDS", "PAYMENT_WORDS", "INVOKE_ALLOWED", "COMMIT_WORDS", "NEVER_KEYS",

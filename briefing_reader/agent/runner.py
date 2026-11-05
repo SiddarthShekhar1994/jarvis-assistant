@@ -7,8 +7,8 @@
                                         comes per user message, and every one is checked
     AgentRun(goal, engine=, registry=, folder=, on_event=, ...)
         start()                         the run's thread: the checks, the endpoint, the MCP config file, the process
-        owner_says(text)                the owner's words go in over stdin, labelled as his (D4). The answer to a
-                                        question that waits, when one does
+        owner_says(text)                the owner's words go in over stdin, labelled as the owner's (D4). The answer to
+                                        an ask_owner question that waits, when one does
         answer(question_id, text)       the owner-question seam: A3's card and the tests call it
         stop()                          kills at once: late tool results are dropped (R8)
         join(timeout)                   the thread and everything it holds are gone
@@ -16,9 +16,10 @@
 The process keeps its stdin open and Jarvis feeds it messages: the first one holds the goal, in the owner's own words,
 and goes in once the process has connected to the endpoint (its init then shows the tools; connect_s at most).
 A wait ends the turn (D5): ask_owner returns at once with "end your turn", the ``result`` event means the model is idle
-(it uses nothing then), and the answer goes in as the next message. The firewall's card waits the same way (kind Q_WEB),
-but only a click answers it: answer(id, "Allow"). What is typed meanwhile goes in as the owner's words and allows
-nothing; no answer in time is a refusal, and the task goes on. A ``result`` with no wait pending and no finish gets
+(it uses nothing then), and the answer goes in as the next message; a choice clicked or words typed answer it. The
+firewall's card waits the same way (kind Q_WEB), but only a click answers it: answer(id, "Allow"), and so does "Keep
+going?" (Q_KEEP_GOING, Q_RESUME). What is typed meanwhile goes in as the owner's words and allows nothing; no answer in
+time to the firewall's card is a refusal, and the task goes on. A ``result`` with no wait pending and no finish gets
 one prompt to carry on or finish, and after another one the task ends as partial. A message sent mid-run is delivered by
 Claude Code after the running tool returns (``--replay-user-messages`` shows when; a ``result`` while one is on its way
 is not idle).
@@ -65,7 +66,8 @@ from ..desktop.backend import real_backend_blocked
 from ..gcal import local_timezone
 from . import policy
 from .endpoint import TOOL_TIMEOUT_S, TOO_LONG_CODE, TOO_LONG_TEXT, Call, Endpoint
-from .tools import (OUTCOME_DONE, OUTCOME_FAILED, OUTCOME_PARTIAL, PlanStep, Registry, RunContext, ToolResult, error)
+from .tools import (OUTCOME_DONE, OUTCOME_FAILED, OUTCOME_PARTIAL, PlanStep, Registry, RunContext, ToolResult,
+                    doing_words, error)
 from .workspace import TaskFolder
 
 logger = logging.getLogger(__name__)
@@ -99,7 +101,7 @@ WRAP_UP_NO = ("Jarvis: the owner chose to stop here. Call finish now with outcom
 WRAP_UP_SILENT = ("Jarvis: the owner did not answer, so the task stops here. Call finish now with outcome partial: "
                   "what you did, what you produced and what is left. Call nothing else.")
 PAUSED_TEXT = ("Jarvis has paused the task: it has reached its budget and the owner is being asked whether to keep "
-               "going. End your turn now with one short sentence. His answer will come to you as your next message.")
+               "going. End your turn now with one short sentence. The answer will come to you as your next message.")
 WRAP_UP_TOOL_TEXT = "The task is stopping. Call finish now, and nothing else."
 WEB_ALLOWED_TEXT = "Jarvis: the owner allowed that one web call. Make it again now, exactly as it was."
 WEB_DECLINED_TEXT = ("Jarvis: the owner said no, so that web call was not made. Do not try it again: carry on without "
@@ -179,7 +181,7 @@ class AgentEvent:
     tool: str = ""                      # its name
     result: ToolResult | None = None    # E_TOOL_END
     steps: tuple[PlanStep, ...] = ()    # E_PLAN
-    text: str = field(default="", repr=False)   # E_SAY, E_NOTICE, E_TEXT: shown, never logged
+    text: str = field(default="", repr=False)   # E_SAY, E_NOTICE, E_TEXT, E_TOOL_START's few words: shown, never logged
     code: str = ""                      # E_NOTICE: a fixed word
     question: OwnerQuestion | None = None       # E_QUESTION, E_QUESTION_GONE
     end: AgentEnd | None = None         # E_ENDED
@@ -219,6 +221,7 @@ class AgentEngine:
         data_dir = Path(base.work_folder).parent
         self.work_folder = data_dir / cli.AGENT_WORK_FOLDER
         self.runs_folder = data_dir / cli.AGENT_RUNS_FOLDER
+        self.fetch_folder = data_dir / cli.AGENT_FETCH_WORK_FOLDER
 
     @property
     def runner(self) -> Any:
@@ -314,7 +317,8 @@ class AgentRun:
                  on_event: Callable[[AgentEvent], None], clock: Callable[[], float] = time.monotonic,
                  now: Callable[[], datetime] = lambda: datetime.now().astimezone(), timing: Timing = Timing(),
                  firewall: policy.Firewall | None = None, run_id: str = "",
-                 on_overage: Callable[[datetime | None], None] | None = None, web: Any = None) -> None:
+                 on_overage: Callable[[datetime | None], None] | None = None, web: Any = None,
+                 fetch: Callable[..., str] | None = None) -> None:
         self.run_id = run_id or secrets.token_hex(3)
         self.goal = goal
         self.engine = engine
@@ -359,7 +363,7 @@ class AgentRun:
         self._garbage = 0
         self._context = RunContext(run_id=self.run_id, folder=folder, clock=clock, on_plan=self._tool_plan,
                                    on_say=self._tool_say, on_question=self._tool_question, on_finish=self._tool_finish,
-                                   web=web, tool_s=timing.tool_s)
+                                   web=web, tool_s=timing.tool_s, fetch=fetch)
         attach = getattr(firewall, "attach", None)
         if callable(attach):
             attach(self.ask_web)
@@ -410,12 +414,12 @@ class AgentRun:
                 return "refused"
             self._note_owner(text)
             wait = self._wait
-            if wait is not None and wait.question.kind != Q_WEB:   # words never answer the firewall's card
+            if wait is not None and wait.question.kind == Q_TASK:   # only ask_owner's: the others are click only
                 self.answer(wait.question.id, text)
                 return "answered"
             if self._paused:
-                if self._paused_until is not None and self._now() < self._paused_until:
-                    self._held_owner.append(owner_message(text))
+                if (self._paused_until is not None and self._now() < self._paused_until) or wait is not None:
+                    self._held_owner.append(owner_message(text))     # a click on the card lets them go, with the pause
                     self._emit(AgentEvent(E_NOTICE, text=HELD_WORDS, code="held"))
                     return "held"
                 self._paused = False
@@ -425,7 +429,7 @@ class AgentRun:
             return "sent"
 
     def answer(self, question_id: str, text: str) -> bool:
-        """The owner's answer to the question ``question_id`` (a click's words or what he typed). False when that
+        """The owner's answer to the question ``question_id`` (a click's words or what was typed). False when that
         question is not waiting any more: nothing happens."""
         with self._lock:
             wait = self._wait
@@ -622,7 +626,7 @@ class AgentRun:
             if wait is not None:
                 if now >= wait.deadline:
                     self._wait = None
-                    self._emit(AgentEvent(E_QUESTION_GONE, question=wait.question))
+                    self._emit(AgentEvent(E_QUESTION_GONE, question=wait.question, code=C_NO_ANSWER))
                     logger.info("Agent %s: no answer to question %s", self.run_id, wait.question.kind)
                     if wait.question.kind == Q_WEB:
                         _tell(wait, False)
@@ -904,9 +908,10 @@ class AgentRun:
         call.number = number
         call.name = name
         tool = self.registry.tool(name)
+        doing = doing_words(name, args if isinstance(args, Mapping) else {}, self._context)
         with self._lock:
             self._tool_count += 1
-            self._emit(AgentEvent(E_TOOL_START, call=number, tool=name))
+            self._emit(AgentEvent(E_TOOL_START, call=number, tool=name, text=doing))
             self._nudged = False
             held = self._held(name)
         result = held

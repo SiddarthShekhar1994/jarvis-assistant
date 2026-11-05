@@ -256,6 +256,14 @@ class DesktopService:
                          for change in reversed(list(changes)))
         return self.pc().undo_changes(changes, cancel=cancel)
 
+    def reveal_file(self, path: str, *, cancel: Any = None) -> bool:
+        """A task's output shown selected in its folder on the owner's click: the backend's show_in_folder, whose last
+        guard stands. It never opens the file. True when it was asked of Windows."""
+        if cancel is not None and cancel.is_set():
+            return False
+        self.backend().show_in_folder(path)
+        return True
+
     def dnd_state(self) -> str:
         """P2.5: Windows' Do Not Disturb read back (read only; pcctl.DND_UNKNOWN when it can't be read)."""
         return self.pc().dnd_state()

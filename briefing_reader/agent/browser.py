@@ -12,9 +12,11 @@ one file of this package that imports Qt; BrowserClient is how the endpoint's th
                           in the window, a page stays open until the next one, and the shot's "picture" is the moment it
                           is ready to read
     WatchWindow           the window: frameless, the HUD's flags and tokens, never activated and never the focus, a thin
-                          strip with the tag "Jarvis is reading", the host and the last few pages, over the page. On a
-                          second screen if there is one, else the right part of the main screen, clear of the HUD, kept
-                          on screen. Mouse and keyboard off: it is Jarvis's to drive
+                          strip with the tag "Jarvis is reading", the host, the last few pages and a small Hide, over
+                          the page. On a second screen if there is one, else the right part of the main screen, clear of
+                          the HUD, kept on screen. Mouse and keyboard off: it is Jarvis's to drive. A page that did not
+                          come leaves words on its dark page, not emptiness: a refusal (HTTP 401, 403, 429) says the
+                          site keeps automated browsers out
     BrowserClient         agent.web's Browser seam, for any thread: hands work to the GUI thread and waits, with a
                           timeout; a Stop or Turn off releases a waiter at once and a late result is dropped (R8)
 
@@ -27,9 +29,16 @@ Content-Security-Policy does not stop them, and this engine does not honour one 
 sent). Otherwise a page holding private data could carry it out. A Live snapshot taken in those moments fails, and says
 so.
 
-When the run ends the page and its profile go at once. The window keeps a still of it for about 10 s, then goes too;
-after a Stop or a Turn off it goes at once. shutdown() leaves nothing: no page, no renderer, no window, also with no
-event loop left.
+When the run ends the page and its profile go at once. The window keeps a still of it for about 10 s, then goes too, or
+for as long as the result card stays when the app says so; after a Stop or a Turn off it goes at once. shutdown() leaves
+nothing: no page, no renderer, no window, also with no event loop left.
+
+Hide (on the strip) and the app's "away" (the owner brought the Jarvis window back) take the window off the screen; the
+page goes on behind it, and a picture that comes out blank meanwhile is said to be one (R_BLANK). The owner's Show on
+the result card opens a task's file in the same sealed way, and only then does the wheel scroll the page.
+
+Never a disguise: the user agent and every header stay the engine's own (nothing here sets one), a refused page is not
+tried again with another identity, and no captcha is answered.
 
 Logs: counts, kinds and times only, never an address, a host, a title, a name or a word of a page.
 """
@@ -63,6 +72,7 @@ _FILE_KINDS = {".html": "text/html;charset=utf-8", ".htm": "text/html;charset=ut
 _PLAIN_KIND = "text/plain;charset=utf-8"    # .md .txt .csv .tsv .json .xml .yaml .yml .log: shown as the text they are
 
 SETTLE_MS = 400                   # after a page finished loading, before it counts as ready
+BLANK_WAIT_MS = 500               # a window's own about:blank gets this long to finish before the page is asked for
 LINGER_S = 10.0                   # the window stays this long when the run ends
 COVER_OFF_PROGRESS = 15           # the last page's still goes when the next one has got this far
 CLEAR_MS = 20                     # a sealed gate waits for the page the agent wrote to be really gone
@@ -74,6 +84,15 @@ PICTURE_STEP = 0.75
 # The window (logical px).
 READING_TAG = "Jarvis is reading"
 FINISHED_TAG = "Jarvis has finished reading"
+SHOWING_TAG = "Your file"
+OTHER_WAY_TAG = "Reading another way - not shown here"
+HIDE_TEXT = "Hide"
+HIDE_SIZE = 26                    # the strip's Hide (its drawn height: the strip is 36 high)
+REFUSED_WORDS = "{host} keeps automated browsers out"
+REFUSED_NOTE = "Jarvis doesn't try to get past that. It will look elsewhere."
+NOT_LOADED_WORDS = "{host} did not load"
+NOT_LOADED_NOTE = "It may be gone, or be something Jarvis doesn't open. It will look elsewhere."
+REFUSAL_STATUSES = frozenset({401, 403, 429})
 FOLDER_WORDS = "Task folder"
 STRIP_HEIGHT = 36
 PAGE_INSET = 6
@@ -90,6 +109,7 @@ MIN_HEIGHT = 360
 SHARE_OF_SCREEN = 0.5
 OLDER_PAGES = 3
 HOST_CAP = 80
+WHEEL_STEP = 100                  # px the owner's wheel scrolls a task's file, a notch
 _SEPARATOR = "  \u00b7  "
 
 
@@ -225,8 +245,49 @@ class _Cover(QWidget):
         painter.drawPixmap(self.rect(), self._picture)
 
 
+class _Notice(QWidget):
+    """Words on the dark page: a page that did not come, never emptiness. Other people's words never get here: only
+    Jarvis's own and a host."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self._title = ""
+        self._note = ""
+        self._title_font = hud.body_font(18, 500)
+        self._note_font = hud.body_font(13)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.hide()
+
+    def set_words(self, title: str, note: str = "") -> None:
+        self._title, self._note = title, note
+        self.setVisible(bool(title))
+        if title:
+            self.raise_()
+            self.update()
+
+    def words(self) -> tuple[str, str]:
+        return self._title, self._note
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(holo.TILE))
+        wide = max(40, self.width() - 2 * MARGIN)
+        flags = int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextWrapAnywhere)
+        middle = self.height() // 2
+        painter.setFont(self._title_font)
+        painter.setPen(QColor(holo.INK_1))
+        painter.drawText(QRect(MARGIN, middle - 44, wide, 56), flags, self._title)
+        painter.setFont(self._note_font)
+        painter.setPen(QColor(holo.INK_3))
+        painter.drawText(QRect(MARGIN, middle + 16, wide, 40), flags, self._note)
+
+
 class WatchWindow(hud_overlay._OverlayWindow):  # noqa: SLF001 - the HUD's own window behaviour, on purpose
     """See the module docs. Holds the view (``page_area``); knows nothing of what the page is."""
+
+    hideClicked = Signal()             # the strip's Hide (the task carries on behind it)
+    wheeled = Signal(int)              # the mouse wheel over it (angle delta): only a task's file shown to the owner
 
     def __init__(self, *, native: Any = None, hide_from_capture: bool = False) -> None:
         super().__init__(hud_overlay.HUD_FLAGS, native, hide_from_capture)
@@ -244,6 +305,10 @@ class WatchWindow(hud_overlay._OverlayWindow):  # noqa: SLF001 - the HUD's own w
         self.page_area.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._view: QWidget | None = None
         self._cover = _Cover(self.page_area)
+        self._notice = _Notice(self.page_area)
+        self.hide_button = holo.HoloButton(HIDE_TEXT, holo.GHOST, size=HIDE_SIZE, parent=self)
+        self.hide_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.hide_button.clicked.connect(self.hideClicked)
         self.resize(MIN_WIDTH, MIN_HEIGHT)
 
     # ---- what it shows -------------------------------------------------------------------------------
@@ -252,6 +317,14 @@ class WatchWindow(hud_overlay._OverlayWindow):  # noqa: SLF001 - the HUD's own w
         self._view = view
         view.setGeometry(self.page_area.rect())
         self._cover.raise_()
+        self._notice.raise_()
+
+    def set_notice(self, title: str = "", note: str = "") -> None:
+        """Words over the page area ("": none): a page that did not come."""
+        self._notice.set_words(title, note)
+
+    def notice(self) -> tuple[str, str]:
+        return self._notice.words()
 
     def set_page(self, host: str) -> None:
         """The page it shows now. The one before joins the last few."""
@@ -289,8 +362,12 @@ class WatchWindow(hud_overlay._OverlayWindow):  # noqa: SLF001 - the HUD's own w
     def cut_texts(self) -> list[str]:
         """Words of the strip's tag that don't fit (none at the sizes it is built for). The host and the last few pages
         are cut with an ellipsis, on purpose."""
-        room = self.width() - 2 * PAD - DOT - DOT_GAP
+        room = self._strip_right() - PAD - DOT - DOT_GAP
         return [self._tag] if QFontMetricsF(self._tag_font).horizontalAdvance(self._tag) > room else []
+
+    def _strip_right(self) -> int:
+        """Where the strip's words end: before the Hide."""
+        return self.width() - PAD // 2 - self.hide_button.sizeHint().width() - TAG_GAP // 2
 
     # ---- where it goes -----------------------------------------------------------------------------------
 
@@ -315,6 +392,14 @@ class WatchWindow(hud_overlay._OverlayWindow):  # noqa: SLF001 - the HUD's own w
         if self._view is not None:
             self._view.setGeometry(self.page_area.rect())
         self._cover.setGeometry(self.page_area.rect())
+        self._notice.setGeometry(self.page_area.rect())
+        hint = self.hide_button.sizeHint()
+        self.hide_button.setGeometry(self.width() - PAD // 2 - hint.width(), (STRIP_HEIGHT - 1 - hint.height()) // 2,
+                                     hint.width(), hint.height())
+
+    def wheelEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        self.wheeled.emit(int(event.angleDelta().y()))
+        event.accept()
 
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         painter = QPainter(self)
@@ -331,7 +416,7 @@ class WatchWindow(hud_overlay._OverlayWindow):  # noqa: SLF001 - the HUD's own w
         painter.drawEllipse(QRectF(PAD, middle - DOT / 2, DOT, DOT))
         x = PAD + DOT + DOT_GAP
         strip = Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
-        right = self.width() - PAD
+        right = self._strip_right()
         painter.setFont(self._tag_font)
         painter.setPen(QColor(holo.HOLO))
         tag = QFontMetricsF(self._tag_font).horizontalAdvance(self._tag)
@@ -404,6 +489,9 @@ class AgentBrowser(PageCamera):
     """See the module docs. GUI thread only. ``done`` callables get their answer once, never inside a Qt signal of a
     page that is going away; a request that is replaced or stopped gets R_CANCELLED."""
 
+    hideAsked = Signal()               # the strip's Hide was clicked
+    windowPlaced = Signal()            # it came or moved
+
     def __init__(self, parent: QObject | None = None, *, html_for: Callable[[str], Any] | None = None,
                  avoid: Callable[[], QRect | None] | None = None, native: Any = None, hide_from_capture: bool = False,
                  screens: Callable[[], Sequence[QScreen]] | None = None,
@@ -424,8 +512,18 @@ class AgentBrowser(PageCamera):
         self._shut = False
         self._clear = self._timer(self._on_clear)
         self._linger = self._timer(self.close_all)
+        self._blank_wait = self._timer(self._on_blank_wait)
+        self._blank_shot: Any = None       # a page waiting for its window's own about:blank to finish
         self._screen_hooks = False
         self._followed: list[QScreen] = []
+        self._http_status = 0              # the status the page in hand answered with, when it is an error's
+        self._status_address = ""          # ... and the address that answered it
+        self._owner_hid = False            # the strip's Hide: off the screen until the panel's Show
+        self._away = False                 # the owner brought the Jarvis window back: off the screen meanwhile
+        self._showable = False             # it has been shown, or would have been: it may come back
+        self._tag = READING_TAG
+        self._owner_view = False           # a task's file the owner asked to see: the wheel scrolls it
+        self._other_way: list[str] = []    # hosts being read another way (fetch_text): the strip says so
 
     def __repr__(self) -> str:
         return f"AgentBrowser(page={self._shot is not None}, window={self._window is not None})"
@@ -475,6 +573,9 @@ class AgentBrowser(PageCamera):
             done(ShotResult(False, snapshots.R_LOAD_FAILED))
             return
         image = view.grab().toImage()
+        if self.is_held() and snapshot_engine._uniform(image):
+            done(ShotResult(False, snapshots.R_BLANK))     # off the screen, it may draw nothing: said plainly
+            return
         if image.isNull() or image.width() < 2:
             done(ShotResult(False, snapshots.R_LOAD_FAILED))
             return
@@ -493,23 +594,76 @@ class AgentBrowser(PageCamera):
                 return
             width = max(MIN_PICTURE_WIDTH, int(width * PICTURE_STEP))
 
+    def show_for_owner(self, name: str, folder: TaskFolder, done: Callable[[Any], None] | None = None) -> None:
+        """The owner's Show on the result card: the file ``name`` of the task's folder, sealed as any task's page is, in
+        this window - back on the screen - where the wheel scrolls it. Never the owner's browser or a default app."""
+        self._owner_view = True
+        self._tag = SHOWING_TAG
+        self._owner_hid = self._away = False
+        self.load_file(name, folder, snapshots.TIMEOUT_S, done or (lambda _result: None))
+
+    def set_hidden(self, *, owner: bool | None = None, away: bool | None = None) -> None:
+        """Off the screen, or back on it: the owner's Hide and Show (``owner``), the Jarvis window coming back and going
+        again (``away``). The page goes on either way."""
+        if owner is not None:
+            self._owner_hid = bool(owner)
+        if away is not None:
+            self._away = bool(away)
+        window = self._window
+        if window is None:
+            return
+        if self._owner_hid or self._away:
+            if window.isVisible():
+                _quietly(window.hide)
+        elif self._showable and not window.isVisible():
+            self._show_window(window)
+
+    def is_held(self) -> bool:
+        return self._owner_hid or self._away
+
+    def other_way(self, host: str, reading: bool) -> None:
+        """fetch_text starts or ends: the strip says this page is being read another way, not shown here."""
+        if reading:
+            self._other_way.append(host)
+        elif host in self._other_way:
+            self._other_way.remove(host)
+        window = self._window
+        if window is not None:
+            window.set_tag(OTHER_WAY_TAG if self._other_way else self._tag)
+
+    def keep_clear(self) -> None:
+        """The HUD grew under the window (a chip, a longer caption): placed again when it now crosses it."""
+        window = self._window
+        if window is None or not window.isVisible() or self._avoid is None:
+            return
+        try:
+            avoid = self._avoid()
+        except Exception:  # noqa: BLE001 - only where it goes
+            return
+        if avoid is not None and avoid.isValid() and avoid.intersects(window.geometry()):
+            self._place()
+
     def stop_now(self) -> None:
         """The page goes, and whoever waits for it gets R_CANCELLED. The window stays until end_run."""
         self._cancel_request()
         self.abort()
 
-    def end_run(self, linger: bool) -> None:
-        """The run ended: no page after this. ``linger``: the window keeps a still of it for a while, then goes."""
+    def end_run(self, linger: bool, hold: bool = False) -> None:
+        """The run ended: no page after this. ``linger``: the window keeps a still of it for a while, then goes; with
+        ``hold`` until close_all (it stays while the result card stays)."""
         self._linger.stop()
         window = self._window
         still = self._still() if linger else None
         self._cancel_request()
         self.abort()
-        if window is not None and linger and window.isVisible() and self._linger_s > 0:
+        self._other_way.clear()
+        if window is not None and linger and window.isVisible() and (hold or self._linger_s > 0):
+            self._tag = FINISHED_TAG
             window.set_tag(FINISHED_TAG)
             if still is not None:
                 window.cover(still)
-            self._linger.start(int(self._linger_s * 1000))
+            if not hold:
+                self._linger.start(int(self._linger_s * 1000))
             return
         self.close_all()
 
@@ -562,7 +716,7 @@ class AgentBrowser(PageCamera):
         still = self._still()
         self.abort()                       # one page at a time: the one before goes, its profile with it
         if self._window is not None:
-            self._window.set_tag(READING_TAG)
+            self._window.set_tag(OTHER_WAY_TAG if self._other_way else self._tag)
             if still is not None:
                 self._window.cover(still)
         self._request = None
@@ -576,7 +730,9 @@ class AgentBrowser(PageCamera):
     def _go(self, request: _Request) -> None:
         self._request = request
         self._timeout_ms = max(100, request.timeout_ms)
+        self._http_status, self._status_address = 0, ""
         if self._window is not None:
+            self._window.set_notice()
             self._window.set_page(request.label)
         if request.html is None:
             self.shoot(request.url)
@@ -616,6 +772,9 @@ class AgentBrowser(PageCamera):
         window = self._window
         if window is None:
             window = self._window = WatchWindow(native=self._native, hide_from_capture=self._hide_from_capture)
+            window.hideClicked.connect(self._on_hide_clicked)
+            window.wheeled.connect(self._on_wheel)
+            window.set_tag(self._tag)
             if self._request is not None:
                 window.set_page(self._request.label)
         view = classes.QWebEngineView(window.page_area)
@@ -627,6 +786,37 @@ class AgentBrowser(PageCamera):
         view.setAccessibleName("")
         window.set_view(view)
         return view
+
+    def _on_hide_clicked(self) -> None:
+        self.set_hidden(owner=True)
+        self.hideAsked.emit()
+
+    def _on_wheel(self, delta: int) -> None:
+        """Only a task's file the owner asked to see scrolls, in Jarvis's own script world: while Jarvis reads, the
+        window is his to drive."""
+        shot = self._shot
+        if self._owner_view and delta and shot is not None and shot.page is not None and not shot.done and shot.opened:
+            step = round(-delta / 120 * WHEEL_STEP)
+            shot.page.runJavaScript(f"window.scrollBy(0, {step});", snapshot_engine._classes().app_world)
+
+    def _connect(self, page: Any, shot: Any) -> None:
+        super()._connect(page, shot)
+        page.loadingChanged.connect(lambda info: self._on_loading(shot, info))
+
+    def _on_loading(self, shot: Any, info: Any) -> None:
+        """The main frame's load: its HTTP status when it answered with an error. It stands through what the engine loads
+        in that address's place (an empty answer's blank page, measured: it may even "succeed"), until another address
+        loads. Nothing is tried again here."""
+        if shot is not self._shot or shot.done or not shot.opened:
+            return
+        try:
+            status, domain, address = info.status().name, info.errorDomain().name, info.url().toString()
+            if domain == "HttpStatusCodeDomain":
+                self._http_status, self._status_address = int(info.errorCode()), address
+            elif status in ("LoadStartedStatus", "LoadSucceededStatus") and address != self._status_address                     and not address.startswith("chrome-error:"):
+                self._http_status = 0
+        except Exception as exc:  # noqa: BLE001 - only how a failure is told apart
+            logger.debug("Agent browser: a load's state could not be read (%s)", type(exc).__name__)
 
     def _configure(self, profile: Any, classes: Any, shot: Any) -> None:
         super()._configure(profile, classes, shot)
@@ -664,12 +854,41 @@ class AgentBrowser(PageCamera):
         return snapshots.BLOCKED
 
     def _load_target(self, shot: Any) -> None:
+        """The page, once its window's own about:blank has finished: an about:blank that finishes after the page was asked
+        for takes the one load signal the engine gives, and the page's HTTP status goes unheard (measured)."""
         request = self._request
         if request is not None and request.folder is not None:
             _hold_gate(shot.profile)
-            shot.page.load(QUrl(request.url))
+        if not shot.page.isLoading():
+            self._ask_for_page(shot)
             return
-        super()._load_target(shot)
+        shot.opened = False                # as before the sandbox check: nothing loads or counts until it is asked for
+        shot.page.loadFinished.connect(lambda _ok: self._blank_done(shot))
+        self._blank_wait.start(BLANK_WAIT_MS)
+        self._blank_shot = shot
+
+    def _blank_done(self, shot: Any) -> None:
+        if self._blank_shot is shot:
+            self._blank_shot = None
+            self._blank_wait.stop()
+            shot.opened = True
+            if shot is self._shot and not shot.done:
+                self._ask_for_page(shot)
+
+    def _on_blank_wait(self) -> None:
+        if self._blank_shot is not None:
+            self._blank_done(self._blank_shot)
+
+    def _ask_for_page(self, shot: Any) -> None:
+        request = self._request
+        try:
+            if request is not None and request.folder is not None:
+                shot.page.load(QUrl(request.url))
+            else:
+                super()._load_target(shot)
+        except Exception as exc:  # noqa: BLE001 - as the camera's own load
+            logger.debug("Agent browser: the page was not loaded (%s)", type(exc).__name__)
+            self._end(shot, snapshots.R_ENGINE_FAILED)
 
     def _on_adopted(self, shot: Any) -> None:
         window = self._window
@@ -686,8 +905,10 @@ class AgentBrowser(PageCamera):
                 child.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
     def _show_window(self, window: WatchWindow) -> None:
-        """Quietly, never activated. It appears at the first web or show step and stays where it is put."""
-        if window.isVisible():
+        """Quietly, never activated. It appears at the first web or show step and stays where it is put, unless the
+        owner hid it or is back in the Jarvis window (``set_hidden``)."""
+        self._showable = True
+        if window.isVisible() or self.is_held():
             return
         self._place()
         if not self._screen_hooks:
@@ -698,6 +919,7 @@ class AgentBrowser(PageCamera):
                 app.screenRemoved.connect(self._on_screens)
             self._follow_work_areas()
         window.show_quietly()
+        self.windowPlaced.emit()
 
     def _follow_work_areas(self) -> None:
         for screen in QGuiApplication.screens():
@@ -722,6 +944,7 @@ class AgentBrowser(PageCamera):
             except Exception:  # noqa: BLE001 - only where it goes
                 avoid = None
         window.place(avoid, self._screens() if self._screens is not None else None)
+        self.windowPlaced.emit()
 
     def _on_progress(self, shot: Any, value: int) -> None:
         super()._on_progress(shot, value)
@@ -734,6 +957,9 @@ class AgentBrowser(PageCamera):
         stays."""
         request = self._request
         if request is None or request.delivered or shot is not self._shot or shot.done:
+            return
+        if self._http_status in REFUSAL_STATUSES:
+            self._end(shot, snapshots.R_LOAD_FAILED)     # it came with a page of its own: a refusal all the same
             return
         try:
             if not final and shot.page is not None and shot.page.isLoading():
@@ -766,15 +992,33 @@ class AgentBrowser(PageCamera):
     def _end(self, shot: Any, reason: str, **data: Any) -> None:
         if shot.done:
             return
+        status = self._http_status if reason == snapshots.R_LOAD_FAILED and self._http_status in REFUSAL_STATUSES else 0
+        reason = snapshots.R_SITE_REFUSED if status else reason
         blocked, took = shot.blocked, int((time.monotonic() - shot.started) * 1000)
         super()._end(shot, reason, **data)
         request, self._request = self._request, None
         if request is not None and not request.delivered:
             request.delivered = True
-            logger.info("Agent browser: no page (%s)", snapshots.reason_kind(reason))
-            _answer(request.done, ShotResult(False, reason or snapshots.R_ENGINE_FAILED, took_ms=took, blocked=blocked))
+            logger.info("Agent browser: no page (%s%s)", snapshots.reason_kind(reason),
+                        f", HTTP {status}" if status else "")
+            self._say_why(request, reason)
+            _answer(request.done, ShotResult(False, reason or snapshots.R_ENGINE_FAILED, took_ms=took, blocked=blocked,
+                                             http_status=status))
         elif request is not None and reason and reason != snapshots.R_CANCELLED:
             logger.info("Agent browser: the page went (%s)", snapshots.reason_kind(reason))
+
+    def _say_why(self, request: _Request, reason: str) -> None:
+        """A web page that did not come leaves words on the dark page, not emptiness (hosts only)."""
+        window = self._window
+        if window is None or request.folder is not None or not request.label:
+            return
+        kind = snapshots.reason_kind(reason)
+        if kind == "site_refused":
+            window.cover(None)
+            window.set_notice(REFUSED_WORDS.format(host=request.label), REFUSED_NOTE)
+        elif kind in ("load_failed", "timeout", "crashed", "blank"):
+            window.cover(None)
+            window.set_notice(NOT_LOADED_WORDS.format(host=request.label), NOT_LOADED_NOTE)
 
     @staticmethod
     def _final_url(shot: Any) -> str:
@@ -838,6 +1082,9 @@ class BrowserClient(QObject):
 
     _post = Signal(object)
     _drop = Signal(object)
+    _note = Signal(str, bool)
+    hideAsked = Signal()               # the strip's Hide was clicked
+    windowPlaced = Signal()            # the window came or moved
 
     def __init__(self, parent: QObject | None = None, *, factory: Callable[[QObject], AgentBrowser] | None = None,
                  poll_s: float = 0.02, **options: Any) -> None:
@@ -847,8 +1094,11 @@ class BrowserClient(QObject):
         self._poll_s = float(poll_s)
         self._browser: AgentBrowser | None = None
         self._ended = threading.Event()
+        self._owner_hid = False
+        self._away = False
         self._post.connect(self._run, Qt.ConnectionType.QueuedConnection)
         self._drop.connect(self._dropped, Qt.ConnectionType.QueuedConnection)
+        self._note.connect(self._on_note, Qt.ConnectionType.QueuedConnection)
 
     def __repr__(self) -> str:
         return f"BrowserClient(browser={self._browser is not None}, ended={self._ended.is_set()})"
@@ -857,6 +1107,13 @@ class BrowserClient(QObject):
 
     def scheme_ready(self) -> bool:
         return scheme_ready()
+
+    def other_way(self, host: str, reading: bool) -> None:
+        """fetch_text starts or ends (any thread; never waits). A task with no window yet makes none for it."""
+        try:
+            self._note.emit(host, bool(reading))
+        except RuntimeError:           # the client went with the app
+            pass
 
     def load(self, url: str, *, timeout_s: float, cancelled: Callable[[], bool]) -> ShotResult:
         return self._loaded(self._ask("load", (url, timeout_s), timeout_s + LOAD_MARGIN_S, cancelled))
@@ -915,7 +1172,48 @@ class BrowserClient(QObject):
         if self._browser is None:
             make = self._factory or (lambda parent: AgentBrowser(parent, **self._options))
             self._browser = make(self)
+            for name, slot in (("hideAsked", self._on_hide_asked), ("windowPlaced", self.windowPlaced)):
+                signal = getattr(self._browser, name, None)
+                if signal is not None:
+                    signal.connect(slot)
+            hidden = getattr(self._browser, "set_hidden", None)
+            if callable(hidden):
+                hidden(owner=self._owner_hid, away=self._away)
         return self._browser
+
+    def _on_hide_asked(self) -> None:
+        self._owner_hid = True
+        self.hideAsked.emit()
+
+    def _on_note(self, host: str, reading: bool) -> None:
+        if self._browser is not None:
+            self._browser.other_way(host, reading)
+
+    def set_hidden(self, *, owner: bool | None = None, away: bool | None = None) -> None:
+        """Off the screen or back on it (AgentBrowser.set_hidden); it holds for the window yet to come too."""
+        if owner is not None:
+            self._owner_hid = bool(owner)
+        if away is not None:
+            self._away = bool(away)
+        if self._browser is not None:
+            self._browser.set_hidden(owner=owner, away=away)
+
+    def owner_hid(self) -> bool:
+        return self._owner_hid
+
+    def window_rect(self) -> QRect | None:
+        """Where the window is, while it shows."""
+        window = self._browser.window() if self._browser is not None else None
+        return window.geometry() if window is not None and window.isVisible() else None
+
+    def keep_clear(self) -> None:
+        if self._browser is not None:
+            self._browser.keep_clear()
+
+    def show_for_owner(self, name: str, folder: TaskFolder, done: Callable[[Any], None] | None = None) -> None:
+        """The owner's Show on the result card, after the run (GUI thread): AgentBrowser.show_for_owner."""
+        self._owner_hid = self._away = False
+        self._ensure().show_for_owner(name, folder, done)
 
     def _run(self, job: _Job) -> None:
         if job.dropped or self._ended.is_set():
@@ -939,13 +1237,14 @@ class BrowserClient(QObject):
         if self._browser is not None:
             self._browser.end_run(False)
 
-    def end_run(self, *, linger: bool = True) -> None:
-        """The run ended: waiters are released, no page after this. Once: what came first stands."""
+    def end_run(self, *, linger: bool = True, hold: bool = False) -> None:
+        """The run ended: waiters are released, no page after this. Once: what came first stands. ``hold``: a window
+        that lingers stays until close_now (the result card's)."""
         if self._ended.is_set():
             return
         self._ended.set()
         if self._browser is not None:
-            self._browser.end_run(linger)
+            self._browser.end_run(linger, hold)
 
     def close_now(self) -> None:
         """A new run starts: the last run's window, if it still lingers, goes first (one window)."""

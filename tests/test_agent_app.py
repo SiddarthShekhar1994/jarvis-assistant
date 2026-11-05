@@ -73,6 +73,7 @@ class AgentApp(HudApp):
             return agent_ui.AgentController(config, planner, timing=timing, **kwargs)
 
         table = f"\n[agent]\nenabled = true\nworkspace = '{workspace.name}'\n{agent}"
+        harness.setdefault("desktop_consent", 3)      # the card that lists tasks (test_agent_feed: the others)
         made = self.make(table, runs=runs, agent_factory=factory, **harness)
         self.c.ask.start()
         self.assertTrue(wait_for(lambda: self.c.ask.ready is not None), "readiness checked")
@@ -344,7 +345,7 @@ class WebInTheAppTests(AgentApp):
             return agent_ui.AgentController(config, planner, timing=WEB_TIMING, **kwargs)
 
         self.make(f"\n[agent]\nenabled = true\nworkspace = '{workspace_.name}'\n",
-                  runs=(FakeEngine(web_task), FakeEngine(web_task)), agent_factory=factory)
+                  runs=(FakeEngine(web_task), FakeEngine(web_task)), agent_factory=factory, desktop_consent=3)
         self.c.ask.start()
         self.assertTrue(wait_for(lambda: self.c.ask.ready is not None), "readiness checked")
         settle()
@@ -614,7 +615,7 @@ class QuestionTests(AgentApp):
         self.assertEqual(asked[0].kind, ar.Q_KEEP_GOING)
         self.assertIn("sir", asked[0].text)                         # Jarvis's own words, the address filled in
         self.assertNotIn("{sir}", asked[0].text)
-        self.type_it("yes")
+        self.assertTrue(self.c.agent.answer(asked[0].id, "Keep going"))     # a click: words never answer it (test_agent_feed)
         self.assertEqual(self.ended().outcome, "done")
 
 

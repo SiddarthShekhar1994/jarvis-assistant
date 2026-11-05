@@ -10,12 +10,14 @@ given it something, whatever goes to the web is checked first.
     decoded_forms(text)          ``text`` and what it decodes to, percent-encoded any number of times
     WebFirewall(book)            policy.Firewall for the web tools:
         attach(ask)              how it asks the owner: the run's ask_web(text, choices, on_answer)
-        owner_said(words)        his words never taint, and their addresses count as seen
-        check(tool, args)        before web_search and open_page: None, or what goes back to the model instead
+        owner_said(words)        the owner's words never taint, and their addresses count as seen
+        check(tool, args)        before web_search, open_page and fetch_text: None, or what goes back to the model
+                                 instead
 
 The rules. In a clean run searches and public https addresses need no click. With any taint, web_search checks the
 query's words and open_page must use an address seen in this run (a search result, a link on a page read, the owner's
-words), unchanged, checked after percent-decoding; a hit, an unseen address or an encoded-looking query waits for an
+words), unchanged, checked after percent-decoding, and fetch_text is held to both: its address as open_page's, its
+question's words as a search's; a hit, an unseen address or an encoded-looking query waits for an
 amber card (the owner-question seam, kind "web") that shows the exact words or address, with "Allow" and "Don't". A
 click allows that one call and clears those words for the run. No click, no call: a declined or unanswered call is
 refused in plain words, so the model adapts, and the same call asked again is refused without a second card. Typed or
@@ -45,7 +47,9 @@ WEB_ALLOW, WEB_DONT = "Allow", "Don't"         # the card's choices; only the fi
 WEB_CHOICES = (WEB_ALLOW, WEB_DONT)
 SEARCH_CARD = 'Jarvis wants to search the web for "{words}"'
 OPEN_CARD = "Jarvis wants to open {words}"
-BUSY_TEXT = ("A question is waiting for the owner already, so that call was not made. End your turn now; his answer "
+FETCH_CARD = "Jarvis wants to read this another way: {words}"
+FETCH_JOIN = " - asking: "       # between the address and the question, on the card and in what is compared
+BUSY_TEXT = ("A question is waiting for the owner already, so that call was not made. End your turn now; the answer "
              "comes as your next message.")
 REFUSED_TEXT = ("The owner did not allow that call, so it was not made. Do not try it again: carry on without it, find "
                 "another way, or say so in your report.")
@@ -341,6 +345,11 @@ class WebFirewall:
             address = args.get("url") if "number" not in args else self.book.address(args.get("number"))
             if isinstance(address, str) and address and not web_link_problem(address):
                 return OPEN_CARD, address
+        if tool.name == "fetch_text":
+            address, question = args.get("url"), args.get("question")
+            if isinstance(address, str) and isinstance(question, str) and question.strip() \
+                    and not web_link_problem(address):
+                return FETCH_CARD, f"{address}{FETCH_JOIN}{' '.join(question.split())}"
         return "", ""
 
     def check(self, tool: Tool, args: Mapping[str, Any]) -> ToolResult | None:
@@ -370,6 +379,9 @@ class WebFirewall:
             return tuple(sorted(hits))
         if tool.name == "web_search":
             return () if looks_encoded(exact) else None
+        if tool.name == "fetch_text":         # the address as open_page's, the question's words as a search's
+            address, _join, question = exact.partition(FETCH_JOIN)
+            return () if looks_encoded(question) or not self.book.seen(address) else None
         return () if not self.book.seen(exact) else None
 
     def _card(self, card: str, call: tuple[str, str], hits: tuple[str, ...]) -> ToolResult:

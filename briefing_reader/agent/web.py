@@ -15,7 +15,7 @@ are.
                                     page at a time (tool calls may come side by side: they wait their turn)
     Browser                         the seam it drives (agent.browser.BrowserClient; a fake in the tests)
     workspace_name(path, token)     a workspace page's address back to a file's name, "" when it is not this task's
-    suspect_lines(text)             how many lines read like an order to Jarvis (desktop.guard's scanner)
+    suspect_lines(text)             how many lines hold a strong sign of an order to Jarvis (guard.strong_order)
 
 A WebRefused is a call that did not happen or did not work: its code is a fixed word (the logs' and Live's), its text
 Jarvis's own words for the model. Nothing here logs anything, and no repr holds a query, an address, a title or a word
@@ -71,6 +71,7 @@ SUSPECT_LINE_CAP = 300            # the scanner reads this much of a sentence
 W_NOT_PUBLIC, W_NO_PAGE, W_NO_RESULTS, W_NOT_LOADED, W_TOO_SLOW, W_NO_ANSWER, W_STOPPED, W_BUSY, W_NO_NUMBER = (
     "not_public", "no_page", "no_results", "not_loaded", "too_slow", "no_answer", "stopped", "busy", "no_number")
 W_CRASHED, W_NO_ENGINE, W_TOO_BIG, W_NO_WINDOW, W_TEST_RUN = "crashed", "no_engine", "too_big", "no_window", "test_run"
+W_REFUSED, W_HIDDEN = "site_refused", "hidden"
 # What a wall is (wall_kind), and how a search page fared.
 WALL_CAPTCHA, WALL_CONSENT, WALL_BLOCK = "captcha", "consent", "block"
 T_NO_RESULTS, T_NOT_LOADED, T_NO_TIME = "no_results", "not_loaded", "no_time"
@@ -81,10 +82,13 @@ NO_NUMBER_TEXT = "No address has that number in this task. Use a number from a r
 NO_PAGE_TEXT = "No page is open in the window now. Open one with open_page first."
 RESULTS_PAGE_TEXT = "That was a results page, with nothing more to read. Open a result with open_page."
 BUSY_TEXT = "The window was busy with other pages for too long. Call this again."
+HIDDEN_TEXT = "The owner has hidden the window, so there is no picture of it now. Read the page's text instead."
 TOO_SLOW_TEXT = "That took too long and was given up on. Try another way, or say so in your report."
 NO_ANSWER_TEXT = "That page stopped answering, so Jarvis closed it. Try another source, or say so in your report."
 STOPPED_TEXT = "The task was stopped."
 LOAD_WORDS = {
+    "site_refused": (W_REFUSED, "This site refuses automated browsers (HTTP {status}). Don't retry it here. Try "
+                                "fetch_text or another source."),
     "timeout": (W_TOO_SLOW, "That page did not load within {seconds} seconds. Try another source."),
     "load_failed": (W_NOT_LOADED, "That page did not load: it may be gone, refuse private windows, or be a download, "
                                   "which Jarvis never takes. Try another source."),
@@ -245,6 +249,7 @@ class PageRead:
     text: str = field(repr=False)
     length: int = 0               # the page's whole text in characters (``text`` stops at TEXT_KEEP)
     links: tuple[tuple[str, str], ...] = field(default=(), repr=False)   # (its visible words, its address)
+    hidden: bool = False          # invisible tag characters spelled something (they are gone from ``text``)
 
 
 @dataclass(frozen=True)
@@ -253,6 +258,7 @@ class ResultsRead:
     url: str = field(repr=False)
     text: str = field(repr=False)
     results: tuple[tuple[str, str, str], ...] = field(default=(), repr=False)   # (title, address, snippet)
+    hidden: bool = False          # invisible tag characters spelled something (they are gone from the results)
 
 
 def _text(value: Any, cap: int = 0) -> str:
@@ -302,9 +308,11 @@ def read_page(raw: Any) -> PageRead | None:
         if words and not web_link_problem(address) and not _same_page(address, url):
             links.append((words, address))
     size = found.get("length")
-    text = clean_text(_text(found.get("text"), TEXT_KEEP))
-    return PageRead(one_line(_text(found.get("title")), TITLE_CAP), url, text,
-                    size if isinstance(size, int) and not isinstance(size, bool) else len(text), tuple(links))
+    raw_text, raw_title = _text(found.get("text"), TEXT_KEEP), _text(found.get("title"))
+    text = clean_text(raw_text)
+    return PageRead(one_line(raw_title, TITLE_CAP), url, text,
+                    size if isinstance(size, int) and not isinstance(size, bool) else len(text), tuple(links),
+                    guard.hidden_message(raw_text) or guard.hidden_message(raw_title))
 
 
 def read_results(raw: Any) -> ResultsRead | None:
@@ -313,14 +321,16 @@ def read_results(raw: Any) -> ResultsRead | None:
     if "results" not in found:
         return None
     results: list[tuple[str, str, str]] = []
+    hidden = False
     for item in found.get("results") if isinstance(found.get("results"), list) else ():
         if not (isinstance(item, list) and len(item) == 3):
             continue
         title, address = one_line(_text(item[0]), TITLE_CAP), _text(item[1])
         if title and not web_link_problem(address):
             results.append((title, address, one_line(_text(item[2]), SNIPPET_CAP)))
+            hidden = hidden or guard.hidden_message(_text(item[0])) or guard.hidden_message(_text(item[2]))
     return ResultsRead(one_line(_text(found.get("title")), TITLE_CAP), _text(found.get("url"), URL_CAP * 2),
-                       _text(found.get("text")), tuple(results[:MAX_RESULTS]))
+                       _text(found.get("text")), tuple(results[:MAX_RESULTS]), hidden)
 
 
 def wall_kind(text: str, url: str = "") -> str:
@@ -356,11 +366,12 @@ def _results_are_a_wall(read: ResultsRead, query: str) -> str:
 
 
 def suspect_lines(text: str) -> int:
-    """How many lines of ``text`` read like an order to Jarvis or a model. guard.suspect_text is for a short name or a
-    line, so it reads a long paragraph a sentence at a time: an article that merely mentions a word or two is no
-    order."""
+    """How many lines of ``text`` hold a strong sign of an order to Jarvis or a model (guard.strong_order: override
+    phrases, role and prompt markers, templates, hidden or look-alike tricks). Not an opening order verb, which ordinary
+    pages are full of ("Find a store"). A long paragraph is read a sentence at a time: an article that merely mentions a
+    word or two is no order."""
     return sum(1 for line in (text or "").splitlines() if line.strip() and any(
-        guard.suspect_text(part[:SUSPECT_LINE_CAP]) for part in _SENTENCE_RE.split(line)))
+        guard.strong_order(part[:SUSPECT_LINE_CAP]) for part in _SENTENCE_RE.split(line)))
 
 
 def owner_addresses(words: str) -> list[str]:
@@ -470,6 +481,8 @@ class Browser(Protocol):
 
     def scheme_ready(self) -> bool: ...
 
+    def other_way(self, host: str, reading: bool) -> None: ...
+
 
 NO_PAGE = "<no page>"             # script(): no page is open (not a string a script's JSON can be)
 
@@ -503,6 +516,7 @@ class Found:
     results: tuple[tuple[int, str, str, str], ...] = field(repr=False)
     tried: str = ""
     shot: snapshots.ShotResult | None = field(default=None, repr=False)
+    hidden: bool = False          # a result held a hidden message (guard.hidden_message)
 
 
 @dataclass(frozen=True)
@@ -523,18 +537,21 @@ class Opened:
     wall: bool = False
     shot: snapshots.ShotResult | None = field(default=None, repr=False)
     live_address: str = field(default="", repr=False)
+    hidden: bool = False          # the page holds a hidden message (guard.hidden_message)
 
 
 class _Page:
     """The page in the window: what was read of it and how far."""
 
-    __slots__ = ("title", "address", "text", "offset", "total", "still_loading", "live_address")
+    __slots__ = ("title", "address", "text", "offset", "total", "still_loading", "live_address", "hidden")
 
-    def __init__(self, title: str, address: str, text: str, total: int, still_loading: bool, live_address: str) -> None:
+    def __init__(self, title: str, address: str, text: str, total: int, still_loading: bool, live_address: str,
+                 hidden: bool = False) -> None:
         self.title, self.address, self.text, self.total = title, address, text, total
         self.offset = 0
         self.still_loading = still_loading
         self.live_address = live_address
+        self.hidden = hidden
 
     def __repr__(self) -> str:        # never its address or words
         return f"_Page({len(self.text)} characters, at {self.offset})"
@@ -543,7 +560,8 @@ class _Page:
 def _load_failure(result: snapshots.ShotResult | None, seconds: float) -> WebRefused:
     kind = snapshots.reason_kind(result.reason) if result is not None else "timeout"
     code, text = LOAD_WORDS.get(kind, ENGINE_FAILED_WORDS)
-    return WebRefused(code, text.format(seconds=round(seconds)))
+    status = result.http_status if result is not None else 0
+    return WebRefused(code, text.format(seconds=round(seconds), status=status))
 
 
 class WebSession:
@@ -595,9 +613,9 @@ class WebSession:
                 call.check()
                 if not loaded.ok:
                     kind = snapshots.reason_kind(loaded.reason)
-                    if kind not in ("timeout", "load_failed", "crashed"):
+                    if kind not in ("timeout", "load_failed", "crashed", "site_refused"):
                         raise _load_failure(loaded, LOAD_TIMEOUT_S)
-                    tried.append((engine.name, T_NOT_LOADED))
+                    tried.append((engine.name, WALL_BLOCK if kind == "site_refused" else T_NOT_LOADED))
                     continue
                 how, read = self._results(browser, engine, query, call)
                 if not how and read is not None:
@@ -637,7 +655,7 @@ class WebSession:
             if number:
                 rows.append((number, title, address, snippet))
         return Found(engine.name, loaded.final_url or read.url, tuple(rows), _tried_words(tried),
-                     self._shot(browser, call))
+                     self._shot(browser, call), read.hidden)
 
     # ---- open_page, read_more ------------------------------------------------------------------------
 
@@ -658,7 +676,7 @@ class WebSession:
             final = loaded.final_url or read.url or address
             if not web_link_problem(final):
                 self.book.see(final)
-            page = _Page(read.title, final, read.text, read.length, loaded.still_loading, final)
+            page = _Page(read.title, final, read.text, read.length, loaded.still_loading, final, read.hidden)
             self._page = page
             links = []
             for words, link in read.links[:MAX_LINKS]:
@@ -695,7 +713,7 @@ class WebSession:
         return Opened(page.title, page.address, page.text[first:last].strip("\n"), first + 1 if last > first else 0,
                       last, len(page.text), links, last < len(page.text), page.total > TEXT_KEEP, page.still_loading,
                       not first and len(page.text) < _WALL_SHORT and bool(wall_kind(page.text, page.address)), shot,
-                      page.live_address)
+                      page.live_address, page.hidden)
 
     def more(self, call: Call) -> Opened:
         """The next part of this page's text; the window really scrolls there. A page that grows as it scrolls is read
@@ -722,6 +740,16 @@ class WebSession:
                 page.text, page.total = read.text, read.length
             return self._part(page, (), self._shot(browser, call))
 
+    def other_way(self, host: str, reading: bool) -> None:
+        """fetch_text starts or ends: the window's strip says this page is read another way. Never waits, never
+        raises."""
+        tell = getattr(self.browser, "other_way", None)
+        if callable(tell):
+            try:
+                tell(host, reading)
+            except Exception:  # noqa: BLE001 - only what the strip says
+                pass
+
     # ---- look_at_page, show_file -----------------------------------------------------------------------
 
     def look(self, call: Call) -> snapshots.ShotResult:
@@ -734,6 +762,8 @@ class WebSession:
                 return taken
             if snapshots.reason_kind(taken.reason) == "too_large":
                 raise WebRefused(W_TOO_BIG, "That picture would not fit. Read the page's text instead.")
+            if snapshots.reason_kind(taken.reason) == "blank":
+                raise WebRefused(W_HIDDEN, HIDDEN_TEXT)
             raise WebRefused(W_NO_PAGE, NO_PAGE_TEXT)
 
     def show(self, folder: TaskFolder, name: str, call: Call) -> Opened:
@@ -750,7 +780,7 @@ class WebSession:
             if not loaded.ok:
                 raise _load_failure(loaded, seconds)
             read = self._read(browser, call)
-            page = _Page(read.title or name, name, read.text, read.length, loaded.still_loading, name)
+            page = _Page(read.title or name, name, read.text, read.length, loaded.still_loading, name, read.hidden)
             self._page = page
             return self._part(page, (), self._shot(browser, call))
 

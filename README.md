@@ -2218,6 +2218,16 @@ your OK on the updated card first, sir." and the card shows (on the HUD it says
 back). Until then Settings > Desktop says "Turned on for opening things - the
 updated card waits for your OK". Turn off takes back both.
 
+**With [tasks](#tasks-jarvis-works-it-through) on**, the card has one more row: "Give me a
+task and I work out the steps myself. I search and read public pages in a window you can
+watch, and the words of a search go straight to DuckDuckGo. Anything that changes things or
+gets sent still waits for your click." (it names `[agent] search_engine`'s engine). Everything
+you allowed before stays allowed, but a task needs your OK on this card: the first time you
+ask for one, nothing starts, the bar says "Tasks need your OK on the updated card first, sir."
+and the card shows with that row marked NEW, your words back in the bar. Until then Settings
+> Desktop says "Turned on - tasks wait for your OK on the updated card". With tasks off the
+card is as it was.
+
 **The switch.** Three ways onto the desktop, each only from you:
 
 - click **Desktop** in the Dock (or Ctrl+8, or "Desktop" in the Find list);
@@ -2429,8 +2439,36 @@ plain question still gets a plain answer through Ask.
 **Turning it on.** It is off in the public `config.toml` (`[agent] enabled =
 false`). Turn it on for this PC with the line `JARVIS_AGENT_ENABLED=true` in `.env`,
 then restart Jarvis. It also needs [Jarvis on your desktop](#jarvis-on-your-desktop-the-hud)
-(turned on, on its card) and [Ask](#ask-jarvis-optional). Off, nothing of it runs and
-not a word of it reaches Claude.
+(turned on, on the card that lists tasks) and [Ask](#ask-jarvis-optional). Off, nothing of
+it runs and not a word of it reaches Claude.
+
+**What you see.** A task moves onto the HUD, as a desktop request does. Under the bar on the
+left a panel shows `WORKING - 3 OF 6 - 2:14` with **Stop**, the plan's steps (dim to come, cyan
+at work, a green tick done, coral failed; amber only while a card waits for you) and one line
+Jarvis writes himself from what he is doing ("Searching the web", "Reading www.example.org",
+"Writing a file", "Waiting for you"): sites' names only, on screen only, never logged or said.
+The panel lets clicks through, but for its buttons, and never takes the focus. If you bring the
+window back the task carries on: the panel and the watch window hide, Home shows
+"Working - 3 of 6" (click it for Live) with a **Stop**, and the HUD key brings them back.
+
+**Stopping it.** The panel's **Stop**, Home's, typing or dictating "stop" or "cancel" in the bar,
+**Turn off** or quitting: the process is killed at once, anything late is dropped, a card that
+waits is withdrawn and the plan is stamped. **Esc** stops it too, but only while the HUD's bar
+has the keyboard. Jarvis does not hold Esc across the system for a task, as it does for the
+seconds a batch of file moves takes: a task can run for 20 minutes while you work in other apps,
+and Esc stays theirs.
+
+**Cards.** A question he asks waits on a card with its choices as buttons, and what you type or
+dictate in the bar answers it too. "Keep going?" and the card for a web step that needs your OK
+take a **click only**: words in the bar reach the task as your message and answer neither. A card
+counts in "N need your OK", and one that times out goes, with words saying so.
+
+**The result card.** `DONE - 6 STEPS - 4:12` (or PARTLY DONE; coral for failed and stopped), the
+whole report, scrolling, and the files he made, each with **Show** (in the same sealed window,
+where your wheel scrolls it) and **Folder** (its folder in Explorer with the file selected), then
+**Done**. Only the report's first sentence or two are said aloud. A page he wrote is never handed
+to your real browser or a default app from here: it could carry private data out there, with
+nothing sealed. The window stays while the card stays.
 
 **This version** is the engine and the web: a plan, short spoken lines, questions, text
 files in the task's own folder, and a real browser you can watch. Your own data comes in a
@@ -2440,8 +2478,9 @@ later version; until then he says plainly when a task needs it.
 screen if you have one, else on the right of the main screen, clear of the HUD: the real
 page, under a thin strip with "Jarvis is reading", the site and the last few sites. What he
 reads is what it shows. It never takes the focus and ignores your mouse and keyboard: it is
-his to drive. When the task ends the page goes at once and the window about 10 seconds
-later; after a Stop or a Turn off it goes at once.
+his to drive. On one screen it covers part of your desktop, so the strip has a small **Hide**
+and the panel then a **Show**; the task carries on behind it. When the task ends the page goes
+at once and the window with the result card; after a Stop or a Turn off it goes at once.
 
 **What goes where.** A search opens the real results page of `[agent] search_engine`
 (DuckDuckGo unless you change it; if it gives nothing, or shows a captcha, a consent page or
@@ -2450,8 +2489,19 @@ of each search go from this PC to that engine, with no sign-in and no cookies ke
 open in the same private web engine as the [page pictures](#pictures-in-live):
 a new private profile for every page, public https addresses only, no sign-in, typing, form,
 download, pop-up or permission, and every connection through the same network gate (public
-IPv4 addresses, port 443). What a page says is only ever data to him; LIVE flags lines that
-read like orders.
+IPv4 addresses, port 443). What a page says is only ever data to him; LIVE flags a page only
+for a strong sign of orders (override phrases, role and prompt markers, templates, hidden or
+look-alike tricks), not for the order verbs ordinary pages are full of ("Find a store").
+
+**A site that refuses.** Many sites keep automated browsers out (HTTP 401, 403 or 429). Jarvis
+never disguises his window or tries to get past a refusal: its user agent and headers stay the
+web engine's own, nothing is tried again under another identity, no captcha is answered. The
+window says "www.example.com keeps automated browsers out", and he is told plainly to try another
+source, or `fetch_text`: Claude Code's own declared fetcher, the one web research uses, in a
+separate short run with that as its only tool (on `[research] model`, at most 15 for a task). That
+run sees only the address and his question. It goes through the same checks as opening a page, what
+comes back is data like any page's text, and the window's strip says it is being read another way,
+not shown there.
 
 **A page he wrote.** He can open a page, a picture or a text from the task's own folder in
 the window, to look over what he made. It may show the folder's other files and run its own
@@ -2470,8 +2520,8 @@ the strong parts.
 **One task at a time.** The first planner run decides that a request is a task; it
 starts from your own words, whatever the planner wrote, and with nothing else.
 While it runs, what you type goes to it as your message, and "stop" or "cancel" ends it
-at once: the process is killed and anything it was still doing is dropped. A question
-he asks shows on the caption and waits for what you type next.
+at once: the process is killed and anything it was still doing is dropped. The bar says
+"Passing that on, sir." when your words went in.
 
 **Its budget.** After `[agent] max_turns` turns or `max_minutes` minutes of work he asks
 "Keep going?" (the clock rests while he waits for you). No, or no answer, and he reports
@@ -3886,7 +3936,7 @@ log. Changes apply the next time the app starts.
 | `[ask] read_mail` | `true` | `false`: Ask never reads mail, whatever the accounts' features say (a meeting brief is then Jarvis's own, without your threads and without a Claude run). |
 | `[research] enabled` | `true` | [Web research](#web-research) (part of Ask: it needs `[ask] enabled = true`): `web:` requests and the planner handing a request over. `false`: `web:` says web research is off and the planner never hands anything over. `JARVIS_RESEARCH_ENABLED` in `.env` overrides it both ways. |
 | `[research] planner_may_ask` | `true` | The Ask planner may hand a request to web research; `false`: only `web:` starts it. |
-| `[research] model` | `"sonnet"` | The model the research runs with; `"haiku"` uses less of your plan. A name that starts with `-` or has spaces is refused. |
+| `[research] model` | `"sonnet"` | The model the research runs with, and a task's `fetch_text`; `"haiku"` uses less of your plan. A name that starts with `-` or has spaces is refused. |
 | `[research] timeout_seconds` | `120` | One research run may take this long (30-300); then it is stopped and nothing is proposed. |
 | `[research] max_searches` | `4` | Web searches one research run may make (1-8); Jarvis stops a run that wants more. |
 | `[research] max_fetches` | `4` | Pages one research run may read (0-8; `0`: search only, WebFetch is not offered); Jarvis stops a run that wants more. |
@@ -3942,11 +3992,11 @@ log. Changes apply the next time the app starts.
 | `[desktop] screenshots_dir` | `""` | Where screenshots go: `""` = `Jarvis\Screenshots` in your user folder, else a full folder path. |
 | `[desktop] undo_days` | `7` | How long Undo is offered for a change to your files (1-30 days); "undo" looks this far back. |
 | `[desktop] apps` | `false` | Work inside apps you allow (a later version); nothing uses it yet. |
-| `[agent] enabled` | `false` | [Tasks](#tasks-jarvis-works-it-through): Jarvis works a task through step by step. Turn it on for this PC with `JARVIS_AGENT_ENABLED=true` in `.env` (it overrides this key both ways); it also needs `[desktop]` and `[ask]` on. |
+| `[agent] enabled` | `false` | [Tasks](#tasks-jarvis-works-it-through): Jarvis works a task through step by step. Turn it on for this PC with `JARVIS_AGENT_ENABLED=true` in `.env` (it overrides this key both ways); it also needs `[desktop]` and `[ask]` on, and your **Turn on** on the card that lists tasks. |
 | `[agent] model`, `effort` | `"opus"`, `""` | The tasks' model and effort (`"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`; `""` = Claude Code's default). Quick replies stay on `[ask] model`. |
 | `[agent] max_turns`, `max_minutes` | `60`, `20` | A task's budget (5-1000 turns, 1-240 minutes of work); reaching one asks "Keep going?". |
 | `[agent] tasks_per_day` | `20` | How many tasks may start in 24 hours (1-200). |
-| `[agent] search_engine` | `"duckduckgo"` | Where his searches go first: `"duckduckgo"`, `"bing"` or `"google"`, then the others if a page gives nothing or shows a wall. The words of each search go there. |
+| `[agent] search_engine` | `"duckduckgo"` | Where his searches go first: `"duckduckgo"`, `"bing"` or `"google"`, then the others if a page gives nothing or shows a wall. The words of each search go there, and the Turn on card names it. |
 | `[agent] workspace` | `""` | The tasks' folder: `""` = `Jarvis\Workspace` in your user folder, else a full folder path. Never under OneDrive: a task refuses to start there. |
 
 The offline voice uses the same `rate` and `volume`: the rate scales Windows'
@@ -4185,7 +4235,7 @@ Other files in `%LOCALAPPDATA%\briefing-reader`:
 | `recipients.json` | The addresses Jarvis sent replies and emails to, as one-way hashes (never the addresses), with the time; at most 5000. An address in it needs no NEW RECIPIENT confirmation. Delete it to confirm every address again. |
 | `ask_usage.json` | Ask Jarvis's planner runs of the last two days, for the hourly and daily caps (shared by every Jarvis process): a random id per run, when it started, how long it took, its turns and token counts and the outcome (web research runs carry `"kind": "research"` and count against both the Ask caps and the research caps; day plans carry `"kind": "plan_day"`, meeting briefs `"prep"` and drafts `"nudge"`, and count against both the Ask caps and `[productivity] max_runs_per_day`); and, after Claude Code reported extra usage, until when Ask is paused (`hold_until`). Never a request or anything the planner wrote. Delete it to reset the counts and the pause (`ask_usage.json.lock` next to it only takes turns between processes). |
 | `agent_tasks.json` | When [tasks](#tasks-jarvis-works-it-through) started in the last 24 hours, for `[agent] tasks_per_day`: times only, never a word of a task. |
-| `agent\`, `agent-runs\` | The empty folder Claude Code runs in for a task (it refuses to run while anything is in it), and each running task's own folder, with the MCP config that holds its one-run token, deleted when the task ends. |
+| `agent\`, `agent-fetch\`, `agent-runs\` | The empty folders Claude Code runs in for a task and its `fetch_text` (they refuse to run while anything is in them), and each running task's own folder, with the MCP config that holds its one-run token, deleted when the task ends. |
 | `ask\` | The empty folder Claude Code runs in for Ask. Ask refuses to run while anything is in it (a `CLAUDE.md` or `.mcp.json` there would add instructions or tools). |
 | `research\` | The empty folder Claude Code runs in for web research; research refuses to run while anything is in it. |
 | `runstate.json` | Per scheduled briefing: when it was first shown, when it was announced (`announced_at`) and first viewed (`viewed_at`), when and how a classic prompt was answered (read, dismissed, done), and (the productivity bundle) when the plan offer was posted for it (`plan_offered_at`) and when its day was planned (`planned_at`; an evening "plan tomorrow" marks tomorrow's AM slot), kept for 14 days. The catch-up task uses it, and it keeps a briefing from being announced twice; see [Catch-up and the hotkey](#catch-up-and-the-hotkey). Safe to delete (a briefing may then be announced once more). |

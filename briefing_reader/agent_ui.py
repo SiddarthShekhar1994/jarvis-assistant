@@ -4,23 +4,34 @@
         offered()              may a first planner run hand a request to a task now? (any thread: on, the owner's
                                Turn on, no task running, tasks left today, Claude Code able, no extra-usage pause).
                                AskPlanner.agent_allowed asks it
-        start(words)           one task, with the owner's own words (R1: only his request starts one). False and a
+        start(words)           one task, with the owner's own words (R1: only the owner's request starts one). False and
+        a
                                plain reason when it can't start
         take_request(text)     AskController's gate (D4): while a task runs, what is typed goes in as the owner's
                                message (the answer, when a question waits), or stops it ("stop", "cancel"). Nothing
                                runs: False
-        answer(id, text)       the owner-question seam: the tests answer through it, and part A3 connects its card to it
+        answer(id, text)       the owner-question seam: a card's click and the tests answer through it
         stop(reason)           ends the task at once (R8): the process is killed and anything late is dropped
+        set_window_hidden(h), set_window_away(a), window_hidden(), window_rect(), keep_window_clear(), close_window()
+                               the watch window, for the feed (agent_feed): the owner's Hide and Show, the Jarvis window
+                               coming back, where it is. The page goes on behind it
+        worked_s(), tools_running(), live_task_id()   for the panel's clock and activity line, and Home's chip
+        outputs_for(end), show_output(name), output_path(name)   the result card's Show (the sealed window) and Folder
         shutdown()             Jarvis closes: the task is killed and waited for, no process is left. Nothing starts
                                after it
     Signals (GUI thread):
         taskStarted(str)       a task started: its run id
-        planChanged(object)    its plan now (tuple of tools.PlanStep; part A3's panel)
+        planChanged(object)    its plan now (tuple of tools.PlanStep; agent_feed's panel)
+        activityChanged(str)   Jarvis's own few words for what it does now (tools.doing_words): on screen only
+        stepEnded()            a tool call ended
         said(str)              a line it said (the say tool): the app's caption and voice
         noticed(str, str)      Jarvis's own words about the task and their tone (paused by the plan's limit ...)
         acknowledged(str)      a few words that what was typed went in (shown, not said)
         questionAsked(object)  a runner.OwnerQuestion for the owner, its {sir} filled in
         questionGone(object)   it is not waiting any more (answered, or the task moved on)
+        questionExpired(object)  it timed out (just before questionGone)
+        windowHidden(bool)     the strip's Hide was clicked
+        windowPlaced()         the watch window came or moved
         taskEnded(object)      a runner.AgentEnd, its {sir} filled in
 
 Events come from the run's threads through a queued signal; a Stop drops what is still on its way. Live: a TASK_AGENT
@@ -29,8 +40,10 @@ the page in the window on it, and it never opens LIVE by itself. Logs: run ids, 
 what was typed, searched for or read.
 
 The web (part A2): each run has its own browser client (agent.browser), session and firewall. The window comes only with
-the first web or show step; when a run ends its page goes at once and the window a little later, at once after a Stop or
-a Turn off; a new run first ends what an older one left, and shutdown leaves nothing.
+the first web or show step; when a run ends its page goes at once and the window a little later, or when the result card
+goes (``hold_window``), at once after a Stop or a Turn off; a new run first ends what an older one left, and shutdown
+leaves nothing. Chromium itself starts as the task starts (snapshot_engine.warm_up), before the switch and the panel
+move: its first start blocks the GUI thread for a second or more, and in the middle of a task it would freeze them.
 """
 
 from __future__ import annotations
@@ -47,16 +60,18 @@ from PySide6.QtCore import QObject, Qt, Signal
 
 from . import hud
 from . import live as live_events
-from . import pictures
+from . import pictures, snapshot_engine
+from .agent import fetch as agent_fetch
 from .agent import firewall as agent_firewall
 from .agent import policy
 from .agent import runner as agent_runner
 from .agent import web
 from .agent.browser import BrowserClient
+from .agent.fetch import Fetcher
 from .agent.runner import AgentEnd, AgentEngine, AgentEvent, AgentRun, OwnerQuestion, Timing
 from .agent.tools import OUTCOME_DONE, OUTCOME_FAILED, Registry, Tool
 from .agent.web import WebSession
-from .agent.workspace import TaskFolder, WorkspaceRefused, workspace_root
+from .agent.workspace import TaskFolder, WorkspaceRefused, check_name, workspace_root
 from .ask.stream import LIMIT
 from .persona import with_address
 
@@ -79,11 +94,17 @@ END_STATUS = {OUTCOME_DONE: live_events.STATUS_OK, OUTCOME_FAILED: live_events.S
               agent_runner.OUTCOME_STOPPED: live_events.STATUS_CANCELLED}
 END_WORDS = {OUTCOME_DONE: "done", OUTCOME_FAILED: "failed", agent_runner.OUTCOME_STOPPED: "stopped"}
 PARTLY = "partly done"
+LIMIT_ACTIVITY = "Waiting for your plan's limit to reset"
+MAX_LISTED = 20                   # files a result card lists when the model did not name them
 CODE_WORDS = {agent_runner.HELD: "held - the task is waiting or stopping",
               "too_long": "took too long and was given up on", "bad_input": "refused: its input did not fit",
               "rate": "refused: too soon after the last one", "raised": "failed", "refused": "refused",
               agent_firewall.DECLINED: "you did not allow it", agent_firewall.CARD_BUSY: "a question waits already",
               web.W_NOT_PUBLIC: "refused: not a public https page", web.W_NO_PAGE: "no page is open",
+              web.W_REFUSED: "the site refuses automated browsers", web.W_HIDDEN: "you hid the window: no picture now",
+              agent_fetch.W_FETCH_CAP: "that was the most for one task",
+              agent_fetch.W_FETCH_FAILED: "it could not be read",
+              agent_fetch.W_FETCH_GUARD: "stopped: it went beyond the one address",
               web.W_NO_RESULTS: "no search page gave results", web.W_NOT_LOADED: "the page did not load",
               web.W_TOO_SLOW: "it took too long", web.W_NO_ANSWER: "the page stopped answering",
               web.W_STOPPED: "stopped", web.W_BUSY: "the window was busy",
@@ -207,8 +228,14 @@ class AgentController(QObject):
     questionAsked = Signal(object)
     questionGone = Signal(object)
     taskEnded = Signal(object)
+    activityChanged = Signal(str)
+    stepEnded = Signal()
+    questionExpired = Signal(object)
+    windowHidden = Signal(bool)
+    windowPlaced = Signal()
 
     def __init__(self, config: Any, planner: Any, *, live: Any = None, consent: Callable[[], bool] = lambda: False,
+                 tasks_consent: Callable[[], bool] | None = None,
                  environ: Mapping[str, str] | None = None, clock: Callable[[], float] = time.monotonic,
                  now: Callable[[], datetime] = lambda: datetime.now().astimezone(), timing: Timing = Timing(),
                  tools: Sequence[Tool] | None = None, parent: QObject | None = None,
@@ -218,7 +245,8 @@ class AgentController(QObject):
         self.config = config
         self.planner = planner
         self.live = live
-        self._consent = consent
+        self._consent = consent           # the owner's Turn on: a first planner run may offer a task
+        self._tasks_consent = tasks_consent or consent   # ... the card that lists tasks: a task may start
         self._environ = environ
         self._clock = clock
         self._now = now
@@ -232,6 +260,8 @@ class AgentController(QObject):
         self._window_avoid = window_avoid
         self._browser_factory = browser_factory
         self._browser: Any = None         # this run's (or, while its window lingers, the last run's) browser client
+        self.hold_window = False          # a window that lingers stays until close_window (the result card's)
+        self._away = False                # the Jarvis window is back: the watch window stays off the screen
         self.firewall: agent_firewall.WebFirewall | None = None
         self._run: AgentRun | None = None
         self._seq = 0
@@ -299,10 +329,12 @@ class AgentController(QObject):
 
         run = AgentRun(words, engine=self._engine, registry=registry, folder=folder, on_event=on_event,
                        clock=self._clock, now=self._now, timing=self.timing, on_overage=self._pause_for_overage,
-                       firewall=self.firewall, web=session)
+                       firewall=self.firewall, web=session, fetch=self._new_fetcher().fetch)
         self._run = run
         logger.info("Agent %s: a task starts", run.run_id)
         run.start()
+        if self._browser_factory is None:
+            snapshot_engine.warm_up()     # here, before the switch and the panel move (the module docs)
         self.taskStarted.emit(run.run_id)
         return True
 
@@ -310,11 +342,28 @@ class AgentController(QObject):
         """This run's use of the window. One window at a time: what the last run left goes first. Nothing of the web
         engine starts until the first web step."""
         self._close_browser()
+        self._browser = self._new_browser()
+        return WebSession(self._browser, self.config.agent.search_engine)
+
+    def _new_browser(self) -> Any:
         make = self._browser_factory or BrowserClient
         desktop = getattr(self.config, "desktop", None)
-        self._browser = make(self, avoid=self._window_avoid,
-                             hide_from_capture=bool(getattr(desktop, "hide_from_capture", True)))
-        return WebSession(self._browser, self.config.agent.search_engine)
+        browser = make(self, avoid=self._window_avoid,
+                       hide_from_capture=bool(getattr(desktop, "hide_from_capture", True)))
+        for name, slot in (("hideAsked", lambda: self.windowHidden.emit(True)),
+                           ("windowPlaced", self.windowPlaced.emit)):
+            signal = getattr(browser, name, None)
+            if signal is not None:
+                signal.connect(slot)
+        hide = getattr(browser, "set_hidden", None)
+        if callable(hide):
+            hide(away=self._away)
+        return browser
+
+    def _new_fetcher(self) -> Fetcher:
+        """This run's fetch_text, on [research] model, with its own cap."""
+        research = getattr(self.config, "research", None)
+        return Fetcher(self._engine, str(getattr(research, "model", "sonnet") or "sonnet"))
 
     def _close_browser(self) -> None:
         browser, self._browser = self._browser, None
@@ -325,7 +374,7 @@ class AgentController(QObject):
     def _refusal(self) -> str:
         if self._run is not None:
             return self._words(RUNNING_TEXT)
-        if not policy.agent_on(self.config) or self._consent() is not True:
+        if not policy.agent_on(self.config) or self._tasks_consent() is not True:
             return self._words(OFF_TEXT)
         if not self.tasks.allowed():
             return self._words(LIMIT_TEXT.replace("{count}", str(self.tasks.per_day)))
@@ -354,6 +403,81 @@ class AgentController(QObject):
         """The owner-question seam. False: that question is not waiting any more."""
         run = self._run
         return run.answer(question_id, text) if run is not None else False
+
+    # ---- the watch window and the result card, for the feed ------------------------------------------------
+
+    def _browser_call(self, name: str, default: Any, *args: Any, **kwargs: Any) -> Any:
+        call = getattr(self._browser, name, None)
+        return call(*args, **kwargs) if callable(call) else default
+
+    def set_window_hidden(self, hidden: bool) -> None:
+        """The owner's Hide and Show: the task carries on behind it."""
+        self._browser_call("set_hidden", None, owner=bool(hidden))
+
+    def set_window_away(self, away: bool) -> None:
+        """The Jarvis window is back (True): the watch window hides meanwhile. On the HUD again it comes back."""
+        self._away = bool(away)
+        self._browser_call("set_hidden", None, away=self._away)
+
+    def window_hidden(self) -> bool:
+        return bool(self._browser_call("owner_hid", False))
+
+    def window_rect(self) -> Any:
+        return self._browser_call("window_rect", None)
+
+    def keep_window_clear(self) -> None:
+        self._browser_call("keep_clear", None)
+
+    def close_window(self) -> None:
+        """The result card went: the window that stayed with it goes."""
+        self._close_browser()
+
+    def worked_s(self) -> float:
+        """How long this task has worked (the clock rests while the owner is waited for)."""
+        run = self._run
+        return run.budget.worked_s if run is not None else 0.0
+
+    def tools_running(self) -> bool:
+        return self._feed is not None and bool(self._feed.steps)
+
+    def live_task_id(self) -> int:
+        return int(getattr(self._feed.task, "id", 0) or 0) if self._feed is not None else 0
+
+    def outputs_for(self, end: AgentEnd) -> tuple[str, ...]:
+        """What the result card lists: the files the report named, else what the task's folder holds."""
+        if end.outputs:
+            return tuple(end.outputs)
+        folder = self.last_folder
+        try:
+            return tuple(name for name, _size in folder.listing())[:MAX_LISTED] if folder is not None else ()
+        except OSError:
+            return ()
+
+    def output_path(self, name: str) -> str:
+        """The full path of a good name of a file in this task's folder, "" when it is no such file."""
+        folder = self.last_folder
+        try:
+            parts = check_name(name)
+        except WorkspaceRefused:
+            return ""
+        if folder is None or not folder.exists("/".join(parts)):
+            return ""
+        return str(folder.path.joinpath(*parts))
+
+    def show_output(self, name: str) -> bool:
+        """The result card's Show: the file in the sealed watch window (a local scheme, a profile of its own, the
+        network gate sealed), never the owner's browser or a default app. False when it can't be shown."""
+        folder = self.last_folder
+        if self._shut or not self.output_path(name) or folder is None:
+            return False
+        if self._browser is None:
+            self._browser = self._new_browser()
+        show = getattr(self._browser, "show_for_owner", None)
+        if not callable(show):
+            return False
+        self._browser_call("set_hidden", None, owner=False, away=False)
+        show("/".join(check_name(name)), folder)
+        return True
 
     def stop(self, reason: str = "stop") -> None:
         run = self._run
@@ -399,8 +523,11 @@ class AgentController(QObject):
         elif kind == agent_runner.E_TOOL_START:
             tool = self._run.registry.tool(event.tool)
             feed.tool_start(event.call, tool.title if tool is not None else event.tool)
+            if event.text:
+                self.activityChanged.emit(event.text)
         elif kind == agent_runner.E_TOOL_END:
             feed.tool_end(event.call, event.result)
+            self.stepEnded.emit()
         elif kind == agent_runner.E_PLAN:
             self.planChanged.emit(event.steps)
         elif kind == agent_runner.E_SAY:
@@ -410,6 +537,8 @@ class AgentController(QObject):
         elif kind == agent_runner.E_NOTICE:
             feed.note(self._words(event.text))
             self.noticed.emit(self._words(event.text), hud.TONE_WARN if event.code == LIMIT else hud.TONE_DONE)
+            if event.code == LIMIT:
+                self.activityChanged.emit(LIMIT_ACTIVITY)
         elif kind == agent_runner.E_QUESTION and event.question is not None:
             # The firewall's card shows the exact words or address, whatever they are.
             question = (event.question if event.question.kind == agent_runner.Q_WEB
@@ -417,6 +546,8 @@ class AgentController(QObject):
             feed.asked(question)
             self.questionAsked.emit(question)
         elif kind == agent_runner.E_QUESTION_GONE:
+            if event.code == agent_runner.C_NO_ANSWER:
+                self.questionExpired.emit(event.question)
             self.questionGone.emit(event.question)
 
     def _end(self, end: AgentEnd | None) -> None:
@@ -426,8 +557,8 @@ class AgentController(QObject):
             return
         end = replace(end, summary=self._words(end.summary)) if end.own_words else end
         self.last_end = end
-        if self._browser is not None:     # its page goes now; its window a little later, unless he stopped it
-            self._browser.end_run(linger=end.outcome != agent_runner.OUTCOME_STOPPED)
+        if self._browser is not None:     # its page goes now; its window later, or with the result card: at once on a Stop
+            self._browser.end_run(linger=end.outcome != agent_runner.OUTCOME_STOPPED, hold=self.hold_window)
         if self.last_folder is not None:
             self.last_folder.discard_if_empty()   # a task that wrote nothing leaves nothing
         feed, self._feed = self._feed, None

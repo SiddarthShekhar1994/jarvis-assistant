@@ -710,22 +710,31 @@ class BudgetTests(RunCase):
         run.answer(question.id, "no")
         self.assertEqual(self.end().code, ar.C_OWNER_NO)
 
-    def test_words_that_are_not_a_yes_go_in_as_his_message_too(self) -> None:
+    def test_words_go_in_as_the_owner_s_and_never_answer_keep_going(self) -> None:
         def script(engine: FakeEngine) -> None:
             engine.wait_message()
             engine.call("say", text="One.")
             engine.call("write_file", name="a.md", text="a")
             engine.end_turn("Waiting.")
             engine.wait_message()
+            engine.end_turn("Still waiting.")
+            engine.wait_message()
             engine.call("finish", summary="Used the blue one.", outcome="done")
             engine.end_turn()
 
         run = self.go(script, agent={"max_turns": 2})
-        self.question()
+        question = self.question()
         self.until(lambda: run._idle)
-        self.assertEqual(run.owner_says("just use the blue one"), "answered")
+        for words in ("yes", "keep going"):
+            self.assertIsNotNone(run.waiting)
+            self.assertEqual(run.owner_says(words), "sent")
+            self.until(lambda: run._idle)
+            if words == "yes":
+                break
+        self.assertEqual(run.waiting, question)                       # only a click answers it
+        self.assertTrue(run.answer(question.id, "Keep going"))
         self.assertEqual(self.end().outcome, "done")
-        self.assertEqual(self.engine.messages[1], f"{ar.KEEP_GOING_YES}\nThe owner says: just use the blue one")
+        self.assertEqual(self.engine.messages[1:], ["The owner says: yes", ar.KEEP_GOING_YES])
 
     def test_minutes_with_the_clock_resting_while_he_decides(self) -> None:
         now = [1000.0]

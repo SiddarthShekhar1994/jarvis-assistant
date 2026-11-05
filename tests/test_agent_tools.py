@@ -289,7 +289,7 @@ class RegistryTests(Temp):
 
     def test_the_one_source(self) -> None:
         names = ("update_plan", "say", "ask_owner", "finish", "write_file", "read_file", "list_files", "web_search",
-                 "open_page", "read_more", "look_at_page", "show_file")
+                 "open_page", "read_more", "fetch_text", "look_at_page", "show_file")
         self.assertEqual(self.registry.names(), names)
         self.assertEqual(self.registry.allowed(), ",".join("mcp__jarvis__" + name for name in names))
         self.assertEqual(self.registry.expected(), {"mcp__jarvis__" + name for name in names})

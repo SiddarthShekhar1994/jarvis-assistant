@@ -318,8 +318,14 @@ class FakeBrowser:
         self.pictures: list[tuple[int, int]] = []
         self.current: FakePage | None = None
         self.gone = False                     # script() and picture() see no page from now on
-        self.stopped = self.ended = self.closed = self.shut = 0
+        self.stopped = self.ended = self.closed = self.shut = self.kept_clear = 0
         self.lingers: list[bool] = []
+        self.holds: list[bool] = []
+        self.owner_hidden = False
+        self.away = False
+        self.rect: Any = None                 # window_rect(): where the window is (None: not showing)
+        self.other_ways: list[tuple[str, bool]] = []
+        self.shown: list[str] = []            # what the owner's Show asked for
 
     # ---- the Browser seam -----------------------------------------------------------------------------
 
@@ -379,9 +385,31 @@ class FakeBrowser:
     def stop(self) -> None:
         self.stopped += 1
 
-    def end_run(self, *, linger: bool = True) -> None:
+    def end_run(self, *, linger: bool = True, hold: bool = False) -> None:
         self.ended += 1
         self.lingers.append(linger)
+        self.holds.append(hold)
+
+    def set_hidden(self, *, owner: bool | None = None, away: bool | None = None) -> None:
+        if owner is not None:
+            self.owner_hidden = bool(owner)
+        if away is not None:
+            self.away = bool(away)
+
+    def owner_hid(self) -> bool:
+        return self.owner_hidden
+
+    def window_rect(self) -> Any:
+        return self.rect
+
+    def keep_clear(self) -> None:
+        self.kept_clear += 1
+
+    def other_way(self, host: str, reading: bool) -> None:
+        self.other_ways.append((host, reading))
+
+    def show_for_owner(self, name: str, folder: Any, done: Any = None) -> None:
+        self.shown.append(name)
 
     def close_now(self) -> None:
         self.closed += 1

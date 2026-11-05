@@ -2,11 +2,13 @@
 Jarvis serves (SPEC "Jarvis, a true agent"). Qt-free but for ``browser``; the app's side is agent_ui.
 
 Off unless [agent] enabled (or JARVIS_AGENT_ENABLED) is true, with [desktop] and [ask] on: off means no endpoint,
-nothing started and no new word in any prompt or schema. Built so far (parts A1, the engine, and A2, the browser):
+nothing started and no new word in any prompt or schema. Built so far (parts A1, the engine, A2, the browser, and A3,
+the feed, whose windows are in hud_overlay and agent_feed):
 
 * ``tools``: the registry - each tool's name, description, input schema, tier and handler; the one source for tools/list
   and --allowedTools: update_plan, say, ask_owner, finish, write_file, read_file, list_files, web_search, open_page,
-  read_more, look_at_page and show_file.
+  read_more, fetch_text, look_at_page and show_file.
+* ``fetch``: fetch_text's short run of Claude Code's own declared fetcher, when a site refuses the window.
 * ``workspace``: the task's own folder, the one place a task may write without a click (text-like files, with caps).
 * ``endpoint``: the local MCP endpoint: 127.0.0.1 only, a per-run token, handlers off the HTTP thread, 45 s at most.
 * ``policy``: what is offered, the budgets, the tasks a day and the seam the firewall plugs into.

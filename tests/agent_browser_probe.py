@@ -193,10 +193,86 @@ def children(name: str = "QtWebEngineProcess.exe") -> list[int]:
     return found(name)
 
 
+class _RefusingSite:
+    """Stands where the network gate would (Chromium's proxy) and answers as a site would: the status its path names.
+    Only ever on loopback. ``hits``: each path asked for; ``agents``: the User-Agent each request came with;
+    ``connects``: tunnels asked for (none is made)."""
+
+    BODIES = {"403": (403, b"<html><body>Access denied</body></html>"), "403empty": (403, b""),
+              "401": (401, b"<html><body>Sign in</body></html>"), "429": (429, b"<html><body>Slow down</body></html>"),
+              "404": (404, b"<html><body>Not here</body></html>"),
+              "200": (200, b"<html><title>Fine</title><body style='background:#fff'><h1>A page</h1></body></html>")}
+
+    def __init__(self) -> None:
+        self.hits: list[str] = []
+        self.agents: list[str] = []
+        self.connects = 0
+        self._server = socket.socket()
+        self._server.bind(("127.0.0.1", 0))
+        self._server.listen(16)
+        self._server.settimeout(0.2)
+        self._stop = False
+
+    def start(self) -> int:
+        threading.Thread(target=self._serve, daemon=True).start()
+        return self._server.getsockname()[1]
+
+    def seal(self, _sealed: bool) -> None:
+        pass
+
+    def counts(self) -> dict[str, int]:
+        return {"hits": len(self.hits)}
+
+    def stop(self) -> None:
+        self._stop = True
+
+    def _serve(self) -> None:
+        while not self._stop:
+            try:
+                connection, _address = self._server.accept()
+            except OSError:
+                continue
+            threading.Thread(target=self._answer, args=(connection,), daemon=True).start()
+
+    def _answer(self, connection: socket.socket) -> None:
+        with connection:
+            connection.settimeout(5)
+            raw = b""
+            try:
+                while b"\r\n\r\n" not in raw:
+                    piece = connection.recv(4096)
+                    if not piece:
+                        return
+                    raw += piece
+                lines = raw.decode("latin-1").split("\r\n")
+                method, target, _version = lines[0].split(" ", 2)
+                if method == "CONNECT":
+                    self.connects += 1
+                    connection.sendall(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
+                    return
+                path = target.rsplit("/", 1)[-1]
+                self.hits.append(path)
+                self.agents += [line.split(":", 1)[1].strip() for line in lines if line.lower().startswith("user-agent:")]
+                status, body = self.BODIES.get(path, (404, b""))
+                connection.sendall(f"HTTP/1.1 {status} Status\r\nContent-Type: text/html\r\nContent-Length: {len(body)}\r\n"
+                                   "Connection: close\r\n\r\n".encode("ascii") + body)
+            except OSError:
+                pass
+
+
+def _default_agent(snapshot_engine: Any) -> str:
+    """The user agent of a profile nobody touched: the engine's own."""
+    profile = snapshot_engine._classes().QWebEngineProfile()
+    try:
+        return profile.httpUserAgent()
+    finally:
+        profile.deleteLater()
+
+
 def main(case: str) -> dict[str, Any]:
     from briefing_reader import snapshot_engine, snapshot_gate, snapshots
 
-    if case not in ("gate", "gate_control"):
+    if case not in ("gate", "gate_control", "refused"):
         os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(snapshots.OFFLINE_FLAGS)
     else:
         os.environ.pop("QTWEBENGINE_CHROMIUM_FLAGS", None)
@@ -737,8 +813,146 @@ def main(case: str) -> dict[str, Any]:
         client.shutdown()
         report["flags"] = snapshots.flag_tokens(os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", ""))
         listener.stop()
+    elif case == "refused":
+        # A real HTTP status through the real engine: the "gate" is a little server on loopback that answers as a site
+        # would, and no connection goes anywhere else.
+        site = _RefusingSite()
+        snapshot_engine._gate_factory = lambda: site
+        snapshot_engine._test_platform = lambda: False
+        client, _session, _context = make(html_for=None, decide=lambda *_args, **_kwargs: "")
+        outcomes: dict[str, Any] = {}
+        for path in ("403", "403empty", "401", "429", "404", "200", "403"):
+            value, _took = in_thread(lambda path=path: client.load(f"http://www.example.org/{path}", timeout_s=15,
+                                                                   cancelled=lambda: False))
+            pump(0.2)
+            window = client.browser().window()
+            picture = window.grab().toImage()
+            outcomes[path] = {"ok": value.ok, "kind": snapshots.reason_kind(value.reason), "status": value.http_status,
+                              "notice": list(window.notice()), "strip": list(window.strip_texts()),
+                              "uniform": snapshot_engine._uniform(picture)}
+        report.update(outcomes=outcomes, hits=site.hits, agents=sorted(set(site.agents)), connects=site.connects)
+        browser = client.browser()
+        report["profile_agent_default"] = _default_agent(snapshot_engine)
+        report["hooks"] = browser.hook_counts()
+        client.shutdown()
+        site.stop()
+    elif case == "feed_window":
+        tall = "<!doctype html><title>Tall</title><body style='background:#fff'><h1>Words</h1>" + "<p>A line.</p>" * 400 + "</body>"
+        pages[PAGE] = tall
+        pages["https://www.example.org/second"] = tall
+        pages["https://www.example.org/third"] = tall
+        other = QLineEdit()
+        other.show()
+        other.activateWindow()
+        other.setFocus()
+        pump(0.1)
+        client, session, context = make()
+        first, _took = in_thread(lambda: tool(context, "open_page", url=PAGE))
+        browser = client.browser()
+        window = browser.window()
+        report["first"] = describe(first)
+        report["shown_first"] = window.isVisible()
+        report["hide_in_strip"] = {"policy": window.hide_button.focusPolicy() == Qt.FocusPolicy.NoFocus,
+                                   "inside": window.rect().contains(window.hide_button.geometry()),
+                                   "cut": window.cut_texts()}
+        report["agent"] = browser._shot.profile.httpUserAgent()
+        report["agent_default"] = _default_agent(snapshot_engine)
+        asked_hide: list[bool] = []
+        client.hideAsked.connect(lambda: asked_hide.append(True))
+        window.hide_button.click()
+        pump(0.1)
+        report["hidden"] = {"visible": window.isVisible(), "asked": asked_hide, "owner": client.owner_hid()}
+        second, _took = in_thread(lambda: tool(context, "open_page", url="https://www.example.org/second"))
+        report["second"] = describe(second)
+        report["second_visible"] = window.isVisible()
+        look, _took = in_thread(lambda: tool(context, "look_at_page"))
+        report["look_hidden"] = describe(look)
+        client.set_hidden(owner=False)
+        pump(0.2)
+        report["back_visible"] = window.isVisible()
+        client.set_hidden(away=True)
+        pump(0.1)
+        report["away_visible"] = window.isVisible()
+        third, _took = in_thread(lambda: tool(context, "open_page", url="https://www.example.org/third"))
+        report["third_code"] = third.code
+        report["third_visible"] = window.isVisible()
+        client.set_hidden(away=False)
+        pump(0.2)
+        report["after_away_visible"] = window.isVisible()
+        # While Jarvis reads the wheel moves nothing; the strip says when a page is read another way.
+        window.wheeled.emit(-240)
+        pump(0.3)
+        report["scroll_while_reading"] = main_world(client, "window.scrollY")
+        client.other_way("www.example.net", True)
+        pump(0.1)
+        report["other_way_tag"] = window.strip_texts()[0]
+        client.other_way("www.example.net", False)
+        pump(0.1)
+        report["after_other_way_tag"] = window.strip_texts()[0]
+        report["focus_kept"] = QApplication.focusWidget() is other or QApplication.focusWidget() is None
+        report["took_focus"] = window.isActiveWindow()
+        other.hide()
+        client.shutdown()
+    elif case == "owner_show":
+        tall = "<!doctype html><title>Report</title><body><h1>The report</h1>" + "<p>A line of it.</p>" * 400 + "</body>"
+        folder.write("report.html", tall)
+        pages[PAGE] = "<!doctype html><title>A page</title><body style='background:#fff'><h1>Words</h1></body>"
+        client, _session, context = make(linger_s=0.2)
+        in_thread(lambda: tool(context, "open_page", url=PAGE))
+        browser = client.browser()
+        window = browser.window()
+        client.end_run(linger=True, hold=True)
+        pump(0.6)                                       # past its linger: held
+        report["held"] = {"visible": window.isVisible(), "tag": window.strip_texts()[0], "page": browser.has_page()}
+        done: list[Any] = []
+        client.show_for_owner("report.html", folder, done.append)
+        report["delivered"] = wait_until(lambda: done, 15)
+        pump(0.3)
+        report["shown"] = {"ok": done[0].ok if done else None, "visible": window.isVisible(), "strip": list(window.strip_texts()),
+                           "sealed": browser.sealed(), "title": main_world(client, "document.title"),
+                           "scheme": main_world(client, "location.protocol")}
+        window.wheeled.emit(-240)
+        report["scrolled"] = wait_until(lambda: main_world(client, "window.scrollY"), 5)
+        client.close_now()
+        pump(0.3)
+        report["window_gone"] = not _shown(app)
+        report["sealed_after"] = agent_browser.gate_held()
+        client.shutdown()
+    elif case == "warm_up":
+        gaps: list[float] = []
+        last = [time.monotonic()]
+
+        def beat() -> None:
+            now = time.monotonic()
+            gaps.append(now - last[0])
+            last[0] = now
+
+        timer = QTimer()
+        timer.setInterval(10)
+        timer.timeout.connect(beat)
+        timer.start()
+        pump(0.2)
+        gaps.clear()
+        report["no_warm_up_here"] = snapshot_engine.warm_up()
+        report["first"] = snapshot_engine.warm_up(test_platform=True)
+        report["started"] = snapshot_engine._ENGINE.started
+        report["again"] = snapshot_engine.warm_up(test_platform=True)
+        report["windows_after"] = _shown(app)
+        report["renderers_after"] = len(children())
+        pump(0.1)
+        report["warm_gap"] = round(max(gaps), 3)
+        gaps.clear()
+        pages[PAGE] = "<!doctype html><title>A page</title><body><h1>Words</h1></body>"
+        client, _session, context = make()
+        opened, _took = in_thread(lambda: tool(context, "open_page", url=PAGE))
+        report["opened"] = opened.code
+        report["first_step_gap"] = round(max(gaps), 3)
+        timer.stop()
+        client.shutdown()
     elif case == "task":
         report.update(whole_task(pages, html_for, root, wait_until, pump))
+    elif case == "feed_task":
+        report.update(feed_task(pages, html_for, root, wait_until, pump))
     else:
         report["error"] = f"unknown case {case!r}"
     qInstallMessageHandler(None)
@@ -814,6 +1028,147 @@ class _Listener:
 
     def stop(self) -> None:
         self._stop.set()
+
+
+def feed_task(pages: dict[str, Any], html_for: Any, root: Path, wait_until: Any, pump: Any) -> dict[str, Any]:
+    """The feed over the real controller, the real browser, the real endpoint and the real HUD windows: only Claude Code is a
+    fake, and the desktop controller and Home stand-ins."""
+    from PySide6.QtCore import QObject, Signal
+    from PySide6.QtTest import QTest
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
+
+    from briefing_reader import agent_feed, agent_ui, hud_overlay, live
+    from briefing_reader.agent import browser as agent_browser
+    from briefing_reader.agent.runner import Timing
+    from briefing_reader.config import AgentConfig
+    from tests.agent_fakes import FakeEngine, FakeEngineRunner, base_engine
+
+    tall = "<!doctype html><title>A page</title><body style='background:#fff'><h1>Words</h1></body>"
+    pages["https://www.example.org/one"] = tall
+    pages["https://www.example.org/two"] = tall
+    report: dict[str, Any] = {}
+    gates = [threading.Event() for _ in range(3)]
+    reached = [threading.Event() for _ in range(3)]
+
+    def script(engine: FakeEngine) -> None:
+        engine.wait_message()
+        engine.call("update_plan", steps=[{"text": "Read", "status": "doing"}, {"text": "Write", "status": "todo"}])
+        engine.call("open_page", url="https://www.example.org/one")
+        reached[0].set()
+        gates[0].wait(30)
+        engine.call("open_page", url="https://www.example.org/two")
+        reached[1].set()
+        gates[1].wait(30)
+        engine.call("write_file", name="report.html", text="<!doctype html><title>The report</title><body>Yes.</body>")
+        engine.call("finish", summary="The answer is yes. It took two pages.", outcome="done", outputs=["report.html"])
+        engine.end_turn("Done.")
+
+    engine = FakeEngine(script)
+    runner = FakeEngineRunner(engine)
+    config = SimpleNamespace(agent=AgentConfig(enabled=True, workspace=str(root / "workspace")),
+                             desktop=SimpleNamespace(enabled=True, hide_from_capture=False),
+                             ask=SimpleNamespace(enabled=True), data_dir=root / "data",
+                             assistant=SimpleNamespace(address="sir"))
+    planner = SimpleNamespace(engine=base_engine(root, runner), usage=SimpleNamespace(hold_until=lambda: None))
+    overlay = hud_overlay.HudOverlay(hud_key="", hide_from_capture=False, native=hud_overlay.NoNative())
+    overlay.show_on(QApplication.primaryScreen())
+
+    class Desktop(QObject):
+        hudChanged = Signal(bool)
+        waits = 0
+        revealed: list[str] = []
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.overlay = overlay
+            self._click_guard = None
+
+        def enter_hud(self) -> bool:
+            return False
+
+        def is_hud(self) -> bool:
+            return True
+
+        def bar(self) -> Any:
+            return overlay.hud.bar
+
+        def consent_given(self) -> bool:
+            return True
+
+        def set_task_waiting(self, count: int) -> None:
+            self.waits = count
+
+        def reveal_task_file(self, path: str) -> bool:
+            self.revealed.append(path)
+            return True
+
+    class Reading(QObject):
+        taskChipClicked = Signal()
+        taskStopClicked = Signal()
+
+        def set_task_look(self, _base: str) -> None:
+            pass
+
+        def set_task_chip(self, _text: str, *, can_stop: bool = False) -> None:
+            pass
+
+    def factory(parent: Any, **options: Any) -> agent_browser.BrowserClient:
+        return agent_browser.BrowserClient(parent, html_for=html_for, poll_s=0.01, **options)
+
+    desktop, reading = Desktop(), Reading()
+    controller = agent_ui.AgentController(config, planner, live=live.LiveStream(), consent=lambda: True, browser_factory=factory,
+                                          window_avoid=overlay.hud.occupied_rect,
+                                          timing=Timing(poll_s=0.01, connect_s=5.0, init_s=20.0, tool_s=40.0,
+                                                        after_finish_s=2.0, replay_s=0.5), parent=QApplication.instance())
+    feed = agent_feed.TaskFeed(controller, desktop, reading, words=lambda *_a, **_k: None, reveal_live=lambda _link: None)
+    report["started"] = controller.start("read two pages")
+    report["first_page"] = wait_until(reached[0].is_set, 30)
+    pump(0.3)
+    panel, buttons = feed.panel(), feed.buttons()
+    window = controller._browser.browser().window()
+    report["after_first"] = {"panel": panel.isVisible(), "window": window.isVisible(), "activity": feed.activity(),
+                             "head": panel.content().head,
+                             "clear": not panel.geometry().intersects(overlay.hud.occupied_rect()),
+                             "show_hidden": buttons.show_button.isHidden()}
+    QTest.mouseClick(window.hide_button, Qt.MouseButton.LeftButton)
+    pump(0.2)
+    report["after_hide"] = {"window": window.isVisible(), "show_hidden": buttons.show_button.isHidden(),
+                            "buttons": buttons.isVisible(), "running": controller.running}
+    gates[0].set()
+    report["second_page"] = wait_until(reached[1].is_set, 30)
+    pump(0.2)
+    report["second_activity"] = feed.activity()
+    report["second_window"] = window.isVisible()
+    QTest.mouseClick(buttons.show_button, Qt.MouseButton.LeftButton)
+    pump(0.3)
+    report["after_show"] = {"window": window.isVisible(), "show_hidden": buttons.show_button.isHidden()}
+    gates[1].set()
+    report["ended"] = wait_until(lambda: controller.last_end is not None, 30)
+    pump(0.4)
+    card = feed.card
+    report["result"] = {"kicker": card.task().kicker, "body": card.task().body, "rows": [row.name for row in card.task().rows],
+                        "window": window.isVisible(), "tag": window.strip_texts()[0], "page": controller._browser.browser().has_page(),
+                        "spoken": agent_feed.spoken_summary(card.task().body)}
+    feed._card_at -= 5
+    links = card.row_buttons()
+    QTest.mouseClick(links["show:report.html"], Qt.MouseButton.LeftButton)
+    report["shown"] = wait_until(lambda: controller._browser.browser().has_page() and window.strip_texts()[0] == agent_browser.SHOWING_TAG, 15)
+    report["sealed"] = wait_until(agent_browser.gate_held, 10)
+    QTest.mouseClick(links["folder:report.html"], Qt.MouseButton.LeftButton)
+    report["revealed"] = [Path(path).name for path in desktop.revealed]
+    QTest.mouseClick(card.buttons()["done"], Qt.MouseButton.LeftButton)
+    pump(0.5)
+    report["after_done"] = {"card": feed.card is None, "panel": panel.isVisible(), "active": feed.active(),
+                            "shown": [name for name in _shown(QApplication.instance()) if name in ("JarvisWatch", "JarvisPlan",
+                                                                                                    "JarvisTask")]}
+    report["sealed_after"] = agent_browser.gate_held()
+    report["failure"] = repr(engine.failure) if engine.failure is not None else ""
+    feed.shutdown()
+    controller.shutdown()
+    overlay.shutdown()
+    pump(0.2)
+    return report
 
 
 def whole_task(pages: dict[str, Any], html_for: Any, root: Path, wait_until: Any, pump: Any) -> dict[str, Any]:

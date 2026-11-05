@@ -30,7 +30,7 @@ from tests.ui_fakes import fonts, settle
 PROBE = Path(__file__).with_name("agent_browser_probe.py")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CASES = ("search", "read", "picture", "crash", "timeout", "stop", "quit", "hooks", "focus", "linger", "file", "gate",
-         "gate_control", "task")
+         "gate_control", "task", "refused", "feed_window", "owner_show", "warm_up", "feed_task")
 MARK = "PROBE-WORDS-7f3a"
 PAGE = "https://www.example.org/page"
 REPORTS: dict[str, dict] = {}
@@ -720,6 +720,157 @@ class BrowserHelperTests(unittest.TestCase):
 
     def test_fonts_are_there_for_the_strip(self) -> None:
         self.assertTrue(hud.mono_font(10, 500, 0.12).family())
+
+
+class RefusedTests(ProbeCase):
+    """A real HTTP status through the real engine, from a little server on loopback standing where the gate would."""
+
+    def outcomes(self) -> dict:
+        return self.report("refused")["outcomes"]
+
+    def test_401_403_and_429_are_a_refusal_told_apart_with_words_in_the_window(self) -> None:
+        outcomes = self.outcomes()
+        for path, status in (("403", 403), ("403empty", 403), ("401", 401), ("429", 429)):
+            outcome = outcomes[path]
+            self.assertFalse(outcome["ok"], path)
+            self.assertEqual((outcome["kind"], outcome["status"]), ("site_refused", status), path)
+            self.assertEqual(outcome["notice"], ["www.example.org keeps automated browsers out", agent_browser.REFUSED_NOTE], path)
+            self.assertFalse(outcome["uniform"], path)               # words on its dark page, not emptiness
+
+    def test_another_failure_says_something_else(self) -> None:
+        outcome = self.outcomes()["404"]
+        self.assertEqual((outcome["ok"], outcome["kind"], outcome["status"]), (False, "load_failed", 0))
+        self.assertEqual(outcome["notice"], ["www.example.org did not load", agent_browser.NOT_LOADED_NOTE])
+
+    def test_a_page_that_comes_leaves_no_words(self) -> None:
+        outcome = self.outcomes()["200"]
+        self.assertTrue(outcome["ok"])
+        self.assertEqual(outcome["notice"], ["", ""])
+
+    def test_nothing_is_tried_again_and_no_identity_but_the_engine_s(self) -> None:
+        report = self.report("refused")
+        self.assertEqual(report["hits"], ["403", "403empty", "401", "429", "404", "200", "403"])    # each asked for once
+        self.assertEqual(len(report["agents"]), 1)                   # one user agent for every request ...
+        self.assertEqual(report["agents"][0], report["profile_agent_default"])    # ... the engine's own
+        self.assertIn("QtWebEngine", report["agents"][0])            # it says what it is
+
+
+class FeedWindowTests(ProbeCase):
+    def test_the_user_agent_is_never_set(self) -> None:
+        report = self.report("feed_window")
+        self.assertEqual(report["agent"], report["agent_default"])
+        self.assertIn("QtWebEngine", report["agent"])
+
+    def test_no_disguise_anywhere_in_the_source(self) -> None:
+        for name in ("agent/browser.py", "agent/web.py", "agent/fetch.py", "agent/tools.py", "snapshot_engine.py", "agent_ui.py",
+                     "agent_feed.py"):
+            source = (PROJECT_ROOT / "briefing_reader" / name).read_text(encoding="utf-8")
+            for word in ("setHttpUserAgent", "setHttpHeader", "setHttpAcceptLanguage", "--user-agent", "User-Agent"):
+                self.assertNotIn(word, source, name)
+
+    def test_hide_and_show(self) -> None:
+        report = self.report("feed_window")
+        self.assertTrue(report["shown_first"])
+        self.assertTrue(report["hide_in_strip"]["policy"])
+        self.assertTrue(report["hide_in_strip"]["inside"])
+        self.assertEqual(report["hide_in_strip"]["cut"], [])
+        self.assertEqual(report["hidden"], {"visible": False, "asked": [True], "owner": True})
+        self.assertFalse(report["second"]["is_error"])               # the task carries on behind it
+        self.assertIn("Words", report["second"]["text"])
+        self.assertFalse(report["second_visible"])                   # a new page does not bring it back
+        self.assertTrue(report["back_visible"])
+
+    def test_a_picture_while_hidden_is_a_picture_or_says_it_is_hidden(self) -> None:
+        look = self.report("feed_window")["look_hidden"]
+        self.assertTrue(look["pictures"] == 1 or look["code"] == web.W_HIDDEN, look)
+
+    def test_away_while_the_jarvis_window_is_back(self) -> None:
+        report = self.report("feed_window")
+        self.assertFalse(report["away_visible"])
+        self.assertEqual(report["third_code"], "")
+        self.assertFalse(report["third_visible"])
+        self.assertTrue(report["after_away_visible"])
+
+    def test_while_jarvis_reads_the_wheel_moves_nothing(self) -> None:
+        self.assertEqual(self.report("feed_window")["scroll_while_reading"], 0)
+
+    def test_the_strip_says_a_page_is_read_another_way(self) -> None:
+        report = self.report("feed_window")
+        self.assertEqual(report["other_way_tag"], agent_browser.OTHER_WAY_TAG)
+        self.assertEqual(report["after_other_way_tag"], READING_TAG)
+
+    def test_the_focus_stays_where_it_was(self) -> None:
+        report = self.report("feed_window")
+        self.assertTrue(report["focus_kept"])
+        self.assertFalse(report["took_focus"])
+
+
+class OwnerShowTests(ProbeCase):
+    def test_the_window_stays_while_the_card_stays(self) -> None:
+        held = self.report("owner_show")["held"]
+        self.assertEqual(held, {"visible": True, "tag": FINISHED_TAG, "page": False})
+
+    def test_show_opens_it_sealed_in_the_window_and_the_wheel_scrolls_it(self) -> None:
+        report = self.report("owner_show")
+        self.assertTrue(report["delivered"])
+        shown = report["shown"]
+        self.assertTrue(shown["ok"])
+        self.assertTrue(shown["visible"])
+        self.assertTrue(shown["sealed"])                             # the network gate refuses everything meanwhile
+        self.assertEqual(shown["scheme"], f"{web.SCHEME}:")          # Jarvis's own local scheme
+        self.assertEqual(shown["title"], "Report")
+        self.assertEqual(shown["strip"][0], agent_browser.SHOWING_TAG)
+        self.assertTrue(report["scrolled"])
+
+    def test_nothing_is_left_when_the_card_goes(self) -> None:
+        report = self.report("owner_show")
+        self.assertTrue(report["window_gone"])
+        self.assertFalse(report["sealed_after"])
+
+
+class FeedOverTheRealBrowserTests(ProbeCase):
+    """The panel, Hide and Show, the result card, Show and Folder over the real controller, browser, endpoint and HUD windows."""
+
+    def test_through_a_whole_task(self) -> None:
+        report = self.report("feed_task")
+        self.assertEqual(report["failure"], "")
+        self.assertTrue(report["started"] and report["first_page"] and report["second_page"] and report["ended"])
+        first = report["after_first"]
+        self.assertTrue(first["panel"] and first["window"] and first["clear"] and first["show_hidden"])
+        self.assertEqual(first["activity"], "Reading www.example.org")
+        self.assertRegex(first["head"], r"^WORKING - 1 OF 2 - \d+:\d\d$")
+        self.assertEqual(report["after_hide"], {"window": False, "show_hidden": False, "buttons": True, "running": True})
+        self.assertFalse(report["second_window"])                    # the task carried on behind it
+        self.assertEqual(report["second_activity"], "Reading www.example.org")
+        self.assertEqual(report["after_show"], {"window": True, "show_hidden": True})
+        result = report["result"]
+        self.assertRegex(result["kicker"], r"^DONE - 2 STEPS - \d+:\d\d$")
+        self.assertEqual(result["body"], "The answer is yes. It took two pages.")
+        self.assertEqual(result["rows"], ["report.html"])
+        self.assertTrue(result["window"])                            # the window stays while the card stays
+        self.assertEqual(result["tag"], FINISHED_TAG)
+        self.assertFalse(result["page"])                             # its page went
+        self.assertTrue(report["shown"])
+        self.assertTrue(report["sealed"])
+        self.assertEqual(report["revealed"], ["report.html"])
+        self.assertEqual(report["after_done"], {"card": True, "panel": False, "active": False, "shown": []})
+        self.assertFalse(report["sealed_after"])
+
+
+class WarmUpTests(ProbeCase):
+    def test_it_starts_chromium_and_nothing_else_once(self) -> None:
+        report = self.report("warm_up")
+        self.assertEqual(report["no_warm_up_here"], 0.0)             # never by itself on a test platform
+        self.assertGreater(report["first"], 0.0)
+        self.assertTrue(report["started"])
+        self.assertEqual(report["again"], 0.0)
+        self.assertEqual(report["windows_after"], [])                # no page, no renderer, no window
+        self.assertEqual(report["renderers_after"], 0)
+
+    def test_the_first_web_step_then_blocks_the_gui_far_less(self) -> None:
+        report = self.report("warm_up")
+        self.assertEqual(report["opened"], "")
+        self.assertLess(report["first_step_gap"], report["warm_gap"])
 
 
 if __name__ == "__main__":

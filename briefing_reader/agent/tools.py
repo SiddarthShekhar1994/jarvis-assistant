@@ -28,6 +28,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from ..actions import link_host, web_link_problem
 from ..ask.cli import AGENT_TOOL_PREFIX
 from ..ask.context import data
 from . import web
@@ -51,10 +52,21 @@ OUTCOME_DONE, OUTCOME_PARTIAL, OUTCOME_FAILED = "done", "partial", "failed"
 OUTCOMES = (OUTCOME_DONE, OUTCOME_PARTIAL, OUTCOME_FAILED)
 STEP_TODO, STEP_DOING, STEP_DONE, STEP_FAILED = "todo", "doing", "done", "failed"
 STEP_STATES = (STEP_TODO, STEP_DOING, STEP_DONE, STEP_FAILED)
-WAIT_TEXT = ("The owner has it on his screen. End your turn now with one short sentence. His answer will come to you "
+WAIT_TEXT = ("The owner has it on their screen. End your turn now with one short sentence. The answer will come to you "
              "as your next message.")
-ANOTHER_QUESTION_TEXT = ("A question is waiting for the owner already. End your turn now; his answer comes as your "
+ANOTHER_QUESTION_TEXT = ("A question is waiting for the owner already. End your turn now; the answer comes as your "
                          "next message.")
+FETCH_QUESTION_CAP = 300
+NO_FETCH_TEXT = "Reading a page another way isn't available now. Try another source, or say so in your report."
+# The few words the panel's activity line shows for a tool call (doing_words): Jarvis's own, on screen only.
+DOING = {"web_search": "Searching the web", "read_more": "Reading on", "look_at_page": "Looking at the page",
+         "write_file": "Writing a file", "read_file": "Reading a file back", "list_files": "Checking the task's files",
+         "show_file": "Looking over a file", "ask_owner": "Waiting for you", "finish": "Writing it up"}
+READING_HOST = "Reading {host}"
+READING_PAGE = "Opening a page"
+READING_OTHER_WAY = "Reading {host} another way"
+READING_OTHER_PAGE = "Reading a page another way"
+DOING_HOST_CAP = 60
 # Result codes (the logs' and Live's: fixed words).
 BAD_INPUT, RAISED, RATE, REFUSED, UNKNOWN_TOOL = "bad_input", "raised", "rate", "refused", "unknown_tool"
 
@@ -108,6 +120,7 @@ class RunContext:
     say_lock: threading.Lock = field(default_factory=threading.Lock)
     web: web.WebSession | None = None # the run's use of the window (None: there is none)
     tool_s: float = 45.0              # a tool's time (the endpoint's rule): a web call answers plainly before it
+    fetch: Callable[..., str] | None = None   # fetch_text's way (agent.fetch.Fetcher.fetch; None: there is none)
 
 
 def _object(**props: Any) -> dict[str, Any]:
@@ -274,9 +287,11 @@ def _web_call(ctx: RunContext) -> web.Call:
     return web.Call(ctx.cancelled, ctx.tool_s, time.monotonic)
 
 
-def _page_flags(*texts: str) -> tuple[str, tuple[tuple[str, str], ...], bool]:
-    """(a line for the model, a field for Live, whether the step is flagged) when lines read like orders (R5)."""
-    count = sum(web.suspect_lines(text) for text in texts)
+def _page_flags(*texts: str, hidden: bool = False) -> tuple[str, tuple[tuple[str, str], ...], bool]:
+    """(a line for the model, a field for Live, whether the step is flagged) when lines hold a strong sign of an order
+    (R5; web.suspect_lines), or the page held a hidden message: only then is an ordinary page's step in Live a
+    warning."""
+    count = sum(web.suspect_lines(text) for text in texts) + int(hidden)
     if not count:
         return "", (), False
     what = f"{count} line{'s' if count != 1 else ''}"
@@ -298,7 +313,8 @@ def _web_search(args: Mapping[str, Any], ctx: RunContext) -> ToolResult:
         row = f"{number}. {data(title, web.TITLE_CAP)}\n   {address}"
         rows.append(row + f"\n   {data(snippet)}" if snippet else row)
     block = "\n".join(rows)
-    flag, flagged, warn = _page_flags("\n".join(f"{title}\n{snippet}" for _n, title, _a, snippet in found.results))
+    flag, flagged, warn = _page_flags("\n".join(f"{title}\n{snippet}" for _n, title, _a, snippet in found.results),
+                                      hidden=found.hidden)
     return ToolResult(f"These are from {found.engine}, whose results page is in the window now. Open one with "
                       f"open_page and its number.\n{untrusted('web search results', block)}{flag}",
                       note=f"{len(found.results)} result(s) from {found.engine}", warn=warn,
@@ -329,7 +345,8 @@ def _opened_text(opened: web.Opened, source: str, more_hint: str) -> str:
 
 
 def _opened_result(opened: web.Opened, source: str, note: str, fields: tuple[tuple[str, str], ...]) -> ToolResult:
-    flag, flagged, warn = _page_flags(opened.title, opened.text, "\n".join(words for _n, words, _a in opened.links))
+    flag, flagged, warn = _page_flags(opened.title, opened.text, "\n".join(words for _n, words, _a in opened.links),
+                                      hidden=opened.hidden)
     picture = (opened.live_address, opened.shot) if opened.shot is not None else None
     if opened.still_loading:
         fields = (*fields, ("Still loading", "when Jarvis read it"))
@@ -381,6 +398,54 @@ def _look_at_page(_args: Mapping[str, Any], ctx: RunContext) -> ToolResult:
                       live_picture=(taken.final_url, taken))
 
 
+def _fetch_text(args: Mapping[str, Any], ctx: RunContext) -> ToolResult:
+    """A page read another way (agent.fetch): the window's strip says so, and it is not shown there. The firewall looked
+    at the call first (policy.gate), exactly as at open_page."""
+    address, question = str(args["url"]), " ".join(str(args["question"]).split())
+    fields = (("Address", address), ("Asked", question))
+    if ctx.fetch is None:
+        return ToolResult(NO_FETCH_TEXT, is_error=True, code=web.W_NO_WINDOW, fields=fields)
+    why = web_link_problem(address)
+    if why:
+        return ToolResult(web.NOT_PUBLIC_TEXT.format(why=why), is_error=True, code=web.W_NOT_PUBLIC, fields=fields)
+    host = link_host(address)
+    if ctx.web is not None:
+        ctx.web.other_way(host, True)
+    try:
+        text = ctx.fetch(address, question, _web_call(ctx))
+    except web.WebRefused as refused:
+        return ToolResult(refused.text, is_error=True, code=refused.code, fields=fields)
+    finally:
+        if ctx.web is not None:
+            ctx.web.other_way(host, False)
+    flag, flagged, warn = _page_flags(text)
+    return ToolResult(f"The page was read another way; it is not in the window.\n"
+                      f"{untrusted('a web page read another way', text)}{flag}",
+                      note=f"{len(text):,} characters", warn=warn, fields=(*fields, *flagged))
+
+
+def _doing_host(address: Any, known: str, unknown: str) -> str:
+    """Jarvis's few words with a page's host in them: hosts only, never more of its address."""
+    if not isinstance(address, str) or web_link_problem(address):
+        return unknown
+    host = web.one_line(link_host(address), DOING_HOST_CAP)
+    return known.format(host=host) if host else unknown
+
+
+def doing_words(name: str, args: Mapping[str, Any], ctx: RunContext) -> str:
+    """What the panel's activity line says for this tool call ("" when it changes nothing: the plan, a say line). On
+    screen only: never logged, never spoken."""
+    try:
+        if name == "open_page":
+            address = args.get("url") if "url" in args or ctx.web is None else ctx.web.book.address(args.get("number"))
+            return _doing_host(address, READING_HOST, READING_PAGE)
+        if name == "fetch_text":
+            return _doing_host(args.get("url"), READING_OTHER_WAY, READING_OTHER_PAGE)
+        return DOING.get(name, "")
+    except Exception:  # noqa: BLE001 - only what the panel says
+        return ""
+
+
 def _show_file(args: Mapping[str, Any], ctx: RunContext) -> ToolResult:
     if ctx.web is None or ctx.folder is None:
         return error(web.NO_WINDOW_TEXT, web.W_NO_WINDOW)
@@ -414,30 +479,31 @@ class Tool:
 
 TOOLS: tuple[Tool, ...] = (
     Tool("update_plan",
-         "Show the owner your plan: every step and how it stands. Call it first, then again whenever a step changes or "
-         "the plan does.",
+         "Show the owner your plan: every step and how it stands. Call it first, then again whenever a step starts or "
+         "ends, one change at a time, not in batches, and whenever the plan changes.",
          _object(steps={"type": "array", "minItems": 1, "maxItems": MAX_PLAN_STEPS,
                         "description": "The whole plan, in order.",
                         "items": _object(text=_text("One step, in a few plain words.", PLAN_TEXT_CAP),
                                          status={"type": "string", "enum": list(STEP_STATES)})}),
          TIER_SHOW, _update_plan, "The plan"),
     Tool("say",
-         "Say one short line to the owner, aloud and on his screen, when something is worth saying. In your own "
+         "Say one short line to the owner, aloud and on their screen, when something is worth saying. In your own "
          "words, never words copied from a page, a file or a message; no addresses or file paths. At most one every "
          "6 seconds.",
          _object(text=_text("One short spoken sentence.", SAY_CAP)),
          TIER_SHOW, _say, "Said"),
     Tool("ask_owner",
-         "Ask the owner something only he can decide, when you are truly stuck or the choice is really his. It "
-         "returns at once; end your turn, and his answer comes as your next message.",
+         "Ask the owner something only they can decide, when you are truly stuck or the choice is really theirs. It "
+         "returns at once; end your turn, and the answer comes as your next message.",
          _object(question=_text("One short question.", QUESTION_CAP),
                  choices={"type": "array", "maxItems": MAX_CHOICES, "optional": True,
-                          "description": "Up to 5 short answers he can pick; leave it out for a free answer.",
+                          "description": "Up to 5 short answers to pick from; leave it out for a free answer.",
                           "items": _text("A short answer.", CHOICE_CAP)}),
          TIER_WAIT, _ask_owner, "Asked you"),
     Tool("finish",
-         "End the task with your report. Call it only when the work is done, or when you cannot go further. Say what "
-         "you did, what you produced and what you could not do and why. List only files you checked.",
+         "End the task with your report. Call it only when the work is done, or when you cannot go further. Lead with "
+         "the answer in the first sentence, since only that is spoken. Then say what you did, what you produced and "
+         "what you could not do and why. List only files you checked.",
          _object(summary=_text("A short honest report, in plain words.", SUMMARY_CAP),
                  outcome={"type": "string", "enum": list(OUTCOMES),
                           "description": "done: all of it, checked. partial: some of it. failed: none of it."},
@@ -477,6 +543,14 @@ TOOLS: tuple[Tool, ...] = (
          "is more and you need it.",
          _object(),
          TIER_WEB, _read_more, "Read on"),
+    Tool("fetch_text",
+         "Read a public page another way, when a site refuses the window (it says so plainly) or the window cannot "
+         "read it: Claude Code's own declared fetcher reads it in a separate short run and answers your question about it. "
+         "It sees only the address and the question. It is not shown in the window. You get the answer as text, up to "
+         "12,000 characters; it takes up to 40 seconds; at most 15 for a task.",
+         _object(url=_text("A public https address.", web.URL_CAP),
+                 question=_text("What you want from the page, in plain words.", FETCH_QUESTION_CAP)),
+         TIER_WEB, _fetch_text, "Read it another way"),
     Tool("look_at_page",
          "A picture of what the window shows now. Pictures cost more than text: use it only when the layout or a "
          "picture matters.",

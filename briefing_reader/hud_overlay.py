@@ -67,6 +67,18 @@ the chips and the cards (``Glow``) as well as the brackets and tethers.
     decision waits), cyan (Jarvis is at it), done (mint) and ``TONE_CORAL`` (failed or refused). ``set_desk(
     DeskContent)``, ``desk()``, ``ticks()``, ``buttons()``; ``HudOverlay.new_desk_card()``.
 
+``PlanPanel``, ``PanelButtons``, ``TaskCard``
+    A task's feed (the agent, part A3; made only while a task needs them, by agent_feed.TaskFeed). The panel under the
+    bar on the left: click-through (``DECOR_FLAGS``: a window by job, never a partly click-through one), its header, the
+    plan's rows and Jarvis's own activity line; ``set_panel(PanelContent)``, ``set_head(text)`` (the clock's tick
+    repaints only the header), ``set_limits(width, max_height)``, at most about ``PANEL_MAX_ROWS`` rows and "+N more".
+    ``PanelButtons``: the one small window over its header that takes clicks, Stop and Show, never the focus.
+    ``TaskCard``: a ResultCard (its flags, its shadow in the layer, never the focus) with plain text that wraps anywhere
+    and scrolls when it must, a task's outputs each with its two links, a note and its buttons;
+    ``set_task(TaskContent)``. Its words are never read as HTML. ``HudOverlay.feed_panel()``, ``set_feed_shown(bool)``,
+    ``place_feed(watch, card)``, ``new_task_card()``,
+    ``adopt_card(card)``.
+
 ``DecorLayer``
     One per QScreen, sized to its geometry, also ``WindowTransparentForInput``: the outer shadows and glows under the
     interactive windows (``Glow``: Switch.dc.html's box-shadows of the bar, the chips and the cards - painted once per
@@ -127,8 +139,10 @@ from PySide6.QtGui import (
     QRadialGradient,
     QRegion,
     QScreen,
+    QTextLayout,
+    QTextOption,
 )
-from PySide6.QtWidgets import QAbstractButton, QApplication, QSizePolicy, QWidget
+from PySide6.QtWidgets import QAbstractButton, QApplication, QFrame, QScrollArea, QSizePolicy, QWidget
 
 from . import alive, holo, hud, offer_view, settings_view
 from . import orb as orb_mod
@@ -2544,6 +2558,587 @@ class DesktopCard(ResultCard):
 
 
 # --------------------------------------------------------------------------
+# A task's feed: the plan panel and its cards (the agent, part A3)
+# --------------------------------------------------------------------------
+
+STEP_TODO, STEP_DOING, STEP_DONE, STEP_FAILED = "todo", "doing", "done", "failed"    # agent.tools' plan states
+PANEL_WIDTH = 400
+PANEL_MIN_WIDTH = 300
+PANEL_GAP = 12                 # from the bar and the chips above it, the window beside it and a card
+PANEL_PAD = (12, 14)           # vertical, horizontal
+PANEL_HEAD = 18                # its header's line
+PANEL_SLOT = 16                # a row's mark
+PANEL_SLOT_GAP = 8
+PANEL_LINE = 20                # a row's line
+PANEL_ROW_LINES = 2
+PANEL_ROW_GAP = 3
+PANEL_MORE = 20                # "+N more"
+PANEL_ACTIVITY = 32            # the activity line, a hairline above it
+PANEL_MAX_ROWS = 8
+PANEL_COMPACT = PANEL_PAD[0] * 2 + PANEL_HEAD + 8 + PANEL_LINE + PANEL_ACTIVITY     # the least it takes with a row
+MORE_TEXT = "+{count} more"
+STOP_TEXT = "Stop"
+SHOW_TEXT = "Show"
+PANEL_BUTTON_SIZE = 26         # their drawn height
+TASK_CARD_WIDTH = DESK_WIDTH
+TASK_CARD_MIN_WIDTH = 320
+TASK_CARD_MIN_BODY = 64        # at least this much of its text shows, whatever the room
+TASK_LINE = 21
+TASK_ROW = 40                  # an output: its name, its two links
+_ROW_INK = {STEP_TODO: holo.INK_4, STEP_DOING: holo.HOLO, STEP_DONE: holo.INK_2, STEP_FAILED: holo.ALERT_TX}
+_SCROLL_STYLE = ("QScrollArea { background: transparent; border: 0; } "
+                 "QScrollBar:vertical { background: transparent; width: 8px; margin: 0; } "
+                 "QScrollBar::handle:vertical { background: rgba(60, 211, 238, 90); min-height: 24px; "
+                 "border-radius: 3px; } "
+                 "QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; } "
+                 "QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }")
+
+
+@dataclass(frozen=True)
+class PlanRow:
+    text: str
+    state: str = STEP_TODO
+
+
+@dataclass(frozen=True)
+class PanelContent:
+    head: str = ""                     # "WORKING - 3 OF 6 - 2:14"
+    tone: str = TONE_CYAN              # cyan; amber only while a card waits; done (mint) or coral once stamped
+    rows: tuple[PlanRow, ...] = ()
+    activity: str = ""                 # Jarvis's own few words: "Reading www.example.org"
+
+
+def panel_rows(rows: Sequence[PlanRow], count: int) -> tuple[list[PlanRow], int]:
+    """At most ``count`` of ``rows`` around the step at work (two before it), and how many are not among them."""
+    rows = list(rows)
+    if len(rows) <= count:
+        return rows, 0
+    at = next((index for index, row in enumerate(rows) if row.state == STEP_DOING), None)
+    if at is None:
+        at = next((index for index, row in enumerate(rows) if row.state == STEP_TODO), len(rows) - 1)
+    start = max(0, min(at - min(2, count - 1), len(rows) - count))
+    return rows[start:start + count], len(rows) - count
+
+
+class PlanPanel(_OverlayWindow):
+    """See the module docstring: it paints; only ``PanelButtons`` over it takes a click."""
+
+    shapeChanged = Signal()
+
+    def __init__(self, *, native: HudNative | None = None, hide_from_capture: bool = True) -> None:
+        super().__init__(DECOR_FLAGS, native, hide_from_capture)
+        self.setObjectName("JarvisPlan")
+        self.setWindowTitle("Jarvis")
+        self._content = PanelContent()
+        self._head_font = hud.mono_font(10, 500, 0.12)
+        self._row_font = hud.body_font(13)
+        self._more_font = hud.mono_font(10, 500, 0.12)
+        self._width = PANEL_WIDTH
+        self._max_height = 0                # 0: no limit
+        self._head_room = 0                 # what the buttons over its header take
+        self._shown: list[tuple[PlanRow, list[str]]] = []
+        self._more = 0
+        self.setFixedSize(PANEL_WIDTH, PANEL_COMPACT)
+
+    def content(self) -> PanelContent:
+        return self._content
+
+    def set_panel(self, content: PanelContent) -> None:
+        self._content = content
+        self._relayout()
+        self.update()
+        self.shapeChanged.emit()            # its tone may have changed
+
+    def set_head(self, head: str) -> None:
+        """The clock's tick: only its header repaints."""
+        if head != self._content.head:
+            self._content = PanelContent(head, self._content.tone, self._content.rows, self._content.activity)
+            self.update(0, 0, self.width(), PANEL_PAD[0] + PANEL_HEAD + 2)
+
+    def set_limits(self, width: int, max_height: int = 0) -> None:
+        self._width = max(PANEL_MIN_WIDTH, int(width))
+        self._max_height = max(0, int(max_height))
+        self._relayout()
+
+    def set_head_room(self, room: int) -> None:
+        if room != self._head_room:
+            self._head_room = int(room)
+            self.update()
+
+    def shown_rows(self) -> list[str]:
+        """The rows' words on show (tests and the harness)."""
+        return [" ".join(lines) for _row, lines in self._shown]
+
+    def more_count(self) -> int:
+        return self._more
+
+    def _row_room(self) -> float:
+        return self._width - 2 * PANEL_PAD[1] - PANEL_SLOT - PANEL_SLOT_GAP
+
+    def _measure(self, count: int) -> tuple[int, list[tuple[PlanRow, list[str]]], int]:
+        rows, more = panel_rows(self._content.rows, count)
+        shown = [(row, offer_view.wrap_lines(row.text, self._row_font, self._row_room(), PANEL_ROW_LINES) or [""])
+                 for row in rows]
+        height = PANEL_PAD[0] * 2 + PANEL_HEAD + PANEL_ACTIVITY + (8 if shown else 0)
+        height += sum(PANEL_LINE * len(lines) + PANEL_ROW_GAP for _row, lines in shown)
+        return height + (PANEL_MORE if more else 0), shown, more
+
+    def _relayout(self) -> None:
+        count = PANEL_MAX_ROWS
+        height, shown, more = self._measure(count)
+        while self._max_height and height > self._max_height and count > 1:
+            count -= 1
+            height, shown, more = self._measure(count)
+        self._shown, self._more = shown, more
+        if (self._width, height) != (self.width(), self.height()):
+            self.setFixedSize(self._width, height)
+            self.shapeChanged.emit()
+
+    def glow(self) -> Glow:
+        tone = TONE_AMBER if self._content.tone == TONE_AMBER else TONE_CYAN
+        return Glow(self.geometry(), CARD_RADIUS, GLOW_CARD, tone)
+
+    def cut_texts(self) -> list[str]:
+        """Words it cuts now: its header or its activity line (a row's third line goes on purpose, with an ellipsis)."""
+        cut = []
+        room = self.width() - 2 * PANEL_PAD[1] - self._head_room
+        if QFontMetricsF(self._head_font).horizontalAdvance(self._content.head) > room:
+            cut.append("head")
+        room = self.width() - 2 * PANEL_PAD[1] - 14
+        if QFontMetricsF(self._row_font).horizontalAdvance(self._content.activity) > room:
+            cut.append("activity")
+        return cut
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        content = self._content
+        tone = content.tone if content.tone in _DESK_LOOKS else TONE_CYAN
+        fill, border, ink, *_rest = _DESK_LOOKS[tone]
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            rect = QRectF(self.rect())
+            path = QPainterPath()
+            path.addRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), CARD_RADIUS, CARD_RADIUS)
+            painter.fillPath(path, QColor(fill))
+            painter.setPen(QPen(border, 1.0))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(path)
+            pad_v, pad_h = PANEL_PAD
+            align = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            painter.setFont(self._head_font)
+            painter.setPen(QColor(ink))
+            room = self.width() - 2 * pad_h - self._head_room
+            painter.drawText(QRectF(pad_h, pad_v, room, PANEL_HEAD), align, QFontMetricsF(self._head_font).elidedText(
+                content.head, Qt.TextElideMode.ElideRight, room))
+            y = pad_v + PANEL_HEAD + 8.0
+            for row, lines in self._shown:
+                self._paint_mark(painter, row.state, QRectF(pad_h, y + 2, PANEL_SLOT, PANEL_SLOT), tone)
+                painter.setFont(self._row_font)
+                painter.setPen(QColor(holo.AMBER_TX if row.state == STEP_DOING and tone == TONE_AMBER
+                                      else _ROW_INK.get(row.state, holo.INK_3)))
+                for index, line in enumerate(lines):
+                    painter.drawText(QRectF(pad_h + PANEL_SLOT + PANEL_SLOT_GAP, y + PANEL_LINE * index,
+                                            self._row_room(), PANEL_LINE), align, line)
+                y += PANEL_LINE * len(lines) + PANEL_ROW_GAP
+            if self._more:
+                painter.setFont(self._more_font)
+                painter.setPen(QColor(holo.INK_4))
+                painter.drawText(QRectF(pad_h + PANEL_SLOT + PANEL_SLOT_GAP, y, self._row_room(), PANEL_MORE), align,
+                                 MORE_TEXT.format(count=self._more))
+            line_y = self.height() - pad_v - PANEL_ACTIVITY + 8.5
+            painter.setPen(QPen(holo.alpha(ink, 0.16), 1.0))
+            painter.drawLine(QPointF(pad_h, line_y), QPointF(self.width() - pad_h, line_y))
+            text_y = line_y + 5
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(ink))
+            painter.drawEllipse(QPointF(pad_h + 3, text_y + PANEL_LINE / 2), 2.5, 2.5)
+            painter.setFont(self._row_font)
+            painter.setPen(QColor(holo.INK_3))
+            room = self.width() - 2 * pad_h - 14
+            painter.drawText(QRectF(pad_h + 14, text_y, room, PANEL_LINE), align,
+                             QFontMetricsF(self._row_font).elidedText(content.activity, Qt.TextElideMode.ElideRight, room))
+        finally:
+            painter.end()
+
+    @staticmethod
+    def _paint_mark(painter: QPainter, state: str, slot: QRectF, tone: str) -> None:
+        painter.save()
+        try:
+            center = slot.center()
+            if state == STEP_DONE:
+                holo.paint_icon(painter, slot.adjusted(1, 1, -1, -1), "check", holo.OK, stroke=2.4)
+            elif state == STEP_FAILED:
+                holo.paint_icon(painter, slot.adjusted(2, 2, -2, -2), "close", holo.ALERT_TX, stroke=2.2)
+            elif state == STEP_DOING:
+                ink = QColor(holo.AMBER if tone == TONE_AMBER else holo.HOLO)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(holo.alpha(ink, 0.3))
+                painter.drawEllipse(center, 6.0, 6.0)
+                painter.setBrush(ink)
+                painter.drawEllipse(center, 3.5, 3.5)
+            else:
+                painter.setPen(QPen(holo.alpha(QColor(holo.INK_4), 0.7), 1.2))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawEllipse(center, 3.5, 3.5)
+        finally:
+            painter.restore()
+
+
+class PanelButtons(_OverlayWindow):
+    """The small window over the panel's header that takes clicks: Show (only while the watch window is hidden) and Stop
+    (only while a task runs). Never the focus: its buttons are NoFocus and act on a click."""
+
+    stopClicked = Signal()
+    showClicked = Signal()
+
+    def __init__(self, *, native: HudNative | None = None, hide_from_capture: bool = True) -> None:
+        super().__init__(HUD_FLAGS, native, hide_from_capture)
+        self.setObjectName("JarvisPlanButtons")
+        self.setWindowTitle("Jarvis")
+        self._fill = holo.TILE
+        self.show_button = holo.HoloButton(SHOW_TEXT, holo.GHOST, size=PANEL_BUTTON_SIZE, parent=self)
+        self.stop_button = holo.HoloButton(STOP_TEXT, holo.DANGER_GHOST, size=PANEL_BUTTON_SIZE, parent=self)
+        for button, signal, words in ((self.show_button, self.showClicked, "Show the window Jarvis reads in"),
+                                      (self.stop_button, self.stopClicked, "Stop the task")):
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            button.setAccessibleName(words)
+            button.clicked.connect(signal)
+        self.set_buttons(False, False)
+
+    def set_buttons(self, stop: bool, show: bool, tone: str = TONE_CYAN) -> None:
+        self.stop_button.setVisible(bool(stop))
+        self.show_button.setVisible(bool(show))
+        self._fill = _DESK_LOOKS.get(tone, _DESK_LOOKS[TONE_CYAN])[0]
+        x = 0
+        high = 0
+        for button in (self.show_button, self.stop_button):
+            if button.isHidden():
+                continue
+            hint = button.sizeHint()
+            button.setGeometry(x, 0, hint.width(), hint.height())
+            x += hint.width() - 2
+            high = max(high, hint.height())
+        self.setFixedSize(max(1, x + 2), max(1, high))
+        self.update()
+
+    def any_shown(self) -> bool:
+        return not self.stop_button.isHidden() or not self.show_button.isHidden()
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(self._fill))
+        painter.end()
+
+
+class _PlainBody(QWidget):
+    """Plain text that wraps at word boundaries, or anywhere in an address too long for a line: never HTML, every
+    character of it on show (nothing is cut). As tall as it needs."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._text = ""
+        self._font = hud.body_font(14)
+        self._ink = QColor(holo.INK_1)
+        self._layout: QTextLayout | None = None
+        self._laid = (-1, "")
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def set_text(self, text: str, ink: str) -> None:
+        self._text, self._ink = text, QColor(ink)
+        self._laid = (-1, "")
+        self.update()
+
+    def text(self) -> str:
+        return self._text
+
+    def _lay_out(self, width: int) -> int:
+        """Its lines at ``width``: their height."""
+        layout = QTextLayout(self._text, self._font)
+        option = QTextOption()
+        option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        layout.setTextOption(option)
+        layout.beginLayout()
+        y = 0.0
+        while True:
+            line = layout.createLine()
+            if not line.isValid():
+                break
+            line.setLineWidth(max(1.0, float(width)))
+            line.setPosition(QPointF(0.0, y))
+            y += TASK_LINE
+        layout.endLayout()
+        self._layout = layout
+        self._laid = (width, self._text)
+        return math.ceil(y)
+
+    def height_for(self, width: int) -> int:
+        return self._lay_out(width) if self._text else 0
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        if not self._text:
+            return
+        if self._laid != (self.width(), self._text):
+            self._lay_out(self.width())
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(self._ink)
+        self._layout.draw(painter, QPointF(0.0, 0.0))
+        painter.end()
+
+
+@dataclass(frozen=True)
+class TaskRow:
+    """One of a task's outputs on its result card: its name and the keys its two links say (``buttonClicked``)."""
+
+    name: str
+    show_key: str = ""
+    folder_key: str = ""
+
+
+@dataclass(frozen=True)
+class TaskContent:
+    kicker: str
+    body: str = ""
+    tone: str = TONE_CYAN
+    buttons: tuple[CardButton, ...] = ()
+    note: str = ""
+    rows: tuple[TaskRow, ...] = ()
+    show_text: str = SHOW_TEXT
+    folder_text: str = "Folder"
+
+
+class _OutputName(QWidget):
+    """An output's name, cut in its middle when it must be (its whole name is the tooltip)."""
+
+    def __init__(self, name: str, parent: QWidget) -> None:
+        super().__init__(parent)
+        self._name = name
+        self._font = hud.body_font(13)
+        self.setAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips, True)
+        self.setToolTip(hud.plain_tooltip(name))
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        painter.setFont(self._font)
+        painter.setPen(QColor(holo.INK_2))
+        painter.drawText(QRectF(self.rect()), int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                         QFontMetricsF(self._font).elidedText(self._name, Qt.TextElideMode.ElideMiddle, self.width()))
+        painter.end()
+
+
+class TaskCard(ResultCard):
+    """See the module docstring. Click only: it never takes the keyboard (``keyboard_controls`` offers nothing), so no
+    key of the owner's, typed or dictated, can press anything here."""
+
+    def __init__(self, *, native: HudNative | None = None, hide_from_capture: bool = True) -> None:
+        super().__init__(native=native, hide_from_capture=hide_from_capture)
+        self.setObjectName("JarvisTask")
+        self._task = TaskContent("")
+        self._card_width = TASK_CARD_WIDTH
+        self._max_height = 0
+        self._note_font = hud.body_font(13)
+        self._column = QWidget()
+        self.body = _PlainBody(self._column)
+        self._names: list[QWidget] = []
+        self.scroll = QScrollArea(self)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setStyleSheet(_SCROLL_STYLE)
+        self.scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.scroll.verticalScrollBar().setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setWidget(self._column)
+        self.scroll.viewport().setAutoFillBackground(False)
+        self._column.setAutoFillBackground(False)        # after setWidget, which turns it on
+
+    def keyboard_controls(self) -> list[QAbstractButton]:
+        return []
+
+    def task(self) -> TaskContent:
+        return self._task
+
+    def set_task(self, content: TaskContent) -> None:
+        self._task = content
+        self._content = CardContent(content.kicker, "", tone=content.tone)
+        for button in [*self._buttons.values(), *self._row_buttons.values()]:
+            button.hide()
+            button.deleteLater()
+        for name in self._names:
+            name.hide()
+            name.deleteLater()
+        self._buttons, self._row_buttons, self._names = {}, {}, []
+        for spec in content.buttons:
+            self._buttons[spec.key] = self._new_button(spec.key, spec.text, spec.variant, holo.SIZE_MD, spec.text)
+        for row in content.rows:
+            self._names.append(_OutputName(row.name, self._column))
+            for key, words in ((row.show_key, content.show_text), (row.folder_key, content.folder_text)):
+                if key:
+                    button = self._new_button(key, words, holo.LINK_CYAN, holo.SIZE_SM, f"{words}: {row.name}")
+                    button.setParent(self._column)
+                    button.show()
+                    self._row_buttons[key] = button
+        self.body.set_text(content.body, holo.AMBER_TX if content.tone == TONE_AMBER else holo.INK_1)
+        self.setAccessibleName(content.kicker)
+        self.setAccessibleDescription(content.body)
+        self._relayout()
+        self.shapeChanged.emit()
+
+    def set_limits(self, width: int, max_height: int = 0) -> None:
+        self._card_width = max(TASK_CARD_MIN_WIDTH, min(TASK_CARD_WIDTH, int(width)))
+        self._max_height = max(0, int(max_height))
+        self._relayout()
+
+    def _fit_buttons(self, inner: int) -> None:
+        """A choice too long for the card's width shows cut (a model's words, at most 60 characters); its whole words stay
+        its tooltip and accessible name, and they are what a click answers."""
+        margin = holo.HoloButton.MARGIN
+        for spec in self._task.buttons:
+            button = self._buttons[spec.key]
+            words = spec.text
+            button.setText(words)
+            while button.sizeHint().width() - 2 * margin > inner and len(words) > 8:
+                words = words[:-2].rstrip()
+                button.setText(f"{words}...")
+            if button.text() != spec.text:
+                button.setToolTip(hud.plain_tooltip(spec.text))
+
+    def _button_rows(self, inner: int) -> list[list[QAbstractButton]]:
+        """Its buttons in one row when they fit, else one under another."""
+        buttons = list(self._buttons.values())
+        margin = holo.HoloButton.MARGIN
+        wide = sum(button.sizeHint().width() - 2 * margin for button in buttons)
+        wide += holo.BUTTON_GAP * max(0, len(buttons) - 1)
+        return [buttons] if wide <= inner else [[button] for button in buttons]
+
+    def _relayout(self) -> None:
+        if not hasattr(self, "scroll"):
+            return                                       # ResultCard's own constructor
+        content = self._task
+        pad_v, pad_h = CARD_PAD
+        width = self._card_width
+        inner = width - 2 * pad_h
+        margin = holo.HoloButton.MARGIN
+        note = offer_view.wrap_lines(content.note, self._note_font, inner, self.NOTE_LINES) if content.note else []
+        self._fit_buttons(inner)
+        rows = self._button_rows(inner) if self._buttons else []
+        below = (12 + 20 * len(note) if note else 0) + (14 + (holo.SIZE_MD + 6) * len(rows) - 6 if rows else 0)
+        above = 14 + 10
+        wanted = self._column_height(inner)
+        room = (self._max_height - 2 * pad_v - above - below) if self._max_height else wanted
+        shown = max(min(TASK_CARD_MIN_BODY, wanted), min(wanted, room))
+        scrolls = wanted > shown
+        if scrolls:                                      # room for the scroll bar: its lines wrap again
+            wanted = self._column_height(inner - 12)
+        self._place_column(inner - 12 if scrolls else inner, wanted)
+        y = float(pad_v)
+        self._rows = {"kicker": QRectF(pad_h, y, inner, 14)}
+        y += above
+        self.scroll.setGeometry(pad_h, round(y), inner, shown)
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded if scrolls
+                                               else Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        y += shown
+        if note:
+            y += 12
+            self._rows["note"] = QRectF(pad_h, y, inner, 20 * len(note))
+            y += 20 * len(note)
+        if rows:
+            y += 14
+            for row in rows:
+                x = pad_h - margin
+                for button in row:
+                    hint = button.sizeHint()
+                    button.setGeometry(round(x), round(y) - margin, hint.width(), hint.height())
+                    x += hint.width() - 2 * margin + holo.BUTTON_GAP
+                y += holo.SIZE_MD + 6
+            y -= 6
+        self.setFixedSize(width, math.ceil(y + pad_v))
+        self.update()
+
+    def _column_height(self, width: int) -> int:
+        height = self.body.height_for(width)
+        return height + (10 + TASK_ROW * len(self._names) if self._names else 0)
+
+    def _place_column(self, width: int, height: int) -> None:
+        self._column.setFixedSize(width, height)
+        self.body.setGeometry(0, 0, width, self.body.height_for(width))
+        y = self.body.height() + 10
+        for row, name in zip(self._task.rows, self._names):
+            right = width + holo.HoloButton.MARGIN
+            for key in (row.folder_key, row.show_key):
+                button = self._row_buttons.get(key)
+                if button is not None:
+                    hint = button.sizeHint()
+                    right -= hint.width()
+                    button.setGeometry(right, y + (TASK_ROW - hint.height()) // 2, hint.width(), hint.height())
+                    right += 2 * holo.HoloButton.MARGIN - 8
+            name.setGeometry(0, y, max(40, right - 12), TASK_ROW)
+            y += TASK_ROW
+
+    def cut_texts(self) -> list[str]:
+        """Words it cuts now (its body scrolls, and nothing of it is ever cut; an output's name is cut in its
+        middle)."""
+        cut = []
+        inner = self._card_width - 2 * CARD_PAD[1]
+        if QFontMetricsF(self._kicker_font).horizontalAdvance(self._task.kicker.upper()) > inner - 14:
+            cut.append("kicker")
+        if self._task.note and not _whole(self._task.note, offer_view.wrap_lines(
+                self._task.note, self._note_font, inner, self.NOTE_LINES), self._note_font, inner):
+            cut.append("note")
+        for button in self._buttons.values():
+            if button.geometry().right() - holo.HoloButton.MARGIN >= self.width():
+                cut.append("buttons")
+        return cut
+
+    def shown_buttons(self) -> list[str]:
+        """The buttons' words as they show (tests and the harness)."""
+        return [button.text() for button in self._buttons.values()]
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        content = self._task
+        tone = content.tone if content.tone in _DESK_LOOKS else TONE_CYAN
+        fill, border, ink_name, *_rest = _DESK_LOOKS[tone]
+        ink = QColor(ink_name)
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            rect = QRectF(self.rect())
+            path = QPainterPath()
+            path.addRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), CARD_RADIUS, CARD_RADIUS)
+            painter.fillPath(path, QColor(fill))
+            painter.save()
+            painter.setClipPath(path)
+            painter.fillRect(rect, holo.scan_brush(holo.SCAN_AMBER if tone == TONE_AMBER else holo.SCAN))
+            painter.restore()
+            painter.setPen(QPen(border, 1.0))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(path)
+            holo.paint_brackets(painter, rect, ink, leg=CARD_BRACKET, radius=CARD_RADIUS, width=2.0)
+            align = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            kicker = self.row_rect("kicker")
+            dot = QPointF(kicker.left() + 3, kicker.center().y())
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(holo.alpha(ink, 0.3))
+            painter.drawEllipse(dot, 5.0, 5.0)
+            painter.setBrush(ink)
+            painter.drawEllipse(dot, 3.0, 3.0)
+            painter.setFont(self._kicker_font)
+            painter.setPen(ink)
+            room = kicker.adjusted(14, 0, 0, 0)
+            painter.drawText(room, align, QFontMetricsF(self._kicker_font).elidedText(
+                content.kicker.upper(), Qt.TextElideMode.ElideRight, room.width()))
+            note = self.row_rect("note")
+            if not note.isEmpty():
+                painter.setFont(self._note_font)
+                painter.setPen(QColor(holo.AMBER_TX2 if tone == TONE_AMBER else holo.INK_3))
+                inner = self._card_width - 2 * CARD_PAD[1]
+                lines = offer_view.wrap_lines(content.note, self._note_font, inner, self.NOTE_LINES)
+                for index, line in enumerate(lines):
+                    painter.drawText(QRectF(note.left(), note.top() + 20 * index, note.width(), 20), align, line)
+        finally:
+            painter.end()
+
+
+# --------------------------------------------------------------------------
 # The decor layer (one per screen)
 # --------------------------------------------------------------------------
 
@@ -2859,6 +3454,8 @@ class HudOverlay(QObject):
         self._toast: QWidget | None = None
         self._rec_pill: QWidget | None = None
         self._stack: list[QWidget] = []
+        self._feed: tuple[PlanPanel, PanelButtons] | None = None   # a task's panel (made at its first use)
+        self._feed_shown = False                        # it shows while the HUD shows
         self._screen: QScreen | None = None            # the screen the HUD shows on
         self._holding = False                           # the RecPill is held (shown, or a switch on its way)
         self.hud = HudWindow(hud_key=hud_key, native=self._native, hide_from_capture=self._hide_from_capture)
@@ -2872,7 +3469,7 @@ class HudOverlay(QObject):
     # ---- the windows -----------------------------------------------------------------------
 
     def windows(self) -> list[QWidget]:
-        return [self.hud, *self._cards, *self._layers]
+        return [self.hud, *self._cards, *self._layers, *(self._feed or ())]
 
     def layers(self) -> list[DecorLayer]:
         return list(self._layers)
@@ -2940,6 +3537,7 @@ class HudOverlay(QObject):
         for card in self._cards:
             if card in self._placed:
                 card.show_quietly()
+        self._show_feed()
         self.hud.show_quietly()
         self.restack()
 
@@ -3035,6 +3633,94 @@ class HudOverlay(QObject):
         self._apply_decor()
         return rect
 
+    # ---- a task's feed (the agent, part A3) ----------------------------------------------------------
+
+    def feed_panel(self) -> tuple[PlanPanel, PanelButtons]:
+        """The plan panel and its buttons: made at the first task, hidden until ``set_feed_shown``."""
+        if self._feed is None:
+            panel = PlanPanel(native=self._native, hide_from_capture=self._hide_from_capture)
+            buttons = PanelButtons(native=self._native, hide_from_capture=self._hide_from_capture)
+            panel.shapeChanged.connect(self._apply_decor)
+            self._feed = (panel, buttons)
+        return self._feed
+
+    def set_feed_shown(self, shown: bool) -> None:
+        """While a task's panel is wanted: it shows with the HUD, and goes when told."""
+        self._feed_shown = bool(shown)
+        if self._feed is None:
+            return
+        if shown and self._shown:
+            self._show_feed()
+            self.restack()
+        elif not shown:
+            for window in self._feed:
+                window.hide()
+        self._apply_decor()
+
+    def _show_feed(self) -> None:
+        if self._feed is not None and self._feed_shown:
+            panel, buttons = self._feed
+            panel.show_quietly()
+            if buttons.any_shown():
+                buttons.show_quietly()
+            else:
+                buttons.hide()
+
+    def new_task_card(self) -> TaskCard:
+        """A task's card (a question, the firewall's, Keep going, the result): hidden until ``adopt_card``."""
+        card = TaskCard(native=self._native, hide_from_capture=self._hide_from_capture)
+        card.shapeChanged.connect(self._apply_decor)
+        self._cards.append(card)
+        return card
+
+    def adopt_card(self, card: ResultCard) -> None:
+        """``card`` shows with the HUD from now on (``place_feed`` says where)."""
+        if card in self._cards and card not in self._placed:
+            self._placed.append(card)
+        if self._shown:
+            card.show_quietly()
+            self.restack()
+        self._apply_decor()
+
+    def place_feed(self, watch: QRect | None = None, card: TaskCard | None = None) -> None:
+        """The panel under the bar on the left, clear of the bar, the chips and the watch window, kept on screen;
+        ``card`` beside it when there is room, else under it (then the panel shows fewer rows and the card, what fits,
+        scrolling). Sizes follow what is left."""
+        if self._feed is None:
+            return
+        panel, buttons = self._feed
+        win = self.hud
+        area = win.area() if win.area().isValid() else win.geometry()
+        top = win.occupied_rect().bottom() + 1 + PANEL_GAP
+        left, right = area.left() + CARD_MARGIN, area.right() + 1 - CARD_MARGIN
+        bottom = area.bottom() + 1 - CARD_MARGIN
+        if watch is not None and watch.isValid() and watch.intersects(QRect(area.left(), top, area.width(),
+                                                                            bottom - top)):
+            right = max(left + PANEL_MIN_WIDTH, min(right, watch.left() - PANEL_GAP))
+        width = max(PANEL_MIN_WIDTH, min(PANEL_WIDTH, right - left))
+        x = max(left, min(win.bar_rect().left(), right - width))
+        room = max(PANEL_COMPACT, bottom - top)
+        if card is None:
+            panel.set_limits(width, room)
+            panel.move(x, top)
+        else:
+            beside_left, beside_right = x - left, right - (x + width)
+            wide = TASK_CARD_WIDTH + PANEL_GAP
+            if beside_left >= wide or beside_right >= wide:
+                panel.set_limits(width, room)
+                panel.move(x, top)
+                card.set_limits(TASK_CARD_WIDTH, room)
+                card.move(x - PANEL_GAP - card.width() if beside_left >= wide else x + width + PANEL_GAP, top)
+            else:
+                panel.set_limits(width, PANEL_COMPACT)      # the least it takes: the rest is the card's, as it needs
+                card.set_limits(right - left, max(0, room - panel.height() - PANEL_GAP))
+                panel.set_limits(width, room - card.height() - PANEL_GAP)
+                panel.move(x, top)
+                card.move(max(left, min(x, right - card.width())), top + panel.height() + PANEL_GAP)
+        buttons.move(panel.x() + panel.width() - buttons.width() - 8, panel.y() + 4)
+        panel.set_head_room(buttons.width() + 4 if buttons.any_shown() else 0)
+        self._apply_decor()
+
     def new_desk_card(self) -> DesktopCard:
         """A NEEDS YOUR OK card of file steps (P2.3) - a card of this HUD like ``new_card``'s, hidden until placed."""
         card = DesktopCard(native=self._native, hide_from_capture=self._hide_from_capture)
@@ -3063,7 +3749,8 @@ class HudOverlay(QObject):
         each placed card's (none while it is hidden)."""
         if not self._shown or self._closed:
             return []
-        return [*self.hud.glows(), *(card.glow() for card in self._cards if card in self._placed)]
+        feed = [self._feed[0].glow()] if self._feed is not None and self._feed_shown else []
+        return [*self.hud.glows(), *feed, *(card.glow() for card in self._cards if card in self._placed)]
 
     def _sync_decor(self) -> None:
         """Each layer's items as they are now (a layer repaints only what changed)."""
@@ -3131,6 +3818,7 @@ class HudOverlay(QObject):
         order: list[QWidget] = [layer for layer in self._layers if layer.isVisible()]
         if pill is not None and pill.isVisible():
             order.append(pill)
+        order += [window for window in self._feed or () if window.isVisible()]
         order += [card for card in self._cards if card.isVisible()]
         if toast is not None and toast.isVisible():
             order.append(toast)
@@ -3156,6 +3844,7 @@ class HudOverlay(QObject):
         for window in self.windows():
             window.deleteLater()
         self._cards, self._placed, self._layers = [], [], []
+        self._feed = None
 
 
 def _alive(widget: QWidget | None) -> QWidget | None:

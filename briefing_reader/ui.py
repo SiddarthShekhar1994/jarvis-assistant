@@ -1063,6 +1063,7 @@ TRANSCRIPT_TITLE = "Transcript"
 _ORB_BASE = {hud.ORB_SPEAKING: orb_mod.SPEAKING, hud.ORB_WORKING: orb_mod.THINKING,
              hud.ORB_LISTENING: orb_mod.LISTENING, hud.ORB_WAITING: orb_mod.WAITING}
 PAUSED_WORD = "PAUSED"
+TASK_STOP_TEXT = "Stop"                  # beside Home's chip of a task
 # Home's error tiles (HOLOGRAM_SPEC 16.7): one sentence and one action each; the first by this order shows.
 ERROR_BRIEFING = "briefing"             # the briefing could not be loaded: Retry (the Briefing screen's own Retry)
 ERROR_SIGN_IN = "claude"                # Claude Code isn't signed in: How to fix (its existing help text)
@@ -1176,6 +1177,8 @@ class ReadingView(QWidget):
     recordAgendaRow = Signal(str)  # Record on a Day view meeting row (its key): that meeting's start card (only)
     desktopRequested = Signal()  # the Dock's Desktop, Ctrl+8 or the Find list's Desktop: switch to the HUD (only)
     glanceChanged = Signal()     # Briefing ready, N need your OK, REC or the look changed (the desktop HUD's mirror)
+    taskChipClicked = Signal()   # Home's chip of a task (agent_feed; only while [agent] is on)
+    taskStopClicked = Signal()   # ... and its Stop
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1451,6 +1454,9 @@ class ReadingView(QWidget):
         self.stage.set_side_tile(self.offer_tile)
         self.answer_chip = holo.ActionChip("", holo.CHIP_CYAN)
         self.answer_chip.clicked.connect(self._on_answer_chip)
+        self.task_chip: holo.ActionChip | None = None    # a task's chip and its Stop (set_task_chip): made as they show
+        self.task_stop: holo.HoloButton | None = None
+        self._task_look = ""
         # The states (round 2, part 3b, HOLOGRAM_SPEC 16.7): the waiting readout and the offline voice's steel
         # badge in the chip row (when no chip shows), an error as ONE tile at the focal point (where an offer's
         # tile sits; an open offer goes first), and quiet hours read again every half minute.
@@ -1806,6 +1812,8 @@ class ReadingView(QWidget):
         if base not in (orb_mod.SPEAKING, orb_mod.THINKING):
             if self._typing:
                 base = orb_mod.LISTENING
+            elif self._task_look:
+                base = self._task_look   # a task works, or a card of it waits (set_task_look)
             elif self._pending > 0 or self._offers > 0 or self._errors:
                 base = orb_mod.NEEDS     # an error waits on the owner's action too (spec 12.6)
             elif self._waiting or base == orb_mod.WAITING:
@@ -2359,6 +2367,35 @@ class ReadingView(QWidget):
         self.approvals_chip.setVisible(approvals)
         if briefing and not was_shown:
             self.briefing_chip.start_ping()
+
+    def set_task_look(self, base: str) -> None:
+        """The orb while a task runs (agent_feed): it thinks; orb.NEEDS while a card of it waits; "" none."""
+        if base != self._task_look:
+            self._task_look = base
+            self._sync_look()
+
+    def set_task_chip(self, text: str, *, can_stop: bool = False) -> None:
+        """Home's chip of a task (agent_feed): "Working - 3 of 6", with a Stop beside it while it runs; "" none. Made
+        when it first shows: with [agent] off Home is as it was. It keeps its place: a way to stop is always there."""
+        if self.task_chip is None:
+            if not text:
+                return
+            self.task_chip = holo.ActionChip(text, holo.CHIP_CYAN)
+            self.task_chip.clicked.connect(self.taskChipClicked)
+            self.task_stop = holo.HoloButton(TASK_STOP_TEXT, holo.DANGER_GHOST, size=holo.SIZE_SM)
+            self.task_stop.setAccessibleName("Stop the task")
+            self.task_stop.clicked.connect(self.taskStopClicked)
+            row = self._chip_row.layout()
+            row.insertWidget(1, self.task_chip)
+            row.insertWidget(2, self.task_stop)
+        if text and self.task_chip.text() != text:
+            self.task_chip.setText(text)
+            self.task_chip.updateGeometry()
+        self.task_chip.setVisible(bool(text))
+        self.task_stop.setVisible(bool(text) and can_stop)
+
+    def task_chip_text(self) -> str:
+        return self.task_chip.text() if self.task_chip is not None and not self.task_chip.isHidden() else ""
 
     def home_chip(self) -> str:
         """The chip Home shows ("" when none)."""
@@ -3785,6 +3822,7 @@ MEMORY_NO_MATCH_TEXT = "I have no note about that, {sir}."
 MEMORY_DUPLICATE_HUD = "I already have that, {sir}."    # the desktop HUD's words for a duplicate (never the note)
 # A desktop request typed before the owner's Turn on (the first-run card shows; the words stay in the bar), and after it.
 DESKTOP_OFF_TEXT = "Jarvis on your desktop isn't turned on yet - nothing was done"
+TASK_RUNNING_TEXT = "A task is running; try that again when it's done"
 DESKTOP_TURNED_ON_TEXT = "Jarvis on your desktop is on. Press Enter to ask again, {sir}."
 MEMORY_SEVERAL_TEXT = "Which note, {sir}? I've opened MEMORY with the matches."
 # Who gets the notes.
@@ -5062,6 +5100,7 @@ class AppController(QObject):
         self.productivity: Any = self._create_productivity()   # the bundle's day read and offers (needs Ask)
         self.meetings: Any = self._create_meetings()    # [meetings]: the meeting recorder, or None while it is off
         self._init_desktop(desktop_factory)             # [desktop]: the Dock's Desktop, Settings > Desktop, the HUD
+        self.task_feed: Any = None                     # the task's panel and cards (agent_feed), with the agent
         self.agent: Any = self._create_agent(agent_factory)   # [agent]: a task worked through, or None while it is off
         self.window.reading.set_find_actions(self.productivity is not None)   # offers' links in the Find list
         # Jarvis's own voice: silent unless injected; start() builds the real one ([assistant] speak).
@@ -8358,9 +8397,12 @@ class AppController(QObject):
 
     def _ask_blocked(self) -> str:
         """Why an Ask may not start now ("" when it may): a Google sign-in is open in the browser
-        (the calendar can't be read meanwhile), or a desktop request is being looked up on this PC."""
+        (the calendar can't be read meanwhile), or a desktop request is being looked up on this PC. While a task runs
+        nothing else starts, so the bar stays the task's (D4)."""
         if self.state == STATE_QUITTING:
             return "Jarvis is closing"
+        if getattr(getattr(self, "agent", None), "running", False):
+            return TASK_RUNNING_TEXT
         if self._signing_in():
             return ASK_SIGN_IN_FIRST
         desktop = getattr(self, "desktop", None)
@@ -9102,7 +9144,7 @@ class AppController(QObject):
                                         note=settings_view.DESKTOP_NOTE, how=settings_view.DESKTOP_HOW,
                                         rows=lambda: settings_view.desktop_rows(
                                             self.config, turned_on=self._desktop_turned_on(),
-                                            current=self._desktop_ok_current()),
+                                            current=self._desktop_ok_current(), tasks=not self._task_update_due()),
                                         extra=self._desktop_settings)
         self.desktop = self._create_desktop(factory)
         if self.desktop is not None:
@@ -9239,6 +9281,11 @@ class AppController(QObject):
         desktop = getattr(self, "desktop", None)
         return desktop is not None and desktop.consent_current()
 
+    def _task_update_due(self) -> bool:
+        """Tasks are on and the owner's OK is on a card that did not list them (desktop_ui.needs_task_update)."""
+        desktop = getattr(self, "desktop", None)
+        return desktop is not None and desktop.needs_task_update()
+
     def _desktop_update_needed(self, text: str, *, on_hud: bool) -> bool:
         """p2r-6: ``text`` asks for a PC control while the owner's OK is Phase 1's card's - nothing runs: the bar says
         why in coral (the words stay) and the updated card shows (in the window now, or when he brings it back from
@@ -9284,7 +9331,14 @@ class AppController(QObject):
             window.visibilityChanged.connect(self._on_window_visibility_for_desktop)
             self._desktop_consent_card = card
         reading.find_overlay.close_list(restore_focus=False)
-        card.open_card(entry, updated=desktop.consent_given() and not desktop.consent_current())
+        task_row = ""
+        if desktop.tasks_on():
+            from .agent.web import engine_order
+            from .desktop_view import CONSENT_TASK_ROW
+
+            task_row = CONSENT_TASK_ROW.format(engine=engine_order(self.config.agent.search_engine)[0].name)
+        card.open_card(entry, updated=desktop.consent_given() and not desktop.consent_current(), task_row=task_row,
+                       task_new=desktop.consent_given() and not desktop.consent_for_tasks())
         logger.info("Desktop: the first-run card shows (%s)", entry)
 
     def _show_desktop_consent_later(self) -> None:
@@ -9294,9 +9348,13 @@ class AppController(QObject):
 
         entry, self._desktop_consent_later = self._desktop_consent_later, ""
         desktop = getattr(self, "desktop", None)
-        if entry and desktop is not None and desktop.consent_given() and not desktop.consent_current():
+        if entry and desktop is not None and desktop.consent_given() and (not desktop.consent_current()
+                                                                          or desktop.needs_task_update()):
             if self.ask is not None:                         # the HUD's "Bring Jarvis back to read it" is done with
-                self.ask.show_note(with_address(UPDATE_NEEDED_TEXT, self.config.assistant.address), hud.TONE_ERROR)
+                from .desktop_ui import TASK_UPDATE_TEXT
+
+                said = UPDATE_NEEDED_TEXT if not desktop.consent_current() else TASK_UPDATE_TEXT
+                self.ask.show_note(with_address(said, self.config.assistant.address), hud.TONE_ERROR)
             self._show_desktop_consent(entry)
 
     def _on_consent_turn_on(self, entry: str) -> None:
@@ -9351,6 +9409,8 @@ class AppController(QObject):
         saved = desktop.turn_off()
         if getattr(self, "agent", None) is not None:
             self.agent.stop("turned off")    # R8: a task ends at once, and none is offered while it is off
+            if self.task_feed is not None:
+                self.task_feed.consent_gone()   # a result card up: nothing of it stays
         ask = self.ask
         if ask is not None and ask.running_mode == MODE_DESKTOP:
             logger.info("Desktop: turned off while a desktop request's planner run was on its way; cancelled")
@@ -9510,6 +9570,8 @@ class AppController(QObject):
         if desktop.busy():
             ask.show_note(BUSY_TEXT, hud.TONE_ERROR)  # one at a time: the words stay (not done: coral)
             return None
+        if self.task_feed is not None:
+            self.task_feed.new_request()
         if self._desktop_update_needed(text, on_hud=self._hud_active()):
             return None                              # p2r-6: Phase 1's OK - the updated card first
         if not self._hud_active():
@@ -9653,11 +9715,16 @@ class AppController(QObject):
         planner = self.ask.planner
         try:
             controller = (factory or agent_ui.AgentController)(self.config, planner, live=self.live,
-                                                               consent=desktop.consent_given, parent=self,
+                                                               consent=desktop.consent_given,
+                                                               tasks_consent=desktop.consent_for_tasks, parent=self,
                                                                window_avoid=self._hud_reach)
         except Exception as exc:  # noqa: BLE001 - Jarvis works without tasks
             logger.warning("Could not set up tasks (%s)", type(exc).__name__)
             return None
+        from . import agent_feed
+
+        self.task_feed = agent_feed.TaskFeed(controller, desktop, self.window.reading, words=self._agent_words,
+                                             reveal_live=self._reveal_live, parent=self)
         controller.said.connect(self._on_agent_said)
         controller.noticed.connect(self._on_agent_noticed)
         controller.acknowledged.connect(lambda text: self._agent_words(text, hud.TONE_DONE, speak=False))
@@ -9677,8 +9744,27 @@ class AppController(QObject):
     def _start_agent(self, words: str) -> None:
         """A first planner run handed the request to a task: it starts with the owner's own words."""
         agent = getattr(self, "agent", None)
-        if agent is not None and self.state != STATE_QUITTING:
-            agent.start(words)
+        if agent is None or self.state == STATE_QUITTING:
+            return
+        if self._task_update_due():
+            self._task_update_needed(words)
+            return
+        agent.start(words)
+
+    def _task_update_needed(self, words: str) -> None:
+        """A task asked for while the owner's OK is on a card that did not list tasks: nothing starts, the bar says why
+        in coral, the words come back to the bar and the updated card shows (in the window now, or when the owner brings
+        it back from the HUD)."""
+        from .desktop_ui import ENTRY_REQUEST, ENTRY_UPDATE, TASK_UPDATE_HUD_TEXT, TASK_UPDATE_TEXT
+
+        on_hud = self._hud_active()
+        said = with_address(TASK_UPDATE_HUD_TEXT if on_hud else TASK_UPDATE_TEXT, self.config.assistant.address)
+        ask = self.ask
+        if ask is not None:
+            ask.bar.give_back(words)
+            ask.show_note(said, hud.TONE_ERROR, hud_text=said)
+        logger.info("Agent: a task waits for the updated card")
+        self._show_desktop_consent(ENTRY_UPDATE if on_hud else ENTRY_REQUEST)
 
     def _agent_words(self, text: str, tone: str, *, speak: bool = True) -> None:
         """Words about the task on the caption line of the bar Ask is bound to (the HUD's, or the window's status line)
@@ -9700,23 +9786,26 @@ class AppController(QObject):
         self._agent_words(text, tone)
 
     def _on_agent_question(self, question: Any) -> None:
-        """A question for the owner: on the caption and in the conversation, in amber (a decision waits); what he types
-        next is its answer (AgentController.take_request). Part A3 gives it a card. The firewall's (kind "web") is never
-        said aloud or kept on this PC, and only a click on A3's card answers it: its words may be private."""
+        """A question for the owner: its card waits on the HUD (agent_feed); on the caption and in the conversation, in
+        amber (a decision waits). What is typed next answers ask_owner's (AgentController.take_request). The firewall's
+        (kind "web") is never said aloud or kept on this PC, and only a click on its card answers it: its words may be
+        private. Keep going is said, and answered by a click too."""
         web_card = question.kind == "web"
         self._agent_words(question.text, hud.TONE_WARN, speak=not web_card)
         self._jarvis(question.text, tone=hud.TONE_WARN, keep=not web_card, context=False)
 
     def _on_agent_ended(self, end: Any) -> None:
-        """The task ended: its report (or Jarvis's own words) on the caption, in the conversation and said aloud, and
-        one row of counts in ACTIVITY. Never given to a later Ask as the conversation: it may hold what pages said."""
+        """The task ended: the whole report (or Jarvis's own words) on its result card and in the conversation, its
+        first sentence or two on the caption and said aloud (agent_feed.spoken_summary), and one row of counts in
+        ACTIVITY. Never given to a later Ask as the conversation: it may hold what pages said."""
         from .agent.tools import OUTCOME_DONE, OUTCOME_FAILED
+        from .agent_feed import spoken_summary
 
         if self.state == STATE_QUITTING:
             return
         tone = {OUTCOME_FAILED: hud.TONE_ERROR, "stopped": hud.TONE_IDLE}.get(end.outcome, hud.TONE_DONE)
         words = {OUTCOME_DONE: "done", OUTCOME_FAILED: "failed", "stopped": "stopped"}.get(end.outcome, "partly done")
-        self._agent_words(end.summary, tone, speak=end.outcome != "stopped")
+        self._agent_words(spoken_summary(end.summary), tone, speak=end.outcome != "stopped")
         files = f"\nFiles: {', '.join(end.outputs)}" if end.outputs else ""
         sub = [f"task {words}", _plural(end.tools, "step"), _live.elapsed_text(end.worked_s)]
         self._jarvis(end.summary + files, tone=tone, sub=f" {DOT} ".join(sub), context=False)
@@ -13832,6 +13921,8 @@ class AppController(QObject):
         self._live_feed.stop()
         if getattr(self, "meetings", None) is not None:
             self.meetings.shutdown()   # a recording stops and is saved; the pill goes
+        if getattr(self, "task_feed", None) is not None:
+            self.task_feed.shutdown()  # the task's panel and cards: before the HUD's windows go
         if getattr(self, "desktop", None) is not None:
             if self.ask is not None:
                 self.ask.set_bar(self.window.reading.command_bar)   # never bound to a HUD bar that is deleted

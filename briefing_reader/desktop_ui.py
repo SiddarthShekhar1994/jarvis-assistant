@@ -207,6 +207,12 @@ ENTRIES = (ENTRY_DOCK, ENTRY_KEY, ENTRY_START, ENTRY_REQUEST, ENTRY_UPDATE)
 # binned on a click, with Undo; music, volume, timers and screenshots at once, with Undo). A Turn on saved before
 # (Phase 1's card) is version 1: Phase 1's skills work on it, Phase 2's only after the owner turns this one on.
 CONSENT_VERSION = 2
+# The agent's card (part A3): tasks need version 3, which adds their row. It is what Turn on stores while [agent] is on;
+# anything allowed on 1 or 2 stays allowed, and with [agent] off nothing of this shows and 2 is stored as before.
+AGENT_CONSENT_VERSION = 3
+TASK_UPDATE_TEXT = "Tasks need your OK on the updated card first, {sir} - nothing was started."
+TASK_UPDATE_HUD_TEXT = "Tasks need your OK on the updated card first, {sir} - Bring Jarvis back to read it."
+REVEAL_FAILED_TEXT = "Windows couldn't show that file in its folder, {sir}."
 UPDATE_NEEDED_TEXT = "That needs your OK on the updated card first, {sir} - nothing was changed."
 UPDATE_NEEDED_HUD_TEXT = "That needs your OK on the updated card first, {sir} - Bring Jarvis back to read it."
 # p2r-3 (D9): the owner's "undo" brings the newest change within undo_days back as its stamped card (its Undo: his
@@ -475,6 +481,7 @@ class _Bridge(QObject):
     dnd_opened = Signal(int, object)        # P2.5: the Do Not Disturb chip's click (its Future: a pcctl.PcChange)
     dnd_read = Signal(int, object)          # P2.5: Do Not Disturb read back (its Future: pcctl.DND_*)
     recalled = Signal(int, object)          # p2r-3: the owner's "undo" (its Future: desktop.service.Recalled)
+    revealed = Signal(int, object)          # a task's output shown in its folder (its Future: whether it was)
 
 
 def _deliver(bridge: _Bridge, seq: int, future: Future, signal: str = "resolved") -> None:
@@ -559,6 +566,8 @@ class DesktopController(QObject):
         # out or putting it back (number, "batch" / "undo", its stop, THE CONSENT GATE, the button's words, when the
         # stop was asked), the app's click guards, the Esc seam (made at the first batch) and the journals' folder.
         self._tidy: desktop_tidy.TidyState | None = None
+        self._task_waiting = 0                               # a task's card that waits for the owner (agent_feed)
+        self._reveal_seq = 0
         self._tidy_job: list[Any] | None = None
         self._tidy_seq = 0
         self._approved_at = ""
@@ -605,6 +614,7 @@ class DesktopController(QObject):
         self._bridge.dnd_opened.connect(self._on_dnd_opened, Qt.ConnectionType.QueuedConnection)
         self._bridge.dnd_read.connect(self._on_dnd_read, Qt.ConnectionType.QueuedConnection)
         self._bridge.recalled.connect(self._on_recalled, Qt.ConnectionType.QueuedConnection)
+        self._bridge.revealed.connect(self._on_revealed, Qt.ConnectionType.QueuedConnection)
         self._request_seq = 0
         # The request being resolved: (number, words, planner, run id, its stop - set when the app stops waiting -,
         # THE CONSENT GATE as it stood when it started: set once the owner turns it off).
@@ -810,6 +820,20 @@ class DesktopController(QObject):
         or binning files, the PC's controls and focus mode - act only then (fail-closed)."""
         return self.consent_version() >= CONSENT_VERSION
 
+    def tasks_on(self) -> bool:
+        """[agent] is on, with what it stands on: its row is on the card (fail-closed; off: as if it did not exist)."""
+        return all(getattr(getattr(self.config, name, None), "enabled", False) is True
+                   for name in ("agent", "desktop", "ask"))
+
+    def consent_for_tasks(self) -> bool:
+        """The owner's OK covers a task (version 3; fail-closed)."""
+        return self.consent_version() >= AGENT_CONSENT_VERSION
+
+    def needs_task_update(self) -> bool:
+        """Turned on, on a card that did not list tasks, while tasks are on: the updated card is offered at the first
+        task request."""
+        return self.tasks_on() and self.consent_given() and not self.consent_for_tasks()
+
     def needs_update(self, words: str) -> bool:
         """``words`` ask for a PC control (a local route that acts at once: volume, music, a timer, a screenshot,
         focus mode) while the owner's OK is Phase 1's card's: refused before anything runs, the updated card offered.
@@ -871,8 +895,8 @@ class DesktopController(QObject):
         store = None
         try:
             store = self._consent_store() if self._consent_store is not None else None
-            saved = (bool(store.set_desktop_turned_on(bool(on), version=CONSENT_VERSION if on else 0))
-                     if store is not None else False)
+            version = (AGENT_CONSENT_VERSION if self.tasks_on() else CONSENT_VERSION) if on else 0
+            saved = bool(store.set_desktop_turned_on(bool(on), version=version)) if store is not None else False
         except Exception as exc:  # noqa: BLE001 - not saved: fail-closed
             logger.warning("Desktop: the owner's OK could not be saved (%s)", type(exc).__name__)
             saved = False
@@ -1627,8 +1651,43 @@ class DesktopController(QObject):
         return self._tidy
 
     def waiting_count(self) -> int:
-        """NEEDS YOUR OK cards of file steps waiting for the owner's decision (the chip counts them)."""
-        return 1 if self._tidy is not None and self._tidy.waiting() else 0
+        """NEEDS YOUR OK cards waiting for the owner's decision (the chip counts them): file steps, and a task's."""
+        return (1 if self._tidy is not None and self._tidy.waiting() else 0) + self._task_waiting
+
+    def set_task_waiting(self, count: int) -> None:
+        """A card of a task waits, or no longer does (agent_feed): it counts as a card of file steps does."""
+        count = max(0, int(count))
+        if count != self._task_waiting:
+            self._task_waiting = count
+            self.sync_glance()
+            self.waitingChanged.emit(self.waiting_count())
+
+    def reveal_task_file(self, path: str) -> bool:
+        """A task's output shown selected in its folder on the owner's click (the result card's Folder): the guarded
+        backend's show_in_folder, on the desktop thread, after THE CONSENT GATE. The file itself is never opened. False
+        when it can't go now."""
+        if self._shut or self._quitting or not self.consent_given():
+            return False
+        worker, service = self._ensure_worker()
+        self._reveal_seq += 1
+        future = worker.submit(service.reveal_file, path, cancel=self._gate())
+        bridge, seq = self._bridge, self._reveal_seq
+        future.add_done_callback(lambda done, seq=seq: _deliver(bridge, seq, done, "revealed"))
+        logger.info("Desktop: a task's output goes to its folder (the owner's click)")
+        return True
+
+    def _on_revealed(self, _seq: int, future: Future) -> None:
+        if self._shut:
+            return
+        try:
+            shown = bool(future.result())
+        except CancelledError:
+            return
+        except Exception as exc:  # noqa: BLE001 - said plainly
+            logger.warning("Desktop: a task's output could not be shown in its folder (%s)", type(exc).__name__)
+            shown = False
+        if not shown:
+            self.answered.emit(with_address(REVEAL_FAILED_TEXT, self._address), TONE_ERROR, "", False)
 
     def _journal_folder(self) -> Any:
         folder = self.journal_folder
