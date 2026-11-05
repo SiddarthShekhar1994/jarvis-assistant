@@ -868,6 +868,11 @@ def _in_range(value: int | None, low: int, high: int) -> bool:
     return value is None or low <= value <= high
 
 
+def step_shape(step: PlannedStep) -> str:
+    """Check 1 by itself (a PC control a task asks for, which never goes through a plan): its code, or ""."""
+    return _shape(step)
+
+
 def _shape(step: PlannedStep) -> str:
     allowed = SKILL_FIELDS.get(step.skill)
     if allowed is None or step.keys - {"skill", "why"} - allowed:

@@ -368,8 +368,10 @@ apps = false                  # work inside the apps you allow (filling forms): 
 # Jarvis, a true agent: give him a task and he works out the steps himself - he shows a plan, works through it with
 # his own tools, checks what he did and reports what he produced and what he could not do. Your own Claude Code does
 # the thinking on your claude.ai plan, over tools only Jarvis serves on this PC. He writes only inside his workspace
-# (text-like files, never a program or a script); anything else waits for your click, as ever. Off here; turn it on for
-# this PC with JARVIS_AGENT_ENABLED=true in .env. It also needs [desktop] and [ask] on.
+# (text-like files, never a program or a script); anything else waits for your click, as ever. When a task needs them
+# he reads what "private" below allows: never to send, and once he has read a mail or a file, whatever he would search
+# for outside your own words asks you first. Off here; turn it on for this PC with JARVIS_AGENT_ENABLED=true in .env.
+# It also needs [desktop] and [ask] on.
 enabled = false
 model = "opus"                # the tasks' model; quick replies stay on [ask] model
 effort = ""                   # "low", "medium", "high", "xhigh" or "max"; "" = Claude Code's default
@@ -378,3 +380,4 @@ max_minutes = 20              # ... and so does this many minutes of work (1..24
 tasks_per_day = 20            # how many tasks may start in 24 hours (1..200)
 search_engine = "duckduckgo"  # where his searches go: "duckduckgo", "bing" or "google" (the words of each search go there)
 workspace = ""                # his files; "" = the Jarvis\Workspace folder in your user folder; never under OneDrive
+private = ["calendar", "contacts", "memory", "mail", "files"]   # what a task may read of your things, when it needs them

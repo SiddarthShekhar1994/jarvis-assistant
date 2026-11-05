@@ -3456,6 +3456,8 @@ class HudOverlay(QObject):
         self._stack: list[QWidget] = []
         self._feed: tuple[PlanPanel, PanelButtons] | None = None   # a task's panel (made at its first use)
         self._feed_shown = False                        # it shows while the HUD shows
+        self._feed_watch: QRect | None = None           # where the watch window was as the panel was last placed
+        self._feed_card: QRect | None = None            # ... and where the task's own card went
         self._screen: QScreen | None = None            # the screen the HUD shows on
         self._holding = False                           # the RecPill is held (shown, or a switch on its way)
         self.hud = HudWindow(hud_key=hud_key, native=self._native, hide_from_capture=self._hide_from_capture)
@@ -3624,6 +3626,9 @@ class HudOverlay(QObject):
         """Place ``card`` beside ``target`` (global), clear of the HUD's bar and chips (and of ``avoid``: the other
         cards), and show it while the HUD shows (from now on it shows with the HUD, its shadow under it)."""
         clear = [self.hud.occupied_rect()] if self._shown or self.hud.area().isValid() else []
+        if self._feed is not None and self._feed_shown:   # a task's panel and watch window (place_feed): off, never so
+            clear.append(self._feed[0].geometry())
+            clear += [rect for rect in (self._feed_watch, self._feed_card) if rect is not None and rect.isValid()]
         rect = card.place_beside(target, area, [*clear, *avoid])
         if card in self._cards and card not in self._placed:
             self._placed.append(card)
@@ -3688,6 +3693,7 @@ class HudOverlay(QObject):
         scrolling). Sizes follow what is left."""
         if self._feed is None:
             return
+        self._feed_watch = QRect(watch) if watch is not None else None
         panel, buttons = self._feed
         win = self.hud
         area = win.area() if win.area().isValid() else win.geometry()
@@ -3717,6 +3723,7 @@ class HudOverlay(QObject):
                 panel.set_limits(width, room - card.height() - PANEL_GAP)
                 panel.move(x, top)
                 card.move(max(left, min(x, right - card.width())), top + panel.height() + PANEL_GAP)
+        self._feed_card = QRect(card.geometry()) if card is not None else None
         buttons.move(panel.x() + panel.width() - buttons.width() - 8, panel.y() + 4)
         panel.set_head_room(buttons.width() + 4 if buttons.any_shown() else 0)
         self._apply_decor()

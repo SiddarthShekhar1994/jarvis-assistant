@@ -44,6 +44,11 @@ there, one at a time, so nothing in it is shared with the GUI or the Ask thread.
 * ``housekeep(...)`` (p2r-1; a function of its own - it needs no service): the journal's start-up recovery and its
   purge of the runs older than 30 days, at start-up and at the owner's Turn on, then at the first desktop request of
   each new day (desktop_ui; never on a timer).
+* A task's reads (agent.owner, part A4): ``find_for_task(words)`` (the files its words find, the places they are in and
+  the apps they name: names only), ``list_for_task(place)`` (what one place holds, or the roots), ``read_text(item,
+  start=, cap=)`` (a part of a text-like file: re-checked right before the read - the scope as it is now, the same item
+  - and never a secret, an online-only file or any other type) and ``pc_for_task(asked, ...)`` (a PC control asked for
+  by a task, carried out as a local route is). ``cancel`` stops each before it touches anything.
 
 Each job's ``cancel`` (anything with ``is_set()``) holds the app's stop and THE CONSENT GATE (desktop_ui: the owner's
 Turn off): the executor asks it before each step and right before each OS call - once it is set nothing opens, and
@@ -67,11 +72,15 @@ cancel=, hud=)``, ``context_for(words)``, ``carry_out(plan, words, context, canc
 ``carry_out_card(card, sha=, ticked=, cancel=, on_start=, on_row=, stop_keys=, on_stop=)``, ``undo_card(run_id, seqs,
 cancel=, on_start=, stop_keys=, on_stop=)``, ``find(query)``, ``executor()``; ``days_in(words)``; ``RECENT_FILES``;
 ``housekeep(journal_folder, backend, cancel=)`` -> ``Housekept``; ``recall_undo(cancel=)`` -> ``Recalled``.
+``find_for_task(words, cancel=)``, ``list_for_task(place, cancel=)`` -> ``TaskListing``, ``read_text(item, start=, cap=,
+cancel=)`` -> ``TextPart``, ``pc_for_task(asked, run_id=, cancel=, hud=)``; ``READABLE_TYPES``, ``READ_*`` codes.
 """
 
 from __future__ import annotations
 
+import codecs
 import logging
+import ntpath
 import time
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field, replace
@@ -88,7 +97,8 @@ from . import validate as dv
 from .backend import DesktopBackend
 from .context import MAX_FILES, MAX_PLACES, AppItem, DesktopContext, Place, SiteItem, build_context
 from .executor import DesktopRun, Executor, FindQuery
-from .index import LocalSearch, TreeFolder, folder_tree, name_score, pick_places, query_words, recent_files
+from .index import (LocalSearch, TreeFolder, file_item, folder_tree, name_score, pick_places, place_item, query_words,
+                    recent_files, skipped)
 from .journal import Journal, default_folder
 
 logger = logging.getLogger(__name__)
@@ -102,6 +112,63 @@ WITHIN_FILES = 40                       # files changed in the days the words sa
 # Days back the owner's words ask for ("from yesterday", "this week").
 _DAYS = ((("today",), 1), (("yesterday",), 2), (("this", "week"), 7), (("last", "week"), 14), (("past", "week"), 7),
          (("this", "month"), 31), (("last", "month"), 62))
+# What a task may read of a file (agent.owner): plain text-like types, no parser. Never a program or a config full of
+# keys: those are not here, and guard's NEVER list is asked first.
+READABLE_TYPES = frozenset({"txt", "text", "md", "markdown", "rst", "csv", "tsv", "json", "jsonl", "ndjson", "log",
+                            "html", "htm", "xml", "yaml", "yml", "srt", "vtt", "tex", "bib"})
+READ_BYTES_CAP = 8 * 1024 * 1024        # of a file: the first this much, and it says so
+LIST_ENTRIES_CAP = 2000                 # entries of a folder looked at for a task
+READ_TYPE, READ_ONLINE, READ_SECRET, READ_BINARY, READ_STOPPED, READ_UNAVAILABLE, READ_FAILED = (
+    "read_type", "read_online", "read_secret", "read_binary", "read_stopped", "read_unavailable", "read_failed")
+
+
+def decode_text(raw: bytes, *, cut: bool = False) -> str | None:
+    """A text file's bytes as text (a byte order mark says which; else UTF-8, else Windows' own); None when they don't
+    read as text. ``cut``: they end where the read stopped, maybe inside a character."""
+    for mark, name in ((codecs.BOM_UTF8, "utf-8-sig"), (codecs.BOM_UTF16_LE, "utf-16-le"),
+                       (codecs.BOM_UTF16_BE, "utf-16-be")):
+        if raw.startswith(mark):
+            return raw[len(mark):].decode(name.removesuffix("-sig"), errors="replace")
+    if b"\x00" in raw[:8192]:
+        return None
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        if cut and exc.start >= len(raw) - 3:   # a character cut at the end of what was read
+            return raw[:exc.start].decode("utf-8", errors="replace")
+    return raw.decode("cp1252", errors="replace")
+
+
+@dataclass(frozen=True)
+class TextPart:
+    """A part of a text file, or why not (``code``): characters ``first`` to ``last`` of what was read; ``more``: there
+    are more of them; ``cut``: the file is longer than Jarvis reads; ``hidden``: it holds a hidden message (read before
+    such characters are cleaned away). Memory only."""
+
+    code: str = ""
+    text: str = field(default="", repr=False)
+    first: int = 0
+    last: int = 0
+    more: bool = False
+    cut: bool = False
+    hidden: bool = False
+
+    def __repr__(self) -> str:
+        return f"TextPart({self.code or 'read'}, {self.last - self.first} characters)"
+
+
+@dataclass(frozen=True)
+class TaskListing:
+    """What one place holds, for a task (or the roots): its folders and files, each checked, and how many were left out;
+    ``code``: why it can't be listed."""
+
+    code: str = ""
+    places: tuple[Place, ...] = field(default=(), repr=False)
+    files: tuple[Any, ...] = field(default=(), repr=False)
+    left_out: int = 0
+
+    def __repr__(self) -> str:
+        return f"TaskListing({self.code or 'ok'}, {len(self.places)} places, {len(self.files)} files)"
 
 
 def days_in(words: Any) -> int | None:
@@ -518,6 +585,115 @@ class DesktopService:
         state = tidy.recalled(best[1], best[2], self.scope(), best[3])
         logger.info("Desktop %s: the undo route shows its card (%d item(s) to put back)", best[1], len(best[3]))
         return Recalled(state)
+
+    # ---- a task's reads (agent.owner; part A4) ------------------------------------------------------------
+
+    def find_for_task(self, words: str, *, limit: int = MAX_FILES, cancel: Any = None) -> DesktopContext:
+        """The files ``words`` find (names only, each checked by the path check), the places they are in, and the apps
+        the words name. Unlike ``context_for``, nothing that the words did not ask for: no Recent items, no other
+        folders."""
+        backend = self.backend()
+        if backend is None or (cancel is not None and cancel.is_set()):
+            return DesktopContext()
+        scope = self.scope()
+        cache: dict[str, bool] = {}
+        searched = query_words(words)
+        search = LocalSearch(scope, backend, clock=self._clock, now=self._now, cache=cache)
+        result = search.search(searched, limit=limit)
+        if cancel is not None and cancel.is_set():
+            return DesktopContext()
+        places = pick_places(scope, backend, self.tree(), words=searched, files=result.files, cap=MAX_PLACES,
+                             cache=cache, newest=False)
+        return build_context(places, result.files, desktop_apps.match(words, self.apps()), self._sites,
+                             looked_in=result.looked_in, found=result.found)
+
+    def list_for_task(self, place: Place | None, *, cap: int = 150, cancel: Any = None) -> TaskListing:
+        """What ``place`` (a Place listed in this run, re-checked; None: the roots) holds right now: folders first,
+        every item through the path check, links, hidden, excluded and secret-shaped ones never listed, an online-only
+        folder never gone into (it would download)."""
+        executor = self.executor()
+        if executor is None:
+            return TaskListing(READ_UNAVAILABLE)
+        if cancel is not None and cancel.is_set():
+            return TaskListing(READ_STOPPED)
+        backend, scope = executor.backend, self.scope(fresh=True)
+        if place is None:
+            return TaskListing(places=tuple(pick_places(scope, backend, (), cap=len(scope.roots), newest=False)))
+        code, verdict = executor.check_place(place)
+        if code or verdict is None:
+            return TaskListing(code or READ_UNAVAILABLE)
+        if paths.FLAG_ONLINE_ONLY in verdict.flags:
+            return TaskListing(READ_ONLINE)
+        try:
+            entries = backend.list_folder(verdict.path, limit=LIST_ENTRIES_CAP)
+        except OSError:
+            return TaskListing(READ_FAILED)
+        cache: dict[str, bool] = {}
+        places: list[Place] = []
+        files: list[Any] = []
+        left_out = 0
+        for entry in sorted((item for item in entries if not skipped(item)),
+                            key=lambda item: (not item.is_dir, -item.mtime_ns)):
+            if cancel is not None and cancel.is_set():
+                return TaskListing(READ_STOPPED)
+            if len(places) + len(files) >= cap:
+                left_out += 1
+                continue
+            child = paths.check_path(ntpath.join(verdict.path, entry.name), scope, backend, cache=cache)
+            if entry.is_dir:
+                found = place_item(child, (*place.parts, entry.name), backend) if child.ok else None
+                places.extend([found] if found is not None else [])
+            else:
+                found = file_item(child, backend) if child.ok else None
+                files.extend([found] if found is not None else [])
+        return TaskListing("", tuple(places), tuple(files), left_out)
+
+    def read_text(self, item: Any, *, start: int = 0, cap: int = 12_000, cancel: Any = None) -> TextPart:
+        """Characters ``start`` on of a listed text file, ``cap`` at most. Right before the read it is re-checked in the
+        scope as it is now (the same final path, the same identity: executor.check_file), it is a type Jarvis reads as
+        text, its name says nothing of secrets and its content is on this PC; the handle read from must be that same
+        item (backend.read_head). ``cancel``, once set: nothing is read."""
+        executor = self.executor()
+        if executor is None:
+            return TextPart(READ_UNAVAILABLE)
+        if cancel is not None and cancel.is_set():
+            return TextPart(READ_STOPPED)
+        code, verdict = executor.check_file(item)
+        if code or verdict is None:
+            return TextPart(code or READ_UNAVAILABLE)
+        name = ntpath.basename(verdict.path)
+        if guard.sensitive_file_name(name):
+            return TextPart(READ_SECRET)
+        if guard.suffix(name) not in READABLE_TYPES:
+            return TextPart(READ_TYPE)
+        if paths.FLAG_ONLINE_ONLY in verdict.flags or getattr(item, "online_only", False):
+            return TextPart(READ_ONLINE)
+        if cancel is not None and cancel.is_set():
+            return TextPart(READ_STOPPED)
+        try:
+            raw = executor.backend.read_head(verdict.path, max_bytes=READ_BYTES_CAP + 1, identity=item.identity)
+        except OSError as exc:
+            logger.info("Desktop: a file could not be read for a task (%s %s)", type(exc).__name__,
+                        getattr(exc, "winerror", "") or "")
+            return TextPart(READ_FAILED)
+        whole = decode_text(raw[:READ_BYTES_CAP], cut=len(raw) > READ_BYTES_CAP)
+        if whole is None:
+            return TextPart(READ_BINARY)
+        first = max(0, int(start))
+        part = whole[first:first + int(cap)]
+        return TextPart("", part, first, first + len(part), first + len(part) < len(whole), len(raw) > READ_BYTES_CAP,
+                        guard.hidden_message(part))
+
+    def pc_for_task(self, asked: pcctl.PcAsk, *, words: str = "", run_id: str = "", cancel: Any = None,
+                    hud: Sequence[int] = ()) -> DesktopRun:
+        """A PC control a task asked for, once its licence was read from the owner's words (agent.owner): carried out as
+        a local route is. Its chips and Undo are desktop_ui's, as for any."""
+        executor = self.executor()
+        if executor is None:
+            return DesktopRun(run_id)
+        route = desktop_routes.LocalRoute(asked.kind, dv.INSTANT, target=asked)
+        return self._shown(executor.run_route(route, words=words, run_id=run_id, cancel=cancel, hud=hud), executor,
+                           words)
 
     def find(self, query: FindQuery) -> tuple[Any, ...]:
         """A find_files step's search: the files (or, for kind "folder", the folders) its words find, checked."""

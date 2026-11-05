@@ -2,18 +2,22 @@
 Jarvis serves (SPEC "Jarvis, a true agent"). Qt-free but for ``browser``; the app's side is agent_ui.
 
 Off unless [agent] enabled (or JARVIS_AGENT_ENABLED) is true, with [desktop] and [ask] on: off means no endpoint,
-nothing started and no new word in any prompt or schema. Built so far (parts A1, the engine, A2, the browser, and A3,
-the feed, whose windows are in hud_overlay and agent_feed):
+nothing started and no new word in any prompt or schema. Built so far (parts A1, the engine, A2, the browser, A3, the
+feed, whose windows are in hud_overlay and agent_feed, and A4, the owner's things and the firewall in full):
 
 * ``tools``: the registry - each tool's name, description, input schema, tier and handler; the one source for tools/list
   and --allowedTools: update_plan, say, ask_owner, finish, write_file, read_file, list_files, web_search, open_page,
-  read_more, fetch_text, look_at_page and show_file.
+  read_more, fetch_text, look_at_page, show_file; calendar_find, contacts_find, memory_read, conversation_read, mail_search,
+  mail_read, files_find, files_list, file_read; propose_files, propose_action, open_thing and pc_control.
+* ``owner``: what those last ones do: the owner's things read through the existing paths, whatever they give feeding the
+  firewall, changes only through the desktop's and Ask's own validators and cards, licensed by the owner's own words.
 * ``fetch``: fetch_text's short run of Claude Code's own declared fetcher, when a site refuses the window.
 * ``workspace``: the task's own folder, the one place a task may write without a click (text-like files, with caps).
 * ``endpoint``: the local MCP endpoint: 127.0.0.1 only, a per-run token, handlers off the HTTP thread, 45 s at most.
 * ``policy``: what is offered, the budgets, the tasks a day and the seam the firewall plugs into.
 * ``web``: what a search and a page read are: the engines, the scripts Jarvis runs in an isolated world, the numbered
-  addresses, a run's use of the window. ``firewall``: the rules for what may go out to the web (taint, seen addresses).
+  addresses, a run's use of the window. ``firewall``: the rules for what may go out to the web (taint, strict, seen
+  addresses).
 * ``browser``: the window the owner watches, on the page snapshots' private web engine and network gate. Qt, GUI thread.
 * ``runner``: one run: the process, its stream checked event by event, messages over stdin, waits that end the turn.
 * ``assets``: ``agent_prompt.md`` and ``agent_settings.json``.

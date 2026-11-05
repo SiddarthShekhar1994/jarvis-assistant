@@ -9713,11 +9713,14 @@ class AppController(QObject):
         from . import agent_ui
 
         planner = self.ask.planner
+        things = agent_ui.AppThings(planner, desktop, conversation=self._conversation_turns,
+                                    take_cards=self._take_task_cards, withdraw_cards=self._withdraw_task_cards,
+                                    briefing=lambda: self._ask_context()[0], parent=self)
         try:
             controller = (factory or agent_ui.AgentController)(self.config, planner, live=self.live,
                                                                consent=desktop.consent_given,
                                                                tasks_consent=desktop.consent_for_tasks, parent=self,
-                                                               window_avoid=self._hud_reach)
+                                                               window_avoid=self._hud_reach, things=things)
         except Exception as exc:  # noqa: BLE001 - Jarvis works without tasks
             logger.warning("Could not set up tasks (%s)", type(exc).__name__)
             return None
@@ -9735,6 +9738,23 @@ class AppController(QObject):
         logger.info("Agent: tasks are on (model %s; at most %d a day)", self.config.agent.model,
                     self.config.agent.tasks_per_day)
         return controller
+
+    def _take_task_cards(self, cards: Sequence[ProposedAction]) -> None:
+        """A task's propose_action: its cards wait under ASK in Approvals, on the HUD's chip, as an Ask's do. GUI thread."""
+        self._take_ask_cards(list(cards))
+        self._activity(hud.TAG_ASK, _plural(len(cards), "proposal"), "from a task")
+        logger.info("Agent: %d card(s) shown under ASK", len(cards))
+
+    def _withdraw_task_cards(self, card_ids: Sequence[str]) -> None:
+        """A task was stopped (or turned off): its Ask cards still waiting leave NEEDS YOUR OK. One held, on its way or
+        decided keeps its result. GUI thread."""
+        hold = self._send_hold.action.id if self._send_hold is not None else ""
+        gone = {card_id for card_id in card_ids if card_id not in self._jobs and card_id != hold
+                and not self._store.is_decided(card_id)}
+        if gone:
+            self._set_source(SOURCE_ASK, [action for action in self._source_lists[SOURCE_ASK] if action.id not in gone])
+            self._refresh_actions_ui()
+            logger.info("Agent: %d card(s) withdrawn", len(gone))
 
     def _hud_reach(self) -> Any:
         """Where the HUD is, while it shows: the window Jarvis reads in keeps clear of it."""
@@ -9790,7 +9810,7 @@ class AppController(QObject):
         amber (a decision waits). What is typed next answers ask_owner's (AgentController.take_request). The firewall's
         (kind "web") is never said aloud or kept on this PC, and only a click on its card answers it: its words may be
         private. Keep going is said, and answered by a click too."""
-        web_card = question.kind == "web"
+        web_card = question.kind == "web"                 # (a card of file steps says only that it waits)
         self._agent_words(question.text, hud.TONE_WARN, speak=not web_card)
         self._jarvis(question.text, tone=hud.TONE_WARN, keep=not web_card, context=False)
 

@@ -2,8 +2,10 @@
 
     agent_on(config)            [agent] enabled, with [desktop] and [ask] on: anything less is "off" - no endpoint,
                                 nothing started, no new word in any prompt or schema
-    offered(config, tools)      the tools this version offers a run: every entry of tools.TOOLS whose tier is on
-                                OFFERED_TIERS
+    offered(config, tools, connected)   the tools this version offers a run: every entry of tools.TOOLS whose tier is on
+                                OFFERED_TIERS and, for one that needs something (Tool.needs), only when that is
+                                connected and, for the owner's things, allowed by [agent] private. Fail-closed: anything
+                                unknown offers nothing
     Budget(max_turns, max_minutes, clock)   one task's turns and minutes of work: its clock rests while the owner is
                                 being waited for; reached() says which ran out; extend() is the owner's yes to "Keep
                                 going?"
@@ -12,9 +14,9 @@
     yes_or_no(words)            the owner's typed answer to "Keep going?"
     gate(tool, args, firewall)  the check before every tool call
 
-The firewall (SPEC section 6) plugs in at ``Firewall``: part A2's agent.firewall.WebFirewall guards the web tools, and
-part A4 adds the private ones. With none behind it, a web, private, card or instant tool is refused outright: never a
-stand-in.
+The firewall (SPEC section 6) plugs in at ``Firewall``: agent.firewall.WebFirewall guards the web tools and open_thing's
+site; agent.owner holds the private and change tools to the rest. With none behind it, a web, private, card or instant
+tool is refused outright: never a stand-in.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
+from ..config import AGENT_PRIVATE
 from . import tools as agent_tools
 
 logger = logging.getLogger(__name__)
@@ -39,10 +42,12 @@ TASKS_FILE = "agent_tasks.json"
 DAY = timedelta(days=1)
 # What this version offers. A later part adds its tier here when it adds its tools and its firewall.
 OFFERED_TIERS = frozenset({agent_tools.TIER_SHOW, agent_tools.TIER_WAIT, agent_tools.TIER_END,
-                           agent_tools.TIER_WORKSPACE, agent_tools.TIER_WEB})
+                           agent_tools.TIER_WORKSPACE, agent_tools.TIER_WEB, agent_tools.TIER_PRIVATE,
+                           agent_tools.TIER_CARD, agent_tools.TIER_INSTANT})
 # Tiers that reach outside Jarvis's own show, end and workspace tools: never without a firewall.
 GUARDED_TIERS = frozenset({agent_tools.TIER_WEB, agent_tools.TIER_PRIVATE, agent_tools.TIER_CARD,
                            agent_tools.TIER_INSTANT})
+_PERMITTED_AS = {"conversation": "memory"}   # what the owner said before a task goes with [agent] private's "memory"
 NO_FIREWALL = "no_firewall"       # a tool result's code
 NO_FIREWALL_TEXT = "That tool isn't available in this version of Jarvis; say so in your report."
 BUDGET_TURNS, BUDGET_MINUTES = "turns", "minutes"
@@ -59,9 +64,29 @@ def agent_on(config: Any) -> bool:
             and getattr(getattr(config, "ask", None), "enabled", False) is True)
 
 
-def offered(_config: Any = None, tools: Sequence[agent_tools.Tool] = agent_tools.TOOLS) -> tuple[agent_tools.Tool, ...]:
-    """The tools a run is given, in the registry's order."""
-    return tuple(tool for tool in tools if tool.tier in OFFERED_TIERS)
+def private_allowed(config: Any) -> frozenset[str]:
+    """[agent] private as it stands: only names it knows. Anything else allows nothing."""
+    listed = getattr(getattr(config, "agent", None), "private", AGENT_PRIVATE)
+    if not isinstance(listed, (tuple, list, frozenset, set)):
+        return frozenset()
+    return frozenset(name for name in listed if name in AGENT_PRIVATE)
+
+
+def offered(config: Any = None, tools: Sequence[agent_tools.Tool] = agent_tools.TOOLS,
+            connected: frozenset[str] | set[str] = frozenset()) -> tuple[agent_tools.Tool, ...]:
+    """The tools a run is given, in the registry's order: nothing that needs what is not ``connected``, and none of the
+    owner's things that [agent] private leaves out."""
+    allowed = private_allowed(config)
+
+    def on(tool: agent_tools.Tool) -> bool:
+        if tool.tier not in OFFERED_TIERS:
+            return False
+        if not tool.needs:
+            return True
+        permit = _PERMITTED_AS.get(tool.needs, tool.needs)
+        return tool.needs in connected and (permit not in AGENT_PRIVATE or permit in allowed)
+
+    return tuple(tool for tool in tools if on(tool))
 
 
 class Firewall(Protocol):

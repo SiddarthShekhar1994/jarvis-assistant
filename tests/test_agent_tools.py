@@ -304,13 +304,13 @@ class RegistryTests(Temp):
             Registry([policy.offered()[0], policy.offered()[0]])
 
     def test_a_later_part_only_adds_entries(self) -> None:
-        extra = tools.Tool("mail_search", "Search.", {"type": "object", "properties": {}, "additionalProperties": False},
-                           tools.TIER_PRIVATE, lambda _args, _ctx: tools.ToolResult("ok"))
-        self.assertEqual(policy.offered(tools=(*tools.TOOLS, extra)), tools.TOOLS)   # not offered until its tier is on
-        with mock.patch.object(policy, "OFFERED_TIERS", policy.OFFERED_TIERS | {tools.TIER_PRIVATE}):
+        extra = tools.Tool("sing_a_song", "Sing.", {"type": "object", "properties": {}, "additionalProperties": False},
+                           "later", lambda _args, _ctx: tools.ToolResult("ok"))
+        self.assertNotIn(extra, policy.offered(tools=(*tools.TOOLS, extra)))   # not offered until its tier is on
+        with mock.patch.object(policy, "OFFERED_TIERS", policy.OFFERED_TIERS | {"later"}):
             offered = policy.offered(tools=(*tools.TOOLS, extra))
         self.assertIn(extra, offered)
-        self.assertIn("mcp__jarvis__mail_search", Registry(offered).allowed())
+        self.assertIn("mcp__jarvis__sing_a_song", Registry(offered).allowed())
 
     def test_every_bad_input_gets_a_clear_error_and_never_its_value(self) -> None:
         secret = "Sam-private-words"

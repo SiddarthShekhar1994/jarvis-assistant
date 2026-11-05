@@ -19,7 +19,10 @@ A wait ends the turn (D5): ask_owner returns at once with "end your turn", the `
 (it uses nothing then), and the answer goes in as the next message; a choice clicked or words typed answer it. The
 firewall's card waits the same way (kind Q_WEB), but only a click answers it: answer(id, "Allow"), and so does "Keep
 going?" (Q_KEEP_GOING, Q_RESUME). What is typed meanwhile goes in as the owner's words and allows nothing; no answer in
-time to the firewall's card is a refusal, and the task goes on. A ``result`` with no wait pending and no finish gets
+time to the firewall's card is a refusal, and the task goes on. A file card waits too (Q_CARD: propose_files'; the card
+is the desktop's own), and only its own end says anything: card_ended(id, message) puts that in as the next message, and
+finish waits for it unless the task is stopping. A choice clicked answers, but it is the model's words, so it licenses
+nothing and clears nothing; words typed are the owner's. A ``result`` with no wait pending and no finish gets
 one prompt to carry on or finish, and after another one the task ends as partial. A message sent mid-run is delivered by
 Claude Code after the running tool returns (``--replay-user-messages`` shows when; a ``result`` while one is on its way
 is not idle).
@@ -80,7 +83,7 @@ OUTCOME_STOPPED = "stopped"            # AgentEnd.outcome: the owner's Stop, a T
 E_STARTED, E_PLAN, E_SAY, E_TOOL_START, E_TOOL_END, E_QUESTION, E_QUESTION_GONE, E_NOTICE, E_TEXT, E_USAGE, E_ENDED = (
     "started", "plan", "say", "tool_start", "tool_end", "question", "question_gone", "notice", "text", "usage", "ended")
 # Whose question it is (OwnerQuestion.kind).
-Q_TASK, Q_KEEP_GOING, Q_RESUME, Q_WEB = "task", "keep_going", "resume", "web"
+Q_TASK, Q_KEEP_GOING, Q_RESUME, Q_WEB, Q_CARD = "task", "keep_going", "resume", "web", "card"
 # Why it ended (AgentEnd.code: fixed words, safe to log).
 C_FINISHED, C_STOPPED, C_NO_FINISH, C_NO_ANSWER, C_OWNER_NO, C_MAX_TURNS, C_OVERAGE = (
     "finished", "stopped", "no_finish", "no_answer", "owner_no", "max_turns", "overage")
@@ -108,12 +111,17 @@ WEB_DECLINED_TEXT = ("Jarvis: the owner said no, so that web call was not made. 
                      "it, find another way, or say so in your report.")
 WEB_UNANSWERED_TEXT = ("Jarvis: the owner did not answer, so that web call was not made. Do not try it again: carry on "
                        "without it, find another way, or say so in your report.")
+CARD_UNANSWERED_TEXT = ("Jarvis: nobody clicked the card in time, so nothing was changed. Do not propose it again: "
+                        "carry on without it, or say so in your report.")
+CARD_WAITS_TEXT = ("A card waits for the owner, so the task is not finished yet. End your turn now; what they decide "
+                   "comes as your next message, and then you can finish.")
 ALREADY_FINISHED_TEXT = "The task has finished. End your turn now."
 STOPPED_TOOL_TEXT = "The task was stopped."
 
 # Jarvis's own words ({sir}: agent_ui fills it in).
 KEEP_GOING_WORDS = "That's {what} on this task, {sir}. Keep going?"
 KEEP_GOING_CHOICES = ("Keep going", "Stop here")
+CARD_WORDS = "That needs your OK on its card, {sir}."
 RESUME_WORDS = "Your Claude plan's limit has reset, {sir}. Shall I carry on with this task?"
 LIMIT_WORDS = ("Your Claude plan's limit is reached, {sir}. I've paused this task: it resets {when}, and I'll ask you "
                "then.")
@@ -201,6 +209,7 @@ class Timing:
     question_s: float = 30 * 60.0       # the owner's answer to a question
     keep_going_s: float = 10 * 60.0     # ... to "Keep going?"
     web_card_s: float = 10 * 60.0       # ... to the firewall's card: then that one call is refused and the task goes on
+    card_s: float = 16 * 60.0           # ... to a file card: its own 15 minutes end first; this only if they did not
     wrap_up_s: float = 60.0             # told to report and finish: this long, then it ends as partial
     after_finish_s: float = 20.0        # finish recorded: this long for its last words
     replay_s: float = 5.0               # a message sent never showed as delivered and nothing came: idle after all
@@ -318,7 +327,7 @@ class AgentRun:
                  now: Callable[[], datetime] = lambda: datetime.now().astimezone(), timing: Timing = Timing(),
                  firewall: policy.Firewall | None = None, run_id: str = "",
                  on_overage: Callable[[datetime | None], None] | None = None, web: Any = None,
-                 fetch: Callable[..., str] | None = None) -> None:
+                 fetch: Callable[..., str] | None = None, owner: Any = None) -> None:
         self.run_id = run_id or secrets.token_hex(3)
         self.goal = goal
         self.engine = engine
@@ -361,9 +370,11 @@ class AgentRun:
         self._paused_until: datetime | None = None
         self._held_owner: list[str] = []    # the owner's words while the limit holds
         self._garbage = 0
+        self._card_id = ""                  # the file card a Q_CARD wait hangs on
         self._context = RunContext(run_id=self.run_id, folder=folder, clock=clock, on_plan=self._tool_plan,
                                    on_say=self._tool_say, on_question=self._tool_question, on_finish=self._tool_finish,
-                                   web=web, tool_s=timing.tool_s, fetch=fetch)
+                                   web=web, tool_s=timing.tool_s, fetch=fetch, owner=owner, on_card=self._tool_card,
+                                   card_gone=self._tool_card_gone)
         attach = getattr(firewall, "attach", None)
         if callable(attach):
             attach(self.ask_web)
@@ -433,7 +444,8 @@ class AgentRun:
         question is not waiting any more: nothing happens."""
         with self._lock:
             wait = self._wait
-            if wait is None or wait.question.id != question_id or self._end is not None:
+            if wait is None or wait.question.id != question_id or self._end is not None \
+                    or wait.question.kind == Q_CARD:
                 return False
             self._wait = None
             question = wait.question
@@ -444,7 +456,8 @@ class AgentRun:
                 _tell(wait, allowed)
                 self._deliver(WEB_ALLOWED_TEXT if allowed else WEB_DECLINED_TEXT)
                 return True
-            self._note_owner(text)
+            if text not in question.choices:    # a choice clicked is the model's words: never the owner's own
+                self._note_owner(text)
             if question.kind == Q_TASK:
                 self._deliver(owner_message(text, ANSWER_LABEL))
                 return True
@@ -631,6 +644,8 @@ class AgentRun:
                     if wait.question.kind == Q_WEB:
                         _tell(wait, False)
                         self._deliver(WEB_UNANSWERED_TEXT)
+                    elif wait.question.kind == Q_CARD:
+                        self._deliver(CARD_UNANSWERED_TEXT)
                     else:
                         self._start_wrap_up(C_NO_ANSWER, WRAP_UP_SILENT)
                 return
@@ -941,9 +956,11 @@ class AgentRun:
         ends = tool is not None and tool.name == "finish"
         if self._wrap_up_code and not ends:
             return ToolResult(WRAP_UP_TOOL_TEXT, code=HELD, note="the task is stopping")
+        if ends and not self._wrap_up_code and self._wait is not None and self._wait.question.kind == Q_CARD:
+            return ToolResult(CARD_WAITS_TEXT, code=HELD, note="a card waits")
         if not ends:
             wait = self._wait
-            if wait is not None and wait.question.kind not in (Q_TASK, Q_WEB):
+            if wait is not None and wait.question.kind not in (Q_TASK, Q_WEB, Q_CARD):
                 return ToolResult(PAUSED_TEXT, code=HELD, note="waiting for you")
             reached = self.budget.reached() if wait is None and not self._paused else ""
             if reached:
@@ -971,6 +988,37 @@ class AgentRun:
             if self._wait is not None or self._stop.is_set():
                 return False
             self._ask(Q_WEB, text, choices, self.timing.web_card_s, on_answer)
+            return True
+
+    def _tool_card(self, card_id: str) -> bool:
+        """A file card is about to show (any thread): the run waits on it (D5). False when another wait is on, or the
+        task is ending: then no card shows."""
+        with self._lock:
+            if self._wait is not None or self._stop.is_set() or self._finished is not None or self._wrap_up_code:
+                return False
+            self._card_id = card_id
+            self._ask(Q_CARD, CARD_WORDS, (), self.timing.card_s)
+            return True
+
+    def _tool_card_gone(self, card_id: str) -> None:
+        """It could not be shown after all: nothing waits."""
+        with self._lock:
+            wait = self._wait
+            if wait is not None and wait.question.kind == Q_CARD and self._card_id == card_id:
+                self._wait = None
+                self._emit(AgentEvent(E_QUESTION_GONE, question=wait.question))
+
+    def card_ended(self, card_id: str, message: str) -> bool:
+        """The file card this run waits on ended (the owner's click and what came of it, Not now, its time): ``message``
+        goes in as the model's next message. False when nothing waits on that card: nothing happens."""
+        with self._lock:
+            wait = self._wait
+            if wait is None or wait.question.kind != Q_CARD or self._card_id != card_id or self._end is not None:
+                return False
+            self._wait = None
+            self._emit(AgentEvent(E_QUESTION_GONE, question=wait.question))
+            logger.info("Agent %s: a file card ended", self.run_id)
+            self._deliver(message)
             return True
 
     def _tool_finish(self, outcome: str, summary: str, outputs: tuple[str, ...]) -> None:

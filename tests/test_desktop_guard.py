@@ -567,6 +567,7 @@ _REAL_CALLS = {
     "exists": (("C:\\Users\\Owner\\Downloads\\a.pdf",), {}),
     "drive_type": (("C:\\",), {}),
     "file_id": (("C:\\Users\\Owner\\Downloads\\a.pdf",), {}),
+    "read_head": (("C:\\Users\\Owner\\Downloads\\a.txt",), {"max_bytes": 10}),
     "list_folder": (("C:\\Users\\Owner\\Downloads",), {}),
     "search_index": (("SELECT TOP 1 System.ItemPathDisplay FROM SystemIndex",), {"timeout_s": 1.0, "max_rows": 1}),
     "recent_items": ((), {"limit": 5}),
@@ -664,6 +665,9 @@ class RealBackendMethodTests(unittest.TestCase):
 
     def test_file_id_raises_under_the_guard(self) -> None:
         self.call_refused("file_id")
+
+    def test_read_head_raises_under_the_guard(self) -> None:
+        self.call_refused("read_head")
 
     def test_list_folder_raises_under_the_guard(self) -> None:
         self.call_refused("list_folder")

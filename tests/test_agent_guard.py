@@ -11,6 +11,7 @@ from unittest import mock
 
 from briefing_reader import live
 from briefing_reader.agent import policy
+from briefing_reader.agent import tools as agent_tools
 from briefing_reader.agent.tools import Registry
 from briefing_reader.ask import cli
 from tests.ask_fakes import HELP_TEXT
@@ -156,7 +157,7 @@ class SettingsTests(unittest.TestCase):
 
 
 class PromptTests(unittest.TestCase):
-    """SPEC 5: the prompt must teach this."""
+    """SPEC 5: the prompt must teach this. (agent_tools: every tool of this version; a run has those it is offered.)"""
 
     def words(self) -> str:
         return " ".join(cli.AGENT_PROMPT_FILE.read_bytes().decode("ascii").split())
@@ -203,11 +204,10 @@ class PromptTests(unittest.TestCase):
 
     def test_it_names_no_tool_it_does_not_have(self) -> None:
         words = self.words()
-        offered = {tool.name for tool in policy.offered()}
-        for tool in offered:
-            self.assertIn(tool, words)
-        for later in ("calendar_find", "mail_search", "propose_files", "pc_control", "open_thing"):
-            self.assertNotIn(later, words)
+        for tool in agent_tools.TOOLS:
+            self.assertIn(tool.name, words)
+        for never in ("send_mail", "run_code", "type_text", "press_button", "delete_file"):
+            self.assertNotIn(never, words)
 
 
 class NoShellTests(unittest.TestCase):

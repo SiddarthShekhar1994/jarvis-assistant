@@ -39,6 +39,14 @@ task, with one step per tool call (the words in it stay on screen and in memory:
 the page in the window on it, and it never opens LIVE by itself. Logs: run ids, kinds, states and counts only, never
 what was typed, searched for or read.
 
+The owner's things (part A4): ``things`` (AppThings, made by the app) is what a run's agent.owner.OwnerAccess reads and
+shows through, on the right threads: Google's objects on the tool's own, files on the "desktop" thread, whatever shows
+on the GUI thread. What is connected and allowed decides what a run is offered (policy.offered). A card of file steps a
+run waits on tells it how it ended (DesktopController.tidyEnded). A Stop or a Turn off withdraws the run's undecided
+cards at once: a card of file steps goes (one at work stops after the row on its way, with its stamp and Undo), and its
+Ask cards leave Approvals unless they were decided or are on their way. At a natural end its Ask cards stay: the report
+says what is waiting.
+
 The web (part A2): each run has its own browser client (agent.browser), session and firewall. The window comes only with
 the first web or show step; when a run ends its page goes at once and the window a little later, or when the result card
 goes (``hold_window``), at once after a Stop or a Turn off; a new run first ends what an older one left, and shutdown
@@ -50,29 +58,33 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, Qt, QThread, Signal
 
 from . import hud
 from . import live as live_events
 from . import pictures, snapshot_engine
 from .agent import fetch as agent_fetch
 from .agent import firewall as agent_firewall
+from .agent import owner as agent_owner
 from .agent import policy
 from .agent import runner as agent_runner
 from .agent import web
 from .agent.browser import BrowserClient
 from .agent.fetch import Fetcher
 from .agent.runner import AgentEnd, AgentEngine, AgentEvent, AgentRun, OwnerQuestion, Timing
-from .agent.tools import OUTCOME_DONE, OUTCOME_FAILED, Registry, Tool
+from .agent.tools import ERROR_CODES, OUTCOME_DONE, OUTCOME_FAILED, Registry, Tool
 from .agent.web import WebSession
 from .agent.workspace import TaskFolder, WorkspaceRefused, check_name, workspace_root
-from .ask.stream import LIMIT
+from .ask.stream import GUARD, LIMIT
 from .persona import with_address
 
 logger = logging.getLogger(__name__)
@@ -96,6 +108,7 @@ END_WORDS = {OUTCOME_DONE: "done", OUTCOME_FAILED: "failed", agent_runner.OUTCOM
 PARTLY = "partly done"
 LIMIT_ACTIVITY = "Waiting for your plan's limit to reset"
 MAX_LISTED = 20                   # files a result card lists when the model did not name them
+HOP_S = 10.0                      # what a tool waits for the GUI thread at most, for something to show
 CODE_WORDS = {agent_runner.HELD: "held - the task is waiting or stopping",
               "too_long": "took too long and was given up on", "bad_input": "refused: its input did not fit",
               "rate": "refused: too soon after the last one", "raised": "failed", "refused": "refused",
@@ -123,6 +136,131 @@ class _Bridge(QObject):
     """Connected queued: the slot runs on the GUI thread."""
 
     event = Signal(int, object)      # the task's number, a runner.AgentEvent
+
+
+class _Hop(QObject):
+    """A tool's thread has something done on the GUI thread, and waits for it (a little while: ``HOP_S``)."""
+
+    job = Signal(object)
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.job.connect(self._on_job, Qt.ConnectionType.QueuedConnection)
+
+    def _on_job(self, job: Callable[[], None]) -> None:
+        job()
+
+    def run(self, work: Callable[[], Any], default: Any = None) -> Any:
+        if QThread.currentThread() is self.thread():
+            return work()
+        future: Future = Future()
+
+        def job() -> None:
+            if not future.set_running_or_notify_cancel():
+                return                # nobody waits any more: it does nothing
+            try:
+                future.set_result(work())
+            except Exception as exc:  # noqa: BLE001 - it goes to the thread that asked
+                future.set_exception(exc)
+
+        try:
+            self.job.emit(job)
+        except RuntimeError:
+            return default            # the app is going
+        try:
+            return future.result(timeout=HOP_S)
+        except FutureTimeout:
+            future.cancel()           # still queued: it must not happen later, when it has been said not to
+            return default
+
+
+class AppThings:
+    """What the app gives a task of the owner's things (agent.owner.Things), on the right threads: the planner's sources
+    and notes as Ask reads them, the conversation and the cards on the GUI thread, files on the "desktop" thread."""
+
+    def __init__(self, planner: Any, desktop: Any, *, conversation: Callable[[], Any],
+                 take_cards: Callable[[Any], None], withdraw_cards: Callable[[Any], None],
+                 briefing: Callable[[], Any] = lambda: None,
+                 parent: QObject | None = None) -> None:
+        self.planner = planner
+        self.desktop = desktop
+        self.config = planner.config
+        self.sources = planner.sources
+        self._conversation = conversation
+        self._take_cards = take_cards
+        self._withdraw_cards = withdraw_cards
+        self._briefing = briefing
+        self._hop = _Hop(parent)
+
+    def listen(self, slot: Callable[[Any, str], None]) -> None:
+        self.desktop.tidyEnded.connect(slot)
+
+    def connected(self) -> frozenset[str]:
+        """What may be offered now, asked of this PC only (GUI thread, as a task starts). Unknown: not connected."""
+        found = {"desk", "files", "conversation"}
+        try:
+            ask = getattr(self.sources, "connected", None)
+            if callable(ask):
+                calendar, mail, send = ask()
+            else:
+                accounts = self.sources.accounts()
+                calendar = any(account.calendar == "yes" for account in accounts)
+                mail = any(account.read_mail == "yes" for account in accounts)
+                send = any(account.send_mail for account in accounts)
+        except Exception as exc:  # noqa: BLE001 - unknown: not connected
+            logger.warning("Agent: what is connected could not be read (%s)", type(exc).__name__)
+            calendar = mail = send = False
+        found |= {name for name, on in (("calendar", calendar), ("mail", mail), ("contacts", calendar or mail),
+                                        ("actions", calendar or send), ("memory", self.planner.memory is not None))
+                  if on}
+        return frozenset(found)
+
+    def ready(self) -> None:
+        self.desktop.task_ready()
+
+    def consent(self) -> bool:
+        return self.desktop.consent_for_tasks()
+
+    def now(self) -> datetime:
+        return self.planner.clock()
+
+    def memory(self) -> Sequence[str]:
+        source = self.planner.memory
+        return tuple(source()) if source is not None else ()
+
+    def conversation(self) -> Sequence[Any]:
+        return self._hop.run(self._conversation, ()) or ()
+
+    def briefing(self) -> Any:
+        return self._hop.run(self._briefing)
+
+    def job(self, method: str, *args: Any, stop: threading.Event, **kwargs: Any) -> Future:
+        return self.desktop.task_job(method, *args, stop=stop, **kwargs)
+
+    def before_open(self) -> None:
+        self._hop.run(self.desktop.task_before_open)
+
+    def show_run(self, run: Any) -> bool:
+        return bool(self._hop.run(lambda: self.desktop.task_show(run), False))
+
+    def hud_windows(self) -> Sequence[int]:
+        return self._hop.run(self.desktop._hud_windows, ()) or ()              # noqa: SLF001 - its own controller's
+
+    def pc_done(self, asked: Any, run: Any) -> None:
+        self._hop.run(lambda: self.desktop.task_pc_done(asked, run))
+
+    def take_cards(self, cards: Sequence[Any]) -> bool:
+        def take() -> bool:
+            self._take_cards(list(cards))
+            return True
+
+        return bool(self._hop.run(take, False))
+
+    def withdraw(self, run_ids: Sequence[str], card_ids: Sequence[str], *, cards: bool) -> None:
+        """GUI thread: a task's undecided cards go (the module docs)."""
+        self.desktop.withdraw_task(run_ids, cards=cards)
+        if card_ids:
+            self._withdraw_cards(card_ids)
 
 
 class _Feed:
@@ -166,7 +304,8 @@ class _Feed:
         elif result.code == agent_firewall.WAITING:
             step.done(live_events.STATUS_WARN, status_text=WAITING_STATUS, summary=result.note)
         elif result.is_error:
-            step.done(live_events.STATUS_WARN, summary=result.note or CODE_WORDS.get(result.code, result.code))
+            words = CODE_WORDS.get(result.code) or ERROR_CODES.get(result.code, result.code)
+            step.done(live_events.STATUS_WARN, summary=result.note or words)
         else:
             step.done(live_events.STATUS_WARN if result.warn else live_events.STATUS_OK, summary=result.note)
 
@@ -191,7 +330,7 @@ class _Feed:
 
     @live_events.quiet()
     def asked(self, question: OwnerQuestion) -> None:
-        if question.kind not in (agent_runner.Q_TASK, agent_runner.Q_WEB):   # those have their tool's own step
+        if question.kind not in (agent_runner.Q_TASK, agent_runner.Q_WEB, agent_runner.Q_CARD):   # their tools' steps
             step = self.task.step(live_events.AGENT_TOOL, "Asked you", fields=[("Question", question.text)])
             step.done(live_events.STATUS_WARN, status_text="WAITING", summary="waiting for you")
 
@@ -240,7 +379,7 @@ class AgentController(QObject):
                  now: Callable[[], datetime] = lambda: datetime.now().astimezone(), timing: Timing = Timing(),
                  tools: Sequence[Tool] | None = None, parent: QObject | None = None,
                  window_avoid: Callable[[], Any] | None = None,
-                 browser_factory: Callable[..., Any] | None = None) -> None:
+                 browser_factory: Callable[..., Any] | None = None, things: Any = None) -> None:
         super().__init__(parent)
         self.config = config
         self.planner = planner
@@ -263,6 +402,10 @@ class AgentController(QObject):
         self.hold_window = False          # a window that lingers stays until close_window (the result card's)
         self._away = False                # the Jarvis window is back: the watch window stays off the screen
         self.firewall: agent_firewall.WebFirewall | None = None
+        self._things = things             # the owner's things (AppThings; None: a task reaches none of them)
+        self._owner: agent_owner.OwnerAccess | None = None
+        if things is not None:
+            things.listen(self._on_card_ended)
         self._run: AgentRun | None = None
         self._seq = 0
         self._feed: _Feed | None = None
@@ -314,9 +457,17 @@ class AgentController(QObject):
             return False
         self._seq += 1
         seq = self._seq
-        registry = Registry(self._tools if self._tools is not None else policy.offered(self.config))
+        things = self._things
+        connected = things.connected() if things is not None else frozenset()
+        registry = Registry(self._tools if self._tools is not None
+                            else policy.offered(self.config, connected=connected))
         session = self._new_session()
         self.firewall = agent_firewall.WebFirewall(session.book)
+        owner = None
+        if things is not None:
+            things.ready()
+            owner = agent_owner.OwnerAccess(things, self.firewall, workspace=root)
+        self._owner = owner
         self._feed = _Feed(self.live, words, self.config, folder.path.name, len(registry))
         self._stopping = False
         self.last_folder = folder
@@ -329,7 +480,9 @@ class AgentController(QObject):
 
         run = AgentRun(words, engine=self._engine, registry=registry, folder=folder, on_event=on_event,
                        clock=self._clock, now=self._now, timing=self.timing, on_overage=self._pause_for_overage,
-                       firewall=self.firewall, web=session, fetch=self._new_fetcher().fetch)
+                       firewall=self.firewall, web=session, fetch=self._new_fetcher().fetch, owner=owner)
+        if owner is not None:
+            owner.run_id = run.run_id
         self._run = run
         logger.info("Agent %s: a task starts", run.run_id)
         run.start()
@@ -479,11 +632,29 @@ class AgentController(QObject):
         show("/".join(check_name(name)), folder)
         return True
 
+    def _withdraw(self, *, cards: bool) -> None:
+        """The run's undecided cards go (the module docs): at once on a Stop, a Turn off or a guard's stop (``cards``),
+        and at any end the card of file steps nothing waits on any more. Never while Jarvis closes: the app's going."""
+        owner, things = self._owner, self._things
+        if owner is None or things is None or self._shut:
+            return
+        try:
+            things.withdraw(tuple(owner.run_ids), tuple(owner.card_ids) if cards else (), cards=cards)
+        except Exception as exc:  # noqa: BLE001 - never a reason for a Stop not to end
+            logger.warning("Agent: its cards could not be withdrawn (%s)", type(exc).__name__)
+
+    def _on_card_ended(self, state: Any, ending: str) -> None:
+        """A card of file steps ended: the run that waits on it hears how, in plain words, as its next message."""
+        run = self._run
+        if run is not None:
+            run.card_ended(state.card.run_id, agent_owner.card_message(state, ending))
+
     def stop(self, reason: str = "stop") -> None:
         run = self._run
         if run is not None:
             self._stopping = True         # what is still on its way to this thread is dropped
             run.stop(reason)
+            self._withdraw(cards=True)
         if self._browser is not None:
             self._browser.stop()          # R8: a load is released at once, the page and the window go
 
@@ -548,6 +719,8 @@ class AgentController(QObject):
         elif kind == agent_runner.E_QUESTION_GONE:
             if event.code == agent_runner.C_NO_ANSWER:
                 self.questionExpired.emit(event.question)
+                if event.question.kind == agent_runner.Q_CARD:   # the model was told nothing changed: so it stays
+                    self._withdraw(cards=False)
             self.questionGone.emit(event.question)
 
     def _end(self, end: AgentEnd | None) -> None:
@@ -557,6 +730,8 @@ class AgentController(QObject):
             return
         end = replace(end, summary=self._words(end.summary)) if end.own_words else end
         self.last_end = end
+        self._withdraw(cards=end.outcome == agent_runner.OUTCOME_STOPPED or end.code.startswith(GUARD))
+        self._owner = None
         if self._browser is not None:     # its page goes now; its window later, or with the result card: at once on a Stop
             self._browser.end_run(linger=end.outcome != agent_runner.OUTCOME_STOPPED, hold=self.hold_window)
         if self.last_folder is not None:

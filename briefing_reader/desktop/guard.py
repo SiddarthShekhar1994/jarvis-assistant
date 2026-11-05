@@ -438,6 +438,25 @@ def secret_file(name: Any) -> bool:
     return any(fnmatch.fnmatchcase(base, pattern) for pattern in SECRET_FILE_PATTERNS)
 
 
+# A task may read text files (agent.owner), so a text file NAMED for secrets stays out of it too, whatever its type.
+_SENSITIVE_FILE_WORDS = frozenset({"password", "passwords", "passwd", "passcode", "passcodes", "passphrase", "secret",
+                                  "secrets", "credential", "credentials", "token", "tokens", "apikey", "apikeys",
+                                  "privatekey", "2fa", "otp", "seedphrase", "pin", "ssn",
+                                  "passport", "iban", "cvv", "wallet", "login", "logins", "account", "accounts"})
+_SENSITIVE_FILE_PHRASES = _phrases("api key", "api keys", "private key", "private keys", "backup code", "backup codes",
+                                   "recovery code", "recovery codes", "seed phrase", "card number", "card numbers",
+                                   "bank details", "social security", "sign in", "log in")
+
+
+def sensitive_file_name(name: Any) -> bool:
+    """A file's name says it holds secrets or sign-ins ("My passwords.txt", "api keys.md", "accounts.csv"), as words:
+    Jarvis reads none of them for a task, whatever its type, on top of ``secret_file``."""
+    if secret_file(name):
+        return True
+    return any(_SENSITIVE_FILE_WORDS & set(tokens) or _has_phrase(tokens, _SENSITIVE_FILE_PHRASES)
+               for tokens in _readings(name))
+
+
 # --------------------------------------------------------------------------
 # Other
 # --------------------------------------------------------------------------

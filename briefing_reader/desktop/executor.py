@@ -341,6 +341,14 @@ class Executor:
             return not self._check_item(item, folder=False)[0]
         return False
 
+    def check_file(self, item: Any) -> tuple[str, paths.PathVerdict | None]:
+        """A listed file re-checked right before something is read of it (``_check_item``): (its code, None), or ("", the
+        verdict)."""
+        return self._check_item(item, folder=False)
+
+    def check_place(self, item: Any) -> tuple[str, paths.PathVerdict | None]:
+        return self._check_item(item, folder=True)
+
     def _check_link(self, via: Any, target: Any) -> str:
         """A shortcut's card: the shortcut is still the one shown (re-checked) and still names ``target``'s path."""
         code, _verdict = self._check_item(via, folder=False)

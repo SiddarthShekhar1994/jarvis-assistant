@@ -439,6 +439,8 @@ class DesktopConfig:
 AGENT_RANGES = {"max_turns": (5, 1000), "max_minutes": (1, 240), "tasks_per_day": (1, 200)}
 AGENT_EFFORTS = ("", "low", "medium", "high", "xhigh", "max")      # "" = Claude Code's default
 AGENT_SEARCH_ENGINES = ("duckduckgo", "bing", "google")
+# What a task may read of the owner's things ([agent] private): an entry that is none of these grants nothing.
+AGENT_PRIVATE = ("calendar", "contacts", "memory", "mail", "files")
 
 
 @dataclass(frozen=True)
@@ -455,6 +457,7 @@ class AgentConfig:
     tasks_per_day: int = 20        # tasks started in the last 24 hours (1..200)
     search_engine: str = "duckduckgo"              # where web_search goes first; then the others (agent.web)
     workspace: str = field(default="", repr=False)   # "" = Jarvis\Workspace in your user folder; never under OneDrive
+    private: tuple[str, ...] = AGENT_PRIVATE         # what a task may read of the owner's things (AGENT_PRIVATE)
 
 
 @dataclass(frozen=True)
@@ -1265,13 +1268,23 @@ def _parse_agent(doc: Mapping[str, Any], environ: Mapping[str, str] | None = Non
     elif raw is not _MISSING:
         logger.warning("config.toml: agent.workspace is not a full folder path; using the default (Jarvis\\Workspace "
                        "in your user folder)")
+    private = d.private
+    listed = r._get("private")
+    if isinstance(listed, list):
+        names = [item.strip().casefold() for item in listed if isinstance(item, str)]
+        private = tuple(name for name in AGENT_PRIVATE if name in names)
+        if len(names) != len(listed) or any(name not in AGENT_PRIVATE for name in names):
+            logger.warning("config.toml: agent.private has an entry that is none of %s; it grants nothing",
+                           ", ".join(AGENT_PRIVATE))
+    elif listed is not _MISSING:
+        logger.warning("config.toml: agent.private is not a list; using all of %s", ", ".join(AGENT_PRIVATE))
     return AgentConfig(enabled=enabled, model=r.string("model", d.model, pattern=_MODEL_RE),
                        effort=r.choice("effort", d.effort, AGENT_EFFORTS),
                        max_turns=r.integer("max_turns", d.max_turns, *AGENT_RANGES["max_turns"]),
                        max_minutes=r.integer("max_minutes", d.max_minutes, *AGENT_RANGES["max_minutes"]),
                        tasks_per_day=r.integer("tasks_per_day", d.tasks_per_day, *AGENT_RANGES["tasks_per_day"]),
                        search_engine=r.choice("search_engine", d.search_engine, AGENT_SEARCH_ENGINES),
-                       workspace=workspace)
+                       workspace=workspace, private=private)
 
 
 def _parse_assistant(doc: Mapping[str, Any]) -> AssistantConfig:

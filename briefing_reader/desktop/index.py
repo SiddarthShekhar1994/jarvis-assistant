@@ -486,10 +486,10 @@ def folder_tree(scope: paths.Scope, backend: DesktopBackend, *, caps: WalkCaps =
 
 def pick_places(scope: paths.Scope, backend: DesktopBackend, tree: Sequence[TreeFolder], *,
                 words: Sequence[str] = (), files: Sequence[FileItem] = (), named: Sequence[str] = (),
-                cap: int = MAX_PLACES, cache: dict[str, bool] | None = None) -> list[Place]:
+                cap: int = MAX_PLACES, cache: dict[str, bool] | None = None, newest: bool = True) -> list[Place]:
     """The places for <places>: the roots, then the folders the owner's words name (``named``: their paths), the
-    folders whose names hold the words, the folders the listed files are in (down to 3 levels), then the newest -
-    each one only once it passes the path check, at most ``cap``."""
+    folders whose names hold the words, the folders the listed files are in (down to 3 levels), then (``newest``) the
+    newest - each one only once it passes the path check, at most ``cap``."""
     places: list[Place] = []
     seen: set[str] = set()
 
@@ -526,7 +526,7 @@ def pick_places(scope: paths.Scope, backend: DesktopBackend, tree: Sequence[Tree
         if holder:
             folder = by_key[ntpath.normcase(holder.rstrip("\\"))]
             add(folder.path, folder.parts)
-    for folder in sorted(tree, key=lambda folder: -folder.mtime_ns):
+    for folder in sorted(tree, key=lambda folder: -folder.mtime_ns) if newest else ():
         if len(places) >= cap:
             break
         add(folder.path, folder.parts)

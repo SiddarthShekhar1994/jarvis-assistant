@@ -19,6 +19,8 @@ only:
   they take no keyboard, the bar's words never reach them (agent.runner), a click passes the app's guards and a card
   that has only just appeared does not take one yet.
 * one that times out goes, with words saying so.
+* a card of file steps (propose_files) is the desktop's own, with its own guards, journal and Undo: here the panel only
+  says WAITING, in amber, until its end. It counts in "N need your OK" as it always does.
 
 The result card: the outcome, the steps and the time in its kicker, the whole report (scrolling), the outputs with Show
 (in the sealed watch window: agent_ui.show_output) and Folder (the guarded backend's way of showing a file in Explorer:
@@ -76,7 +78,8 @@ DONE_KEY = "done"
 EXPIRED_WORDS = {agent_runner.Q_TASK: "No answer came, so that question went, {sir}.",
                  agent_runner.Q_KEEP_GOING: "No answer came, so the task stops here, {sir}.",
                  agent_runner.Q_RESUME: "No answer came, so the task stops here, {sir}.",
-                 agent_runner.Q_WEB: "No answer came, so Jarvis left that out, {sir}. The task goes on."}
+                 agent_runner.Q_WEB: "No answer came, so Jarvis left that out, {sir}. The task goes on.",
+                 agent_runner.Q_CARD: "No answer came, so nothing was changed, {sir}. The task goes on."}
 NOT_SHOWN_TEXT = "That file couldn't be shown in the window, {sir}."
 SPOKEN_CAP = 200
 QUIET_MS = 4000                 # no tool at work for this long: "Thinking it over"
@@ -302,6 +305,9 @@ class TaskFeed(QObject):
         self._placing = True
         try:
             self.overlay.place_feed(self.agent.window_rect(), self.card)
+            others = getattr(self.desktop, "place_cards_again", None)
+            if others is not None:
+                others()
         finally:
             self._placing = False
 
@@ -390,9 +396,10 @@ class TaskFeed(QObject):
         self._waiting = True
         self._quiet.stop()
         self._activity = WAITING_ACTIVITY
-        self.desktop.set_task_waiting(1)
         self.reading.set_task_look(orb_mod.NEEDS)
-        self._new_card(self._question_content(question))
+        if question.kind != agent_runner.Q_CARD:           # its card is the desktop's, which counts itself
+            self.desktop.set_task_waiting(1)
+            self._new_card(self._question_content(question))
         self._render()
         logger.info("Task feed: a card waits (%s)", question.kind)
 

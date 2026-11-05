@@ -55,8 +55,9 @@ CONSENT_ROWS = ("I open files, apps, folders and sites you name.",
 CONSENT_NEW = (1, 2)                   # the rows of CONSENT_ROWS new since Phase 1's card
 # The agent's row (version 3 of the card): only while [agent] is on; off, the card is as it was.
 CONSENT_TASK_ROW = ("Give me a task and I work out the steps myself. I search and read public pages in a window you "
-                    "can watch, and the words of a search go straight to {engine}. Anything that changes things or gets "
-                    "sent still waits for your click.")
+                    "can watch, and the words of a search go straight to {engine}. When a task needs them, I read your "
+                    "calendar, mail, contacts, notes and allowed folders. Anything that changes things or gets sent "
+                    "still waits for your click.")
 NEW_TAG_TEXT = "NEW"
 CONSENT_FOOT = "You can turn it off again in Settings \u203a Desktop."
 NOT_NOW_TEXT = "Not now"
@@ -332,6 +333,8 @@ class ConsentCard(QWidget):
         self.panel.setFixedWidth(width)
         self.panel.adjustSize()
         height = self.panel.sizeHint().height()
+        if self._task_row is not None and not self._task_row.isHidden():    # a long row: its wrapped lines all show
+            height = max(height, self.panel.layout().totalHeightForWidth(width))
         self.panel.setGeometry(int((self.width() - width) / 2), int(max(16, (self.height() - height) / 2)),
                                int(width), int(height))
 

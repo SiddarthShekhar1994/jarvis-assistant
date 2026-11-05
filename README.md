@@ -2220,8 +2220,9 @@ updated card waits for your OK". Turn off takes back both.
 
 **With [tasks](#tasks-jarvis-works-it-through) on**, the card has one more row: "Give me a
 task and I work out the steps myself. I search and read public pages in a window you can
-watch, and the words of a search go straight to DuckDuckGo. Anything that changes things or
-gets sent still waits for your click." (it names `[agent] search_engine`'s engine). Everything
+watch, and the words of a search go straight to DuckDuckGo. When a task needs them, I read your
+calendar, mail, contacts, notes and allowed folders. Anything that changes things or gets sent
+still waits for your click." (it names `[agent] search_engine`'s engine). Everything
 you allowed before stays allowed, but a task needs your OK on this card: the first time you
 ask for one, nothing starts, the bar says "Tasks need your OK on the updated card first, sir."
 and the card shows with that row marked NEW, your words back in the bar. Until then Settings
@@ -2508,14 +2509,38 @@ the window, to look over what he made. It may show the folder's other files and 
 inline script, and it can reach nothing else: while such a page is open the network gate
 refuses everything, so a page picture in LIVE that falls in those moments fails, and says so.
 
+**Your things.** When a task needs them he can read your calendar (as Ask reads it), the people
+in it and in your briefing, your notes, the last few turns of what you said to him, your mail
+and your files in the folders you allow. `[agent] private` narrows that, and nothing is offered
+that is not connected. Each read is checked again at the moment it happens, and Turn off stops
+them at once. He may search your mail only with your own words from this task, exactly as Ask
+refuses other searches, and read at most 10 threads a task. He reaches files only by refs given
+in this task, re-checked before each read: only text-like files (.txt .md .csv .tsv .json .log
+.html .xml .yaml and the like; other types can't be read yet), at most 12,000 characters a call and
+30 reads a task, and never a secret, a token, an account file, Jarvis's own folders, a code folder,
+a link or an online-only file. All of it is data to him, whatever it says.
+
 **Your private data and the web.** A task starts clean, knowing only your words. Once a
-private tool has given him something (the next version's mail, calendar, contacts and files),
-a search that carries those words, an address he was not given or a search that looks encoded
-waits for your click on a card with the exact words: "Allow" lets that one call go and clears
-those words for the task; "Don't", or no answer, and it never goes and he carries on without
-it. Nothing you type or say counts as that click. The honest limit: matching words can't
-catch a determined paraphrase. The address rule and his having no way to type into a page are
-the strong parts.
+private tool has given him something, a search that carries those words (names, titles,
+subjects, file names of 4 or more letters, addresses, numbers), an address he was not given or
+a search that looks encoded waits for your click on a card with the exact words: "Allow" lets
+that one call go and clears those words for the task; "Don't", or no answer, and it never goes
+and he carries on without it. Nothing you type or say counts as that click. Once he has read a
+mail's text, a file's contents or the earlier conversation the task is strict, because matching
+words can't cover all of those: every search or `fetch_text` question with any word outside your
+own words and the most common ones goes to that card. The honest limit: in a task that has read
+only your calendar, contacts, notes or file names, matching words can't catch a determined
+paraphrase, and any task could choose among links a page offers. The address rule and his having
+no way to type into a page are the strong parts.
+
+**What he changes.** Nothing by himself. Moves, copies, renames, zips, new folders and the Recycle
+Bin go on the desktop's own NEEDS YOUR OK card (`propose_files`), checked against your own words in
+this task, never his, a file's name or a page's, with ticks, Undo and the "undo" route as ever; the
+task waits for your click, and the panel says WAITING. Events, emails, replies and the like go on
+Ask's cards in Approvals (`propose_action`); those don't hold the task up, and his report says what
+is waiting. He opens things and changes the volume, music, timers, screenshots or focus mode only
+when your own words in this task ask for that, at the tier the desktop gives them, with their chips
+and Undo. Stop or Turn off withdraws what is still undecided.
 
 **One task at a time.** The first planner run decides that a request is a task; it
 starts from your own words, whatever the planner wrote, and with nothing else.
@@ -3998,6 +4023,7 @@ log. Changes apply the next time the app starts.
 | `[agent] tasks_per_day` | `20` | How many tasks may start in 24 hours (1-200). |
 | `[agent] search_engine` | `"duckduckgo"` | Where his searches go first: `"duckduckgo"`, `"bing"` or `"google"`, then the others if a page gives nothing or shows a wall. The words of each search go there, and the Turn on card names it. |
 | `[agent] workspace` | `""` | The tasks' folder: `""` = `Jarvis\Workspace` in your user folder, else a full folder path. Never under OneDrive: a task refuses to start there. |
+| `[agent] private` | `["calendar", "contacts", "memory", "mail", "files"]` | What a task may read of your things, when it needs them and only while it is connected. A shorter list narrows it (`"memory"` covers your notes and what you said before the task); an entry that is none of these grants nothing; something that is not a list means all of them. |
 
 The offline voice uses the same `rate` and `volume`: the rate scales Windows'
 default 200 words per minute, and a volume above `+0%` cannot get louder than

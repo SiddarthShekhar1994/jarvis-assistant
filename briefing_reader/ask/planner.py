@@ -812,6 +812,13 @@ class GoogleSources:
             found.append(AccountInfo(alias, address, status, sender is not None, read, zone))
         return found
 
+    def connected(self) -> tuple[bool, bool, bool]:
+        """(a calendar is signed in, a mailbox may be read now, mail can be sent): asked of this PC only, no network, so
+        the GUI thread may ask (what a task is offered: agent.policy)."""
+        calendar = any(_call_bool(item, "is_signed_in") for item in self.calendars.values())
+        mail = bool(self.config.ask.read_mail) and any(not reader.available()[0] for reader in self.readers.values())
+        return calendar, mail, bool(self.senders)
+
     def time_zone(self) -> str:
         calendar = self.calendars.get("personal")
         if calendar is not None and _call_bool(calendar, "is_signed_in"):

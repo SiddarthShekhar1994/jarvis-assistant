@@ -933,6 +933,19 @@ class BarTests(FeedApp):
 class ConsentTests(FeedApp):
     ROW = desktop_view.CONSENT_TASK_ROW.format(engine="DuckDuckGo")
 
+    def test_every_line_of_the_row_shows_and_it_says_what_a_task_may_read(self) -> None:
+        for words in ("calendar", "mail", "contacts", "notes", "allowed folders", "waits for your click"):
+            self.assertIn(words, self.ROW)
+        self.make_agent(desktop_consent=2)
+        self.c._show_desktop_consent(desktop_ui.ENTRY_REQUEST)
+        settle()
+        card = self.c._desktop_consent_card
+        label = card._task_row.label
+        self.assertEqual(label.text(), self.ROW)
+        self.assertGreaterEqual(label.height(), label.heightForWidth(label.width()))
+        self.assertTrue(card.rect().contains(card.panel.geometry()))
+        self.assertTrue(card.panel.rect().contains(label.mapTo(card.panel, label.rect().bottomRight())))
+
     def card(self) -> desktop_view.ConsentCard:
         self.assertIsNotNone(self.c._desktop_consent_card, "the card was made")
         return self.c._desktop_consent_card

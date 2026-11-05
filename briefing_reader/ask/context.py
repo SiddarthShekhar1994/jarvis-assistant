@@ -496,6 +496,53 @@ def _message_header(message: MailMessage) -> str:
 # build_prompt
 # --------------------------------------------------------------------------
 
+def index_event(index: ContextIndex, alias: str, brief: EventBrief) -> None:
+    """An event a line may name, and its first MAX_GUESTS guests and its organizer: what its row shows."""
+    index.events[(alias, brief.calendar_id, brief.event_id)] = EventFacts(
+        brief.organizer_self, brief.start, brief.end, brief.all_day, brief.title)
+    for guest in brief.guests[:MAX_GUESTS]:
+        index.add_address(guest.email, SOURCE_GUEST, guest.name)
+    if brief.organizer_email and not brief.organizer_self:
+        index.add_address(brief.organizer_email, SOURCE_GUEST, brief.organizer_name)
+
+
+def index_thread(index: ContextIndex, thread: MailThread) -> None:
+    """A thread a Reply may answer, its messages' ids and the people its headers show."""
+    ids = index.threads.setdefault((thread.account, thread.thread_id), set())
+    for message in thread.messages:
+        ids.add("gmid:" + message.gmail_id)
+        if message.message_id:
+            ids.add(f"<{message.message_id}>")
+        for person in message.people():
+            index.add_address(person.email, SOURCE_MAIL)
+
+
+def event_start(brief: EventBrief) -> datetime:
+    """When an event starts, for ordering (an all-day one: its first day)."""
+    return _event_start(brief)
+
+
+def event_row(alias: str, brief: EventBrief) -> str:
+    """One <calendar> row: the account, the ids a line needs, the title, when, who organises it and who comes."""
+    return _event_row(alias, brief)
+
+
+def person_row(name: str, address: str) -> str:
+    """One <contacts> row."""
+    return _person(name, address)
+
+
+def recipients_named(action: ProposedAction) -> dict[str, str]:
+    """The casefolded addresses a briefing card writes to, with the name it gives each ("" for none)."""
+    named = {address.casefold(): name for name, address in _named(action.raw)}
+    return {address.casefold(): named.get(address.casefold(), "") for address in action.mail_recipients()}
+
+
+def addresses_in(text: str) -> list[str]:
+    """The addresses in a note or a turn of the conversation."""
+    return _ADDRESS_RE.findall(text or "")
+
+
 def _index(ctx: AskContext, shown_events: Sequence[tuple[str, EventBrief]],
            pending: Sequence[ProposedAction], *, notes: Sequence[str] | None = None,
            said: Sequence[Any] = ()) -> ContextIndex:
@@ -509,12 +556,7 @@ def _index(ctx: AskContext, shown_events: Sequence[tuple[str, EventBrief]],
                                                  if account.address),
                          command=ctx.command)
     for alias, brief in shown_events:
-        index.events[(alias, brief.calendar_id, brief.event_id)] = EventFacts(
-            brief.organizer_self, brief.start, brief.end, brief.all_day, brief.title)
-        for guest in brief.guests[:MAX_GUESTS]:
-            index.add_address(guest.email, SOURCE_GUEST, guest.name)
-        if brief.organizer_email and not brief.organizer_self:
-            index.add_address(brief.organizer_email, SOURCE_GUEST, brief.organizer_name)
+        index_event(index, alias, brief)
     for action in pending:
         named = {address.casefold(): name for name, address in _named(action.raw)}
         for address in action.mail_recipients():
@@ -526,13 +568,7 @@ def _index(ctx: AskContext, shown_events: Sequence[tuple[str, EventBrief]],
             if action.field("gmid"):
                 ids.add("gmid:" + action.field("gmid"))
     for thread in ctx.mail:
-        ids = index.threads.setdefault((thread.account, thread.thread_id), set())
-        for message in thread.messages:
-            ids.add("gmid:" + message.gmail_id)
-            if message.message_id:
-                ids.add(f"<{message.message_id}>")
-            for person in message.people():
-                index.add_address(person.email, SOURCE_MAIL)
+        index_thread(index, thread)
     notes = memory_notes_shown(ctx.memory) if notes is None else tuple(notes)
     index.memory_notes = len(notes)
     for note in notes:
