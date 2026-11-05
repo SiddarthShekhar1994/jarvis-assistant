@@ -10,7 +10,7 @@ import json
 import logging
 import threading
 import unittest
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from briefing_reader.ask import stream as st
@@ -284,6 +284,23 @@ class RateLimitTests(Engine):
                                        "rate_limit_info": {"isUsingOverage": True, "resetsAt": "soon"}},
                                       now=lambda: NOW)
         self.assertEqual(signal, st.LimitSignal(True, None))
+
+    def test_a_reset_time_is_the_local_clocks_at_that_moment(self) -> None:
+        """P2.R (item 18): with the PC's own clock a reset is said in the offset in force AT it - a summer-time change
+        between now and then (January and July: one of them is across it wherever the PC's zone has one) never
+        shifts it by an hour, as today's offset applied to it did; a clock in another fixed zone keeps its zone."""
+        year = datetime.now().year
+        for month in (1, 7):
+            reset = int(datetime(year, month, 15, 19, 30, tzinfo=timezone.utc).timestamp())
+            with self.subTest(month=month):
+                signal = st.rate_limit_signal({"type": "rate_limit_event", "rate_limit_info": {
+                    "isUsingOverage": True, "resetsAt": reset}}, now=lambda: datetime.now().astimezone())
+                local = datetime.fromtimestamp(reset)                      # the PC's wall clock then
+                self.assertEqual(signal.resets_at.replace(tzinfo=None), local)
+                self.assertEqual(signal.resets_at.timestamp(), reset)
+        signal = st.rate_limit_signal({"type": "rate_limit_event", "rate_limit_info": {
+            "isUsingOverage": True, "resetsAt": int(NOW.timestamp()) + 3 * 3600}}, now=lambda: NOW)
+        self.assertEqual((signal.resets_at.utcoffset(), signal.resets_at.hour), (NOW.utcoffset(), 12))
 
     def test_clock_words(self) -> None:
         self.assertEqual(st.clock_words(NOW.replace(hour=14, minute=5), NOW), "2:05 PM")

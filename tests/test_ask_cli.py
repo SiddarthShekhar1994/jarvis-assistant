@@ -82,8 +82,33 @@ class ArgvTests(unittest.TestCase):
             "--json-schema", self.SCHEMA, "--tools", "", "--mcp-config", '{"mcpServers":{}}', "--strict-mcp-config",
             "--setting-sources", "", "--settings", str(Path("C:/Jarvis 1.0/assets/ask_settings.json")),
             "--disallowedTools", "mcp__*", "--disable-slash-commands", "--permission-mode", "dontAsk",
-            "--permission-prompts", "none", "--max-turns", "4", "--no-session-persistence"])
+            "--permission-prompts", "none", "--input-format", "stream-json", "--include-partial-messages",
+            "--max-turns", "4", "--no-session-persistence"])
         self.assertEqual(self.argv(hardened=True)[-2:], ["--safe-mode", "--restricted"])
+
+    def test_without_streaming_it_is_the_plain_command_line(self) -> None:
+        plain, streaming = self.argv(streaming=False), self.argv()
+        at = streaming.index("--input-format")
+        self.assertEqual(streaming[at:at + 3], ["--input-format", "stream-json", "--include-partial-messages"])
+        self.assertEqual(streaming[:at] + streaming[at + 3:], plain)
+        self.assertFalse(cli.holds_stdin(plain))
+        self.assertTrue(cli.holds_stdin(streaming))
+
+    def test_the_new_flags_are_not_forbidden_and_a_forbidden_one_is_still_refused(self) -> None:
+        self.assertFalse(set(self.argv(hardened=True)) & set(cli.FORBIDDEN_FLAGS))
+        self.assertFalse(set(cli.STREAM_FLAGS) & set(cli.FORBIDDEN_FLAGS))
+        for flag in ("--bare", "--resume", "--dangerously-skip-permissions"):
+            with self.subTest(flag=flag), mock.patch.object(cli, "INPUT_FORMAT_FLAG", flag), \
+                    self.assertRaises(ValueError):
+                self.argv()
+
+    def test_the_prompt_is_one_stream_json_message(self) -> None:
+        prompt = 'A "quoted" line\nand \u00e9 and \U0001f600'
+        line = cli.stream_message(prompt)
+        self.assertTrue(line.endswith("\n"))
+        self.assertEqual(line.count("\n"), 1)
+        self.assertTrue(line.isascii())
+        self.assertEqual(json.loads(line), {"type": "user", "message": {"role": "user", "content": prompt}})
 
     def test_never_forbidden_flags_or_the_prompt(self) -> None:
         for hardened in (False, True):
@@ -120,7 +145,8 @@ class ArgvTests(unittest.TestCase):
         self.assertIn("Speak as Jarvis: calm, concise, polite and British.", say)
         self.assertIn("the word in <owner>", say)
         self.assertIn("at most once per reply, and not at all when <owner> is empty", say)
-        self.assertIn("One or two short sentences, spoken aloud.", say)
+        self.assertIn("One or two short sentences, up to four when the question needs it, spoken aloud.", say)
+        self.assertNotIn("One or two short sentences, spoken aloud.", say)
         self.assertIn("no lists, ids, addresses, URLs or markdown", say)
         self.assertIn("Never claim something is done, sent, moved or booked.", say)
         self.assertIn('Never quote or read out email text in "say"', say)
@@ -452,14 +478,15 @@ class ResearchCliTests(unittest.TestCase):
         self.assertLess(prompt.index("READING MAIL"), prompt.index("WEB RESEARCH"))
         self.assertLess(prompt.index("WEB RESEARCH"), prompt.index("EXAMPLE (invented)"))
 
-    # schema_text() as it was at 3b598ee (length, sha256) for (allow_search, allow_web): the memory
-    # build adds "remember" only when asked, so these never change.
-    SCHEMA_GOLDEN = {(False, False): (844, "a72f4c868ada645b37f64794cc313e8fa25306d7558fe45b36bccb6db9e82487"),
-                     (False, True): (1287, "76f0b01aa9ea5c78fff88b219a337fb271af77f0bb41f109a52c99f29b589410"),
-                     (True, False): (1340, "dcffe0e4cb9d4371079d683deef008e820d8fe2789a14ec46fdaf5b3eb60a3b9"),
-                     (True, True): (1783, "84e727ce38debcb77a3f9cafa213d801a86239ad32d28ed5d557c11d38579d54")}
+    # schema_text() (length, sha256) for (allow_search, allow_web): as at 3b598ee but for the words of say's description
+    # (up to four sentences, facts from the context); the memory build adds "remember" only when asked, so these
+    # change only when schema.json is meant to.
+    SCHEMA_GOLDEN = {(False, False): (927, "f9935a6fa5705643e92e1265ac0ee5cfc2584ebcbbc60c64f126d9436187c467"),
+                     (False, True): (1370, "8310a0319e69140eddd5f91f9992cf15618d23583370b2c876f133be3a6f9c66"),
+                     (True, False): (1423, "dcad9d43c86bf0ae741bc3a0c6a2c1e0115239cc334789689fbf5a1c92b5cbb6"),
+                     (True, True): (1866, "e1f3c83ded6ec70f727c95f11a8dd0acb0716eab962d1f29e67894ff11d178d4")}
 
-    def test_the_default_schema_is_byte_identical_to_3b598ee(self) -> None:
+    def test_the_default_schema_is_pinned(self) -> None:
         import hashlib
 
         for (allow_search, allow_web), golden in self.SCHEMA_GOLDEN.items():

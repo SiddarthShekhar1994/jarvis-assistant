@@ -54,6 +54,15 @@ a typed address or a search's words). Only an Ask: web research, planner modes a
 The UI calls plan() on its Ask worker thread (it blocks: Google reads and up to two CLI runs);
 ``on_stage`` reports STAGE_* as it goes, and setting ``cancel`` ends a running CLI within a second.
 
+An Ask's first words: ``on_words(run number, text, complete, mail)`` hears the planner's "say" as it is written
+(stream.SayWatch; an Ask's runs only, never a mode's or web research's) - the final validated plan stays the source
+of truth. With the prestart seam (ClaudeEngine.prestart: the app's engine, never a test's unless it asks) run 1 takes a
+Claude Code started ahead of the question (ask.prestart: ``prestart_ask()`` after the readiness check, again right
+after each use on the command line just used; ``prestart_sweep()`` recycles, ``prestart_shutdown()`` kills), `claude auth
+status` runs alongside the context (ClaudeEngine.sign_in_ahead: it is still asked before every run), and the calendar
+reads of an Ask's context may be up to RECENT_READ_S old, never past a change Jarvis made (GoogleSources.
+recent_event_briefs; ``read_ahead()`` reads them as the owner starts typing). One log line per Ask gives the times.
+
 Planner modes (the productivity bundle): plan_mode(request, inputs=, briefing=, ...) runs one mode
 on the same thread and the same one-at-a-time lock as plan(). This build has the day plan
 (ask.modes.MODE_PLAN, "plan my day"): the Ask caps plus the bundle's daily cap and the hourly
@@ -134,7 +143,7 @@ from ..config import DEFAULT_ACCOUNT, Config
 from ..gcal import CalendarError, CalendarNotSignedIn, EventBrief, local_timezone, zone_offset
 from ..gmail import GmailError
 from ..google_auth import PROBLEM_EXPIRED, PROBLEM_SCOPE, PROBLEM_SETUP, PROBLEM_SIGNED_OUT, logged_alias
-from . import cli
+from . import cli, prestart
 from ..live import (
     ASK_CHECKS,
     ASK_VALIDATE,
@@ -210,7 +219,24 @@ from .research import (
 from .research_validate import ResearchReport
 from .research_validate import notes as research_notes
 from .research_validate import validate as validate_research
-from .stream import CANCELLED, OVERAGE, AskFailure, InitSummary, Plan, RunResult, RunStats, run_cli, run_planner
+from .stream import (
+    CANCELLED,
+    GUARD,
+    NO_INIT,
+    NOT_SIGNED_IN,
+    OVERAGE,
+    PRESTART_DIED,
+    START_AHEAD,
+    START_COLD,
+    START_FELL_BACK,
+    AskFailure,
+    InitSummary,
+    Plan,
+    RunResult,
+    RunStats,
+    run_cli,
+    run_planner,
+)
 from .usage import KIND_RESEARCH, USAGE_FILE, CapCheck, UsageLog
 from .validate import LINE_CARD, LINE_OVER_CAP, LINE_REFUSED, LINE_REPEAT, Cards, keep_valid, to_cards
 from . import dayplan, desktop_mode, meeting_summary, modes, prep
@@ -280,18 +306,32 @@ class Readiness:
     hardened: bool = False            # ... and [ask] hardened_flags uses them
     auth: cli.AuthStatus | None = None
     research_missing: tuple[str, ...] = ()   # flags web research needs that --help lacks (Ask stays ok)
+    streaming: bool = True            # --help lists cli.STREAM_FLAGS (else the plain path, the whole reply at the end)
+
+
+def _worth_a_cold_run(result: RunResult) -> bool:
+    """A run on a process started ahead failed before it could have been the question's fault: it ended before any
+    output, it never said it started, or it spoke for a sign-in it may have read long ago, with no words yet."""
+    failure = result.failure
+    if failure is None:
+        return False
+    return (failure.detail == PRESTART_DIED or (failure.kind == GUARD and failure.detail == NO_INIT)
+            or (failure.kind == NOT_SIGNED_IN and result.first_words_s is None))
 
 
 class ClaudeEngine:
-    """The owner's Claude Code CLI for Ask: readiness (no model request) and planner runs."""
+    """The owner's Claude Code CLI for Ask: readiness (no model request) and planner runs. ``prestart``: the
+    ask.prestart.Prestarter its runs may take a process from (None: every run starts cold, the tests' default)."""
 
     def __init__(self, ask: Any, data_dir: Path, *, runner: cli.Runner | None = None,
                  environ: Mapping[str, str] | None = None,
                  locate: Callable[[Mapping[str, str]], cli.ClaudeExe | None] = cli.locate_claude,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic, prestart: Any = None) -> None:
         self.ask = ask
         self.work_folder = Path(data_dir) / cli.WORK_FOLDER
         self.runner = runner or cli.SubprocessRunner()
+        self.prestart = prestart
+        self._auth_ahead: threading.Thread | None = None   # a `claude auth status` running alongside the context
         self._environ = environ
         self._locate = locate
         self._clock = clock
@@ -313,11 +353,11 @@ class ClaudeEngine:
         with self._lock:
             self._ready = ready if ready.ok else None
             self._auth_at = self._clock() if ready.ok else None
-        logger.info("Ask: readiness %s (Claude Code %s from %s, sign-in %s, hardening %s)",
+        logger.info("Ask: readiness %s (Claude Code %s from %s, sign-in %s, hardening %s, words as written %s)",
                     "ok" if ready.ok else ready.problem, ready.version or "?",
                     ready.exe.source if ready.exe else "-",
                     ready.auth.method if ready.auth and ready.auth.method else "-",
-                    "on" if ready.hardened else "off")
+                    "on" if ready.hardened else "off", "on" if ready.streaming else "off")
         return ready
 
     def _check(self) -> Readiness:
@@ -346,7 +386,7 @@ class ClaudeEngine:
         if not auth.ok:
             return Readiness(False, auth.problem or "error", auth.message, exe, probe.version, probe.hardening,
                              hardened, auth, missing)
-        return Readiness(True, "", "", exe, probe.version, probe.hardening, hardened, auth, missing)
+        return Readiness(True, "", "", exe, probe.version, probe.hardening, hardened, auth, missing, probe.streaming)
 
     def argv(self, ready: Readiness, *, allow_search: bool, allow_web: bool = False,
              allow_remember: bool = False) -> list[str]:
@@ -354,7 +394,7 @@ class ClaudeEngine:
         return cli.build_argv(ready.exe.path, model=self.ask.model, max_turns=self.ask.max_turns,
                               schema=cli.schema_text(allow_search=allow_search, allow_web=allow_web,
                                                      allow_remember=allow_remember),
-                              hardened=ready.hardened)
+                              hardened=ready.hardened, streaming=ready.streaming)
 
     def preflight(self) -> tuple[Readiness, AskFailure | None]:
         """Right before a planner run: readiness (the CLI and its flags cached), an empty work
@@ -381,11 +421,14 @@ class ClaudeEngine:
 
     def run(self, prompt: str, *, allow_search: bool, cancel: threading.Event | None = None,
             progress: Callable[[str, Any], None] | None = None, capture: bool = False,
-            allow_web: bool = False, allow_remember: bool = False) -> RunResult:
+            allow_web: bool = False, allow_remember: bool = False,
+            on_words: Callable[[str, bool], None] | None = None, slot: str = "") -> RunResult:
         """One planner run with ``prompt`` on stdin, after preflight(). ``progress`` / ``capture``:
         stream.run_planner's (the LIVE view; neither changes the run). ``allow_web``: the run may
         hand the request to web research (planner run 1 only); ``allow_remember``: it may suggest
-        one note to remember (planner run 1 without mail, with [productivity] memory_suggestions)."""
+        one note to remember (planner run 1 without mail, with [productivity] memory_suggestions).
+        ``on_words``: the say's words as they are written; ``slot``: the prestart slot this run may take a process
+        from and fills again (a first run; "" starts cold and leaves the slots alone)."""
         from .stream import failure
 
         ready, refused = self.preflight()
@@ -395,10 +438,14 @@ class ClaudeEngine:
             return RunResult(failure=failure(CANCELLED, "cancel"))
         env = cli.clean_env(self._env_source())
         argv = self.argv(ready, allow_search=allow_search, allow_web=allow_web, allow_remember=allow_remember)
-        result = run_planner(self.runner, argv, prompt, env=env, cwd=self.work_folder,
-                             timeout_s=float(self.ask.timeout_seconds), allow_search=allow_search, cancel=cancel,
-                             clock=self._clock, progress=progress, capture=capture, allow_web=allow_web,
-                             allow_remember=allow_remember)
+
+        def go(process: Any, after: Callable[[], None] | None) -> RunResult:
+            return run_planner(self.runner, argv, prompt, env=env, cwd=self.work_folder,
+                               timeout_s=float(self.ask.timeout_seconds), allow_search=allow_search, cancel=cancel,
+                               clock=self._clock, progress=progress, capture=capture, allow_web=allow_web,
+                               allow_remember=allow_remember, on_words=on_words, process=process, after_start=after)
+
+        result = self._started(slot, argv, env, go, cancel)
         init = result.init
         logger.info("Ask: planner run %s in %.1f s (%d turn(s), %d in / %d out / %d cached tokens; tools %s, "
                     "structured output %s, exit %s)", result.outcome, result.stats.duration_ms / 1000,
@@ -409,12 +456,39 @@ class ClaudeEngine:
             self.forget()
         return result
 
+    def _started(self, slot: str, argv: Sequence[str], env: Mapping[str, str],
+                 go: Callable[[Any, Callable[[], None] | None], RunResult],
+                 cancel: threading.Event | None) -> RunResult:
+        """``go(process, after_start)`` once: on the process the slot holds when it is exactly this command line,
+        environment and folder, else on a new one. The slot is filled again as soon as the prompt is on its way. A
+        process started ahead that fails before any answer is run cold once, inside this same counted run: every
+        failure of the seam ends on today's cold path."""
+        pool = self.prestart
+        if pool is None or not slot or not cli.holds_stdin(argv):
+            return go(None, None)
+        folder = self.work_folder
+
+        def fill_again() -> None:
+            pool.fill(slot, argv, env, folder, used=True)
+
+        process = pool.take(slot, argv, env, folder)
+        if process is None:
+            return replace(go(None, fill_again), start=START_COLD)
+        result = go(process, fill_again)
+        if not _worth_a_cold_run(result) or (cancel is not None and cancel.is_set()):
+            return replace(result, start=START_AHEAD)
+        logger.info("Ask: the Claude Code started ahead failed before answering (%s); running cold",
+                    result.failure.detail if result.failure is not None else "-")
+        return replace(go(None, fill_again), start=START_FELL_BACK)
+
     def mode_argv(self, ready: Readiness, mode: str, *, allow_remember: bool = False) -> list[str]:
-        """A planner mode's command line: Ask's exactly, but its own system prompt and schema."""
+        """A planner mode's command line: Ask's exactly, but its own system prompt and schema (only a desktop request's
+        streams and can be started ahead: the others have no words to show early and keep plain stdin)."""
         assert ready.exe is not None
         return cli.build_argv(ready.exe.path, model=self.ask.model, max_turns=self.ask.max_turns,
                               schema=cli.mode_schema_text(mode, allow_remember=allow_remember),
-                              hardened=ready.hardened, prompt_file=cli.MODE_PROMPTS[mode])
+                              hardened=ready.hardened, prompt_file=cli.MODE_PROMPTS[mode],
+                              streaming=ready.streaming and mode == MODE_DESKTOP)
 
     def run_mode(self, prompt: str, mode: str, *, cancel: threading.Event | None = None,
                  progress: Callable[[str, Any], None] | None = None, capture: bool = False,
@@ -448,10 +522,14 @@ class ClaudeEngine:
                              read=meeting_summary.read_summary_result, cancel=cancel,
                              clock=self._clock, progress=progress, capture=capture)
         elif mode == MODE_DESKTOP:   # a plan of refs, read strictly (desktop_mode.plan_from); validate decides
-            result = run_cli(self.runner, argv, prompt, env=env, cwd=self.work_folder,
-                             timeout_s=float(self.ask.timeout_seconds),
-                             read=desktop_mode.read_desktop_result, cancel=cancel,
-                             clock=self._clock, progress=progress, capture=capture)
+            def go(process: Any, after: Callable[[], None] | None) -> RunResult:
+                return run_cli(self.runner, argv, prompt, env=env, cwd=self.work_folder,
+                               timeout_s=float(self.ask.timeout_seconds),
+                               read=desktop_mode.read_desktop_result, cancel=cancel,
+                               clock=self._clock, progress=progress, capture=capture, process=process,
+                               after_start=after)
+
+            result = self._started(prestart.SLOT_DESKTOP, argv, env, go, cancel)
         else:
             result = run_planner(self.runner, argv, prompt, env=env, cwd=self.work_folder,
                                  timeout_s=float(self.ask.timeout_seconds), allow_search=False, cancel=cancel,
@@ -467,8 +545,40 @@ class ClaudeEngine:
             self.forget()
         return result
 
+    def sign_in_ahead(self) -> None:
+        """With the prestart seam: `claude auth status` starts now on its own thread, alongside the Ask's context, so
+        the run's preflight (which still asks before every run, and trusts only AUTH_FRESH_S) finds its answer there
+        and does not wait for it afterwards. Never raises; a failed check is simply asked again by the preflight."""
+        if self.prestart is None:
+            return
+        with self._lock:
+            ready, running = self._ready, self._auth_ahead
+        if ready is None or not ready.ok or ready.exe is None or (running is not None and running.is_alive()):
+            return
+        env = cli.clean_env(self._env_source())
+
+        def check() -> None:
+            try:
+                auth = cli.auth_status(ready.exe.path, self.runner, env, self.work_folder)
+            except Exception as exc:  # noqa: BLE001 - the run's preflight asks again and reports it
+                logger.info("Ask: the sign-in could not be checked ahead (%s)", type(exc).__name__)
+                return
+            if auth.ok:
+                with self._lock:
+                    self._auth_at = self._clock()
+
+        thread = threading.Thread(target=check, name="ask-sign-in", daemon=True)
+        with self._lock:
+            self._auth_ahead = thread
+        thread.start()
+
     def _fresh_auth(self, ready: Readiness, env: Mapping[str, str]) -> cli.AuthStatus:
-        """`claude auth status` now, unless readiness ran it moments ago (AUTH_FRESH_S)."""
+        """`claude auth status` now, unless readiness (or sign_in_ahead: waited for here) ran it moments ago
+        (AUTH_FRESH_S)."""
+        with self._lock:
+            ahead = self._auth_ahead
+        if ahead is not None:
+            ahead.join(cli.QUICK_TIMEOUT_S + 1.0)
         with self._lock:
             checked_at = self._auth_at
         if ready.auth is not None and checked_at is not None and self._clock() - checked_at < AUTH_FRESH_S:
@@ -627,16 +737,21 @@ _READ_WORDS = {PROBLEM_SCOPE: READ_NOT_ALLOWED, PROBLEM_SIGNED_OUT: READ_NEEDS_S
                PROBLEM_EXPIRED: READ_NEEDS_SIGN_IN, PROBLEM_SETUP: READ_NOT_SET_UP}
 
 
+RECENT_READ_S = 60.0       # an Ask's context may use a calendar read this old, never past a change Jarvis made
+
+
 class GoogleSources:
     """The app's own Google objects (executor.build_calendars / build_senders / build_readers),
     used read-only and never to sign in."""
 
     def __init__(self, config: Config, calendars: Mapping[str, Any], senders: Mapping[str, Any] | None = None,
-                 readers: Mapping[str, Any] | None = None) -> None:
+                 readers: Mapping[str, Any] | None = None, clock: Callable[[], float] = time.monotonic) -> None:
         self.config = config
         self.calendars = dict(calendars)
         self.senders = dict(senders or {})
         self.readers = dict(readers or {})
+        self._clock = clock
+        self._recent: dict[tuple[Any, ...], tuple[float, int, tuple[EventBrief, ...]]] = {}
 
     def aliases(self) -> list[str]:
         names = list(self.config.accounts)
@@ -712,6 +827,35 @@ class GoogleSources:
             logger.warning("Ask: reading the %s calendar failed unexpectedly (%s)", logged_alias(alias),
                            type(exc).__name__)
             return [], "error"
+
+    def _changes(self) -> int | None:
+        """How many changes Jarvis has made through these calendars (GoogleCalendar.mutations); None when one of them
+        can't say: then nothing may be reused."""
+        total = 0
+        for calendar in self.calendars.values():
+            count = getattr(calendar, "mutations", None)
+            if not isinstance(count, int):
+                return None
+            total += count
+        return total
+
+    def recent_event_briefs(self, alias: str, start: datetime, end: datetime,
+                            calendars: Sequence[str]) -> tuple[list[EventBrief], str, float]:
+        """event_briefs, reusing a read of exactly this window that is at most RECENT_READ_S old when Jarvis has
+        changed no calendar since (any account's: an invitation reaches the other one): (briefs, status, how many
+        seconds old). Only an Ask's context comes here; a day plan, a meeting brief or a follow-up reads afresh."""
+        key = (alias, start, end, tuple(calendars))
+        changes = self._changes()
+        now = self._clock()
+        kept = self._recent.get(key)
+        if kept is not None and changes is not None and kept[1] == changes and now - kept[0] <= RECENT_READ_S:
+            return list(kept[2]), "yes", now - kept[0]
+        self._recent.pop(key, None)
+        briefs, status = self.event_briefs(alias, start, end, calendars)
+        if changes is not None and status == "yes":
+            self._recent = {old: read for old, read in self._recent.items() if now - read[0] <= RECENT_READ_S}
+            self._recent[key] = (now, changes, tuple(briefs))
+        return briefs, status, 0.0
 
     def reader(self, alias: str) -> Any | None:
         return self.readers.get(alias)
@@ -838,6 +982,39 @@ class AskOutcome:
         return text
 
 
+def _seconds(value: float | None) -> str:
+    return "-" if value is None else f"{value:.2f} s"
+
+
+@dataclass
+class _AskTiming:
+    """When an Ask's parts happened (the per-Ask log line; durations and a word for how its process came, never
+    text): seconds from the Ask's start, unless named otherwise."""
+
+    started: float
+    accounts_s: float = 0.0           # took: what each account allows
+    calendars_s: float = 0.0          # took: the calendar reads
+    reused: bool = False              # a recent read was used
+    context_s: float = 0.0            # the context was ready
+    sign_in_s: float = 0.0            # took: the wait for `claude auth status` before run 1
+    sent_s: float | None = None       # run 1's prompt went out (None: no run)
+    first_words_s: float | None = None
+    say_complete_s: float | None = None
+    start: str = ""                   # stream.START_*
+
+    def heard(self, now: float, complete: bool) -> None:
+        if self.first_words_s is None:
+            self.first_words_s = now - self.started
+        if complete and self.say_complete_s is None:
+            self.say_complete_s = now - self.started
+
+    def words(self) -> str:
+        return (f"first words {_seconds(self.first_words_s)}, say complete {_seconds(self.say_complete_s)}, "
+                f"{self.start or 'cold'} (context {self.context_s:.2f} s: accounts {self.accounts_s:.2f} s, calendars "
+                f"{self.calendars_s:.2f} s{', reused' if self.reused else ''}; sign-in check {self.sign_in_s:.2f} s; "
+                f"sent at {_seconds(self.sent_s)})")
+
+
 @dataclass(frozen=True)
 class DryRun:
     prompt: str                       # exactly what would go to stdin, email text as counts
@@ -866,6 +1043,8 @@ class AskPlanner:
     # The token hashes of the suggestions the owner dismissed (memory.MemoryStore.dismissed): a
     # suggestion that matches one is dropped.
     memory_dismissed: Callable[[], Sequence[frozenset[str]]] | None = None
+    # plan() takes ``on_words`` (the app passes it only to a planner that says so).
+    streams_words = True
 
     def __init__(self, config: Config, engine: ClaudeEngine, sources: Sources, *, usage: UsageLog | None = None,
                  clock: Callable[[], datetime] | None = None, monotonic: Callable[[], float] = time.monotonic,
@@ -900,21 +1079,36 @@ class AskPlanner:
         was said before an Ask (its <conversation>)."""
         on_stage(STAGE_CONTEXT)
         ask = self.config.ask
+        timing = getattr(self._reads, "timing", None)
+        began = self._monotonic()
         accounts = self.sources.accounts()
+        if timing is not None:
+            timing.accounts_s = self._monotonic() - began
         start, end = day_window(now, ask.days_back, ask.days_ahead)
         calendar = _calendar_step(live, start, end, ask.calendars)
         events: dict[str, tuple[EventBrief, ...]] = {}
         updated = []
+        recent = getattr(self.sources, "recent_event_briefs", None)
+        oldest = 0.0
+        began = self._monotonic()
         for account in accounts:
             if account.calendar != "yes" or (cancel is not None and cancel.is_set()):
                 _calendar_account(calendar, account.alias, account.calendar, None, cancelled=account.calendar == "yes")
                 updated.append(account)
                 continue
-            briefs, status = self.sources.event_briefs(account.alias, start, end, ask.calendars)
+            if callable(recent):   # sources that keep no recent read (tests) read every time
+                briefs, status, age = recent(account.alias, start, end, ask.calendars)
+                oldest = max(oldest, age)
+            else:
+                briefs, status = self.sources.event_briefs(account.alias, start, end, ask.calendars)
             if status == "yes":
                 events[account.alias] = tuple(briefs)
             _calendar_account(calendar, account.alias, status, briefs if status == "yes" else None)
             updated.append(replace(account, calendar=status))
+        if timing is not None:
+            timing.calendars_s, timing.reused = self._monotonic() - began, oldest > 0.0
+        if oldest > 0.0:
+            _calendar_reused(calendar, oldest)
         _calendar_done(calendar, events, updated, self._hour24(), cancelled=cancel is not None and cancel.is_set(),
                        start=start, end=end, now=now)
         self._reads.calendar = CalendarRead(start, end, tuple(events.items()), now)
@@ -987,12 +1181,18 @@ class AskPlanner:
 
     def _run(self, prompt: str, *, allow_search: bool, cancel: threading.Event | None, live: LiveTask = NO_TASK,
              number: int = 1, search_words: str = "", allow_web: bool = False, web_words: str = "",
-             allow_remember: bool = False, mode: str = "") -> RunResult:
+             allow_remember: bool = False, mode: str = "",
+             on_words: Callable[[str, bool], None] | None = None, slot: str = "") -> RunResult:
         """One planner run, counted when it starts (``mode``: a planner mode's run, ClaudeEngine.run_mode,
-        counted as that mode's bundle kind)."""
+        counted as that mode's bundle kind): the send, never a process started ahead's start. ``on_words`` and
+        ``slot``: ClaudeEngine.run's."""
         step = _run_step(live, self.config.ask.model, prompt, number, search_words, web_words, allow_remember,
                          mode=mode)
+        timing = getattr(self._reads, "timing", None)
+        began = self._monotonic()
         ready, refused = self.engine.preflight()   # a run refused before it starts is not counted
+        if timing is not None and number == 1:
+            timing.sign_in_s = self._monotonic() - began
         if refused is not None:
             step.rename_block(STDIN_PENDING, STDIN_NOT_SENT)
             step.done(STATUS_BLOCKED, status_text="SKIPPED", summary=f"Not started: {refused.message}")
@@ -1008,10 +1208,18 @@ class AskPlanner:
                 extra["allow_web"] = True
             if allow_remember:        # the same
                 extra["allow_remember"] = True
+            if on_words is not None:  # the same
+                extra["on_words"] = on_words
+            if slot and getattr(self.engine, "prestart", None) is not None:   # the same
+                extra["slot"] = slot
+            if timing is not None and number == 1:
+                timing.sent_s = self._monotonic() - timing.started
             if mode:
                 result = self.engine.run_mode(prompt, mode, cancel=cancel, **extra)
             else:
                 result = self.engine.run(prompt, allow_search=allow_search, cancel=cancel, **extra)
+            if timing is not None and number == 1:
+                timing.start = result.start
             if result.limit is not None and result.limit.overage:
                 self._pause_for_overage(result.limit.resets_at)
             _run_result(step, result, keep_text=live.keep_text)
@@ -1037,20 +1245,23 @@ class AskPlanner:
     def plan(self, command: str, *, briefing: BriefingContext | None = None, page_ids: Sequence[str] = (),
              cancel: threading.Event | None = None,
              on_stage: Callable[[str], None] = lambda stage: None, live: LiveTask | None = None,
-             conversation: Sequence[Any] = ()) -> AskOutcome:
+             conversation: Sequence[Any] = (),
+             on_words: Callable[[int, str, bool, bool], None] | None = None) -> AskOutcome:
         """One Ask (see the module docs). Never raises for Google or the CLI; one at a time.
         ``live``: the Ask's LIVE view task (its steps are added here; the caller finishes it).
         ``conversation``: what was said before this request (conversation.Turn, oldest first): its
-        <conversation> block; never given to web research."""
+        <conversation> block; never given to web research. ``on_words(run number, text, complete, mail)``: the
+        planner's say as it is written (``mail``: that run's stdin has mail; the words are shown, never logged)."""
         task = live or NO_TASK
         if not self._busy.acquire(blocking=False):
             task.step(ASK_CHECKS, CHECKS_TITLE, status=STATUS_BLOCKED, summary=BUSY_MESSAGE)
             return AskOutcome(False, "busy", BUSY_MESSAGE)
         started = self._monotonic()
         self._reads.calendar = None
+        self._reads.timing = _AskTiming(started)
         try:
             outcome = self._plan(" ".join((command or "").split())[:COMMAND_CAP], briefing, page_ids, cancel,
-                                 on_stage, task, tuple(conversation or ()))
+                                 on_stage, task, tuple(conversation or ()), on_words)
         except Exception as exc:  # noqa: BLE001 - an Ask must never take the app down
             logger.warning("Ask: stopped by an unexpected error (%s)", type(exc).__name__)
             task.current().done(STATUS_FAILED, summary=f"unexpected error ({type(exc).__name__})")
@@ -1058,10 +1269,79 @@ class AskPlanner:
         finally:
             self._busy.release()
         read, self._reads.calendar = getattr(self._reads, "calendar", None), None
+        timing, self._reads.timing = getattr(self._reads, "timing", None), None
         outcome = replace(outcome, duration_ms=int((self._monotonic() - started) * 1000), caps=self.usage.check(),
                           calendar_read=read)
         logger.info("Ask: %s", outcome.summary())
+        if timing is not None and timing.sent_s is not None:
+            logger.info("Ask: %s", timing.words())
         return outcome
+
+    # ---- ahead of the question ----------------------------------------------------------------
+
+    def prestart_ask(self) -> None:
+        """Ask is ready: an idle Claude Code for the command line a first run would use now (or the one the last first
+        run used). No model request and nothing counted. Ask off, not ready or no prestart seam: nothing. Never
+        raises: the first request then simply runs cold."""
+        pool = getattr(self.engine, "prestart", None)
+        if pool is None or not self.config.ask.enabled:
+            return
+        try:
+            ready = self.engine.readiness()
+            if not ready.ok or not ready.streaming or ready.exe is None:
+                return
+            if pool.wants(prestart.SLOT_ASK):
+                if not pool.holds(prestart.SLOT_ASK):
+                    pool.sweep()
+                return
+            searchable = any(account.read_mail == "yes" for account in self.sources.accounts())
+            allow_search = searchable and self.usage.check(runs=2).allowed
+            extra = {"allow_web": True} if self._web_allowed()[0] else {}
+            if self._suggestions_on():
+                extra["allow_remember"] = True
+            argv = self.engine.argv(ready, allow_search=allow_search, **extra)
+            pool.fill(prestart.SLOT_ASK, argv, cli.clean_env(self.engine._env_source()), self.engine.work_folder)
+        except Exception as exc:  # noqa: BLE001 - only prepares the next request
+            logger.warning("Ask: Claude Code could not be prepared ahead (%s)", type(exc).__name__)
+
+    def prestart_sweep(self) -> None:
+        """Recycle what idled too long, died or whose files changed (ask.prestart). Never while a request runs: its
+        replacement is on its way already."""
+        pool = getattr(self.engine, "prestart", None)
+        if pool is None or not self.config.ask.enabled or self._busy.locked():
+            return
+        try:
+            pool.sweep()
+        except Exception as exc:  # noqa: BLE001 - only prepares the next request
+            logger.warning("Ask: Claude Code could not be prepared ahead (%s)", type(exc).__name__)
+
+    def prestart_forget_desktop(self) -> None:
+        """Desktop was turned off: its slot lets go of what waits and wants nothing more (a later run asks again)."""
+        pool = getattr(self.engine, "prestart", None)
+        if pool is not None:
+            pool.forget(prestart.SLOT_DESKTOP)
+
+    def prestart_shutdown(self) -> None:
+        """Jarvis closes: what waits is killed and nothing starts again."""
+        pool = getattr(self.engine, "prestart", None)
+        if pool is not None:
+            pool.shutdown()
+
+    def read_ahead(self) -> None:
+        """The owner started typing: the calendars an Ask's context would read, read now (GoogleSources.
+        recent_event_briefs keeps them for it). Read only; no sign-in; never raises. Sources that keep no recent read:
+        nothing."""
+        recent = getattr(self.sources, "recent_event_briefs", None)
+        if not callable(recent) or not self.config.ask.enabled or self._busy.locked():
+            return
+        ask = self.config.ask
+        try:
+            start, end = day_window(self.clock(), ask.days_back, ask.days_ahead)
+            for account in self.sources.accounts():
+                if account.calendar == "yes":
+                    recent(account.alias, start, end, ask.calendars)
+        except Exception as exc:  # noqa: BLE001 - the Ask reads them itself
+            logger.info("Ask: the calendars could not be read ahead (%s)", type(exc).__name__)
 
     def _refusal(self, live: LiveTask = NO_TASK, *, bundle: bool = False) -> AskOutcome | None:
         """Ask on, the caps, Claude Code ready (no model request); ``bundle``: a planner mode's run,
@@ -1122,7 +1402,8 @@ class AskPlanner:
 
     def _plan(self, command: str, briefing: BriefingContext | None, page_ids: Sequence[str],
               cancel: threading.Event | None, on_stage: Callable[[str], None],
-              live: LiveTask = NO_TASK, conversation: Sequence[Any] = ()) -> AskOutcome:
+              live: LiveTask = NO_TASK, conversation: Sequence[Any] = (),
+              on_words: Callable[[int, str, bool, bool], None] | None = None) -> AskOutcome:
         if not command:
             live.step(ASK_CHECKS, CHECKS_TITLE, status=STATUS_BLOCKED, summary=EMPTY_MESSAGE)
             return AskOutcome(False, EMPTY, EMPTY_MESSAGE)
@@ -1134,9 +1415,25 @@ class AskPlanner:
             return refusal
         now = self.clock()
         shown: dict[tuple[str, str], LiveStep] = {}   # the mail.thread steps (this call's memory only)
+        ahead = getattr(self.engine, "sign_in_ahead", None)
+        if callable(ahead):
+            ahead()                                   # alongside the context: the run asks again only if it is old
+        timing = getattr(self._reads, "timing", None)
         ctx, notes = self._context(command, briefing, now, on_stage, cancel, live, shown, conversation)
         if cancel is not None and cancel.is_set():
             return AskOutcome(False, CANCELLED, "Cancelled; nothing was proposed")
+
+        def words(number: int, mail: bool) -> Callable[[str, bool], None] | None:
+            if on_words is None:
+                return None
+
+            def heard(text: str, complete: bool) -> None:
+                if timing is not None:
+                    timing.heard(self._monotonic(), complete)
+                on_words(number, text, complete, mail)
+
+            return heard
+
         searchable = {account.alias for account in ctx.accounts if account.read_mail == "yes"}
         allow_search = bool(searchable) and self.usage.check(runs=2).allowed
         if searchable and not allow_search:
@@ -1145,6 +1442,8 @@ class AskPlanner:
         prompt, index = build_prompt(ctx)
         logger.info("Ask: context of %d characters (%s; mail %d thread(s))", len(prompt),
                     ", ".join(f"{name} {count}" for name, count in index.counts().items()), len(ctx.mail))
+        if timing is not None:
+            timing.context_s = self._monotonic() - timing.started
         _given(live, ctx, index)
         _threads_given(shown, ctx.mail, prompt)
         on_stage(STAGE_PLANNING)
@@ -1153,8 +1452,11 @@ class AskPlanner:
         allow_web, web_words = self._web_allowed()
         # Only a run whose stdin has no <mail> may suggest a note (never run 2).
         allow_remember = self._suggestions_on() and not ctx.mail
+        logger.info("Ask: run 1 may ask for: mail search %s, web research %s, a note %s", "yes" if allow_search else "no",
+                    web_words, "yes" if allow_remember else "no")   # web_words: no path, no address, never text
         first = self._run(prompt, allow_search=allow_search, cancel=cancel, live=live, number=1, search_words=why_not,
-                          allow_web=allow_web, web_words=web_words, allow_remember=allow_remember)
+                          allow_web=allow_web, web_words=web_words, allow_remember=allow_remember,
+                          on_words=words(1, bool(ctx.mail)), slot=prestart.SLOT_ASK)
         del prompt
         if first.failure is not None or first.plan is None:
             failure = first.failure
@@ -1203,7 +1505,7 @@ class AskPlanner:
                     on_stage(STAGE_PLANNING_AGAIN)
                     second = self._run(second_prompt, allow_search=False, cancel=cancel, live=live, number=2,
                                        search_words="no - this is the second run",
-                                       web_words="no - this is the second run")
+                                       web_words="no - this is the second run", on_words=words(2, True))
                     del second_prompt
                     if second.started:
                         runs, stats = 2, stats + [second.stats]
@@ -2263,7 +2565,7 @@ class AskPlanner:
             argv = tuple(cli.build_argv(ready.exe.path, model=self.config.ask.model,
                                         max_turns=self.config.ask.max_turns,
                                         schema=cli.schema_text(allow_search=searchable, allow_web=allow_web),
-                                        hardened=ready.hardened))
+                                        hardened=ready.hardened, streaming=ready.streaming))
         return DryRun(prompt, argv, ready, index.counts(), report(ctx.mail))
 
     def research_dry_run(self, question: str) -> DryRun:
@@ -2385,6 +2687,12 @@ def _calendar_account(step: LiveStep, alias: str, status: str, briefs: Sequence[
         step.field(alias, "not read (cancelled)")
     else:
         step.field(alias, _CALENDAR_WORDS.get(status, f"{status} - not read"))
+
+
+@_quiet()
+def _calendar_reused(step: LiveStep, age_s: float) -> None:
+    if step is not NO_STEP:
+        step.note(f"Read {max(1, round(age_s))} s ago; Jarvis has changed nothing since")
 
 
 @_quiet()
@@ -2540,7 +2848,7 @@ def _run_progress(step: LiveStep) -> Callable[[str, Any], None]:
     def progress(what: str, value: Any) -> None:
         if what == "started":
             step.rename_block(STDIN_PENDING, STDIN_SENT)
-            step.note("Claude Code started")
+            step.note("Claude Code was ready: started ahead of your request" if value else "Claude Code started")
         elif what == "init" and value is not None:
             step.note(f"Checked its start: model {value.model or '?'}, tools: {', '.join(value.tools) or 'none'}, "
                       f"MCP servers: {value.mcp_servers}, API key source: {value.api_key_source}")

@@ -383,10 +383,11 @@ UNCLEAR_TEXT = "I need a clearer request: name the file, folder, app or site, {s
 NOTHING_TEXT = "I found nothing to open for that, {sir}."
 _OPEN_NOUNS = ((dv.OPEN_FILE, "a file", "files"), (dv.OPEN_FOLDER, "a folder", "folders"),
                (dv.OPEN_APP, "an app", "apps"), (dv.OPEN_URL, "a web page", "web pages"))
-# The file steps (P2.2), in words: one step, more than one.
+# The file steps (P2.2; the Recycle Bin's P2.6), in words: one step, more than one.
 _ORGANISE_WORDS = ((dv.MOVE_FILES, "move files", "move files"), (dv.COPY_FILES, "copy files", "copy files"),
                    (dv.RENAME_FILE, "rename a file", "rename {n} files"),
-                   (dv.MAKE_FOLDER, "make a folder", "make {n} folders"), (dv.ZIP_FILES, "make a zip", "make {n} zips"))
+                   (dv.MAKE_FOLDER, "make a folder", "make {n} folders"), (dv.ZIP_FILES, "make a zip", "make {n} zips"),
+                   (dv.RECYCLE_FILES, "move files to the Recycle Bin", "move files to the Recycle Bin"))
 
 
 def and_words(items: Sequence[str]) -> str:
@@ -462,10 +463,13 @@ _RUN_WORDS = {dx.DONE: "opened", dx.FOUND: "found", dx.WAITING: "waiting for you
 
 
 def run_summary(run: dx.DesktopRun | None) -> str:
-    """"1 opened, 1 waiting for you" ("nothing was opened" when nothing was carried out)."""
+    """"1 opened, 1 waiting for you" ("nothing was opened" when nothing was carried out; "1 done" for the PC's
+    controls, P2.4)."""
     if run is None or not run.results:
         return "nothing was opened"
-    return ", ".join(f"{count} {_RUN_WORDS.get(status, status)}" for status, count in run.counts().items())
+    controls = all(result.skill in dx.pcctl.PC_SKILLS for result in run.results)
+    return ", ".join(f"{count} {'done' if controls and status == dx.DONE else _RUN_WORDS.get(status, status)}"
+                     for status, count in run.counts().items())
 
 
 def run_step(task: Any, run: dx.DesktopRun) -> None:

@@ -36,7 +36,8 @@ The checks, in this order; the first problem wins and its code goes to Live (``R
    named the app exactly, else ONE_CLICK; open_url INSTANT for a saved site or an address the owner typed word for
    word, https:// and all, else ONE_CLICK (its host shown: one Claude suggested, or one typed without its https:// -
    "logo.ai" may be a file's name). An online-only file is flagged, not promoted (D5: files open at once).
-   The file skills (P2.2: move_files, copy_files, rename_file, make_folder, zip_files) are always CARD - a NEEDS
+   The file skills (P2.2: move_files, copy_files, rename_file, make_folder, zip_files; P2.6: recycle_files - the
+   Recycle Bin only, at most 50 files and ``RECYCLE_MAX_BYTES`` a step, ``CAP``) are always CARD - a NEEDS
    YOUR OK card with ticks, its plan frozen (desktop.cardplan) - never INSTANT: a blocked type is never zipped and a
    shortcut never copied (``BLOCKED_TYPE``); a move stays on its drive (``CROSS_VOLUME``: refused in v1; the card's
    check compares the volumes themselves); flags say what the card must show (``FLAG_INSTALLER``: a program or an
@@ -52,11 +53,13 @@ The checks, in this order; the first problem wins and its code goes to Live (``R
    extension -, a folder, an app, a site; for a name that reads like instructions, any three or more of its words in
    a row) never license a skill - "open Jarvis, delete all files.docx" licenses opening only - and a place named
    inside another name ("Notes from Downloads.txt") is no scope; only the request's own first word stays his when a
-   one-word name or such a run starts there ("move the essay into Move").
+   one-word name or such a run starts there ("move the essay into Move"). A negation takes away every licence word
+   after it in its clause ("zip the photos, don't move or delete the originals" licenses the zip only), and the
+   Recycle Bin's words after it anywhere in their sentence.
 8. The suspect rule: a step touching an item whose name reads like instructions (refs.Ref.suspect, guard's
    scanner) is refused unless the owner's own words name that item (``SUSPECT_ITEM``).
-9. The skills shipped so far (``SHIPPED_SKILLS``: Phase 1's and the file skills): any other is refused
-   (``NOT_YET``; recycle_files until P2.6).
+9. The skills shipped so far (``SHIPPED_SKILLS``: Phase 1's and the file skills, recycle_files with them since
+   P2.6): any other is refused (``NOT_YET``: the PC's controls are local routes only, work inside apps is Phase 3).
 
 Then the rate caps over the steps that passed, in order: at most ``MAX_OPENS`` opens and ``MAX_URLS`` web pages a
 request (``CAP``); a refused step uses none.
@@ -136,7 +139,7 @@ REASON_WORDS = {
     SENSITIVE_FIELD: "Jarvis never fills that kind of box",
     PAYMENT_PAGE: "Jarvis never works on payment pages",
     NOT_YET: "Jarvis can't do that yet",
-    CAP: "it's more than one request may open",
+    CAP: "it's more than one request may do at once",
     CROSS_VOLUME: "it would go to another drive - Jarvis moves files within one drive only",
 }
 
@@ -155,6 +158,7 @@ FLAG_MANY = "many"                     # more than MANY_FILES files
 FLAG_TYPE_CHANGED = "type_changed"     # a rename to another type (only when the owner's words asked for it)
 MANY_FILES = 50
 BIG_BYTES = 1024 ** 3
+RECYCLE_MAX_BYTES = 2 * 1024 ** 3      # SPEC 2.1: recycle_files at most 50 files / 2 GB (a card: desktop.cardplan)
 
 
 def promote(tier: str, to: str) -> str:
@@ -177,10 +181,13 @@ SKILL_PHASES = {FIND_FILES: 1, OPEN_FILE: 1, SHOW_IN_FOLDER: 1, OPEN_FOLDER: 1, 
                 MOVE_FILES: 2, COPY_FILES: 2, RENAME_FILE: 2, MAKE_FOLDER: 2, ZIP_FILES: 2, RECYCLE_FILES: 2,
                 VOLUME: 2, MEDIA: 2, TIMER: 2, CANCEL_TIMER: 2, SCREENSHOT: 2, FOCUS_MODE: 2, FILL_FIELDS: 3}
 PHASE_1_SKILLS = tuple(skill for skill, phase in SKILL_PHASES.items() if phase == 1)
-# Phase 2's file skills (P2.2): always a NEEDS YOUR OK card (desktop.cardplan freezes its plan).
-ORGANISE_SKILLS = (MOVE_FILES, COPY_FILES, RENAME_FILE, MAKE_FOLDER, ZIP_FILES)
-# The skills shipped so far: the schema's enum; any other is refused NOT_YET (recycle_files until P2.6, the PC's
-# controls until P2.4, work inside apps until Phase 3).
+# Phase 2's skills (the file skills and the PC's controls): only once the owner turned on the card that lists them
+# (desktop_ui.CONSENT_VERSION; p2r-6).
+PHASE_2_SKILLS = frozenset(skill for skill, phase in SKILL_PHASES.items() if phase == 2)
+# Phase 2's file skills (P2.2; recycle_files P2.6): always a NEEDS YOUR OK card (desktop.cardplan freezes its plan).
+ORGANISE_SKILLS = (MOVE_FILES, COPY_FILES, RENAME_FILE, MAKE_FOLDER, ZIP_FILES, RECYCLE_FILES)
+# The skills shipped so far: the schema's enum; any other is refused NOT_YET (the PC's controls are local routes only,
+# work inside apps comes in Phase 3).
 SHIPPED_SKILLS = PHASE_1_SKILLS + ORGANISE_SKILLS
 # Every step key of SPEC 4.3's outline (any phase): plan_from refuses the whole answer for any other key.
 STEP_KEYS = ("skill", "why", "files", "place", "to", "id", "name", "query", "kind", "within_days", "app", "site",
@@ -369,14 +376,45 @@ LICENCES = (
 # Words before the request proper ("jarvis, can you please ..."): skipped to find the request's first word.
 _LEAD_INS = frozenset({"jarvis", "hey", "hi", "ok", "okay", "please", "kindly", "can", "could", "would", "will",
                        "you", "i", "d", "like", "want", "need", "to", "now", "just"})
-# A licence word right after one of these does not count ("don't delete anything", "without moving").
+# A licence word after one of these in its clause does not count ("don't delete anything", "without moving", "don't
+# move or delete the originals" - both); "do not disturb" is a licence of its own, not a negation.
 _NEGATIONS = frozenset({"not", "never", "no", "without", "don", "dont", "doesn", "didn", "won", "shouldn", "mustn"})
+# Where a negation's clause ends (p2r-12): the break before a word (_clause_tokens) - none, a comma (never the one of
+# "1,000"), a ';' or a sentence's end ('.', '!' or '?' before a space or the end; never the dot of "essay.docx") -
+# and the words that start a new clause after them ("but", "just", "only", "and then"). A comma inside a negated
+# list of verbs goes on with the list ("don't touch, move or delete the rest"): when what stands between it and the
+# negation (or the list's last comma) is one word, or only verbs and the words that join them.
+_NO_BREAK, _COMMA, _CLAUSE, _SENTENCE = 0, 1, 2, 3
+_BREAK_RE = re.compile(r"(?<!\d),|,(?!\d)|;|[.!?]+(?=\s|$)")
+_CLAUSE_WORDS = frozenset({"but", "just", "only"})
+_LIST_WORDS = frozenset({"or", "and", "nor", "t"})          # "t": the end of "don't"
 
 
 def _tokens(text: Any) -> list[str]:
     """``text`` as casefolded words (guard.words: NFKC, hidden characters removed, punctuation split; camelCase
     kept whole: the owner's words, not a label)."""
     return guard.words(text, camel=False)
+
+
+def _clause_tokens(text: Any) -> tuple[list[str], list[int], int]:
+    """``text`` as _tokens (the same words), with the break before each word (_NO_BREAK, _COMMA, _CLAUSE or
+    _SENTENCE) and the break after the last one (for the words that follow ``text``)."""
+    plain = guard.strip_hidden(unicodedata.normalize("NFKC", text)) if isinstance(text, str) else ""
+    tokens: list[str] = []
+    marks: list[int] = []
+    pending = _NO_BREAK
+    position = 0
+    for match in [*_BREAK_RE.finditer(plain), None]:
+        part = plain[position:match.start()] if match is not None else plain[position:]
+        for word in _tokens(part):
+            tokens.append(word)
+            marks.append(pending)
+            pending = _NO_BREAK
+        if match is not None:
+            kind = {",": _COMMA, ";": _CLAUSE}.get(match.group()[0], _SENTENCE)
+            pending = max(pending, kind)
+            position = match.end()
+    return tokens, marks, pending
 
 
 def _find(tokens: Sequence[str], phrase: Sequence[str]) -> list[int]:
@@ -406,9 +444,11 @@ def licensed_skills(owner_words: Any, names: Iterable[Any] = ()) -> frozenset[st
     """The skills the owner's typed words license (SPEC 4.5): deterministic, on his words only. ``names``: the names of
     what this request lists (files, folders, apps, sites): his words that are one of them - or that he put in quotes -
     are only that name, never a licence ("open Jarvis, delete all files.docx" licenses opening only). Names only ever
-    take words away: what is licensed with them is always part of what his words alone license."""
+    take words away: what is licensed with them is always part of what his words alone license. A negation takes
+    away every licence word after it in its clause, and the Recycle Bin's after it in its sentence (_licences)."""
     said = _read(owner_words, [(name, False) for name in names])
-    return _licences(_tokens(owner_words)) & _licences(said.licence)
+    tokens, marks, _after = _clause_tokens(owner_words)
+    return _licences(tokens, marks) & _licences(said.licence, said.marks)
 
 
 # ---- the owner's words, read with the names in them (P2.2) -----------------------------------------------
@@ -432,6 +472,19 @@ class _Said:
 
     licence: tuple[str, ...]
     scope: tuple[str, ...]
+    marks: tuple[int, ...] = ()                     # the break before each word of ``licence`` (_clause_tokens)
+
+
+def _add_words(tokens: list[str], marks: list[int], text: str, pending: int) -> int:
+    """``text``'s words onto ``tokens`` and their breaks onto ``marks``; ``pending``: a break before them. Returns the
+    break after them."""
+    words, kinds, after = _clause_tokens(text)
+    if words:
+        kinds[0] = max(kinds[0], pending)
+        pending = _NO_BREAK
+    tokens += words
+    marks += kinds
+    return max(pending, after)
 
 
 def _runs(tokens: Sequence[str], words: Sequence[str], minimum: int) -> list[tuple[int, int]]:
@@ -468,16 +521,20 @@ def _read(owner_words: Any, names: Iterable[tuple[Any, bool]] = ()) -> _Said:
         if len(whole) >= MIN_RUN and guard.suspect_text(name):
             partial[whole] = partial.get(whole, False) or bool(is_place)
     tokens: list[str] = []
+    marks: list[int] = []                                # the break before each word (_clause_tokens)
     spans: list[tuple[int, int, bool, str]] = []         # (start, end, is a place's name, how: quoted/whole/run)
     position = 0
+    pending = _NO_BREAK
     for match in _QUOTED_RE.finditer(text):
-        tokens += _tokens(text[position:match.start()])
+        pending = _add_words(tokens, marks, text[position:match.start()], pending)
         inner = _tokens(next(group for group in match.groups() if group is not None))
         if inner:
             spans.append((len(tokens), len(tokens) + len(inner), wanted.get(tuple(inner), False), "quoted"))
             tokens += inner
+            marks += [pending] + [_NO_BREAK] * (len(inner) - 1)
+            pending = _NO_BREAK
         position = match.end()
-    tokens += _tokens(text[position:])
+    _add_words(tokens, marks, text[position:], pending)
     taken = [False] * len(tokens)
     for start, end, _place, _how in spans:
         taken[start:end] = [True] * (end - start)
@@ -492,37 +549,97 @@ def _read(owner_words: Any, names: Iterable[tuple[Any, bool]] = ()) -> _Said:
     lead = _lead(tokens)
     by_start = {span[0]: span for span in spans}
     licence: list[str] = []
+    licence_marks: list[int] = []                        # a name is one word: the breaks inside it are not his
     scope: list[str] = []
     index = 0
     while index < len(tokens):
         span = by_start.get(index)
         if span is None:
             licence.append(tokens[index])
+            licence_marks.append(marks[index])
             scope.append(tokens[index])
             index += 1
             continue
         start, end, is_place, how = span
         if start == lead and how != "quoted" and (end - start == 1 or how == "run"):
             licence.append(tokens[start])                # the request's own first word stays his ("move ... Move")
+            licence_marks.append(marks[start])
             if end - start > 1:
                 licence.append(_NAME)
+                licence_marks.append(_NO_BREAK)
         else:
             licence.append(_NAME)
+            licence_marks.append(marks[start])
         scope.extend(tokens[start:end] if is_place else [_NAME])
         index = end
-    return _Said(tuple(licence), tuple(scope))
+    return _Said(tuple(licence), tuple(scope), tuple(licence_marks))
 
 
-def _licences(tokens: Sequence[str]) -> frozenset[str]:
-    """The skills SPEC 4.5's table gives for ``tokens`` (the owner's words, names already read as names)."""
+def _negations(tokens: Sequence[str]) -> list[bool]:
+    """Which of ``tokens`` negate what follows them (_NEGATIONS, but never a word of a licence's own phrase: "do not
+    disturb")."""
+    negating = [token in _NEGATIONS for token in tokens]
+    for licence in LICENCES:
+        for phrase in licence.phrases:
+            if "*" not in phrase and any(word in _NEGATIONS for word in phrase):
+                for start in _find(tokens, phrase):
+                    negating[start:start + len(phrase)] = [False] * len(phrase)
+    return negating
+
+
+_VERBS = frozenset(phrase[0] for licence in LICENCES for phrase in licence.phrases)
+
+
+def _a_list(words: Sequence[str]) -> bool:
+    """``words`` (between a negation, or a negated list's comma, and the next comma) are part of a list of verbs."""
+    others = [word for word in words if word not in _LIST_WORDS]
+    return len(others) <= 1 or all(word in _VERBS for word in others)
+
+
+def _clause_starts(tokens: Sequence[str], marks: Sequence[int],
+                   negating: Sequence[bool]) -> tuple[list[int], list[int]]:
+    """For each of ``tokens``: where its clause starts and where its sentence starts (``marks``: the break before each
+    word; a clause also starts after "but", "just", "only" and "and then"; a comma in a negated list of verbs is
+    none)."""
+    clauses: list[int] = []
+    sentences: list[int] = []
+    clause = sentence = 0
+    listing: int | None = None                  # where a negated list of verbs goes on from (its negation or comma)
+    for index, token in enumerate(tokens):
+        mark = marks[index] if index < len(marks) else _NO_BREAK
+        if mark == _COMMA and listing is not None and _a_list(tokens[listing:index]):
+            listing = index
+        elif mark >= _COMMA:
+            clause, listing = index, None
+            if mark >= _SENTENCE:
+                sentence = index
+        clauses.append(clause)
+        sentences.append(sentence)
+        if negating[index]:
+            listing = index + 1
+        if token in _CLAUSE_WORDS or (token == "then" and index and tokens[index - 1] == "and"):
+            clause, listing = index + 1, None
+    return clauses, sentences
+
+
+def _licences(tokens: Sequence[str], marks: Sequence[int] = ()) -> frozenset[str]:
+    """The skills SPEC 4.5's table gives for ``tokens`` (the owner's words, names already read as names; ``marks``:
+    the break before each word). A licence word after a negation does not count: one of the two words before it
+    ("don't delete"), or any earlier in its clause - a negation covers the whole list of verbs after it ("zip the
+    photos, don't move or delete the originals" licenses the zip only; p2r-12); and the Recycle Bin's words never
+    after a negation anywhere earlier in their sentence ("don't keep them, just bin them" bins nothing)."""
     lead = _lead(tokens)
+    negating = _negations(tokens)
+    clauses, sentences = _clause_starts(tokens, marks, negating)
     allowed: set[str] = set()
     for licence in LICENCES:
         for phrase in licence.phrases:
             for start in _find(tokens, phrase):
                 if licence.lead and start != lead:
                     continue
-                if any(token in _NEGATIONS for token in tokens[max(0, start - 2):start]):
+                if any(negating[max(0, start - 2):start]) or any(negating[clauses[start]:start]):
+                    continue
+                if RECYCLE_FILES in licence.skills and any(negating[sentences[start]:start]):
                     continue
                 allowed |= licence.skills
                 break
@@ -739,7 +856,7 @@ def _check_step(step: PlannedStep, number: int, run: _Run) -> CheckedStep:
         if made_in is not None:
             run.new_places[step.id] = made_in.path
     run.targets.update(_destinations(step, targets))
-    if step.skill in (MOVE_FILES, RENAME_FILE):
+    if step.skill in (MOVE_FILES, RENAME_FILE, RECYCLE_FILES):
         run.gone.update(_target_key(ref) for ref in targets if ref.kind == FILE)
     return CheckedStep(number, step.skill, "", tier, flags, targets, step)
 
@@ -1056,6 +1173,8 @@ def _organise(step: PlannedStep, targets: tuple[Ref, ...], run: _Run, flags: set
         return BLOCKED_TYPE                               # blocked types are never zipped
     if skill == COPY_FILES and any(guard.suffix(item.name) in guard.NEVER_CREATE_TYPES for item in items):
         return BLOCKED_TYPE                               # a copy would make a new shortcut: never (SPEC 2.4)
+    if skill == RECYCLE_FILES and sum(max(0, item.size) for item in items) > RECYCLE_MAX_BYTES:
+        return CAP                                        # SPEC 2.1: at most 2 GB to the Recycle Bin a step
     if skill == MOVE_FILES:
         place = _place_of(targets, step.to)
         where = place.path if place is not None else run.new_places.get(step.to, "")

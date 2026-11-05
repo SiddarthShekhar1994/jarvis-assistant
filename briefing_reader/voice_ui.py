@@ -18,7 +18,10 @@ speaks through (speech.Voice).
           ran empty the voice resumes it, only if it paused it itself and the owner has not
           touched playback since (``owner_acted()``);
         * ``stop()`` (the owner pressed Play, Pause, Skip or a section) ends the utterance now and
-          drops the queue;
+          drops the queue; ``stop_key(key)`` only the utterance with that key (an Ask's say the owner
+          stopped), playing or waiting;
+        * an acknowledgement never delays the answer: the moment a reply's audio is ready it ends the
+          acknowledgement still playing;
         * nothing starts while a Send's hidden hold runs (``hold_active()``); ``pump()`` looks
           again (the controller calls it when a hold starts, ends or is undone);
         * ``set_muted(True)`` stops speaking, drops the queue and is remembered in assistant.json
@@ -44,7 +47,7 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaDevices, QMediaPlayer
 from . import voice_fx
 from .persona import scrub_for_speech
 from .player import PAUSED, PLAYING, WAITING
-from .speech import SpeechLane, Utterance
+from .speech import KIND_ACK, KIND_REPLY, SpeechLane, Utterance
 
 logger = logging.getLogger(__name__)
 
@@ -296,6 +299,19 @@ class AssistantVoice(QObject):
     def cancel_key(self, key: str) -> None:
         self._forget(self._lane.cancel_key(key))
 
+    def stop_key(self, key: str) -> None:
+        """The utterance with this ``key`` goes, playing or waiting; the next one starts if there is one."""
+        self.cancel_key(key)
+        current = self._lane.current
+        if key and current is not None and current.key == key:
+            self._end_current(current)
+
+    def _end_current(self, current: Utterance) -> None:
+        self._lane.finish(current.seq)
+        self._player.stop()
+        self.speakingChanged.emit("")
+        self.pump()
+
     def stop(self) -> None:
         """Stop the utterance now and drop the queue; the briefing this voice paused comes back
         unless the owner acted (``owner_acted`` first)."""
@@ -308,7 +324,13 @@ class AssistantVoice(QObject):
         self._schedule_resume()
 
     def pump(self) -> None:
-        if self._closed or self._lane.current is not None:
+        if self._closed:
+            return
+        current = self._lane.current
+        if current is not None:
+            waiting = self._lane.pending
+            if current.kind == KIND_ACK and waiting and waiting[0].kind == KIND_REPLY and waiting[0].ready:
+                self._end_current(current)      # the answer's audio is here: it never waits for an acknowledgement
             return
         utterance = self._lane.start_next(hold=self._hold())
         if utterance is None:

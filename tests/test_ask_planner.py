@@ -39,6 +39,7 @@ from tests.ask_fakes import (
     research_stream,
     stream,
     success_events,
+    without_stream_flags,
 )
 
 TOMORROW_2PM = NOW.replace(hour=14, minute=0) + timedelta(days=1)
@@ -2475,9 +2476,11 @@ class PlanModeTests(PlannerTestCase):
         self.assertEqual(plan_child.env, ask_child.env)
         self.assertEqual(plan_child.cwd, ask_child.cwd)
         self.assertEqual(plan_child.argv[0], ask_child.argv[0])
-        self.assertEqual(len(plan_child.argv), len(ask_child.argv))
+        asks = without_stream_flags(ask_child.argv)    # an Ask streams its words; a day plan keeps plain stdin
+        self.assertEqual(without_stream_flags(plan_child.argv), plan_child.argv)
+        self.assertEqual(len(plan_child.argv), len(asks))
         differ = [plan_child.argv[number - 1] for number, (mine, theirs)
-                  in enumerate(zip(plan_child.argv, ask_child.argv)) if mine != theirs]
+                  in enumerate(zip(plan_child.argv, asks)) if mine != theirs]
         self.assertEqual(differ, ["--system-prompt-file", "--json-schema"])
 
     def test_the_live_steps_of_a_plan(self) -> None:
@@ -2863,9 +2866,10 @@ class PrepModeTests(PlannerTestCase):
         self.assertTrue(ask.plan("what's on today?").ok)
         prep_child, ask_child = self.runner.started
         self.assertEqual((prep_child.env, prep_child.cwd), (ask_child.env, ask_child.cwd))
-        self.assertEqual(len(prep_child.argv), len(ask_child.argv))
+        asks = without_stream_flags(ask_child.argv)    # an Ask streams its words; a brief keeps plain stdin
+        self.assertEqual(len(prep_child.argv), len(asks))
         differ = [prep_child.argv[number - 1] for number, (mine, theirs)
-                  in enumerate(zip(prep_child.argv, ask_child.argv)) if mine != theirs]
+                  in enumerate(zip(prep_child.argv, asks)) if mine != theirs]
         self.assertEqual(differ, ["--system-prompt-file", "--json-schema"])
 
     def test_the_live_steps_of_a_brief(self) -> None:

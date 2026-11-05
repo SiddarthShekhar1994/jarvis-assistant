@@ -323,8 +323,11 @@ from .persona import (
     Greeting,
     announcement,
     ask_failure_speech,
+    ask_final_shown,
     ask_reply_note_speech,
+    ask_reply_rest,
     ask_reply_speech,
+    ask_say_speech,
     brief_ready_text,
     clock_text,
     compose_opening,
@@ -1373,6 +1376,7 @@ class ReadingView(QWidget):
         self._activity = hud.ORB_WORKING
         self._typing = False
         self._pending = 0
+        self._desktop_waiting = 0              # p2r-5: NEEDS YOUR OK cards waiting on the desktop HUD
         self._offers = 0
         self._muted_look = False
         self._offline_voice = False
@@ -2290,6 +2294,23 @@ class ReadingView(QWidget):
         """The voice stopped: the last page holds, then the band rests."""
         self.captions.finish()
 
+    def stream_caption(self, text: str, *, complete: bool = False, spoken: bool = True) -> None:
+        """An answer's words as they are written, as Home's caption (home.CaptionView.stream): the voice takes the line
+        over without typing it again."""
+        self.captions.stream(text, complete=complete, spoken=spoken)
+        self._sync_echo()
+
+    def correct_caption(self, text: str, *, alert: bool = False, spoken: bool = True) -> None:
+        """The words on the band were wrong: ``text`` replaces them at once (``alert``: in coral)."""
+        self.captions.correct(text, alert=alert, spoken=spoken)
+        self._sync_echo()
+
+    def clear_stream_caption(self) -> None:
+        """An answer's words leave the band at once (never a line of the briefing's or anything else's)."""
+        if self.captions.streamed():
+            self.captions.clear()
+        self._sync_echo()
+
     def show_request(self, text: str) -> None:
         """The owner's request just made, as the YOU echo under the orb (until the band rests again);
         the last answer's chip goes."""
@@ -2320,14 +2341,15 @@ class ReadingView(QWidget):
         offer = self._offers > 0
         answer = resting and not offer and bool(self._answer[0])
         briefing = resting and not (offer or answer) and self._new_briefing
-        approvals = resting and not (offer or answer or briefing) and self._pending > 0
+        needs_ok = self._pending + self._desktop_waiting          # p2r-5: the HUD's chip says the same total
+        approvals = resting and not (offer or answer or briefing) and needs_ok > 0
         # Without a chip: when Jarvis checks for the briefing he waits for, else the Windows voice's badge.
         quiet_row = resting and not (offer or answer or briefing or approvals)
         readout = quiet_row and self._waiting and bool(self._waiting_readout)
         self.waiting_readout.setVisible(readout)
         self.voice_badge.setVisible(quiet_row and not readout and self._offline_voice)
         for chip, shown, text in ((self.answer_chip, answer, self._answer[0]),
-                                  (self.approvals_chip, approvals, needs_ok_chip(self._pending))):
+                                  (self.approvals_chip, approvals, needs_ok_chip(needs_ok))):
             if shown and chip.text() != text:
                 chip.setText(text)
                 chip.updateGeometry()
@@ -2866,13 +2888,25 @@ class ReadingView(QWidget):
         self.briefing_stage.set_proposals(pending)
         self.approvals_bar.set_value(str(pending), pending / total if total else 0.0)
         self._pending = max(0, int(pending))
-        self.dock.set_approvals(self._pending)
+        self.dock.set_approvals(self._pending + self._desktop_waiting)
         self._sync_chip()
         self._sync_look()                       # ... and the desktop HUD's "N need your OK" (glanceChanged)
 
     def pending_count(self) -> int:
-        """Proposals waiting for the owner's OK (``set_pending``: the Dock's amber count, Home's chip)."""
+        """Proposals waiting for the owner's OK (``set_pending``; with ``set_desktop_waiting``'s cards: the Dock's
+        amber count, Home's chip)."""
         return self._pending
+
+    def set_desktop_waiting(self, count: int) -> None:
+        """p2r-5: the NEEDS YOUR OK cards waiting on the desktop HUD (desktop_ui.waitingChanged) count with the
+        proposals in Home's "N need your OK" chip and the Dock's amber Approvals count - the same total as the HUD's
+        chip (which adds them to ``pending_count`` itself)."""
+        count = max(0, int(count))
+        if count == self._desktop_waiting:
+            return
+        self._desktop_waiting = count
+        self.dock.set_approvals(self._pending + count)
+        self._sync_chip()
 
     # ---- approval cards ------------------------------------------------------
 
@@ -3725,10 +3759,17 @@ STATE_QUITTING = "quitting"
 TRAY_TOOLTIP = "Jarvis"
 TOAST_VIEW = "view"                    # the toast's View: the Briefing screen
 TOAST_PREP = "prep"                    # the toast's Prepare brief: Home with the prep offer's tile
+TOAST_TIMER = "timer"                  # P2.4: a Jarvis timer ended - its OK only puts the toast away
+TOAST_TIMER_TEXT = "OK"
+FOCUS_SPEECH_KEPT = 8                  # P2.5: sentences focus mode holds at most (memory only) ...
+FOCUS_SPEECH_SAID = 3                  # ... and says, newest last, when it ends
+FOCUS_TOAST_AFTER_MS = states_view.TOAST_MS + 250   # a held toast waits this long for the one showing as focus ends
 VIEW_BRIEFING_TEXT = "View briefing"   # the announcement's link in the conversation
 VIEW_BRIEFING_LINK = "view-briefing"
 ASK_CANCELLED_ENTRY = "Cancelled; nothing was proposed."   # the conversation's entry for a cancelled Ask
 ASK_ACK_KEY = "ask-ack"                  # "One moment, sir." while an Ask plans (dropped when it ends first)
+ASK_ACK_HOLD_MS = 1500                   # ... said only when no word of the answer has come by this long after the request
+ASK_SAY_KEY = "ask-say"                  # an Ask's say, spoken as soon as it is written (Stop, a new request: it goes)
 # Memory (the productivity bundle): the conversation's links and texts (shown only; never logged).
 MEMORY_UNDO_LINK = "mem-undo:"           # + an opaque counter: Undo a note saved or forgotten
 MEMORY_SAVE_LINK = "mem-save:"           # + an opaque counter: Remember this (a suggestion)
@@ -4806,6 +4847,18 @@ def _live_exec_finished(task: Any, action: ProposedAction, outcome: Any) -> None
         task.finish(_live.STATUS_FAILED, summary=str(outcome.error or "") or "it did not happen")
 
 
+@dataclasses.dataclass
+class _SayStream:
+    """One Ask's say as it is written (memory only, never logged): its run, what the band shows of it, what Jarvis began
+    saying the moment it was whole ("" when nothing was) and whether it is whole."""
+
+    seq: int
+    number: int = 0
+    shown: str = dataclasses.field(default="", repr=False)
+    early: str = dataclasses.field(default="", repr=False)
+    complete: bool = False
+
+
 class AppController(QObject):
     """State machine behind the window: prompt -> (snoozed ->) reading -> quit.
 
@@ -4902,7 +4955,10 @@ class AppController(QObject):
     their winwatch uses - None: winwatch's default). Before the owner's Turn on (THE CONSENT GATE, stored in
     assistant.json), the Dock's and the Find list's Desktop, the HUD key, a --hud start and a typed desktop request
     show the first-run "Jarvis on your desktop" card in the window instead (desktop_view.ConsentCard); Settings >
-    Desktop shows "Your OK" and has Turn off.
+    Desktop shows "Your OK" and has Turn off. P2.5's focus mode keeps Jarvis quiet while it runs (``_focus_quiet``):
+    his toasts and voice are held and the offers see no activity; when it ends - at its end, by the focus chip's Undo,
+    by Undo all or by a Turn off (``focusChanged``) - the newest toast and the last few sentences come back and the
+    offers tick again. The owner's own timers still end with their toast.
     """
 
     def __init__(self, config: Config, client: NotionClient, *, expected_run: str | None,
@@ -4938,6 +4994,7 @@ class AppController(QObject):
         # run; tests and the harness pass a fake over pretend windows).
         self._desktop_window_api = desktop_window_api
         self._desktop_consent_card: Any = None        # the first-run "Jarvis on your desktop" card (made at first use)
+        self._desktop_consent_later = ""              # p2r-6: the updated card asked for on the HUD: at the way back
         self._desktop_settings: Any = None            # Settings > Desktop's own part (Turn off)
         self._snapshot_factory = snapshot_factory   # tests: a fake page snapshotter (no web engine)
         self.expected_run = _normalize_run(expected_run)
@@ -5068,8 +5125,14 @@ class AppController(QObject):
     def _post_toast(self, line: str, action: str, key: str) -> None:
         """Jarvis's own toast (never a Windows notification, never the focus), only where the app already
         surfaces something while the owner is elsewhere: the briefing's announcement, a prep offer that
-        flashes the taskbar button."""
+        flashes the taskbar button, a Jarvis timer's end (P2.4: its OK only puts the toast away)."""
         if self.state == STATE_QUITTING or self._shut_down or not line:
+            return
+        if key != TOAST_TIMER and self._focus_quiet():
+            # P2.5: focus mode holds Jarvis's toasts (the owner's own timers still say they ended): the newest comes
+            # back when focus ends (_on_focus_changed), as a newer toast would have replaced it anyway.
+            self._focus_toast = (line, action, key)
+            logger.info("Toast held (focus mode)")
             return
         try:
             self._toast().post(line, action, key, look=self.window.reading.look())
@@ -5079,8 +5142,8 @@ class AppController(QObject):
     def _on_toast_action(self, key: str) -> None:
         """The toast's ONE action (the owner's click, so the focus may move): View opens the Briefing screen,
         Prepare brief opens Home with the prep offer's tile (its own click prepares anything). Nothing runs."""
-        if self.state != STATE_READING or self._shut_down:
-            return
+        if self.state != STATE_READING or self._shut_down or key == TOAST_TIMER:
+            return                                     # a timer's OK: the toast went; nothing else moves
         reading = self.window.reading
         if self._hud_active():
             # On the desktop HUD: the click brings the window back on the toast's screen (leave_hud comes forward on
@@ -5251,6 +5314,8 @@ class AppController(QObject):
         self._briefing_caption = ""                # ... and what the voice says for it (Home's caption)
         self._briefing_caption_ms = 0              # ... and how long its audio says it (0: unknown)
         self._last_ack = ""                        # the last "One moment, sir." template (never twice in a row)
+        self._say_stream: _SayStream | None = None   # the running or last Ask's say as it was written
+        self._ack_timer = self._make_timer(self._say_ack, single_shot=True)
 
     def _init_timers(self) -> None:
         self._ignore_timer = self._make_timer(self._on_prompt_ignored, single_shot=True)
@@ -5553,7 +5618,7 @@ class AppController(QObject):
         worker = SayWorker(factory, on_result)
         player = voice_ui.UtterancePlayer(self, volume=self._volume)
         voice = voice_ui.AssistantVoice(worker=worker, player=player, briefing_player=lambda: self.player,
-                                        hold_active=lambda: self._send_hold is not None,
+                                        hold_active=lambda: self._send_hold is not None or self._focus_quiet(),
                                         prefs=self._prefs_store(), parent=self)
         bridge.sayResult.connect(voice.on_audio, Qt.ConnectionType.QueuedConnection)
         voice.speakingChanged.connect(self._on_voice_speaking)
@@ -8252,6 +8317,8 @@ class AppController(QObject):
         controller.outcomeReady.connect(self._on_ask_outcome)
         controller.askStarted.connect(self._on_ask_started)
         controller.askCancelled.connect(self._on_ask_cancelled)
+        controller.sayWritten.connect(self._on_ask_say)
+        controller.askStopping.connect(self._on_ask_stopping)
         controller.chipChanged.connect(self._set_ask_chip)
         controller.mailSignInRequested.connect(self.sign_in_for_mail)
         controller.memoryRequested.connect(self._on_memory_route)
@@ -8302,9 +8369,11 @@ class AppController(QObject):
         return ""
 
     def _on_ask_busy(self, busy: bool) -> None:
-        """An Ask started (the briefing pauses; the orb shows PLANNING; Jarvis says "One moment,
-        sir.") or ended."""
+        """An Ask started (the briefing pauses; the orb shows PLANNING at once; "One moment, sir." only if
+        no word of the answer has come ASK_ACK_HOLD_MS after the request: it never delays the reply) or ended."""
         self._ask_busy = bool(busy)
+        if not busy:
+            self._ack_timer.stop()
         if busy and self.ask is not None and self.ask.running_mode in (MODE_MEETING, MODE_DESKTOP):
             # A meeting summary runs in the background, a desktop request on the HUD (its caption says what Jarvis
             # is doing): nothing pauses or is said.
@@ -8314,13 +8383,13 @@ class AppController(QObject):
             self._voice_call("owner_acted")   # the Ask holds the briefing now: the voice never resumes it
             if self.state == STATE_READING and self.player.state in (PLAYING, WAITING):
                 self.player.pause()
-            self._say_ack()
+            self._ack_timer.start(ASK_ACK_HOLD_MS)
         self._update_reading_controls()
 
     def _say_ack(self) -> None:
-        """A short acknowledgement while an Ask plans (dropped if the answer is there first)."""
+        """A short acknowledgement while a slow Ask plans (dropped if the answer is there first)."""
         assistant = self.config.assistant
-        if not assistant.speak_replies:
+        if not assistant.speak_replies or not self._ask_busy or self.state == STATE_QUITTING:
             return
         self._last_ack = pick_ack(self._last_ack, self._rng)
         self._say(KIND_ACK, with_address(self._last_ack, assistant.address), key=ASK_ACK_KEY)
@@ -8332,6 +8401,8 @@ class AppController(QObject):
         screen "tab" brings LIVE up (a "web:" request's WEB task as an Ask's), else Home comes up."""
         if self.state == STATE_QUITTING:
             return
+        if self.ask is None or self.ask.running_mode != MODE_MEETING:
+            self._end_say_stream()              # a new request: what the last answer was still saying goes
         self._ask_desktop = bool(self.ask is not None and self.ask.running_mode == MODE_DESKTOP)
         if self.ask is not None and self.ask.running_mode in (MODE_MEETING, MODE_DESKTOP):
             # A meeting summary the owner asked for (the start card's tick, or Summarise), or a desktop request on the
@@ -8359,8 +8430,64 @@ class AppController(QObject):
         if task_id:
             self._snapshots_call("cancel_task", task_id)
 
+    def _end_say_stream(self) -> None:
+        """An Ask's say stops here and now: it leaves the band (never another line) and its utterance goes, playing or
+        waiting. Nothing it wrote later shows (the controller drops it)."""
+        if self._say_stream is None:
+            return
+        self._say_stream = None
+        self._voice_call("stop_key", ASK_SAY_KEY)
+        self.window.reading.clear_stream_caption()
+
+    def _on_ask_stopping(self, _seq: int) -> None:
+        """Stop (the bar's Cancel, Esc, a Turn off): no acknowledgement and no more words, at once; the run itself ends
+        within a second (_on_ask_cancelled follows)."""
+        self._ack_timer.stop()
+        self._voice_call("cancel_key", ASK_ACK_KEY)
+        self._end_say_stream()
+
+    def _on_ask_say(self, seq: int, number: int, text: str, shown: str, complete: bool, mail: bool) -> None:
+        """The planner's say as it is written (AskController.sayWritten; never logged). Home's caption shows the words
+        (``shown``) as they come; the voice starts as soon as the say is whole - it does not wait for the cards' lines -,
+        through the same guards as the final reply (persona.ask_say_speech: one that claims something was done or
+        repeats a memory note waits for the final answer's own words). The final plan stays the source of truth
+        (_converse_ask). A second run's say replaces the first's on the band; what the first still has to say and has
+        not started goes."""
+        if self.state == STATE_QUITTING:
+            return
+        stream = self._say_stream
+        if stream is None or stream.seq != seq:
+            stream = self._say_stream = _SayStream(seq)
+            self._ack_timer.stop()                       # the first words are here: no acknowledgement
+            self._voice_call("cancel_key", ASK_ACK_KEY)
+        if number != stream.number:
+            if stream.early:
+                self._voice_call("cancel_key", ASK_SAY_KEY)
+            stream.number, stream.early, stream.complete = number, "", False
+        before, stream.shown = stream.shown, shown
+        reading = self.window.reading
+        on_screen = self.state == STATE_READING
+        if not complete:
+            if on_screen:
+                reading.stream_caption(shown)
+            return
+        assistant = self.config.assistant
+        early = (ask_say_speech(text, read_mail=mail, address=assistant.address, notes=self._memory_spoken_guard())
+                 if assistant.speak_replies else "")
+        if stream.complete and stream.early == early and before == shown:
+            return
+        if stream.early:                                 # the tool was called again with other words
+            self._voice_call("stop_key", ASK_SAY_KEY)
+        stream.early, stream.complete = early, True
+        if on_screen:
+            reading.stream_caption(shown, complete=True, spoken=bool(early))
+        if early and not self._say(KIND_REPLY, early, key=ASK_SAY_KEY) and on_screen:
+            reading.stream_caption(shown, complete=True, spoken=False)   # no voice is coming: the muted pace
+
     def _on_ask_cancelled(self, _seq: int) -> None:
         self._offer_running = 0
+        self._ack_timer.stop()
+        self._end_say_stream()
         if self._ask_task_id:
             self._snapshots_call("cancel_task", self._ask_task_id)   # its queued and running pictures stop
         if self.state == STATE_QUITTING:
@@ -8395,8 +8522,15 @@ class AppController(QObject):
             link = (SEE_STEPS_TEXT, f"live:{task_id}") if self.live.enabled and task_id else ("", "")
             self._jarvis(AskController._answer(outcome), tone=hud.TONE_WARN if question_only else hud.TONE_DONE,
                          sub=f" {DOT} ".join(sub), link=link)
+            stream = self._say_stream if self._say_stream is not None and self._say_stream.number == outcome.runs else None
             if assistant.speak_replies:
-                spoken = ask_reply_note_speech(outcome, assistant.address, notes=self._memory_spoken_guard())
+                notes = self._memory_spoken_guard()
+                early = stream.early if stream is not None else ""
+                rest = ask_reply_rest(outcome, early, assistant.address, notes=notes) if early else None
+                if rest is not None:   # it was said as it was written: only its question is left
+                    self._say_rest(early, rest)
+                    return
+                spoken = ask_reply_note_speech(outcome, assistant.address, notes=notes)
                 if spoken:
                     logger.info("Ask reply not spoken as written (it repeats a memory note)")
                 else:
@@ -8404,7 +8538,10 @@ class AppController(QObject):
                     if reply.guarded:
                         logger.info("Ask reply not spoken as written (it claimed something was done)")
                     spoken = reply.text
+                self._correct_say(stream, spoken)
                 self._say(KIND_REPLY, spoken)
+            elif stream is not None and stream.shown != ask_final_shown(outcome):
+                self.window.reading.correct_caption(ask_final_shown(outcome), spoken=False)
             return
         if outcome.kind in ("empty", "busy"):
             return
@@ -8414,10 +8551,43 @@ class AppController(QObject):
         self._jarvis(outcome.message or "Ask failed; nothing was proposed.",
                      tone=hud.TONE_WARN if outcome.kind in _SOFT_KINDS else hud.TONE_ERROR)
         spoken = ask_failure_speech(outcome.kind, assistant.address) if assistant.speak_replies else ""
+        self._say_failed(spoken or outcome.message or "Ask failed; nothing was proposed.", bool(spoken))
         if spoken:
             self._say(KIND_REPLY, spoken)
         else:
             self._voice_call("cancel_key", ASK_ACK_KEY)
+
+    def _say_rest(self, early: str, rest: str) -> None:
+        """The final answer is what was written: only its question is left to say. With no voice the band shows it
+        after the say, with the say's own line kept."""
+        if not rest:
+            return
+        if self._voice_silent() and self.state == STATE_READING:
+            self.window.reading.say_caption(f"{early} {rest}", spoken=False)
+            if self._focus_quiet():
+                self._hold_for_focus(KIND_REPLY, rest, "")   # the say is held already (under its key)
+        else:
+            self._say(KIND_REPLY, rest, key=ASK_SAY_KEY)
+
+    def _correct_say(self, stream: _SayStream | None, spoken: str) -> None:
+        """The final answer is not what was written: what was being said of it goes and the band says the final words at
+        once (their voice takes them over from there)."""
+        if stream is None or not (stream.shown or stream.early):
+            return
+        self._voice_call("stop_key", ASK_SAY_KEY)
+        if self.state == STATE_READING:
+            self.window.reading.correct_caption(spoken, spoken=not self._voice_silent())
+
+    def _say_failed(self, words: str, spoken: bool) -> None:
+        """The run failed after its words were out: they go, and the band says so in coral (the bar's status line and
+        the conversation entry say why, as always)."""
+        stream = self._say_stream
+        if stream is None or not (stream.shown or stream.early):
+            return
+        self._say_stream = None
+        self._voice_call("stop_key", ASK_SAY_KEY)
+        if self.state == STATE_READING:
+            self.window.reading.correct_caption(words, alert=True, spoken=spoken and not self._voice_silent())
 
     def _converse_research(self, outcome: Any) -> None:
         """A web research's answer in the conversation: one JARVIS entry with the answer and its
@@ -8429,6 +8599,7 @@ class AppController(QObject):
         from .ask_ui import research_proposals
 
         assistant = self.config.assistant
+        self._say_stream = None     # run 1's words said it would look it up: they stand
         report = outcome.research
         text = entry_text(report)
         # Jarvis's own notes the entry does not already show (a thread the planner could not read,
@@ -8909,6 +9080,8 @@ class AppController(QObject):
         from .desktop_view import DesktopSettingsPanel
 
         self.desktop: Any = None
+        self._focus_toast: tuple[str, str, str] | None = None     # P2.5: the newest toast focus mode held
+        self._focus_speech: list[tuple[str, str, str]] = []       # ... and what Jarvis would have said (memory only)
         desktop = getattr(self.config, "desktop", None)
         if not getattr(desktop, "enabled", False):
             return
@@ -8920,7 +9093,8 @@ class AppController(QObject):
         reading.settings_page.add_group(settings_view.DESKTOP_GROUP, settings_view.DESKTOP_TITLE,
                                         note=settings_view.DESKTOP_NOTE, how=settings_view.DESKTOP_HOW,
                                         rows=lambda: settings_view.desktop_rows(
-                                            self.config, turned_on=self._desktop_turned_on()),
+                                            self.config, turned_on=self._desktop_turned_on(),
+                                            current=self._desktop_ok_current()),
                                         extra=self._desktop_settings)
         self.desktop = self._create_desktop(factory)
         if self.desktop is not None:
@@ -8954,6 +9128,8 @@ class AppController(QObject):
         controller.plannerNeeded.connect(self._on_desktop_planner)
         controller.consentNeeded.connect(self._show_desktop_consent)
         controller.consentChanged.connect(lambda _on: self._sync_desktop_settings())
+        controller.timerEnded.connect(lambda line: self._post_toast(line, TOAST_TIMER_TEXT, TOAST_TIMER))
+        controller.focusChanged.connect(self._on_focus_changed)
         meetings = getattr(self, "meetings", None)
         if meetings is not None:
             meetings.pillCreated.connect(controller.set_rec_pill)
@@ -8994,6 +9170,8 @@ class AppController(QObject):
         self._desktop_waiting = waiting
         self.desktop.waitingChanged.connect(waiting.set_count)
         waiting.set_count(self.desktop.waiting_count())
+        self.desktop.waitingChanged.connect(reading.set_desktop_waiting)     # p2r-5: Home's chip, the Dock's badge
+        reading.set_desktop_waiting(self.desktop.waiting_count())
 
     def _on_desktop_show_me(self) -> None:
         """Approvals' "Show me": onto the HUD, where the NEEDS YOUR OK card waits (the owner's click)."""
@@ -9008,6 +9186,39 @@ class AppController(QObject):
         desktop = getattr(self, "desktop", None)
         return desktop is not None and desktop.is_hud()
 
+    def _focus_quiet(self) -> bool:
+        """P2.5: focus mode runs (desktop_ui.DesktopController.in_focus) - Jarvis keeps quiet: his offers, toasts and
+        voice are held until it ends; the owner's own timers still say they ended."""
+        desktop = getattr(self, "desktop", None)
+        try:
+            return desktop is not None and bool(desktop.in_focus())
+        except Exception:  # noqa: BLE001 - unknown: not quiet (nothing is lost either way)
+            return False
+
+    def _on_focus_changed(self, on: bool) -> None:
+        """P2.5: focus mode started - Jarvis quiet: the offers stop (the bundle sees no activity), his toasts and voice
+        are held - or ended (at its end, early by the owner's Undo, or turned off): what was held comes back - the
+        offers at their next tick, the last few sentences, and the newest toast (after the one showing, if any)."""
+        self._prod_call("sync")
+        if on:
+            logger.info("Focus mode: Jarvis keeps quiet")
+            return
+        toast, self._focus_toast = self._focus_toast, None
+        speech, self._focus_speech = list(self._focus_speech), []
+        logger.info("Focus mode over: %d toast(s) and %d sentence(s) held come back", int(toast is not None),
+                    min(len(speech), FOCUS_SPEECH_SAID))
+        if self.state == STATE_QUITTING or self._shut_down:
+            return
+        for kind, text, key in speech[-FOCUS_SPEECH_SAID:]:
+            self._say(kind, text, key=key)
+        self._pump_voice()
+        if toast is not None:
+            window = self._toast_window
+            if window is not None and window.isVisible():
+                QTimer.singleShot(FOCUS_TOAST_AFTER_MS, self, lambda held=toast: self._post_toast(*held))
+            else:
+                self._post_toast(*toast)
+
     # ---- the first-run "Jarvis on your desktop" card (hard rule 15; SPEC 10.3) ---------------------------------
 
     def _desktop_turned_on(self) -> bool:
@@ -9015,17 +9226,45 @@ class AppController(QObject):
         desktop = getattr(self, "desktop", None)
         return desktop is not None and desktop.consent_given()
 
+    def _desktop_ok_current(self) -> bool:
+        """p2r-6: the owner's OK covers today's card (desktop_ui.CONSENT_VERSION: Phase 2's rows too)."""
+        desktop = getattr(self, "desktop", None)
+        return desktop is not None and desktop.consent_current()
+
+    def _desktop_update_needed(self, text: str, *, on_hud: bool) -> bool:
+        """p2r-6: ``text`` asks for a PC control while the owner's OK is Phase 1's card's - nothing runs: the bar says
+        why in coral (the words stay) and the updated card shows (in the window now, or when he brings it back from
+        the HUD). False when it may go on."""
+        from .desktop_ui import ENTRY_REQUEST, ENTRY_UPDATE, UPDATE_NEEDED_HUD_TEXT, UPDATE_NEEDED_TEXT
+
+        desktop = getattr(self, "desktop", None)
+        if desktop is None or not desktop.needs_update(text):
+            return False
+        said = with_address(UPDATE_NEEDED_HUD_TEXT if on_hud else UPDATE_NEEDED_TEXT, self.config.assistant.address)
+        if self.ask is not None:
+            self.ask.show_note(said, hud.TONE_ERROR, hud_text=said)
+        else:
+            desktop.bar().set_status(said, hud.TONE_ERROR)
+        logger.info("Desktop: a request for a PC control waits for the updated card")
+        self._show_desktop_consent(ENTRY_UPDATE if on_hud else ENTRY_REQUEST)
+        return True
+
     def _show_desktop_consent(self, entry: str) -> None:
         """Before the owner's Turn on, the Dock's Desktop (and the Find list's), the HUD key, a --hud start and a typed
         desktop request show the first-run card in the window instead (desktop_view.ConsentCard, over the screen
         shown). It never brings the window forward by itself: the Dock and the Find list are clicked in it, the HUD
         key and a --hud start bring it forward as the window key does (the owner's own key) before this, and a request
         is typed in it. Nothing is stored until his Turn on."""
+        from .desktop_ui import ENTRY_UPDATE
+
         desktop = getattr(self, "desktop", None)
         window = self.window
         if desktop is None or self._shut_down or not window.isVisible() or not window.is_reading_view():
             logger.info("Desktop: the first-run card waits (the window is not up)")
+            if desktop is not None and entry == ENTRY_UPDATE:
+                self._desktop_consent_later = entry          # p2r-6: it shows as the owner brings the window back
             return
+        self._desktop_consent_later = ""
         reading = window.reading
         card = self._desktop_consent_card
         if card is None:
@@ -9037,8 +9276,20 @@ class AppController(QObject):
             window.visibilityChanged.connect(self._on_window_visibility_for_desktop)
             self._desktop_consent_card = card
         reading.find_overlay.close_list(restore_focus=False)
-        card.open_card(entry)
+        card.open_card(entry, updated=desktop.consent_given() and not desktop.consent_current())
         logger.info("Desktop: the first-run card shows (%s)", entry)
+
+    def _show_desktop_consent_later(self) -> None:
+        """p2r-6: the updated card asked for on the HUD shows now the window is back (once; not when turned on by
+        then)."""
+        from .desktop_ui import UPDATE_NEEDED_TEXT
+
+        entry, self._desktop_consent_later = self._desktop_consent_later, ""
+        desktop = getattr(self, "desktop", None)
+        if entry and desktop is not None and desktop.consent_given() and not desktop.consent_current():
+            if self.ask is not None:                         # the HUD's "Bring Jarvis back to read it" is done with
+                self.ask.show_note(with_address(UPDATE_NEEDED_TEXT, self.config.assistant.address), hud.TONE_ERROR)
+            self._show_desktop_consent(entry)
 
     def _on_consent_turn_on(self, entry: str) -> None:
         """The owner's Turn on: stored first (it counts only once saved - else the card says so and nothing is on),
@@ -9082,7 +9333,8 @@ class AppController(QObject):
     def _on_desktop_turn_off(self) -> None:
         """Settings > Desktop's Turn off: the owner's OK goes (for this run even when it couldn't be saved - then the
         panel says it will be on again after a restart), and what is on its way stops at once - the desktop's own jobs
-        (desktop_ui.turn_off: nothing opens after it) and a desktop request's planner run (cancelled)."""
+        (desktop_ui.turn_off: nothing opens after it), a desktop request's planner run and an Ask whose words are
+        coming (cancelled)."""
         from .desktop_view import TURN_OFF_NOT_SAVED_TEXT
 
         desktop = getattr(self, "desktop", None)
@@ -9093,6 +9345,11 @@ class AppController(QObject):
         if ask is not None and ask.running_mode == MODE_DESKTOP:
             logger.info("Desktop: turned off while a desktop request's planner run was on its way; cancelled")
             ask.cancel()
+        elif ask is not None and ask.busy and not ask.running_mode and ask.running_kind == _live.TASK_ASK:
+            logger.info("Desktop: turned off while an Ask was being answered; cancelled")
+            ask.cancel()               # its words stop at once too (AskController.askStopping)
+        if ask is not None:
+            ask.forget_desktop_ahead()  # no Claude Code waits for a desktop request that can't come
         self._sync_desktop_settings("" if saved else TURN_OFF_NOT_SAVED_TEXT)
 
     def _sync_desktop_settings(self, problem: str = "") -> None:
@@ -9211,6 +9468,8 @@ class AppController(QObject):
             wanted = route(text, RouteFlags(desktop=True)).kind == ROUTE_DESKTOP
         except Exception as exc:  # noqa: BLE001 - the note below instead
             logger.warning("Desktop: a request typed with Ask off could not be read (%s)", type(exc).__name__)
+        if wanted and self._desktop_update_needed(text, on_hud=True):
+            return                                            # p2r-6: Phase 1's OK - the updated card first
         if wanted and desktop.request(text, planner=False):
             bar.set_status(LOOKING_TEXT, hud.TONE_WORKING)    # the words stay until it is handled
             return
@@ -9241,6 +9500,8 @@ class AppController(QObject):
         if desktop.busy():
             ask.show_note(BUSY_TEXT, hud.TONE_ERROR)  # one at a time: the words stay (not done: coral)
             return None
+        if self._desktop_update_needed(text, on_hud=self._hud_active()):
+            return None                              # p2r-6: Phase 1's OK - the updated card first
         if not self._hud_active():
             window_bar = self.window.reading.command_bar
             if not desktop.consent_given():
@@ -9337,6 +9598,8 @@ class AppController(QObject):
             QTimer.singleShot(0, self._offer_pending_run)
         if not entered and self._account_ask_later is not None:
             QTimer.singleShot(0, self._ask_account_later)
+        if not entered and self._desktop_consent_later:
+            QTimer.singleShot(0, self._show_desktop_consent_later)
 
     def _on_about_to_quit(self) -> None:
         """The application quits while Jarvis may be on the desktop HUD: Windows ends the session (sign-out, shut
@@ -9936,8 +10199,11 @@ class AppController(QObject):
     def _prod_activity(self) -> str:
         """"visible": the reading screen is up and in sight; "minimized": the reading screen minimized - or Jarvis on
         the desktop HUD (its offers take the toast path; Phase 2-3: none in focus mode or while in control); "off":
-        anything else (hidden WAITING, the prompt, quitting)."""
+        anything else (hidden WAITING, the prompt, quitting) - and while focus mode runs (P2.5: the offers are held,
+        back when it ends)."""
         window = self.window
+        if self._focus_quiet():
+            return "off"
         if self.state == STATE_READING and not self._shut_down and self._hud_active():
             return "minimized"
         if self.state != STATE_READING or self._shut_down or not window.isVisible():
@@ -11362,7 +11628,10 @@ class AppController(QObject):
         keeps to captions and text until it stops)."""
         if self.state == STATE_QUITTING:
             return False
-        if self._meeting_recording():
+        if self._focus_quiet():
+            self._hold_for_focus(kind, text, key)
+            said = False
+        elif self._meeting_recording():
             said = False
         else:
             try:
@@ -11375,9 +11644,18 @@ class AppController(QObject):
             self.window.reading.say_caption(scrub_for_speech(text), spoken=False)
         return said
 
+    def _hold_for_focus(self, kind: str, text: str, key: str) -> None:
+        """P2.5: focus mode holds Jarvis's voice - kept (memory only; an acknowledgement is pointless later) and said
+        when focus ends; meanwhile his words show as text, as when muted."""
+        held = getattr(self, "_focus_speech", None)
+        if held is not None and text and kind != KIND_ACK:
+            held[:] = [item for item in held if not (key and item[2] == key)] + [(kind, text, key)]
+            del held[:-FOCUS_SPEECH_KEPT]
+
     def _voice_silent(self) -> bool:
-        """Jarvis's voice is muted or off, or a meeting records: what he would say shows as a caption only."""
-        if not self.config.assistant.speak or self._meeting_recording():
+        """Jarvis's voice is muted or off, a meeting records or focus mode runs (P2.5): what he would say shows as a
+        caption only."""
+        if not self.config.assistant.speak or self._meeting_recording() or self._focus_quiet():
             return True
         try:
             return bool(self.voice.muted)
@@ -11385,7 +11663,14 @@ class AppController(QObject):
             return False
 
     def _voice_call(self, name: str, *args: Any) -> None:
-        """``voice.<name>(*args)``; a broken voice never stops the app."""
+        """``voice.<name>(*args)``; a broken voice never stops the app. What focus mode holds goes the same way: a
+        cancelled key's sentence, or all of it when the voice is stopped (P2.5)."""
+        held = getattr(self, "_focus_speech", None)
+        if held:
+            if name in ("cancel_key", "stop_key") and args:
+                held[:] = [item for item in held if item[2] != args[0]]
+            elif name == "stop":
+                held.clear()
         try:
             getattr(self.voice, name)(*args)
         except Exception as exc:  # noqa: BLE001 - his words are on screen either way
@@ -11414,9 +11699,11 @@ class AppController(QObject):
         reading = self.window.reading
         reading.set_speech(self._utterance or self._briefing_speech)
         if text:
-            # Home's caption: what he says now, each word as he says it; the orb's spikes follow his voice
+            # Home's caption: what he says now, each word as he says it; the orb's spikes follow his voice. An
+            # answer's line being written, or waiting for its own voice, is left alone by anything else he says.
             timeline = self._voice_timeline()
-            reading.say_caption(text, timeline=timeline, position=self._voice_position)
+            if not reading.captions.waits_for_words() or reading.captions.holds_line(text):
+                reading.say_caption(text, timeline=timeline, position=self._voice_position)
             reading.set_voice(timeline, self._voice_position)
             self._show_context_tiles()             # the greeting's tiles fly out as he starts the line
         else:
@@ -13461,7 +13748,7 @@ class AppController(QObject):
         self._closing.set()
         for timer in (self._ignore_timer, self._tick_timer, self._snooze_timer, self._note_timer,
                       self._recheck_timer, self._agenda_timer, self._send_hold_timer, self._undo_timer,
-                      self._greeting_timer, self._held_timer):
+                      self._greeting_timer, self._held_timer, self._ack_timer):
             timer.stop()
         self._undos.clear()
         if self.ask is not None:

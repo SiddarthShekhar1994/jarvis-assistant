@@ -15,7 +15,11 @@
                                 own, NOTION_TOKEN and every other .env value) removed; three
                                 switches set
     build_argv(...)             the exact command line: a list, never a shell; the prompt goes to
-                                stdin and never into argv
+                                stdin and never into argv. ``streaming`` (an Ask's runs and a desktop
+                                request's) adds --input-format stream-json and --include-partial-messages:
+                                the prompt is then one stream-json user message (stream_message), stdin
+                                stays open until the result, and the reply's words arrive as they are
+                                written (stream.SayWatch)
     build_research_argv(...)    web research's: the same, but its only tools are WebSearch and
                                 WebFetch (--tools and --allowedTools), its own prompt, schema and
                                 settings (ask.research)
@@ -23,7 +27,8 @@
                                 created empty; anything in it (a CLAUDE.md, .mcp.json, .claude)
                                 refuses the run
     SubprocessRunner            CREATE_NO_WINDOW, a kill-on-close Job Object, stdout lines through
-                                a queue (so every wait has a timeout), a 4 KB stderr tail, kill()
+                                a queue (so every wait has a timeout), a 4 KB stderr tail, kill();
+                                with --input-format its stdin stays open: send() and close_stdin()
 
 Nothing here reads Claude's credential files or prints what `auth status` says beyond the three
 fields above. Never ``--bare`` (API keys only), ``--resume`` / ``--continue``, ``--debug`` or a
@@ -94,6 +99,10 @@ HARDENING_FLAGS = ("--safe-mode", "--restricted")
 # Flags web research needs besides REQUIRED_FLAGS (probed, not required by Ask): the allow rules
 # --permission-mode dontAsk needs for WebSearch / WebFetch (it denies anything not pre-approved).
 RESEARCH_FLAGS = ("--allowedTools",)
+# Flags the reply's words need as they are written (probed, not required: a Claude Code without them runs as before,
+# the whole reply at the end, with the prompt as plain stdin). The prompt never goes into argv either way.
+INPUT_FORMAT_FLAG = "--input-format"
+STREAM_FLAGS = (INPUT_FORMAT_FLAG, "--include-partial-messages")
 # Never passed, whatever a later version offers: --bare reads API keys only, the others resume
 # saved sessions, write debug files or skip permissions.
 FORBIDDEN_FLAGS = ("--bare", "--resume", "--continue", "-c", "-r", "--debug", "--debug-file",
@@ -156,6 +165,7 @@ class Probe:
     hardening: bool = False                   # --safe-mode and --restricted are both there
     message: str = ""                         # why not ok (safe to show and log)
     research_missing: tuple[str, ...] = ()    # RESEARCH_FLAGS --help does not list (Ask stays ok)
+    streaming: bool = True                    # --help lists every STREAM_FLAGS (else the plain path, as before)
 
 
 @dataclass(frozen=True)
@@ -293,11 +303,14 @@ def compact_json(data: Any) -> str:
 
 
 def build_argv(exe: Path | str, *, model: str, max_turns: int, schema: str, hardened: bool,
-               prompt_file: Path = PROMPT_FILE, settings_file: Path = SETTINGS_FILE) -> list[str]:
+               prompt_file: Path = PROMPT_FILE, settings_file: Path = SETTINGS_FILE,
+               streaming: bool = True) -> list[str]:
     """The planner's exact command line. No tools (``--tools ""``), no MCP servers (an empty
     ``--mcp-config`` with ``--strict-mcp-config``), no settings files (``--setting-sources ""``;
     ``--settings`` adds only Jarvis's own deny list), no slash commands, nothing saved, a turn cap;
-    ``hardened`` adds --safe-mode --restricted. The prompt is never in argv: it goes to stdin."""
+    ``hardened`` adds --safe-mode --restricted; ``streaming`` adds STREAM_FLAGS (the prompt as one
+    stream-json message, the reply's words as they are written). The prompt is never in argv: it goes
+    to stdin."""
     if not model or model.startswith("-") or any(char.isspace() for char in model):
         raise ValueError("not a model name")
     argv = [str(exe), "-p", "--output-format", "stream-json", "--verbose", "--model", model,
@@ -305,13 +318,26 @@ def build_argv(exe: Path | str, *, model: str, max_turns: int, schema: str, hard
             "--tools", "", "--mcp-config", EMPTY_MCP_CONFIG, "--strict-mcp-config",
             "--setting-sources", "", "--settings", str(settings_file),
             "--disallowedTools", "mcp__*", "--disable-slash-commands",
-            "--permission-mode", "dontAsk", "--permission-prompts", "none",
-            "--max-turns", str(int(max_turns)), "--no-session-persistence"]
+            "--permission-mode", "dontAsk", "--permission-prompts", "none"]
+    if streaming:
+        argv += [INPUT_FORMAT_FLAG, "stream-json", "--include-partial-messages"]
+    argv += ["--max-turns", str(int(max_turns)), "--no-session-persistence"]
     if hardened:
         argv += list(HARDENING_FLAGS)
     if set(argv) & set(FORBIDDEN_FLAGS):   # never, whatever changes above
         raise ValueError("a forbidden flag")
     return argv
+
+
+def holds_stdin(argv: Sequence[str]) -> bool:
+    """This command line reads its prompt as stream-json messages: stdin stays open until the result (the
+    process ends when it closes), so a process can also be started before anything is sent."""
+    return INPUT_FORMAT_FLAG in argv
+
+
+def stream_message(prompt: str) -> str:
+    """``prompt`` as the one stream-json user message a run with STREAM_FLAGS reads from stdin (one line, ASCII)."""
+    return json.dumps({"type": "user", "message": {"role": "user", "content": prompt}}) + "\n"
 
 
 def build_research_argv(exe: Path | str, *, model: str, max_turns: int, schema: str, hardened: bool,
@@ -376,6 +402,14 @@ class Process(Protocol):
     def stderr_tail(self) -> str: ...
 
     def close(self) -> None: ...
+
+    def send(self, text: str) -> bool:
+        """Write ``text`` to a process whose stdin stays open (holds_stdin); False when it has ended."""
+
+    def close_stdin(self) -> None:
+        """No more input: a process that holds its stdin ends once it has answered."""
+
+    def alive(self) -> bool: ...
 
 
 class Runner(Protocol):
@@ -461,7 +495,9 @@ _job_warning_logged = False
 
 
 class SubprocessProcess:
-    """One running CLI (SubprocessRunner.start). Thread-safe kill(); read_line() on one thread."""
+    """One running CLI (SubprocessRunner.start). Thread-safe kill(); read_line() on one thread. With a command line
+    that holds its stdin (holds_stdin) stdin stays open after ``stdin_text`` ("": nothing yet): send() writes more,
+    close_stdin() ends it; every other command line gets ``stdin_text`` and an end of input at once."""
 
     def __init__(self, argv: Sequence[str], *, stdin_text: str, env: Mapping[str, str], cwd: Path) -> None:
         global _job_warning_logged
@@ -479,18 +515,26 @@ class SubprocessProcess:
         self._tail = bytearray()
         self._tail_lock = threading.Lock()
         self._killed = False
-        payload = stdin_text.encode("utf-8")
-        threading.Thread(target=self._write, args=(payload,), name="ask-stdin", daemon=True).start()
+        self._stdin_jobs: queue.SimpleQueue[bytes | None] = queue.SimpleQueue()   # None: end of input
+        self._stdin_ended = False
+        if stdin_text:
+            self._stdin_jobs.put(stdin_text.encode("utf-8"))
+        if not holds_stdin(argv):
+            self.close_stdin()
+        threading.Thread(target=self._write, name="ask-stdin", daemon=True).start()
         threading.Thread(target=self._read_out, name="ask-stdout", daemon=True).start()
         threading.Thread(target=self._read_err, name="ask-stderr", daemon=True).start()
 
-    def _write(self, payload: bytes) -> None:
+    def _write(self) -> None:
         stdin = self._proc.stdin
         try:
-            if stdin is not None:
+            while stdin is not None:
+                payload = self._stdin_jobs.get()
+                if payload is None:
+                    break
                 stdin.write(payload)
                 stdin.flush()
-        except OSError:
+        except (OSError, ValueError):
             pass   # the process ended early; its exit code and stdout say why
         finally:
             try:
@@ -498,6 +542,21 @@ class SubprocessProcess:
                     stdin.close()
             except OSError:
                 pass
+
+    def send(self, text: str) -> bool:
+        """See the class docs (never blocks: the stdin thread writes it)."""
+        if self._stdin_ended or not self.alive():
+            return False
+        self._stdin_jobs.put(text.encode("utf-8"))
+        return True
+
+    def close_stdin(self) -> None:
+        if not self._stdin_ended:
+            self._stdin_ended = True
+            self._stdin_jobs.put(None)
+
+    def alive(self) -> bool:
+        return self._proc.poll() is None
 
     def _read_out(self) -> None:
         stdout = self._proc.stdout
@@ -564,6 +623,7 @@ class SubprocessProcess:
             return bytes(self._tail).decode("utf-8", errors="replace")
 
     def close(self) -> None:
+        self.close_stdin()      # the stdin thread ends with the process
         if self._proc.poll() is None:
             self.kill()
             self.wait(5)
@@ -624,11 +684,12 @@ def check_help(help_text: str, version: str) -> Probe:
         missing = ("--permission-mode dontAsk",)
     hardening = all(flag in flags for flag in HARDENING_FLAGS)
     research_missing = tuple(flag for flag in RESEARCH_FLAGS if flag not in flags)
+    streaming = all(flag in flags for flag in STREAM_FLAGS)
     if missing:
         return Probe(False, version, missing, hardening,
                      f"Claude Code {version or '(unknown version)'} is not supported by Ask yet (it lacks "
-                     f"{', '.join(missing)})", research_missing)
-    return Probe(True, version, (), hardening, research_missing=research_missing)
+                     f"{', '.join(missing)})", research_missing, streaming)
+    return Probe(True, version, (), hardening, research_missing=research_missing, streaming=streaming)
 
 
 def probe(exe: Path, runner: Runner, env: Mapping[str, str], cwd: Path | None = None) -> Probe:

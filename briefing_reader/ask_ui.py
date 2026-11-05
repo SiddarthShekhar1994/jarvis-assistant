@@ -11,7 +11,7 @@
                           window's again after): one bar at a time; it takes over what Ask shows
                           (running, Cancel, status, meta, link); on the HUD's bar a finished
                           request's answer is Jarvis's own words for where it is (HUD_IN_APPROVALS,
-                          HUD_IN_WINDOW), never the planner's
+                          HUD_IN_WINDOW) - only a plain answer whose words it showed as they were written stays
         shutdown()        cancels a running Ask and stops the thread (a daemon: never waited for)
     Signals (GUI thread):
         busyChanged(bool)            an Ask's planning really started (its first stage: the checks
@@ -31,6 +31,19 @@
                                      handles it at once - no planner run, no caps, no askStarted
         followupsRequested(str)      a typed "any follow-ups?" (ask.routes FOLLOWUPS) and the words as
                                      typed: the app answers from its follow-up list at once (no run)
+        sayWritten(int, int, str, str, bool, bool)  an Ask's say as it is written (ask.stream.SayWatch; never a mode's):
+                                     seq, run number, the words so far, what the caption may show of them
+                                     (persona.ask_say_shown; "" while it may show nothing), whether it is whole, and
+                                     whether that run's stdin had mail. Never after a Cancel. Never logged
+        askStopping(int)             Cancel was clicked: the Ask's words stop now (askCancelled follows when the run has
+                                     ended, within a second)
+
+An Ask's words come before its answer (sayWritten), and on the HUD's bar they are the caption line; the final
+validated answer stays the source of truth (``outcomeReady``; on the HUD's bar: HUD_IN_APPROVALS when it proposed
+something, a question back HUD_IN_WINDOW, else the final say's words). Ahead of the question: after each readiness check
+and every SWEEP_EVERY_S the planner may prepare an idle Claude Code (planner.prestart_ask / prestart_sweep, only with its
+prestart seam: the app's), and as the owner starts typing it reads the calendars an Ask would read (planner.read_ahead,
+at most every READ_AHEAD_EVERY_S). shutdown() kills what waits.
 
 The planner only proposes: its cards reach the app through ``outcomeReady`` and then go through the
 same click, Undo and executor.run_action path as the briefing's. ``live`` (the app's
@@ -114,6 +127,7 @@ from . import hud
 from .actions import is_web_open, link_host
 from .ask import desktop_mode
 from .ask import planner as ask_planner
+from .ask import prestart as ask_prestart
 from .ask.context import COMMAND_CAP, MEMORY_PROMPT_CAP, conversation_exchanges
 from .ask.modes import (MODE_DESKTOP, MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_TASKS, MODE_TITLES,
                         ORIGIN_AUTO, ORIGIN_CHOICE, ORIGIN_TYPED, ModeInputs, ModeRequest)
@@ -125,7 +139,7 @@ from .ask.stream import CANCELLED, LIMIT, RESEARCH_CAP
 from .config import Config
 from .desktop import executor as desktop_executor
 from .google_auth import PROBLEM_EXPIRED, PROBLEM_SCOPE, PROBLEM_SIGNED_OUT, logged_alias
-from .persona import with_address
+from .persona import ask_final_shown, ask_say_shown, with_address
 from .live import (
     ASK_CARDS,
     ASK_REQUEST,
@@ -196,12 +210,14 @@ NOTHING_TEXT = "Nothing to propose for that"
 MAIL_LINK_TEXT = "Allow {alias} mail"
 MAIL_LINK_TIP = ("{message}. Opens Google's sign-in for the {alias} account in your browser: tick the box for "
                  "reading email (read only; Ask uses it only for the request you type)")
-# The desktop HUD's bar (set_bar; SPEC 3): its caption shows only Jarvis's own words, so a finished request says
-# where its answer is - never the planner's words (the window's conversation has them, and Jarvis says them).
+# The desktop HUD's bar (set_bar; SPEC 3): a finished request says where its answer is, in Jarvis's own words (the
+# window's conversation has the planner's, and Jarvis says them). Only the words Jarvis is saying show on its caption
+# line as they are written, and a plain answer stays there (_hud_answer).
 HUD_IN_APPROVALS = "That's in Approvals, {sir}."     # it proposed something: the cards wait there (the chip counts them)
 HUD_IN_WINDOW = "That's in the window, {sir}."       # an answer or a question back: in the window's conversation
 DEFAULT_META = f"uses your Claude plan {DOT} nothing happens without your OK"
 _TICK_MS = 1000
+READ_AHEAD_EVERY_S = 30.0      # the calendars are read ahead at most this often as the owner starts typing
 # The header chip's colour for each planner.CHIP_* state.
 CHIP_STATUSES = {ask_planner.CHIP_OK: hud.STATUS_OK, ask_planner.CHIP_SIGN_IN: hud.STATUS_WARN,
                  ask_planner.CHIP_LIMIT: hud.STATUS_WARN, ask_planner.CHIP_OFF: hud.STATUS_OFF,
@@ -248,6 +264,13 @@ class _ModeJob:
     live: Any = None
 
 
+@dataclasses.dataclass(frozen=True)
+class _AheadJob:
+    """Something done ahead of the question, on the ask thread: planner.<method>() when the planner has it."""
+
+    method: str
+
+
 @dataclasses.dataclass
 class _Running:
     seq: int
@@ -265,6 +288,8 @@ class _Running:
     # A typed request's words (memory only, never logged): back to the empty bar when it is refused
     # before any planner run.
     words: str = dataclasses.field(default="", repr=False)
+    # What may be shown of its say so far (memory only, never logged): the HUD's caption line while it runs.
+    said: str = dataclasses.field(default="", repr=False)
 
 
 class _AskBridge(QObject):
@@ -273,6 +298,7 @@ class _AskBridge(QObject):
     checked = Signal(int, object, object, object)   # seq, Readiness, CapCheck, [MailNeed]
     stage = Signal(int, str)                        # seq, planner.STAGE_*
     planned = Signal(int, object)                   # seq, AskOutcome
+    words = Signal(int, int, str, bool, bool)       # seq, run number, the say so far, whole, mail in that run's stdin
 
 
 class _AskWorker:
@@ -313,6 +339,8 @@ class _AskWorker:
                     self._mode(job)
                 elif isinstance(job, _CheckJob):
                     self._check(job)
+                elif isinstance(job, _AheadJob):
+                    self._ahead(job.method)
             except Exception as exc:  # noqa: BLE001 - a bug must not end the thread (or take the app down)
                 logger.error("The Ask thread failed unexpectedly (%s)", type(exc).__name__)
                 if isinstance(job, (_PlanJob, _ModeJob)):
@@ -327,15 +355,28 @@ class _AskWorker:
         if step is not None:
             _claude_checked(step, ready, caps)
         self._emit("checked", job.seq, ready, caps, self._mail_needs())
+        if ready is not None and ready.ok:
+            self._ahead("prestart_ask")
+
+    def _ahead(self, method: str) -> None:
+        """planner.<method>() when it has it and Jarvis is not closing: nothing a test's planner must know of."""
+        call = getattr(self._planner, method, None)
+        if callable(call) and not self._stop.is_set():
+            call()
 
     def _plan(self, job: _PlanJob) -> None:
         def on_stage(stage: str) -> None:
             self._emit("stage", job.seq, stage)
 
+        def on_words(number: int, text: str, complete: bool, mail: bool) -> None:
+            self._emit("words", job.seq, number, text, complete, mail)
+
         # Only what there is: a planner without these keywords keeps working.
         extra: dict[str, Any] = {"live": job.live} if job.live is not None else {}
         if job.conversation:
             extra["conversation"] = job.conversation
+        if getattr(self._planner, "streams_words", False):
+            extra["on_words"] = on_words
         outcome = self._planner.plan(job.text, briefing=job.briefing, page_ids=job.page_ids, cancel=job.cancel,
                                      on_stage=on_stage, **extra)
         self._emit("planned", job.seq, outcome)
@@ -370,6 +411,8 @@ class AskController(QObject):
     mailSignInRequested = Signal(str)
     memoryRequested = Signal(object, str)
     followupsRequested = Signal(str)
+    sayWritten = Signal(int, int, str, str, bool, bool)
+    askStopping = Signal(int)
 
     def __init__(self, config: Config, planner: Any, bar: hud.CommandBar, *,
                  context: Callable[[], tuple[Any, Sequence[str]]],
@@ -408,6 +451,7 @@ class AskController(QObject):
         self._bridge.checked.connect(self._on_checked, queued)
         self._bridge.stage.connect(self._on_stage, queued)
         self._bridge.planned.connect(self._on_planned, queued)
+        self._bridge.words.connect(self._on_words, queued)
         self._worker: _AskWorker | None = None
         self._seq = 0
         self._running: _Running | None = None
@@ -421,6 +465,10 @@ class AskController(QObject):
         self._tick = QTimer(self)
         self._tick.setInterval(_TICK_MS)
         self._tick.timeout.connect(self._show_stage)
+        self._sweep = QTimer(self)             # Claude Code started ahead: recycled, replaced (only with the seam)
+        self._sweep.setInterval(int(ask_prestart.SWEEP_EVERY_S * 1000))
+        self._sweep.timeout.connect(self._on_sweep)
+        self._read_ahead_at = -math.inf        # monotonic time of the last read ahead
         # What the bound bar shows (replayed on the other bar by set_bar): its status line - ("status", text, tone,
         # keep_link, the HUD's words or None) or ("hint", text, tooltip) - and its meta line.
         self._shown: tuple = ("status", CHECKING_TEXT, hud.TONE_IDLE, False, None)
@@ -437,7 +485,7 @@ class AskController(QObject):
         an empty field reach this controller and the other bar's no longer do - one bar is bound at a time - and
         ``bar`` shows what Ask shows now: running or not (with Cancel as it is), the status line, the meta line and the
         link. On the HUD's bar a finished request's answer is Jarvis's own words for where it is (HUD_IN_APPROVALS,
-        HUD_IN_WINDOW), never the planner's."""
+        HUD_IN_WINDOW), or a plain answer's own words when they showed there as they were written."""
         old = self.bar
         if bar is None or bar is old:
             return
@@ -457,10 +505,12 @@ class AskController(QObject):
         bar.cancelRequested.connect(self.cancel)
         bar.linkClicked.connect(self._on_link)
         bar.statusDismissed.connect(self._show_idle)
+        bar.typingChanged.connect(self._on_typing)
 
     def _unbind(self, bar: hud.CommandBar) -> None:
         for signal, slot in ((bar.submitted, self.submit), (bar.cancelRequested, self.cancel),
-                             (bar.linkClicked, self._on_link), (bar.statusDismissed, self._show_idle)):
+                             (bar.linkClicked, self._on_link), (bar.statusDismissed, self._show_idle),
+                             (bar.typingChanged, self._on_typing)):
             try:
                 signal.disconnect(slot)
             except (RuntimeError, TypeError):   # not connected (or the bar is gone): nothing to let go of
@@ -502,6 +552,8 @@ class AskController(QObject):
                                       background=self._background_task)
             logger.info("Ask Jarvis is on (model %s; at most %d planner runs an hour, %d a day)",
                         self.config.ask.model, self.config.ask.max_per_hour, self.config.ask.max_per_day)
+            if self._prepares_ahead():
+                self._sweep.start()
         self.refresh()
 
     def refresh(self, full: bool = True) -> None:
@@ -518,8 +570,38 @@ class AskController(QObject):
             running.task.finish(STATUS_CANCELLED, summary="Jarvis closed")
         self._stop.set()
         self._tick.stop()
+        self._sweep.stop()
         if self._worker is not None:
             self._worker.stop()
+        closing = getattr(self.planner, "prestart_shutdown", None)
+        if callable(closing):
+            try:
+                closing()          # what waits ahead of the question is killed; nothing starts after this
+            except Exception as exc:  # noqa: BLE001 - shutting down goes on
+                logger.warning("Ask: what was started ahead could not be closed (%s)", type(exc).__name__)
+
+    def forget_desktop_ahead(self) -> None:
+        """Desktop was turned off: no Claude Code waits for a desktop request any more (on the ask thread, in turn)."""
+        if self._worker is not None and not self._stop.is_set() and self._prepares_ahead():
+            self._worker.put(_AheadJob("prestart_forget_desktop"))
+
+    def _prepares_ahead(self) -> bool:
+        """The planner has a prestart seam (the app's real one; a test's only when it asks)."""
+        return getattr(getattr(self.planner, "engine", None), "prestart", None) is not None
+
+    def _on_sweep(self) -> None:
+        if self._worker is not None and not self._stop.is_set() and self._running is None:
+            self._worker.put(_AheadJob("prestart_sweep"))
+
+    def _on_typing(self, typing: bool) -> None:
+        """The owner starts typing: the calendars an Ask would read are read now, on the ask thread (a request sent
+        meanwhile waits for them there, and then needs no read of its own)."""
+        if not typing or self._worker is None or self._stop.is_set() or self._running is not None:
+            return
+        now = self._monotonic()
+        if self._prepares_ahead() and now - self._read_ahead_at >= READ_AHEAD_EVERY_S:
+            self._read_ahead_at = now
+            self._worker.put(_AheadJob("read_ahead"))
 
     @property
     def busy(self) -> bool:
@@ -746,6 +828,7 @@ class AskController(QObject):
         running.task.note("Cancel clicked")
         self.bar.set_cancel_enabled(False)
         self._status(CANCELLING_TEXT, hud.TONE_WORKING)
+        self.askStopping.emit(running.seq)
 
     def _on_stage(self, seq: int, stage: str) -> None:
         running = self._running
@@ -757,11 +840,24 @@ class AskController(QObject):
             self.busyChanged.emit(True)
         self._show_stage()
 
+    def _on_words(self, seq: int, number: int, text: str, complete: bool, mail: bool) -> None:
+        """The say so far: a Cancel, a closing app or another request's seq and nothing shows any more."""
+        running = self._running
+        if running is None or seq != running.seq or running.cancel_requested or running.mode or self._stop.is_set():
+            return
+        running.said = ask_say_shown(text, complete=complete, read_mail=mail)
+        self.sayWritten.emit(seq, number, text, running.said, complete, mail)
+        if self.bar.is_hud():
+            self._show_stage()
+
     def _show_stage(self) -> None:
         running = self._running
         if running is None or running.cancel_requested:
             return
         if self._monotonic() < self._notice_until:   # a refused click's words stay a few seconds
+            return
+        if running.said and self.bar.is_hud():       # the HUD's caption line: Jarvis's words as they are written
+            self._status(running.said, hud.TONE_DONE)
             return
         if running.mode:   # "Planning your day... 9 s" from the click on (the meta line: Esc cancels)
             text = f"{MODE_STATUS.get(running.mode, STARTING_TEXT)} {round(self._monotonic() - running.started)} s"
@@ -807,7 +903,8 @@ class AskController(QObject):
                 tone = _desktop_tone(outcome)
             # The bar is never touched here: a typed request left it as it started (Up brings it back),
             # and a click-started run never touches what the owner may be typing (R23).
-            self._status(self._answer(outcome), tone, keep_link=keep_link, hud_text=self._hud_answer(outcome))
+            self._status(self._answer(outcome), tone, keep_link=keep_link,
+                         hud_text=self._hud_answer(outcome, bool(running.said)))
         else:
             if outcome.kind == LIMIT:
                 self._limit_message = outcome.message
@@ -881,17 +978,22 @@ class AskController(QObject):
             parts = [note, *parts] if first else [*parts, note]
         return " ".join(parts)
 
-    def _hud_answer(self, outcome: Any) -> str:
-        """A finished request's words on the desktop HUD's bar, whose caption shows only Jarvis's own words (SPEC 3):
-        where the answer is - HUD_IN_APPROVALS when it proposed something (the "N need your OK" chip counts it), else
-        HUD_IN_WINDOW (an answer or a question back, in the window's conversation). A brief, a meeting's summary and a
-        mode that did not run say what ``_answer`` says: those are Jarvis's own words already."""
+    def _hud_answer(self, outcome: Any, written: bool = False) -> str:
+        """A finished request's words on the desktop HUD's bar: where the answer is - HUD_IN_APPROVALS when it proposed
+        something (the "N need your OK" chip counts it), else HUD_IN_WINDOW (an answer or a question back, in the
+        window's conversation). ``written``: its say was on the caption line as it was written, so a plain answer stays
+        there, in the final plan's words. A brief, a meeting's summary and a mode that did not run say what ``_answer``
+        says: those are Jarvis's own words already."""
         mode = getattr(outcome, "mode", "")
         if getattr(outcome, "note_kind", "") or mode == MODE_DESKTOP or (mode in (MODE_PREP, MODE_MEETING)
                                                                          and getattr(outcome, "brief", None) is not None):
             return self._answer(outcome)
         address = getattr(getattr(self.config, "assistant", None), "address", "sir")
         proposed = any(not card.error for card in outcome.cards)
+        if written and not proposed and not getattr(outcome, "question", ""):
+            shown = ask_final_shown(outcome)
+            if shown:
+                return shown
         return with_address(HUD_IN_APPROVALS if proposed else HUD_IN_WINDOW, address)
 
     # ---- checks, chip and the idle bar -------------------------------------------------------
@@ -1395,9 +1497,14 @@ def default_planner(config: Config, calendars: Mapping[str, Any], senders: Mappi
     """The app's planner: the owner's Claude Code (ClaudeEngine) and the app's own Google objects,
     read only (GoogleSources). ``accounts`` are executor.build_accounts' (shared with the calendars
     and senders, one sign-in each); the Gmail readers of the "gmail_read" accounts are built on them."""
+    from .config import CONFIG_FILE_NAME, PROJECT_ROOT
     from .executor import build_readers
 
     readers = build_readers(config, accounts) if accounts and config.ask.read_mail else {}
     engine = ask_planner.ClaudeEngine(config.ask, config.data_dir)
+    # One idle Claude Code ahead of the question; recycled when these change too (the prompt, the settings and
+    # claude.exe it watches anyway). While the test guard is on it never starts a real process.
+    engine.prestart = ask_prestart.Prestarter(engine.runner, extra_files=(
+        PROJECT_ROOT / CONFIG_FILE_NAME, ask_planner.cli.SCHEMA_FILE, ask_planner.cli.DESKTOP_SCHEMA_FILE))
     sources = ask_planner.GoogleSources(config, calendars, senders, readers)
     return ask_planner.AskPlanner(config, engine, sources)

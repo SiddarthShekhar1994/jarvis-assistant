@@ -437,10 +437,11 @@ class AskConversationTests(unittest.TestCase):
         app = self.make(GatedProcess(plan(), gate))
         c, reading = app.c, app.c.window.reading
         reading.set_tab(hud.TAB_BRIEFING)
-        with self.assertLogs("briefing_reader", level="DEBUG") as logs:
+        with self.assertLogs("briefing_reader", level="DEBUG") as logs, mock.patch.object(ui, "ASK_ACK_HOLD_MS", 1):
             self.submit(c)
             self.assertEqual(reading.current_tab(), hud.TAB_LIVE)   # [live] auto_open = "tab" (the default)
             self.assertEqual(reading.conversation.entries()[-1][0::2], ("you", COMMAND))
+            self.assertTrue(wait_for(lambda: "ack" in app.voice.kinds()))   # a slow request: its hold is over
             gate.set()
             self.assertTrue(wait_for(lambda: not c.ask.busy, 10))
             settle()

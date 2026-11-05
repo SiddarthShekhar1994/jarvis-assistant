@@ -162,7 +162,7 @@ class WebRequestTests(ResearchAppCase):
         address = self.c.config.assistant.address
         expected = research_reply_speech(report.answer, sources=2, cards=1, address=address).text
         self.assertEqual(self.app.voice.said[-1], ("reply", expected, ""))
-        self.assertEqual(self.app.voice.kinds(), ["ack", "reply"])
+        self.assertEqual(self.app.voice.kinds(), ["reply"])      # answered within the acknowledgement's hold
         self.assertNotIn("[1]", expected)
         self.assertIn("The sources are on screen", expected)
         # ACTIVITY: counts only (never the question, the answer, a title or a site).

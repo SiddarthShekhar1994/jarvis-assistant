@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -19,6 +20,7 @@ from briefing_reader.desktop import backend as dbk
 from briefing_reader.desktop import fileops as fo
 from briefing_reader.desktop import journal as jn
 from briefing_reader.desktop import paths
+from briefing_reader.desktop import service as ds
 from briefing_reader.desktop.context import FileItem, Place
 from tests.desktop_fakes import DOCS, DOWNLOADS, LING, FakeRecycleBin, desktop_disk
 
@@ -291,9 +293,10 @@ class RecoveryTests(unittest.TestCase):
         for seq, after in ((4, True), (5, False)):
             original = bin_.recycle
 
-            def crashing(path: str, after: bool = after, original=original) -> None:  # type: ignore[no-untyped-def]
+            def crashing(path: str, identity: object = None, after: bool = after,  # type: ignore[no-untyped-def]
+                         original=original) -> None:
                 if after:
-                    original(path)
+                    original(path, identity)
                 raise _Crash()
 
             bin_.recycle = crashing                                          # type: ignore[method-assign]
@@ -338,6 +341,38 @@ class RecoveryTests(unittest.TestCase):
         self.assertIn("recovered 1 item(s) in 1 run(s) (done=1), 1 unreadable line(s)", text)
         self.assertNotIn(CANARY, text)
         self.assertNotIn("Owner", text)
+
+    def test_the_apps_housekeeping_recovers_then_purges_and_never_redoes(self) -> None:
+        """p2r-1: desktop.service.housekeep (the desktop thread's job at start-up, at Turn on and at the day's first
+        request): the item a crash left "doing" is corrected, the run older than 30 days purged - nothing redone; set
+        off (THE CONSENT GATE) or with no folder nothing runs, and with no backend only the purge."""
+        self.crash("move_item", after=True)
+        self.crashed(fo.FileOp(fo.MOVE, (self.item(BUDGET),), self.place(DOWNLOADS)))
+        now = time.time()                                                   # the crash's journal is today's
+        old = jn.Journal(self.folder, "old1", clock=lambda: now - 31 * DAY)
+        old.append(jn.Record(1, jn.MOVE, jn.DONE))
+        recent = jn.Journal(self.folder, "recent1", clock=lambda: now - 29 * DAY)
+        recent.append(jn.Record(1, jn.MOVE, jn.DONE))
+
+        class Off:
+            def is_set(self) -> bool:
+                return True
+
+        self.assertEqual(ds.housekeep(lambda: self.folder, lambda: self.fake, cancel=Off()), ds.Housekept())
+        self.assertEqual(self.last(1).state, jn.DOING)                     # turned off: nothing ran
+        self.assertEqual(ds.housekeep(self.refused, lambda: self.fake), ds.Housekept())
+        before = len(self.fake.calls)
+        self.assertEqual(ds.housekeep(lambda: self.folder, lambda: self.fake), ds.Housekept(True, 1, 1))
+        self.assertEqual((self.last(1).state, self.last(1).reason_code), (jn.DONE, jn.R_RECOVERED))
+        self.assertEqual({method for method, _argument in self.fake.calls[before:]} & set(_FILE_OPS), set())
+        self.assertEqual(sorted(os.listdir(self.folder)), ["crash1.jsonl", "recent1.jsonl"])
+        later = jn.Journal(self.folder, "old2", clock=lambda: now - 40 * DAY)
+        later.append(jn.Record(1, jn.MOVE, jn.DOING, src=BUDGET, dst=DOWNLOADS + "\\Budget 2026.xlsx"))
+        self.assertEqual(ds.housekeep(lambda: self.folder, self.refused), ds.Housekept(True, 0, 1))
+
+    @staticmethod
+    def refused() -> object:
+        raise dbk.RealBackendInTests("never in a test")
 
 
 if __name__ == "__main__":

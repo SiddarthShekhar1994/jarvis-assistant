@@ -192,6 +192,7 @@ class ResultCards(QObject):
     changed = Signal()                          # the cards or the decor changed
     tidyClicked = Signal(str)                   # the tidy card's button (desktop.tidy's keys)
     tidyTicked = Signal(int, bool)              # the owner's tick on its row
+    keyboardReturned = Signal(str)              # p2r-10: a card gave the keyboard back (hud_overlay.KEYS_*)
 
     def __init__(self, overlay: hud_overlay.HudOverlay, *,
                  watch_factory: Callable[[], winwatch.WindowWatch] | None = None, hour24: bool = False,
@@ -217,6 +218,10 @@ class ResultCards(QObject):
 
     def entries(self) -> list[CardEntry]:
         return list(self._entries)
+
+    def newest_window(self) -> Any:
+        """p2r-10: the newest card showing (SPEC 8.1: the one the owner's Tab in the HUD's bar moves into), or None."""
+        return next((entry.window for entry in reversed(self._entries) if entry.window.isVisible()), None)
 
     def show_run(self, run: Any, before: Collection[int] = frozenset()) -> int:
         """``run``'s cards (``run.shown``) on the HUD, each looking for its window; how many show."""
@@ -297,6 +302,7 @@ class ResultCards(QObject):
         entry = TidyEntry(state, window)
         window.buttonClicked.connect(lambda key, entry=entry: self._on_tidy(entry, key))
         window.tickToggled.connect(lambda number, ticked, entry=entry: self._on_tick(entry, number, ticked))
+        window.keyboardReturned.connect(self.keyboardReturned)
         self._entries.append(entry)
         self._place(entry)
         if state.card.folder:
@@ -334,6 +340,7 @@ class ResultCards(QObject):
         window.set_content(content_for(card, self._hour24))
         entry = CardEntry(card, window, before)
         window.buttonClicked.connect(lambda key, entry=entry: self._on_button(entry, key))
+        window.keyboardReturned.connect(self.keyboardReturned)
         self._entries.append(entry)
         self._place(entry)
         if card.kind == desktop_results.OPENED and card.exe:

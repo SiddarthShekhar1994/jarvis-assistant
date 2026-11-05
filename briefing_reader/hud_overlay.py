@@ -16,25 +16,31 @@ the chips and the cards (``Glow``) as well as the brackets and tethers.
     Jarvis", the HUD key's keycaps - none while no key can work), Jarvis's caption line with the orb's state word, a
     hairline and "Bring Jarvis back"; under the bar the chips: "Briefing ready" (cyan), "N need your OK" (amber;
     ui.needs_ok_chip's words) and REC with a coral dot and the time (tabular figures: its width holds while the
-    seconds tick). The caption wraps as the prototype's ``.bcap`` does, to at most ``CAPTION_LINES`` lines - the bar
-    and the window grow with it, the chips move down - and only past that it is cut with an ellipsis, its whole text
-    the tooltip (``WA_AlwaysShowToolTips``: the HUD is never the active window). ``place_on(screen)`` /
+    seconds tick); P2.4: "Timer \u00b7 ends 10:32 AM" (cyan, static) while a Jarvis timer runs. The caption wraps
+    as the prototype's ``.bcap`` does, to at most ``CAPTION_LINES`` lines - the bar and the window grow with it, the
+    chips move down - and only past that it is cut with an ellipsis, its whole text the tooltip
+    (``WA_AlwaysShowToolTips``: the HUD is never the active window). ``place_on(screen)`` /
     ``place_in(area)``, ``area()``; ``set_caption(text)``; ``set_look(base, muted=, offline=)`` (the orb and the
-    state word); ``set_briefing_ready(bool)``, ``set_pending(count)``, ``set_recording(elapsed, warning="")`` (a chip
-    whose words did not change is not repainted); ``chip_texts()``; ``bar_rect()``, ``orb_center()``,
-    ``occupied_rect()`` (global); ``glows()`` (the bar's and the chips' ``Glow``, global); ``cut_texts()`` (words
-    cut or crowded: none at the sizes it is built for). Signals ``bringBackClicked()``, ``chipClicked(key)``
-    (``CHIP_BRIEFING``, ``CHIP_APPROVALS``, ``CHIP_REC``), ``shapeChanged()`` (the window, the bar or a chip moved
-    or changed size) and ``keyboardChanged(bool)``; the bar's own signals are on ``bar``. The bar's status (an answer,
-    a question, a problem, what Jarvis is doing - as Home's thinking line, without its seconds) shows in the caption
-    line without its technical readouts. The bar's keyboard (SPEC 8.3, P1.6): while idle the window keeps
-    ``WindowDoesNotAcceptFocus``; ``take_keyboard()`` (the HUD key, through the app) or a click in the input
-    remembers the window that has the keyboard, drops the flag on the NATIVE window (QWindow.setFlag; never
+    state word); ``set_briefing_ready(bool)``, ``set_pending(count)``, ``set_recording(elapsed, warning="")``,
+    ``set_timer(text)`` (a chip whose words did not change is not repainted); ``chip_texts()``. P2.5: under the chips
+    the instant row (``set_instant(items, dnd=, undo_all=)``, ``instant_texts()``; ``instant``, ``dnd_chip``,
+    ``undo_all``): one cyan ``InstantChip`` per kind of change done at once - what it did and its NoFocus Undo link
+    (``instantUndo(key)``) -, "Do Not Disturb - Turn on" while focus mode runs (``dndClicked``: Windows' own switch)
+    and "Undo all" (``undoAllClicked``); it adds a row (or wraps) only while it shows, its chips fly with the others
+    and have their glows in the layer; ``bar_rect()``,
+    ``orb_center()``, ``occupied_rect()`` (global); ``glows()`` (the bar's and the chips' ``Glow``, global);
+    ``cut_texts()`` (words cut or crowded: none at the sizes it is built for). Signals ``bringBackClicked()``,
+    ``chipClicked(key)`` (``CHIP_BRIEFING``, ``CHIP_APPROVALS``, ``CHIP_REC``, ``CHIP_TIMER``), ``shapeChanged()`` (the
+    window, the bar or a chip moved or changed size) and ``keyboardChanged(bool)``; the bar's own signals are on
+    ``bar``. The bar's status (an answer, a question, a problem, what Jarvis is doing - as Home's thinking line, without
+    its seconds) shows in the caption line without its technical readouts. The bar's keyboard (SPEC 8.3, P1.6): while
+    idle the window keeps ``WindowDoesNotAcceptFocus``; ``take_keyboard()`` (the HUD key, through the app) or a click in
+    the input remembers the window that has the keyboard, drops the flag on the NATIVE window (QWindow.setFlag; never
     QWidget.setWindowFlag, which recreates and hides it), activates it through the seam (never a synthetic key) and
-    focuses the input - its outline lit; Enter, or Esc in an empty bar, gives the keyboard back
-    (``give_back_keyboard``: the flag back, the remembered window activated again); Esc with text clears it and Esc
-    while a request runs cancels it (CommandBar's own); the owner going to another window, or the HUD hiding, gives it
-    back with nothing activated; ``holds_keyboard()``. Its
+    focuses the input - its outline lit; Enter, or Esc in an empty bar, gives the keyboard back (``give_back_keyboard``:
+    the flag back, the remembered window activated again); Esc with text clears it and Esc while a request runs cancels
+    it (CommandBar's own); the owner going to another window, or the HUD hiding, gives it back with nothing activated;
+    ``holds_keyboard()``. Its
     paint is one cached pixmap (the panel, the hairlines, the orb's dark disc): an orb frame repaints 104 px of it.
     ``flight_pictures(dpr)``: the panel and what is in the bar as pictures of the whole window, and the chips' - the
     switch flies them in and out (alive.WindowFlight), also while the window is hidden.
@@ -122,7 +128,7 @@ from PySide6.QtGui import (
     QRegion,
     QScreen,
 )
-from PySide6.QtWidgets import QAbstractButton, QSizePolicy, QWidget
+from PySide6.QtWidgets import QAbstractButton, QApplication, QSizePolicy, QWidget
 
 from . import alive, holo, hud, offer_view, settings_view
 from . import orb as orb_mod
@@ -169,6 +175,12 @@ CHIP_BRIEFING = "briefing"
 CHIP_APPROVALS = "approvals"
 CHIP_REC = "rec"
 CHIP_KEYS = (CHIP_BRIEFING, CHIP_APPROVALS, CHIP_REC)
+CHIP_TIMER = "timer"                        # P2.4: while a Jarvis timer runs (after the others; P2.5's row follows)
+CHIP_DND = "dnd"                            # P2.5: "Do Not Disturb - Turn on" while focus mode runs (Windows' switch)
+# P2.5: the instant row's chips, one per kind of change done at once, in this order (desktop.pcctl.INSTANT_KINDS).
+INSTANT_KEYS = ("focus", "music", "volume", "timers", "shots")
+UNDO_TEXT = "Undo"
+UNDO_ALL_TEXT = "Undo all"
 BRIEFING_READY_TEXT = "Briefing ready"
 BRING_BACK_TEXT = "Bring Jarvis back"
 _AMBER_CHEVRON = "#C9A46A"
@@ -612,6 +624,8 @@ _CHIP_LOOKS = {   # fill, border, hover border, text, dot, chevron
     CHIP_APPROVALS: (holo.TILE_AMBER, holo.alpha(holo.AMBER, 0.60), QColor(holo.AMBER), holo.AMBER_TX, holo.AMBER,
                      _AMBER_CHEVRON),
     CHIP_REC: (holo.RAISED, holo.alpha(holo.ALERT, 0.55), QColor(holo.ALERT), holo.INK_1, holo.ALERT, holo.INK_4),
+    CHIP_TIMER: (holo.TILE, holo.alpha(holo.HOLO, 0.42), QColor(holo.HOLO), holo.INK_1, holo.HOLO, holo.INK_4),
+    CHIP_DND: (holo.TILE, holo.alpha(holo.HOLO, 0.42), QColor(holo.HOLO), holo.INK_1, holo.HOLO, holo.INK_4),
 }
 
 
@@ -619,13 +633,15 @@ class HudChip(QAbstractButton):
     """A chip under the HUD bar (Switch.dc.html .hchip): 36 high, opaque, a dot, the words and a chevron. Static (no
     ping, no blinking dot: only the orb loops; words that did not change repaint nothing); REC's figures are tabular,
     so its width holds while the seconds tick (the window's REC readout does the same). NoFocus, a click emits
-    ``clicked``."""
+    ``clicked`` - but a ``read_only`` one (p2r-8: the timer's "Timer - ends 10:32 AM") is a plain label: the arrow
+    cursor, no hover, no chevron, never a click."""
 
     PAD = 12
 
-    def __init__(self, key: str, parent: QWidget | None = None) -> None:
+    def __init__(self, key: str, parent: QWidget | None = None, *, read_only: bool = False) -> None:
         super().__init__(parent)
         self._key = key if key in _CHIP_LOOKS else CHIP_BRIEFING
+        self._read_only = bool(read_only)
         self._hover = False
         self._font = hud.body_font(13, 500)
         if self._key == CHIP_REC:
@@ -633,12 +649,15 @@ class HudChip(QAbstractButton):
                 self._font.setFeature(QFont.Tag("tnum"), 1)      # as holo.font does for its tabular roles
             except (AttributeError, TypeError, ValueError):       # Qt before 6.7: proportional figures
                 pass
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setCursor(Qt.CursorShape.ArrowCursor if self._read_only else Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
     def key(self) -> str:
         return self._key
+
+    def read_only(self) -> bool:
+        return self._read_only
 
     def setText(self, text: str) -> None:  # noqa: N802 - Qt override
         if text == self.text():
@@ -655,9 +674,14 @@ class HudChip(QAbstractButton):
     def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
         return self.sizeHint()
 
+    def hitButton(self, pos: QPoint) -> bool:  # noqa: N802 - Qt override
+        """A chip that is not showing (a count at 0) never answers a click, nor a read-only one."""
+        return not self._read_only and not self.isHidden() and super().hitButton(pos)
+
     def _chrome(self) -> float:
-        """Everything but the words: the padding, the dot and the chevron with their gaps."""
-        return self.PAD + 7 + 8 + 8 + 14 + self.PAD
+        """Everything but the words: the padding, the dot and the chevron with their gaps (a read-only chip has no
+        chevron)."""
+        return self.PAD + 7 + 8 + (0 if self._read_only else 8 + 14) + self.PAD
 
     def shown_text(self) -> str:
         """The words as painted: cut with an ellipsis only when the chip is narrower than its words."""
@@ -666,13 +690,18 @@ class HudChip(QAbstractButton):
 
     def enterEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().enterEvent(event)
-        self._hover = True
-        self.update()
+        if not self._read_only:
+            self._hover = True
+            self.update()
 
     def leaveEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().leaveEvent(event)
-        self._hover = False
-        self.update()
+        if self._hover:
+            self._hover = False
+            self.update()
+
+    def hovered(self) -> bool:
+        return self._hover
 
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         fill, border, hover, ink, dot, chevron = _CHIP_LOOKS[self._key]
@@ -697,8 +726,209 @@ class HudChip(QAbstractButton):
             width = QFontMetricsF(self._font).horizontalAdvance(text)
             painter.drawText(QRectF(x, 0, width + 2, self.height()),
                              int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), text)
-            holo.paint_icon(painter, QRectF(x + width + 8, rect.center().y() - 7, 14, 14), "chevron",
-                            QColor(chevron), stroke=2.0)
+            if not self._read_only:
+                holo.paint_icon(painter, QRectF(x + width + 8, rect.center().y() - 7, 14, 14), "chevron",
+                                QColor(chevron), stroke=2.0)
+        finally:
+            painter.end()
+
+
+def _shown(widget: QWidget) -> bool:
+    """The widget and its parent are not hidden (a chip not showing never answers a click)."""
+    parent = widget.parentWidget()
+    return not widget.isHidden() and (parent is None or not parent.isHidden())
+
+
+class _ChipLink(QAbstractButton):
+    """An instant chip's Undo (P2.5): cyan words at the chip's right end, brighter and underlined under the pointer.
+    NoFocus; a click emits ``clicked`` (one not showing never answers)."""
+
+    def __init__(self, text: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._hover = False
+        self._font = hud.body_font(13, 500)
+        self.setText(text)
+        self.setAccessibleName(text)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return QSize(math.ceil(QFontMetricsF(self._font).horizontalAdvance(self.text())) + 2, CHIP_HEIGHT - 8)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return self.sizeHint()
+
+    def hitButton(self, pos: QPoint) -> bool:  # noqa: N802 - Qt override
+        return _shown(self) and super().hitButton(pos)
+
+    def enterEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().enterEvent(event)
+        self._hover = True
+        self.update()
+
+    def leaveEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().leaveEvent(event)
+        self._hover = False
+        self.update()
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            font = QFont(self._font)
+            font.setUnderline(self._hover or self.isDown())
+            painter.setFont(font)
+            painter.setPen(QColor(holo.HOLO_HI if (self._hover or self.isDown()) else holo.HOLO))
+            painter.drawText(QRectF(self.rect()), int(Qt.AlignmentFlag.AlignCenter), self.text())
+        finally:
+            painter.end()
+
+
+class InstantChip(QWidget):
+    """P2.5: a chip of the HUD's instant row - what Jarvis changed at once ("Volume - 20%", "Music - paused", "Focus -
+    ends 10:30 AM") and its Undo: a NoFocus link at its right end after a hairline (``undoClicked``). Switch.dc.html's
+    .hchip in cyan (a dot, the words; static - only the orb loops). The chip itself takes no click and never the
+    focus."""
+
+    undoClicked = Signal()
+    PAD = 12
+    GAP = 10
+
+    def __init__(self, key: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._key = key
+        self._text = ""
+        self._font = hud.body_font(13, 500)
+        self.undo = _ChipLink(UNDO_TEXT, self)
+        self.undo.clicked.connect(self.undoClicked)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+    def key(self) -> str:
+        return self._key
+
+    def text(self) -> str:
+        return self._text
+
+    def set_text(self, text: str) -> bool:
+        """Its words; False when they did not change (nothing repaints, nothing moves)."""
+        text = str(text or "")
+        if text == self._text:
+            return False
+        self._text = text
+        self.setAccessibleName(text)
+        self.undo.setAccessibleName(f"{UNDO_TEXT}: {text}")
+        self.updateGeometry()
+        self._place_link()
+        self.update()
+        return True
+
+    def _chrome(self) -> float:
+        """Everything but the words: the padding, the dot, the hairline and the Undo with their gaps."""
+        return self.PAD + 7 + 8 + self.GAP + 1 + self.GAP + self.undo.sizeHint().width() + self.PAD
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        width = self._chrome() + QFontMetricsF(self._font).horizontalAdvance(self._text)
+        return QSize(math.ceil(width), CHIP_HEIGHT)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return self.sizeHint()
+
+    def shown_text(self) -> str:
+        """The words as painted: cut with an ellipsis only when the chip is narrower than they are."""
+        room = max(0.0, self.width() - self._chrome())
+        return QFontMetricsF(self._font).elidedText(self._text, Qt.TextElideMode.ElideRight, room + 0.5)
+
+    def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        self._place_link()
+
+    def _place_link(self) -> None:
+        hint = self.undo.sizeHint()
+        self.undo.setGeometry(self.width() - self.PAD - hint.width(), (self.height() - hint.height()) // 2,
+                              hint.width(), hint.height())
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+            radius = rect.height() / 2
+            painter.setPen(QPen(holo.alpha(holo.HOLO, 0.42), 1.0))
+            painter.setBrush(QColor(holo.TILE))
+            painter.drawRoundedRect(rect, radius, radius)
+            center = QPointF(self.PAD + 3.5, rect.center().y())
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(holo.alpha(holo.HOLO, 0.25))
+            painter.drawEllipse(center, 6.0, 6.0)
+            painter.setBrush(QColor(holo.HOLO))
+            painter.drawEllipse(center, 3.5, 3.5)
+            x = self.PAD + 7 + 8
+            painter.setFont(self._font)
+            painter.setPen(QColor(holo.INK_1))
+            painter.drawText(QRectF(x, 0, max(0.0, self.width() - self._chrome()) + 2, self.height()),
+                             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), self.shown_text())
+            line = self.undo.x() - self.GAP - 0.5
+            painter.setPen(QPen(holo.alpha(holo.HOLO, 0.25), 1.0))
+            painter.drawLine(QPointF(line, 10.0), QPointF(line, self.height() - 10.0))
+        finally:
+            painter.end()
+
+
+class _UndoAllChip(QAbstractButton):
+    """P2.5: "Undo all" at the end of the instant row - a chip with cyan words, brighter under the pointer. NoFocus; a
+    click emits ``clicked`` (one not showing never answers)."""
+
+    PAD = 14
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._hover = False
+        self._font = hud.body_font(13, 500)
+        self.setText(UNDO_ALL_TEXT)
+        self.setAccessibleName(UNDO_ALL_TEXT)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        width = 2 * self.PAD + QFontMetricsF(self._font).horizontalAdvance(self.text())
+        return QSize(math.ceil(width), CHIP_HEIGHT)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return self.sizeHint()
+
+    def hitButton(self, pos: QPoint) -> bool:  # noqa: N802 - Qt override
+        return _shown(self) and super().hitButton(pos)
+
+    def shown_text(self) -> str:
+        room = max(0.0, self.width() - 2 * self.PAD)
+        return QFontMetricsF(self._font).elidedText(self.text(), Qt.TextElideMode.ElideRight, room + 0.5)
+
+    def enterEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().enterEvent(event)
+        self._hover = True
+        self.update()
+
+    def leaveEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().leaveEvent(event)
+        self._hover = False
+        self.update()
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        lit = self._hover or self.isDown()
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+            radius = rect.height() / 2
+            painter.setPen(QPen(QColor(holo.HOLO) if lit else holo.alpha(holo.HOLO, 0.42), 1.0))
+            painter.setBrush(QColor(holo.TILE))
+            painter.drawRoundedRect(rect, radius, radius)
+            painter.setFont(self._font)
+            painter.setPen(QColor(holo.HOLO_HI if lit else holo.HOLO))
+            painter.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), self.shown_text())
         finally:
             painter.end()
 
@@ -773,6 +1003,10 @@ class HudWindow(_OverlayWindow):
     chipClicked = Signal(str)
     shapeChanged = Signal()            # the window, the bar or a shown chip moved or changed size
     keyboardChanged = Signal(bool)     # the bar took the keyboard (True) or gave it back (False; SPEC 8.3)
+    instantUndo = Signal(str)          # P2.5: an instant chip's Undo (its key, INSTANT_KEYS)
+    undoAllClicked = Signal()          # P2.5: Undo all
+    dndClicked = Signal()              # P2.5: "Do Not Disturb - Turn on" (Windows' settings page, the owner's switch)
+    tabToCard = Signal()               # p2r-10: Tab in the bar while it has the keyboard: into the newest card
 
     def __init__(self, *, hud_key: str = "", native: HudNative | None = None, hide_from_capture: bool = True) -> None:
         super().__init__(HUD_FLAGS, native, hide_from_capture)
@@ -796,6 +1030,7 @@ class HudWindow(_OverlayWindow):
         self._holding = False                               # the bar was given the keyboard and has not given it back
         self._held_active = False                           # ... and this window has been the active one since
         self._remembered = 0                                # the window that had the keyboard before (0: none known)
+        self._lent = False                                  # p2r-10: lent to a card for the owner's Tab (kept held)
         self.orb = orb_mod.OrbWidget(ORB_PX, self)          # no ground: the window is translucent
         self.keycaps = _KeyCaps(hud_key, self)
         self.bar = hud.CommandBar(self)
@@ -806,12 +1041,29 @@ class HudWindow(_OverlayWindow):
         self.back_button = _BackButton(BRING_BACK_TEXT, self)
         self.back_button.clicked.connect(self.bringBackClicked)
         self.chips: dict[str, HudChip] = {}
-        for key in CHIP_KEYS:
-            chip = HudChip(key, self)
+        for key in (*CHIP_KEYS, CHIP_TIMER):
+            chip = HudChip(key, self, read_only=key == CHIP_TIMER)     # p2r-8: the timer's chip only says when
             chip.hide()
-            chip.clicked.connect(partial(self.chipClicked.emit, key))
+            if not chip.read_only():
+                chip.clicked.connect(partial(self.chipClicked.emit, key))
             self.chips[key] = chip
         self.chips[CHIP_BRIEFING].setText(BRIEFING_READY_TEXT)
+        # P2.5: the instant row under the chips - one chip per kind of change done at once (each with its Undo), Do
+        # Not Disturb's opener while focus mode runs and Undo all; none of them shows until there is one.
+        self.instant: dict[str, InstantChip] = {}
+        for key in INSTANT_KEYS:
+            instant = InstantChip(key, self)
+            instant.hide()
+            instant.undoClicked.connect(partial(self.instantUndo.emit, key))
+            self.instant[key] = instant
+        self.dnd_chip = HudChip(CHIP_DND, self)
+        self.dnd_chip.hide()
+        self.dnd_chip.clicked.connect(self.dndClicked)
+        self.undo_all = _UndoAllChip(self)
+        self.undo_all.hide()
+        self.undo_all.clicked.connect(self.undoAllClicked)
+        self._instant_order: list[QWidget] = [self.instant[INSTANT_KEYS[0]], self.dnd_chip,
+                                              *(self.instant[key] for key in INSTANT_KEYS[1:]), self.undo_all]
         self.bar.statusChanged.connect(self._on_bar_status)
         # The bar's keyboard (SPEC 8.3): a click in its input takes it; Enter, or Esc in an empty bar, gives it back.
         self.bar.submitted.connect(self._on_submitted)
@@ -839,7 +1091,8 @@ class HudWindow(_OverlayWindow):
         bar_left = area.x() + (area.width() - self._bar_width) // 2
         left = max(area.x(), min(bar_left - ORB_LEFT, area.x() + area.width() - ORB_LEFT - self._bar_width
                                  - RIGHT_MARGIN))
-        self.setGeometry(left, area.y(), self._wanted_width(left), self._window_height())
+        width = self._wanted_width(left)
+        self.setGeometry(left, area.y(), width, self._window_height(width))
         self._layout()
 
     def area(self) -> QRect:
@@ -872,17 +1125,22 @@ class HudWindow(_OverlayWindow):
         for chip in self.chips.values():
             if not chip.isHidden():
                 rect = rect.united(chip.geometry())
+        for item in self._instant_shown():
+            rect = rect.united(item.geometry())
         return rect.translated(self.geometry().topLeft())
 
     def glows(self) -> list[Glow]:
         """The bar's and the shown chips' outer shadows and glows (global): the DecorLayer under this window paints
-        them (Switch.dc.html .bar and .hchip box-shadows) - this window never does (its margins stay clear)."""
+        them (Switch.dc.html .bar and .hchip box-shadows) - this window never does (its margins stay clear). The
+        instant row's (P2.5) come after the chips', cyan."""
         origin = self.geometry().topLeft()
         glows = [Glow(self.bar_rect_local().translated(origin), BAR_RADIUS, GLOW_BAR)]
         for key, chip in self.chips.items():
             if not chip.isHidden():
                 glows.append(Glow(chip.geometry().translated(origin), CHIP_HEIGHT / 2, GLOW_CHIP,
                                   TONE_AMBER if key == CHIP_APPROVALS else TONE_CYAN))
+        for item in self._instant_shown():
+            glows.append(Glow(item.geometry().translated(origin), CHIP_HEIGHT / 2, GLOW_CHIP, TONE_CYAN))
         return glows
 
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
@@ -896,7 +1154,8 @@ class HudWindow(_OverlayWindow):
     def _check_shape(self) -> None:
         """``shapeChanged`` once the window, the bar or a shown chip moved or changed size (the shadows follow)."""
         key = (self.geometry().getRect(), self.bar_rect_local().getRect(),
-               tuple((name, chip.geometry().getRect()) for name, chip in self.chips.items() if not chip.isHidden()))
+               tuple((name, chip.geometry().getRect()) for name, chip in self.chips.items() if not chip.isHidden()),
+               tuple(item.geometry().getRect() for item in self._instant_shown()))
         if key != self._shape_key:
             self._shape_key = key
             self.shapeChanged.emit()
@@ -907,18 +1166,51 @@ class HudWindow(_OverlayWindow):
         back_x = ORB_LEFT + self._bar_width - 1 - BACK_GAP - self.back_button.sizeHint().width()
         return max(0, back_x - BACK_GAP - 1 - SIDE_PAD - (ORB_LEFT + ORB_PAD))
 
-    def _window_height(self) -> int:
-        return BAR_TOP + self.bar_height() + CHIP_GAP + CHIP_HEIGHT + 2
+    def _window_height(self, width: int | None = None) -> int:
+        """With one row of chips; P2.5's instant row adds a row under it (rows when it wraps) only while it shows."""
+        return BAR_TOP + self.bar_height() + CHIP_GAP + CHIP_HEIGHT + 2 + (CHIP_GAP + CHIP_HEIGHT) * self._extra_rows(
+            self._wanted_width() if width is None else width)
 
     def _chips_width(self) -> int:
         hints = [chip.sizeHint().width() for chip in self.chips.values() if not chip.isHidden()]
         return sum(hints) + CHIP_GAP * max(0, len(hints) - 1)
 
+    def _instant_shown(self) -> list[QWidget]:
+        """The instant row's items shown, left to right (P2.5)."""
+        return [item for item in self._instant_order if not item.isHidden()]
+
+    def _instant_rows(self, width: int | None = None) -> list[list[QWidget]]:
+        """The instant row's items laid out left to right in a window ``width`` wide (now: its own), on a new row when
+        the next one would not fit."""
+        items = self._instant_shown()
+        if not items:
+            return []
+        room = max(1, (self.width() if width is None else width) - RIGHT_MARGIN - ORB_LEFT - ORB_PAD)
+        rows: list[list[QWidget]] = [[]]
+        used = 0
+        for item in items:
+            hint = item.sizeHint().width()
+            if rows[-1] and used + CHIP_GAP + hint > room:
+                rows.append([])
+                used = 0
+            used += (CHIP_GAP if rows[-1] else 0) + hint
+            rows[-1].append(item)
+        return rows
+
+    def _extra_rows(self, width: int | None = None) -> int:
+        """The rows the instant row adds under the chips (the first takes the chips' row when none of them shows)."""
+        rows = len(self._instant_rows(width))
+        if not rows:
+            return 0
+        return rows if any(not chip.isHidden() for chip in self.chips.values()) else rows - 1
+
     def _wanted_width(self, left: int | None = None) -> int:
-        """The window's width: the orb and the bar, wider to the right when the chips need it (as far as the work
-        area goes)."""
+        """The window's width: the orb and the bar, wider to the right when the chips (or the instant row) need it
+        (as far as the work area goes)."""
         base = ORB_LEFT + self._bar_width + RIGHT_MARGIN
-        wanted = max(base, ORB_LEFT + ORB_PAD + self._chips_width() + RIGHT_MARGIN)
+        items = [item.sizeHint().width() for item in self._instant_shown()]
+        instant = sum(items) + CHIP_GAP * max(0, len(items) - 1)
+        wanted = max(base, ORB_LEFT + ORB_PAD + max(self._chips_width(), instant) + RIGHT_MARGIN)
         if wanted > base and self._area.isValid():
             x = self.x() if left is None else left
             wanted = max(base, min(wanted, self._area.x() + self._area.width() - x))
@@ -926,7 +1218,8 @@ class HudWindow(_OverlayWindow):
 
     def _layout(self) -> None:
         self._caption_lines = self.caption.line_count(self._caption_width())
-        size = (self._wanted_width(), self._window_height())
+        width = self._wanted_width()
+        size = (width, self._window_height(width))
         if size != (self.width(), self.height()):
             self.resize(*size)                          # the caption's lines grow the bar, the window grows down
         bar = self.bar_rect_local()
@@ -942,6 +1235,7 @@ class HudWindow(_OverlayWindow):
         self.bar.setGeometry(left, bar.y() + 1, width, ROW_HEIGHT)
         self.caption.setGeometry(left, bar.y() + 1 + ROW_HEIGHT + 1, width, caption_height(self._caption_lines) - 1)
         x, y = left, bar.y() + bar.height() + CHIP_GAP
+        first = False
         for chip in self.chips.values():
             if chip.isHidden():
                 continue
@@ -949,6 +1243,16 @@ class HudWindow(_OverlayWindow):
             room = max(0, self.width() - RIGHT_MARGIN - x)
             chip.setGeometry(x, y, min(hint.width(), room), CHIP_HEIGHT)     # cut (never past the window)
             x += hint.width() + CHIP_GAP
+            first = True
+        y += CHIP_HEIGHT + CHIP_GAP if first else 0           # P2.5: the instant row under the chips (or in their row)
+        for row in self._instant_rows():
+            x = left
+            for item in row:
+                hint = item.sizeHint()
+                room = max(0, self.width() - RIGHT_MARGIN - x)
+                item.setGeometry(x, y, min(hint.width(), room), CHIP_HEIGHT)
+                x += hint.width() + CHIP_GAP
+            y += CHIP_HEIGHT + CHIP_GAP
         key = (self.width(), self.height(), self._bar_width, self._hairline_x)
         if key != self._layout_key:       # the panel moved: repaint it (a chip's change repaints only the chips)
             self._layout_key = key
@@ -980,6 +1284,9 @@ class HudWindow(_OverlayWindow):
         for key, chip in self.chips.items():
             if not chip.isHidden() and (chip.shown_text() != chip.text() or chip.geometry().right() >= self.width()):
                 cut.append(f"chip {key}")
+        for item in self._instant_shown():
+            if item.shown_text() != item.text() or item.geometry().right() >= self.width():
+                cut.append(f"instant {getattr(item, 'key', lambda: 'undo all')()}")
         return cut
 
     # ---- what it shows ---------------------------------------------------------------------
@@ -1024,9 +1331,45 @@ class HudWindow(_OverlayWindow):
             self.chips[CHIP_REC].setText(text)
         self._show_chip(CHIP_REC, bool(self._recording))
 
+    def set_timer(self, text: str = "") -> None:
+        """P2.4: "Timer \u00b7 ends 10:32 AM" while a Jarvis timer runs (desktop.pcctl.chip_text; "" when none).
+        Static: it never ticks."""
+        text = str(text or "")
+        if text:
+            self.chips[CHIP_TIMER].setText(text)
+        self._show_chip(CHIP_TIMER, bool(text))
+
     def chip_texts(self) -> list[str]:
         """The chips shown, left to right."""
         return [chip.text() for chip in self.chips.values() if not chip.isHidden()]
+
+    def set_instant(self, items: Sequence[tuple[str, str]] = (), dnd: str = "", undo_all: bool = False) -> None:
+        """P2.5: the instant row - ``items`` ((key, words) of INSTANT_KEYS: "Volume - 20%" ...) shown in the row's
+        order, each with its Undo (the others hidden), Do Not Disturb's chip with ``dnd`` ("" none) after the focus
+        chip, and Undo all last. Words that did not change repaint nothing and move nothing."""
+        wanted = {key: str(text) for key, text in items if key in self.instant and text}
+        changed = False
+        for key, chip in self.instant.items():
+            text = wanted.get(key, "")
+            if text:
+                changed = chip.set_text(text) or changed
+            if chip.isHidden() == bool(text):
+                chip.setVisible(bool(text))
+                changed = True
+        dnd = str(dnd or "")
+        if dnd and dnd != self.dnd_chip.text():
+            self.dnd_chip.setText(dnd)
+            changed = True
+        for item, shown in ((self.dnd_chip, bool(dnd)), (self.undo_all, bool(undo_all))):
+            if item.isHidden() == shown:
+                item.setVisible(shown)
+                changed = True
+        if changed:
+            self._layout()
+
+    def instant_texts(self) -> list[str]:
+        """P2.5: the instant row shown, left to right (each chip's words, Do Not Disturb's, "Undo all")."""
+        return [item.text() for item in self._instant_shown()]
 
     def _show_chip(self, key: str, shown: bool) -> None:
         chip = self.chips[key]
@@ -1062,13 +1405,15 @@ class HudWindow(_OverlayWindow):
         if not self._holding:
             self._remembered = int(self._native_call("foreground", 0) or 0)
             self._holding, self._held_active = True, self.isActiveWindow()
+        self._lent = False
         handle.setFlag(Qt.WindowType.WindowDoesNotAcceptFocus, False)
         self._native_call("activate", False, int(self.winId()))
         self.activateWindow()
         self.bar.input.setFocus(Qt.FocusReason.MouseFocusReason if reason == "click"
                                 else Qt.FocusReason.ShortcutFocusReason)
         self._update_lit()
-        logger.info("HUD: the bar takes the keyboard (%s)", "a click" if reason == "click" else "the HUD key")
+        logger.info("HUD: the bar takes the keyboard (%s)",
+                    {"click": "a click", "card": "back from a card"}.get(reason, "the HUD key"))
         self.keyboardChanged.emit(True)
         return True
 
@@ -1080,9 +1425,10 @@ class HudWindow(_OverlayWindow):
         if not self._holding:
             return False
         remembered, self._remembered = self._remembered, 0
-        self._holding = self._held_active = False
-        if self.bar.input.hasFocus():
-            self.bar.input.clearFocus()
+        self._holding = self._held_active = self._lent = False
+        # Cleared even before it has the focus (P2.5): an activation still on its way would otherwise hand the input
+        # the focus after the keyboard was given back (QWidget.clearFocus also drops it as the window's focus child).
+        self.bar.input.clearFocus()
         handle = self.windowHandle()
         if handle is not None:
             handle.setFlag(Qt.WindowType.WindowDoesNotAcceptFocus, True)
@@ -1097,6 +1443,18 @@ class HudWindow(_OverlayWindow):
         """The bar has the keyboard: it was given it and has not given it back, and this window is the active one (the
         owner's keys reach the bar)."""
         return self._holding and self.isActiveWindow()
+
+    def lend_keyboard(self) -> bool:
+        """p2r-10: the owner's Tab hands the keyboard to a card for a while - the bar keeps holding it (the window
+        that had it before is still the one it goes back to after Enter or Esc), and this window losing activation to
+        that card gives nothing back. False when the bar does not hold it."""
+        if not self._holding:
+            return False
+        self._lent = True
+        return True
+
+    def lent(self) -> bool:
+        return self._lent
 
     def is_lit(self) -> bool:
         """The bar's outline is lit: it was given the keyboard."""
@@ -1120,10 +1478,17 @@ class HudWindow(_OverlayWindow):
         self.give_back_keyboard(True, "Esc")
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt override
-        """A click in the bar's input (or beside its text) takes the keyboard."""
+        """A click in the bar's input (or beside its text) takes the keyboard; Tab there while it has it moves into
+        the newest card (p2r-10, SPEC 8.1: ``tabToCard`` - never on a card's show, only on the owner's Tab)."""
         if (event.type() == QEvent.Type.MouseButtonPress and (watched is self.bar.input or watched is self.bar.field)
                 and not self.holds_keyboard()):
             self.take_keyboard("click")
+        if (event.type() == QEvent.Type.KeyPress and watched is self.bar.input and event.key() == Qt.Key.Key_Tab
+                and not event.modifiers() & (Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier
+                                             | Qt.KeyboardModifier.AltModifier)
+                and self._holding):
+            self.tabToCard.emit()
+            return True                                     # the bar's own focus never moves on Tab
         return super().eventFilter(watched, event)
 
     def changeEvent(self, event: QEvent) -> None:  # noqa: N802 - Qt override
@@ -1132,7 +1497,7 @@ class HudWindow(_OverlayWindow):
         if event.type() == QEvent.Type.ActivationChange and self._holding:
             if self.isActiveWindow():
                 self._held_active = True
-            elif self._held_active:
+            elif self._held_active and not self._lent:      # lent to a card (p2r-10): it comes back from there
                 self.give_back_keyboard(False, "the owner went to another window")
 
     def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
@@ -1232,11 +1597,10 @@ class HudWindow(_OverlayWindow):
         finally:
             painter.end()
         chips = []
-        for chip in self.chips.values():
-            if not chip.isHidden():
-                pixmap = picture(chip.width(), chip.height())
-                chip.render(pixmap, QPoint(), QRegion(), QWidget.RenderFlag.DrawChildren)
-                chips.append((pixmap, chip.geometry()))
+        for chip in [*(chip for chip in self.chips.values() if not chip.isHidden()), *self._instant_shown()]:
+            pixmap = picture(chip.width(), chip.height())
+            chip.render(pixmap, QPoint(), QRegion(), QWidget.RenderFlag.DrawChildren)
+            chips.append((pixmap, chip.geometry()))
         return panel, inner, chips
 
     def paintEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
@@ -1301,11 +1665,20 @@ class CardContent:
     note_first: bool = False           # the note right under the meta (what happened), before the buttons
 
 
+# p2r-10: why a card gave the keyboard back (ResultCard.keyboardReturned).
+KEYS_ESC, KEYS_BACKTAB, KEYS_AWAY, KEYS_HID = "esc", "backtab", "away", "hid"
+
+
 class ResultCard(_OverlayWindow):
-    """A result beside the thing it is about; see the module docstring."""
+    """A result beside the thing it is about; see the module docstring. SPEC 8.1's keyboard path (p2r-10): only after
+    the owner's Tab in the HUD's bar (``take_keyboard``) the window accepts the focus for that time, its buttons (and a
+    tidy card's ticks) take Tab - Tab goes on between them, Space or Enter clicks the focused one - and Esc or
+    Shift+Tab gives the keyboard back (``give_back_keyboard``: ``keyboardReturned``, also when the owner goes to another
+    window or the card goes); then it never takes the focus again by itself."""
 
     buttonClicked = Signal(str)
     shapeChanged = Signal()            # it moved, changed size or changed tone (its shadow follows)
+    keyboardReturned = Signal(str)     # p2r-10: it gave the keyboard back - KEYS_ESC, KEYS_BACKTAB, KEYS_AWAY, KEYS_HID
 
     TITLE_LINES = 2
     META_LINES = 2
@@ -1327,7 +1700,99 @@ class ResultCard(_OverlayWindow):
         self._kicker_font = hud.mono_font(10, 500, 0.22)           # DesktopB .kick
         self._tag_font = hud.mono_font(10, 500, 0.2)
         self._rows: dict[str, QRectF] = {}
+        self._keyboard = False                                     # p2r-10: it has the keyboard (the owner's Tab)
+        self._keyboard_active = False                              # ... and has been the active window since
         self.setFixedSize(CARD_WIDTH, 120)
+
+    # ---- SPEC 8.1's keyboard path (p2r-10) ----------------------------------------------------------------
+
+    def keyboard_controls(self) -> list[QAbstractButton]:
+        """What Tab goes between while it has the keyboard: its shown, enabled buttons, in their order."""
+        return [button for button in [*self._buttons.values(), *self._row_buttons.values()]
+                if button.isVisibleTo(self) and button.isEnabled()]
+
+    def has_keyboard(self) -> bool:
+        return self._keyboard
+
+    def take_keyboard(self) -> bool:
+        """The owner's Tab in the HUD's bar: this window accepts the focus for now (QWindow.setFlag on its native
+        window, as the bar does), is activated through the native seam, and its first control takes the focus. False
+        (nothing changed) when it is not showing or has nothing to press."""
+        handle = self.windowHandle()
+        if handle is None or not self.isVisible() or not self.keyboard_controls():
+            return False
+        self._keyboard, self._keyboard_active = True, self.isActiveWindow()
+        handle.setFlag(Qt.WindowType.WindowDoesNotAcceptFocus, False)
+        self._keyboard_refresh(focus=True)
+        try:
+            self._native.activate(int(self.winId()))
+        except Exception as exc:  # noqa: BLE001 - Qt's own activation below
+            logger.debug("HUD: the card could not be activated natively (%s)", type(exc).__name__)
+        self.activateWindow()
+        self._keyboard_refresh(focus=True)
+        return True
+
+    def give_back_keyboard(self, why: str = KEYS_ESC) -> bool:
+        """The keyboard goes back (``why``: Esc, Shift+Tab, the owner went to another window, the card went): its
+        controls NoFocus again and WindowDoesNotAcceptFocus back on; ``keyboardReturned(why)``. False when it did not
+        have it."""
+        if not self._keyboard:
+            return False
+        self._keyboard = self._keyboard_active = False
+        for control in self.findChildren(QAbstractButton):
+            control.removeEventFilter(self)
+            control.clearFocus()
+            control.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        handle = self.windowHandle()
+        if handle is not None:
+            handle.setFlag(Qt.WindowType.WindowDoesNotAcceptFocus, True)
+        logger.info("HUD: a card gave the keyboard back (%s)", why)
+        self.keyboardReturned.emit(why)
+        return True
+
+    def _keyboard_refresh(self, *, focus: bool = False) -> None:
+        """While it has the keyboard: its controls (made anew as its content changed too) take Tab and their keys are
+        heard; the first takes the focus when ``focus`` or when the focused one went."""
+        if not self._keyboard:
+            return
+        controls = self.keyboard_controls()
+        for control in controls:
+            control.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+            control.removeEventFilter(self)
+            control.installEventFilter(self)
+        current = QApplication.focusWidget()
+        if controls and (focus or current is None or current not in controls):
+            controls[0].setFocus(Qt.FocusReason.TabFocusReason)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt override
+        """Its controls' keys while it has the keyboard: Esc and Shift+Tab give it back; Enter on a tick toggles it
+        (a button's own Enter and Space click it)."""
+        if self._keyboard and event.type() == QEvent.Type.KeyPress and isinstance(watched, QAbstractButton):
+            key = event.key()
+            if key == Qt.Key.Key_Escape:
+                self.give_back_keyboard(KEYS_ESC)
+                return True
+            if key == Qt.Key.Key_Backtab or (key == Qt.Key.Key_Tab
+                                             and event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+                self.give_back_keyboard(KEYS_BACKTAB)
+                return True
+            if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and watched.isCheckable() and watched.isEnabled():
+                watched.click()
+                return True
+        return super().eventFilter(watched, event)
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802 - Qt override
+        """The owner went to another window while it had the keyboard: it gives it back."""
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.ActivationChange and self._keyboard:
+            if self.isActiveWindow():
+                self._keyboard_active = True
+            elif self._keyboard_active:
+                self.give_back_keyboard(KEYS_AWAY)
+
+    def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        self.give_back_keyboard(KEYS_HID)
+        super().hideEvent(event)
 
     def content(self) -> CardContent:
         return self._content
@@ -1353,6 +1818,7 @@ class ResultCard(_OverlayWindow):
         self.setAccessibleName(content.title)
         self.setAccessibleDescription(" ".join(part for part in (content.kicker, content.meta, content.note) if part))
         self._relayout()
+        self._keyboard_refresh()                        # p2r-10: while it has the keyboard, the new ones take Tab
         self.shapeChanged.emit()                        # its tone (and its size) may have changed
 
     def _new_button(self, key: str, text: str, variant: str, size: int, name: str) -> holo.HoloButton:
@@ -1725,6 +2191,7 @@ class DesktopCard(ResultCard):
         self._desk = DeskContent("", "")
         self._ticks: dict[int, _TickBox] = {}
         self._desk_buttons: dict[str, holo.HoloButton] = {}
+        self._button_kinds: list[tuple[str, int]] = []      # (key, size) of the buttons now: kept while they stay
         self._name_font = hud.body_font(12)            # DesktopB .prow: 12.5 px
         self._to_font = hud.body_font(12)
         self._flag_font = hud.mono_font(9, 500, 0.12)
@@ -1744,6 +2211,12 @@ class DesktopCard(ResultCard):
 
     def row_buttons(self) -> dict[str, holo.HoloButton]:
         return {}
+
+    def keyboard_controls(self) -> list[QAbstractButton]:
+        """p2r-10: its ticks (by row) then its buttons and the Undo link - the shown, enabled ones."""
+        ticks = [self._ticks[number] for number in sorted(self._ticks)]
+        return [control for control in [*ticks, *self._desk_buttons.values()]
+                if control.isVisibleTo(self) and control.isEnabled()]
 
     def set_desk(self, content: DeskContent) -> None:
         self._desk = content
@@ -1767,21 +2240,35 @@ class DesktopCard(ResultCard):
                 box.setChecked(row.ticked)
                 box.blockSignals(False)
                 box.setAccessibleName(("Leave out " if row.ticked else "Include ") + row.name)
-        for button in self._desk_buttons.values():
-            button.hide()
-            button.deleteLater()
-        self._desk_buttons = {}
-        for spec in content.buttons:
-            button = self._new_button(spec.key, spec.text, spec.variant, holo.SIZE_MD, spec.text)
-            button.setEnabled(spec.enabled)
-            self._desk_buttons[spec.key] = button
+        wanted_buttons = [(spec.key, spec.text, spec.variant, holo.SIZE_MD, spec.enabled) for spec in content.buttons]
         if content.link is not None:
-            key, words = content.link
-            self._desk_buttons[key] = self._new_button(key, words, holo.LINK_CYAN, holo.SIZE_SM, words)
+            wanted_buttons.append((content.link[0], content.link[1], holo.LINK_CYAN, holo.SIZE_SM, True))
+        if [(key, size) for key, _text, _variant, size, _on in wanted_buttons] == self._button_kinds:
+            # The same buttons (a row ended while the batch runs): kept, changed in place - a click pressed on Stop
+            # before the refresh is still heard at its release (p2r-13).
+            for key, text, variant, _size, enabled in wanted_buttons:
+                button = self._desk_buttons[key]
+                if button.text() != text:
+                    button.setText(text)
+                    button.setAccessibleName(text)
+                    button.updateGeometry()
+                button.set_variant(variant)
+                button.setEnabled(enabled)
+        else:
+            for button in self._desk_buttons.values():
+                button.hide()
+                button.deleteLater()
+            self._desk_buttons = {}
+            for key, text, variant, size, enabled in wanted_buttons:
+                button = self._new_button(key, text, variant, size, text)
+                button.setEnabled(enabled)
+                self._desk_buttons[key] = button
+            self._button_kinds = [(key, size) for key, _text, _variant, size, _on in wanted_buttons]
         self.setAccessibleName(content.title)
         self.setAccessibleDescription(" ".join(part for part in (content.kicker, content.note, content.link_note)
                                                if part))
         self._relayout()
+        self._keyboard_refresh()                        # p2r-10: while it has the keyboard, new controls take Tab
         self.shapeChanged.emit()
 
     def _on_tick(self, number: int, checked: bool) -> None:

@@ -26,6 +26,8 @@ This module only builds sentences; it never speaks, logs or stores them.
   or "Sent" is ever said ("Done, sir - I've moved 'Project sync' to Friday at
   2 PM."); ``outcome_tone`` says how the conversation shows it. Never the
   error message, a body or a recipient.
+* ``ask_say_shown`` / ``ask_say_speech`` / ``ask_reply_rest``: an Ask's say while it is being written: what
+  the caption may show of it, what is said the moment it is whole, and what is left to say of the final answer
 * ``ask_reply_speech`` / ``ask_failure_speech`` / ``ACKS``: Ask's spoken answer
   (the planner's say and question only, guarded by ``claims_done``; the question
   is always kept, and after mail was read the say is kept short and never quotes
@@ -59,6 +61,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
+from types import SimpleNamespace
 from typing import Any, NamedTuple
 
 MORNING = "morning"
@@ -619,6 +622,80 @@ def _read_mail(outcome: Any) -> bool:
 
 NOTE_QUESTION = "I have a question for you, {sir}; it's on screen."
 NOTE_FOUND = "Here's what I found, {sir}."
+
+
+def _say_words(say: str, *, read_mail: bool) -> str:
+    """A whole say as it is said when nothing guards it (ask_reply_speech's own steps): one line that ends a sentence,
+    after mail was read without a sentence that quotes a passage and at most MAIL_SAY_LIMIT, nothing unsafe to say."""
+    words = _end_sentence(" ".join(str(say or "").split()))
+    if read_mail:
+        words = _without_quotes(words)
+    return scrub_for_speech(words, limit=MAIL_SAY_LIMIT if read_mail else SPEECH_LIMIT) if words else ""
+
+
+def ask_say_shown(text: str, *, complete: bool, read_mail: bool = False) -> str:
+    """What the caption may show of a say still being written (``text``: stream.SayWatch's words so far; a space at
+    its end says the last word has ended): whole words only - the unfinished last word waits -, in the words they will
+    be said in (scrub_for_speech: no address, link or long id). After mail was read nothing from an opening double
+    quote on until it closes, and a sentence that quotes a passage goes as it does when said. "" while it claims
+    something was done (``claims_done``: such a say is never shown or said as written)."""
+    if complete:
+        words = _say_words(text, read_mail=read_mail)
+    else:
+        raw = str(text or "")
+        flat = " ".join(raw.split())
+        if not raw[-1:].isspace():
+            flat = flat.rpartition(" ")[0]                # the last word may not have ended
+        if read_mail:
+            flat = _without_quotes(flat)
+            flat = flat[:_open_quote(flat)].rstrip()
+        words = scrub_for_speech(flat, limit=MAIL_SAY_LIMIT if read_mail else SPEECH_LIMIT) if flat else ""
+    return "" if claims_done(words) else words
+
+
+def ask_final_shown(outcome: Any) -> str:
+    """ask_say_shown for a finished answer's own say, as what that answer is known to have read says."""
+    return ask_say_shown(str(getattr(outcome, "say", "") or ""), complete=True, read_mail=_read_mail(outcome))
+
+
+def _open_quote(text: str) -> int:
+    """Where a double quote that has not closed yet opens in ``text`` (its length when none does)."""
+    straight = [index for index, char in enumerate(text) if char == '"']
+    curly = text.rfind("\u201c")
+    at = len(text)
+    if len(straight) % 2:
+        at = straight[-1]
+    if curly >= 0 and "\u201d" not in text[curly:]:
+        at = min(at, curly)
+    return at
+
+
+def ask_say_speech(say: str, *, read_mail: bool = False, address: str = "sir", notes: Sequence[str] = ()) -> str:
+    """What Jarvis says the moment an Ask's say is written, before the rest of its reply (ask_reply_speech's words for
+    that say alone, through the same guards). "" when it has to wait for the whole answer: the say claims something
+    was done, repeats a memory note (``ask_reply_note_speech``), or nothing of it may be said."""
+    words = _say_words(say, read_mail=read_mail)
+    if not words or claims_done(words):
+        return ""
+    mail = SimpleNamespace(threads=1 if read_mail else 0, messages=0)
+    outcome = SimpleNamespace(say=say, question="", cards=(), mail=mail)
+    if ask_reply_note_speech(outcome, address, notes=notes):
+        return ""
+    return words
+
+
+def ask_reply_rest(outcome: Any, early: str, address: str = "sir", *, notes: Sequence[str] = ()) -> str | None:
+    """What is left to say of a finished answer whose say Jarvis began saying as soon as it was written (``early``:
+    ask_say_speech's words): None when the final say would not be said like that (the whole reply is said then, the
+    final plan being the source of truth); else its question, said whole ("" when there is none, or when it claims
+    something was done), or that there is one on screen when it repeats a memory note."""
+    if ask_say_speech(getattr(outcome, "say", ""), read_mail=_read_mail(outcome), address=address, notes=notes) != early:
+        return None
+    question = _flat_field(outcome, "question")
+    if not question or claims_done(question):
+        return ""
+    asked = SimpleNamespace(say="", question=question, cards=())
+    return ask_reply_note_speech(asked, address, notes=notes) or scrub_for_speech(question, limit=QUESTION_LIMIT)
 
 
 def ask_reply_note_speech(outcome: Any, address: str = "sir", *, notes: Sequence[str] = ()) -> str:

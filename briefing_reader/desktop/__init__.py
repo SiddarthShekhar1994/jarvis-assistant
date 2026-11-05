@@ -19,6 +19,9 @@ Off unless [desktop] enabled (or JARVIS_DESKTOP_ENABLED) is true. Built so far (
 * Phase 2, part 1: ``journal`` (the write-ahead journal of what was done to the owner's files: start-up recovery,
   purge) and ``fileops`` (move, rename, copy, make a folder, zip - every row re-checked, source and destination, right
   before its OS call - and Undo, item by item in reverse order).
+* Phase 2, part 4: ``pcctl`` - the PC's controls (volume and mute through Core Audio, music through the player's
+  controls or the media keys, Jarvis's own timers, screenshots with the HUD left out), INSTANT local routes behind
+  their own seam (``Win32Pc``: every method raises while the tests run), each change kept for Undo all.
 
 Nothing in this package imports Qt, starts a process or a shell (tests/test_desktop_guard.py greps for it), or logs
 a path, a name, a title or a typed value.

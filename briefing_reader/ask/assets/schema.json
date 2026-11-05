@@ -8,7 +8,7 @@
     "say": {
       "type": "string",
       "maxLength": 300,
-      "description": "Write this first. One or two short spoken sentences for the owner, with no ids, addresses or URLs. Never claim anything was done: Jarvis acts only after the owner clicks a card."
+      "description": "Write this first. One or two short spoken sentences for the owner, up to four when the question needs it, with no ids, addresses or URLs. Facts only from the context; never a guess. Never claim anything was done: Jarvis acts only after the owner clicks a card."
     },
     "question": {
       "type": "string",

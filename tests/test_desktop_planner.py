@@ -350,7 +350,7 @@ class FileSkillsTests(DesktopRunTests):
                              [("move", "", True), ("copy", "", True), ("mkdir", "", True), ("zip", "", True),
                               ("rename", "", True)])
             self.assertIn("to_onedrive", card.rows[0].flags)                   # Downloads into LING (OneDrive)
-            self.assertEqual(outcome.message, "5 steps need your OK first - nothing has changed yet, sir.")
+            self.assertEqual(outcome.message, "5 changes need your OK first - nothing has changed yet, sir.")
             changed = [call for call in fake.calls if call[0] in ("move_item", "copy_file", "make_folder",
                                                                   "remove_folder", "write_zip")]
             self.assertEqual(changed, [])                                    # nothing until the owner's click
@@ -439,7 +439,12 @@ class DryRunTests(PlannerTestCase):
         self.assertIn("Jarvis would say: Understood: open your Downloads folder. Nothing was opened yet, sir.", text)
         self.assertNotIn("---- stdin ----", text)
         code, text = self.dry("volume 30")
-        self.assertIn("Handled on this PC (no planner run): volume, refused: not_yet\n", text)
+        self.assertIn("Handled on this PC (no planner run): volume, instant\n", text)
+        self.assertIn("Jarvis would say: Understood: set the volume to 30. Nothing was changed yet, sir.", text)
+        code, text = self.dry("focus mode for 45 minutes")                    # P2.5: a local route of its own
+        self.assertIn("Handled on this PC (no planner run): focus_mode, instant\n", text)
+        self.assertIn("Jarvis would say: Understood: start focus mode for 45 minutes. Nothing was changed yet, sir.",
+                      text)
         code, text = self.dry("what's on today?")
         self.assertEqual((code, text), (2, commands.NOT_DESKTOP + "\n"))
 

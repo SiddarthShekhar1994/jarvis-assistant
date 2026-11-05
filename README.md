@@ -1209,8 +1209,9 @@ voice when the online one cannot be reached), politely and to the point:
 
 - **When you open him**: the greeting and, once per briefing, "Your AM
   briefing is ready to view." (see [Using it](#using-it)).
-- **Ask** (see [Ask Jarvis](#ask-jarvis-optional)): "One moment, sir." while it
-  plans (left out when the answer is quicker), then the planner's answer and
+- **Ask** (see [Ask Jarvis](#ask-jarvis-optional)): the planner's answer as soon
+  as it is written, before the cards are ready ("One moment, sir." only when no
+  word of it has come about 1.5 s after your request), then
   its question back, for example "Right, sir. I've lined up moving Project sync
   to Friday at two. It's waiting for your OK." Never Jarvis's own note, a mail
   search or a card's text. His question back is always said whole; a long
@@ -2177,30 +2178,45 @@ memory there.
 
 ### Jarvis on your desktop (the HUD)
 
-Jarvis can work on your desktop: in this version he **opens** the files, apps,
-folders and web addresses you name and **finds** files for you. Tidying files,
-music, volume, timers and screenshots, and filling forms in apps you allow come
-in later versions.
+Jarvis can work on your desktop. He **opens** the files, apps, folders and web
+addresses you name and **finds** files for you. He **organises your files** -
+moves, copies, renames, zips, makes folders and puts files in the Recycle Bin -
+only after your click on a card that shows every file first, with Undo for 7
+days. And he works **your PC's controls** - volume, music, timers, screenshots
+and focus mode - at once, with Undo. Filling forms in apps you allow comes in a
+later version.
 
 **Turning it on.** It is off in the public `config.toml` (`[desktop] enabled =
 false`). Turn it on for this PC with the line `JARVIS_DESKTOP_ENABLED=true` in
 `.env`, then restart Jarvis. Even then **nothing works until you say so**: the
 first time you click **Desktop** in the Dock (or press the HUD key, or type a
 desktop request), Jarvis shows a card instead, "Jarvis on your desktop" (DESKTOP
-· NEEDS YOUR OK). It says plainly what he will do in this version:
+· NEEDS YOUR OK). It says plainly what he will do:
 
 - "I open files, apps, folders and sites you name."
+- "Music, volume, timers and screenshots happen at once - Undo puts them back."
+- "Moving, renaming, zipping or putting files in the Recycle Bin waits for your
+  click on a card, with Undo. Nothing is deleted for good."
 - "I only work in the folders and apps you allow."
 - "To plan, file, folder and app names go to your Claude plan. They're never
   kept in logs."
 
 **Not now** turns nothing on (the card comes back next time); **Turn on** stores
-your OK on this PC (in `assistant.json`, as a yes/no only) and then does what you
-asked - for a request you typed, your words stay in the bar and Enter sends
-them. Your OK counts only once it is saved: if it can't be saved, the card says
+your OK on this PC (in `assistant.json`: a yes/no and the card's version number,
+nothing else) and then does what you asked - for a request you typed, your words
+stay in the bar and Enter sends them. Your OK counts only once it is saved: if it can't be saved, the card says
 so and nothing is on. **Settings > Desktop** shows "Your OK: Turned on" and has
 **Turn off**, which takes it back at once (the card shows again next time):
 whatever was on its way stops there, and nothing opens after it.
+
+**If you turned it on before this version**, your OK covers opening and finding:
+those work as before, but moving files, the Recycle Bin, the PC's controls and
+focus mode wait until you turn on the updated card, whose two new rows are
+marked NEW. Ask for one of them and nothing happens: the bar says "That needs
+your OK on the updated card first, sir." and the card shows (on the HUD it says
+"... - Bring Jarvis back to read it.", and the card shows as the window comes
+back). Until then Settings > Desktop says "Turned on for opening things - the
+updated card waits for your OK". Turn off takes back both.
 
 **The switch.** Three ways onto the desktop, each only from you:
 
@@ -2242,8 +2258,8 @@ close the window (the card stays) or when the card goes. Cards go when you ask
 for something else or go back to the window. If you go back to the window
 before Jarvis has answered, his cards wait for you - nothing of them shows or
 runs in the meantime - and appear the next time you go onto the desktop (a step
-that waits for your click or OK keeps its card). File Explorer windows get no
-outline in this version.
+that waits for your click or OK keeps its card). File Explorer windows get an
+outline only for a card of file changes (below).
 
 **One click, or your OK, first.** Some things wait on a card for your click,
 and nothing opens until then:
@@ -2266,6 +2282,98 @@ new search - and a file that changed since says "The file changed since I looked
 - left as it is, sir." **Not now** takes the card away. Programs, installers and
 scripts that turn up in a search are never opened: only shown in their folder.
 
+**Organising files: one NEEDS YOUR OK card.** Ask in your own words - "tidy my
+Downloads into LING, Uni and Documents", "copy my budget to Documents", "rename
+my reading list", "zip my photos from Sunday", "make a folder called Lectures"
+- and nothing changes yet. Jarvis's planner proposes the steps, Jarvis checks
+each one himself, and ONE amber card (MOVE FILES · NEEDS YOUR OK) shows beside
+the File Explorer window on that folder, when one is open, with a cyan outline
+round it. It lists every file, where it would go and its flags in words:
+UPLOADS TO ONEDRIVE, LEAVES ONEDRIVE - REMOVED FROM YOUR OTHER DEVICES,
+ONLINE-ONLY, INSTALLER - STAYS UNLESS YOU TICK IT (installers start unticked),
+RENAMED - THAT NAME WAS TAKEN (nothing is ever overwritten: a taken name becomes
+"name (2)"). Each row has a tick: untick what should stay. The caption counts
+what the card shows ("Moving 5 files needs your OK first - nothing has changed
+yet, sir."), and while it waits it counts in "N need your OK" on the HUD, on
+Home and on the Dock's Approvals, where "Waiting on your desktop · Show me"
+brings you to it. **Not now** puts it away; **Move 5 files** carries out exactly
+the ticked rows, each checked again right before it ("Changed since - left as
+it is."). A card is good for 15 minutes: then it stops waiting and says "This
+card is more than 15 minutes old, so nothing was moved. Ask again for a fresh
+one." Moves stay on their drive in this version; a step moves or copies at most
+200 files, renames 50 and zips 1,000 (4 GB).
+
+**Stop and Esc.** While the rows are carried out the card says "MOVING 2 OF
+5..." in cyan, with **Stop**. **Esc** stops it too, from any window, while a
+batch runs - Jarvis holds Esc only then. Either stops it after the file on its
+way, and the card and the caption say what was and wasn't done. A Turn off in
+Settings stops it at the next file as well, and the caption still says what was
+done ("Stopped - you turned Jarvis on your desktop off. 2 of 5 files were
+moved.").
+
+**Undo for 7 days (D9).** The stamp ("MOVED 5 FILES · 10:22 AM") has **Undo**
+("Puts every file back where it was.") and says 'Undo stays for 7 days - type
+"undo" to bring this back.' Undo puts the files back newest first, each only if
+it is still where Jarvis put it and its old place is free; what changed since is
+left as it is, with the reason ("Moved since - left where it is.", "Something new
+is in its old place - left where it is."), and the stamp counts it ("PUT BACK 4
+OF 5 · 1 MOVED SINCE"). Copies and zips Jarvis made go to the Recycle Bin
+(unchanged ones only), and a folder he made goes when it is empty. A new request
+or a restart takes the card away, but not its Undo: type **undo** ("undo that",
+"undo the last change") and the newest change of the last 7 days that can still
+be put back comes back as its stamped card, with Undo. Saying it only shows the
+card - only your click on Undo puts anything back - and when there is nothing,
+"Nothing to undo from the last 7 days, sir." `[desktop] undo_days` sets the 7.
+
+**The Recycle Bin.** Jarvis puts files in the Recycle Bin only when your own
+words ask him to delete, remove, bin, trash or get rid of something. "Tidy my
+Downloads" never does, and neither does a request that says not to: a "don't",
+"never" or "without" earlier in the same sentence keeps the Recycle Bin out of
+it ("zip the photos, don't move or delete the originals" zips only). It has its
+own card, TO THE RECYCLE BIN · NEEDS YOUR OK ("You can get them back from the
+Recycle Bin, or with Undo."), with at most 50 files and 2 GB. Nothing is deleted
+for good: Jarvis bins only on a fixed drive whose Recycle Bin is on and has room
+(never an online-only OneDrive file), and if Windows would delete a file instead
+of recycling it, he stops there. Undo takes the files back out of the Recycle
+Bin ("Can't be put back - the Recycle Bin was emptied." when it was); a file you
+already restored yourself is "back in its place already".
+
+**Your PC's controls.** These happen at once, on this PC with no planner run,
+each with Undo:
+
+- "volume 30", "volume up" or "louder", "quieter", "mute", "unmute";
+- "pause", "play", "next song", "previous" (when Windows can't say what the
+  player was doing, Jarvis presses the media key, and that one can't be put
+  back);
+- "timer 10 minutes" or "remind me in 20 minutes to stretch": Jarvis's own
+  timers (up to 5, 1 to 240 minutes) end with a toast and a short sound, show
+  as "Timer · ends 10:32 AM" under the bar, and come back after a restart;
+  "cancel the timers" ends them;
+- "screenshot" or "screenshot of the window": a PNG in your `Jarvis\Screenshots`
+  folder (`[desktop] screenshots_dir`), with the HUD left out of it; it is never
+  sent anywhere.
+
+Each change gets a chip in a row under the bar (MUSIC Paused, VOLUME 30%, ...)
+with its own **Undo**, and **Undo all** puts everything back, newest first
+("Back as it was: music playing, volume 60%."). A screenshot's Undo puts the
+file in the Recycle Bin.
+
+**Focus mode.** "focus for 45 minutes" (or "focus mode for an hour"): Jarvis
+keeps quiet - offers, toasts and his voice wait, and he tells you the last 3
+when it ends - pauses the music, turns a loud volume down to 20% and runs a
+timer. Its chip ("FOCUS 44:59 · ENDS 11:06") ends it early with Undo, which
+also plays the music again and puts the volume back, as Undo all does ("Back as
+it was: music playing, volume 60%."). When it runs out, the PC is left as it is
+and the music and volume chips keep their Undo. Windows' own Do Not Disturb stays
+your switch: the "Do Not Disturb · Turn on" chip opens Windows' notification
+settings, and it says "On" only when Windows says so. After a restart only
+Jarvis's quiet carries on.
+
+**The keyboard.** When the HUD's bar has the keyboard, **Tab** moves into the
+newest card: its ticks and buttons take the keyboard for that time, Space or
+Enter clicks the one in focus, and Esc or Shift+Tab gives the keyboard back to
+the bar. A card never takes the keyboard by itself.
+
 **What your Claude Code sees (D6).** Simple requests ("open Downloads", "open
 Spotify", "open youtube.com", and a find whose every word is in a file's name,
 such as "find Budget 2026.xlsx") are handled on this PC without Claude at all;
@@ -2276,7 +2384,8 @@ Code (no API key, no paid API, counted like any Ask): it gets the **names** of
 files, folders and apps that might match, as ids, and plans with those - never
 paths, file contents, what you typed into other apps or screenshots. Names
 written by other people are marked as data, never instructions. Jarvis checks
-every step of the plan himself before anything opens.
+every step of the plan himself before anything opens or changes, and a step your
+words didn't ask for (a Recycle Bin you didn't mention) is refused.
 
 **Hidden from screen sharing (D7).** The HUD, its cards and outlines are left
 out of screenshots, recordings and screen sharing (`[desktop]
@@ -2292,11 +2401,19 @@ Game Bar, OBS ...) and the Start menu's Run are never opened, whatever you
 type. Nothing on the desktop starts by itself, from an email, a file or an
 offer.
 
+**Jarvis's record of your files.** Every change to your files is written down
+first, on this PC only, in `%LOCALAPPDATA%\briefing-reader\desktop\journal`
+(one file per card: what moved where - Undo needs the paths). It is never
+logged and never sent to Claude. When Jarvis starts (or you turn it on), it
+looks at any change a crash left half-done and corrects the record from what is
+on the disk - it never redoes anything - and records older than 30 days go.
+
 **LIVE** shows each desktop request as a DESKTOP task: the route ("on this PC -
 no planner run", or the planner), "Looked in 2 places: 214 files", the plan
 checked step by step ("1 file name looked like instructions - treated as
 data"), each item carried out and its result, and for a card's click "Approved
-by your click 10:22 AM" with what it did. On the HUD LIVE never opens by itself.
+by your click 10:22 AM" with each file and what came of it (Stop or Esc, and how
+long stopping took). On the HUD LIVE never opens by itself.
 **Logs** carry run ids, kinds, counts, statuses and refusal codes only - never a
 file name, a path, a window title, an app's name or what you typed.
 
@@ -2907,6 +3024,20 @@ is not a claude.ai subscription (see [Privacy and cost](#privacy-and-cost)).
 Runs are capped: 20 an hour and 60 a day by default (`[ask] max_per_hour`,
 `max_per_day`), counted in `ask_usage.json` for every Jarvis process together
 (the app and `--ask-text` from a terminal share the count).
+
+**How it answers quickly.** The caption shows Jarvis's words as Claude writes
+them and his voice starts as soon as the answer is written; the proposals follow
+when the plan is whole and checked, and the checked plan has the last word (if it
+differs, or the run fails, the caption is corrected). While Ask is on, the app keeps
+one idle `claude.exe` ready with the exact command line a request would use, so a
+request does not wait for Claude Code to start: it gets nothing and makes no
+Claude request until you ask, is used for one request only and replaced, is
+replaced after 30 idle minutes or when its files change, and ends with Jarvis. It
+is checked and counted like any other run, when your request is sent. As you start
+typing Jarvis also reads the calendars your request would need; a read at most 60
+seconds old is used, never one from before a change Jarvis made. It answers
+facts only from what it was given (web research for what can change); what it
+can't see or check, it says so.
 
 **Setup (about 45 minutes, once).**
 
@@ -3731,7 +3862,9 @@ log. Changes apply the next time the app starts.
 | `[desktop] extra_folders` | `[]` | More folders, each a full path under your user folder (the same checks apply). |
 | `[desktop] hide_from_capture` | `true` | Leave the HUD, its cards and outlines out of screenshots and screen sharing. |
 | `[desktop] hud_key` | `"ctrl+alt+h"` | The HUD key (switches between the window and the HUD; never the `[hotkey] combo`). |
-| `[desktop] screenshots_dir`, `undo_days`, `apps` | `""`, `7`, `false` | For later versions (screenshots, Undo for file changes, work inside apps); nothing uses them yet. |
+| `[desktop] screenshots_dir` | `""` | Where screenshots go: `""` = `Jarvis\Screenshots` in your user folder, else a full folder path. |
+| `[desktop] undo_days` | `7` | How long Undo is offered for a change to your files (1-30 days); "undo" looks this far back. |
+| `[desktop] apps` | `false` | Work inside apps you allow (a later version); nothing uses it yet. |
 
 The offline voice uses the same `rate` and `volume`: the rate scales Windows'
 default 200 words per minute, and a volume above `+0%` cannot get louder than
@@ -3971,7 +4104,8 @@ Other files in `%LOCALAPPDATA%\briefing-reader`:
 | `ask\` | The empty folder Claude Code runs in for Ask. Ask refuses to run while anything is in it (a `CLAUDE.md` or `.mcp.json` there would add instructions or tools). |
 | `research\` | The empty folder Claude Code runs in for web research; research refuses to run while anything is in it. |
 | `runstate.json` | Per scheduled briefing: when it was first shown, when it was announced (`announced_at`) and first viewed (`viewed_at`), when and how a classic prompt was answered (read, dismissed, done), and (the productivity bundle) when the plan offer was posted for it (`plan_offered_at`) and when its day was planned (`planned_at`; an evening "plan tomorrow" marks tomorrow's AM slot), kept for 14 days. The catch-up task uses it, and it keeps a briefing from being announced twice; see [Catch-up and the hotkey](#catch-up-and-the-hotkey). Safe to delete (a briefing may then be announced once more). |
-| `assistant.json` | Whether Jarvis's voice is muted, the ids of the last 5 greetings (so the next one differs), whether the briefings an older version read through its prompt were taken as viewed (done once, at the first start after the update, so they are not announced again), and, once you used it, where the LIVE pop-out window was and whether it was open, and `prod_hint_shown` once the "minimize instead of Done" hint was shown, and `followups_off` while the follow-up list is turned off on this PC. Never any text. Safe to delete. |
+| `assistant.json` | Whether Jarvis's voice is muted, the ids of the last 5 greetings (so the next one differs), whether the briefings an older version read through its prompt were taken as viewed (done once, at the first start after the update, so they are not announced again), and, once you used it, where the LIVE pop-out window was and whether it was open, and `prod_hint_shown` once the "minimize instead of Done" hint was shown, and `followups_off` while the follow-up list is turned off on this PC, and `desktop_turned_on` (with `desktop_consent_version`, the card's version) once you turned [Jarvis on your desktop](#jarvis-on-your-desktop-the-hud) on. Never any text. Safe to delete. |
+| `desktop\` | Jarvis on your desktop's own records, on this PC only: `journal\<run id>.jsonl`, for each NEEDS YOUR OK card you clicked, every file it moved, copied, renamed, zipped or put in the Recycle Bin with its old and new path (Undo needs them; never logged, never sent to Claude; kept 30 days); `timers.json`, your running timers and their labels (so a restart keeps them); `focus.json` while focus mode runs. Safe to delete (Undo of those changes goes with it). |
 | `followups.json` | The follow-up rows you hid: per row a 32-character hash (of the account name, the thread and its newest deciding message, never in clear), when you hid it and until when ("" = until something new arrives); entries older than 30 days are dropped. No subject, name, address or id. Safe to delete (hidden rows come back). |
 | `prep_series.json` | The productivity bundle's repeating meetings whose prep offers ended unclicked: per series a 32-character hash (of the account name, the calendar and Google's series id, never in clear), how many times in a row (3 stops its offers) and the day of the last change; entries untouched for 60 days are dropped. No title, id or address. Safe to delete (the offers come back). |
 | `conversation.json` | The last 24 hours of the conversation (at most 100 entries: your requests, Jarvis's answers and results as the Transcript showed them, each with its time; never your memory lines), shown again at a start and given to Ask as `<conversation>` (a web research's question and answer are marked and never given; see [Ask remembers the conversation](#ask-remembers-the-conversation)). Written by the app a moment after the conversation changes and when it closes; older entries leave it at the start and within the hour after they turn a day old. **Clear conversation** in the Transcript deletes it; you can delete it yourself while Jarvis is closed. A broken file is ignored and replaced. Never logged. |

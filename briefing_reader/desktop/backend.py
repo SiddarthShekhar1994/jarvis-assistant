@@ -38,7 +38,8 @@ The methods:
   new zip under a temporary name, removed by Windows unless it is finished), ``zone_identifier`` (a file's mark of the
   web, copied onto a zip), ``content_hash`` (sha256: a copy's or a zip's, for Undo) and ``free_space``. Each is
   guarded once more (a plain path on a fixed drive, never a secret file, never a blocked type zipped); the raw calls
-  live in desktop.fileops.
+  live in desktop.fileops. P2.4 adds ``save_png`` (a screenshot's new file: a .png holding a PNG only, CREATE_NEW -
+  never over anything; desktop.pcctl names it).
 
 No method is ever named for something on the NEVER list (guard.NEVER_CAPABILITIES): there is no delete, no close, no
 shell command, no send. Logs carry folder keys, counts and exception types (with a winerror) only, never a path, a
@@ -52,8 +53,8 @@ max_rows=)``, ``recent_items(limit=)``, ``start_menu_apps(limit=)``, ``open_docu
 ``open_script_document(path)``, ``show_in_folder(path)``, ``open_folder(path)``, ``launch_app(app_id)``,
 ``open_url(url)``, ``app_for(kind)``, ``link_target(path)``, ``move_item(src, dst)``, ``copy_file(src, dst,
 cancel=)``, ``make_folder(path)``, ``remove_folder(path)``, ``write_zip(members, temp, cancel=, zone=)``,
-``zone_identifier(path)``, ``content_hash(path)``, ``free_space(path)``; ``ZipMember(path, arcname, is_dir, size,
-mtime_ns)``.
+``zone_identifier(path)``, ``content_hash(path)``, ``free_space(path)``, ``save_png(path, data)``; ``ZipMember(path,
+arcname, is_dir, size, mtime_ns)``; ``PNG_SIGNATURE``.
 ``FileInfo(attributes, reparse_tag, is_dir)``, ``FileIdentity(volume, file_id, size, mtime_ns, is_dir)``
 (``same_item(other)``), ``DirEntry(name, is_dir, attributes, reparse_tag, size, mtime_ns)``, ``IndexRow(path, name,
 size, modified, attributes, is_dir)``, ``AppEntry(app_id, name)``, ``AppInfo(name, exe)``; ``app_kind(kind)`` (what
@@ -138,6 +139,7 @@ _INDEX_PROVIDER = "Provider=Search.CollatorDSO;Extended Properties='Application=
 INDEX_COLUMNS = ("System.ItemPathDisplay", "System.FileName", "System.Size", "System.DateModified",
                  "System.FileAttributes")
 MAX_LISTED = 10_000                             # entries of one folder a listing reads at most
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"            # save_png writes a PNG only (P2.4)
 # The associations (AssocQueryStringW): the open verb's app, by its friendly name and its exe.
 _ASSOCF_INIT_IGNOREUNKNOWN = 0x00000400
 _ASSOCF_IS_PROTOCOL = 0x00001000
@@ -404,6 +406,11 @@ class DesktopBackend(Protocol):
 
     def free_space(self, path: str) -> int:
         """The bytes free on the volume of the folder ``path``."""
+        ...
+
+    def save_png(self, path: str, data: bytes) -> None:
+        """A new picture file at ``path`` holding ``data`` (P2.4: a screenshot) - a .png only, never over anything
+        (FileExistsError when the name is taken)."""
         ...
 
 
@@ -679,6 +686,15 @@ class Win32Backend:
         from . import fileops
 
         return fileops.raw_free(path)
+
+    @_real
+    def save_png(self, path: str, data: bytes) -> None:
+        self._file_guard(path)
+        if not path.casefold().endswith(".png") or not bytes(data[:8]) == PNG_SIGNATURE:
+            raise ValueError("refused by the last guard")
+        from . import fileops
+
+        fileops.raw_new_file(path, data)
 
     def _file_guard(self, *targets: str) -> None:
         """The file operations' last guard: each path a plain absolute local one on a fixed drive, never a

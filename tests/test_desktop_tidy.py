@@ -37,7 +37,7 @@ from briefing_reader.desktop import winwatch as ww
 from briefing_reader.desktop.context import FileItem
 from briefing_reader.desktop.service import DesktopService
 from tests.desktop_fakes import DOCS, DOWNLOADS, LING, UNI, FakeStopKeys, FakeWinApi, desktop_context, desktop_disk
-from tests.ui_fakes import fonts, settle
+from tests.ui_fakes import fonts, settle, wait_for
 
 NOW = datetime(2026, 10, 28, 10, 22, tzinfo=timezone.utc)
 MONO = 500.0
@@ -106,6 +106,83 @@ class StopKeysTests(unittest.TestCase):
             self.assertFalse(held)
         with sk.held(None, lambda: None) as held:
             self.assertFalse(held)
+
+
+class _FakeUser32:
+    """user32 as the real seam's logic calls it - nothing real: RegisterHotKey waits for ``go`` (a key thread the
+    PC is slow to run), GetMessageW hands out what ``post`` queued (WM_QUIT: 0)."""
+
+    def __init__(self) -> None:
+        import queue
+
+        self.go = threading.Event()
+        self.events: list[str] = []
+        self.loops = 0                                  # GetMessageW calls: the key thread sat in its message loop
+        self.queue: queue.Queue = queue.Queue()
+
+    def PeekMessageW(self, *_args: object) -> int:  # noqa: N802 - the Win32 name
+        return 0
+
+    def RegisterHotKey(self, _hwnd: object, ident: int, mods: int, vk: int) -> int:  # noqa: N802
+        self.go.wait(5)
+        self.events.append(f"register {ident:#x} {mods:#x} {vk:#x}")
+        return 1
+
+    def UnregisterHotKey(self, _hwnd: object, ident: int) -> int:  # noqa: N802
+        self.events.append(f"unregister {ident:#x}")
+        return 1
+
+    def GetMessageW(self, msg: object, *_args: object) -> int:  # noqa: N802
+        self.loops += 1
+        message, wparam = self.queue.get(timeout=5)
+        target = getattr(msg, "_obj", msg)
+        target.message, target.wParam = message, wparam
+        return 0 if message == sk.WM_QUIT else 1
+
+    def PostThreadMessageW(self, tid: int, message: int, *_args: object) -> int:  # noqa: N802
+        self.events.append(f"post {tid} {message:#x}")
+        self.queue.put((message, 0))
+        return 1
+
+
+class EscSeamTests(unittest.TestCase):
+    """p2r-16: Win32StopKeys' own arm/disarm logic over a fake user32 (built without its guarded constructor and
+    reached through functools.wraps' __wrapped__ - no real hot key, the guard stays on)."""
+
+    def seam(self) -> tuple[sk.Win32StopKeys, _FakeUser32]:
+        from ctypes import wintypes
+
+        user32 = _FakeUser32()
+        seam = object.__new__(sk.Win32StopKeys)
+        seam._ctypes, seam._msg_type, seam._user32 = ctypes, wintypes.MSG, user32
+        seam._kernel32 = mock.Mock(GetCurrentThreadId=mock.Mock(return_value=4242))
+        seam._lock, seam._thread, seam._tid = threading.Lock(), None, 0
+        return seam, user32
+
+    def test_a_key_thread_that_registers_after_arm_gave_up_lets_esc_go_at_once(self) -> None:
+        seam, user32 = self.seam()
+        with mock.patch.object(sk, "_READY_S", 0.05), mock.patch.object(sk, "_JOIN_S", 0.05):
+            self.assertFalse(sk.Win32StopKeys.arm.__wrapped__(seam, lambda: None))     # it waited, then gave up
+        self.assertFalse(seam.armed())
+        user32.go.set()                                                     # the late thread runs now
+        self.assertTrue(wait_for(lambda: len(user32.events) == 2, timeout=2.0))
+        self.assertEqual(user32.events, [f"register {sk.HOTKEY_ID:#x} {sk.MOD_NOREPEAT:#x} {sk.VK_ESCAPE:#x}",
+                                         f"unregister {sk.HOTKEY_ID:#x}"])     # held for no time at all
+        self.assertEqual(user32.loops, 0)                                   # it never sat in its message loop
+        sk.Win32StopKeys.disarm.__wrapped__(seam)                           # the batch's finally: nothing to end
+        self.assertEqual(len(user32.events), 2)
+
+    def test_held_in_time_esc_stops_and_disarm_always_ends_the_thread(self) -> None:
+        seam, user32 = self.seam()
+        user32.go.set()
+        pressed: list[str] = []
+        self.assertTrue(sk.Win32StopKeys.arm.__wrapped__(seam, lambda: pressed.append("esc")))
+        self.assertTrue(seam.armed())
+        user32.queue.put((sk.WM_HOTKEY, sk.HOTKEY_ID))                      # the owner's Esc
+        self.assertTrue(wait_for(lambda: pressed == ["esc"]))
+        sk.Win32StopKeys.disarm.__wrapped__(seam)
+        self.assertFalse(seam.armed())
+        self.assertEqual(user32.events[1:], [f"post 4242 {sk.WM_QUIT:#x}", f"unregister {sk.HOTKEY_ID:#x}"])
 
 
 # --------------------------------------------------------------------------
@@ -247,6 +324,40 @@ class CardWordsTests(TidyCase):
         self.assertEqual(text.note, "1 was left as it is - see why above.")
         self.assertEqual(dt.said(state), "Put back 1 of 2, sir - see the card for the rest.")
 
+    def test_a_row_the_owner_took_back_out_himself_says_so(self) -> None:
+        """p2r-11: an item already back in its place (the owner's own Restore) is put back, in its own words."""
+        state = dt.TidyState(self.card())
+        state.start()
+        state.finish(dt.CardOutcome("t1", "", (dt.RowEnd(1, jn.DONE, "", 1), dt.RowEnd(2, jn.DONE, "", 2))), NOW)
+        state.start_undo()
+        state.finish_undo(dt.UndoOutcome("t1", (dt.RowEnd(0, jn.UNDONE, "", 2),
+                                                dt.RowEnd(0, jn.UNDONE, fo.R_BACK_ALREADY, 1)), "PUT BACK 2 OF 2"), NOW)
+        text = dt.tidy_text(state)
+        self.assertEqual([row.words for row in text.rows[:2]], ["It's back in its place already.", "Put back."])
+        self.assertEqual(text.tone, dt.MINT)
+        self.assertEqual(dt.said(state), "Put back, sir. Everything is where it was.")
+
+    def test_a_turn_off_mid_batch_says_what_was_done(self) -> None:
+        """p2r-2: the caption once a batch, or an Undo, that the owner's Turn off stopped has ended."""
+        state = dt.TidyState(self.card())
+        state.start()
+        ends = (dt.RowEnd(1, jn.DONE, "", 1), dt.RowEnd(2, jn.DONE, "", 2)) + tuple(
+            dt.RowEnd(n, jn.SKIPPED, fo.R_STOPPED, n) for n in range(3, 6))
+        state.finish(dt.CardOutcome("t1", "", ends), NOW)
+        self.assertEqual(dt.turned_off_words(state),
+                         "Stopped - you turned Jarvis on your desktop off. 2 of 5 files were moved.")
+        none = dt.TidyState(self.card())
+        none.start()
+        none.finish(dt.CardOutcome("t1", "", tuple(dt.RowEnd(n, jn.SKIPPED, fo.R_STOPPED, n) for n in range(1, 6))),
+                    NOW)
+        self.assertEqual(dt.turned_off_words(none),
+                         "Stopped - you turned Jarvis on your desktop off. Nothing was moved.")
+        state.start_undo()
+        state.finish_undo(dt.UndoOutcome("t1", (dt.RowEnd(0, jn.UNDONE, "", 2), dt.RowEnd(0, jn.UNDO_REFUSED,
+                                                                                          fo.R_STOPPED, 1))), NOW)
+        self.assertEqual(dt.turned_off_words(state),
+                         "Stopped - you turned Jarvis on your desktop off. 1 of 2 files was put back.")
+
     def test_done_refused_and_stopped_first_in_plain_words(self) -> None:
         card = self.card()
         at = datetime(2026, 10, 28, 22, 5)
@@ -285,7 +396,7 @@ class CardWordsTests(TidyCase):
         self.assertEqual(done.stage, dt.DONE)
         self.assertEqual(dt.said(done), "Nothing was put back, sir - I can't change files on this PC right now.")
 
-    def test_copies_and_zips_say_plainly_that_undo_cant_bin_them_yet(self) -> None:
+    def test_copies_and_zips_are_undone_through_the_recycle_bin(self) -> None:
         steps = [{"skill": "copy_files", "why": "x", "files": ["f1", "f2"], "to": "d3"}]
         state = dt.TidyState(self.card(steps, "copy my Downloads files into LING"))
         self.assertEqual(dt.tidy_text(state).kicker, f"COPY FILES {DOT} NEEDS YOUR OK")
@@ -293,10 +404,12 @@ class CardWordsTests(TidyCase):
         state.start()
         state.finish(dt.CardOutcome("t1", "", (dt.RowEnd(1, jn.DONE, "", 1), dt.RowEnd(2, jn.DONE, "", 2))), NOW)
         text = dt.tidy_text(state)
-        self.assertFalse(state.undoable())
-        self.assertIsNone(text.link)
-        self.assertEqual(text.note, "Undo can't take back copies or zips yet - that needs the Recycle Bin, which comes "
-                                    "in a later update.")
+        self.assertTrue(state.undoable())                                     # P2.6: the bin takes Jarvis's copies
+        self.assertEqual((text.link, text.link_note), (("undo", "Undo"), "Puts every file back where it was. Copies "
+                                                                         "and zips Jarvis made go to the Recycle Bin."))
+        state.undo_expired = True
+        text = dt.tidy_text(state)
+        self.assertEqual((text.link, text.note), (None, "Too long ago to undo now."))
 
 
 # --------------------------------------------------------------------------
@@ -477,6 +590,45 @@ class DesktopCardTests(unittest.TestCase):
         self.assertFalse(card.buttons()["go"].isEnabled())
         QTest.mouseClick(card.buttons()["go"], Qt.MouseButton.LeftButton)
         self.assertEqual(clicked, ["go"])                                           # disabled: nothing
+        card.hide()
+
+    @staticmethod
+    def running(done: int) -> hud_overlay.DeskContent:
+        rows = tuple(hud_overlay.DeskRow(n, f"file{n}.pdf", "Documents",
+                                         mark=hud_overlay.MARK_DONE if n <= done else hud_overlay.MARK_NONE,
+                                         ticked=True) for n in range(1, 6))
+        return hud_overlay.DeskContent(f"MOVING {done + 1} OF 5{dt.ELLIPSIS}", "Tidy Downloads into your folders",
+                                       hud_overlay.TONE_CYAN, rows, "Stop or Esc stops it after this one.",
+                                       hud_overlay.TONE_CYAN,
+                                       (hud_overlay.DeskButton("stop", "Stop", holo.GHOST, True),))
+
+    def test_stop_is_heard_when_a_row_ends_between_the_press_and_the_release(self) -> None:
+        """p2r-13: each row's end sets the card anew; the buttons stay the same widgets (changed in place), so a click
+        on Stop pressed before a row's end is heard at its release. A new set of buttons is made anew."""
+        card = hud_overlay.DesktopCard(native=hud_overlay.NoNative())
+        self.addCleanup(card.deleteLater)
+        clicked: list[str] = []
+        card.buttonClicked.connect(clicked.append)
+        card.set_desk(self.running(1))
+        card.show()
+        settle()
+        stop = card.buttons()["stop"]
+        QTest.mousePress(stop, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, stop.rect().center())
+        card.set_desk(self.running(2))                    # a row ended while the owner's button was down
+        settle()
+        self.assertIs(card.buttons()["stop"], stop)
+        QTest.mouseRelease(stop, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, stop.rect().center())
+        self.assertEqual(clicked, ["stop"])
+        stamp = hud_overlay.DeskContent("MOVED 5 FILES", "Tidy Downloads into your folders", hud_overlay.TONE_DONE,
+                                        link=("undo", "Undo"), link_note="Puts every file back where it was.")
+        card.set_desk(stamp)
+        self.assertEqual(sorted(card.buttons()), ["undo"])
+        self.assertEqual(card.buttons()["undo"].variant(), holo.LINK_CYAN)
+        card.set_desk(self.content())                     # its text, look and state follow in place
+        go = card.buttons()["go"]
+        card.set_desk(self.content(enabled=False))
+        self.assertIs(card.buttons()["go"], go)
+        self.assertEqual((go.text(), go.accessibleName(), go.isEnabled()), ("Nothing ticked", "Nothing ticked", False))
         card.hide()
 
 

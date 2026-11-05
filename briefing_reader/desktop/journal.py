@@ -25,7 +25,9 @@ rename is "done" when its file id is at ``dst``, "failed" (interrupted) when it 
 when it is at neither; a file copy is "done" only when its output's content is its (unchanged) source's, else
 "failed" (partial, or interrupted); a zip or a folder copy - written under a temporary name, then its file id and
 hash saved, then renamed into place - is "done" only when that file id is at ``dst``, "failed" (partial) when it is
-still under the temporary name or only part of it was made, else "failed"; a new folder is "done" when it is there.
+still under the temporary name or only part of it was made, else "failed"; a new folder is "done" when it is there;
+an item on its way to the Recycle Bin (P2.6) is "failed" (interrupted) while its file id is still at ``src``, else
+"done" - Undo then looks for it in the bin and says plainly when the bin doesn't have it.
 An Undo left "doing" becomes "undone" when the item is back (or Jarvis's own output is gone), else "undo_refused"
 again. A path that is no plain path on a fixed drive now is never touched: that item is "failed" (unchecked).
 
@@ -426,7 +428,16 @@ def _corrected(item: Item, backend: DesktopBackend) -> Record:
         if last.tmp and backend.exists(last.tmp):
             return replace(last, state=FAILED, reason_code=R_PARTIAL)
         return replace(last, state=FAILED, reason_code=R_INTERRUPTED)
-    return replace(last, state=FAILED, reason_code=R_UNCHECKED)       # recycling: P2.6 checks its own
+    if kind == RECYCLE:
+        # Still where it was: the bin never took it. Gone from there: it went to the bin (Undo looks for it there by
+        # its old path, when and its size - and says so plainly when the bin doesn't have it). A line with no
+        # identity (fileops always saves one) can't be told apart from something new there: never touched.
+        if last.identity is None:
+            return replace(last, state=FAILED, reason_code=R_UNCHECKED)
+        if _same_id(_identity_at(last.src, backend), last):
+            return replace(last, state=FAILED, reason_code=R_INTERRUPTED)
+        return replace(last, state=DONE, reason_code=R_RECOVERED)
+    return replace(last, state=FAILED, reason_code=R_UNCHECKED)
 
 
 def _corrected_file_copy(last: Record, backend: DesktopBackend) -> Record:
@@ -459,6 +470,10 @@ def _corrected_undo(item: Item, backend: DesktopBackend) -> Record:
         if _same_id(_identity_at(last.dst, backend), done):
             return replace(last, state=UNDO_REFUSED, reason_code=R_INTERRUPTED)
         return replace(last, state=UNDONE, reason_code=R_RECOVERED)   # Jarvis's own output is gone from its place
+    if item.kind == RECYCLE:                                          # taken out of the bin: back at its old place?
+        if last.src and _same_id(_identity_at(last.src, backend), done):
+            return replace(last, state=UNDONE, reason_code=R_RECOVERED)
+        return replace(last, state=UNDO_REFUSED, reason_code=R_INTERRUPTED)
     return replace(last, state=UNDO_REFUSED, reason_code=R_UNCHECKED)
 
 

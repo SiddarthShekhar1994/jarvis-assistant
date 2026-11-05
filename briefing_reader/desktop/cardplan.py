@@ -1,17 +1,20 @@
 """The frozen card plan of a request's file steps (Jarvis on your desktop, P2.2; SPEC sections 3 step 7, 4.4, 5.2-5.4,
 6.2 and 10.3; hard rules 3, 4, 5, 7, 8 and 12; no Qt).
 
-The file skills (desktop.validate.ORGANISE_SKILLS: move_files, copy_files, rename_file, make_folder, zip_files) are
-always CARD: nothing of them happens until the owner's click on a NEEDS YOUR OK card that shows every row, with ticks
-(P2.3). ``build_card`` makes that card's plan on the desktop thread, right before the card shows (hard rule 8), from
-the checked plan's accepted file steps - their RESOLVED targets: the run's own RefIndex entries with the 5.3 identity
-they were listed with, never a bare id resolved again against a newer index. Each step becomes its rows (a move, a
-copy or a rename: one row per file; a new folder: one row, keyed by its n id so later rows go into it; a zip: one
-row, into ``to`` or else next to its first file), and each row is checked as things are now by
+The file skills (desktop.validate.ORGANISE_SKILLS: move_files, copy_files, rename_file, make_folder, zip_files and,
+since P2.6, recycle_files) are always CARD: nothing of them happens until the owner's click on a NEEDS YOUR OK card
+that shows every row, with ticks (P2.3). ``build_card`` makes that card's plan on the desktop thread, right before
+the card shows (hard rule 8), from the checked plan's accepted file steps - their RESOLVED targets: the run's own
+RefIndex entries with the 5.3 identity they were listed with, never a bare id resolved again against a newer index.
+Each step becomes its rows (a move, a copy, a rename or a file to the Recycle Bin: one row per file; a new folder: one
+row, keyed by its n id so later rows go into it; a zip: one row, into ``to`` or else next to its first file), and each
+row is checked as things are now by
 desktop.fileops.FileOps.check - the executor's own re-check: every source and the destination through the path check
 (the roots, the NEVER list, secret names, code folders, network and removable drives, links), the same item
 unchanged, a folder's bounded subtree walk, the name rules, the drive (a move stays on its volume in v1), the space -
-with the card's earlier rows taken into account (a new folder not made yet; a name an earlier row takes).
+with the card's earlier rows taken into account (a new folder not made yet; a name an earlier row takes). A row to
+the Recycle Bin is checked by the bin too (desktop.recycle: a fixed drive, the bin on, room for it; an online-only
+file would skip it), and one card bins at most 50 files and 2 GB (``fileops.R_RECYCLE_CAP`` past that).
 
 * A name that is taken - on the disk or by an earlier row of the card - gets its free name ON THE PLAN ("Budget 2026
   (2).xlsx": fileops.free_name; hard rule 5: never chosen silently at run time), and the row says so
@@ -77,7 +80,7 @@ ROW_FLAGS = (fo.FLAG_TO_ONEDRIVE, fo.FLAG_LEAVES_ONEDRIVE, fo.FLAG_ONLINE_ONLY, 
              fo.FLAG_HIDDEN_CHARS, FLAG_RENAMED, dv.FLAG_INSTALLER, dv.FLAG_BIG, dv.FLAG_MANY, dv.FLAG_TYPE_CHANGED)
 FORMAT = 1                              # the canonical JSON's own version
 _KINDS = {dv.MOVE_FILES: fo.MOVE, dv.COPY_FILES: fo.COPY, dv.RENAME_FILE: fo.RENAME, dv.MAKE_FOLDER: fo.MKDIR,
-          dv.ZIP_FILES: fo.ZIP}
+          dv.ZIP_FILES: fo.ZIP, dv.RECYCLE_FILES: fo.RECYCLE}
 
 # A row's reason in Jarvis's own words (Live; never a name or a path).
 CODE_WORDS = {
@@ -95,6 +98,12 @@ CODE_WORDS = {
     fo.R_NO_FOLDER: "its new folder can't be made",
     fo.R_WALK_CAP: "it holds too much to check",
     fo.R_UNREADABLE: "something in it can't be read",
+    fo.R_NO_BIN: "the Recycle Bin can't be reached right now",
+    fo.R_BIN_OFF: "the Recycle Bin is off for that drive",
+    fo.R_BIN_FULL: "it's bigger than the Recycle Bin has room for",
+    fo.R_BIN_UNKNOWN: "I can't tell how much the Recycle Bin can take",
+    fo.R_NO_BIN_HERE: "that drive has no Recycle Bin",
+    fo.R_RECYCLE_CAP: "it's more than one card may put in the Recycle Bin (50 files, 2 GB)",
 }
 CODE_WORDS.update({reason: "it holds something Jarvis never moves" for reason in
                    (fo.R_HOLDS_PLACE, fo.R_HOLDS_CODE, fo.R_HOLDS_SECRET_FOLDER, fo.R_HOLDS_EXCLUDED,
@@ -301,6 +310,8 @@ def _step_rows(step: dv.CheckedStep, backend: DesktopBackend,
         folder = to if parsed is not None and parsed[0] == NEW else next(
             (ref.target for ref in step.targets if ref.id == to and isinstance(ref.target, Place)), None)
     name = planned.name if planned is not None else ""
+    if kind == fo.RECYCLE:
+        return [("", fo.FileOp(kind, (item,))) for item in items]
     if kind in (fo.MOVE, fo.COPY):
         return [("", fo.FileOp(kind, (item,), folder)) for item in items]
     if kind == fo.RENAME:
@@ -349,9 +360,22 @@ def _row_flags(op: fo.FileOp, check: fo.Check) -> set[str]:
 
 def _checked_row(number: int, step: dv.CheckedStep, op: fo.FileOp, checker: fo.FileOps,
                  pending: dict[str, tuple[Place, str]], taken: dict[str, set[str]],
-                 backend: DesktopBackend) -> CardRow:
+                 backend: DesktopBackend, binned: list[int]) -> CardRow:
     """One row checked as things are now; a name taken (on the disk, or by an earlier row) swapped for its free
-    name ON THE PLAN."""
+    name ON THE PLAN. ``binned``: [files, bytes] the card's earlier rows put in the Recycle Bin (its 50 files and
+    2 GB)."""
+    if op.kind == fo.RECYCLE:
+        check = checker.check(op)
+        if not check.ok:
+            return CardRow(number, step.number, step.skill, op.kind, op.sources, None, "", "",
+                           frozenset(check.flags), False, check.reason)
+        if binned[0] + 1 > dv.SKILL_CAPS[dv.RECYCLE_FILES] or binned[1] + check.bytes > dv.RECYCLE_MAX_BYTES:
+            return CardRow(number, step.number, step.skill, op.kind, op.sources, None, "", "", frozenset(), False,
+                           fo.R_RECYCLE_CAP)
+        binned[0] += 1
+        binned[1] += check.bytes
+        return CardRow(number, step.number, step.skill, op.kind, op.sources, None, "", "",
+                       frozenset(_row_flags(op, check)), True, "")
     check = checker.check(op, pending=pending)
     renamed = False
     clash = check.reason == fo.R_NAME_CLASH
@@ -383,16 +407,19 @@ def _checked_row(number: int, step: dv.CheckedStep, op: fo.FileOp, checker: fo.F
 
 def build_card(plan: dv.DesktopPlan, backend: DesktopBackend, scope: paths.Scope, *, now: datetime,
                mono: float = 0.0, clock: Callable[[], float] = time.monotonic,
-               caps: fo.SubtreeCaps = fo.SUBTREE_CAPS) -> CardPlan | None:
+               caps: fo.SubtreeCaps = fo.SUBTREE_CAPS, recycler: fo.Recycler | None = None) -> CardPlan | None:
     """The frozen plan of ``plan``'s accepted file steps (see the module docstring), checked against ``scope`` (the
-    scope as it is now) through ``backend``; made at ``now`` (and ``mono`` by the monotonic clock). None when the plan
-    has no file step. Nothing is changed: only fileops' checks are made."""
+    scope as it is now) through ``backend`` (and ``recycler``, the Recycle Bin's own pre-checks, for a row to the
+    bin: NoRecycleBin when none - such a row can't go); made at ``now`` (and ``mono`` by the monotonic clock). None
+    when the plan has no file step. Nothing is changed: only fileops' checks are made."""
     steps = [step for step in plan.accepted() if step.skill in _KINDS]
     if not steps:
         return None
-    checker = fo.FileOps(backend, None, scope=lambda: scope, clock=clock, caps=caps)   # type: ignore[arg-type]
+    checker = fo.FileOps(backend, None, scope=lambda: scope, clock=clock, caps=caps,   # type: ignore[arg-type]
+                         recycler=recycler)
     pending: dict[str, tuple[Place, str]] = {}
     taken: dict[str, set[str]] = {}
+    binned = [0, 0]
     rows: list[CardRow] = []
     for step in steps:
         for code, op in _step_rows(step, backend, scope):
@@ -400,7 +427,7 @@ def build_card(plan: dv.DesktopPlan, backend: DesktopBackend, scope: paths.Scope
             if op is None:
                 rows.append(CardRow(number, step.number, step.skill, _KINDS[step.skill], ticked=False, code=code))
                 continue
-            rows.append(_checked_row(number, step, op, checker, pending, taken, backend))
+            rows.append(_checked_row(number, step, op, checker, pending, taken, backend, binned))
     card = freeze(plan.run_id, rows, now=now, mono=mono, refs=plan.refs)
     reasons: dict[str, int] = {}
     for row in card.rows:

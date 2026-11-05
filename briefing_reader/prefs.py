@@ -11,8 +11,9 @@ true`` once the productivity bundle's one-time "minimize instead of Done" entry
 was shown (R34); ``"followups_off": true`` while the follow-up list is turned off on
 this PC (its section's "Turn off on this PC"); ``"desktop_turned_on": true`` once the
 owner clicked Turn on on the first-run "Jarvis on your desktop" card (Settings >
-Desktop's Turn off takes it away again). Ids, numbers and booleans only: never any
-text (the LIVE view's steps are never saved).
+Desktop's Turn off takes it away again), with ``"desktop_consent_version": 2`` once the
+card he turned on listed Phase 2's rows (none: Phase 1's card, version 1). Ids, numbers
+and booleans only: never any text (the LIVE view's steps are never saved).
 
 The file is written atomically (temporary file + ``os.replace``); a missing,
 corrupt or unwritable file counts as the defaults and never stops the app
@@ -47,7 +48,7 @@ class AssistantPrefs:
         self.path = Path(path)
         self._lock = threading.Lock()
         (self._muted, self._recent, self._adopted, self._live_window, self._live_popped,
-         self._prod_hint, self._followups_off, self._desktop_on) = _load(self.path)
+         self._prod_hint, self._followups_off, self._desktop_on, self._desktop_version) = _load(self.path)
 
     @property
     def muted(self) -> bool:
@@ -128,14 +129,24 @@ class AssistantPrefs:
         with self._lock:
             return self._desktop_on is True
 
-    def set_desktop_turned_on(self, on: bool) -> bool:
-        """The owner's Turn on (True) or Turn off (False); True when it was saved. Fail-closed: a Turn on that could
-        not be saved is undone at once (it never counts unsaved); a Turn off counts for this run even unsaved."""
+    @property
+    def desktop_consent_version(self) -> int:
+        """The version of the card the owner turned on: 0 while not turned on, 1 for Phase 1's card (a Turn on saved
+        before the card listed Phase 2's rows), else the version saved with it."""
         with self._lock:
+            return max(1, self._desktop_version) if self._desktop_on is True else 0
+
+    def set_desktop_turned_on(self, on: bool, version: int = 1) -> bool:
+        """The owner's Turn on (True) of the card of ``version``, or his Turn off (False: both go); True when it was
+        saved. Fail-closed: a Turn on that could not be saved is undone at once (it never counts unsaved - what was
+        saved before stays); a Turn off counts for this run even unsaved."""
+        with self._lock:
+            before = (self._desktop_on, self._desktop_version)
             self._desktop_on = bool(on)
+            self._desktop_version = max(1, int(version)) if on else 0
             saved = self._save_locked()
             if not saved and self._desktop_on:
-                self._desktop_on = False                  # never on unsaved
+                self._desktop_on, self._desktop_version = before    # never on unsaved
             return saved
 
     def remember_greeting(self, greeting_id: str) -> bool:
@@ -163,6 +174,8 @@ class AssistantPrefs:
             values["followups_off"] = True
         if self._desktop_on is True:
             values["desktop_turned_on"] = True
+            if self._desktop_version > 1:
+                values["desktop_consent_version"] = self._desktop_version
         return _write_atomic(self.path, json.dumps(values, indent=2) + "\n")
 
 
@@ -183,8 +196,9 @@ def _live_rect(value: object) -> tuple[int, int, int, int] | None:
 
 
 
-_Loaded = tuple[bool, list[str], bool, tuple[int, int, int, int] | None, bool, bool, bool, bool]
-_DEFAULTS: _Loaded = (False, [], False, None, False, False, False, False)
+_Loaded = tuple[bool, list[str], bool, tuple[int, int, int, int] | None, bool, bool, bool, bool, int]
+_DEFAULTS: _Loaded = (False, [], False, None, False, False, False, False, 0)
+_CONSENT_VERSIONS = range(1, 100)   # a stored card version outside this is none (Phase 1's card)
 
 
 def _load(path: Path) -> _Loaded:
@@ -210,7 +224,17 @@ def _load(path: Path) -> _Loaded:
     return (muted, recent[-RECENT_GREETINGS_MAX:], data.get("answers_adopted") is True,
             _live_rect(window) if isinstance(window := data.get("live_window"), dict) else None,
             data.get("live_popped_out") is True, data.get("prod_hint_shown") is True,
-            data.get("followups_off") is True, data.get("desktop_turned_on") is True)
+            data.get("followups_off") is True, data.get("desktop_turned_on") is True, _consent_version(data))
+
+
+def _consent_version(data: dict) -> int:
+    """The card version saved with the desktop OK (an int 1-99; anything else - or none - is Phase 1's card: 1)."""
+    if data.get("desktop_turned_on") is not True:
+        return 0
+    version = data.get("desktop_consent_version")
+    if isinstance(version, int) and not isinstance(version, bool) and version in _CONSENT_VERSIONS:
+        return version
+    return 1
 
 
 def _write_atomic(path: Path, data: str) -> bool:

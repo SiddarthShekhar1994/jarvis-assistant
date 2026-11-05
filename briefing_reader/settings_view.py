@@ -22,7 +22,8 @@ Public API
 ``settings_rows(config, group, connected)``
     The (label, value) pairs a group shows (used by the panel and the tests).
 
-``desktop_rows(config, turned_on=False)``, ``DESKTOP_GROUP`` / ``DESKTOP_TITLE`` / ``DESKTOP_NOTE`` / ``DESKTOP_HOW``
+``desktop_rows(config, turned_on=False, current=True)``, ``DESKTOP_GROUP`` / ``DESKTOP_TITLE`` / ``DESKTOP_NOTE`` /
+``DESKTOP_HOW``
     Settings > Desktop, added (``add_group``) only while [desktop] is on: its values and whether the owner turned it
     on on its first-run card ("Your OK": "Turned on", or "Not turned on yet"); its own part under the rows
     (desktop_view.DesktopSettingsPanel) has Turn off, which takes the OK back - the only thing it changes.
@@ -84,6 +85,7 @@ DESKTOP_HOW = ("Jarvis on your desktop is switched on or off with [desktop] in c
                "in .env), then a restart. The one thing you can change here is your OK: Turn off takes it back.")
 NOT_TURNED_ON = "Not turned on yet"
 TURNED_ON = "Turned on"
+TURNED_ON_PHASE_1 = "Turned on for opening things - the updated card waits for your OK"   # p2r-6: Phase 1's card
 NO_HUD_KEY_SHORTCUT_OFF = "No key while the keyboard shortcut is off - the Dock's Desktop switches"
 _DESKTOP_FOLDERS = {"desktop": "Desktop", "documents": "Documents", "downloads": "Downloads", "pictures": "Pictures",
                     "music": "Music", "videos": "Videos"}
@@ -243,9 +245,10 @@ def effective_hud_key(config: Any) -> str:
     return str(getattr(getattr(config, "desktop", None), "hud_key", "") or "")
 
 
-def desktop_rows(config: Any, turned_on: bool = False) -> list[tuple[str, str]]:
+def desktop_rows(config: Any, turned_on: bool = False, current: bool = True) -> list[tuple[str, str]]:
     """Settings > Desktop: [desktop] as loaded, in plain words, and whether the owner turned it on (its first-run
-    card). Read only, like every group."""
+    card; ``current``: today's card - not yet, the OK of Phase 1's covers opening things only). Read only, like every
+    group."""
     desktop = getattr(config, "desktop", None)
     if desktop is None:
         return []
@@ -264,7 +267,8 @@ def desktop_rows(config: Any, turned_on: bool = False) -> list[tuple[str, str]]:
         key_words = "None - the Dock's Desktop switches"
     days = int(getattr(desktop, "undo_days", 7) or 7)
     shots = str(getattr(desktop, "screenshots_dir", "") or "")
-    return [("Your OK", TURNED_ON if turned_on else NOT_TURNED_ON),
+    ok = (TURNED_ON if current else TURNED_ON_PHASE_1) if turned_on else NOT_TURNED_ON
+    return [("Your OK", ok),
             ("Folders Jarvis may look in", where),
             ("HUD key", key_words),
             ("Left out of screenshots and screen sharing", _yes(getattr(desktop, "hide_from_capture", True))),
