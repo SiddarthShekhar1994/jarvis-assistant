@@ -703,9 +703,9 @@ class WebResearchOfferedTests(PlannerTestCase):
         prompt = cli.PROMPT_FILE.read_bytes().decode("ascii")
         say = " ".join(prompt.split("\nSAY\n")[1].split("\n\n")[0].split())
         self.assertIn("Answer facts only from the context.", say)
-        self.assertIn("A fact not in the context that can change (news, prices, opening hours, people's jobs, anything "
-                      "recent): use web_research when it is in the schema; otherwise say plainly you can't see or "
-                      "check that.", say)
+        self.assertIn("A fact not in the context that can change (news, weather, prices, opening hours, people's jobs, "
+                      "anything recent): use web_research when it is in the schema. Only when it isn't, or for something "
+                      "private the context doesn't hold, say plainly you can't see or check that.", say)
         self.assertIn("Never guess or fill in from memory, and never present a guess as fact.", say)
         self.assertIn("Things that don't change may be answered briefly.", say)
         self.assertIn("One or two short sentences, up to four when the question needs it, spoken aloud.", say)
