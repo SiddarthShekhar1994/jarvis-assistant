@@ -107,6 +107,7 @@ LOAD_WORDS = {
     "cancelled": (W_STOPPED, STOPPED_TEXT),
     "shutdown": (W_STOPPED, STOPPED_TEXT),
 }
+TURNED_AWAY_TEXT = "This site doesn't open in Jarvis's window. Don't retry it here. Try fetch_text or another source."
 ENGINE_FAILED_WORDS = (W_NO_WINDOW,
                        "Jarvis's private web window could not be started on this PC. Say so in your report.")
 NO_RESULTS_TEXT = ("No search page gave results for that: {tried}. Jarvis never answers a captcha or clicks through a "
@@ -636,6 +637,8 @@ def _load_failure(result: snapshots.ShotResult | None, seconds: float) -> WebRef
     kind = snapshots.reason_kind(result.reason) if result is not None else "timeout"
     code, text = LOAD_WORDS.get(kind, ENGINE_FAILED_WORDS)
     status = result.http_status if result is not None else 0
+    if kind == "site_refused" and not status:     # the engine turned it away: no status to name (agent.browser)
+        text = TURNED_AWAY_TEXT
     return WebRefused(code, text.format(seconds=round(seconds), status=status))
 
 

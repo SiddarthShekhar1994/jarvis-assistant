@@ -785,9 +785,16 @@ class RefusedTests(ProbeCase):
         self.assertTrue(outcome["ok"])
         self.assertEqual(outcome["notice"], ["", ""])
 
+    def test_a_response_the_sandboxed_window_may_not_open_is_a_refusal_with_no_status(self) -> None:
+        """An opener policy, as a site's bot check sends: the engine's ERR_BLOCKED_BY_RESPONSE."""
+        outcome = self.outcomes()["turned"]
+        self.assertEqual((outcome["ok"], outcome["kind"], outcome["status"]), (False, "site_refused", 0))
+        self.assertEqual(outcome["notice"], ["www.example.org doesn't open in this window", agent_browser.REFUSED_NOTE])
+        self.assertFalse(outcome["uniform"])                         # words on its dark page, not emptiness
+
     def test_nothing_is_tried_again_and_no_identity_but_the_engine_s(self) -> None:
         report = self.report("refused")
-        self.assertEqual(report["hits"], ["403", "403empty", "401", "429", "404", "200", "403"])    # each asked for once
+        self.assertEqual(report["hits"], ["403", "403empty", "401", "429", "404", "200", "403", "turned"])   # each once
         self.assertEqual(len(report["agents"]), 1)                   # one user agent for every request ...
         self.assertEqual(report["agents"][0], report["profile_agent_default"])    # ... the engine's own
         self.assertIn("QtWebEngine", report["agents"][0])            # it says what it is

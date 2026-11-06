@@ -118,6 +118,25 @@ class ScriptTests(unittest.TestCase):
             web.scroll_script("0); alert(1); (0")  # type: ignore[arg-type]
 
 
+class RefusalWordsTests(unittest.TestCase):
+    """A refusal is told apart from a page that did not load, so the model doesn't try the same site's other pages."""
+
+    def refused(self, status: int) -> web.WebRefused:
+        return web._load_failure(snapshots.ShotResult(False, snapshots.R_SITE_REFUSED, http_status=status), 30.0)
+
+    def test_a_status_is_named(self) -> None:
+        found = self.refused(403)
+        self.assertEqual(found.code, web.W_REFUSED)
+        self.assertIn("HTTP 403", found.text)
+
+    def test_with_no_status_the_window_was_turned_away_and_no_number_is_made_up(self) -> None:
+        found = self.refused(0)
+        self.assertEqual(found.code, web.W_REFUSED)
+        self.assertEqual(found.text, web.TURNED_AWAY_TEXT)
+        self.assertNotIn("HTTP", found.text)
+        self.assertIn("fetch_text", found.text)
+
+
 class ParseTests(unittest.TestCase):
     def test_a_page_as_read(self) -> None:
         raw = json.dumps({"title": "  A\n title ", "url": "https://www.example.org/a#top", "length": 50000,

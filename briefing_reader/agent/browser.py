@@ -93,6 +93,10 @@ REFUSED_NOTE = "Jarvis doesn't try to get past that. It will look elsewhere."
 NOT_LOADED_WORDS = "{host} did not load"
 NOT_LOADED_NOTE = "It may be gone, or be something Jarvis doesn't open. It will look elsewhere."
 REFUSAL_STATUSES = frozenset({401, 403, 429})
+# The engine's word for a response a sandboxed window may not open: an opener policy, as a site's bot check sends and some
+# ordinary pages do. No page and no status come of it, and a refusal is what it is: Jarvis doesn't lift the sandbox for it.
+TURNED_AWAY_ERROR = "ERR_BLOCKED_BY_RESPONSE"
+TURNED_AWAY_WORDS = "{host} doesn't open in this window"
 FOLDER_WORDS = "Task folder"
 STRIP_HEIGHT = 36
 PAGE_INSET = 6
@@ -518,6 +522,7 @@ class AgentBrowser(PageCamera):
         self._followed: list[QScreen] = []
         self._http_status = 0              # the status the page in hand answered with, when it is an error's
         self._status_address = ""          # ... and the address that answered it
+        self._turned_away = False          # the load in hand ended in TURNED_AWAY_ERROR
         self._owner_hid = False            # the strip's Hide: off the screen until the panel's Show
         self._away = False                 # the owner brought the Jarvis window back: off the screen meanwhile
         self._rest = False                 # a file card waits: off the screen meanwhile (agent_feed)
@@ -740,6 +745,7 @@ class AgentBrowser(PageCamera):
         self._request = request
         self._timeout_ms = max(100, request.timeout_ms)
         self._http_status, self._status_address = 0, ""
+        self._turned_away = False
         if self._window is not None:
             self._window.set_notice()
             self._window.set_page(request.label)
@@ -820,6 +826,10 @@ class AgentBrowser(PageCamera):
             return
         try:
             status, domain, address = info.status().name, info.errorDomain().name, info.url().toString()
+            if status == "LoadStartedStatus":
+                self._turned_away = False
+            elif status == "LoadFailedStatus" and TURNED_AWAY_ERROR in info.errorString():
+                self._turned_away = True
             if domain == "HttpStatusCodeDomain":
                 self._http_status, self._status_address = int(info.errorCode()), address
             elif status in ("LoadStartedStatus", "LoadSucceededStatus") and address != self._status_address                     and not address.startswith("chrome-error:"):
@@ -1003,7 +1013,8 @@ class AgentBrowser(PageCamera):
         if shot.done:
             return
         status = self._http_status if reason == snapshots.R_LOAD_FAILED and self._http_status in REFUSAL_STATUSES else 0
-        reason = snapshots.R_SITE_REFUSED if status else reason
+        turned_away = reason == snapshots.R_LOAD_FAILED and not status and self._turned_away
+        reason = snapshots.R_SITE_REFUSED if status or turned_away else reason
         blocked, took = shot.blocked, int((time.monotonic() - shot.started) * 1000)
         super()._end(shot, reason, **data)
         request, self._request = self._request, None
@@ -1025,7 +1036,8 @@ class AgentBrowser(PageCamera):
         kind = snapshots.reason_kind(reason)
         if kind == "site_refused":
             window.cover(None)
-            window.set_notice(REFUSED_WORDS.format(host=request.label), REFUSED_NOTE)
+            words = TURNED_AWAY_WORDS if self._turned_away else REFUSED_WORDS
+            window.set_notice(words.format(host=request.label), REFUSED_NOTE)
         elif kind in ("load_failed", "timeout", "crashed", "blank"):
             window.cover(None)
             window.set_notice(NOT_LOADED_WORDS.format(host=request.label), NOT_LOADED_NOTE)

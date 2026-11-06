@@ -201,7 +201,8 @@ class _RefusingSite:
     BODIES = {"403": (403, b"<html><body>Access denied</body></html>"), "403empty": (403, b""),
               "401": (401, b"<html><body>Sign in</body></html>"), "429": (429, b"<html><body>Slow down</body></html>"),
               "404": (404, b"<html><body>Not here</body></html>"),
-              "200": (200, b"<html><title>Fine</title><body style='background:#fff'><h1>A page</h1></body></html>")}
+              "200": (200, b"<html><title>Fine</title><body style='background:#fff'><h1>A page</h1></body></html>"),
+              "turned": (404, b"<html><body>Not here</body></html>")}
 
     def __init__(self) -> None:
         self.hits: list[str] = []
@@ -866,7 +867,28 @@ def main(case: str) -> dict[str, Any]:
         snapshot_engine._test_platform = lambda: False
         client, _session, _context = make(html_for=None, decide=lambda *_args, **_kwargs: "")
         outcomes: dict[str, Any] = {}
-        for path in ("403", "403empty", "401", "429", "404", "200", "403"):
+        for path in ("403", "403empty", "401", "429", "404", "200", "403", "turned"):
+            if path == "turned":
+                # An opener policy counts only over https, so a loopback site can't draw the engine's own word for it (real
+                # sites do): it is put on this one failure, the rest of the road being the real engine's.
+                browser = client.browser()
+                real_loading = browser._on_loading
+
+                class _TurnedAway:
+                    def __init__(self, info: Any) -> None:
+                        self._info = info
+
+                    def __getattr__(self, name: str) -> Any:
+                        return getattr(self._info, name)
+
+                    def errorString(self) -> str:  # noqa: N802 - Qt's name
+                        return "net::ERR_BLOCKED_BY_RESPONSE"
+
+                def on_loading(shot: Any, info: Any, real: Any = real_loading) -> None:
+                    failed = info.status().name == "LoadFailedStatus"
+                    real(shot, _TurnedAway(info) if failed and info.url().toString().endswith("/turned") else info)
+
+                browser._on_loading = on_loading
             value, _took = in_thread(lambda path=path: client.load(f"http://www.example.org/{path}", timeout_s=15,
                                                                    cancelled=lambda: False))
             pump(0.2)
