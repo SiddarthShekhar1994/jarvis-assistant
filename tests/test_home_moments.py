@@ -124,6 +124,18 @@ class TranscriptTests(WindowCase):
 
 
 class OfferTileTests(unittest.TestCase):
+    def test_an_invite_s_title_is_never_read_as_html_on_hover(self) -> None:
+        tile = offer_view.OfferTile()
+        self.addCleanup(tile.deleteLater)
+        hostile = '<img src="file://attacker.example/share/x.png"> Standup'
+        tile.set_offer(offer_view.OfferInfo(4, "prep", "offer:4", "12:30 PM", hostile, "Prepare brief", (), "Shall I?"))
+        tip = tile.toolTip()
+        self.assertNotIn("<img", tip)
+        self.assertIn("&lt;img", tip)      # still readable, as plain words
+        self.assertIn("Standup", tip)
+        tile.set_offer(offer_view.OfferInfo(5, "prep", "offer:5", "12:30 PM", "", "Prepare brief", (), "Shall I?"))
+        self.assertEqual(tile.toolTip(), "")
+
     def test_a_prep_offer_tile_shows_words_never_readouts(self) -> None:
         tile = offer_view.OfferTile()
         self.addCleanup(tile.deleteLater)

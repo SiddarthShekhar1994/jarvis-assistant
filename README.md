@@ -2817,7 +2817,8 @@ What is sent:
   organizer; nobody else's answer is touched. "organizer emailed" (the default)
   or "organizer not emailed" (`notify=none`) says whether Google emails the
   organizer about it; the organizer sees your answer and note on the event
-  either way.
+  either way. A note too long for the card opens **Edit** first, so you read
+  all of it to its end before your next click sends it; a note that fits is one click.
 - **Move** gives the event the card's new start and end, in your calendar's time
   zone.
 - **Cancel event** deletes the event you organize.
