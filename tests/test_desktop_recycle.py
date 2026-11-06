@@ -28,6 +28,8 @@ from datetime import datetime, timezone
 from typing import Any
 from unittest import mock
 
+import pythoncom
+
 from briefing_reader.ask import desktop_mode as dm
 from briefing_reader.ask.modes import MODE_DESKTOP, ModeRequest
 from briefing_reader.desktop import backend as dbk
@@ -142,6 +144,81 @@ class DecideTests(unittest.TestCase):
         self.assertEqual(flags, 0x00080000 | 0x0040 | 0x4000 | 0x0400)
         self.assertEqual(fo.BIN_STOPS, {fo.R_WOULD_NUKE, fo.R_NOT_RECYCLED})
         self.assertEqual(fo.UNDO_WORDS[fo.R_BIN_EMPTIED], "Can't be put back - the Recycle Bin was emptied.")
+
+
+class FakeItemMenu:
+    """A bin item's menu (IContextMenu) with invented verbs. ``verbs``: the number on the menu -> its verb."""
+
+    def __init__(self, verbs: dict[int, str]) -> None:
+        self.verbs = verbs
+        self.invoked: list[tuple[Any, ...]] = []
+
+    def QueryContextMenu(self, _popup: Any, _at: int, _first: int, _last: int, _flags: int) -> None:  # noqa: N802
+        pass
+
+    def GetCommandString(self, offset: int, _kind: int) -> str:  # noqa: N802
+        if offset not in self.verbs:
+            raise pythoncom.com_error(-2147467259, "no verb", None, None)
+        return self.verbs[offset]
+
+    def InvokeCommand(self, info: tuple[Any, ...]) -> None:  # noqa: N802
+        self.invoked.append(info)
+
+
+class RestoreByNumberTests(unittest.TestCase):
+    """pywin32's InvokeCommand takes the whole process down when the verb is given as text, on any item's menu, so the
+    bin's restore names its verb by number. Everything of Windows is a fake here: the real method's body runs (its guard
+    is stepped round), and the bin, the menu and the popup it asks for are all invented."""
+
+    ENTRY = recycle.BinEntry("C:\\Users\\Owner\\Downloads", "a.txt", 1.0, 1, b"x")
+    ORIGINAL = "C:\\Users\\Owner\\Downloads\\a.txt"
+
+    def test_the_verbs_number_is_found_among_what_the_menu_holds(self) -> None:
+        menu = FakeItemMenu({2: "open", 6: "UnDelete", 9: "undelete"})
+        self.assertEqual(recycle._verb_offset(menu, [0, 0xFFFFFFFF, -1, 3, 5, 7, 10], "undelete"), 6)   # noqa: SLF001
+
+    def test_no_such_verb_is_no_number(self) -> None:
+        menu = FakeItemMenu({2: "open", 0x8000: "undelete"})
+        self.assertIsNone(recycle._verb_offset(menu, [3, 5, 0x8001], "undelete"))                       # noqa: SLF001
+        self.assertIsNone(recycle._verb_offset(menu, [], "undelete"))                                   # noqa: SLF001
+
+    def run_restore(self, menu: FakeItemMenu, commands: list[int]) -> mock.Mock:
+        folder = mock.Mock()
+        folder.GetUIObjectOf.return_value = (0, menu)
+        popup = object()
+        gui = mock.Mock()
+        gui.CreatePopupMenu.return_value = popup
+        gui.GetMenuItemCount.return_value = len(commands)
+        gui.GetMenuItemID.side_effect = lambda _popup, at: commands[at]
+        seam = object.__new__(recycle.Win32RecycleBin)                 # its constructor never ran
+        body = recycle.Win32RecycleBin.restore_entry.__wrapped__
+        with (mock.patch.object(recycle, "_com_ready"), mock.patch.object(recycle, "_bin_folder", return_value=folder),
+              mock.patch.dict(sys.modules, {"win32gui": gui}), mock.patch.object(recycle, "RESTORE_WAIT_S", 0.0)):
+            try:
+                body(seam, self.ENTRY, self.ORIGINAL)
+            finally:
+                gui.DestroyMenu.assert_called_once_with(popup)
+        return gui
+
+    def test_the_restore_gives_the_verb_as_its_number_and_never_as_text(self) -> None:
+        menu = FakeItemMenu({0: "open", 4: recycle.UNDELETE_VERB, 7: "properties"})
+        self.run_restore(menu, [1, 0, 5, 8])
+        self.assertEqual(menu.invoked, [(0, 0, 4, None, None, recycle.SW_SHOWNORMAL, 0, None)])
+        self.assertIs(type(menu.invoked[0][2]), int)
+        self.assertEqual(menu.invoked[0][0], 0)                        # never without the bin's own questions
+
+    def test_a_menu_without_the_verb_says_so_and_does_nothing(self) -> None:
+        menu = FakeItemMenu({0: "open", 7: "properties"})
+        with self.assertRaises(OSError):
+            self.run_restore(menu, [1, 8])
+        self.assertEqual(menu.invoked, [])
+
+    def test_a_refusal_from_the_menu_is_an_oserror_not_a_crash(self) -> None:
+        menu = FakeItemMenu({4: recycle.UNDELETE_VERB})
+        menu.InvokeCommand = mock.Mock(side_effect=pythoncom.com_error(-2147024891, "denied", None, None))
+        with self.assertRaises(OSError) as caught:
+            self.run_restore(menu, [5])
+        self.assertEqual(caught.exception.winerror, 5)
 
 
 class RealBinGuardTests(unittest.TestCase):

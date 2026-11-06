@@ -31,8 +31,8 @@ copy - goes through ``RecycleBin.recycle``, in this order, every time:
 Undo of an item Jarvis binned (SPEC 6.3; fileops.Undoer checks its old folder and that its old place is free first):
 ``find`` looks for it in the bin by its old path, when it was binned and its size (the bin's IShellFolder2 details
 System.Recycle.DeletedFrom and System.Recycle.DateDeleted, and System.Size) - None when the bin was emptied - and
-``restore`` asks the bin itself to put it back (its "undelete" verb), confirmed at its old place
-(``fileops.R_NOT_RESTORED`` when it isn't).
+``restore`` asks the bin itself to put it back (its "undelete" verb, by that verb's number on the item's menu: pywin32
+crashes the process on a verb given as text), confirmed at its old place (``fileops.R_NOT_RESTORED`` when it isn't).
 
 ``BinSeam`` is what the Windows side offers; ``Win32RecycleBin`` is the real one (pywin32: the shell's
 IFileOperation, IShellFolder2 and IContextMenu; winreg read only; ctypes for the volume's name) - constructing it,
@@ -57,7 +57,7 @@ import logging
 import ntpath
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -79,6 +79,7 @@ MAX_BIN_ENTRIES = 10_000                 # bin items looked at, at most, when lo
 RESTORE_WAIT_S = 2.0                     # how long a restore is waited for at its old place
 SW_SHOWNORMAL = 1
 _CMF_NORMAL = 0
+_MENU_FIRST, _MENU_LAST = 1, 0x7FFF      # the command numbers an item's menu is asked to use
 _E_ABORT = 0x80004004
 _COPYENGINE_E_USER_CANCELLED = 0x80270000
 _FACILITY_WIN32 = 7
@@ -509,9 +510,14 @@ class Win32RecycleBin:
             _inout, menu = folder.GetUIObjectOf(0, [entry.key], shell.IID_IContextMenu, 0)
             popup = win32gui.CreatePopupMenu()
             try:
-                menu.QueryContextMenu(popup, 0, 1, 0x7FFF, _CMF_NORMAL)
+                menu.QueryContextMenu(popup, 0, _MENU_FIRST, _MENU_LAST, _CMF_NORMAL)
+                commands = [win32gui.GetMenuItemID(popup, at) for at in range(win32gui.GetMenuItemCount(popup))]
+                offset = _verb_offset(menu, commands, UNDELETE_VERB)
+                if offset is None:
+                    raise OSError(0, "the Recycle Bin's item has no Restore")
+                # By number: pywin32's InvokeCommand takes the whole process down when the verb is given as text.
                 # fMask 0: never CMIC_MASK_FLAG_NO_UI - without its UI the bin could replace what is in the old place.
-                menu.InvokeCommand((0, 0, UNDELETE_VERB, None, None, SW_SHOWNORMAL, 0, None))
+                menu.InvokeCommand((0, 0, offset, None, None, SW_SHOWNORMAL, 0, None))
             finally:
                 win32gui.DestroyMenu(popup)
         except pythoncom.com_error as exc:
@@ -525,6 +531,25 @@ class Win32RecycleBin:
 # --------------------------------------------------------------------------
 # Windows helpers (only ever reached through Win32RecycleBin's guarded methods)
 # --------------------------------------------------------------------------
+
+def _verb_offset(menu: Any, commands: Iterable[int], verb: str) -> int | None:
+    """Where ``verb`` is on a shell item's menu, as the number InvokeCommand wants (its command less _MENU_FIRST), from the
+    menu's ``commands``. None when it isn't there. A separator (0), a submenu (-1, or that as unsigned) and a command that
+    won't name itself are passed over."""
+    import pythoncom
+    from win32com.shell import shellcon
+
+    for command in commands:
+        if not _MENU_FIRST <= command <= _MENU_LAST:
+            continue
+        try:
+            name = menu.GetCommandString(command - _MENU_FIRST, shellcon.GCS_VERBW)
+        except pythoncom.com_error:
+            continue
+        if isinstance(name, str) and name.casefold() == verb:
+            return command - _MENU_FIRST
+    return None
+
 
 def _volume_guid(root: str) -> str:
     """The volume's GUID ("{...}") for a drive's root ("C:\\"), from GetVolumeNameForVolumeMountPointW."""

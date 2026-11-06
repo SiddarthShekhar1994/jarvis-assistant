@@ -16,3 +16,8 @@ python-dotenv>=1.0
 google-api-python-client>=2.100
 google-auth-oauthlib>=1.2
 google-auth-httplib2>=0.2
+# Jarvis on your desktop: music controls that can read what is playing, so Undo can put it back. Optional: without
+# these Jarvis presses the media keys instead.
+winrt-runtime==3.2.1
+winrt-Windows.Media.Control==3.2.1
+winrt-Windows.Foundation==3.2.1
