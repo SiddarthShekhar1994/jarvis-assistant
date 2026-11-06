@@ -5737,6 +5737,10 @@ class ActionCard(QWidget):
         """The body preview as shown before any cut (line breaks folded into spaces)."""
         return self.body_label.full_text()
 
+    def body_cut(self) -> bool:
+        """The body preview (an RSVP's note to the organizer) does not fit its lines at the current width."""
+        return not self.body_label.isHidden() and self.body_label.is_cut()
+
     def set_texts(self, kind: str, title: str, detail: str) -> None:
         self._title = title
         self.kind_label.set_full_text(kind.upper())
@@ -6636,7 +6640,7 @@ class EditDialog(QDialog):
         self._find_links = find_links or (lambda _text: ())
         self._max_recipients = max_recipients
         self._fitted = False
-        self._seen_all = not self.mail
+        self._seen_all = not self.mail and kind != EDIT_RSVP   # what's sent must be read: a message, an RSVP's note
         self._follow_cursor = False
         self.fields_scroll: QScrollArea | None = None
         self.setWindowModality(Qt.WindowModality.WindowModal)
@@ -6699,6 +6703,9 @@ class EditDialog(QDialog):
             self.fields_scroll.verticalScrollBar().valueChanged.connect(self._note_seen)
         else:
             self._build_event(fields, notify=notify, hour24=hour24, note=note)
+            if kind == EDIT_RSVP:
+                self.fields_scroll.verticalScrollBar().valueChanged.connect(self._note_seen)
+                self.note_edit.verticalScrollBar().valueChanged.connect(self._note_seen)
         self.error_label = make_label("", mono_font(11), RED, wrap=True)
         self.error_label.hide()
         layout.addWidget(self.error_label)
@@ -6913,8 +6920,9 @@ class EditDialog(QDialog):
             self.show_error("")
 
     def whole_seen(self) -> bool:
-        """Every field of a Reply / Email (the subject and the message to their ends) has been on
-        screen while the dialog was open: it fit, or its fields were scrolled to the end."""
+        """Every field of a Reply / Email (the subject and the message to their ends) or an RSVP's
+        note to its end has been on screen while the dialog was open: it fit, or it was scrolled to
+        the end. Other kinds send no text, so they have nothing to read."""
         return self._seen_all
 
     def _note_seen(self, *_args: Any) -> None:
@@ -6930,8 +6938,13 @@ class EditDialog(QDialog):
                   else layout.totalSizeHint().height())
         if content.height() + 1 < needed:
             return   # not laid out yet: decide on the next look
-        # The message's end must be inside the fields' viewport, the dialog and the screen alike.
-        bottom = self.body_edit.mapToGlobal(QPoint(0, self.body_edit.height())).y()
+        if not self.mail:
+            inner = self.note_edit.verticalScrollBar()   # the note's box has a fixed height and scrolls by itself
+            if inner.value() < inner.maximum():
+                return
+        # The text's end must be inside the fields' viewport, the dialog and the screen alike.
+        field = self.body_edit if self.mail else self.note_edit
+        bottom = field.mapToGlobal(QPoint(0, field.height())).y()
         limits = [viewport.mapToGlobal(QPoint(0, viewport.height())).y(),
                   self.mapToGlobal(QPoint(0, self.height())).y()]
         screen = self._screen()
@@ -7072,7 +7085,7 @@ class EditDialog(QDialog):
         if not self._fitted:   # shown without open(): fit the content once all the same
             self._fitted = True
             self._fit()
-        if self.mail:   # is all of it on screen from the start?
+        if self.mail or self.kind == EDIT_RSVP:   # is all of it on screen from the start?
             QTimer.singleShot(0, self._note_seen)
 
     def _relayout(self) -> None:

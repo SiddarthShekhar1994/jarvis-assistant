@@ -35,7 +35,7 @@ from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
-from . import holo
+from . import holo, hud
 
 TILE_MIN = 220
 TILE_MAX = 290
@@ -128,7 +128,7 @@ class OfferTile(QWidget):
         what = info.commit.lower() if info.commit else "an offer"
         self.setAccessibleName(f"Offer from Jarvis: {what}")
         self.setAccessibleDescription(" ".join(part for part in (info.kicker, info.title, *info.meta) if part))
-        self.setToolTip(info.title if info.title else "")
+        self.setToolTip(hud.plain_tooltip(info.title))   # an invite's title is anyone's text: never read as HTML
         if fresh and not holo.reduced_motion():
             self._ping_start = time.monotonic()
             self._ping.start()

@@ -4006,6 +4006,10 @@ MAIL_SIGNED_IN_NOTE = "Signed in - this card sends from {sender}; nothing is sen
 REVIEW_NOTE = "Read the whole message in Edit, then click Send again"
 REVIEW_BANNER = ("The card doesn't show all of this message. Read all of it here, to its end; Save keeps any "
                  "change. Nothing is sent until you click Send again.")
+RSVP_REVIEW_NOTE = "Read the whole note in Edit, then click {button} again"
+RSVP_REVIEW_BANNER = ("The card doesn't show all of this note, and it goes to the organizer with your answer. Read "
+                      "all of it here, to its end; Save keeps any change. Nothing is sent until you click {button} "
+                      "again.")
 FROM_CHANGED_NOTE = ("The sending account changed before it went; nothing was sent - check From and click "
                      "Send again")
 # A new binding (an alias's first sign-in): is it the right Google account? Nothing is sent or
@@ -5291,8 +5295,8 @@ class AppController(QObject):
         self._confirm_action: ProposedAction | None = None
         # That question when it came up on the desktop HUD: (alias, card id, action), asked once the window is back.
         self._account_ask_later: tuple[str, str, ProposedAction | None] | None = None
-        # Reply / Email id -> _review_digest of the subject and message the Edit dialog showed whole
-        # (this run, memory only): Send skips the review only while the card still says exactly that.
+        # Reply / Email id -> _review_digest of the subject and message the Edit dialog showed whole, RSVP id ->
+        # of its note (this run, memory only): the click skips the review only while the card still says exactly that.
         self._reviewed: dict[str, str] = {}
         self._connect_mail = False                 # the queued / running sign-in is a Reply / Email's Send
         self._read_slot: str | None = None         # the scheduled slot this reading settled
@@ -6925,6 +6929,16 @@ class AppController(QObject):
         cut = body_needs_review(action) or card is None or card.mail_cut()
         return cut and self._reviewed.get(action.id) != _review_digest(action.title, action.body)
 
+    def _note_unread(self, action: ProposedAction) -> bool:
+        """An RSVP whose note goes to the organizer but does not fit on its card, and whose Edit dialog has not shown
+        exactly this note to its end yet: the click opens the dialog to read it first. A note that fits was on screen
+        beside the button."""
+        if action.kind != RSVP or not action.body:
+            return False
+        card = self.window.reading.action_card(action.id)
+        cut = card is None or card.body_cut()
+        return cut and self._reviewed.get(action.id) != _review_digest("", action.body)
+
     def _approve_event(self, action: ProposedAction) -> None:
         """Accept / Move / Cancel event / Retry: sign in or check first when needed, else carry it out (an
         RSVP or Move at once; a Cancel after its hidden hold)."""
@@ -6965,6 +6979,11 @@ class AppController(QObject):
             self._mismatch_seen[action_id] = check
             self._hint(action_id, MISMATCH_NOTE.format(what=_MISMATCH_WHAT.get(check.mismatch, "other details"),
                                                        button=button))
+            return
+        if self._note_unread(action):
+            logger.info("Approve %s: opening Edit to read the whole note first", action_id)
+            self._hint(action_id, RSVP_REVIEW_NOTE.format(button=button))
+            self._open_event_dialog(action, RSVP_REVIEW_BANNER.format(button=button))
             return
         if action.held:
             self._start_send_hold(action)
@@ -7423,6 +7442,13 @@ class AppController(QObject):
         if action.sends_mail:
             self._open_mail_dialog(action)
             return
+        self._open_event_dialog(action)
+
+    def _open_event_dialog(self, action: ProposedAction, banner: str = "") -> None:
+        """The Edit dialog of an RSVP, Move or Cancel: its answer or time, Notify guests and the note."""
+        if self.state == STATE_QUITTING or self._dialog is not None or self._account_dialog is not None:
+            return
+        action_id = action.id
         hour24 = self.config.display.hour24
         date_text, start_text, end_text = _time_texts(action, hour24)
         view = card_view(action, self._now().date())
@@ -7431,7 +7457,7 @@ class AppController(QObject):
                                 answer=action.field("answer", "yes"), notify=action.field("notify", "all"),
                                 date_text=date_text, start_text=start_text, end_text=end_text,
                                 note=action.body, check_text=check_tip or check_text, hour24=hour24,
-                                parent=self.window)
+                                banner=banner, parent=self.window)
         dialog.saved.connect(self._on_edit_saved)
         dialog.finished.connect(self._on_edit_closed)
         self._dialog = dialog
@@ -7535,6 +7561,8 @@ class AppController(QObject):
                 # says exactly this. A Cancel after typing leaves the card's text unread.
                 values = dialog.values()
                 self._reviewed[dialog.action_id] = _review_digest(values.get("subject", ""), values.get("body", ""))
+            elif dialog.kind == hud.EDIT_RSVP and dialog.whole_seen():
+                self._reviewed[dialog.action_id] = _review_digest("", dialog.values().get("note", ""))
             dialog.deleteLater()
         if self.state != STATE_QUITTING:
             self._sync_card_locks()
