@@ -12,6 +12,7 @@ import ntpath
 import os
 import unittest
 from types import SimpleNamespace
+from typing import Any
 
 from briefing_reader import agent_ui
 from briefing_reader import config as app_config
@@ -24,8 +25,9 @@ from briefing_reader.desktop import guard, service
 from briefing_reader.desktop import validate as dv
 from briefing_reader.desktop.context import FileItem
 from briefing_reader.desktop.refs import FILE, RefIndex
+from tests.ask_fakes import gmail_message, gmail_thread
 from tests.desktop_fakes import DOWNLOADS, pretend_path
-from tests.owner_fakes import (ALL_CONNECTED, ATTACKER, BODY_WORD, CONTENT_WORD, DATA_DIR, EVENT_ID, FILE_WORD,
+from tests.owner_fakes import (ALL_CONNECTED, ATTACKER, BODY_WORD, CONTENT_WORD, DATA_DIR, EVENT_ID, FILE_WORD, GUEST,
                                GUEST_ADDRESS, LETTER, NOTE_WORD, PROJECT_DIR, SAID_WORD, SECRET_WORD, SUBJECT_WORD,
                                THREAD_ID, OwnerBench, invented_thread)
 
@@ -180,6 +182,54 @@ class MailTests(Base):
         self.assertIn("<untrusted", result.text)
         self.assertTrue(bench.firewall.strict)
         self.assertTrue(bench.firewall.taint.hits(BODY_WORD))
+
+    def holding_a_key(self, bench_goal: str = "find the Orionhold mail") -> tuple[Any, Any]:
+        """rf-10: a thread of two: one message with a key in it, one without."""
+        key = ("Here is the new key.\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n"
+               "-----END OPENSSH PRIVATE KEY-----\npassword: Hunter2Hunter2Hunter2 for Ravenscar")
+        thread = gmail_thread(THREAD_ID, [
+            gmail_message("msg0000001", sender=f"{GUEST} <{GUEST_ADDRESS}>", to="me@example.com", subject="Orionhold keys",
+                          body=key, msgid="<CAB7@mail.example.edu>", at_ms=1791200000000),
+            gmail_message("msg0000002", sender="me@example.com", to=GUEST_ADDRESS, subject="Re: Orionhold keys",
+                          body=f"The {BODY_WORD} figures are 42.", msgid="<CAB8@mail.example.edu>", at_ms=1791200900000)])
+        bench = self.bench(bench_goal, threads={THREAD_ID: thread})
+        self.assertFalse(bench.call("mail_search", words="Orionhold").is_error)
+        return bench, bench.call("mail_read", thread=THREAD_ID)
+
+    def test_a_message_holding_a_key_is_left_out_and_the_rest_of_the_thread_goes_on(self) -> None:
+        bench, result = self.holding_a_key()
+        self.assertFalse(result.is_error)
+        self.assertNotIn("BEGIN OPENSSH", result.text)
+        self.assertNotIn("Hunter2", result.text)
+        self.assertNotIn("Here is the new key", result.text)
+        self.assertIn(owner.MAIL_LEFT_OUT_TEXT, result.text)
+        self.assertIn(BODY_WORD, result.text)                        # the rest goes on
+        self.assertIn(GUEST_ADDRESS, result.text)                    # and its headers
+        self.assertTrue(bench.firewall.strict)
+
+    def test_live_warns_of_it_with_no_word_of_it(self) -> None:
+        _bench, result = self.holding_a_key()
+        self.assertTrue(result.warn)
+        self.assertEqual(dict(result.fields)["Left out"], "1 message: what looks like a key or a password, never read")
+        shown = " ".join([result.note, *(value for _label, value in result.fields)])
+        for word in ("Hunter2", "OPENSSH", "Ravenscar", "new key"):
+            self.assertNotIn(word, shown)
+
+    def test_what_was_left_out_feeds_nothing_and_jarvis_s_own_words_taint_nothing(self) -> None:
+        bench, _result = self.holding_a_key()
+        self.assertEqual(bench.firewall.taint.hits("Ravenscar"), ())
+        self.assertEqual(bench.firewall.taint.hits("Hunter2Hunter2Hunter2"), ())
+        self.assertEqual(bench.firewall.taint.hits("holds looks password"), ())
+        self.assertTrue(bench.firewall.taint.hits(BODY_WORD))
+        self.assertFalse(bench.firewall.read_words.holds("[Jarvis left this message out: it holds what looks like a key"))
+
+    def test_an_ordinary_thread_has_no_warning_for_it(self) -> None:
+        bench = self.bench("find the Orionhold mail")
+        bench.call("mail_search", words="Orionhold")
+        result = bench.call("mail_read", thread=THREAD_ID)
+        self.assertFalse(result.warn)
+        self.assertNotIn("Left out", dict(result.fields))
+        self.assertNotIn(owner.MAIL_LEFT_OUT_TEXT, result.text)
 
     def test_only_a_thread_a_search_of_this_task_found(self) -> None:
         bench = self.bench("find the Orionhold mail")

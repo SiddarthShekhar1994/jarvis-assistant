@@ -124,6 +124,13 @@ _UNKNOWN_OPTION_RE = re.compile(r"unknown option|unknown command|error: option .
 _RESET_RE = re.compile(r"resets?\s+(?:at\s+)?([0-9]{1,2}(?::[0-9]{2})?\s*(?:[ap]\.?m\.?)?"
                        r"(?:\s*\([A-Za-z_/+\-]{1,40}\))?)", re.IGNORECASE)
 _RESET_EPOCH_RE = re.compile(r"\|\s*(\d{10})\b")
+# A day or a date anywhere in a limit's words: "resets 5am Mon" is not the next 5am, and a pause must never be shorter than
+# the real one.
+_RESET_DAY_RE = re.compile(r"\b(?:mon|tue|tues|wed|weds|thu|thur|thurs|fri|sat|sun"
+                           r"|(?:mon|tues|wednes|thurs|fri|satur|sun)day"
+                           r"|today|tonight|tomorrow|jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february"
+                           r"|march|april|june|july|august|september|october|november|december)\b"
+                           r"|\b\d{1,2}(?:st|nd|rd|th)\b|\b\d{4}-\d{1,2}|\b\d{1,2}[/.]\d{1,2}\b", re.IGNORECASE)
 _RESET_PARTS_RE = re.compile(r"([0-9]{1,2})(?::([0-9]{2}))?\s*(?:([ap])\.?m\.?)?(?:\s*\(([A-Za-z_/+\-]{1,40})\))?",
                              re.IGNORECASE)
 _FENCE_RE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
@@ -516,13 +523,15 @@ def _reset_words(text: str, now: Callable[[], datetime]) -> str:
 def limit_reset_time(text: str, *, now: Callable[[], datetime] = lambda: datetime.now().astimezone()) -> datetime | None:
     """When a usage-limit text says the limit resets, as a moment: "resets 3pm (Europe/London)" the next 3pm there (in
     this PC's own zone when Python has no such zone: no tzdata here), "resets 15:30" the next 15:30, "...|1762300000"
-    that moment. None when it names no time a clock can read: "resets 3" says neither morning nor afternoon."""
+    that moment. None when it names no time a clock can read: "resets 3" says neither morning nor afternoon, and with a
+    day or a date beside the time ("resets 5am Mon") the next such time may be far too soon: a pause must never be
+    shorter than the real one, so the task waits as with no time given."""
     match = _RESET_RE.search(text or "")
     if match is None:
         epoch = _RESET_EPOCH_RE.search(text or "")
         return _epoch_time(int(epoch.group(1)), now) if epoch else None
     parts = _RESET_PARTS_RE.fullmatch(" ".join(match.group(1).split()))
-    if parts is None:
+    if parts is None or _RESET_DAY_RE.search(text):
         return None
     hour, minute = int(parts.group(1)), int(parts.group(2) or 0)
     meridiem = (parts.group(3) or "").casefold()

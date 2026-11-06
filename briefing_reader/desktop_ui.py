@@ -146,8 +146,9 @@ hook). It keeps the owner's rules:
   ``task_job`` gives the desktop thread a task's reads and carry-outs, with THE CONSENT GATE as ever; ``task_show`` shows
   what they came to as a request's cards, with the same click guards, journal and Undo, and a click right after one comes
   up is ignored (a task's card can come at any moment, under the pointer); ``tidyAtWork`` tells when the owner's click
-  starts a card of file steps' batch and ``tidyEnded`` how it ended; ``withdraw_task`` takes back what a stopped task left
-  undecided. A card that waits for the owner is never replaced by a task's: ``task_show`` says no, and the model is told.
+  starts a card of file steps' batch, ``tidyProgress`` when a row of it ended and ``tidyEnded`` how it ended;
+  ``withdraw_task`` takes back what a stopped task left undecided. A card that waits for the owner is never replaced by a
+  task's: ``task_show`` says no, and the model is told.
   A task's one-click card that still waits for its click comes back with the HUD after a visit to the window, and counts
   in the window meanwhile: the task's report says it waits.
 
@@ -540,6 +541,7 @@ class DesktopController(QObject):
     waitingChanged = Signal(int)       # NEEDS YOUR OK cards of file steps waiting for him (P2.3: Approvals' reminder)
     tidyEnded = Signal(object, str)    # a card of file steps ended (its state, tidy.ENDED_*): a task on it hears
     tidyAtWork = Signal(object, bool)  # the owner's click started its batch (False: it ran nothing and the card waits on)
+    tidyProgress = Signal(object)      # a row of its batch ended: a task waiting on it watches this
     hudLanded = Signal()               # the HUD's windows have just shown (the instant swap, or the flight's handover)
     timerEnded = Signal(str)           # P2.4: a Jarvis timer ended - the toast's line (the app posts it)
     focusChanged = Signal(bool)        # P2.5: focus mode started (True: Jarvis quiet) or ended (False: let go)
@@ -2041,6 +2043,7 @@ class DesktopController(QObject):
         if job is None or job[0] != seq or state is None or not isinstance(end, desktop_tidy.RowEnd):
             return
         state.row_ended(end, ended)
+        self.tidyProgress.emit(state)
         wait = ROW_REFRESH_S - (time.monotonic() - self._row_shown)
         if wait <= 0:
             self._refresh_tidy()
@@ -2476,7 +2479,7 @@ class DesktopController(QObject):
         self._sync_instant()                                 # P2.5: the instant row as it is now
         win.orb.set_recording(bool(elapsed))
         base, muted, offline = reading.look()
-        win.set_look(base, muted=muted, offline=offline)
+        win.set_look(base, muted=muted, offline=offline, word=reading.task_word(base, muted))
         self._refresh_flight()                               # the chips arrive with the counts as they are now
 
     def set_toast(self, toast: Any) -> None:

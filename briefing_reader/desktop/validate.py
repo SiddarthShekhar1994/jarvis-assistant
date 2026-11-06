@@ -73,8 +73,9 @@ Tiers ``INSTANT``, ``ONE_CLICK``, ``CARD``, ``NEVER`` (``TIERS``), ``promote(tie
 a tier went up, or what a card row must show). ``PlannedStep``, ``DesktopAnswer`` (the planner's answer as read),
 ``CheckedStep``, ``DesktopPlan`` (``accepted()``, ``refused()``, ``counts()``, ``skills_text()``,
 ``codes_text()``), ``check_plan(answer, refs, owner_words, run_id=, path_check=, names=, withdrawn=)``,
-``licensed_skills(words, names=)``, ``taken_back(message)`` and ``withdrawn_skills(messages, names=)`` (a task's: what a
-later message took back), ``names_item(words, label)``, ``named_exactly(words, label)``, ``typed_url(words, url,
+``licensed_skills(words, names=, extra=)``, ``taken_back(message)`` and ``withdrawn_skills(messages, names=, extra=)`` (a
+task's: what a later message took back; ``TASK_LICENCES``: its own words for the same skills, for ``extra``),
+``negated(words)``, ``names_item(words, label)``, ``named_exactly(words, label)``, ``typed_url(words, url,
 bare=)``, ``places_named(words, places)`` (the places scope licensing reads in the owner's words; desktop.index searches
 them first).
 
@@ -386,9 +387,10 @@ _NEGATIONS = frozenset({"not", "never", "no", "without", "don", "dont", "doesn",
 # "1,000"), a ';' or a sentence's end ('.', '!' or '?' before a space or the end; never the dot of "essay.docx") -
 # and the words that start a new clause after them ("but", "just", "only", "and then"). A comma inside a negated
 # list of verbs goes on with the list ("don't touch, move or delete the rest"): when what stands between it and the
-# negation (or the list's last comma) is one word, or only verbs and the words that join them.
+# negation (or the list's last comma) is one word, or only verbs and the words that join them. A run of marks is tried
+# once, not from each of its marks: this runs on whatever was pasted, and re holds the GIL throughout.
 _NO_BREAK, _COMMA, _CLAUSE, _SENTENCE = 0, 1, 2, 3
-_BREAK_RE = re.compile(r"(?<!\d),|,(?!\d)|;|[.!?]+(?=\s|$)")
+_BREAK_RE = re.compile(r"(?<!\d),|,(?!\d)|;|(?<![.!?])[.!?]+(?=\s|$)")
 _CLAUSE_WORDS = frozenset({"but", "just", "only"})
 _LIST_WORDS = frozenset({"or", "and", "nor", "t"})          # "t": the end of "don't"
 
@@ -443,15 +445,16 @@ def _lead(tokens: Sequence[str]) -> int:
     return index
 
 
-def licensed_skills(owner_words: Any, names: Iterable[Any] = ()) -> frozenset[str]:
+def licensed_skills(owner_words: Any, names: Iterable[Any] = (), extra: Sequence[Licence] = ()) -> frozenset[str]:
     """The skills the owner's typed words license (SPEC 4.5): deterministic, on his words only. ``names``: the names of
     what this request lists (files, folders, apps, sites): his words that are one of them - or that he put in quotes -
     are only that name, never a licence ("open Jarvis, delete all files.docx" licenses opening only). Names only ever
     take words away: what is licensed with them is always part of what his words alone license. A negation takes
-    away every licence word after it in its clause, and the Recycle Bin's after it in its sentence (_licences)."""
+    away every licence word after it in its clause, and the Recycle Bin's after it in its sentence (_licences).
+    ``extra``: licences besides SPEC 4.5's (TASK_LICENCES: a task's own)."""
     said = _read(owner_words, [(name, False) for name in names])
     tokens, marks, _after = _clause_tokens(owner_words)
-    return _licences(tokens, marks) & _licences(said.licence, said.marks)
+    return _licences(tokens, marks, extra) & _licences(said.licence, said.marks, extra)
 
 
 # ---- the owner's words, read with the names in them (P2.2) -----------------------------------------------
@@ -625,17 +628,17 @@ def _clause_starts(tokens: Sequence[str], marks: Sequence[int],
     return clauses, sentences
 
 
-def _licences(tokens: Sequence[str], marks: Sequence[int] = ()) -> frozenset[str]:
-    """The skills SPEC 4.5's table gives for ``tokens`` (the owner's words, names already read as names; ``marks``:
-    the break before each word). A licence word after a negation does not count: one of the two words before it
-    ("don't delete"), or any earlier in its clause - a negation covers the whole list of verbs after it ("zip the
+def _licences(tokens: Sequence[str], marks: Sequence[int] = (), extra: Sequence[Licence] = ()) -> frozenset[str]:
+    """The skills SPEC 4.5's table (and ``extra``) gives for ``tokens`` (the owner's words, names already read as names;
+    ``marks``: the break before each word). A licence word after a negation does not count: one of the two words before
+    it ("don't delete"), or any earlier in its clause - a negation covers the whole list of verbs after it ("zip the
     photos, don't move or delete the originals" licenses the zip only; p2r-12); and the Recycle Bin's words never
     after a negation anywhere earlier in their sentence ("don't keep them, just bin them" bins nothing)."""
     lead = _lead(tokens)
     negating = _negations(tokens)
     clauses, sentences = _clause_starts(tokens, marks, negating)
     allowed: set[str] = set()
-    for licence in LICENCES:
+    for licence in (*LICENCES, *extra):
         for phrase in licence.phrases:
             for start in _find(tokens, phrase):
                 if licence.lead and start != lead:
@@ -652,6 +655,11 @@ def _licences(tokens: Sequence[str], marks: Sequence[int] = ()) -> frozenset[str
 # ---- a licence taken back by a later message (a task's: agent.owner; a desktop request has one message)
 # ----------------
 
+# A task's own words for the same skills (agent.owner's pc_control passes them as ``extra``): at worst they reach its
+# click card, and are never refused as not asked for. No desktop request reads them.
+TASK_LICENCES = (Licence(_p("sound"), frozenset({VOLUME})),
+                 Licence(_p("stop the music", "stop the song", "stop the track", "go back a song", "go back a track"),
+                         frozenset({MEDIA})))
 _ALL_LICENSED = frozenset(skill for licence in LICENCES for skill in licence.skills)
 _TAKE_ALL_BACK = _p("never mind", "nevermind", "forget it", "forget that", "scrap that", "scrap it", "cancel that",
                     "leave it", "leave them", "leave that", "leave those", "leave everything", "do nothing",
@@ -702,15 +710,21 @@ def taken_back(message: Any) -> frozenset[str]:
     return frozenset(gone)
 
 
-def withdrawn_skills(messages: Iterable[Any], names: Iterable[Any] = ()) -> frozenset[str]:
+def withdrawn_skills(messages: Iterable[Any], names: Iterable[Any] = (), extra: Sequence[Licence] = ()) -> frozenset[str]:
     """The skills the owner's words license no more: taken back by a later message and not licensed again since. The
-    first message has nothing to take back. ``names``: as ``licensed_skills``'."""
+    first message has nothing to take back. ``names`` and ``extra``: as ``licensed_skills``'."""
     listed = tuple(names)
     gone: set[str] = set()
     for number, message in enumerate(messages):
         taken = taken_back(message) if number else frozenset()
-        gone = (gone | taken) - (licensed_skills(message, listed) - taken)   # "leave the volume alone" licenses none
+        # ("leave the volume alone" licenses none)
+        gone = (gone | taken) - (licensed_skills(message, listed, extra) - taken)
     return frozenset(gone)
+
+
+def negated(words: Any) -> bool:
+    """A negation stands somewhere in ``words``, as ``_licences`` reads one ("do not disturb" is none)."""
+    return any(_negations(_tokens(words)))
 
 
 def _label_tokens(label: str, *, stem: bool = False) -> list[str]:

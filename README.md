@@ -2487,7 +2487,7 @@ where your wheel scrolls it) and **Folder** (its folder in Explorer with the fil
 `.svg`) is never handed to your real browser or a default app from here: it could carry private
 data out there, with nothing sealed. So its **Folder** opens the folder with nothing selected, and
 its row says "A page Jarvis wrote: open it with Show, not from the folder." If you open one from
-Explorer all the same, it and any `.xml` or `.csv` he wrote carry the Mark of the Web, as a download
+Explorer all the same, it and any `.xml`, `.csv` or `.tsv` he wrote carry the Mark of the Web, as a download
 does, so your browser and Office treat them as from the internet (on a drive that can't hold the
 mark they simply have none). The window stays while the card stays. His report and his questions
 are never kept on this PC: they stay on screen until Jarvis closes.
@@ -2553,12 +2553,15 @@ in it and in your briefing, your notes, the last few turns of what you said to h
 and your files in the folders you allow. `[agent] private` narrows that, and nothing is offered
 that is not connected. Each read is checked again at the moment it happens, and Turn off stops
 them at once. He may search your mail only with your own words from this task, exactly as Ask
-refuses other searches, and read at most 10 threads a task. He reaches files only by refs given
+refuses other searches, and read at most 10 threads a task; a message plainly holding a key or a
+password is left out of what he reads, with its place marked and a warning in LIVE, and the rest of
+the thread goes on. He reaches files only by refs given
 in this task, re-checked before each read: only text-like files (.txt .md .csv .tsv .json .log
 .html .xml .yaml and the like; other types can't be read yet), at most 12,000 characters a call and
 30 reads a task, and never a file named for secrets, or plainly holding keys (a name or a folder that
 says passwords, tokens, accounts, sign-ins or a password manager's export; a private key's header, a
-well-known key's prefix, or a line such as `API_KEY=...`), Jarvis's own folders, a code folder, a link
+well-known key's prefix, a password in an address, or a line such as `API_KEY=...` or
+`Authorization: Bearer ...`, anywhere along the line), Jarvis's own folders, a code folder, a link
 or an online-only file. That is a rule about names and plain keys: a password written into a sentence
 in an ordinary note can't be told from any other sentence. All of it is data to him, whatever it says.
 
@@ -2568,43 +2571,66 @@ those words (names, titles, subjects, file names of 4 or more letters, addresses
 or more but for years), an address he was not given or a search that looks encoded waits for your
 click on a card with the exact words: "Allow" lets that one call go and clears those words for the
 task; "Don't", or no answer, and it never goes and he carries on without it, whatever is cleared
-later. Nothing you type or say counts as that click. Words are matched as they would read: look-alike
+later. Nothing you type or say counts as that click, at any moment: once a task holds anything of
+yours, a later message that names such a word or an address clears nothing and makes nothing seen,
+whatever it says ("no, don't search for that", "yes, search for that"). Your words still reach him
+and still count for what you ask of him, but that search takes a click, and that click clears the word
+for the task; another address takes a click of its own. The words of your request, and a word that
+was not private when you said it, stay yours and are never held up. So do the words you type in
+answer to a question of his, but they turn these checks on for the rest of the task, whatever the
+question said: a page may have told him what to ask. Words are matched as they would read: look-alike
 letters, accents, invisible characters, cuts and glue aside, reversed, in ROT13 or with digits for
-letters, numbers in any form of digit; a word with a letter outside the plain alphabet beside plain
-letters (a name like Soren with a stroked o) takes one click in such a task, because no table of
-look-alikes can be whole. Once
+letters, numbers in any form of digit, reversed or with zeros before them, and short words in base64.
+How a word is written counts too, in such a task, so nothing can ride on a word that reads as yours:
+one with anything outside the plain alphabet that you did not spell so (an accent, a name like Soren
+with a stroked o, another script) takes one click, because no table of look-alikes can be whole, and
+so do two or more marks glued to a word or standing alone that you did not write. One you did spell
+so goes with no card. Once
 he has read a mail's text, a file's contents or the earlier conversation the task is strict, because
 matching words can't cover all of those: every search or `fetch_text` question with any word outside
 your own words and the most common ones, or any symbol that is not ordinary punctuation, goes to that
 card. The honest limit: in a task that has read only your calendar, contacts, notes or file names, a
 paraphrase, a word with a letter dropped, an amount or a time go out with no card; a strict task still
-passes anything spelled in common words; and any task could choose among links a page offers. The
+passes anything spelled in common words, in any mix of capitals, with a mark at a time; and any task
+could choose among links a page offers. The
 address rule and his having no way to type into a page are the strong parts.
 
 **What he changes.** Nothing by himself. Moves, copies, renames, zips, new folders and the Recycle
 Bin go on the desktop's own NEEDS YOUR OK card (`propose_files`), checked against your own words in
 this task, never his, a file's name or a page's, with ticks, Undo and the "undo" route as ever; the
-task waits for your click, and the panel says WAITING. Events, emails, replies and the like go on
+task waits for your click, and the panel says WAITING. Should no row of its batch end for 30 minutes
+(a share gone away, a download that hangs) the task goes on without it and says so: the batch is
+still at work, and its card has the truth and its Stop. Events, emails, replies and the like go on
 Ask's cards in Approvals (`propose_action`); those don't hold the task up, and his report says what
 is waiting. He opens something at once only when your own words in this task name it; anything else
 waits on a card for your click. He changes the volume, music, timers, screenshots or focus mode at
-once, with their chips and Undo, only when your words ask for it as the desktop's own commands read
-them ("turn the volume down", "pause the music", the same direction too); a word that only mentions it
-("the trading volume", "the next train") puts it on a card for your click first. A later message
-takes back what an earlier one allowed: "don't delete anything", "leave the volume alone", "never
-mind". Stop or Turn off withdraws what is still undecided.
+once, with their chips and Undo, only when your message is plainly that request, as the desktop's own
+commands and a few plainer wordings read it ("turn the sound down", "pause the music"): from its
+start ("mute and pause"), or straight after a then, an after that or a next ("find the report, then
+mute"), and for just what you asked: the same direction, level, minutes and window, a step no bigger
+than the usual one. Anything else that names it ("the trading volume", "the next train", "compare the
+play, pause and next buttons", "find the report and mute") puts it on a card for your click first. A
+later message takes back what an earlier one allowed: "don't delete anything", "leave the volume
+alone", "never mind", and a whole message of "no", "no wait", "don't", "not that" or "actually no"
+takes back what the last one asked; the same message can too ("mute. no, actually don't"). Stop or
+Turn off withdraws what is still undecided.
 
 **One task at a time.** The first planner run decides that a request is a task; it
 starts from your own words, whatever the planner wrote, and with nothing else.
 While it runs, what you type goes to it as your message, and "stop" or "cancel" ends it
-at once: the process is killed and anything it was still doing is dropped. The bar says
-"Passing that on, sir." when your words went in.
+at once: the process is killed and anything it was still doing is dropped, and he says nothing
+more: what he was saying goes too, and a Turn off leaves nothing of the task in the conversation
+either. (A briefing being read aloud reads on.) The bar says
+"Passing that on, sir." when your words went in; in the first seconds of a task they go in right
+after your request.
 
 **Its budget.** After `[agent] max_turns` turns or `max_minutes` minutes of work he asks
-"Keep going?" (the clock rests while he waits for you). No, or no answer, and he reports
+"Keep going?" (the clock rests while he waits for you). Reached while a card is up or a batch is at
+work, his calls are held and he asks when that has ended. No, or no answer, and he reports
 where things stand and stops. If your plan's limit is reached the task pauses, says
-when it resets and asks you then; with no time named it waits for you to say carry on, 6 hours at
-most, and then stops there. What you say or answer meanwhile goes in with the resume, in the order
+when it resets and asks you then; with no time named, or a day or a date beside it, it waits for you
+to say carry on, 6 hours at most, and then stops there. Meanwhile the state word says WAITING. What
+you say or answer meanwhile goes in with the resume, in the order
 you said it. A run that would use extra usage is killed at once. `tasks_per_day` limits how many
 start in 24 hours: the next one is told so, and your words wait in the bar.
 

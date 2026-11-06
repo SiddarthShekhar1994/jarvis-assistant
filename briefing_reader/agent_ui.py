@@ -13,7 +13,8 @@
                                the word), or stops it ("stop", "cancel", with what is said around them: stop_words).
                                While a card only a click answers waits, the bar says so (clickNeeded). Nothing runs: False
         answer(id, text)       the owner-question seam: a card's click and the tests answer through it
-        stop(reason)           ends the task at once (R8): the process is killed and anything late is dropped
+        stop(reason)           ends the task at once (R8): the process is killed and anything late is dropped.
+                               ``stopped_by`` says so until the next task: the voice says nothing more of it (the app)
         set_window_hidden(h), set_window_away(a), window_hidden(), window_rect(), keep_window_clear(), close_window()
                                the watch window, for the feed (agent_feed): the owner's Hide and Show, the Jarvis window
                                coming back, where it is. The page goes on behind it
@@ -34,6 +35,7 @@
         acknowledged(str)      a few words that what was typed went in (shown, not said)
         clickNeeded(str)       words came while a card only a click answers waits ("sent" or "held"): the feed says so
         cardAtWork(bool)       the owner's click started a file card's batch (False: it ran nothing, and the card waits on)
+        limitPaused(bool)      the plan's limit holds the task now (False: it let go)
         questionAsked(object)  a runner.OwnerQuestion for the owner, its {sir} filled in
         questionGone(object)   it is not waiting any more (answered, or the task moved on)
         questionExpired(object)  it timed out (just before questionGone)
@@ -120,6 +122,7 @@ OFF_TEXT = "Tasks need Jarvis on your desktop turned on, {sir}; nothing was star
 TOO_OLD_TEXT = "This Claude Code is too old for tasks, {sir}: update it and ask again. Nothing was started."
 TAKEN_TEXT = {"sent": "Passing that on, {sir}.", "answered": "Thank you, {sir}."}
 TURNED_OFF = "turned off"         # stop()'s reason for a Turn off: nothing stays, even a report
+STOPPED_BY_OWNER = "stopped"      # AgentController.stopped_by: their Stop, in the words of any end (else TURNED_OFF)
 # What is said in place of a line of the model's that may hold something private (AgentController.spoken).
 QUESTION_LINE = "I've a question for you, {sir}. It's on the card."
 REPORT_LINES = {OUTCOME_DONE: "That's done, {sir}. It's on the card.",
@@ -130,7 +133,7 @@ END_STATUS = {OUTCOME_DONE: live_events.STATUS_OK, OUTCOME_FAILED: live_events.S
               agent_runner.OUTCOME_STOPPED: live_events.STATUS_CANCELLED}
 END_WORDS = {OUTCOME_DONE: "done", OUTCOME_FAILED: "failed", agent_runner.OUTCOME_STOPPED: "stopped"}
 PARTLY = "partly done"
-LIMIT_ACTIVITY = "Waiting for your plan's limit to reset"
+LIMIT_ACTIVITY = agent_runner.LIMIT_ACTIVITY
 WENT_WELL = (agent_runner.HOW_ALLOWED, agent_runner.HOW_ANSWERED, agent_runner.HOW_KEEP_GOING, agent_runner.HOW_CARRY_ON)
 MAX_LISTED = 20                   # files a result card lists when the model did not name them
 HOP_S = 10.0                      # what a tool waits for the GUI thread at most, for something to show
@@ -234,8 +237,9 @@ class AppThings:
     def listen(self, slot: Callable[[Any, str], None]) -> None:
         self.desktop.tidyEnded.connect(slot)
 
-    def listen_at_work(self, slot: Callable[[Any, bool], None]) -> None:
+    def listen_at_work(self, slot: Callable[[Any, bool], None], progress: Callable[[Any], None]) -> None:
         self.desktop.tidyAtWork.connect(slot)
+        self.desktop.tidyProgress.connect(progress)
 
     def connected(self) -> frozenset[str]:
         """What may be offered now, asked of this PC only (GUI thread, as a task starts). Unknown: not connected."""
@@ -448,6 +452,7 @@ class AgentController(QObject):
     acknowledged = Signal(str)
     clickNeeded = Signal(str)
     cardAtWork = Signal(bool)
+    limitPaused = Signal(bool)
     questionAsked = Signal(object)
     questionGone = Signal(object)
     taskEnded = Signal(object)
@@ -490,13 +495,14 @@ class AgentController(QObject):
         self._owner: agent_owner.OwnerAccess | None = None
         if things is not None:
             things.listen(self._on_card_ended)
-            things.listen_at_work(self._on_card_at_work)
+            things.listen_at_work(self._on_card_at_work, self._on_card_progress)
         self._too_old = False             # this Claude Code plans, but lacks what a task needs (offered says)
         self._run: AgentRun | None = None
         self._seq = 0
         self._feed: _Feed | None = None
         self._stopping = False
         self._shut = False
+        self.stopped_by = ""              # this task: the owner's Stop or Turn off came (TURNED_OFF, STOPPED_BY_OWNER)
         self.last_end: AgentEnd | None = None
         self.last_folder: TaskFolder | None = None
 
@@ -557,6 +563,7 @@ class AgentController(QObject):
         self._owner = owner
         self._feed = _Feed(self.live, words, self.config, folder.path.name, len(registry))
         self._stopping = False
+        self.stopped_by = ""
         self.last_folder = folder
 
         def on_event(event: AgentEvent, seq: int = seq) -> None:
@@ -580,7 +587,10 @@ class AgentController(QObject):
 
     def spoken(self, line: str, instead: str = "") -> str:
         """The one gate on the way to the voice for a line the model wrote: the line, or ``instead`` (Jarvis's own fixed
-        words, {sir} filled in), or "": it stays on the caption, unsaid. See the module docs. Fail-closed."""
+        words, {sir} filled in), or "": it stays on the caption, unsaid. See the module docs. Fail-closed. After the owner's
+        Stop or Turn off nothing more is said, whatever was on its way."""
+        if self.stopped_by:
+            return ""
         if getattr(self.config.agent, "speak_private", False) is True:
             return line
         wall = self.firewall
@@ -798,14 +808,22 @@ class AgentController(QObject):
         if run is not None and run.card_at_work(state.card.run_id, working):
             self.cardAtWork.emit(bool(working))
 
+    def _on_card_progress(self, state: Any) -> None:
+        """A row of that card's batch ended: the run's watch on it starts again."""
+        run = self._run
+        if run is not None:
+            run.card_progress(state.card.run_id)
+
     def stop(self, reason: str = "stop") -> None:
         """R8. In the moment after the model's finish the task is done with: a Stop ends it now as it would have ended,
-        with its report and what that report says waits. A Turn off leaves nothing, report or not."""
+        with its report on its card and what that report says waits. A Turn off leaves nothing, report or not. After
+        either the voice says nothing more of it (``stopped_by``)."""
         run = self._run
         reported = run is not None and run.reported and reason != TURNED_OFF
         if run is not None:
+            self.stopped_by = TURNED_OFF if reason == TURNED_OFF else STOPPED_BY_OWNER
             self._stopping = not reported     # what is still on its way to this thread is dropped
-            run.stop(reason)
+            run.stop(reason, keep_report=reason != TURNED_OFF)
             if not reported:
                 self._withdraw(cards=True)
         if self._browser is not None and not reported:
@@ -865,6 +883,9 @@ class AgentController(QObject):
             self.noticed.emit(self._words(event.text), hud.TONE_ERROR if event.code == LIMIT else hud.TONE_DONE)
             if event.code == LIMIT:
                 self.activityChanged.emit(LIMIT_ACTIVITY)
+                self.limitPaused.emit(True)
+        elif kind == agent_runner.E_LIMIT_GONE:
+            self.limitPaused.emit(False)
         elif kind == agent_runner.E_QUESTION and event.question is not None:
             # The firewall's card shows the exact words or address, whatever they are.
             question = (event.question if event.question.kind == agent_runner.Q_WEB

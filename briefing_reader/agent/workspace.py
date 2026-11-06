@@ -43,7 +43,8 @@ from ..format_chars import invisible_char
 
 ALLOWED_EXTENSIONS = frozenset({".md", ".txt", ".csv", ".tsv", ".json", ".html", ".htm", ".css", ".svg", ".xml",
                                 ".yaml", ".yml", ".log"})
-MARKED_EXTENSIONS = frozenset({".html", ".htm", ".svg", ".xml", ".csv"})   # what can run a script or a formula
+# What can run a script or a formula: every text table Excel opens by default is marked, should it come to be allowed.
+MARKED_EXTENSIONS = frozenset({".html", ".htm", ".svg", ".xml", ".csv", ".tsv", ".tab", ".slk", ".dif", ".prn"})
 ZONE_STREAM = ":Zone.Identifier"
 ZONE_MARK = b"[ZoneTransfer]\r\nZoneId=3\r\n"     # 3: the internet
 MAX_FILE_BYTES = 5 * 1024 * 1024

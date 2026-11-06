@@ -1199,7 +1199,7 @@ def feed_task(pages: dict[str, Any], html_for: Any, root: Path, wait_until: Any,
         taskChipClicked = Signal()
         taskStopClicked = Signal()
 
-        def set_task_look(self, _base: str) -> None:
+        def set_task_look(self, _base: str, _word: str = "") -> None:
             pass
 
         def set_task_chip(self, _text: str, *, can_stop: bool = False) -> None:

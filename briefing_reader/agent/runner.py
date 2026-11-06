@@ -21,17 +21,20 @@ firewall's card waits the same way (kind Q_WEB), but only a click answers it: an
 going?" (Q_KEEP_GOING, Q_RESUME). What is typed meanwhile goes in as the owner's words and allows nothing (at the resume
 card it waits for the click, with the pause), and the wait's end says so, never "no answer came"; no answer in time to
 the firewall's card is a refusal, and the task goes on. A file card waits too (Q_CARD: propose_files'; the card is the
-desktop's own), and only its own end says anything: card_at_work(id) stops its clock when the owner's click starts the
-batch, card_ended(id, message) puts its end in as the next message, and finish waits for it unless the task is
-stopping. A choice clicked answers, but it is the model's words, so it licenses
-nothing and clears nothing; words typed are the owner's. A ``result`` with no wait pending and no finish gets
-one prompt to carry on or finish, and after another one the task ends as partial. A message sent mid-run is delivered by
-Claude Code after the running tool returns (``--replay-user-messages`` shows when; a ``result`` while one is on its way
-is not idle).
+desktop's own), and only its own end says anything: card_at_work(id) gives its clock over to a watch on its rows when the
+owner's click starts the batch, card_ended(id, message) puts its end in as the next message, and finish waits for it
+unless the task is stopping. With no row ended for BATCH_QUIET_MINUTES (card_progress(id) starts the watch again) the run
+stops waiting on it, in true words: the batch is still at work, untouched, and its card has the truth. A choice clicked
+answers, but it is the model's words, so it licenses nothing and clears nothing; words typed are the owner's, and those
+typed at the model's own question turn the firewall on for the rest of the run. A ``result`` with no wait pending and no
+finish gets one prompt to carry on or finish, and after another one the task ends as partial. A message sent mid-run is
+delivered by Claude Code after the running tool returns (``--replay-user-messages`` shows when; a ``result`` while one is
+on its way is not idle). Words typed before the goal has gone in go in right after it, in order.
 
 The budget (agent.policy.Budget): reaching a turn or minute cap asks "Keep going?" through the same seam; tool calls
 then return "end your turn" until the answer. Yes: as much again. No, or no answer: the model is told to report and
-finish, gets a short while for it and the task ends as partial. The clock rests while the owner is waited for.
+finish, gets a short while for it and the task ends as partial. The clock rests while the owner is waited for. Reached
+while a card or a batch is up, tool calls but finish are held the same way, and "Keep going?" comes when that wait ends.
 
 The plan's limit (stream.rate_limit_signal, or a failed result's text): a run that would use extra usage is killed at
 once (the owner's rule: no paid calls). The plan's own limit pauses the task with words saying when, and when that time
@@ -51,7 +54,6 @@ from __future__ import annotations
 
 import itertools
 import logging
-import math
 import re
 import secrets
 import shutil
@@ -86,6 +88,7 @@ OUTCOME_STOPPED = "stopped"            # AgentEnd.outcome: the owner's Stop, a T
 # What an AgentRun reports (AgentEvent.kind).
 E_STARTED, E_PLAN, E_SAY, E_TOOL_START, E_TOOL_END, E_QUESTION, E_QUESTION_GONE, E_NOTICE, E_TEXT, E_USAGE, E_ENDED = (
     "started", "plan", "say", "tool_start", "tool_end", "question", "question_gone", "notice", "text", "usage", "ended")
+E_LIMIT_GONE = "limit_gone"            # the plan's limit let go (it came as an E_NOTICE with the code LIMIT)
 # Whose question it is (OwnerQuestion.kind).
 Q_TASK, Q_KEEP_GOING, Q_RESUME, Q_WEB, Q_CARD = "task", "keep_going", "resume", "web", "card"
 # Why it ended (AgentEnd.code: fixed words, safe to log).
@@ -93,6 +96,7 @@ C_FINISHED, C_STOPPED, C_NO_FINISH, C_NO_ANSWER, C_OWNER_NO, C_MAX_TURNS, C_OVER
     "finished", "stopped", "no_finish", "no_answer", "owner_no", "max_turns", "overage")
 C_NO_CLICK, C_LIMIT_WAIT = "no_click", "limit_wait"     # words came but no click; the limit held, with no word
 C_TEST_GUARD, C_INTERNAL, C_EXIT, C_GARBLED = "test_guard", "internal", "exit", "garbled"
+C_BATCH_QUIET = "batch_quiet"          # E_NOTICE's code: a batch at work has gone quiet
 HELD = "held"                          # a tool result's code: the call was not made, the model is told to end its turn
 WEB_ALLOW_WORD = "Allow"               # the one word on the firewall's card that allows anything
 STOPPED_CODE = "stopped"
@@ -110,6 +114,14 @@ WRAP_UP_SILENT = ("Jarvis: the owner did not answer, so the task stops here. Cal
                   "what you did, what you produced and what is left. Call nothing else.")
 PAUSED_TEXT = ("Jarvis has paused the task: it has reached its budget and the owner is being asked whether to keep "
                "going. End your turn now with one short sentence. The answer will come to you as your next message.")
+BUDGET_AT_A_WAIT_TEXT = ("That call was not made: the task has reached its budget while a card is up, and the owner will "
+                         "be asked whether to keep going when that card has ended. End your turn now with one short "
+                         "sentence and wait. What comes of it will come to you as your next message.")
+BATCH_QUIET_MINUTES = 30               # a file card's batch at work: this long with no row ended, and the task goes on
+BATCH_QUIET_TEXT = ("Jarvis: the batch the owner's click started on that card is still at work, but no row of it has "
+                    f"ended for {BATCH_QUIET_MINUTES} minutes, so the task no longer waits for it. Its card has the "
+                    "truth; what it has changed or not is not known here, so do not say either way. Carry on without "
+                    "it, and say in your report that its card has the truth.")
 WRAP_UP_TOOL_TEXT = "The task is stopping. Call finish now, and nothing else."
 WRAP_UP_NO_CLICK = ("Jarvis: the owner's words came in, but only a click answers that card and none came, so the task "
                     "stops here. Call finish now with outcome partial: what you did, what you produced and what is "
@@ -152,6 +164,8 @@ OWNER_NO_WORDS = "Stopped there, as you said, {sir}. Live has its steps, and any
 NO_ANSWER_WORDS = "No answer came, so I stopped there, {sir}. Live has its steps, and any files are in the workspace."
 NO_CLICK_WORDS = ("You typed while the card waited, {sir}, but only a click answers it and none came, so I stopped "
                   "there. Live has its steps, and any files are in the workspace.")
+BATCH_QUIET_WORDS = (f"No row of that card's batch has ended for {BATCH_QUIET_MINUTES} minutes, {{sir}}. It is still at "
+                     "work and its card has the truth. The task goes on without it.")
 MAX_TURNS_WORDS = "That ran past what Claude Code allows one task, {sir}. Any files are in the workspace."
 GUARD_WORDS = "Claude Code started with something a task does not allow, so I stopped it, {sir}."
 GARBLED_WORDS = "Claude Code's output could not be read, so I stopped the task, {sir}."
@@ -165,7 +179,10 @@ HOW_NO_CLICK = "You typed, but no click came"
 HOW_KEEP_GOING, HOW_STOP_HERE, HOW_CARRY_ON = "You said keep going", "You said stop here", "You said carry on"
 HOW_ANSWERED = "You answered"
 HOW_ENDED = "The task ended first"
+HOW_BATCH_QUIET = "It is still at work, and its card has the truth"
+LIMIT_ACTIVITY = "Waiting for your plan's limit to reset"    # the panel's activity line while the limit holds
 HELD_NOTE = "not made: the task was waiting for you"
+BUDGET_HELD_NOTE = "not made: its budget is reached, and a card is up"
 _WORD_RE = re.compile(r"[A-Za-z0-9._\-\[\]]{1,80}")
 
 
@@ -238,6 +255,7 @@ class Timing:
     keep_going_s: float = 10 * 60.0     # ... to "Keep going?"
     web_card_s: float = 10 * 60.0       # ... to the firewall's card: then that one call is refused and the task goes on
     card_s: float = 16 * 60.0           # ... to a file card: its own 15 minutes end first; this only if they did not
+    at_work_s: float = BATCH_QUIET_MINUTES * 60.0     # its batch at work: this long with no row ended
     wrap_up_s: float = 60.0             # told to report and finish: this long, then it ends as partial
     after_finish_s: float = 20.0        # finish recorded: this long for its last words
     replay_s: float = 5.0               # a message sent never showed as delivered and nothing came: idle after all
@@ -392,7 +410,8 @@ class AgentRun:
         self._idle = False                  # the last result came and nothing has gone in since
         self._unreplayed = 0                # messages sent that have not shown as delivered
         self._replay_since: float | None = None   # a result came while one was on its way
-        self._outbox: list[str] = []        # goes in at the next result
+        self._outbox: list[str] = []        # goes in at the next result (or, before the goal has gone in, after it)
+        self._goal_sent = False             # the first message has gone in: nothing may go before it
         self._nudged = False                # the one prompt to carry on or finish went, with no tool call since
         self._finished: tuple[str, str, tuple[str, ...]] | None = None
         self._finished_at = 0.0
@@ -451,17 +470,27 @@ class AgentRun:
         return wait.question if wait is not None and wait.question.kind != Q_TASK and not wait.at_work else None
 
     def _note_owner(self, words: str) -> None:
-        """The owner's own words: the firewall never counts them as private, and addresses in them as seen."""
+        """The owner's own words, for the firewall (WebFirewall.owner_said: they clear nothing, once it holds anything
+        private)."""
         heard = getattr(self._firewall, "owner_said", None)
         if callable(heard):
             heard(words)
 
-    def stop(self, reason: str = C_STOPPED) -> None:
+    def _answer_coming(self) -> None:
+        """Words typed in answer to a question the model wrote, and a page may have told it what to ask, whatever the
+        words of the question. The firewall's checks are on from now on, before those words are noted: an address in
+        them is not seen, so the address rule stands between the answer and any page not seen in this run."""
+        note = getattr(self._firewall, "note_private", None)
+        if callable(note):
+            note()
+
+    def stop(self, reason: str = C_STOPPED, *, keep_report: bool = True) -> None:
         """Kills at once (R8): whatever a tool still comes back with is dropped. ``reason``: the log's word. After finish
-        the task is done with: only its last words are left to come, so its report and its outcome stand."""
+        the task is done with: only its last words are left to come, so its report and its outcome stand, but for a Turn
+        off (not ``keep_report``), which leaves nothing."""
         logger.info("Agent %s: stopped (%s)", self.run_id, reason)
         with self._lock:
-            if self._finished is not None and self._end is None:
+            if keep_report and self._finished is not None and self._end is None:
                 self._end_finished()
                 return
         self._finish_run(OUTCOME_STOPPED, C_STOPPED, STOPPED_WORDS)
@@ -469,12 +498,14 @@ class AgentRun:
     def owner_says(self, text: str) -> str:
         """The owner's words while the task runs: "answered" (the question that waits), "sent", "held" (the plan's limit
         holds, or its card waits: they go in with the resume) or "refused" (it has ended). Never past what is on its way
-        already: they go in the order they were said."""
+        already, the goal among it: they go in the order they were said."""
         with self._lock:
             if self._end is not None or self._stop.is_set() or self._finished is not None:
                 return "refused"
-            self._note_owner(text)
             wait = self._wait
+            if wait is not None and wait.question.kind == Q_TASK:
+                self._answer_coming()
+            self._note_owner(text)
             if wait is not None and wait.question.kind == Q_TASK:   # only ask_owner's: the others are click only
                 if self._paused and not self._limit_holds():
                     self._resume("", [])                 # past the reset, or no time given: what is typed tries again
@@ -489,8 +520,8 @@ class AgentRun:
                         self._emit(AgentEvent(E_NOTICE, text=HELD_WORDS, code="held"))
                     return "held"
                 self._resume("", [owner_message(text)])  # what waited goes first: the order they were said in
-            elif self._outbox:
-                self._outbox.append(owner_message(text))  # after what waits for the next result: never past it
+            elif self._outbox or not self._goal_sent:
+                self._outbox.append(owner_message(text))  # after what waits for the next result, or the goal: never past it
             else:
                 self._send(owner_message(text))
             logger.info("Agent %s: a message from the owner went in", self.run_id)
@@ -514,6 +545,8 @@ class AgentRun:
                 self._deliver(WEB_ALLOWED_TEXT if allowed else WEB_DECLINED_TEXT)
                 return True
             if text not in question.choices:    # a choice clicked is the model's words: never the owner's own
+                if question.kind == Q_TASK:
+                    self._answer_coming()
                 self._note_owner(text)
             if question.kind == Q_TASK:
                 self._deliver(owner_message(text, ANSWER_LABEL))
@@ -588,8 +621,11 @@ class AgentRun:
             if self._stop.is_set():
                 return False
             self._process.send(cli.stream_message(message))
-            self._unreplayed = 1
+            self._unreplayed += 1
             self._started_at = self._clock()
+            self._goal_sent = True
+            for waiting in self._take_outbox():          # typed in the first seconds: after the goal, in order
+                self._send(waiting)
         return True
 
     def _loop(self) -> None:
@@ -697,7 +733,9 @@ class AgentRun:
                 return
             wait = self._wait
             if wait is not None:
-                if now >= wait.deadline:
+                if now >= wait.deadline and wait.at_work:
+                    self._batch_went_quiet(wait)
+                elif now >= wait.deadline:
                     self._wait = None
                     typed = wait.typed and wait.question.kind != Q_TASK
                     self._emit(AgentEvent(E_QUESTION_GONE, question=replace(wait.question, typed=typed), code=C_NO_ANSWER,
@@ -988,6 +1026,7 @@ class AgentRun:
         """The limit let go: everything that waited goes in, in the order it came."""
         self._paused = False
         self._paused_until = None
+        self._emit(AgentEvent(E_LIMIT_GONE))
         held, self._held_owner = self._held_owner, []
         for text in [*([message] if message else []), *self._take_outbox(), *held, *extra]:
             self._send(text)
@@ -1032,7 +1071,8 @@ class AgentRun:
                                   result=error(TOO_LONG_TEXT, TOO_LONG_CODE)))
 
     def _held(self, name: str) -> ToolResult | None:
-        """The call is not made: the task has finished, is stopping, or waits for "Keep going?"."""
+        """The call is not made: the task has finished, is stopping, waits for "Keep going?", or has reached its budget
+        while a card or a batch is up: one thing waits at a time, so "Keep going?" comes when that wait ends (_tick)."""
         if self._finished is not None:
             return ToolResult(ALREADY_FINISHED_TEXT, code=HELD, note="the task has finished")
         tool = self.registry.tool(name)
@@ -1045,7 +1085,10 @@ class AgentRun:
             wait = self._wait
             if wait is not None and wait.question.kind not in (Q_TASK, Q_WEB, Q_CARD):
                 return ToolResult(PAUSED_TEXT, code=HELD, note=HELD_NOTE)
-            reached = self.budget.reached() if wait is None and not self._paused else ""
+            reached = self.budget.reached() if not self._paused else ""
+            if reached and wait is not None:
+                logger.info("Agent %s: budget reached (%s) while a wait is on; held", self.run_id, reached)
+                return ToolResult(BUDGET_AT_A_WAIT_TEXT, code=HELD, note=BUDGET_HELD_NOTE)
             if reached:
                 self._ask_keep_going(reached)
                 return ToolResult(PAUSED_TEXT, code=HELD, note=HELD_NOTE)
@@ -1093,17 +1136,38 @@ class AgentRun:
 
     def card_at_work(self, card_id: str, working: bool = True) -> bool:
         """The owner's click started the batch of the file card this run waits on (``working``), or it stopped before
-        anything ran and the card waits on: from a click on the clock rests, and only the card's own end speaks (a batch
-        has its own limits and its own Stop: nothing here may say "nothing was changed" while it is at work). False when
-        nothing waits on that card."""
+        anything ran and the card waits on: from a click on, its card's clock gives way to a watch on its rows, and only
+        the card's own end speaks unless they stop ending (card_progress; _batch_went_quiet): nothing here may say "nothing
+        was changed" while it is at work, and it has its own Stop. False when nothing waits on that card."""
         with self._lock:
             wait = self._wait
             if wait is None or wait.question.kind != Q_CARD or self._card_id != card_id or self._end is not None:
                 return False
             wait.at_work = bool(working)
-            wait.deadline = math.inf if working else self._clock() + self.timing.card_s
+            wait.deadline = self._clock() + (self.timing.at_work_s if working else self.timing.card_s)
             logger.info("Agent %s: a file card's batch %s", self.run_id, "is at work" if working else "did not run")
             return True
+
+    def card_progress(self, card_id: str) -> bool:
+        """A row of that card's batch ended: the watch on it starts again. False when no batch this run waits on is at
+        work."""
+        with self._lock:
+            wait = self._wait
+            if (wait is None or wait.question.kind != Q_CARD or self._card_id != card_id or not wait.at_work
+                    or self._end is not None):
+                return False
+            wait.deadline = self._clock() + self.timing.at_work_s
+            return True
+
+    def _batch_went_quiet(self, wait: _Wait) -> None:
+        """No row of the batch at work has ended for its while: a share that went away, a download that hangs. The run
+        stops waiting on it, in true words: it is still at work, and its card has the truth. Nothing here touches the batch,
+        and nothing here can say what it changed."""
+        self._wait = None
+        self._emit(AgentEvent(E_QUESTION_GONE, question=wait.question, text=HOW_BATCH_QUIET))
+        logger.info("Agent %s: a file card's batch has gone quiet; the task goes on", self.run_id)
+        self._emit(AgentEvent(E_NOTICE, text=BATCH_QUIET_WORDS, code=C_BATCH_QUIET))
+        self._deliver(BATCH_QUIET_TEXT)
 
     def card_ended(self, card_id: str, message: str, how: str = "") -> bool:
         """The file card this run waits on ended (the owner's click and what came of it, Not now, its time): ``message``

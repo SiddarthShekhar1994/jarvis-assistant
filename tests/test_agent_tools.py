@@ -271,13 +271,25 @@ class MarkTests(Temp):
             return stream.read()
 
     def test_a_page_or_a_table_is_marked_from_the_internet(self) -> None:
-        for name in ("page.html", "page.htm", "drawing.svg", "data.xml", "table.csv", "PAGE.HTML"):
+        for name in ("page.html", "page.htm", "drawing.svg", "data.xml", "table.csv", "table.tsv", "PAGE.HTML"):
             with self.subTest(name=name):
                 self.folder.write(name, "<p>x</p>")
                 self.assertEqual(self.stream(name), b"[ZoneTransfer]\r\nZoneId=3\r\n")
 
+    def test_every_text_table_excel_opens_is_marked_or_cannot_be_written(self) -> None:
+        """X1: a formula in a .tsv runs as it does in a .csv."""
+        for kind in (".csv", ".tsv", ".tab", ".slk", ".dif", ".prn"):
+            with self.subTest(kind=kind):
+                self.assertIn(kind, workspace.MARKED_EXTENSIONS)
+                if kind in workspace.ALLOWED_EXTENSIONS:
+                    self.folder.write(f"table{kind}", "=1+1")
+                    self.assertEqual(self.stream(f"table{kind}"), workspace.ZONE_MARK)
+                else:
+                    with self.assertRaises(workspace.WorkspaceRefused):
+                        self.folder.write(f"table{kind}", "=1+1")
+
     def test_plain_text_is_not(self) -> None:
-        for name in ("notes.md", "notes.txt", "data.json", "style.css", "list.tsv", "a.yaml", "a.log"):
+        for name in ("notes.md", "notes.txt", "data.json", "style.css", "a.yaml", "a.log"):
             with self.subTest(name=name):
                 self.folder.write(name, "x")
                 with self.assertRaises(OSError):

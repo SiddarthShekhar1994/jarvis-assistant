@@ -26,6 +26,9 @@ only:
   panel, and the task is resting anyway, so the window is off the screen until the card's end; the panel's Show brings
   it back at once, and the owner's own Hide still holds after.
 
+While the plan's limit holds the task nothing thinks and nothing is for the owner to decide: the orb rests, and the state
+word and the panel's header say WAITING, never in amber, on the bar and in the window's header (``limitPaused``).
+
 The result card: the outcome, the steps and the time in its kicker, the whole report (scrolling), the outputs with Show
 (in the sealed watch window: agent_ui.show_output) and Folder (the guarded backend's way of showing a file in Explorer:
 desktop_ui.reveal_task_file), and Done. A page the agent wrote could carry private data out through the owner's real
@@ -184,6 +187,7 @@ class TaskFeed(QObject):
         self._steps: tuple[Any, ...] = ()
         self._activity = ""
         self._waiting = False               # a card waits for the owner
+        self._limit_held = False            # the plan's limit holds the task: nothing thinks, and nothing is to decide
         self._question: Any = None
         self.card: hud_overlay.TaskCard | None = None   # the one card: a wait's, or the result
         self._card_at = 0.0
@@ -206,6 +210,7 @@ class TaskFeed(QObject):
         agent.questionExpired.connect(self._on_question_expired)
         agent.clickNeeded.connect(self._on_click_needed)
         agent.cardAtWork.connect(self._on_card_at_work)
+        agent.limitPaused.connect(self._on_limit_paused)
         agent.taskEnded.connect(self._on_ended)
         agent.windowHidden.connect(self._on_window_hidden)
         agent.windowPlaced.connect(self._place)
@@ -267,6 +272,7 @@ class TaskFeed(QObject):
         self._running = False
         self._steps = ()
         self._waiting = False
+        self._limit_held = False
         self._question = None
         self._tick.stop()
         self._quiet.stop()
@@ -296,7 +302,7 @@ class TaskFeed(QObject):
             self._quiet.start(QUIET_MS)
 
     def _on_quiet(self) -> None:
-        if not self._running or self._waiting:
+        if not self._running or self._waiting or self._limit_held:
             return
         if self.agent.tools_running():
             self._quiet.start(QUIET_MS)
@@ -310,7 +316,8 @@ class TaskFeed(QObject):
             panel.set_head(self._head())
 
     def _head(self) -> str:
-        return head_text(WAITING_WORD if self._waiting else WORKING_WORD, self._steps, self.agent.worked_s())
+        waiting = self._waiting or self._limit_held
+        return head_text(WAITING_WORD if waiting else WORKING_WORD, self._steps, self.agent.worked_s())
 
     def _rows(self) -> tuple[PlanRow, ...]:
         return tuple(PlanRow(step.text, step.status) for step in self._steps)
@@ -491,9 +498,28 @@ class TaskFeed(QObject):
         if self._ended is None:
             self._drop_card()
         if self._running:
-            self.reading.set_task_look(orb_mod.THINKING)
-            self._activity = THINKING_ACTIVITY
+            self._at_rest_or_thinking()
+            self._activity = agent_runner.LIMIT_ACTIVITY if self._limit_held else THINKING_ACTIVITY
             self._sync_chip()
+            self._render()
+
+    def _at_rest_or_thinking(self) -> None:
+        """No card waits: the orb thinks, or while the plan's limit holds the task it rests and the state word says it
+        waits (in the words of the panel's own header, and no look of its own: nothing is for the owner to decide)."""
+        if self._limit_held:
+            self.reading.set_task_look(orb_mod.IDLE, WAITING_WORD)
+        else:
+            self.reading.set_task_look(orb_mod.THINKING)
+
+    def _on_limit_paused(self, held: bool) -> None:
+        """The plan's limit holds the task, or let go. A card that waits keeps its own look."""
+        if not self._running:
+            return
+        self._limit_held = bool(held)
+        if not self._waiting:
+            self._at_rest_or_thinking()
+            if not held:
+                self._activity = THINKING_ACTIVITY      # (not "waiting for the plan's limit" until the next tool)
             self._render()
 
     def _end_rest(self) -> None:
@@ -526,7 +552,7 @@ class TaskFeed(QObject):
         self._waiting = not working
         self._quiet.stop()
         self._activity = AT_WORK_ACTIVITY if working else WAITING_ACTIVITY
-        self.reading.set_task_look(orb_mod.THINKING if working else orb_mod.NEEDS)
+        self.reading.set_task_look(orb_mod.THINKING if working else orb_mod.NEEDS)   # (the batch works: limit or no)
         self._sync_chip()
         self._render()
 
@@ -581,6 +607,7 @@ class TaskFeed(QObject):
         self._quiet.stop()
         self._end_rest()
         self._waiting = False
+        self._limit_held = False
         self._question = None
         self.desktop.set_task_waiting(0)
         self.reading.set_task_look("")

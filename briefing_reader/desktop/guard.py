@@ -145,11 +145,14 @@ _SECRET_ASK_WORDS = _phrases("login", "logon", "log in", "sign in", "signin", "c
                              "auth token", "your token", "the token", "private key", "private keys", "secret key",
                              "seed phrase", "recovery phrase", "recovery key", "recovery keys", "recovery codes",
                              "backup codes", "verification codes", "security codes", "card details", "bank details",
-                             "login details", "sign in details")
+                             "login details", "sign in details", "digit", "digits", "number we", "number from",
+                             "number on your card", "texted", "sent you", "authenticator", "maiden name",
+                             "memorable word", "pass word", "date of birth")
 
 
 def asks_for_secret(text: Any) -> bool:
-    """A question that reads as asking for a secret: ``sensitive_label``'s words, a sign-in, or "the code"."""
+    """A question that reads as asking for a secret: ``sensitive_label``'s words, a sign-in, "the code", or the everyday
+    ways of asking for one ("the 6 digit number we texted you"). A false refusal here costs a rewording."""
     return sensitive_label(text) or _says(text, _SECRET_ASK_WORDS)
 
 
@@ -463,8 +466,9 @@ _SENSITIVE_FILE_WORDS = frozenset({"password", "passwords", "passwd", "passcode"
                                   "secrets", "credential", "credentials", "cred", "creds", "token", "tokens", "apikey",
                                   "apikeys", "privatekey", "2fa", "otp", "seedphrase", "pin", "pins", "mypin", "mypins",
                                   "ssn", "passport", "iban", "cvv", "wallet", "login", "logins", "account", "accounts",
-                                  "env"})
-_SENSITIVE_FILE_ONLY = frozenset({"vault", "vaults"})       # a file's, never a folder's: note apps call theirs a vault
+                                  "env", "pwd", "pwds", "passwrd", "seedwords", "seedword"})
+# A file's, never a folder's: note apps call theirs a vault, and a folder of boarding passes is one.
+_SENSITIVE_FILE_ONLY = frozenset({"vault", "vaults", "pass", "pw", "pws"})
 _SENSITIVE_FILE_PHRASES = _phrases("api key", "api keys", "private key", "private keys", "backup code", "backup codes",
                                    "recovery code", "recovery codes", "seed phrase", "card number", "card numbers",
                                    "bank details", "social security", "sign in", "log in")
@@ -473,9 +477,9 @@ _SENSITIVE_FILE_PHRASES = _phrases("api key", "api keys", "private key", "privat
 _SENSITIVE_PARTS = ("password", "passwd", "credential", "apikey", "privatekey", "privkey", "mnemonic", "seedphrase",
                     "backupcode", "recoverycode", "recoverykey", "bitwarden", "lastpass", "1password", "keepass",
                     "dashlane", "netrc", "dotenv", "serviceaccount", "adminsdk", "kubeconfig", "accesskey", "rootkey",
-                    "creditcard")
+                    "creditcard", "sshkey", "recoveryphrase")
 _KEY_OWNERS = frozenset({"aws", "gcp", "gcloud", "azure", "ssh", "api", "private", "root"})   # "key" beside these
-_RECOVERY_THINGS = frozenset({"code", "codes", "key", "keys"})                                # "recovery" beside these
+_RECOVERY_THINGS = frozenset({"code", "codes", "key", "keys", "phrase", "phrases"})           # "recovery" beside these
 _KEY_TYPES = frozenset({"pem", "key", "pfx", "p12", "ppk", "kdbx"})     # before the last extension: "my.pem.txt"
 _DIGITS_RE = re.compile(r"\d+")
 
@@ -525,33 +529,44 @@ def sensitive_folder_name(name: Any) -> bool:
 
 # What plainly is a key in a text a task would read (holds_secret): the header of a private key, a well-known key's
 # prefix, or a line naming a secret with a value that looks like one.
-_KEY_HEADER_RE = re.compile(r"-----BEGIN [A-Z0-9 ]{0,32}PRIVATE KEY(?: BLOCK)?-----")
-_KEY_PREFIX_RE = re.compile(r"(?<![A-Za-z0-9])(?:sk-ant-[A-Za-z0-9_\-]{8,}|sk-[A-Za-z0-9]{32,}|AKIA[0-9A-Z]{12,}"
-                            r"|ghp_[A-Za-z0-9]{16,}|gho_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}"
-                            r"|xox[abeoprs]-[A-Za-z0-9\-]{8,}|AIza[0-9A-Za-z_\-]{30,})")
-_SECRET_LINE_RE = re.compile(r"([A-Za-z][A-Za-z0-9_.\- ]{0,63})[\"']?\s{0,4}[:=]\s{0,4}[\"']?([^\s\"',;]{1,400})")
-_SECRET_LINE_CAP = 600            # of a line, looked at
+_KEY_HEADER_RE = re.compile(r"-----BEGIN [A-Z0-9 ]{0,32}PRIVATE KEY(?: BLOCK)?-----|PuTTY-User-Key-File-\d")
+_KEY_PREFIX_RE = re.compile(r"(?<![A-Za-z0-9])(?:sk-ant-[A-Za-z0-9_\-]{8,}|sk-proj-[A-Za-z0-9_\-]{8,}|sk-[A-Za-z0-9]{32,}"
+                            r"|sk_live_[A-Za-z0-9]{8,}|AKIA[0-9A-Z]{12,}"
+                            r"|ghp_[A-Za-z0-9]{16,}|gho_[A-Za-z0-9]{16,}|ghs_[A-Za-z0-9]{16,}|ghu_[A-Za-z0-9]{16,}"
+                            r"|github_pat_[A-Za-z0-9_]{16,}|glpat-[A-Za-z0-9_\-]{16,}"
+                            r"|xox[abeoprs]-[A-Za-z0-9\-]{8,}|AIza[0-9A-Za-z_\-]{30,}"
+                            r"|eyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,})"
+                            r"|://[^/\s:@]{1,256}:[^/\s@]{6,256}@")    # a password in an address: scheme://user:password@
+_SECRET_LINE_RE = re.compile(r"([A-Za-z][A-Za-z0-9_.\- ]{0,63})[\"']?\s{0,16}[:=]\s{0,16}[\"']?"
+                             r"((?:(?:[Bb]earer|[Bb]asic)\s+)?[^\s\"',;]{1,400})")
+# A long line (minified JSON) is looked at a window at a time, each overlapping the last by more than a name, its mark and
+# enough of its value to tell (64 + 34 + 16): nothing a line says can fall between two.
+_SECRET_LINE_WINDOW, _SECRET_LINE_STEP = 600, 480
 _KEY_NAMES = _phrases("api key", "apikey", "api token", "private key", "privatekey", "access key", "accesskey", "auth",
                       "authorization", "bearer", "credential", "credentials", "token", "client secret", "secret key")
 _NOT_A_SECRET_VALUE = _phrases("expiry", "expiration", "exp date", "routing")  # sensitive_label's, with plain values
 
 
 def holds_secret(text: Any) -> bool:
-    """``text`` plainly holds a key: a private key's header, a well-known key's prefix (sk-ant-, AKIA, ghp_, xox ...),
-    or a line such as ``API_KEY=...`` or ``"password": "..."`` whose value looks like one. Not a promise about
-    everything: a password in a sentence stays what it is. Bounded: it looks at each line once, up to its cap."""
+    """``text`` plainly holds a key: a private key's header, a well-known key's prefix (sk-ant-, sk-proj-, AKIA, ghp_,
+    xox, a JWT ...), a password in an address (``postgres://user:password@host``), or a line such as ``API_KEY=...``,
+    ``"password": "..."`` or ``Authorization: Bearer ...`` whose value looks like one, anywhere along the line. Not a
+    promise about everything: a password in a sentence stays what it is. Bounded: a line is read a window at a time."""
     if not isinstance(text, str) or not text:
         return False
     if _KEY_HEADER_RE.search(text) or _KEY_PREFIX_RE.search(text):
         return True
     for line in text.splitlines():
-        for match in _SECRET_LINE_RE.finditer(line[:_SECRET_LINE_CAP]):
-            name, value = match.groups()
-            if _says(name, _KEY_NAMES) and len(value) >= 16 and not value.isdigit():
-                return True
-            if sensitive_label(name) and not _says(name, _NOT_A_SECRET_VALUE) and (
-                    len(value) >= 16 or (len(value) >= 6 and any(char.isdigit() for char in value))):
-                return True
+        for start in range(0, max(1, len(line) - _SECRET_LINE_WINDOW + _SECRET_LINE_STEP), _SECRET_LINE_STEP):
+            for match in _SECRET_LINE_RE.finditer(line[start:start + _SECRET_LINE_WINDOW]):
+                name, value = match.groups()
+                if len(value) < 6:
+                    continue
+                if _says(name, _KEY_NAMES) and len(value) >= 16 and not value.isdigit():
+                    return True
+                if sensitive_label(name) and not _says(name, _NOT_A_SECRET_VALUE) and (
+                        len(value) >= 16 or any(char.isdigit() for char in value)):
+                    return True
     return False
 
 

@@ -1457,6 +1457,7 @@ class ReadingView(QWidget):
         self.task_chip: holo.ActionChip | None = None    # a task's chip and its Stop (set_task_chip): made as they show
         self.task_stop: holo.HoloButton | None = None
         self._task_look = ""
+        self._task_word = ""
         # The states (round 2, part 3b, HOLOGRAM_SPEC 16.7): the waiting readout and the offline voice's steel
         # badge in the chip row (when no chip shows), an error as ONE tile at the focal point (where an offer's
         # tile sits; an open offer goes first), and quiet hours read again every half minute.
@@ -1834,6 +1835,7 @@ class ReadingView(QWidget):
             word = states_view.waiting_word(self._waiting_run)
         if self._paused and base == orb_mod.IDLE and not muted:
             word = PAUSED_WORD
+        word = self.task_word(base, muted) or word
         # Quiet hours (spec 16.7): the idle orb at 70 % and QUIET HOURS UNTIL 8:00 AM.
         quiet = bool(self._quiet_until) and word == orb_mod.READOUTS[orb_mod.IDLE]
         if quiet:
@@ -2368,11 +2370,16 @@ class ReadingView(QWidget):
         if briefing and not was_shown:
             self.briefing_chip.start_ping()
 
-    def set_task_look(self, base: str) -> None:
-        """The orb while a task runs (agent_feed): it thinks; orb.NEEDS while a card of it waits; "" none."""
-        if base != self._task_look:
-            self._task_look = base
+    def set_task_look(self, base: str, word: str = "") -> None:
+        """The orb while a task runs (agent_feed): it thinks; orb.NEEDS while a card of it waits; "" none. ``word``: the
+        state word in place of its own (the plan's limit holds the task: at rest, and it says it waits)."""
+        if (base, word) != (self._task_look, self._task_word):
+            self._task_look, self._task_word = base, word
             self._sync_look()
+
+    def task_word(self, base: str, muted: bool) -> str:
+        """The state word a task gives this look, "" for its own (MUTED wins, and what the orb is at for the moment)."""
+        return self._task_word if self._task_word and base == self._task_look and not muted else ""
 
     def set_task_chip(self, text: str, *, can_stop: bool = False) -> None:
         """Home's chip of a task (agent_feed): "Working - 3 of 6", with a Stop beside it while it runs; "" none. Made
@@ -3810,6 +3817,7 @@ ASK_SAY_KEY = "ask-say"                  # an Ask's say, spoken as soon as it is
 TASK_SAY_KEY = "task-say"                # what a task says: a Stop takes it, playing or queued, and nothing else
 # How a task ended, for later Asks (Turn.note): never a word of its report or of what a page said.
 TASK_ENDED_LINE = "That task has ended ({how}). Its report is on the owner's screen and not here: say so if asked about it."
+TASK_TURNED_OFF_LINE = "That task was stopped by a Turn off, and nothing of it is kept here: say so if asked about it."
 # Memory (the productivity bundle): the conversation's links and texts (shown only; never logged).
 MEMORY_UNDO_LINK = "mem-undo:"           # + an opaque counter: Undo a note saved or forgotten
 MEMORY_SAVE_LINK = "mem-save:"           # + an opaque counter: Remember this (a suggestion)
@@ -9891,34 +9899,42 @@ class AppController(QObject):
         first sentence or two on the caption and, through the voice's gate when the model wrote them, said aloud
         (agent_feed.spoken_summary), and one row of counts in ACTIVITY. Never given to a later Ask as the conversation:
         it may hold what pages said; and a report is never kept on this PC (D11): it may quote a mail or a file.
-        Jarvis's own words for how a task ended are, and a later Ask hears only that it ended (_note_task_ended). A task
-        that was stopped stops talking: the line being said and those behind it go (under their own keys: a briefing
-        reads on, and nothing else the voice is at is touched)."""
+        Jarvis's own words for how a task ended are, and a later Ask hears only that it ended (_note_task_ended). After the
+        owner's Stop or Turn off, whatever the outcome (a Stop in the seconds after finish keeps its report on its card), it
+        stops talking: the line being said and those behind it go (under their own keys: a briefing reads on, and nothing
+        else the voice is at is touched), and nothing more is said. A Turn off leaves nothing of it: no report and no entry
+        in the conversation, and on the caption only Jarvis's own word that it stopped."""
         from .agent.tools import OUTCOME_DONE, OUTCOME_FAILED
         from .agent_feed import spoken_summary
+        from .agent_ui import TURNED_OFF
 
         if self.state == STATE_QUITTING:
             return
         tone = {OUTCOME_FAILED: hud.TONE_ERROR, "stopped": hud.TONE_IDLE}.get(end.outcome, hud.TONE_DONE)
         words = {OUTCOME_DONE: "done", OUTCOME_FAILED: "failed", "stopped": "stopped"}.get(end.outcome, "partly done")
-        if end.outcome == "stopped":
+        stopped_by = self.agent.stopped_by
+        quiet = bool(stopped_by) or end.outcome == "stopped"
+        if quiet:
             self._voice_call("stop_key", TASK_SAY_KEY)
             self._voice_call("stop_key", ASK_SAY_KEY)       # (its spoken start: no other Ask runs beside a task)
-        self._note_task_ended(words)
-        opening = spoken_summary(end.summary)
-        self._agent_words(opening, tone, speak=end.outcome != "stopped",
-                          said=None if end.own_words else self.agent.spoken_report(end, opening))
-        files = f"\nFiles: {', '.join(end.outputs)}" if end.outputs else ""
+        turned_off = stopped_by == TURNED_OFF
+        self._note_task_ended(words, TASK_TURNED_OFF_LINE if turned_off else TASK_ENDED_LINE)
         sub = [f"task {words}", _plural(end.tools, "step"), _live.elapsed_text(end.worked_s)]
-        self._jarvis(end.summary + files, tone=tone, sub=f" {DOT} ".join(sub), keep=end.own_words, context=False)
+        opening = spoken_summary(end.summary)
+        if end.own_words or not turned_off:
+            self._agent_words(opening, tone, speak=not quiet,
+                              said=None if end.own_words else self.agent.spoken_report(end, opening))
+        if not turned_off:
+            files = f"\nFiles: {', '.join(end.outputs)}" if end.outputs else ""
+            self._jarvis(end.summary + files, tone=tone, sub=f" {DOT} ".join(sub), keep=end.own_words, context=False)
         self._activity(hud.TAG_ASK, f"Task: {words}", f" {DOT} ".join(sub[1:]))
 
-    def _note_task_ended(self, how: str) -> None:
+    def _note_task_ended(self, how: str, line: str = TASK_ENDED_LINE) -> None:
         """One line of Jarvis's own for later Asks, never shown: without it <conversation> ends on the promise to do the
         task, and a follow-up has nothing to stand on. Not a word of the report: it may hold what pages said."""
         now = self._now()
         self._task_notes = [*recent_turns(self._task_notes, now),
-                            Turn(hud.ROLE_JARVIS, TASK_ENDED_LINE.format(how=how), now if now.utcoffset() is not None
+                            Turn(hud.ROLE_JARVIS, line.format(how=how), now if now.utcoffset() is not None
                                  else now.astimezone(), hud.TONE_DONE, note=True)]
         self._on_conversation_changed()
 

@@ -20,7 +20,7 @@ the chips and the cards (``Glow``) as well as the brackets and tethers.
     as the prototype's ``.bcap`` does, to at most ``CAPTION_LINES`` lines - the bar and the window grow with it, the
     chips move down - and only past that it is cut with an ellipsis, its whole text the tooltip
     (``WA_AlwaysShowToolTips``: the HUD is never the active window). ``place_on(screen)`` /
-    ``place_in(area)``, ``area()``; ``set_caption(text)``; ``set_look(base, muted=, offline=)`` (the orb and the
+    ``place_in(area)``, ``area()``; ``set_caption(text)``; ``set_look(base, muted=, offline=, word=)`` (the orb and the
     state word); ``set_briefing_ready(bool)``, ``set_pending(count)``, ``set_recording(elapsed, warning="")``,
     ``set_timer(text)`` (a chip whose words did not change is not repainted); ``chip_texts()``. P2.5: under the chips
     the instant row (``set_instant(items, dnd=, undo_all=)``, ``instant_texts()``; ``instant``, ``dnd_chip``,
@@ -1314,14 +1314,15 @@ class HudWindow(_OverlayWindow):
     def caption_text(self) -> str:
         return self.caption.text()
 
-    def set_look(self, base: str, *, muted: bool = False, offline: bool = False) -> None:
-        """The orb's look and the state word beside the caption (amber dot when he needs you)."""
+    def set_look(self, base: str, *, muted: bool = False, offline: bool = False, word: str = "") -> None:
+        """The orb's look and the state word beside the caption (amber dot when he needs you). ``word``: in place of the
+        look's own (the window's task_word)."""
         self.orb.set_look(base, muted=muted, offline=offline)
-        word = orb_mod.state_word(base, muted, offline)
+        own = orb_mod.state_word(base, muted, offline)
         if base == orb_mod.WAITING and not muted and not offline:
-            word = orb_mod.READOUTS[orb_mod.IDLE]       # the long waiting readout stays in the window's header
+            own = orb_mod.READOUTS[orb_mod.IDLE]        # the long waiting readout stays in the window's header
         dot = holo.AMBER if base == orb_mod.NEEDS else holo.STEEL if (muted or offline) else holo.HOLO
-        self.caption.set_word(word, dot)
+        self.caption.set_word(word or own, dot)
         self._layout()                                  # a longer word leaves the caption less room
 
     def state_word(self) -> str:
