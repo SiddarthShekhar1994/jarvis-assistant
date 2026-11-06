@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import tempfile
 import threading
+import time
 import unittest
 from collections.abc import Callable
 from dataclasses import replace
@@ -154,6 +155,47 @@ class TaintSetTests(unittest.TestCase):
 
     def test_its_repr_holds_counts_only(self) -> None:
         self.assertNotIn("samantha", repr(self.taint()).casefold())
+
+
+class WhatARequestHoldsTests(unittest.TestCase):
+    def test_what_plainly_holds_something_private(self) -> None:
+        for goal in ("my wifi password is hunter2, why won't it connect", "what does reference 482913 mean",
+                     "look up order 114-3928475-9912345", "email bob@example.org about the party",
+                     "card 4111 1111 1111 1111 was declined, why", "what is sk-ant-abcdefgh12345678",
+                     "٤٨٢٩١٣ is what the letter says"):
+            with self.subTest(goal=goal):
+                self.assertTrue(fw.holds_something_private(goal))
+
+    def test_what_does_not(self) -> None:
+        for goal in ("find me a cheap laptop", "what's on in Portland on 2026-11-06", "flights on 12/25/2026 under 1500",
+                     "the population of Tokyo in 2020", "compare three 4K TVs under $800", "", "turn the volume down",
+                     "what happened on 2026-11-06 in Portland", "2026 11 06 meeting notes"):
+            with self.subTest(goal=goal):
+                self.assertFalse(fw.holds_something_private(goal))
+
+    def test_the_request_s_addresses_stay_seen_and_its_words_the_owner_s(self) -> None:
+        wall = WebFirewall(web.AddressBook())
+        goal = "my reference is 482913, look it up on https://www.example.org/status"
+        wall.owner_said(goal)
+        wall.note_goal(goal)
+        self.assertTrue(wall.private)
+        self.assertFalse(wall.strict)
+        self.assertTrue(wall.book.seen("https://www.example.org/status"))
+        self.assertEqual(wall.taint.hits("482913"), ())
+
+    def test_a_clean_request_leaves_the_run_clean(self) -> None:
+        wall = WebFirewall(web.AddressBook())
+        wall.owner_said("find me a cheap laptop")
+        wall.note_goal("find me a cheap laptop")
+        self.assertFalse(wall.private)
+
+    def test_a_long_request_is_read_in_time(self) -> None:
+        for text in ("." * 32767, "a" * 32767, "1" * 32767, "a " * 16383, "1 " * 16383, "@" * 32767, "a@" * 16383,
+                     "1-" * 16383, "password " * 3640):
+            with self.subTest(text=text[:4]):
+                began = time.perf_counter()
+                fw.holds_something_private(text)
+                self.assertLess(time.perf_counter() - began, 1.5)
 
 
 class EncodedTests(unittest.TestCase):

@@ -15,7 +15,7 @@ controls, zero-width characters, tag characters, line and paragraph separators):
 Secrets and payments: ``UIA_IS_PASSWORD_PROPERTY``, ``SENSITIVE_WORDS`` / ``sensitive_label(text)``,
 ``PAYMENT_WORDS`` / ``payment_page(text)`` (a URL path or a page title; a heuristic, the owner's Submit is the
 backstop). What a task may not read or ask (agent.*): ``sensitive_file_name(name)``, ``sensitive_folder_name(name)``,
-``holds_secret(text)``, ``asks_for_secret(text)``.
+``holds_secret(text)``, ``asks_for_secret(text)``, ``line_asks_for_secret(text)``.
 Buttons and keys inside other apps: ``INVOKE_ALLOWED`` (False: no button is pressed in v1), ``COMMIT_WORDS`` /
 ``commit_button(name)`` (Submit, Send, Pay ... are only highlighted), ``NEVER_KEYS`` / ``key_allowed(vk, ...)``,
 ``typed_text_allowed(text)``, ``CONSENT_WORDS`` / ``consent_box(label)``, ``FILE_PICKER_WORDS`` /
@@ -154,6 +154,17 @@ def asks_for_secret(text: Any) -> bool:
     """A question that reads as asking for a secret: ``sensitive_label``'s words, a sign-in, "the code", or the everyday
     ways of asking for one ("the 6 digit number we texted you"). A false refusal here costs a rewording."""
     return sensitive_label(text) or _says(text, _SECRET_ASK_WORDS)
+
+
+# What makes a line that names a secret one that asks for it: "the login page is down" only says so.
+_ASKING_WORDS = _phrases("type", "enter", "send", "tell me", "give me", "share", "paste", "provide", "read me",
+                         "need your", "i need", "reply with", "what is your", "what s your", "whats your")
+
+
+def line_asks_for_secret(text: Any) -> bool:
+    """A line a task says that asks for a secret, where no card stands in the way of what is typed back: it names one as
+    ``asks_for_secret`` reads it, and it asks, with a question mark or the words of asking."""
+    return asks_for_secret(text) and ("?" in str(text) or _says(text, _ASKING_WORDS))
 
 
 def payment_page(text: Any) -> bool:

@@ -71,6 +71,7 @@ END_TONES = {OUTCOME_DONE: hud_overlay.TONE_DONE, OUTCOME_PARTIAL: hud_overlay.T
 CHIP_WORKING = "Working"
 CHIP_COUNT = "Working - {step} of {steps}"
 CHIP_WAITING = "Waiting for you"
+CHIP_LIMIT = "Waiting - plan's limit"
 CHIP_ENDED = {OUTCOME_DONE: "Task done", OUTCOME_PARTIAL: "Task partly done", OUTCOME_FAILED: "Task failed",
               agent_runner.OUTCOME_STOPPED: "Task stopped"}
 STARTING_ACTIVITY = "Working out the steps"
@@ -390,6 +391,8 @@ class TaskFeed(QObject):
             text = CHIP_ENDED.get(self._ended.outcome, CHIP_ENDED[OUTCOME_PARTIAL])
         elif self._waiting:
             text = CHIP_WAITING
+        elif self._limit_held and self._running:
+            text = CHIP_LIMIT
         elif self._running:
             step, count = plan_counts(self._steps)
             text = CHIP_COUNT.format(step=step, steps=count) if count else CHIP_WORKING
@@ -520,6 +523,7 @@ class TaskFeed(QObject):
             self._at_rest_or_thinking()
             if not held:
                 self._activity = THINKING_ACTIVITY      # (not "waiting for the plan's limit" until the next tool)
+            self._sync_chip()
             self._render()
 
     def _end_rest(self) -> None:

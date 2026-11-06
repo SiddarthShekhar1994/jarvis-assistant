@@ -2139,6 +2139,18 @@ class ListsAndCapsThatCanFail(Corpus):
         self.assertEqual(bench.call("propose_action", lines=[f"Open: title=Look | link={seen}"]).code, fw.WAITING)
         self.assertEqual([card.link for card in bench.things.cards], [seen])
 
+    def test_a_link_the_owner_wrote_may_go_on_a_card_but_loads_no_page(self) -> None:
+        """Said once the run holds anything: the click on that card is what sends it, and it shows there."""
+        link = "https://docs.google.com/document/d/one"
+        bench = self.bench()
+        self.read_hostile_mail(bench)
+        bench.owner_says(f"put {link} on the invite")
+        self.assertFalse(bench.firewall.book.seen(link))
+        self.assertEqual(bench.call("propose_action", lines=[f"Open: title=Look | link={link}"]).code, fw.WAITING)
+        self.assertEqual([card.link for card in bench.things.cards], [link])
+        bench.browser.loads.clear()
+        self.assert_no_call_but_a_card(bench, bench.call("open_page", url=link), link)
+
     def test_a_clean_run_may_put_an_allowed_link_on_a_card(self) -> None:
         bench = self.bench()
         link = "https://docs.google.com/document/d/one"

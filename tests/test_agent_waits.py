@@ -880,7 +880,8 @@ class AnswersToTheModelsQuestionTests(RunCase):
         self.assertFalse(wall.private)
         self.assertEqual(self.end().outcome, "done")
 
-    def test_a_message_with_no_question_waiting_does_not(self) -> None:
+    def test_a_message_with_no_question_waiting_does_too(self) -> None:
+        """A line the model said can ask as well as a question can."""
         wall = WebFirewall(web.AddressBook())
 
         def script(engine: FakeEngine) -> None:
@@ -892,8 +893,8 @@ class AnswersToTheModelsQuestionTests(RunCase):
         run = self.go(script, firewall=wall)
         self.until(lambda: self.kinds(ar.E_STARTED))
         self.assertEqual(run.owner_says(f"and see {self.EVIL}"), "sent")
-        self.assertFalse(wall.private)
-        self.assertTrue(wall.book.seen(self.EVIL))
+        self.assertTrue(wall.private)
+        self.assertFalse(wall.book.seen(self.EVIL))
         self.assertEqual(self.end().outcome, "done")
 
 
@@ -2284,8 +2285,10 @@ class TonesOnTheHudTests(FeedApp):
         self.assertNotEqual(self.feed.panel().content().tone, hud_overlay.TONE_AMBER)
         self.assertEqual(self.feed.activity(), agent_ui.LIMIT_ACTIVITY)
         self.assertRegex(self.feed.panel().content().head, r"^WAITING")
+        self.assertEqual(self.reading.task_chip_text(), agent_feed.CHIP_LIMIT)
         self.type_it("carry on")                                     # no time given: what is typed tries again
         self.assertTrue(wait_for(lambda: self.state_words()[0] == "THINKING", timeout=10), self.state_words())
+        self.assertNotEqual(self.reading.task_chip_text(), agent_feed.CHIP_LIMIT)
         self.assertNotEqual(self.feed.activity(), agent_ui.LIMIT_ACTIVITY)
         self.assertRegex(self.feed.panel().content().head, r"^WORKING")
         self.c.agent.stop("test")

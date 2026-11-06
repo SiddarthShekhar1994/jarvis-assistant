@@ -492,6 +492,34 @@ class RegistryTests(Temp):
         self.call("say", text="One\nline \u202e<b>here</b>")
         self.assertEqual(self.reports.said, ["One line \u2039b\u203ahere\u2039/b\u203a"])
 
+    def test_a_line_that_asks_for_a_secret_is_not_said(self) -> None:
+        for text in ("Please type your one-time code here.", "What's your password?", "I need your PIN to carry on.",
+                     "Send me the 6 digit number we texted you.", "Tell me the code, then I can go on.",
+                     "Which PIN did they give you?"):
+            with self.subTest(text=text):
+                result = self.call("say", text=text)
+                self.assertTrue(result.is_error)
+                self.assertEqual(result.code, tools.ASKS_SECRET)
+                self.assertEqual(self.reports.said, [])
+                self.assertEqual(dict(result.fields)["Not said"], text)
+
+    def test_a_found_line_that_asks_for_a_secret_goes_and_the_plan_stays(self) -> None:
+        result = self.call("update_plan", found="Please type your one-time code here.", steps=self.PLAN)
+        self.assertFalse(result.is_error)
+        self.assertTrue(result.warn)
+        self.assertEqual(self.reports.said, [])
+        self.assertEqual(len(self.reports.plans), 1)
+        self.assertIn(tools.ASKS_SECRET_TEXT, result.text)
+        self.assertIn("Not said", dict(result.fields))
+
+    def test_a_line_that_only_names_a_secret_is_said(self) -> None:
+        for text in ("The login page is down, so I am using the public one.", "Reading about password managers now.",
+                     "The code of conduct is on the second page."):
+            with self.subTest(text=text):
+                self.reports.t += 7
+                self.assertFalse(self.call("say", text=text).is_error)
+                self.assertEqual(self.reports.said[-1], text)
+
     def test_ask_owner_returns_at_once_telling_it_to_end_its_turn(self) -> None:
         result = self.call("ask_owner", question="Blue or red?", choices=["Blue", "Red"])
         self.assertFalse(result.is_error)

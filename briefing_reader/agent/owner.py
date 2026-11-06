@@ -1199,9 +1199,11 @@ class OwnerAccess:
 
     def _link_refused(self, card: Any) -> bool:
         """A card's link leaves the PC on its click, so it is under the address rule once the run holds anything
-        private: an address this run saw, unchanged."""
+        private: an address this run saw, unchanged, or one the owner wrote themselves (no card of the firewall's is
+        needed for that: this card is the click, and the link shows on it)."""
         link = getattr(card, "link", "")
-        return bool(link) and (self.firewall.private or self.firewall.strict) and not self.firewall.book.seen(link)
+        wall = self.firewall
+        return bool(link) and (wall.private or wall.strict) and not wall.book.seen(link) and not wall.owner_wrote(link)
 
     def propose_action(self, args: Mapping[str, Any], ctx: Any) -> ToolResult:
         """Ask's line formats and validators, its cards in Approvals and on the HUD. Not a wait: nothing is sent or done

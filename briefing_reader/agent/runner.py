@@ -25,8 +25,8 @@ desktop's own), and only its own end says anything: card_at_work(id) gives its c
 owner's click starts the batch, card_ended(id, message) puts its end in as the next message, and finish waits for it
 unless the task is stopping. With no row ended for BATCH_QUIET_MINUTES (card_progress(id) starts the watch again) the run
 stops waiting on it, in true words: the batch is still at work, untouched, and its card has the truth. A choice clicked
-answers, but it is the model's words, so it licenses nothing and clears nothing; words typed are the owner's, and those
-typed at the model's own question turn the firewall on for the rest of the run. A ``result`` with no wait pending and no
+answers, but it is the model's words, so it licenses nothing and clears nothing; words typed are the owner's, and any
+typed while the task runs turn the firewall on for the rest of the run. A ``result`` with no wait pending and no
 finish gets one prompt to carry on or finish, and after another one the task ends as partial. A message sent mid-run is
 delivered by Claude Code after the running tool returns (``--replay-user-messages`` shows when; a ``result`` while one is
 on its way is not idle). Words typed before the goal has gone in go in right after it, in order.
@@ -432,6 +432,9 @@ class AgentRun:
         if callable(attach):
             attach(self.ask_web)
         self._note_owner(goal)
+        note_goal = getattr(firewall, "note_goal", None)
+        if callable(note_goal):
+            note_goal(goal)
 
     def __repr__(self) -> str:              # never the goal
         return f"AgentRun({self.run_id})"
@@ -476,10 +479,10 @@ class AgentRun:
         if callable(heard):
             heard(words)
 
-    def _answer_coming(self) -> None:
-        """Words typed in answer to a question the model wrote, and a page may have told it what to ask, whatever the
-        words of the question. The firewall's checks are on from now on, before those words are noted: an address in
-        them is not seen, so the address rule stands between the answer and any page not seen in this run."""
+    def _checks_on(self) -> None:
+        """Words typed while the task runs, and a page may have told the model to ask for them, in a question or in a line
+        it said, whatever the words of the asking. The firewall's checks are on from now on, before those words are noted:
+        an address in them is not seen, so the address rule stands between them and any page not seen in this run."""
         note = getattr(self._firewall, "note_private", None)
         if callable(note):
             note()
@@ -503,8 +506,7 @@ class AgentRun:
             if self._end is not None or self._stop.is_set() or self._finished is not None:
                 return "refused"
             wait = self._wait
-            if wait is not None and wait.question.kind == Q_TASK:
-                self._answer_coming()
+            self._checks_on()
             self._note_owner(text)
             if wait is not None and wait.question.kind == Q_TASK:   # only ask_owner's: the others are click only
                 if self._paused and not self._limit_holds():
@@ -545,8 +547,7 @@ class AgentRun:
                 self._deliver(WEB_ALLOWED_TEXT if allowed else WEB_DECLINED_TEXT)
                 return True
             if text not in question.choices:    # a choice clicked is the model's words: never the owner's own
-                if question.kind == Q_TASK:
-                    self._answer_coming()
+                self._checks_on()
                 self._note_owner(text)
             if question.kind == Q_TASK:
                 self._deliver(owner_message(text, ANSWER_LABEL))

@@ -16,8 +16,11 @@ never the size of the taint set, which a note holding only short words leaves em
         owner_said(words)        the owner's words: what is not tainted now never taints, and while the run holds nothing
                                  private their addresses count as seen; said() gives them back, joined, and messages()
                                  one by one: the words a licence is read from (agent.owner)
-        note_private()           a private tool answered, whatever it fed, or words came in answer to a question the model
-                                 wrote (agent.runner): the checks are on from now on, for good
+        note_private()           a private tool answered, whatever it fed, or the owner typed something while the task ran
+                                 (agent.runner): the checks are on from now on, for good
+        note_goal(words)         the same, from the start, when the request itself plainly holds something private
+                                 (holds_something_private): its words stay the owner's and its addresses seen
+        owner_wrote(address)     that address stands in the owner's own words: for a card's link, never a page's load
         go_strict()              the run has read a mail's body, a file's contents or the conversation (strict)
         check(tool, args)        before web_search, open_page, fetch_text and open_thing's site: None, or what goes back
                                  to the model instead
@@ -127,6 +130,8 @@ READ_RUNS_CAP = 200_000          # runs a run remembers, the oldest going first
 _EMAIL_RE = re.compile(r"[^\s<>\"'(),;:@]{1,64}@[^\s<>\"'(),;:@]{1,253}\.[^\s<>\"'(),;:.@]{2,63}")
 _PHONE_RE = re.compile(r"\+?\d[\d\s().\-/]{5,22}\d")
 _DIGIT_RUN_RE = re.compile(r"\d{%d,}" % DIGIT_RUN_MIN)
+_REQUEST_NUMBER_RE = re.compile(r"(?<!\d)\d{6,}(?!\d)")       # in a request: a code, an account, a reference
+REQUEST_GROUPED_DIGITS = 9       # ... or this many in groups (a card, a phone, an order), which a date never is
 _SHORT_NUMBER_RE = re.compile(r"(?<!\d)\d{4,6}(?!\d)")       # a locker code, a PIN, a reference: years left out
 _YEAR_RE = re.compile(r"(?:19|20)\d\d")
 _ANY_DIGITS_RE = re.compile(r"\d+")
@@ -275,6 +280,15 @@ def _digits(text: str) -> str:
     """The digits of ``text`` and nothing else, each as its value."""
     plain = _ascii_digits(text if text.isascii() else unicodedata.normalize("NFKD", text))
     return "".join(char for char in plain if char.isascii() and char.isdigit())
+
+
+def holds_something_private(words: str) -> bool:
+    """The owner's request itself plainly holds what must not leave by an address a page names: a key or a word for a
+    secret, an email address, a long number. Only ever turns the checks on (WebFirewall.note_goal)."""
+    plain = _ascii_digits(words or "")
+    return (guard.holds_secret(plain) or guard.asks_for_secret(plain) or _EMAIL_RE.search(plain) is not None
+            or _REQUEST_NUMBER_RE.search(plain) is not None
+            or any(len(_digits(found)) >= REQUEST_GROUPED_DIGITS for found in _PHONE_RE.findall(plain)))
 
 
 def _digit_runs(text: str) -> set[str]:
@@ -699,6 +713,7 @@ class WebFirewall:
         self._refused: set[tuple[str, str]] = set()
         self._waiting: set[tuple[str, str]] = set()     # the call on a card that is up, from _shown to _answered
         self._said: list[str] = []
+        self._wrote: set[str] = set()                   # the addresses in the owner's own words (owner_wrote)
         self.private = False
         self.strict = False
         self.cards = 0
@@ -711,6 +726,13 @@ class WebFirewall:
         """A private tool answered, whatever it fed: the model holds what it read now, even a note the taint set finds
         no word in, so the checks are on for good. Nothing the owner says or clicks turns them off."""
         self.private = True
+
+    def note_goal(self, words: str) -> None:
+        """The task's request, once owner_said has heard it: if it plainly holds something private the checks are on from
+        the start, for a page could tell the model to carry that off by an address. Its words stay the owner's and its
+        addresses seen."""
+        if holds_something_private(words):
+            self.note_private()
 
     def go_strict(self) -> None:
         """The run read a mail's body, a file's contents or the conversation: strict from now on, for good."""
@@ -746,13 +768,21 @@ class WebFirewall:
         in them counts as seen only while the run holds nothing private: after that, as a word already tainted, it goes
         to a card, and a click answers it. Typed or spoken words never do, whatever the sentence says."""
         self.taint.note_owner(words)
+        addresses = owner_addresses(words)
         with self._lock:
             if words:
                 self._said.append(" ".join(words.split()).rstrip(" .!?"))
+            self._wrote.update(addresses)
         if self.private or self.strict:
             return
-        for address in owner_addresses(words):
+        for address in addresses:
             self.book.see(address)
+
+    def owner_wrote(self, address: Any) -> bool:
+        """``address`` stands in the owner's own words, exactly, whenever they said it. For a card's link, which a click
+        on that card is what sends, and which shows there. Never for a page to load: that is ``book.seen``."""
+        with self._lock:
+            return address in self._wrote
 
     def _outgoing(self, tool: Tool, args: Mapping[str, Any]) -> tuple[str, str]:
         """(its card's words, exactly what would go out) of a call the firewall looks at, or ("", "") when none would
