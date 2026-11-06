@@ -13,7 +13,7 @@ and Home's chip. Qt, GUI thread; made by the app only while [agent] is on (off: 
 The cards (hud_overlay.TaskCard, one at a time, amber while it waits, counted in "N need your OK"):
 
 * ask_owner's: the question and its choices as buttons; words typed or dictated in the bar answer it too (the agent's
-  gate, agent_ui.take_request).
+  gate, agent_ui.take_request). Its note says, in Jarvis's own words, that he never needs a password or a code.
 * the firewall's: the exact words or address, Don't and Allow. Keep going, and its plan-limit twin. These are click
 only:
   they take no keyboard, the bar's words never reach them (agent.runner), a click passes the app's guards and a card
@@ -25,7 +25,8 @@ only:
 The result card: the outcome, the steps and the time in its kicker, the whole report (scrolling), the outputs with Show
 (in the sealed watch window: agent_ui.show_output) and Folder (the guarded backend's way of showing a file in Explorer:
 desktop_ui.reveal_task_file), and Done. A page the agent wrote could carry private data out through the owner's real
-browser or a default app, so nothing here ever hands one to them. The window stays while the card stays.
+browser or a default app, so nothing here ever hands one to them: for a page, Folder opens the folder with nothing
+selected (desktop_ui.reveal_task_folder) and its row says plainly to use Show. The window stays while the card stays.
 
 Global Esc is never held for a task: a task can run 20 minutes while the owner works in other apps, and Esc is theirs.
 Esc stops a task only while the HUD's bar has the keyboard.
@@ -69,8 +70,8 @@ ENDED_ACTIVITY = "Finished"
 STOPPED_ACTIVITY = "Stopped"
 QUESTION_KICKER = "A question for you"
 OK_KICKER = "Needs your OK"
-QUESTION_NOTE = "Or type your answer in the bar."
-QUESTION_FREE_NOTE = "Type your answer in the bar."
+QUESTION_NOTE = "Or type your answer in the bar. Jarvis never needs a password or a code."
+QUESTION_FREE_NOTE = "Type your answer in the bar. Jarvis never needs a password or a code."
 CLICK_ONLY_NOTE = "Only a click answers this."
 ALLOW_TEXT, DONT_TEXT = agent_firewall.WEB_ALLOW, agent_firewall.WEB_DONT
 DONE_TEXT = "Done"
@@ -88,6 +89,8 @@ CLICK_ARM_S = 0.6               # a card that has only just appeared takes no cl
 CHOICE_KEY = "choice:"
 GUARD_ID = "dsk:task"           # the click guards' id for a task's cards (desktop_ui's namespace)
 SHOW_KEY, FOLDER_KEY = "show:", "folder:"
+PAGE_TYPES = (".html", ".htm", ".svg")   # an output a double click would open in the owner's real browser
+PAGE_ROW_NOTE = "A page Jarvis wrote: open it with Show, not from the folder."
 
 
 def spoken_summary(summary: str, cap: int = SPOKEN_CAP) -> str:
@@ -102,6 +105,10 @@ def spoken_summary(summary: str, cap: int = SPOKEN_CAP) -> str:
     if len(parts) > 1 and len(words) + 1 + len(parts[1]) <= cap:
         words = f"{words} {parts[1]}"
     return words
+
+
+def _a_page(name: str) -> bool:
+    return name.casefold().endswith(PAGE_TYPES)
 
 
 def plan_counts(steps: Any) -> tuple[int, int]:
@@ -519,7 +526,8 @@ class TaskFeed(QObject):
         return tuple(type(step)(step.text, STEP_FAILED) if step.status == STEP_DOING else step for step in steps)
 
     def _result_content(self, end: Any) -> TaskContent:
-        rows = tuple(TaskRow(name, f"{SHOW_KEY}{name}", f"{FOLDER_KEY}{name}") for name in self.agent.outputs_for(end))
+        rows = tuple(TaskRow(name, f"{SHOW_KEY}{name}", f"{FOLDER_KEY}{name}", PAGE_ROW_NOTE if _a_page(name) else "")
+                     for name in self.agent.outputs_for(end))
         return TaskContent(kicker_text(end, self._steps), end.summary,
                            END_TONES.get(end.outcome, hud_overlay.TONE_CYAN), (CardButton(DONE_KEY, DONE_TEXT, holo.GHOST),),
                            rows=rows)
@@ -532,11 +540,15 @@ class TaskFeed(QObject):
         self._render()
 
     def _show_folder(self, name: str) -> None:
-        """Folder: its folder opens with it selected, through the guarded backend; the file itself is never opened."""
+        """Folder: its folder opens with it selected, through the guarded backend; the file itself is never opened. A
+        page is not selected: Enter there would open it in the owner's real browser, with nothing sealed."""
         path = self.agent.output_path(name)
         if path:
             logger.info("Task feed: an output is shown in its folder")
-            self.desktop.reveal_task_file(path)
+            if _a_page(name):
+                self.desktop.reveal_task_folder(path)
+            else:
+                self.desktop.reveal_task_file(path)
 
     def _dismiss(self) -> None:
         """Done: the card, the stamped panel, the window and the chip go."""

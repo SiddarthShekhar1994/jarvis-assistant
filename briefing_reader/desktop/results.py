@@ -76,6 +76,7 @@ NOT_NOW_TEXT = "Not now"
 SCRIPT_NOTE = "It can run macros or scripts, so it opens only when you click Open. Open it only if you trust it."
 HIDDEN_NOTE = "Its name had hidden characters (spelled out above). Check it is the file you want before you open it."
 NOT_NAMED_NOTE = "You didn't name this app exactly, so it opens only on your click."
+TASK_ASKED_NOTE = "Your words in this task didn't name it, so it opens only on your click."
 SUGGESTED_NOTE = "You didn't type this address, so it opens only on your click. Check the site first."
 BARE_HOST_NOTE = "You typed it without https://, so it opens only on your click. Check the site first."
 LINK_NOTE = "It leads to {name}{where}. Open opens that file."
@@ -279,15 +280,21 @@ def _opened(result: Any, base: dict[str, Any], executor: Executor, scope: paths.
 def _waiting(base: dict[str, Any], executor: Executor, scope: paths.Scope, backend: DesktopBackend,
              now: datetime, hour24: bool) -> Card | None:
     skill, target = base["skill"], base["target"]
-    if skill == dv.OPEN_FILE and isinstance(target, FileItem):
+    if skill in (dv.OPEN_FILE, dv.SHOW_IN_FOLDER) and isinstance(target, FileItem):
         if not executor.recheck(target):
             return None                              # changed since: the caption says so; nothing to click
         card = Card(WAITING, **base, name=shown_name(target.name), where=where_words(target.path, scope),
                     when=edited_words(_changed(target), now, hour24=hour24), type_words=type_words(target.name))
-        if guard.open_kind(target.name) == guard.OPEN_SHORTCUT:
+        if skill == dv.OPEN_FILE and guard.open_kind(target.name) == guard.OPEN_SHORTCUT:
             leads, note = _leads(target, scope, backend, now, hour24)
             card = replace(card, leads=leads, leads_note=note)
         return card
+    if skill == dv.OPEN_FOLDER and isinstance(target, Place):      # only a task's: a request's folder opens at once
+        if not executor.recheck(target):
+            return None
+        label = target.parts[-1] if target.parts else ntpath.basename(target.path.rstrip("\\"))
+        return Card(WAITING, **base, name=shown_name(label), where=where_words(target.path, scope, folder=True),
+                    type_words="FOLDER")
     if skill == dv.OPEN_APP and isinstance(target, AppItem):
         return Card(WAITING, **base, name=shown_name(target.name), type_words="APP")
     if skill == dv.OPEN_URL:
@@ -540,5 +547,5 @@ def _waiting_text(card: Card) -> CardText:
                         note_first=True)
     kicker = f"{card.type_words}{SEP}NAME HAD HIDDEN CHARACTERS" if dv.FLAG_HIDDEN_CHARS in flags \
         else f"{card.type_words}{SEP}YOUR CLICK OPENS IT"
-    return CardText(kicker, card.name, _meta(card.where, card.when), HIDDEN_NOTE if dv.FLAG_HIDDEN_CHARS in flags
-                    else "", NOTE_INFO, CYAN, buttons, note_first=True)
+    note = HIDDEN_NOTE if dv.FLAG_HIDDEN_CHARS in flags else TASK_ASKED_NOTE if dv.FLAG_TASK_ASKED in flags else ""
+    return CardText(kicker, card.name, _meta(card.where, card.when), note, NOTE_INFO, CYAN, buttons, note_first=True)

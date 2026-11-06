@@ -11,6 +11,7 @@ native seam records. Every value is invented; files go only to temporary folders
 from __future__ import annotations
 
 import logging
+import os
 import tempfile
 import threading
 import unittest
@@ -123,14 +124,14 @@ class FeedApp(AgentApp):
 
 def whole(engine: FakeEngine, stages: Stages | None = None) -> None:
     engine.wait_message()
-    engine.call("update_plan", steps=plan("doing", "todo", "todo"))
+    engine.call("update_plan", found="", steps=plan("doing", "todo", "todo"))
     if stages:
         stages.reach(1)
-    engine.call("update_plan", steps=plan("done", "doing", "todo"))
+    engine.call("update_plan", found="", steps=plan("done", "doing", "todo"))
     if stages:
         stages.reach(2)
     engine.call("write_file", name="table.md", text="| a | b |")
-    engine.call("update_plan", steps=plan("done", "done", "done"))
+    engine.call("update_plan", found="", steps=plan("done", "done", "done"))
     engine.call("finish", summary=SUMMARY, outcome="done", outputs=["table.md"])
     engine.end_turn("Done.")
 
@@ -210,7 +211,7 @@ class PanelTests(FeedApp):
 
     def test_clear_of_the_bar_chips_cards_and_window_and_kept_on_screen(self) -> None:
         stages = Stages()
-        self.start(lambda engine: (engine.wait_message(), engine.call("update_plan", steps=STEPS),
+        self.start(lambda engine: (engine.wait_message(), engine.call("update_plan", found="", steps=STEPS),
                                    engine.call("ask_owner", question="Blue or Red?", choices=["Blue", "Red"]),
                                    engine.end_turn("Asked."), stages.reach(1)))
         card = self.asked_card()
@@ -371,7 +372,7 @@ class ResultCardTests(FeedApp):
     def test_partly_done(self) -> None:
         def script(engine: FakeEngine) -> None:
             engine.wait_message()
-            engine.call("update_plan", steps=plan("done", "doing", "todo"))
+            engine.call("update_plan", found="", steps=plan("done", "doing", "todo"))
             engine.call("finish", summary="Some of it.", outcome="partial")
             engine.end_turn()
 
@@ -396,7 +397,7 @@ class ResultCardTests(FeedApp):
 
         def script(engine: FakeEngine) -> None:
             engine.wait_message()
-            engine.call("update_plan", steps=plan("doing", "todo", "todo"))
+            engine.call("update_plan", found="", steps=plan("doing", "todo", "todo"))
             engine.call("write_file", name="notes.md", text="so far")
             stages.reach(1)
 
@@ -511,6 +512,49 @@ class OutputTests(FeedApp):
             self.assertFalse(agent.show_output(name), name)
         self.assertEqual(self.fake_browser.shown, [])
 
+    def test_a_page_it_wrote_goes_to_its_folder_with_nothing_selected(self) -> None:
+        def play(engine: FakeEngine) -> None:
+            engine.wait_message()
+            engine.call("write_file", name="page.html", text="<p>Hello</p>")
+            engine.call("write_file", name="drawing.svg", text="<svg></svg>")
+            engine.call("write_file", name="table.md", text="| a |")
+            engine.call("finish", summary=SUMMARY, outcome="done", outputs=["page.html", "drawing.svg", "table.md"])
+            engine.end_turn("Done.")
+
+        self.start(play)
+        self.ended()
+        settle()
+        card = self.feed.card
+        self.assertEqual(card.row_notes(), [agent_feed.PAGE_ROW_NOTE, agent_feed.PAGE_ROW_NOTE])
+        self.assertEqual([row.note for row in card.task().rows], [agent_feed.PAGE_ROW_NOTE, agent_feed.PAGE_ROW_NOTE, ""])
+        buttons = card.row_buttons()
+        self.feed._card_at -= 5
+        self.click(buttons["folder:page.html"])
+        self.assertTrue(wait_for(lambda: self.fake.opened, timeout=10), "its folder opened")
+        path = self.c.agent.output_path("page.html")
+        self.assertEqual(self.fake.opened, [("open_folder", os.path.dirname(path))])     # no file selected, none opened
+        self.fake.opened.clear()
+        self.click(buttons["folder:table.md"])
+        self.assertTrue(wait_for(lambda: self.fake.opened, timeout=10), "its folder opened")
+        self.assertEqual(self.fake.opened, [("show_in_folder", self.c.agent.output_path("table.md"))])
+        self.fake.opened.clear()
+        self.click(buttons["show:page.html"])
+        settle()
+        self.assertEqual(self.fake.opened, [])
+        self.assertEqual(self.fake_browser.shown, ["page.html"])      # Show: the sealed window, as ever
+
+    def test_a_note_shows_whole_at_the_card_s_width(self) -> None:
+        self.assertEqual(agent_feed.PAGE_ROW_NOTE, "A page Jarvis wrote: open it with Show, not from the folder.")
+
+    def test_turned_off_a_page_s_folder_does_nothing(self) -> None:
+        self.start(lambda engine: (engine.wait_message(), engine.call("write_file", name="page.html", text="x"),
+                                   engine.call("finish", summary=SUMMARY, outcome="done", outputs=["page.html"]),
+                                   engine.end_turn("Done.")))
+        self.ended()
+        path = self.c.agent.output_path("page.html")
+        self.desktop.turn_off()
+        self.assertFalse(self.desktop.reveal_task_folder(path))
+
     def test_folder_says_so_when_windows_refuses(self) -> None:
         card = self.finished()
         self.fake.open_errors["show_in_folder"] = ValueError("refused by the last guard")
@@ -531,13 +575,23 @@ class QuestionCardTests(FeedApp):
     def script(choices: Any = ("Blue", "Red")) -> Any:
         def run(engine: FakeEngine) -> None:
             engine.wait_message()
-            engine.call("update_plan", steps=plan("doing", "todo", "todo"))
+            engine.call("update_plan", found="", steps=plan("doing", "todo", "todo"))
             engine.call("ask_owner", question="Blue or Red?", **({"choices": list(choices)} if choices else {}))
             engine.end_turn("Asked.")
             answer = engine.wait_message()
             engine.call("finish", summary=answer, outcome="done")
             engine.end_turn()
         return run
+
+    def test_every_question_says_jarvis_never_needs_a_secret(self) -> None:
+        self.assertIn("Jarvis never needs a password or a code.", agent_feed.QUESTION_NOTE)
+        self.assertIn("Jarvis never needs a password or a code.", agent_feed.QUESTION_FREE_NOTE)
+        self.start(self.script())
+        card = self.asked_card()
+        self.assertIn("Jarvis never needs a password or a code.", card.task().note)
+        self.assertEqual(card.cut_texts(), [])                        # all of it shows
+        self.c.agent.stop("test")
+        self.ended()
 
     def test_its_question_and_choices_and_a_click_answers(self) -> None:
         self.start(self.script())
@@ -623,7 +677,9 @@ class LongChoiceTests(unittest.TestCase):
 class WebCardTests(FeedApp):
     QUERY = "Halberd contract terms"
 
-    def web_task(self, timing: Any = WEB_TIMING) -> tuple[FakeEngine, dict[str, Any]]:
+    def web_task(self, timing: Any = WEB_TIMING, *,
+                 ends: threading.Event | None = None) -> tuple[FakeEngine, dict[str, Any]]:
+        """``ends``: the script waits for it after its two messages, so words typed at the card can't end the run."""
         said: dict[str, Any] = {}
         tainted = threading.Event()
 
@@ -635,6 +691,8 @@ class WebCardTests(FeedApp):
             said["next"] = engine.wait_message()
             engine.end_turn("Still waiting.")
             said["last"] = engine.wait_message()
+            if ends is not None:
+                ends.wait(20)
             engine.call("finish", summary=SUMMARY, outcome="done")
             engine.end_turn("Done.")
 
@@ -643,12 +701,14 @@ class WebCardTests(FeedApp):
         self.make_agent(plan_stream(TASK_PLAN), engine, browser=browser, timing=timing)
         self.type_it(TYPED)
         self.assertTrue(wait_for(lambda: self.c.agent.firewall is not None, 10))
+        self.c.agent.firewall.note_private()
         self.c.agent.firewall.taint.add(["Project Halberd"])
         tainted.set()
         return engine, said
 
     def test_it_shows_the_exact_words_and_only_a_click_allows(self) -> None:
-        _engine, said = self.web_task()
+        ends = threading.Event()
+        _engine, said = self.web_task(ends=ends)
         card = self.asked_card()
         task = card.task()
         self.assertEqual(task.body, f'Jarvis wants to search the web for "{self.QUERY}"')
@@ -668,6 +728,7 @@ class WebCardTests(FeedApp):
         self.press("choice:0")
         self.assertEqual(self.desktop.waiting_count(), 0)
         self.assertTrue(wait_for(lambda: "next" in said, timeout=10))
+        ends.set()
         self.c.agent.stop("test")
         self.ended()
 
@@ -752,7 +813,7 @@ class StopTests(FeedApp):
 
         def script(engine: FakeEngine) -> None:
             engine.wait_message()
-            engine.call("update_plan", steps=plan("doing", "todo", "todo"))
+            engine.call("update_plan", found="", steps=plan("doing", "todo", "todo"))
             engine.call("ask_owner", question="Blue or Red?", choices=["Blue", "Red"])
             engine.end_turn("Asked.")
             stages.reach(1)
@@ -874,7 +935,7 @@ class BarTests(FeedApp):
 
         def script(engine: FakeEngine) -> None:
             engine.wait_message()
-            engine.call("update_plan", steps=STEPS)
+            engine.call("update_plan", found="", steps=STEPS)
             stages.reach(1)
             engine.end_turn("Working.")
             said = engine.wait_message()
@@ -931,7 +992,7 @@ class BarTests(FeedApp):
 
 
 class ConsentTests(FeedApp):
-    ROW = desktop_view.CONSENT_TASK_ROW.format(engine="DuckDuckGo")
+    ROW = desktop_view.CONSENT_TASK_ROW.format(engine="DuckDuckGo", others="Bing and Google")
 
     def test_every_line_of_the_row_shows_and_it_says_what_a_task_may_read(self) -> None:
         for words in ("calendar", "mail", "contacts", "notes", "allowed folders", "waits for your click"):
@@ -1033,7 +1094,8 @@ class ConsentTests(FeedApp):
         self.make_agent(desktop_consent=False, agent='search_engine = "bing"\n')
         self.c._show_desktop_consent(desktop_ui.ENTRY_DOCK)
         settle()
-        self.assertIn(desktop_view.CONSENT_TASK_ROW.format(engine="Bing"), self.card().texts())
+        self.assertIn(desktop_view.CONSENT_TASK_ROW.format(engine="Bing", others="DuckDuckGo and Google"),
+                      self.card().texts())
 
     def test_settings_says_so(self) -> None:
         self.make_agent(desktop_consent=2)
@@ -1042,8 +1104,12 @@ class ConsentTests(FeedApp):
         self.assertEqual(rows["Your OK"], settings_view.TURNED_ON_NO_TASKS)
 
     def test_the_row_is_plain_about_what_goes_where(self) -> None:
-        for words in ("work out the steps", "window you can watch", "go straight to DuckDuckGo", "waits for your click"):
+        for words in ("work out the steps", "window you can watch", "the words of a search go to DuckDuckGo, or to Bing and "
+                      "Google if it gives nothing", "what a task reads goes to your Claude plan, as an Ask's does, and is "
+                      "never kept in logs", "What I say aloud goes to Microsoft's online voice, as an Ask's answers do",
+                      "a line that may hold something private stays on screen", "waits for your click"):
             self.assertIn(words, self.ROW)
+        self.assertNotIn("straight to", self.ROW)
         self.assertNotRegex(self.ROW, r"\b(?:he|him|his)\b")
 
 
@@ -1244,7 +1310,7 @@ class CopyTests(unittest.TestCase):
         from briefing_reader.ask import cli
 
         prompt = cli.AGENT_PROMPT_FILE.read_text(encoding="utf-8")
-        for words in ("when a step starts and again when it ends", "never saved up in batches", "not narration of each step",
+        for words in ("when a step starts and again when it ends", "never saved up in batches", "not what you are about to do",
                       "call fetch_text", "lead with the answer in its first sentence", "only that is spoken aloud"):
             self.assertIn(words, " ".join(prompt.split()), words)
 

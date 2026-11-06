@@ -16,6 +16,8 @@
                                the watch window, for the feed (agent_feed): the owner's Hide and Show, the Jarvis window
                                coming back, where it is. The page goes on behind it
         worked_s(), tools_running(), live_task_id()   for the panel's clock and activity line, and Home's chip
+        spoken(line, instead=), spoken_question(text), spoken_report(end, opening)
+                               the one gate on the way to the voice for a line the model wrote (the module docs)
         outputs_for(end), show_output(name), output_path(name)   the result card's Show (the sealed window) and Folder
         shutdown()             Jarvis closes: the task is killed and waited for, no process is left. Nothing starts
                                after it
@@ -38,6 +40,12 @@ Events come from the run's threads through a queued signal; a Stop drops what is
 task, with one step per tool call (the words in it stay on screen and in memory: D11), a web step with the picture of
 the page in the window on it, and it never opens LIVE by itself. Logs: run ids, kinds, states and counts only, never
 what was typed, searched for or read.
+
+The voice: every line the model wrote (the plan's "found", say, a question, the report's opening) comes to spoken()
+before it reaches the voice, whose words go to Microsoft's online service as an Ask's answers do. Such a line goes on
+only while the run holds nothing private, or when it has no tainted word in it and, in a strict run, no foreign word
+(WebFirewall.speakable); else it stays on the caption and on its card, unsaid, with Jarvis's own fixed words in its
+place for a question or a report. [agent] speak_private = true skips the gate. Jarvis's own fixed lines never come here.
 
 The owner's things (part A4): ``things`` (AppThings, made by the app) is what a run's agent.owner.OwnerAccess reads and
 shows through, on the right threads: Google's objects on the tool's own, files on the "desktop" thread, whatever shows
@@ -81,7 +89,7 @@ from .agent import web
 from .agent.browser import BrowserClient
 from .agent.fetch import Fetcher
 from .agent.runner import AgentEnd, AgentEngine, AgentEvent, AgentRun, OwnerQuestion, Timing
-from .agent.tools import ERROR_CODES, OUTCOME_DONE, OUTCOME_FAILED, Registry, Tool
+from .agent.tools import ERROR_CODES, OUTCOME_DONE, OUTCOME_FAILED, OUTCOME_PARTIAL, Registry, Tool
 from .agent.web import WebSession
 from .agent.workspace import TaskFolder, WorkspaceRefused, check_name, workspace_root
 from .ask.stream import GUARD, LIMIT
@@ -102,6 +110,12 @@ LIMIT_TEXT = "That's the most tasks for one day ({count}), {sir}; nothing was st
 HOLD_TEXT = "Tasks are paused until your plan's limit resets, {sir}: Claude Code said a run would use extra usage."
 OFF_TEXT = "Tasks need Jarvis on your desktop turned on, {sir}; nothing was started."
 TAKEN_TEXT = {"sent": "Passing that on, {sir}.", "answered": "Thank you, {sir}."}
+# What is said in place of a line of the model's that may hold something private (AgentController.spoken).
+QUESTION_LINE = "I've a question for you, {sir}. It's on the card."
+REPORT_LINES = {OUTCOME_DONE: "That's done, {sir}. It's on the card.",
+                OUTCOME_PARTIAL: "That's partly done, {sir}. It's on the card.",
+                OUTCOME_FAILED: "That failed, {sir}. It's on the card.",
+                agent_runner.OUTCOME_STOPPED: "Stopped, {sir}. It's on the card."}
 END_STATUS = {OUTCOME_DONE: live_events.STATUS_OK, OUTCOME_FAILED: live_events.STATUS_FAILED,
               agent_runner.OUTCOME_STOPPED: live_events.STATUS_CANCELLED}
 END_WORDS = {OUTCOME_DONE: "done", OUTCOME_FAILED: "failed", agent_runner.OUTCOME_STOPPED: "stopped"}
@@ -240,8 +254,9 @@ class AppThings:
     def before_open(self) -> None:
         self._hop.run(self.desktop.task_before_open)
 
-    def show_run(self, run: Any) -> bool:
-        return bool(self._hop.run(lambda: self.desktop.task_show(run), False))
+    def show_run(self, run: Any, cancelled: Callable[[], bool] = lambda: False) -> bool:
+        """Asked again on the GUI thread, where a Stop runs: a run stopped on the way here shows nothing (R8)."""
+        return bool(self._hop.run(lambda: not cancelled() and self.desktop.task_show(run), False))
 
     def hud_windows(self) -> Sequence[int]:
         return self._hop.run(self.desktop._hud_windows, ()) or ()              # noqa: SLF001 - its own controller's
@@ -249,8 +264,10 @@ class AppThings:
     def pc_done(self, asked: Any, run: Any) -> None:
         self._hop.run(lambda: self.desktop.task_pc_done(asked, run))
 
-    def take_cards(self, cards: Sequence[Any]) -> bool:
+    def take_cards(self, cards: Sequence[Any], cancelled: Callable[[], bool] = lambda: False) -> bool:
         def take() -> bool:
+            if cancelled():                # as show_run: a run stopped on the way here takes no card
+                return False
             self._take_cards(list(cards))
             return True
 
@@ -490,6 +507,25 @@ class AgentController(QObject):
             snapshot_engine.warm_up()     # here, before the switch and the panel move (the module docs)
         self.taskStarted.emit(run.run_id)
         return True
+
+    def spoken(self, line: str, instead: str = "") -> str:
+        """The one gate on the way to the voice for a line the model wrote: the line, or ``instead`` (Jarvis's own fixed
+        words, {sir} filled in), or "": it stays on the caption, unsaid. See the module docs. Fail-closed."""
+        if getattr(self.config.agent, "speak_private", False) is True:
+            return line
+        wall = self.firewall
+        try:
+            if wall is not None and wall.speakable(line):
+                return line
+        except Exception as exc:  # noqa: BLE001 - unknown: not said
+            logger.warning("Agent: a line could not be checked (%s); not said", type(exc).__name__)
+        return self._words(instead) if instead else ""
+
+    def spoken_question(self, text: str) -> str:
+        return self.spoken(text, QUESTION_LINE)
+
+    def spoken_report(self, end: AgentEnd, opening: str) -> str:
+        return self.spoken(opening, REPORT_LINES.get(end.outcome, REPORT_LINES[OUTCOME_PARTIAL]))
 
     def _new_session(self) -> WebSession:
         """This run's use of the window. One window at a time: what the last run left goes first. Nothing of the web

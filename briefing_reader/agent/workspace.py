@@ -9,13 +9,16 @@
 
 What a name may be: relative to the task folder, in parts split at / or \\. Never "..", an absolute path, a drive
 letter, a ":" stream, a reserved device name (CON, NUL, COM1 ... with or without an extension), a trailing dot or space,
-a part that starts with a dot or a space, or a character Windows refuses or a reader could not see. The last part's
+a part that starts with a dot or a space, a part ending in a shell class id (paths.shell_class_name: it would open as
+Control Panel or another system view), or a character Windows refuses or a reader could not see. The last part's
 extension is on ALLOWED_EXTENSIONS: text-like files only, never a program or a script (not even .js: Windows runs that
 on a double click; a page's own inline script is fine, nothing here reads inside a file).
 
 The caps: MAX_FILE_BYTES a file, MAX_TASK_BYTES and MAX_TASK_FILES a task. Writes are atomic (a temporary file in the
 same folder, flushed, then renamed over the name); ``may_commit`` is asked right before the rename, so a task stopped
-meanwhile changes nothing. A path that leaves the task folder through a link or a junction is refused.
+meanwhile changes nothing. A path that leaves the task folder through a link or a junction is refused. A page or a table
+(MARKED_EXTENSIONS) goes out with the Mark of the Web, as a download would, so a browser or Office treats it as from the
+internet if the owner opens it from Explorer: best effort, for a drive without streams has no mark and that is no error.
 
 WorkspaceRefused.code is a fixed word (the logs' and Live's), its text is Jarvis's own words for the model. Nothing here
 logs anything, and neither ever holds a name or a path of the owner's.
@@ -35,9 +38,14 @@ from datetime import datetime
 from pathlib import Path
 
 from ..desktop.backend import real_backend_blocked
+from ..desktop.paths import shell_class_name
+from ..format_chars import invisible_char
 
 ALLOWED_EXTENSIONS = frozenset({".md", ".txt", ".csv", ".tsv", ".json", ".html", ".htm", ".css", ".svg", ".xml",
                                 ".yaml", ".yml", ".log"})
+MARKED_EXTENSIONS = frozenset({".html", ".htm", ".svg", ".xml", ".csv"})   # what can run a script or a formula
+ZONE_STREAM = ":Zone.Identifier"
+ZONE_MARK = b"[ZoneTransfer]\r\nZoneId=3\r\n"     # 3: the internet
 MAX_FILE_BYTES = 5 * 1024 * 1024
 MAX_TASK_BYTES = 50 * 1024 * 1024
 MAX_TASK_FILES = 200
@@ -169,10 +177,22 @@ def _check_part(part: str) -> None:
     if len(part) > PART_CAP:
         raise WorkspaceRefused(R_TOO_LONG, f"A part of that name is too long: at most {PART_CAP} characters.")
     for char in part:
-        if char in _BAD_CHARS or unicodedata.category(char) in ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"):
+        if char in _BAD_CHARS or unicodedata.category(char) in ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp") \
+                or invisible_char(char):
             raise WorkspaceRefused(R_BAD_CHAR, 'A name can\'t hold < > " | ? * or characters no one can see.')
+    if shell_class_name(part):
+        raise WorkspaceRefused(R_BAD_CHAR, "A name can't end in a system class id ({...}).")
     if _DEVICE_RE.fullmatch(part.split(".", 1)[0].rstrip(" ")):
         raise WorkspaceRefused(R_RESERVED, "That name is one Windows keeps for itself (CON, NUL, COM1 ...).")
+
+
+def _mark_from_the_web(path: str) -> None:
+    """The Mark of the Web on ``path``. Best effort: a drive without streams simply has no mark."""
+    try:
+        with open(path + ZONE_STREAM, "wb") as stream:
+            stream.write(ZONE_MARK)
+    except OSError:
+        pass
 
 
 def megabytes(count: int) -> str:
@@ -275,6 +295,8 @@ class TaskFolder:
                 os.fsync(handle.fileno())
             if not may_commit():
                 raise WorkspaceRefused(R_STOPPED, "The task was stopped; that file was not written.")
+            if os.path.splitext(target)[1].casefold() in MARKED_EXTENSIONS:
+                _mark_from_the_web(part)      # on the temporary file: the rename keeps it, so it is never unmarked
             os.replace(part, target)
             part = None
         except OSError as exc:

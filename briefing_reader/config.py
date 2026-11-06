@@ -447,7 +447,8 @@ AGENT_PRIVATE = ("calendar", "contacts", "memory", "mail", "files")
 class AgentConfig:
     """``[agent]``: Jarvis working through a task (off by default; JARVIS_AGENT_ENABLED overrides ``enabled``; it also
     needs [desktop] and [ask] on: agent.policy.agent_on). Off means no endpoint, nothing started and no new word in any
-    prompt or schema. Bad values become the default with a warning; the workspace's warnings never name its value."""
+    prompt or schema. Bad values become the default with a warning, but for ``private``: one that is not a list grants
+    nothing. The workspace's warnings never name its value."""
 
     enabled: bool = False
     model: str = "opus"            # judgement matters more than speed in a task; quick replies stay on [ask] model
@@ -458,6 +459,7 @@ class AgentConfig:
     search_engine: str = "duckduckgo"              # where web_search goes first; then the others (agent.web)
     workspace: str = field(default="", repr=False)   # "" = Jarvis\Workspace in your user folder; never under OneDrive
     private: tuple[str, ...] = AGENT_PRIVATE         # what a task may read of the owner's things (AGENT_PRIVATE)
+    speak_private: bool = False    # true: a line that may hold something private is said too (agent_ui.spoken: off)
 
 
 @dataclass(frozen=True)
@@ -1255,7 +1257,8 @@ AGENT_ENABLED_ENV = "JARVIS_AGENT_ENABLED"
 
 def _parse_agent(doc: Mapping[str, Any], environ: Mapping[str, str] | None = None) -> AgentConfig:
     """``[agent]`` from config.toml; ``JARVIS_AGENT_ENABLED`` (e.g. in the gitignored ``.env``) overrides ``enabled``
-    both ways, like JARVIS_DESKTOP_ENABLED. Bad values fall back to the defaults. A workspace that is not a full local
+    both ways, like JARVIS_DESKTOP_ENABLED. Bad values fall back to the defaults, but a ``private`` that is no list
+    grants nothing: whoever writes one means to narrow it. A workspace that is not a full local
     folder is refused here; whether it lies under OneDrive is checked when a task starts (agent.workspace). The
     warnings about the workspace (and a [agent] that is not a table) name the setting only: it may be a folder path."""
     d = AgentConfig()
@@ -1277,14 +1280,17 @@ def _parse_agent(doc: Mapping[str, Any], environ: Mapping[str, str] | None = Non
             logger.warning("config.toml: agent.private has an entry that is none of %s; it grants nothing",
                            ", ".join(AGENT_PRIVATE))
     elif listed is not _MISSING:
-        logger.warning("config.toml: agent.private is not a list; using all of %s", ", ".join(AGENT_PRIVATE))
+        private = ()              # the owner meant to narrow it: nothing rather than everything
+        logger.warning("config.toml: agent.private is not a list; it grants nothing (a list of %s does)",
+                       ", ".join(AGENT_PRIVATE))
     return AgentConfig(enabled=enabled, model=r.string("model", d.model, pattern=_MODEL_RE),
                        effort=r.choice("effort", d.effort, AGENT_EFFORTS),
                        max_turns=r.integer("max_turns", d.max_turns, *AGENT_RANGES["max_turns"]),
                        max_minutes=r.integer("max_minutes", d.max_minutes, *AGENT_RANGES["max_minutes"]),
                        tasks_per_day=r.integer("tasks_per_day", d.tasks_per_day, *AGENT_RANGES["tasks_per_day"]),
                        search_engine=r.choice("search_engine", d.search_engine, AGENT_SEARCH_ENGINES),
-                       workspace=workspace, private=private)
+                       workspace=workspace, private=private,
+                       speak_private=r.boolean("speak_private", d.speak_private))
 
 
 def _parse_assistant(doc: Mapping[str, Any]) -> AssistantConfig:

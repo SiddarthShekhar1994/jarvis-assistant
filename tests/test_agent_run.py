@@ -120,7 +120,7 @@ class RunCase(unittest.TestCase):
 
 def whole_task(engine: FakeEngine) -> None:
     engine.wait_message()
-    engine.call("update_plan", steps=[{"text": "Compare them", "status": "doing"}, {"text": "Write it", "status": "todo"}])
+    engine.call("update_plan", found="", steps=[{"text": "Compare them", "status": "doing"}, {"text": "Write it", "status": "todo"}])
     engine.call("say", text="Looking at the three now.")
     engine.call("write_file", name="table.md", text="| a | b |\n")
     read = engine.call("read_file", name="table.md")
@@ -128,7 +128,7 @@ def whole_task(engine: FakeEngine) -> None:
     assert Path(engine.argv[engine.argv.index("--mcp-config") + 1]).is_file()     # there for the length of the run
     listed = engine.call("list_files")
     assert "table.md" in engine.text_of(listed)
-    engine.call("update_plan", steps=[{"text": "Compare them", "status": "done"}, {"text": "Write it", "status": "done"}])
+    engine.call("update_plan", found="", steps=[{"text": "Compare them", "status": "done"}, {"text": "Write it", "status": "done"}])
     engine.call("finish", summary="Wrote the table.", outcome="done", outputs=["table.md"])
     engine.end_turn("Done.")
 

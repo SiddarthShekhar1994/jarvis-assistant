@@ -14,7 +14,8 @@ controls, zero-width characters, tag characters, line and paragraph separators):
 ``strip_hidden(text)``.
 Secrets and payments: ``UIA_IS_PASSWORD_PROPERTY``, ``SENSITIVE_WORDS`` / ``sensitive_label(text)``,
 ``PAYMENT_WORDS`` / ``payment_page(text)`` (a URL path or a page title; a heuristic, the owner's Submit is the
-backstop).
+backstop). What a task may not read or ask (agent.*): ``sensitive_file_name(name)``, ``sensitive_folder_name(name)``,
+``holds_secret(text)``, ``asks_for_secret(text)``.
 Buttons and keys inside other apps: ``INVOKE_ALLOWED`` (False: no button is pressed in v1), ``COMMIT_WORDS`` /
 ``commit_button(name)`` (Submit, Send, Pay ... are only highlighted), ``NEVER_KEYS`` / ``key_allowed(vk, ...)``,
 ``typed_text_allowed(text)``, ``CONSENT_WORDS`` / ``consent_box(label)``, ``FILE_PICKER_WORDS`` /
@@ -134,6 +135,22 @@ PAYMENT_WORDS = ("pay", "checkout", "billing", "basket", "cart", "order", "walle
 def sensitive_label(text: Any) -> bool:
     """A field label, AutomationId or HelpText that names a secret, a payment card or an identity number."""
     return _says(text, SENSITIVE_WORDS)
+
+
+# A task's question (agent.tools): what no one who can't sign in to anything ever needs from the owner.
+_SECRET_ASK_WORDS = _phrases("login", "logon", "log in", "sign in", "signin", "credential", "credentials", "username",
+                             "user name", "the code", "a code", "your code", "that code", "this code", "code you",
+                             "code we", "code sent", "code from", "passwords", "passcodes", "pins", "api key",
+                             "api keys", "apikey", "apikeys", "access key", "access keys", "access token",
+                             "auth token", "your token", "the token", "private key", "private keys", "secret key",
+                             "seed phrase", "recovery phrase", "recovery key", "recovery keys", "recovery codes",
+                             "backup codes", "verification codes", "security codes", "card details", "bank details",
+                             "login details", "sign in details")
+
+
+def asks_for_secret(text: Any) -> bool:
+    """A question that reads as asking for a secret: ``sensitive_label``'s words, a sign-in, or "the code"."""
+    return sensitive_label(text) or _says(text, _SECRET_ASK_WORDS)
 
 
 def payment_page(text: Any) -> bool:
@@ -439,22 +456,103 @@ def secret_file(name: Any) -> bool:
 
 
 # A task may read text files (agent.owner), so a text file NAMED for secrets stays out of it too, whatever its type.
+# Words that are also ordinary pieces of words ("secretary", "tokenomics", "classnotes", "environment", "monkey",
+# "vaulted") count only as whole words, digits gone ("token2") and the name split at everything but letters and at
+# camelCase ("myTokens"):
 _SENSITIVE_FILE_WORDS = frozenset({"password", "passwords", "passwd", "passcode", "passcodes", "passphrase", "secret",
-                                  "secrets", "credential", "credentials", "token", "tokens", "apikey", "apikeys",
-                                  "privatekey", "2fa", "otp", "seedphrase", "pin", "ssn",
-                                  "passport", "iban", "cvv", "wallet", "login", "logins", "account", "accounts"})
+                                  "secrets", "credential", "credentials", "cred", "creds", "token", "tokens", "apikey",
+                                  "apikeys", "privatekey", "2fa", "otp", "seedphrase", "pin", "pins", "mypin", "mypins",
+                                  "ssn", "passport", "iban", "cvv", "wallet", "login", "logins", "account", "accounts",
+                                  "env"})
+_SENSITIVE_FILE_ONLY = frozenset({"vault", "vaults"})       # a file's, never a folder's: note apps call theirs a vault
 _SENSITIVE_FILE_PHRASES = _phrases("api key", "api keys", "private key", "private keys", "backup code", "backup codes",
                                    "recovery code", "recovery codes", "seed phrase", "card number", "card numbers",
                                    "bank details", "social security", "sign in", "log in")
+# ... and these long, unmistakable ones anywhere in a name, written as one word or not ("mypasswords",
+# "bitwarden_export"):
+_SENSITIVE_PARTS = ("password", "passwd", "credential", "apikey", "privatekey", "privkey", "mnemonic", "seedphrase",
+                    "backupcode", "recoverycode", "recoverykey", "bitwarden", "lastpass", "1password", "keepass",
+                    "dashlane", "netrc", "dotenv", "serviceaccount", "adminsdk", "kubeconfig", "accesskey", "rootkey",
+                    "creditcard")
+_KEY_OWNERS = frozenset({"aws", "gcp", "gcloud", "azure", "ssh", "api", "private", "root"})   # "key" beside these
+_RECOVERY_THINGS = frozenset({"code", "codes", "key", "keys"})                                # "recovery" beside these
+_KEY_TYPES = frozenset({"pem", "key", "pfx", "p12", "ppk", "kdbx"})     # before the last extension: "my.pem.txt"
+_DIGITS_RE = re.compile(r"\d+")
+
+
+def _beside(tokens: list[str], word: tuple[str, ...], others: frozenset[str]) -> bool:
+    """One of ``word`` stands next to one of ``others`` in ``tokens``."""
+    return any(token in word and others & {*tokens[max(0, index - 1):index], *tokens[index + 1:index + 2]}
+               for index, token in enumerate(tokens))
+
+
+def _name_says_secret(name: str, *, folder: bool) -> bool:
+    plain = name.translate(_LOOKALIKES)
+    for tokens in _readings(plain):
+        bare = [word for word in (_DIGITS_RE.sub("", token) for token in tokens) if word]
+        said = {*tokens, *bare}
+        if _SENSITIVE_FILE_WORDS & said or (not folder and _SENSITIVE_FILE_ONLY & said):
+            return True
+        if _has_phrase(tokens, _SENSITIVE_FILE_PHRASES) or _has_phrase(bare, _SENSITIVE_FILE_PHRASES):
+            return True
+        if _beside(bare, ("key", "keys"), _KEY_OWNERS) or _beside(bare, ("recovery",), _RECOVERY_THINGS):
+            return True
+        joined = "".join(tokens)
+        if any(part in joined or part in "".join(bare) for part in _SENSITIVE_PARTS):
+            return True
+    base = plain.rstrip(". ")
+    pieces = base.casefold().split(".")
+    stem = base.rsplit(".", 1)[0] if len(pieces) > 1 and not folder else base
+    if [_DIGITS_RE.sub("", word) for word in words(stem)] in (["key"], ["keys"]):
+        return True
+    return not folder and any(piece.strip() in _KEY_TYPES for piece in pieces[:-1])
 
 
 def sensitive_file_name(name: Any) -> bool:
-    """A file's name says it holds secrets or sign-ins ("My passwords.txt", "api keys.md", "accounts.csv"), as words:
-    Jarvis reads none of them for a task, whatever its type, on top of ``secret_file``."""
+    """A file's name says it holds secrets or sign-ins ("My passwords.txt", "api keys.md", "accounts.csv", "token2.txt",
+    "bitwarden_export.json", "prod.env.txt", "my.pem.txt"): Jarvis reads none of them for a task, whatever its type, on
+    top of ``secret_file``. "secretary_letter.docx", "recovery_plan.docx" and "keyboard_notes.txt" are not."""
     if secret_file(name):
         return True
-    return any(_SENSITIVE_FILE_WORDS & set(tokens) or _has_phrase(tokens, _SENSITIVE_FILE_PHRASES)
-               for tokens in _readings(name))
+    return isinstance(name, str) and _name_says_secret(name, folder=False)
+
+
+def sensitive_folder_name(name: Any) -> bool:
+    """A folder's name says what it holds is secrets or sign-ins ("Passwords", "Logins", "recovery codes"): the same
+    words as a file's, but for "vault": note apps call their folder that ("Obsidian Vault")."""
+    return isinstance(name, str) and _name_says_secret(name, folder=True)
+
+
+# What plainly is a key in a text a task would read (holds_secret): the header of a private key, a well-known key's
+# prefix, or a line naming a secret with a value that looks like one.
+_KEY_HEADER_RE = re.compile(r"-----BEGIN [A-Z0-9 ]{0,32}PRIVATE KEY(?: BLOCK)?-----")
+_KEY_PREFIX_RE = re.compile(r"(?<![A-Za-z0-9])(?:sk-ant-[A-Za-z0-9_\-]{8,}|sk-[A-Za-z0-9]{32,}|AKIA[0-9A-Z]{12,}"
+                            r"|ghp_[A-Za-z0-9]{16,}|gho_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}"
+                            r"|xox[abeoprs]-[A-Za-z0-9\-]{8,}|AIza[0-9A-Za-z_\-]{30,})")
+_SECRET_LINE_RE = re.compile(r"([A-Za-z][A-Za-z0-9_.\- ]{0,63})[\"']?\s{0,4}[:=]\s{0,4}[\"']?([^\s\"',;]{1,400})")
+_SECRET_LINE_CAP = 600            # of a line, looked at
+_KEY_NAMES = _phrases("api key", "apikey", "api token", "private key", "privatekey", "access key", "accesskey", "auth",
+                      "authorization", "bearer", "credential", "credentials", "token", "client secret", "secret key")
+_NOT_A_SECRET_VALUE = _phrases("expiry", "expiration", "exp date", "routing")  # sensitive_label's, with plain values
+
+
+def holds_secret(text: Any) -> bool:
+    """``text`` plainly holds a key: a private key's header, a well-known key's prefix (sk-ant-, AKIA, ghp_, xox ...),
+    or a line such as ``API_KEY=...`` or ``"password": "..."`` whose value looks like one. Not a promise about
+    everything: a password in a sentence stays what it is. Bounded: it looks at each line once, up to its cap."""
+    if not isinstance(text, str) or not text:
+        return False
+    if _KEY_HEADER_RE.search(text) or _KEY_PREFIX_RE.search(text):
+        return True
+    for line in text.splitlines():
+        for match in _SECRET_LINE_RE.finditer(line[:_SECRET_LINE_CAP]):
+            name, value = match.groups()
+            if _says(name, _KEY_NAMES) and len(value) >= 16 and not value.isdigit():
+                return True
+            if sensitive_label(name) and not _says(name, _NOT_A_SECRET_VALUE) and (
+                    len(value) >= 16 or (len(value) >= 6 and any(char.isdigit() for char in value))):
+                return True
+    return False
 
 
 # --------------------------------------------------------------------------
@@ -588,6 +686,11 @@ _STRONG_NAME_RE = re.compile(
     r"|\bif\s+you\s+are\s+an?\s+(?:ai|llm|language\s+model|assistant|agent|bot)\b"
     r"|\b(?:assistants?|agents?|models?|bots?|llms?|ais?)\s+"
     r"(?:reading|viewing|summari[sz]ing|processing|browsing|visiting)\s+this\b")
+# Jarvis's own markers (agent.runner, agent.tools): what a page or a mail has no business saying, as strong a sign as
+# any.
+_STRONG_MARK_RE = re.compile(
+    r"\bthe\s+owner\s+(?:says|answers\s+your\s+question)\s*:|</?\s*untrusted\b|\bmcp__jarvis__"
+    r"|\b(?:open_page|web_search|fetch_text|propose_action|propose_files|open_thing|pc_control|mail_read|file_read)\b")
 _TAG_RUN_MIN = 8                 # tag characters in a row spelling this much are a hidden message (a flag emoji has fewer)
 
 
@@ -606,9 +709,10 @@ def hidden_message(text: Any) -> bool:
 
 def strong_order(text: Any) -> bool:
     """For web pages, whose ordinary words are full of opening order verbs: True only on a strong signal - an
-    instruction override, a role or prompt marker, a model's template, words addressed by name to Jarvis or a model, a
-    long run of hidden tag characters, or a word mixing Latin letters with a look-alike. ``suspect_text`` stays as it is
-    for short names and labels, whose bar is lower."""
+    instruction override, a role or prompt marker, a model's template, words addressed by name to Jarvis or a model,
+    Jarvis's own markers ("The owner says:", the untrusted block's mark, its tools' names), a long run of hidden tag
+    characters, or a word mixing Latin letters with a look-alike. ``suspect_text`` stays as it is for short names and
+    labels, whose bar is lower."""
     if not isinstance(text, str) or not text.strip():
         return False
     if hidden_message(text):
@@ -619,7 +723,7 @@ def strong_order(text: Any) -> bool:
             return True
     lowered = plain.translate(_LOOKALIKES).casefold()
     return any(pattern.search(lowered) for pattern in (_OVERRIDE_RE, _STRONG_PHRASE_RE, _STRONG_ROLE_RE,
-                                                       _STRONG_TEMPLATE_RE, _STRONG_NAME_RE))
+                                                       _STRONG_TEMPLATE_RE, _STRONG_NAME_RE, _STRONG_MARK_RE))
 
 
 # Every NEVER constant; each one has its own unit test (tests/test_desktop_guard.py: test_never_<name>).

@@ -16,7 +16,10 @@ import time
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
+from briefing_reader import snapshots
+from briefing_reader.actions import link_host
 from briefing_reader.agent import browser as _browser  # noqa: F401 - the module the app uses
 from briefing_reader.agent import fetch as agent_fetch
 from briefing_reader.agent import firewall, policy, tools, web, workspace
@@ -58,6 +61,11 @@ def good_stream(text: str = ANSWER) -> list[str]:
     return [init_line(), call_line(), result_line(text)]
 
 
+def public_lookup(_host: str, _port: int) -> list[str]:
+    """No real DNS in a test: every host has one public address here."""
+    return ["93.184.216.34"]
+
+
 class FetchCase(unittest.TestCase):
     def setUp(self) -> None:
         folder = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
@@ -66,6 +74,7 @@ class FetchCase(unittest.TestCase):
 
     def fetcher(self, *runs: Any, **options: Any) -> tuple[Fetcher, FakeEngineRunner]:
         runner = FakeEngineRunner(*runs)
+        options.setdefault("resolve", public_lookup)
         return Fetcher(agent_engine(self.root, runner), "sonnet", **options), runner
 
     @staticmethod
@@ -74,11 +83,11 @@ class FetchCase(unittest.TestCase):
 
 
 class CommandLineTests(unittest.TestCase):
-    def test_webfetch_is_its_only_tool_and_research_settings_stand(self) -> None:
-        argv = cli.build_fetch_argv("claude.exe", model="sonnet", hardened=True)
+    def test_webfetch_is_its_only_tool_for_one_host_and_its_own_settings_stand(self) -> None:
+        argv = cli.build_fetch_argv("claude.exe", model="sonnet", hardened=True, host="www.example.org")
         self.assertEqual(argv[argv.index("--tools") + 1], "WebFetch")
-        self.assertEqual(argv[argv.index("--allowedTools") + 1], "WebFetch")
-        self.assertEqual(argv[argv.index("--settings") + 1], str(cli.RESEARCH_SETTINGS_FILE))
+        self.assertEqual(argv[argv.index("--allowedTools") + 1], "WebFetch(domain:www.example.org)")
+        self.assertEqual(argv[argv.index("--settings") + 1], str(cli.AGENT_FETCH_SETTINGS_FILE))
         self.assertEqual(argv[argv.index("--setting-sources") + 1], "")
         self.assertEqual(argv[argv.index("--permission-mode") + 1], "dontAsk")
         self.assertEqual(argv[argv.index("--mcp-config") + 1], cli.EMPTY_MCP_CONFIG)
@@ -91,17 +100,38 @@ class CommandLineTests(unittest.TestCase):
 
     def test_it_is_research_s_command_line_but_for_what_it_needs_less_of(self) -> None:
         research = cli.build_research_argv("claude.exe", model="sonnet", max_turns=4, schema="{}", hardened=True, web_fetch=True)
-        fetch = cli.build_fetch_argv("claude.exe", model="sonnet", hardened=True)
+        fetch = cli.build_fetch_argv("claude.exe", model="sonnet", hardened=True, host="www.example.org")
         lost = set(research) - set(fetch)
-        self.assertEqual(lost, {"--json-schema", "{}", "WebSearch,WebFetch", str(cli.RESEARCH_PROMPT_FILE)})
+        self.assertEqual(lost, {"--json-schema", "{}", "WebSearch,WebFetch", str(cli.RESEARCH_PROMPT_FILE),
+                                str(cli.RESEARCH_SETTINGS_FILE)})
         self.assertNotIn("WebSearch", " ".join(fetch))
         self.assertTrue(cli.AGENT_FETCH_PROMPT_FILE.is_file())
 
     def test_a_bad_model_name_is_refused(self) -> None:
         with self.assertRaises(ValueError):
-            cli.build_fetch_argv("claude.exe", model="-x", hardened=False)
+            cli.build_fetch_argv("claude.exe", model="-x", hardened=False, host="www.example.org")
         with self.assertRaises(ValueError):
-            cli.build_fetch_argv("claude.exe", model="a b", hardened=False)
+            cli.build_fetch_argv("claude.exe", model="a b", hardened=False, host="www.example.org")
+
+    def test_only_a_plain_host_goes_into_the_permission_rule(self) -> None:
+        for host in ("www.example.org", "xn--mnchen-3ya.example", "a-b.example.co.uk"):
+            self.assertIn(f"WebFetch(domain:{host})", cli.build_fetch_argv("c.exe", model="m", hardened=False, host=host))
+        for host in ("", "localhost", "example", "ex ample.org", "ex_ample.org", "m\u00fcnchen.example", "a.org)", "*.org",
+                     "a.org,Bash", "a..org", "x" * 300 + ".org", None):
+            with self.subTest(host=host), self.assertRaises(ValueError):
+                cli.build_fetch_argv("c.exe", model="m", hardened=False, host=host)
+
+    def test_its_settings_have_no_allow_list_and_deny_the_rest(self) -> None:
+        settings = json.loads(cli.AGENT_FETCH_SETTINGS_FILE.read_bytes())
+        self.assertNotIn("allow", settings["permissions"])
+        for name in ("Bash", "PowerShell", "Edit", "Write", "Read", "Glob", "Grep", "NotebookEdit", "Agent", "Task",
+                     "WebSearch", "mcp__*"):
+            self.assertIn(name, settings["permissions"]["deny"])
+        self.assertNotIn("WebFetch", settings["permissions"]["deny"])
+        self.assertTrue(settings["disableAllHooks"])
+        self.assertFalse(settings["autoMemoryEnabled"])
+        self.assertIn(b"\n", cli.AGENT_FETCH_SETTINGS_FILE.read_bytes())
+        self.assertNotIn(b"\r", cli.AGENT_FETCH_SETTINGS_FILE.read_bytes())
 
     def test_the_prompt_says_data_one_address_and_how_to_fail(self) -> None:
         prompt = cli.AGENT_FETCH_PROMPT_FILE.read_text(encoding="utf-8")
@@ -130,8 +160,56 @@ class FetchTests(FetchCase):
         self.assertEqual(started.cwd.name, cli.AGENT_FETCH_WORK_FOLDER)
         self.assertNotIn("ANTHROPIC_API_KEY", started.env)            # the allowlisted environment, as research's
         self.assertNotIn("NOTION_TOKEN", started.env)
+        self.assertEqual((started.env["DISABLE_TELEMETRY"], started.env["DISABLE_ERROR_REPORTING"]), ("1", "1"))
         self.assertTrue(runner.processes[0].killed)                   # nothing is left of the run
         self.assertTrue(runner.processes[0].closed)
+
+    def test_the_run_is_allowed_that_one_host_and_never_logs_it(self) -> None:
+        fetcher, runner = self.fetcher(good_stream())
+        with self.assertLogs("briefing_reader", "INFO") as logs:
+            fetcher.fetch(URL, QUESTION, self.call())
+        argv = runner.started[0].argv
+        self.assertEqual(argv[argv.index("--allowedTools") + 1], f"WebFetch(domain:{link_host(URL)})")
+        self.assertNotIn(link_host(URL), " ".join(logs.output))
+
+    def test_a_host_that_is_not_plain_never_starts_a_run(self) -> None:
+        looked = []
+        fetcher, runner = self.fetcher(resolve=lambda host, _port: looked.append(host) or ["93.184.216.34"])
+        with self.assertRaises(web.WebRefused) as caught:
+            fetcher.fetch("https://m\u00fcnchen.example/page", QUESTION, self.call())
+        self.assertEqual(caught.exception.code, web.W_NOT_PUBLIC)
+        self.assertEqual((runner.started, looked), ([], []))
+
+    def test_a_host_that_leads_to_this_pc_or_its_network_never_starts_a_run(self) -> None:
+        for addresses in (["127.0.0.1"], ["192.168.1.1"], ["10.0.0.8"], ["169.254.169.254"], ["::1"],
+                          ["93.184.216.34", "192.168.1.1"]):
+            with self.subTest(addresses=addresses):
+                fetcher, runner = self.fetcher(resolve=lambda _host, _port, found=addresses: found)
+                with self.assertRaises(web.WebRefused) as caught:
+                    fetcher.fetch(URL, QUESTION, self.call())
+                self.assertEqual(caught.exception.code, web.W_NOT_PUBLIC)
+                self.assertEqual(caught.exception.text, web.NOT_PUBLIC_TEXT.format(why=snapshots.G_LOCAL))
+                self.assertEqual(runner.started, [])
+
+    def test_a_failed_lookup_is_a_refused_read_in_words(self) -> None:
+        def fails(_host: str, _port: int) -> list[str]:
+            raise OSError("no such host")
+
+        for lookup in (fails, lambda _host, _port: []):
+            fetcher, runner = self.fetcher(resolve=lookup)
+            with self.assertRaises(web.WebRefused) as caught:
+                fetcher.fetch(URL, QUESTION, self.call())
+            self.assertEqual(caught.exception.code, web.W_NOT_PUBLIC)
+            self.assertEqual(caught.exception.text, web.NOT_PUBLIC_TEXT.format(why=snapshots.G_UNRESOLVED))
+            self.assertEqual(runner.started, [])
+
+    def test_the_real_lookup_is_never_made_while_the_tests_run(self) -> None:
+        with mock.patch("briefing_reader.snapshot_gate._resolve", side_effect=AssertionError("real DNS")):
+            runner = FakeEngineRunner(good_stream())
+            with self.assertRaises(web.WebRefused) as caught:
+                Fetcher(agent_engine(self.root, runner), "sonnet").fetch(URL, QUESTION, self.call())
+        self.assertEqual(caught.exception.text, web.NOT_PUBLIC_TEXT.format(why=snapshots.G_UNRESOLVED))
+        self.assertEqual(runner.started, [])
 
     def test_an_answer_is_kept_to_12k_characters(self) -> None:
         fetcher, _runner = self.fetcher(good_stream("x " * 9000))
@@ -249,6 +327,7 @@ class FirewallTests(unittest.TestCase):
         self.assertIsNone(self.wall.check(fetch_tool(), self.args("https://www.example.org/never-seen")))
 
     def test_with_taint_an_unseen_address_waits_for_a_click_showing_the_exact_words(self) -> None:
+        self.wall.note_private()
         self.wall.taint.add(["Samantha Example"])
         result = self.wall.check(fetch_tool(), self.args())
         self.assertEqual(result.code, firewall.WAITING)
@@ -257,11 +336,13 @@ class FirewallTests(unittest.TestCase):
         self.assertIn(QUESTION, self.asked[0][0])
 
     def test_with_taint_a_seen_address_and_a_clean_question_go(self) -> None:
+        self.wall.note_private()
         self.wall.taint.add(["Samantha Example"])
         self.book.see(URL)
         self.assertIsNone(self.wall.check(fetch_tool(), self.args()))
 
     def test_the_question_s_words_are_checked_as_a_search_s(self) -> None:
+        self.wall.note_private()
         self.wall.taint.add(["Samantha Example"])
         self.book.see(URL)
         result = self.wall.check(fetch_tool(), self.args(question="What does it say about Samantha?"))
@@ -269,18 +350,21 @@ class FirewallTests(unittest.TestCase):
         self.assertEqual(len(self.asked), 1)
 
     def test_an_encoded_looking_question_waits(self) -> None:
+        self.wall.note_private()
         self.wall.taint.add(["Samantha Example"])
         self.book.see(URL)
         result = self.wall.check(fetch_tool(), self.args(question="c2FtYW50aGEuZXhhbXBsZUBleGFtcGxlLm9yZw=="))
         self.assertEqual(result.code, firewall.WAITING)
 
     def test_data_in_the_address_waits_even_percent_encoded(self) -> None:
+        self.wall.note_private()
         self.wall.taint.add(["Samantha Example"])
         self.book.see("https://www.example.org/?q=%53amantha")
         result = self.wall.check(fetch_tool(), self.args("https://www.example.org/?q=%53amantha"))
         self.assertEqual(result.code, firewall.WAITING)
 
     def test_a_click_allows_that_one_call_and_no_answer_refuses_it(self) -> None:
+        self.wall.note_private()
         self.wall.taint.add(["Samantha Example"])
         self.wall.check(fetch_tool(), self.args())
         self.answers[-1](True)
@@ -291,6 +375,7 @@ class FirewallTests(unittest.TestCase):
         self.assertEqual(refused.code, firewall.DECLINED)
 
     def test_a_bad_address_is_left_to_the_tool_to_refuse(self) -> None:
+        self.wall.note_private()
         self.wall.taint.add(["Samantha Example"])
         self.assertIsNone(self.wall.check(fetch_tool(), self.args("http://www.example.org/")))
         self.assertEqual(self.asked, [])
@@ -362,7 +447,8 @@ class WholeRunTests(FetchCase):
         folder = workspace.TaskFolder.create(self.root / "workspace", "read a page", _now())
         events: list[AgentEvent] = []
         run = AgentRun("read a page", engine=base, registry=Registry(policy.offered()), folder=folder, on_event=events.append,
-                       timing=FAST, fetch=Fetcher(base, "haiku").fetch, firewall=WebFirewall(web.AddressBook()),
+                       timing=FAST, fetch=Fetcher(base, "haiku", resolve=public_lookup).fetch,
+                       firewall=WebFirewall(web.AddressBook()),
                        web=web.WebSession(FakeBrowser()))
         run.start()
         self.assertTrue(run.join(15.0))

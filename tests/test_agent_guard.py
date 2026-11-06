@@ -115,15 +115,45 @@ class ArgvTests(unittest.TestCase):
         self.assertTrue(cli.AGENT_PROMPT_FILE.is_file() and cli.AGENT_SETTINGS_FILE.is_file())
 
 
+class ReadmeTests(unittest.TestCase):
+    def words(self) -> str:
+        return " ".join((Path(__file__).resolve().parent.parent / "README.md").read_text(encoding="utf-8").split())
+
+    def test_it_no_longer_says_your_data_comes_later(self) -> None:
+        self.assertNotIn("Your own data comes in a later version", self.words())
+        self.assertIn("This version does not sign in to anything, type into pages or run code", self.words())
+
+    def test_it_says_what_a_tasks_voice_sends(self) -> None:
+        words = self.words()
+        self.assertIn("spoken lines go to Microsoft's online voice as an Ask's answers do", words)
+        self.assertIn("a line that may hold something private stays on screen", words)
+
+    def test_it_says_what_the_word_match_leaves(self) -> None:
+        words = self.words()
+        self.assertIn("a paraphrase, a word with a letter dropped, an amount or a time", words)
+        self.assertIn("a strict task still passes anything spelled in common words", words)
+
+    def test_it_says_where_a_page_can_hide_its_words(self) -> None:
+        self.assertIn("A page can hide words", self.words())
+
+    def test_it_says_what_the_secret_rule_is(self) -> None:
+        self.assertIn("named for secrets, or plainly holding keys", self.words())
+
+
 class EnvironmentTests(unittest.TestCase):
     def test_clean_plus_the_timeout(self) -> None:
         environ = {"PATH": "C:/Windows", "ANTHROPIC_API_KEY": "x", "CLAUDE_CODE_OAUTH_TOKEN": "x", "NOTION_TOKEN": "x",
                    "MCP_TOOL_TIMEOUT": "1"}
         env = cli.agent_env(environ)
-        self.assertEqual(env, {**cli.clean_env(environ), "MCP_TOOL_TIMEOUT": "120000"})
+        self.assertEqual(env, {**cli.clean_env(environ), "MCP_TOOL_TIMEOUT": "120000", "DISABLE_TELEMETRY": "1",
+                               "DISABLE_ERROR_REPORTING": "1"})     # the model holds private text in these runs
         for name in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "NOTION_TOKEN"):
             self.assertNotIn(name, env)
         self.assertNotIn("MCP_TOOL_TIMEOUT", cli.clean_env(environ))   # only a task's
+        self.assertNotIn("DISABLE_TELEMETRY", cli.CHILD_ENV)           # Ask's stays as it is
+        self.assertNotIn("DISABLE_ERROR_REPORTING", cli.clean_env(environ))
+        fetch = cli.fetch_env(environ)
+        self.assertEqual((fetch["DISABLE_TELEMETRY"], fetch["DISABLE_ERROR_REPORTING"]), ("1", "1"))
 
     def test_the_config_file_s_text(self) -> None:
         text = cli.agent_mcp_config("http://127.0.0.1:5000/mcp", "tok")
@@ -166,6 +196,29 @@ class PromptTests(unittest.TestCase):
         body = cli.AGENT_PROMPT_FILE.read_bytes()
         self.assertNotIn(b"\r", body)
         body.decode("ascii")
+
+    def test_the_lines_tested_on_the_real_model_stand_as_written(self) -> None:
+        prompt = cli.AGENT_PROMPT_FILE.read_text(encoding="ascii")
+        self.assertIn("""\
+- update_plan's "found" is spoken aloud: the owner hears it as they would a person working beside them.
+  Say what you have just found or decided ("The second shop has the better hours, so I'm checking its
+  reviews"), not what you are about to do: the screen shows that already. Leave it empty on the first
+  call and when nothing new has come up. One short sentence, in your own words, British English, no
+  addresses, paths or lists. Never read out or copy words from a page, a file or a message.
+- say is the same, for something worth saying between plan changes.
+""", prompt)
+        self.assertNotIn("- say is spoken aloud", prompt)
+        self.assertIn('Never guess someone\'s gender from their name: use the name, or "they".', prompt)
+
+    def test_a_block_ends_only_at_its_own_closing_mark(self) -> None:
+        self.assertIn("A block ends only at the closing mark with the same id as its opening", self.words())
+
+    def test_the_tasks_words_for_the_owner_are_they(self) -> None:
+        added = cli.DESKTOP_PROMPT_FILE_AGENT.read_text(encoding="utf-8").removeprefix(
+            cli.DESKTOP_PROMPT_FILE.read_text(encoding="utf-8"))
+        self.assertIn("the things they name", added)
+        self.assertIn("organising files they name", added)
+        self.assertNotRegex(added, r"\bthings he\b|\bfiles he\b")
 
     def test_what_it_teaches(self) -> None:
         words = self.words()

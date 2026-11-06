@@ -3,14 +3,20 @@
 Bot protection keeps automated browsers out of many sites, and Jarvis never disguises its window or tries to get past a
 refusal. Claude Code's WebFetch, the fetcher web research uses, says who it is and is let in by some of them. So:
 
-    Fetcher(engine, model, cap=)        one task's reads: at most ``cap`` of them (its own cap, not Ask's rate caps)
-        fetch(url, question, call)      a separate short run of Claude Code with WebFetch as its only tool, research's
-                                        settings file and an empty folder; it sees only the address and the question, on
-                                        stdin. The answer's text (at most TEXT_CAP characters), or web.WebRefused
+    Fetcher(engine, model, cap=, resolve=)
+                                        one task's reads: at most ``cap`` of them (its own cap, not Ask's rate caps)
+        fetch(url, question, call)      a separate short run of Claude Code with WebFetch as its only tool, allowed for
+                                        that address's one host (its own settings file: cli.build_fetch_argv) and an
+                                        empty folder; it sees only the address and the question, on stdin. The answer's
+                                        text (at most TEXT_CAP characters), or web.WebRefused
 
-The firewall looks at the call first, exactly as at open_page (agent.firewall). The run is held to that one address: any
-other tool or address kills it. It runs inside the tool's time (web.Call) and is killed the moment the call is cancelled
-(a Stop, or past the 45 s). While the test guard is on, the real runner is refused before anything runs.
+The firewall looks at the call first, exactly as at open_page (agent.firewall). Before the run the host is resolved as
+the window's network gate does it (snapshot_gate._resolve, snapshots.resolved_problem) and refused in the window's words
+when any address of it is not public; a host that is not plain letters, digits, hyphens and dots never starts a run. The
+CLI itself then refuses any other host (its permission rule), before anything leaves the PC, and the stream's guard
+stays: any other tool or address kills the run. It runs inside the tool's time (web.Call) and is killed the moment the
+call is cancelled (a Stop, or past the 45 s). While the test guard is on, the real runner and the real lookup are
+refused before anything runs.
 
 Logs: ids, kinds, counts and durations only; never the address, the question or a word of the answer.
 """
@@ -20,10 +26,11 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
-from ..actions import web_link_problem
+from .. import snapshot_gate, snapshots
+from ..actions import link_host, web_link_problem
 from ..ask import cli
 from ..ask.research import normalize_url
 from ..ask.stream import GuardTrip, parse_event, rate_limit_signal
@@ -49,6 +56,7 @@ NOT_AVAILABLE_TEXT = "Reading a page another way isn't available now. Try anothe
 GUARD_TEXT = ("That read was stopped: it went beyond the one address it was given. Try another source, or say so in "
               "your report.")
 LIMIT_TEXT = "Claude Code's plan limit stopped that read. Try the window, or say so in your report."
+NOT_PLAIN_HOST = "its host is not plain letters, digits, hyphens and dots"
 
 
 def check_fetch_init(event: Mapping[str, Any]) -> None:
@@ -66,6 +74,13 @@ def check_fetch_init(event: Mapping[str, Any]) -> None:
         raise GuardTrip("permission_mode")
 
 
+def _lookup(host: str, port: int) -> list[str]:
+    """The window's own lookup. Never while the tests run: a test gives its own."""
+    if real_backend_blocked():
+        raise OSError("the test guard is on")
+    return snapshot_gate._resolve(host, port)
+
+
 def _text_of(event: Mapping[str, Any]) -> str:
     text = event.get("result")
     return text if isinstance(text, str) else ""
@@ -74,10 +89,12 @@ def _text_of(event: Mapping[str, Any]) -> str:
 class Fetcher:
     """See the module docs. Thread-safe: tool calls may come side by side."""
 
-    def __init__(self, engine: Any, model: str = "sonnet", *, cap: int = FETCH_CAP) -> None:
+    def __init__(self, engine: Any, model: str = "sonnet", *, cap: int = FETCH_CAP,
+                 resolve: Callable[[str, int], list[str]] = _lookup) -> None:
         self.engine = engine
         self.model = model
         self.cap = int(cap)
+        self._resolve = resolve
         self._lock = threading.Lock()
         self._used = 0
         self._slots = threading.Semaphore(MAX_AT_ONCE)
@@ -108,6 +125,24 @@ class Fetcher:
         finally:
             self._slots.release()
 
+    def _public_host(self, url: str, call: web.Call) -> str:
+        """The address's host, plain and resolving only to public addresses (the window's rule); else web.WebRefused in
+        the window's words. A failed lookup is a refused read too."""
+        host = link_host(url)
+        if not cli.plain_host(host):
+            raise web.WebRefused(web.W_NOT_PUBLIC, web.NOT_PUBLIC_TEXT.format(why=NOT_PLAIN_HOST))
+        try:
+            addresses = list(self._resolve(host, snapshots.GATE_PORT))
+        except Exception as exc:  # noqa: BLE001 - not resolved: refused in words
+            logger.info("Agent: a read another way could not look its host up (%s)", type(exc).__name__)
+            addresses = []
+        call.check()
+        problem = snapshots.resolved_problem(addresses)
+        if problem:
+            logger.info("Agent: a read another way was refused by its host's addresses")
+            raise web.WebRefused(web.W_NOT_PUBLIC, web.NOT_PUBLIC_TEXT.format(why=problem))
+        return host
+
     def _run(self, url: str, question: str, call: web.Call) -> str:
         began = time.monotonic()
         runner = self.engine.runner
@@ -117,13 +152,14 @@ class Fetcher:
         ready = self.engine.base.readiness()
         if not ready.ok or ready.exe is None or ready.research_missing:
             raise web.WebRefused(W_FETCH_FAILED, NOT_AVAILABLE_TEXT)
+        host = self._public_host(url, call)
         if cli.prepare_work_folder(self.folder, what="Reading a page another way", folder=cli.AGENT_FETCH_WORK_FOLDER):
             raise web.WebRefused(W_FETCH_FAILED, NOT_AVAILABLE_TEXT)
-        argv = cli.build_fetch_argv(ready.exe.path, model=self.model, hardened=ready.hardened)
+        argv = cli.build_fetch_argv(ready.exe.path, model=self.model, hardened=ready.hardened, host=host)
         prompt = (f"<{ADDRESS_TAG}>{url}</{ADDRESS_TAG}>\n"
                   f"<{QUESTION_TAG}>{' '.join(question.split())}</{QUESTION_TAG}>")
         try:
-            process = runner.start(argv, stdin_text=prompt, env=cli.clean_env(self.engine.base._env_source()),
+            process = runner.start(argv, stdin_text=prompt, env=cli.fetch_env(self.engine.base._env_source()),
                                    cwd=self.folder)
         except OSError as exc:
             logger.warning("Agent: a read another way could not be started (%s)", type(exc).__name__)

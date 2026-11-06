@@ -118,7 +118,9 @@ class StubThings:
     def before_open(self) -> None:
         pass
 
-    def show_run(self, run: Any) -> bool:
+    def show_run(self, run: Any, cancelled: Any = lambda: False) -> bool:
+        if cancelled():
+            return False
         self.shown.append(run)
         return self.show_ok
 
@@ -128,7 +130,9 @@ class StubThings:
     def pc_done(self, asked: Any, run: Any) -> None:
         self.pc_changes.append((asked, run))
 
-    def take_cards(self, cards: Sequence[Any]) -> bool:
+    def take_cards(self, cards: Sequence[Any], cancelled: Any = lambda: False) -> bool:
+        if cancelled():
+            return False
         self.cards.extend(cards)
         return True
 
@@ -155,13 +159,23 @@ class OwnerBench:
         self.waiting: list[str] = []
         self.stopped = False
         self.fetched: list[tuple[str, str]] = []
+        self.spoken: list[str] = []
+        self.asked: list[str] = []
+        self.plans: list[Any] = []
+        self.fetch_answer = "Fetched words."
         self.ctx = tools.RunContext(run_id="r1", cancelled=lambda: self.stopped, web=self.session, tool_s=10.0,
-                                    owner=self.owner,
-                                    on_card=self._on_card, card_gone=self.waiting.remove, fetch=self._fetch)
+                                    owner=self.owner, on_plan=self.plans.append, on_say=self.spoken.append,
+                                    on_question=self._on_question,
+                                    on_card=self._on_card, card_gone=self.waiting.remove, fetch=self._fetch,
+                                    read_words=self.firewall.read_words)
 
     def _ask(self, text: str, _choices: Any, on_answer: Any) -> bool:
         self.cards.append(text)
         self._answers.append(on_answer)
+        return True
+
+    def _on_question(self, question: str, _choices: Any) -> bool:
+        self.asked.append(question)
         return True
 
     def _on_card(self, card_id: str) -> bool:
@@ -172,7 +186,7 @@ class OwnerBench:
 
     def _fetch(self, url: str, question: str, _call: Any) -> str:
         self.fetched.append((url, question))
-        return "Fetched words."
+        return self.fetch_answer
 
     def call(self, name: str, /, **args: Any) -> tools.ToolResult:
         tool = self.registry.tool(name)

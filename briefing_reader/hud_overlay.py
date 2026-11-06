@@ -2585,6 +2585,7 @@ TASK_CARD_MIN_WIDTH = 320
 TASK_CARD_MIN_BODY = 64        # at least this much of its text shows, whatever the room
 TASK_LINE = 21
 TASK_ROW = 40                  # an output: its name, its two links
+TASK_ROW_NOTE = 18             # ... and any plain words under it
 _ROW_INK = {STEP_TODO: holo.INK_4, STEP_DOING: holo.HOLO, STEP_DONE: holo.INK_2, STEP_FAILED: holo.ALERT_TX}
 _SCROLL_STYLE = ("QScrollArea { background: transparent; border: 0; } "
                  "QScrollBar:vertical { background: transparent; width: 8px; margin: 0; } "
@@ -2889,11 +2890,13 @@ class _PlainBody(QWidget):
 
 @dataclass(frozen=True)
 class TaskRow:
-    """One of a task's outputs on its result card: its name and the keys its two links say (``buttonClicked``)."""
+    """One of a task's outputs on its result card: its name, the keys its two links say (``buttonClicked``) and any
+    plain words under it (``note``: a page Jarvis wrote)."""
 
     name: str
     show_key: str = ""
     folder_key: str = ""
+    note: str = ""
 
 
 @dataclass(frozen=True)
@@ -2909,19 +2912,23 @@ class TaskContent:
 
 
 class _OutputName(QWidget):
-    """An output's name, cut in its middle when it must be (its whole name is the tooltip)."""
+    """An output's name, cut in its middle when it must be (its whole name is the tooltip), or its note, smaller."""
 
-    def __init__(self, name: str, parent: QWidget) -> None:
+    def __init__(self, name: str, parent: QWidget, *, size: int = 13, ink: str = holo.INK_2) -> None:
         super().__init__(parent)
         self._name = name
-        self._font = hud.body_font(13)
+        self._font = hud.body_font(size)
+        self._ink = ink
         self.setAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips, True)
         self.setToolTip(hud.plain_tooltip(name))
+
+    def text(self) -> str:
+        return self._name
 
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         painter = QPainter(self)
         painter.setFont(self._font)
-        painter.setPen(QColor(holo.INK_2))
+        painter.setPen(QColor(self._ink))
         painter.drawText(QRectF(self.rect()), int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
                          QFontMetricsF(self._font).elidedText(self._name, Qt.TextElideMode.ElideMiddle, self.width()))
         painter.end()
@@ -2941,6 +2948,7 @@ class TaskCard(ResultCard):
         self._column = QWidget()
         self.body = _PlainBody(self._column)
         self._names: list[QWidget] = []
+        self._row_notes: dict[int, _OutputName] = {}     # a row's plain words, by its place
         self.scroll = QScrollArea(self)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.scroll.setStyleSheet(_SCROLL_STYLE)
@@ -2963,14 +2971,16 @@ class TaskCard(ResultCard):
         for button in [*self._buttons.values(), *self._row_buttons.values()]:
             button.hide()
             button.deleteLater()
-        for name in self._names:
+        for name in [*self._names, *self._row_notes.values()]:
             name.hide()
             name.deleteLater()
-        self._buttons, self._row_buttons, self._names = {}, {}, []
+        self._buttons, self._row_buttons, self._names, self._row_notes = {}, {}, [], {}
         for spec in content.buttons:
             self._buttons[spec.key] = self._new_button(spec.key, spec.text, spec.variant, holo.SIZE_MD, spec.text)
-        for row in content.rows:
+        for index, row in enumerate(content.rows):
             self._names.append(_OutputName(row.name, self._column))
+            if row.note:
+                self._row_notes[index] = _OutputName(row.note, self._column, size=12, ink=holo.INK_3)
             for key, words in ((row.show_key, content.show_text), (row.folder_key, content.folder_text)):
                 if key:
                     button = self._new_button(key, words, holo.LINK_CYAN, holo.SIZE_SM, f"{words}: {row.name}")
@@ -3056,13 +3066,13 @@ class TaskCard(ResultCard):
 
     def _column_height(self, width: int) -> int:
         height = self.body.height_for(width)
-        return height + (10 + TASK_ROW * len(self._names) if self._names else 0)
+        return height + (10 + TASK_ROW * len(self._names) + TASK_ROW_NOTE * len(self._row_notes) if self._names else 0)
 
     def _place_column(self, width: int, height: int) -> None:
         self._column.setFixedSize(width, height)
         self.body.setGeometry(0, 0, width, self.body.height_for(width))
         y = self.body.height() + 10
-        for row, name in zip(self._task.rows, self._names):
+        for index, (row, name) in enumerate(zip(self._task.rows, self._names)):
             right = width + holo.HoloButton.MARGIN
             for key in (row.folder_key, row.show_key):
                 button = self._row_buttons.get(key)
@@ -3073,6 +3083,15 @@ class TaskCard(ResultCard):
                     right += 2 * holo.HoloButton.MARGIN - 8
             name.setGeometry(0, y, max(40, right - 12), TASK_ROW)
             y += TASK_ROW
+            note = self._row_notes.get(index)
+            if note is not None:
+                note.setGeometry(0, y, width, TASK_ROW_NOTE)
+                note.show()
+                y += TASK_ROW_NOTE
+
+    def row_notes(self) -> list[str]:
+        """The plain words under its rows, as they show (tests and the harness)."""
+        return [note.text() for _index, note in sorted(self._row_notes.items())]
 
     def cut_texts(self) -> list[str]:
         """Words it cuts now (its body scrolls, and nothing of it is ever cut; an output's name is cut in its

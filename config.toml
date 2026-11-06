@@ -381,3 +381,4 @@ tasks_per_day = 20            # how many tasks may start in 24 hours (1..200)
 search_engine = "duckduckgo"  # where his searches go: "duckduckgo", "bing" or "google" (the words of each search go there)
 workspace = ""                # his files; "" = the Jarvis\Workspace folder in your user folder; never under OneDrive
 private = ["calendar", "contacts", "memory", "mail", "files"]   # what a task may read of your things, when it needs them
+speak_private = false         # true: a line that may hold something private is said aloud too (spoken lines go to Microsoft's online voice)

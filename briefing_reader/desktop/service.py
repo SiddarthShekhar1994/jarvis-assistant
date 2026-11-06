@@ -47,8 +47,9 @@ there, one at a time, so nothing in it is shared with the GUI or the Ask thread.
 * A task's reads (agent.owner, part A4): ``find_for_task(words)`` (the files its words find, the places they are in and
   the apps they name: names only), ``list_for_task(place)`` (what one place holds, or the roots), ``read_text(item,
   start=, cap=)`` (a part of a text-like file: re-checked right before the read - the scope as it is now, the same item
-  - and never a secret, an online-only file or any other type) and ``pc_for_task(asked, ...)`` (a PC control asked for
-  by a task, carried out as a local route is). ``cancel`` stops each before it touches anything.
+  - and never a secret, an online-only file or any other type), ``in_secret_folders(paths)`` (which of them lie in a
+  folder named for secrets) and ``pc_for_task(asked, ...)`` (a PC control asked for by a task, carried out as a local
+  route is). ``cancel`` stops each before it touches anything.
 
 Each job's ``cancel`` (anything with ``is_set()``) holds the app's stop and THE CONSENT GATE (desktop_ui: the owner's
 Turn off): the executor asks it before each step and right before each OS call - once it is set nothing opens, and
@@ -73,7 +74,8 @@ cancel=, hud=)``, ``context_for(words)``, ``carry_out(plan, words, context, canc
 cancel=, on_start=, stop_keys=, on_stop=)``, ``find(query)``, ``executor()``; ``days_in(words)``; ``RECENT_FILES``;
 ``housekeep(journal_folder, backend, cancel=)`` -> ``Housekept``; ``recall_undo(cancel=)`` -> ``Recalled``.
 ``find_for_task(words, cancel=)``, ``list_for_task(place, cancel=)`` -> ``TaskListing``, ``read_text(item, start=, cap=,
-cancel=)`` -> ``TextPart``, ``pc_for_task(asked, run_id=, cancel=, hud=)``; ``READABLE_TYPES``, ``READ_*`` codes.
+cancel=)`` -> ``TextPart``, ``in_secret_folders(paths, cancel=)``, ``reveal_folder(path, cancel=)``,
+``pc_for_task(asked, run_id=, cancel=, hud=)``; ``READABLE_TYPES``, ``READ_*`` codes.
 """
 
 from __future__ import annotations
@@ -117,6 +119,7 @@ _DAYS = ((("today",), 1), (("yesterday",), 2), (("this", "week"), 7), (("last", 
 READABLE_TYPES = frozenset({"txt", "text", "md", "markdown", "rst", "csv", "tsv", "json", "jsonl", "ndjson", "log",
                             "html", "htm", "xml", "yaml", "yml", "srt", "vtt", "tex", "bib"})
 READ_BYTES_CAP = 8 * 1024 * 1024        # of a file: the first this much, and it says so
+SECRET_MARGIN = 256                     # characters either side of a part looked at for a key cut by its end
 LIST_ENTRIES_CAP = 2000                 # entries of a folder looked at for a task
 READ_TYPE, READ_ONLINE, READ_SECRET, READ_BINARY, READ_STOPPED, READ_UNAVAILABLE, READ_FAILED = (
     "read_type", "read_online", "read_secret", "read_binary", "read_stopped", "read_unavailable", "read_failed")
@@ -329,6 +332,14 @@ class DesktopService:
         if cancel is not None and cancel.is_set():
             return False
         self.backend().show_in_folder(path)
+        return True
+
+    def reveal_folder(self, path: str, *, cancel: Any = None) -> bool:
+        """The folder of a task's output opened on the owner's click, with nothing selected (a page the agent wrote:
+        Enter there would open it in the real browser). True when it was asked of Windows."""
+        if cancel is not None and cancel.is_set():
+            return False
+        self.backend().open_folder(ntpath.dirname(path))
         return True
 
     def dnd_state(self) -> str:
@@ -648,11 +659,32 @@ class DesktopService:
                 files.extend([found] if found is not None else [])
         return TaskListing("", tuple(places), tuple(files), left_out)
 
+    def _in_secret_folder(self, path: str) -> bool:
+        """A folder between its root and the file is named for secrets ("Documents\\Passwords\\gmail.txt"). Only below
+        the root: where the owner's folders themselves lie says nothing."""
+        root = self.scope().root_of(path)
+        if root is None:
+            return False
+        try:
+            inside = ntpath.relpath(path, root.path)
+        except ValueError:
+            return False
+        return any(guard.sensitive_folder_name(part) for part in inside.split("\\")[:-1])
+
+    def in_secret_folders(self, listed: Sequence[str], *, cancel: Any = None) -> frozenset[str]:
+        """Which of these listed paths lie in a folder named for secrets: a task can list them, and read none of
+        them."""
+        if cancel is not None and cancel.is_set():
+            return frozenset(listed)
+        return frozenset(path for path in listed if self._in_secret_folder(path))
+
     def read_text(self, item: Any, *, start: int = 0, cap: int = 12_000, cancel: Any = None) -> TextPart:
         """Characters ``start`` on of a listed text file, ``cap`` at most. Right before the read it is re-checked in the
         scope as it is now (the same final path, the same identity: executor.check_file), it is a type Jarvis reads as
-        text, its name says nothing of secrets and its content is on this PC; the handle read from must be that same
-        item (backend.read_head). ``cancel``, once set: nothing is read."""
+        text, neither its name nor a folder of it below the root says secrets, and its content is on this PC; the handle
+        read from must be that same item (backend.read_head). A part that plainly holds a key is refused too
+        (guard.holds_secret), with a margin either side, so a key cut by the part's end is still seen. ``cancel``, once
+        set: nothing is read."""
         executor = self.executor()
         if executor is None:
             return TextPart(READ_UNAVAILABLE)
@@ -662,7 +694,7 @@ class DesktopService:
         if code or verdict is None:
             return TextPart(code or READ_UNAVAILABLE)
         name = ntpath.basename(verdict.path)
-        if guard.sensitive_file_name(name):
+        if guard.sensitive_file_name(name) or self._in_secret_folder(verdict.path):
             return TextPart(READ_SECRET)
         if guard.suffix(name) not in READABLE_TYPES:
             return TextPart(READ_TYPE)
@@ -681,6 +713,9 @@ class DesktopService:
             return TextPart(READ_BINARY)
         first = max(0, int(start))
         part = whole[first:first + int(cap)]
+        if guard.holds_secret(whole[max(0, first - SECRET_MARGIN):first + int(cap) + SECRET_MARGIN]):
+            logger.info("Desktop: a file was not read for a task: it holds what looks like a key")
+            return TextPart(READ_SECRET)
         return TextPart("", part, first, first + len(part), first + len(part) < len(whole), len(raw) > READ_BYTES_CAP,
                         guard.hidden_message(part))
 

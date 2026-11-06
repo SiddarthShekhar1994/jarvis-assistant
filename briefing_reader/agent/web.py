@@ -6,7 +6,10 @@ are.
     read_script(), results_script(engine), scroll_script(fraction)   JavaScript Jarvis runs in an isolated world: it
                                     shares only the page's DOM, so the page's scripts can neither see it run nor change
                                     a function or a property it uses (DOM clobbering included: Jarvis asks the
-                                    prototypes)
+                                    prototypes). What the owner can't see is looked for as well, within a bound: a link
+                                    transparent, tiny, off the page or the colour of its ground gets no number, and a
+                                    page with much of its text so is flagged (screen-reader labels and skip links are
+                                    normal)
     read_page(raw), read_results(raw)   what those scripts gave back, checked and capped
     wall_kind(text, url)            a captcha, a consent wall or a block: never answered, Jarvis moves on
     AddressBook                     the run's numbered addresses (results and links keep their number for the whole
@@ -37,8 +40,8 @@ from urllib.parse import quote, quote_plus, unquote, urlsplit
 
 from .. import snapshots
 from ..actions import body_links, web_link_problem
-from ..ask.context import drop_format
 from ..desktop import guard
+from ..format_chars import drop_invisible
 from .workspace import TaskFolder, WorkspaceRefused, check_name
 
 QUERY_CAP = 300
@@ -66,6 +69,10 @@ LIVE_BYTES = 1_500_000
 PICTURE_KIND = "image/jpeg"
 SCHEME = "jarvis-task"            # Jarvis's own address scheme: a file of this task's folder in the window
 SUSPECT_LINE_CAP = 300            # the scanner reads this much of a sentence
+HIDDEN_NODES = 2_000              # text nodes read_script looks at for words no one can see, at most ...
+HIDDEN_MS = 150                   # ... and for this long
+HIDDEN_MIN_CHARS = 300            # such words flag a page from this many characters (screen-reader labels, skip links
+HIDDEN_MIN_SHARE = 0.10           # are normal) and this share of its text
 
 # Why a web call did not work (WebRefused.code; the logs' and Live's fixed words).
 W_NOT_PUBLIC, W_NO_PAGE, W_NO_RESULTS, W_NOT_LOADED, W_TOO_SLOW, W_NO_ANSWER, W_STOPPED, W_BUSY, W_NO_NUMBER = (
@@ -126,7 +133,7 @@ _WALL_PATH_RE = re.compile(r"^/(?:sorry|captcha|consent)(?:/|$)", re.IGNORECASE)
 _WALL_SHORT = 2_500               # a page this short with wall words is the wall; a longer one may only mention them
 _BLANK_LINES_RE = re.compile(r"\n{3,}")
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
-_LINE_END_RE = re.compile(r"[ \t\f\v\r]+\n")
+_LINE_END_SPACE = " \t\f\v\r"     # what a line's end loses (clean_text)
 
 
 # --------------------------------------------------------------------------
@@ -185,23 +192,86 @@ function bodyText() {
 }
 function title() { return String(got(DOC, 'title', document) || ''); }
 """
+# What the owner watching the window can't see though the page's text holds it, and nothing here may hurt a read: every
+# call of it is in its own try. A look is kept per element, so a whole page costs each element one look.
+_JS_UNSEEN = """
+var NODE = Node.prototype, looks = new WeakMap(), lookStarted = Date.now();
+function rgba(text) {
+  var found = /rgba?\\(([^)]*)\\)/.exec(String(text || ''));
+  if (!found) { return null; }
+  var parts = found[1].split(/[,\\/\\s]+/);
+  return parts.length < 3 ? null : [parseFloat(parts[0]), parseFloat(parts[1]), parseFloat(parts[2]),
+                                    parts.length > 3 ? parseFloat(parts[3]) : 1];
+}
+function lookOf(item) {
+  var known = looks.get(item);
+  if (known) { return known; }
+  var up = got(NODE, 'parentElement', item);
+  var above = up ? lookOf(up) : {gone: false, ground: [255, 255, 255], image: false};
+  var style = window.getComputedStyle(item), box = ELEMENT.getBoundingClientRect.call(item);
+  var paint = rgba(style.backgroundColor);
+  var tiny = style.overflow !== 'visible' && (box.width <= 2 || box.height <= 2);
+  var cut = /inset\\((?:50|100)%/.test(style.clipPath)
+    || /rect\\(0(?:px)?,? 0(?:px)?,? 0(?:px)?,? 0(?:px)?\\)/.test(style.clip);
+  var look = {gone: above.gone || parseFloat(style.opacity) < 0.1 || tiny || cut,
+              ground: paint && paint[3] > 0.5 ? paint : above.ground,
+              image: above.image || style.backgroundImage !== 'none'};
+  looks.set(item, look);
+  return look;
+}
+function unseen(item) {
+  var look = lookOf(item), style = window.getComputedStyle(item), box = ELEMENT.getBoundingClientRect.call(item);
+  if (look.gone || parseFloat(style.fontSize) < 3) { return true; }
+  if (box.right + window.scrollX <= 0 || box.bottom + window.scrollY <= 0
+      || box.left + window.scrollX > Math.max(window.innerWidth, 5000)) { return true; }
+  var ink = rgba(style.color);
+  if (!ink) { return false; }
+  if (ink[3] < 0.1) { return true; }
+  return !look.image && Math.abs(ink[0] - look.ground[0]) < 9 && Math.abs(ink[1] - look.ground[1]) < 9
+    && Math.abs(ink[2] - look.ground[2]) < 9;
+}
+function linkOnShow(item) {
+  try { return Date.now() - lookStarted > {ms} || !unseen(item); } catch (error) { return true; }
+}
+function hiddenText(whole) {
+  try {
+    var body = got(DOC, 'body', document), hidden = 0, nodes = 0, node;
+    if (!body || whole < 1) { return false; }
+    var walker = DOC.createTreeWalker.call(document, body, 4), next = TreeWalker.prototype.nextNode;
+    var started = Date.now();
+    while (nodes < {nodes} && Date.now() - started < {ms} && (node = next.call(walker))) {
+      var size = String(got(CharacterData.prototype, 'data', node)).trim().length;
+      var holder = got(NODE, 'parentElement', node);
+      if (!size || !holder) { continue; }
+      nodes += 1;
+      var style = window.getComputedStyle(holder);
+      if (!ELEMENT.getClientRects.call(holder).length || style.visibility !== 'visible') { continue; }
+      if (unseen(holder)) { hidden += size; }
+    }
+    return hidden > {chars} && hidden > whole * {share};
+  } catch (error) { return false; }
+}
+""".replace("{ms}", str(HIDDEN_MS)).replace("{nodes}", str(HIDDEN_NODES)).replace("{chars}", str(HIDDEN_MIN_CHARS))
+_JS_UNSEEN = _JS_UNSEEN.replace("{share}", str(HIDDEN_MIN_SHARE))
 
 
 def read_script() -> str:
     """The page: its title, address, text and the links on show, as JSON text."""
-    return ("(function () {" + _JS_HELPERS + f"""
+    return ("(function () {" + _JS_HELPERS + _JS_UNSEEN + f"""
 var text = bodyText(), links = [], seen = {{}}, anchors = got(DOC, 'links', document);
 for (var i = 0; i < anchors.length && links.length < {LINKS_SEEN}; i++) {{
   var a = anchors[i], href = String(a.href || '');
   if (!href || seen[href]) {{ continue; }}
-  if (!ELEMENT.getClientRects.call(a).length) {{ continue; }}
+  if (!ELEMENT.getClientRects.call(a).length || !linkOnShow(a)) {{ continue; }}
   var label = line(a) || String(ELEMENT.getAttribute.call(a, 'aria-label') || '');
   if (!label) {{ continue; }}
   seen[href] = 1;
   links.push([label.slice(0, {LINK_TEXT_CAP * 2}), href.slice(0, {URL_CAP + 1})]);
 }}
+var began = Date.now(), hidden = hiddenText(text.length);
 return JSON.stringify({{title: title().slice(0, {TITLE_CAP * 2}), url: String(location.href), length: text.length,
-                       text: text.slice(0, {TEXT_KEEP}), links: links}});
+                       text: text.slice(0, {TEXT_KEEP}), links: links, hiddenText: hidden,
+                       hiddenMs: Date.now() - began}});
 }})()""")
 
 
@@ -249,7 +319,8 @@ class PageRead:
     text: str = field(repr=False)
     length: int = 0               # the page's whole text in characters (``text`` stops at TEXT_KEEP)
     links: tuple[tuple[str, str], ...] = field(default=(), repr=False)   # (its visible words, its address)
-    hidden: bool = False          # invisible tag characters spelled something (they are gone from ``text``)
+    hidden: bool = False          # invisible tag characters spelled something (they are gone from ``text``), or much of
+                                  # the page's text is where the owner can't see it (read_script)
 
 
 @dataclass(frozen=True)
@@ -277,15 +348,18 @@ def _json_object(raw: Any) -> dict[str, Any]:
 
 
 def clean_text(text: str) -> str:
-    """A page's text as it goes back: no invisible format characters (tag characters and bidi controls can hide words
-    from whoever reads it on screen), no runs of blank lines."""
-    text = drop_format(text).replace("\r\n", "\n").replace("\r", "\n").replace("\u2028", "\n").replace("\u2029", "\n\n")
-    return _BLANK_LINES_RE.sub("\n\n", _LINE_END_RE.sub("\n", text)).strip()
+    """A page's text as it goes back: no invisible characters (tag characters, bidi controls and variation selectors can
+    hide words from whoever reads it on screen), no runs of blank lines. Line by line, with no pattern over the spaces:
+    on a page's long run of them a regex here takes minutes and holds the GIL, so nothing else runs, Stop neither."""
+    text = (drop_invisible(text).replace("\r\n", "\n").replace("\r", "\n").replace("\u2028", "\n")
+            .replace("\u2029", "\n\n"))
+    text = "\n".join(line.rstrip(_LINE_END_SPACE) for line in text.split("\n"))
+    return _BLANK_LINES_RE.sub("\n\n", text).strip()
 
 
 def one_line(text: str, cap: int) -> str:
     """Other people's words as one row of a list: no way to split it, no invisible characters."""
-    words = " ".join(drop_format(text).split())
+    words = " ".join(drop_invisible(text).split())
     return words if len(words) <= cap else words[:cap - 3].rstrip() + "..."
 
 
@@ -312,7 +386,8 @@ def read_page(raw: Any) -> PageRead | None:
     text = clean_text(raw_text)
     return PageRead(one_line(raw_title, TITLE_CAP), url, text,
                     size if isinstance(size, int) and not isinstance(size, bool) else len(text), tuple(links),
-                    guard.hidden_message(raw_text) or guard.hidden_message(raw_title))
+                    guard.hidden_message(raw_text) or guard.hidden_message(raw_title)
+                    or found.get("hiddenText") is True)
 
 
 def read_results(raw: Any) -> ResultsRead | None:

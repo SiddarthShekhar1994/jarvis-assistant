@@ -10,6 +10,7 @@ import logging
 import os
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -63,6 +64,10 @@ REFUSED_NAMES = (
     ("a|b.md", workspace.R_BAD_CHAR), ("a?b.md", workspace.R_BAD_CHAR), ("a*b.md", workspace.R_BAD_CHAR),
     ("a\x00b.md", workspace.R_BAD_CHAR), ("a\nb.md", workspace.R_BAD_CHAR), ("fdp\u202eb.md", workspace.R_BAD_CHAR),
     ("a\u200bb.md", workspace.R_BAD_CHAR), ("a\U000e0041b.md", workspace.R_BAD_CHAR),
+    ("a\ufe00b.md", workspace.R_BAD_CHAR), ("a\u3164b.md", workspace.R_BAD_CHAR), ("a\u2800b.md", workspace.R_BAD_CHAR),
+    ("a\u034fb.md", workspace.R_BAD_CHAR), ("a\U000e0100b.md", workspace.R_BAD_CHAR),
+    ("x.{21EC2020-3AEA-1069-A2DD-08002B30309D}/a.txt", workspace.R_BAD_CHAR),
+    ("x.{645FF040-5081-101B-9F08-00AA002F954E}/a.txt", workspace.R_BAD_CHAR),
     ("x.exe", workspace.R_EXTENSION), ("x.js", workspace.R_EXTENSION), ("x.ps1", workspace.R_EXTENSION),
     ("x.bat", workspace.R_EXTENSION), ("x.cmd", workspace.R_EXTENSION), ("x.vbs", workspace.R_EXTENSION),
     ("x.lnk", workspace.R_EXTENSION), ("x.dll", workspace.R_EXTENSION), ("x.msi", workspace.R_EXTENSION),
@@ -257,6 +262,51 @@ class FolderTests(Temp):
         self.assertEqual(sorted(path.name for path in outside.iterdir()), ["secret.md"])
 
 
+class MarkTests(Temp):
+    """ars-19, on a real temp folder: what can run a script or a formula goes out with the Mark of the Web, and what
+    reads it here reads it as ever."""
+
+    def stream(self, name: str) -> bytes:
+        with open(str(self.folder.path / name) + workspace.ZONE_STREAM, "rb") as stream:
+            return stream.read()
+
+    def test_a_page_or_a_table_is_marked_from_the_internet(self) -> None:
+        for name in ("page.html", "page.htm", "drawing.svg", "data.xml", "table.csv", "PAGE.HTML"):
+            with self.subTest(name=name):
+                self.folder.write(name, "<p>x</p>")
+                self.assertEqual(self.stream(name), b"[ZoneTransfer]\r\nZoneId=3\r\n")
+
+    def test_plain_text_is_not(self) -> None:
+        for name in ("notes.md", "notes.txt", "data.json", "style.css", "list.tsv", "a.yaml", "a.log"):
+            with self.subTest(name=name):
+                self.folder.write(name, "x")
+                with self.assertRaises(OSError):
+                    self.stream(name)
+
+    def test_an_overwritten_page_stays_marked(self) -> None:
+        self.folder.write("page.html", "<p>one</p>")
+        self.folder.write("page.html", "<p>two</p>")
+        self.assertEqual(self.stream("page.html"), workspace.ZONE_MARK)
+        self.assertEqual(self.folder.body("page.html"), b"<p>two</p>")
+
+    def test_what_reads_it_here_sees_only_the_file(self) -> None:
+        self.folder.write("page.html", "<p>x</p>")
+        self.assertEqual(self.folder.body("page.html"), b"<p>x</p>")                 # Show's sealed window reads this
+        self.assertEqual(self.folder.read("page.html")[1], "<p>x</p>")
+        self.assertEqual(self.folder.listing(), [("page.html", 8)])
+        self.assertTrue(self.folder.exists("page.html"))
+        self.assertEqual(self.files_on_disk(), ["page.html"])
+
+    def test_a_stopped_write_leaves_nothing_marked_or_not(self) -> None:
+        self.assert_refused(workspace.R_STOPPED, self.folder.write, "page.html", "x", may_commit=lambda: False)
+        self.assertEqual(self.files_on_disk(), [])
+
+    def test_a_drive_without_streams_is_no_error(self) -> None:
+        with mock.patch("briefing_reader.agent.workspace.open", side_effect=OSError("no streams"), create=True):
+            self.assertEqual(self.folder.write("page.html", "<p>x</p>"), ("page.html", 8))
+        self.assertEqual(self.folder.body("page.html"), b"<p>x</p>")
+
+
 class Reports:
     """A RunContext's callables, recorded."""
 
@@ -316,12 +366,14 @@ class RegistryTests(Temp):
         secret = "Sam-private-words"
         for name, args, words in (
                 ("update_plan", {}, '"steps"'),
-                ("update_plan", {"steps": secret}, "list"),
-                ("update_plan", {"steps": []}, "at least"),
-                ("update_plan", {"steps": [{"text": secret}]}, '"status"'),
-                ("update_plan", {"steps": [{"text": secret, "status": "maybe"}]}, "todo"),
-                ("update_plan", {"steps": [{"text": "x" * 201, "status": "todo"}]}, "200"),
-                ("update_plan", {"steps": [{"text": "x", "status": "todo"}] * 21}, "20"),
+                ("update_plan", {"steps": [{"text": "x", "status": "todo"}]}, '"found"'),
+                ("update_plan", {"found": "", "steps": secret}, "list"),
+                ("update_plan", {"found": "", "steps": []}, "at least"),
+                ("update_plan", {"found": "", "steps": [{"text": secret}]}, '"status"'),
+                ("update_plan", {"found": "", "steps": [{"text": secret, "status": "maybe"}]}, "todo"),
+                ("update_plan", {"found": "", "steps": [{"text": "x" * 201, "status": "todo"}]}, "200"),
+                ("update_plan", {"found": "", "steps": [{"text": "x", "status": "todo"}] * 21}, "20"),
+                ("update_plan", {"found": 3, "steps": [{"text": "x", "status": "todo"}]}, "text"),
                 ("say", {}, '"text"'),
                 ("say", {"text": 3}, "text"),
                 ("say", {"text": "   "}, "empty"),
@@ -349,14 +401,69 @@ class RegistryTests(Temp):
         self.assertTrue(self.registry.call("say", "not an object", self.reports.context).is_error)
 
     def test_update_plan(self) -> None:
-        result = self.call("update_plan", steps=[{"text": "Look <it> up", "status": "done"},
-                                                 {"text": "Write it", "status": "doing"}])
+        result = self.call("update_plan", found="", steps=[{"text": "Look <it> up", "status": "done"},
+                                                           {"text": "Write it", "status": "doing"}])
         self.assertFalse(result.is_error)
         steps = self.reports.plans[0]
         self.assertEqual([(step.text, step.status) for step in steps],
                          [("Look \u2039it\u203a up", "done"), ("Write it", "doing")])
         self.assertEqual(result.note, "1 of 2 done")
         self.assertNotIn("Look", repr(steps[0]))
+
+    PLAN = [{"text": "Look it up", "status": "doing"}]
+
+    def test_found_is_a_required_string_of_the_plan_capped_as_say_is(self) -> None:
+        schema = self.registry.tool("update_plan").schema
+        self.assertIn("found", schema["required"])
+        found = schema["properties"]["found"]
+        self.assertEqual((found["type"], found["minLength"], found["maxLength"]), ("string", 0, tools.SAY_CAP))
+        self.assertIn('"found"', self.call("update_plan", steps=self.PLAN).text)
+        self.assertEqual(self.reports.plans, [])
+
+    def test_found_is_said_and_the_plan_shown_and_live_records_it(self) -> None:
+        result = self.call("update_plan", found="The second shop\nhas <the> better hours.", steps=self.PLAN)
+        self.assertFalse(result.is_error)
+        self.assertEqual(self.reports.said, ["The second shop has \u2039the\u203a better hours."])
+        self.assertEqual([step.text for step in self.reports.plans[0]], ["Look it up"])
+        self.assertIn(("Found", "The second shop has \u2039the\u203a better hours."), result.fields)
+
+    def test_an_empty_found_says_nothing(self) -> None:
+        for found in ("", "   ", "\u200b\ufe00\u3164"):
+            with self.subTest(found=found):
+                result = self.call("update_plan", found=found, steps=self.PLAN)
+                self.assertFalse(result.is_error)
+                self.assertEqual(self.reports.said, [])
+                self.assertNotIn("Found", dict(result.fields))
+
+    def test_found_shares_say_s_clock_and_too_soon_is_no_error(self) -> None:
+        self.assertFalse(self.call("update_plan", found="First.", steps=self.PLAN).is_error)
+        self.reports.t += 3
+        soon = self.call("update_plan", found="Second.", steps=self.PLAN)
+        self.assertFalse(soon.is_error)
+        self.assertEqual(self.reports.said, ["First."])
+        self.assertEqual(len(self.reports.plans), 2)                 # the plan is always kept
+        self.assertEqual(dict(soon.fields)["Found"], "Second.")
+        self.assertIn("too soon", dict(soon.fields)["Not said"])
+        self.assertEqual(self.call("say", text="Third.").code, tools.RATE)
+        self.reports.t += 3.1
+        self.assertFalse(self.call("say", text="Fourth.").is_error)
+        self.assertFalse(self.call("update_plan", found="Fifth.", steps=self.PLAN).is_error)
+        self.assertEqual(self.reports.said, ["First.", "Fourth."])
+
+    def test_an_empty_found_does_not_touch_the_clock(self) -> None:
+        self.call("update_plan", found="", steps=self.PLAN)
+        self.assertFalse(self.call("say", text="At once.").is_error)
+
+    def test_a_long_found_is_cut_and_the_plan_kept(self) -> None:
+        result = self.call("update_plan", found="word " * 80, steps=self.PLAN)
+        self.assertFalse(result.is_error)
+        self.assertEqual(len(self.reports.plans), 1)
+        self.assertLessEqual(len(self.reports.said[0]), tools.SAY_CAP)
+        self.assertTrue(self.reports.said[0].endswith("..."))
+
+    def test_the_report_holds_nothing_no_one_can_see(self) -> None:
+        self.call("finish", summary="All safe.\u202e exe.txt \u200b\U000e0041 Tag\ufe00 \u3164here.", outcome="done")
+        self.assertEqual(self.reports.finished, [("done", "All safe. exe.txt Tag here.", ())])
 
     def test_say_at_most_one_every_six_seconds(self) -> None:
         self.assertFalse(self.call("say", text="First.").is_error)

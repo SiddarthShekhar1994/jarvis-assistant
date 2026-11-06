@@ -52,7 +52,7 @@ def setUpModule() -> None:
 
 def whole_task(engine: FakeEngine) -> None:
     engine.wait_message()
-    engine.call("update_plan", steps=[{"text": "Compare them", "status": "doing"}])
+    engine.call("update_plan", found="", steps=[{"text": "Compare them", "status": "doing"}])
     engine.call("say", text="Looking at the three now.")
     engine.call("write_file", name="../refused.md", text="no")
     engine.call("write_file", name="table.md", text="| a | b |")
@@ -180,9 +180,8 @@ class WholeTaskInTheAppTests(AgentApp):
         self.make_agent(plan_stream(TASK_PLAN), FakeEngine(whole_task), plan_stream({"say": "Ok.", "question": "", "lines": []}))
         self.type_it(TYPED)
         self.ended()
-        kept = self.reading.conversation.kept_entries()
-        report = next(entry for entry in kept if SUMMARY in entry[2])
-        self.assertFalse(report[4])                                 # kept on screen, never given to Ask
+        self.assertIn(SUMMARY, self.talk())                         # on screen, never kept on this PC or given to Ask
+        self.assertFalse([entry for entry in self.reading.conversation.kept_entries() if SUMMARY in entry[2]])
 
     def test_a_plain_question_stays_a_plain_answer(self) -> None:
         self.make_agent(plan_stream({"say": "It's at two.", "question": "", "lines": []}))
@@ -405,6 +404,7 @@ class WebInTheAppTests(AgentApp):
         self.c.agent.questionAsked.connect(questions.append)
         self.type_it(TYPED)
         self.assertTrue(wait_for(lambda: self.c.agent.firewall is not None, 10))
+        self.c.agent.firewall.note_private()
         self.c.agent.firewall.taint.add(["Project Halberd"])           # what part A4's private tools will feed
         tainted.set()
         self.assertTrue(wait_for(lambda: questions, 10))

@@ -1687,6 +1687,18 @@ class DesktopController(QObject):
         logger.info("Desktop: a task's output goes to its folder (the owner's click)")
         return True
 
+    def reveal_task_folder(self, path: str) -> bool:
+        """The same for a page the agent wrote, with nothing selected: its folder opens, on the owner's click."""
+        if self._shut or self._quitting or not self.consent_given():
+            return False
+        worker, service = self._ensure_worker()
+        self._reveal_seq += 1
+        future = worker.submit(service.reveal_folder, path, cancel=self._gate())
+        bridge, seq = self._bridge, self._reveal_seq
+        future.add_done_callback(lambda done, seq=seq: _deliver(bridge, seq, done, "revealed"))
+        logger.info("Desktop: a page a task wrote: its folder opens (the owner's click)")
+        return True
+
     def _on_revealed(self, _seq: int, future: Future) -> None:
         if self._shut:
             return

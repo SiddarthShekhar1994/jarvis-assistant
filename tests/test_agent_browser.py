@@ -29,7 +29,7 @@ from tests.ui_fakes import fonts, settle
 
 PROBE = Path(__file__).with_name("agent_browser_probe.py")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CASES = ("search", "read", "picture", "crash", "timeout", "stop", "quit", "hooks", "focus", "linger", "file", "gate",
+CASES = ("search", "read", "hidden", "picture", "crash", "timeout", "stop", "quit", "hooks", "focus", "linger", "file", "gate",
          "gate_control", "task", "refused", "feed_window", "owner_show", "warm_up", "feed_task")
 MARK = "PROBE-WORDS-7f3a"
 PAGE = "https://www.example.org/page"
@@ -188,6 +188,44 @@ class ReadProbeTests(ProbeCase):
         report = self.report("read")
         self.assertIn("Address: https://www.example.net/ended-here", inside(report["moved"]))
         self.assertTrue(report["final_seen"])
+
+
+class HiddenWordsProbeTests(ProbeCase):
+    """ars-23, in the real engine: words and links the owner watching the window can't see."""
+
+    def test_much_hidden_text_flags_the_page_and_a_hidden_link_gets_no_number(self) -> None:
+        report = self.report("hidden")
+        much = report["read"]["much"]
+        self.assertTrue(much["hiddenText"])
+        self.assertTrue(much["warn"])
+        self.assertIn("like instructions", much["text"])
+        self.assertEqual(report["numbers"][:2], ["https://www.example.org/open", "https://www.example.org/dark"])
+        self.assertEqual(set(report["seen"].values()), {False})
+        for words in ("LINK-WHITE", "LINK-OPACITY", "LINK-OFF", "LINK-TINY", "LINK-CLEAR"):
+            self.assertNotIn(words, much["text"].split("Links (open one")[-1])
+
+    def test_each_way_of_hiding_counts(self) -> None:
+        read = self.report("hidden")["read"]
+        for name in ("white", "clear", "zero", "off", "clip", "pixel"):
+            with self.subTest(hiding=name):
+                self.assertTrue(read[name]["hiddenText"])
+                self.assertTrue(read[name]["warn"])
+
+    def test_labels_skip_links_a_small_share_and_a_dark_page_do_not(self) -> None:
+        read = self.report("hidden")["read"]
+        for name in ("labels", "small-share", "dark", "huge"):
+            with self.subTest(page=name):
+                self.assertFalse(read[name]["hiddenText"])
+                self.assertFalse(read[name]["warn"])
+
+    def test_it_takes_under_200_ms_on_20000_elements(self) -> None:
+        self.assertLess(self.report("hidden")["read"]["huge"]["ms"], 200)
+
+    def test_a_page_it_cannot_look_through_is_still_read(self) -> None:
+        deep = self.report("hidden")["read"]["deep"]
+        self.assertEqual(deep["error"], "")
+        self.assertIn("Words at the bottom.", deep["text"])
+        self.assertFalse(deep["hiddenText"])
 
 
 class PictureProbeTests(ProbeCase):

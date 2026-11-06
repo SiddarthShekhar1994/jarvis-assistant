@@ -72,10 +72,11 @@ Tiers ``INSTANT``, ``ONE_CLICK``, ``CARD``, ``NEVER`` (``TIERS``), ``promote(tie
 ``STEP_KEYS``, ``OPEN_SKILLS``, ``MAX_OPENS``, ``MAX_URLS``, ``MANY_FILES``, ``BIG_BYTES``). Flags ``FLAG_*`` (why
 a tier went up, or what a card row must show). ``PlannedStep``, ``DesktopAnswer`` (the planner's answer as read),
 ``CheckedStep``, ``DesktopPlan`` (``accepted()``, ``refused()``, ``counts()``, ``skills_text()``,
-``codes_text()``), ``check_plan(answer, refs, owner_words, run_id=, path_check=, names=)``, ``licensed_skills(words,
-names=)``, ``names_item(words, label)``, ``named_exactly(words, label)``, ``typed_url(words, url, bare=)``,
-``places_named(words, places)`` (the places scope licensing reads in the owner's words; desktop.index searches them
-first).
+``codes_text()``), ``check_plan(answer, refs, owner_words, run_id=, path_check=, names=, withdrawn=)``,
+``licensed_skills(words, names=)``, ``taken_back(message)`` and ``withdrawn_skills(messages, names=)`` (a task's: what a
+later message took back), ``names_item(words, label)``, ``named_exactly(words, label)``, ``typed_url(words, url,
+bare=)``, ``places_named(words, places)`` (the places scope licensing reads in the owner's words; desktop.index searches
+them first).
 
 Pure: nothing is logged, opened or read here, and every repr names skills, codes and counts only.
 """
@@ -148,6 +149,7 @@ FLAG_SCRIPT = "script"                 # a document that can run macros or scrip
 FLAG_SHORTCUT = "shortcut"             # a .lnk: its real target is shown on a card first
 FLAG_HIDDEN_CHARS = "hidden_chars"     # the name has hidden characters: shown as <U+202E> before it opens
 FLAG_NOT_NAMED = "not_named"           # an app the owner did not name exactly: one click
+FLAG_TASK_ASKED = "task_asked"         # a task's open of what the owner's words don't name: one click (agent.owner)
 FLAG_SUGGESTED = "suggested"           # a web address the owner did not type: one click, its host shown
 FLAG_BARE_HOST = "bare_host"           # one he typed without its https:// ("logo.ai" may be a file's name): one click
 FLAG_ONLINE_ONLY = "online_only"       # opening it downloads it from OneDrive (flagged only: D5)
@@ -647,6 +649,70 @@ def _licences(tokens: Sequence[str], marks: Sequence[int] = ()) -> frozenset[str
     return frozenset(allowed)
 
 
+# ---- a licence taken back by a later message (a task's: agent.owner; a desktop request has one message)
+# ----------------
+
+_ALL_LICENSED = frozenset(skill for licence in LICENCES for skill in licence.skills)
+_TAKE_ALL_BACK = _p("never mind", "nevermind", "forget it", "forget that", "scrap that", "scrap it", "cancel that",
+                    "leave it", "leave them", "leave that", "leave those", "leave everything", "do nothing",
+                    "don t do that", "don t do it", "dont do that", "dont do it")
+# What the owner calls what a licence is about, when they take it back: "no music please", "leave the volume alone".
+_THINGS = {"volume": (VOLUME,), "sound": (VOLUME,), "music": (MEDIA,), "song": (MEDIA,), "songs": (MEDIA,),
+           "track": (MEDIA,), "tracks": (MEDIA,), "timer": (TIMER, CANCEL_TIMER), "timers": (TIMER, CANCEL_TIMER),
+           "screenshot": (SCREENSHOT,), "screenshots": (SCREENSHOT,), "focus": (FOCUS_MODE,),
+           **{word: ORGANISE_SKILLS for word in ("file", "files", "folder", "folders", "document", "documents")}}
+_LEAVE_SPAN = 8                       # "leave ... alone": at most this many words apart
+
+
+def _skills_of_word(word: str) -> frozenset[str]:
+    """The skills a word of a clause names: as a thing, or as a licence's one-word phrase ("move", "delete")."""
+    found = set(_THINGS.get(word, ()))
+    for licence in LICENCES:
+        if (word,) in licence.phrases:
+            found |= licence.skills
+    return frozenset(found)
+
+
+def taken_back(message: Any) -> frozenset[str]:
+    """What one of the owner's later messages takes away from what earlier ones licensed: a licence word or a thing it
+    is about, negated as ``_licences`` reads a negation ("actually don't delete anything", "do not touch the volume",
+    "no music please"); "leave the volume alone"; and all of it for "leave them alone", "never mind", "forget it" and
+    the like. Only ever takes away: reading too much here costs a click or a refusal, never a change."""
+    tokens, marks, _after = _clause_tokens(message)
+    negating = _negations(tokens)
+    clauses, _sentences = _clause_starts(tokens, marks, negating)
+    gone: set[str] = set()
+
+    def negated(start: int) -> bool:
+        return any(negating[max(0, start - 2):start]) or any(negating[clauses[start]:start])
+
+    for licence in LICENCES:
+        for phrase in licence.phrases:
+            if any(negated(start) for start in _find(tokens, phrase)):
+                gone |= licence.skills
+    for start, token in enumerate(tokens):
+        if token in _THINGS and negated(start):
+            gone.update(_THINGS[token])
+        if token == "leave" and "alone" in tokens[start + 1:start + _LEAVE_SPAN]:
+            between = tokens[start + 1:tokens.index("alone", start + 1)]
+            named = {skill for word in between for skill in _skills_of_word(word)}
+            gone |= named or _ALL_LICENSED
+    if any(_find(tokens, phrase) for phrase in _TAKE_ALL_BACK):
+        gone |= _ALL_LICENSED
+    return frozenset(gone)
+
+
+def withdrawn_skills(messages: Iterable[Any], names: Iterable[Any] = ()) -> frozenset[str]:
+    """The skills the owner's words license no more: taken back by a later message and not licensed again since. The
+    first message has nothing to take back. ``names``: as ``licensed_skills``'."""
+    listed = tuple(names)
+    gone: set[str] = set()
+    for number, message in enumerate(messages):
+        taken = taken_back(message) if number else frozenset()
+        gone = (gone | taken) - (licensed_skills(message, listed) - taken)   # "leave the volume alone" licenses none
+    return frozenset(gone)
+
+
 def _label_tokens(label: str, *, stem: bool = False) -> list[str]:
     text = label
     if stem and guard.suffix(label):
@@ -780,19 +846,20 @@ _LISTED_KINDS = (FILE, PLACE, APP, SITE, WINDOW, FIELD, CELL)
 
 
 def check_plan(answer: DesktopAnswer, refs: RefIndex, owner_words: str, *, run_id: str = "",
-               path_check: Callable[[str], Any] | None = None, names: Iterable[Any] = ()) -> DesktopPlan:
+               path_check: Callable[[str], Any] | None = None, names: Iterable[Any] = (),
+               withdrawn: Collection[str] = ()) -> DesktopPlan:
     """Every step of ``answer`` checked against ``refs`` (THIS run's index) and ``owner_words`` (the owner's typed
     words only) - see the module docstring. ``path_check(path)``: the 5.2 path check (paths.check_path with a
     backend; its verdict's ``ok`` / ``code``), given by the caller that has a backend; without it the context is
     trusted to list only items in scope (the executor checks again before each OS call). ``names``: the names of what
     the request's context holds beyond this index (a row cut to fit): in his words they are names too, never a
-    licence."""
+    licence. ``withdrawn``: skills a task's later message took back (``withdrawn_skills``), whatever the words say."""
     words = owner_words if isinstance(owner_words, str) else ""
     listed = [(item_label(ref), ref.kind == PLACE) for kind in _LISTED_KINDS for ref in refs.refs(kind)]
     listed += [(name, False) for name in names if isinstance(name, str)]
     said = _read(words, listed)
     places = [ref.target for ref in refs.refs(PLACE) if isinstance(ref.target, Place)]
-    run = _Run(refs, words, licensed_skills(words, [name for name, _place in listed]),
+    run = _Run(refs, words, licensed_skills(words, [name for name, _place in listed]) - frozenset(withdrawn),
                tuple(place for place in places if _named_place(said.scope, place)), path_check, said.licence)
     checked: list[CheckedStep] = []
     for number, step in enumerate(answer.steps, 1):

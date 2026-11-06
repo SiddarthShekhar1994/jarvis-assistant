@@ -9336,7 +9336,8 @@ class AppController(QObject):
             from .agent.web import engine_order
             from .desktop_view import CONSENT_TASK_ROW
 
-            task_row = CONSENT_TASK_ROW.format(engine=engine_order(self.config.agent.search_engine)[0].name)
+            first, *others = (engine.name for engine in engine_order(self.config.agent.search_engine))
+            task_row = CONSENT_TASK_ROW.format(engine=first, others=" and ".join(others))
         card.open_card(entry, updated=desktop.consent_given() and not desktop.consent_current(), task_row=task_row,
                        task_new=desktop.consent_given() and not desktop.consent_for_tasks())
         logger.info("Desktop: the first-run card shows (%s)", entry)
@@ -9786,21 +9787,25 @@ class AppController(QObject):
         logger.info("Agent: a task waits for the updated card")
         self._show_desktop_consent(ENTRY_UPDATE if on_hud else ENTRY_REQUEST)
 
-    def _agent_words(self, text: str, tone: str, *, speak: bool = True) -> None:
+    def _agent_words(self, text: str, tone: str, *, speak: bool = True, said: str | None = None) -> None:
         """Words about the task on the caption line of the bar Ask is bound to (the HUD's, or the window's status line)
-        and Home's caption, and said aloud. The status line never while a request runs: the bar belongs to it then."""
+        and Home's caption, and said aloud. The status line never while a request runs: the bar belongs to it then.
+        ``said``: what the voice gets instead of ``text`` ("": nothing). A line the model wrote always comes with what
+        the agent's one gate gave for it (AgentController.spoken): only Jarvis's own fixed words come without."""
         if self.state == STATE_QUITTING or not text:
             return
         shown = scrub_for_speech(text)
         if self.ask is not None:
             self.ask.show_note(shown, tone, hud_text=shown)
-        if speak and self.config.assistant.speak_replies:
-            self._say(KIND_REPLY, text)
+        voice = (text if said is None else said) if speak else ""
+        if voice and self.config.assistant.speak_replies:
+            self._say(KIND_REPLY, voice)
         elif self.state == STATE_READING:
             self.window.reading.say_caption(shown, spoken=False)
 
     def _on_agent_said(self, text: str) -> None:
-        self._agent_words(text, hud.TONE_DONE)
+        """A line the model wrote (the plan's "found", say): through the gate, and on the caption whatever it says."""
+        self._agent_words(text, hud.TONE_DONE, said=self.agent.spoken(text))
 
     def _on_agent_noticed(self, text: str, tone: str) -> None:
         self._agent_words(text, tone)
@@ -9809,15 +9814,19 @@ class AppController(QObject):
         """A question for the owner: its card waits on the HUD (agent_feed); on the caption and in the conversation, in
         amber (a decision waits). What is typed next answers ask_owner's (AgentController.take_request). The firewall's
         (kind "web") is never said aloud or kept on this PC, and only a click on its card answers it: its words may be
-        private. Keep going is said, and answered by a click too."""
-        web_card = question.kind == "web"                 # (a card of file steps says only that it waits)
-        self._agent_words(question.text, hud.TONE_WARN, speak=not web_card)
-        self._jarvis(question.text, tone=hud.TONE_WARN, keep=not web_card, context=False)
+        private. ask_owner's (kind "task") is the model's, so it goes through the voice's gate and is not kept on this
+        PC either. Keep going is said, and answered by a click too."""
+        web_card, asked = question.kind == "web", question.kind == "task"   # (a file card says only that it waits)
+        self._agent_words(question.text, hud.TONE_WARN, speak=not web_card,
+                          said=self.agent.spoken_question(question.text) if asked else None)
+        self._jarvis(question.text, tone=hud.TONE_WARN, keep=not (web_card or asked), context=False)
 
     def _on_agent_ended(self, end: Any) -> None:
         """The task ended: the whole report (or Jarvis's own words) on its result card and in the conversation, its
-        first sentence or two on the caption and said aloud (agent_feed.spoken_summary), and one row of counts in
-        ACTIVITY. Never given to a later Ask as the conversation: it may hold what pages said."""
+        first sentence or two on the caption and, through the voice's gate when the model wrote them, said aloud
+        (agent_feed.spoken_summary), and one row of counts in ACTIVITY. Never given to a later Ask as the conversation:
+        it may hold what pages said; and a report is never kept on this PC (D11): it may quote a mail or a file.
+        Jarvis's own words for how a task ended are."""
         from .agent.tools import OUTCOME_DONE, OUTCOME_FAILED
         from .agent_feed import spoken_summary
 
@@ -9825,10 +9834,12 @@ class AppController(QObject):
             return
         tone = {OUTCOME_FAILED: hud.TONE_ERROR, "stopped": hud.TONE_IDLE}.get(end.outcome, hud.TONE_DONE)
         words = {OUTCOME_DONE: "done", OUTCOME_FAILED: "failed", "stopped": "stopped"}.get(end.outcome, "partly done")
-        self._agent_words(spoken_summary(end.summary), tone, speak=end.outcome != "stopped")
+        opening = spoken_summary(end.summary)
+        self._agent_words(opening, tone, speak=end.outcome != "stopped",
+                          said=None if end.own_words else self.agent.spoken_report(end, opening))
         files = f"\nFiles: {', '.join(end.outputs)}" if end.outputs else ""
         sub = [f"task {words}", _plural(end.tools, "step"), _live.elapsed_text(end.worked_s)]
-        self._jarvis(end.summary + files, tone=tone, sub=f" {DOT} ".join(sub), context=False)
+        self._jarvis(end.summary + files, tone=tone, sub=f" {DOT} ".join(sub), keep=end.own_words, context=False)
         self._activity(hud.TAG_ASK, f"Task: {words}", f" {DOT} ".join(sub[1:]))
 
     # ---- offers (the productivity bundle) ----------------------------------------------------------

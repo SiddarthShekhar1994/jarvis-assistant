@@ -106,10 +106,10 @@ WRAP_UP_SILENT = ("Jarvis: the owner did not answer, so the task stops here. Cal
 PAUSED_TEXT = ("Jarvis has paused the task: it has reached its budget and the owner is being asked whether to keep "
                "going. End your turn now with one short sentence. The answer will come to you as your next message.")
 WRAP_UP_TOOL_TEXT = "The task is stopping. Call finish now, and nothing else."
-WEB_ALLOWED_TEXT = "Jarvis: the owner allowed that one web call. Make it again now, exactly as it was."
-WEB_DECLINED_TEXT = ("Jarvis: the owner said no, so that web call was not made. Do not try it again: carry on without "
+WEB_ALLOWED_TEXT = "Jarvis: the owner allowed that one call. Make it again now, exactly as it was."
+WEB_DECLINED_TEXT = ("Jarvis: the owner said no, so that call was not made. Do not try it again: carry on without "
                      "it, find another way, or say so in your report.")
-WEB_UNANSWERED_TEXT = ("Jarvis: the owner did not answer, so that web call was not made. Do not try it again: carry on "
+WEB_UNANSWERED_TEXT = ("Jarvis: the owner did not answer, so that call was not made. Do not try it again: carry on "
                        "without it, find another way, or say so in your report.")
 CARD_UNANSWERED_TEXT = ("Jarvis: nobody clicked the card in time, so nothing was changed. Do not propose it again: "
                         "carry on without it, or say so in your report.")
@@ -374,7 +374,7 @@ class AgentRun:
         self._context = RunContext(run_id=self.run_id, folder=folder, clock=clock, on_plan=self._tool_plan,
                                    on_say=self._tool_say, on_question=self._tool_question, on_finish=self._tool_finish,
                                    web=web, tool_s=timing.tool_s, fetch=fetch, owner=owner, on_card=self._tool_card,
-                                   card_gone=self._tool_card_gone)
+                                   card_gone=self._tool_card_gone, read_words=getattr(firewall, "read_words", None))
         attach = getattr(firewall, "attach", None)
         if callable(attach):
             attach(self.ask_web)

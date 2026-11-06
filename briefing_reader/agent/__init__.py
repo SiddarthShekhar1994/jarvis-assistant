@@ -20,7 +20,7 @@ feed, whose windows are in hud_overlay and agent_feed, and A4, the owner's thing
   addresses).
 * ``browser``: the window the owner watches, on the page snapshots' private web engine and network gate. Qt, GUI thread.
 * ``runner``: one run: the process, its stream checked event by event, messages over stdin, waits that end the turn.
-* ``assets``: ``agent_prompt.md`` and ``agent_settings.json``.
+* ``assets``: ``agent_prompt.md`` and ``agent_settings.json``; ``fetch_prompt.md`` and ``fetch_settings.json``.
 
 Nothing in this package but ``browser`` imports Qt, nothing starts a process or a shell by itself
 (tests/test_agent_guard.py runs the desktop package's scan over it; the run's one process comes through ask.cli's runner

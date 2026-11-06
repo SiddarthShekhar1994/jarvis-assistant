@@ -8,20 +8,27 @@
 
 What it holds to:
 
-* Every private result feeds the firewall's taint set before it goes back (addresses, numbers, words of 4+ letters of
-  names, titles, subjects and file names). A mail's body, a file's contents or the conversation make the run strict
-  (agent.firewall). All of it goes back inside untrusted blocks (R5), its strong signs of an order flagged.
+* Every private result tells the firewall a private tool answered (note_private: its checks are on from then on, for
+  good) and feeds its taint set before it goes back (addresses, numbers, words of 4+ letters of names, titles, subjects
+  and file names). A mail's body, a file's contents or the conversation make the run strict (agent.firewall). All of it
+  goes back inside untrusted blocks (R5), its strong signs of an order flagged. A mail's and a file's words are kept as
+  what a line in Jarvis's voice may not repeat (firewall.read_words).
 * Turn off stops them at once: ``things.consent()`` (version 3 of the card) is asked at every call.
 * A mail search must name what the owner said in this task, exactly as Ask refuses other searches (ask.mail.check_query,
   over this run's own index: the owner's words, and people the calendar supplied whose name they said). What only mail,
   a note or the conversation supplied never grounds one.
 * A file is reached only by a ref issued in this run (desktop.refs, one index a run) and re-checked right before each
-  read (desktop.service.read_text): scope, identity, the NEVER list, secrets, type, online-only. No parser: other types
-  can't be read yet, and it says so.
+  read (desktop.service.read_text): scope, identity, the NEVER list, a name or a folder named for secrets, a text
+  plainly holding a key, type, online-only. No parser: other types can't be read yet, and it says so.
 * Changes are licensed by the owner's own words only: ``firewall.said()``, the goal and their typed messages; never the
-  model's reasoning, a clicked choice the model wrote, a file's name, a page or a mail. Everything goes through the
-  desktop's validator (desktop.validate.check_plan) or Ask's (ask.validate.to_cards) as it stands, and their tiers
-  stand: never demoted, never above what the validator says.
+  model's reasoning, a clicked choice the model wrote, a file's name, a page or a mail. A later message takes back what
+  an earlier one licensed (dv.withdrawn_skills). Everything goes through the desktop's validator
+  (desktop.validate.check_plan) or Ask's (ask.validate.to_cards) as it stands, and their tiers stand: never demoted;
+  only ever raised, where a task's model has read other people's text first and the keyword alone would act at once:
+  - open_thing opens at once only what the owner's words name (dv.names_item); anything else waits on a one-click card.
+  - pc_control acts at once only on what the local routes' own parser reads in the owner's words, the same kind and, for
+    the volume and media, the same direction: "turn the volume down" is a request, "the trading volume" is a noun. A
+    licence with no such words goes on the firewall's card first (firewall.ask_once).
 * propose_files is a wait (D5): the card is the desktop's own (frozen plan, ticks, journal, Undo) and its end comes back
   as a message (``card_message``). propose_action is not: its cards wait in Approvals and the task goes on. Nothing here
   claims anything was sent or done.
@@ -38,11 +45,13 @@ from __future__ import annotations
 
 import logging
 import ntpath
+import re
 import threading
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import CancelledError, Future
 from concurrent.futures import TimeoutError as FutureTimeout
+from dataclasses import replace
 from datetime import date, datetime, time as clock_time, timedelta
 from datetime import timezone as fixed_zone
 from typing import Any, Protocol
@@ -56,6 +65,7 @@ from ..ask.mail import MAX_THREADS, MailThread, QueryRefused, check_query, searc
 from ..ask.validate import LINE_CARD, to_cards
 from ..desktop import executor as dx
 from ..desktop import cardplan, guard, journal, pcctl, tidy
+from ..desktop import routes as desktop_routes
 from ..desktop import service as desktop_service
 from ..desktop import validate as dv
 from ..desktop.context import FileItem, Place, SiteItem
@@ -136,6 +146,7 @@ NOT_A_REF_TEXT = "That is not something Jarvis listed in this task. files_find o
 WORKSPACE_TEXT = "That is in this task's own folder or another's: Jarvis never hands those to the owner's other apps."
 PC_REFUSED_TEXT = NOT_ASKED + ". " + RETRY_NOTE
 PC_SHAPE_TEXT = "That isn't something the PC's controls can do as written."
+PC_CARD_TEXT = "Jarvis wants to {what}"
 PC_NOT_DONE_TEXT = "It was not done: {reason}."
 MAIL_NOT_RUN_TEXT = ("That search was not run: {reason}. Mail is searched only with the owner's own words from this "
                      "task. " + RETRY_NOTE)
@@ -148,7 +159,8 @@ BAD_DAY_TEXT = '"from" and "to" must be days written YYYY-MM-DD, "from" first, a
 READ_WORDS = {desktop_service.READ_TYPE:
               "Jarvis can't read that type of file yet: only plain text-like files ({types})",
               desktop_service.READ_ONLINE: "it is online-only, and reading it would download it",
-              desktop_service.READ_SECRET: "its name says it holds secrets or sign-ins, and Jarvis never reads those",
+              desktop_service.READ_SECRET: "its name, its folder's or what it holds says secrets or sign-ins, and "
+                                           "Jarvis never reads those",
               desktop_service.READ_BINARY: "it doesn't read as text",
               desktop_service.READ_STOPPED: "the task was stopped",
               desktop_service.READ_UNAVAILABLE: "Jarvis can't reach this PC's files right now",
@@ -160,6 +172,14 @@ READ_NOT_DONE_TEXT = "That was not read: {reason}."
 READ_MORE_NOTE = "(There is more: call file_read with this ref and offset {offset}.)"
 READ_CUT_NOTE = "(Jarvis reads only the first 8 MB of a file.)"
 READ_END_TEXT = "That was all of this file."
+# How the owner's words are read for a PC control: clause by clause, each through the local routes' own parser
+# (desktop.routes.pc_request, a full match), the words around a request aside.
+_CLAUSE_RE = re.compile(r"[.,;:!?]+(?:\s+|$)|\s+(?:and then|and|then|but|also|after that|afterwards)\s+", re.IGNORECASE)
+_LEAD_IN_RE = re.compile(r"(?:(?:jarvis|please|kindly|now|just|and then|and|then|also|but|could you|can you|would you|"
+                         r"will you)[,:]?\s+)+", re.IGNORECASE)
+_TAIL_RE = re.compile(r"(?:\s+(?:please|now|a bit|a little|for me|right now|straight away|again))+$", re.IGNORECASE)
+_SET_VOLUME_RE = re.compile(r"(?:set|put|change|turn)\s+(?:the\s+)?volume\s+(?:to|at)\s+(\d{1,3})\s*(?:%|percent)?",
+                            re.IGNORECASE)
 
 # A file card's end, as the model hears it (card_message): done N, failed M, not now, timed out.
 CARD_DONE_TEXT = "Jarvis: the owner clicked the card. {what}."
@@ -213,10 +233,13 @@ class Things(Protocol):
     def briefing(self) -> Any: ...                # ask.context.BriefingContext or None
     def job(self, method: str, *args: Any, stop: threading.Event, **kwargs: Any) -> Future: ...   # the desktop thread
     def before_open(self) -> None: ...            # GUI: what the window an open brings is not one of
-    def show_run(self, run: Any) -> bool: ...     # GUI: its cards show; False: they can't now
+    # GUI: its cards show; False: they can't now, or ``cancelled()`` says the run was stopped on the way to the GUI
+    # thread
+    def show_run(self, run: Any, cancelled: Callable[[], bool] = lambda: False) -> bool: ...
     def hud_windows(self) -> Sequence[int]: ...   # GUI: left out of a screenshot
     def pc_done(self, asked: Any, run: Any) -> None: ...      # GUI: chips and Undo
-    def take_cards(self, cards: Sequence[Any]) -> bool: ...   # GUI: Ask's cards, in Approvals and on the HUD
+    # GUI: Ask's cards, in Approvals and on the HUD; False, as show_run
+    def take_cards(self, cards: Sequence[Any], cancelled: Callable[[], bool] = lambda: False) -> bool: ...
 
 
 def _day(text: Any) -> date | None:
@@ -253,6 +276,28 @@ def _brief_people(brief: Any) -> list[str]:
 
 def _count_of(count: int, one: str, many: str = "") -> str:
     return f"{count} {one if count == 1 else (many or one + 's')}"
+
+
+def _pc_asks(message: str) -> list[pcctl.PcAsk]:
+    """The PC controls one of the owner's messages asks for, as the local routes' own parser reads its clauses."""
+    asks = []
+    for clause in _CLAUSE_RE.split(" ".join((message or "").split())):
+        plain = _TAIL_RE.sub("", _LEAD_IN_RE.sub("", clause.strip(), count=1))
+        volume = _SET_VOLUME_RE.fullmatch(plain)
+        asked = desktop_routes.pc_request(f"volume {volume[1]}" if volume else plain)
+        if asked is not None:
+            asks.append(asked)
+    return asks
+
+
+def _same_ask(asked: pcctl.PcAsk, wanted: pcctl.PcAsk) -> bool:
+    """What the model asks for is what the owner's words ask for: the same kind and, for the volume and media, the same
+    direction (and level)."""
+    if asked.kind != wanted.kind:
+        return False
+    if asked.kind not in (dv.VOLUME, dv.MEDIA):
+        return True
+    return asked.action == wanted.action and (asked.action != "set" or asked.level == wanted.level)
 
 
 class OwnerAccess:
@@ -292,6 +337,8 @@ class OwnerAccess:
         return error(OFF_TEXT, OFF)
 
     def _taint(self, fragments: Iterable[Any]) -> None:
+        """A private tool is answering, whatever this holds: the firewall's checks are on from now on (note_private)."""
+        self.firewall.note_private()
         self.firewall.taint.add(text for text in fragments if isinstance(text, str) and text)
 
     def _take(self, what: str, cap: int, words: str) -> ToolResult | None:
@@ -532,6 +579,8 @@ class OwnerAccess:
         fit = trim_threads([thread])[0]
         self.firewall.go_strict()             # before anything of it goes back
         self._taint([*_people(fit), *(message.text for message in fit.messages)])
+        for message in fit.messages:
+            self.firewall.read_words.feed(message.text)
         text = thread_text(fit)
         flag, flagged, warn = _page_flags("\n".join(message.text for message in fit.messages))
         logger.info("Agent %s: a thread read, %d message(s)", self.run_id or "-", len(fit.messages))
@@ -559,9 +608,19 @@ class OwnerAccess:
                     rows.append(f"{ref} {desktop_mode.place_label(place)}" + (" [suspect]" if suspect else ""))
         return rows, ids
 
-    def _file_rows(self, files: Iterable[Any], places: Mapping[str, str], cap: int) -> tuple[list[str], int]:
+    def _unreadable(self, ctx: Any, files: Sequence[Any]) -> frozenset[str] | None:
+        """Of these listed files, those in a folder named for secrets; None when it can't be asked: then none is marked
+        [readable]. file_read asks again right before any read."""
+        try:
+            return self._job(ctx, "in_secret_folders", [item.path for item in files if isinstance(item, FileItem)])
+        except web.WebRefused:
+            return None
+
+    def _file_rows(self, files: Sequence[Any], places: Mapping[str, str], cap: int,
+                   ctx: Any) -> tuple[list[str], int]:
         rows: list[str] = []
         left = 0
+        unreadable = self._unreadable(ctx, files)
         with self._lock:
             for item in files:
                 if not isinstance(item, FileItem) or self._in_workspace(item.path):
@@ -576,7 +635,8 @@ class OwnerAccess:
                 place = places.get(ntpath.normcase(item.place or ntpath.dirname(item.path)).rstrip("\\"), "")
                 row = desktop_mode.file_row(ref, item, place, suspect)
                 readable = (guard.suffix(item.name) in desktop_service.READABLE_TYPES and not item.online_only
-                            and not guard.sensitive_file_name(item.name))
+                            and not guard.sensitive_file_name(item.name)
+                            and unreadable is not None and item.path not in unreadable)
                 rows.append(row + (" [readable]" if readable else ""))
         return rows, left
 
@@ -591,7 +651,7 @@ class OwnerAccess:
             return error(why.text, why.code)
         shown = [item for item in found.files if not self._in_workspace(item.path)][:FIND_ROWS]
         place_rows, ids = self._place_rows(found.places)
-        file_rows, left = self._file_rows(found.files, ids, FIND_ROWS)
+        file_rows, left = self._file_rows(found.files, ids, FIND_ROWS, ctx)
         self._taint(item.name for item in shown)
         self._taint(part for place in found.places for part in place.parts)
         with self._lock:
@@ -654,7 +714,7 @@ class OwnerAccess:
                 ids[ntpath.normcase(place.path).rstrip("\\")] = self._refs.issue(
                     PLACE, place, desktop_mode.place_label(place),
                     suspect=any(guard.suspect_text(part) for part in place.parts))
-        file_rows, left = self._file_rows(listing.files, ids, LIST_ROWS)
+        file_rows, left = self._file_rows(listing.files, ids, LIST_ROWS, ctx)
         blocks = []
         if place_rows:
             blocks.append("Places:\n" + "\n".join(place_rows))
@@ -711,6 +771,7 @@ class OwnerAccess:
                               code=UNREADABLE, fields=fields)
         self.firewall.go_strict()             # before anything of it goes back
         self._taint([part.text])
+        self.firewall.read_words.feed(part.text)
         logger.info("Agent %s: a file read, %d characters", self.run_id or "-", part.last - part.first)
         if not part.text:
             return ToolResult(READ_END_TEXT, note="the end of the file", fields=fields)
@@ -726,15 +787,20 @@ class OwnerAccess:
 
     # ---- changes: the desktop's validator and its cards ------------------------------------------------------------
 
+    def _listed_names(self) -> list[str]:
+        """The names of what this run listed: in the owner's words they are names, never a licence. (Lock held.)"""
+        return [dv.item_label(ref) for each in (FILE, PLACE, APP, SITE) for ref in self._refs.refs(each)]
+
     def _checked(self, steps: Sequence[Mapping[str, Any]], run_id: str) -> tuple[Any, str]:
-        """(the plan as desktop.validate checked it against this run's refs and the owner's own words, those words).
-        None for a plan that can't be read."""
+        """(the plan as desktop.validate checked it against this run's refs, the owner's own words and what they took
+        back since, those words). None for a plan that can't be read."""
         answer = desktop_mode.plan_from({"say": "", "steps": [{"why": "", **step} for step in steps]})
         if answer is None:
             return None, ""
         with self._lock:
             said = self._sync()
-            return dv.check_plan(answer, self._refs, said, run_id=run_id), said
+            withdrawn = dv.withdrawn_skills(self.firewall.messages(), self._listed_names())
+            return dv.check_plan(answer, self._refs, said, run_id=run_id, withdrawn=withdrawn), said
 
     @staticmethod
     def _refusals(plan: Any) -> str:
@@ -777,7 +843,7 @@ class OwnerAccess:
             return error(NO_ROWS_TEXT.format(reasons=text), CAP if not reasons else UNREADABLE)
         if not ctx.on_card(card.run_id):
             return ToolResult(ANOTHER_CARD_TEXT, code=CARD_BUSY, note="a card waits already")
-        if ctx.cancelled() or not self.things.show_run(run):
+        if ctx.cancelled() or not self.things.show_run(run, ctx.cancelled):
             ctx.card_gone(card.run_id)
             return error(CARD_NOT_SHOWN_TEXT, DESK_GONE)
         logger.info("Agent %s: a card of file steps waits (%d row(s))", self.run_id or "-", len(rows))
@@ -786,7 +852,8 @@ class OwnerAccess:
 
     def open_thing(self, args: Mapping[str, Any], ctx: Any) -> ToolResult:
         """The desktop's open skills at their own tiers (validate decides them, from the resolved target): at once, or
-        on a card for the owner's click, which the task need not wait for."""
+        on a card for the owner's click, which the task need not wait for. A task's model has read other people's text,
+        so at once only what the owner's words name (_named_or_click)."""
         refused = self._refused_first(ctx)
         if refused is not None:
             return refused
@@ -812,6 +879,7 @@ class OwnerAccess:
             self._take("web pages", URLS_CAP, "web pages opened") if step["skill"] == dv.OPEN_URL else None)
         if over is not None:
             return over
+        plan = self._named_or_click(plan, said)
         with self._lock:
             self.run_ids.append(run_id)
         self.things.before_open()
@@ -820,7 +888,7 @@ class OwnerAccess:
         except web.WebRefused as why:
             return error(why.text, why.code)
         result = run.results[0] if run.results else None
-        self.things.show_run(run)
+        self.things.show_run(run, ctx.cancelled)
         status = result.status if result is not None else dx.REFUSED
         logger.info("Agent %s: an open came to %s", self.run_id or "-", status)
         if status == dx.DONE:
@@ -830,6 +898,19 @@ class OwnerAccess:
         code = result.code if result is not None else ""
         reason = dx.code_words(code) or REASONS.get(code, "") or "Jarvis's checks stopped it"
         return ToolResult(OPEN_NOT_DONE_TEXT.format(reason=reason), is_error=True, code=code or dx.REFUSED)
+
+    @staticmethod
+    def _named_or_click(plan: Any, said: str) -> Any:
+        """A file, place, app or saved site opens at once only when the owner's words name it; else on a one-click card.
+        Only ever raises a tier (dv.promote), so what the validator asks a card for stays on its card."""
+        steps = []
+        for step in plan.steps:
+            if step.ok and step.tier == dv.INSTANT and step.targets \
+                    and not dv.names_item(said, dv.item_label(step.targets[0])):
+                step = replace(step, tier=dv.promote(step.tier, dv.ONE_CLICK),
+                               flags=step.flags | {dv.FLAG_TASK_ASKED})
+            steps.append(step)
+        return replace(plan, steps=tuple(steps))
 
     def _open_step(self, ref_id: str, show: bool) -> dict[str, Any] | ToolResult | None:
         parsed = parse_ref(ref_id)
@@ -880,21 +961,43 @@ class OwnerAccess:
             return pcctl.PcAsk(kind, pcctl.ACTIVE_WINDOW if args.get("window") else pcctl.SCREEN)
         return None
 
+    @staticmethod
+    def _pc_wanted(messages: Sequence[str]) -> list[pcctl.PcAsk]:
+        """The PC controls the owner's messages ask for and have not taken back since."""
+        wanted: list[pcctl.PcAsk] = []
+        for number, message in enumerate(messages):
+            if number:
+                gone = dv.taken_back(message)
+                wanted = [asked for asked in wanted if asked.kind not in gone]
+            wanted += _pc_asks(message)
+        return wanted
+
     def pc_control(self, args: Mapping[str, Any], ctx: Any) -> ToolResult:
-        """The existing skills, licensed by the owner's own words as a desktop request's are, with chips and Undo."""
+        """The existing skills, licensed by the owner's own words as a desktop request's are, with chips and Undo. At
+        once only when the local routes' parser reads the same thing in those words (the module docs); a licence with no
+        such words goes on the firewall's card first."""
         refused = self._refused_first(ctx)
         if refused is not None:
             return refused
         kind = args["kind"]
         with self._lock:
             said = self._sync()
-            names = [dv.item_label(ref) for each in (FILE, PLACE, APP, SITE) for ref in self._refs.refs(each)]
-        if kind not in dv.licensed_skills(said, names):
+            names = self._listed_names()
+        messages = self.firewall.messages()
+        asked = self._pc_ask(args)
+        routed = asked is not None and any(_same_ask(asked, wanted) for wanted in self._pc_wanted(messages))
+        if not routed and kind not in dv.licensed_skills(said, names) - dv.withdrawn_skills(messages, names):
             logger.info("Agent %s: a PC control was refused (not licensed)", self.run_id or "-")
             return ToolResult(PC_REFUSED_TEXT, is_error=True, code=dv.INTENT_NOT_LICENSED, note=NOT_ASKED)
-        asked = self._pc_ask(args)
         if asked is None:
             return error(PC_SHAPE_TEXT, "bad_input")
+        if not routed:
+            held = self.firewall.ask_once("pc_control", repr((asked.kind, asked.action, asked.level, asked.step,
+                                                              asked.minutes, asked.label)),
+                                          PC_CARD_TEXT.format(what=desktop_routes.pc_what(asked)))
+            if held is not None:
+                logger.info("Agent %s: a PC control waits on a card", self.run_id or "-")
+                return held
         over = self._take("PC changes", PC_CHANGES_CAP, "changes to the PC")
         if over is not None:
             return over
@@ -919,7 +1022,7 @@ class OwnerAccess:
         """A card's link leaves the PC on its click, so it is under the address rule once the run holds anything
         private: an address this run saw, unchanged."""
         link = getattr(card, "link", "")
-        return bool(link) and (bool(self.firewall.taint) or self.firewall.strict) and not self.firewall.book.seen(link)
+        return bool(link) and (self.firewall.private or self.firewall.strict) and not self.firewall.book.seen(link)
 
     def propose_action(self, args: Mapping[str, Any], ctx: Any) -> ToolResult:
         """Ask's line formats and validators, its cards in Approvals and on the HUD. Not a wait: nothing is sent or done
@@ -953,10 +1056,9 @@ class OwnerAccess:
                               note="no card was made")
         with self._lock:
             self._counts["action cards"] = self._counts.get("action cards", 0) + len(valid)
-        if ctx.cancelled() or not self.things.take_cards(valid):
+            self.card_ids.extend(card.id for card in valid)   # before anything can show: a Stop withdraws them now
+        if ctx.cancelled() or not self.things.take_cards(valid, ctx.cancelled):
             return error(CARD_NOT_SHOWN_TEXT, DESK_GONE)
-        with self._lock:
-            self.card_ids.extend(card.id for card in valid)
         logger.info("Agent %s: %d card(s) wait in Approvals (%d refused)", self.run_id or "-", len(valid), len(reasons))
         text = ACTION_WAIT_TEXT.format(count=_count_of(len(valid), "line is", "lines are"))
         return ToolResult(" ".join([text, *reasons]), code=WAITING, note=f"{_count_of(len(valid), 'card')} waiting")

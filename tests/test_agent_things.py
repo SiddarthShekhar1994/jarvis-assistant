@@ -18,6 +18,7 @@ import unittest
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import Qt
@@ -29,6 +30,7 @@ from briefing_reader.actions import SOURCE_ASK
 from briefing_reader.agent import firewall as fw
 from briefing_reader.agent import owner, policy
 from briefing_reader.agent import runner as ar
+from briefing_reader.config import load_config
 from briefing_reader.conversation import ROLE_YOU, Turn
 from briefing_reader.desktop import cardplan, fileops
 from briefing_reader.desktop import tidy as desktop_tidy
@@ -89,6 +91,13 @@ class Script:
 
 def text_of(result: Any) -> str:
     return FakeEngine.text_of(result)
+
+
+def load_agent(text: str) -> Any:
+    """[agent] as config.toml's ``text`` reads, in a temporary folder."""
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        (Path(tmp) / "config.toml").write_text(text, encoding="utf-8")
+        return load_config(Path(tmp), environ={"LOCALAPPDATA": str(Path(tmp) / "l")}).agent
 
 
 def ref_in(result: Any, name: str) -> str:
@@ -239,7 +248,7 @@ class FirewallThroughToTheCardTests(ThingsApp):
         self.assertIn("End your turn", script.text("asked"))
         self.press_card("choice:0")                                  # Allow, by a click
         self.assertTrue(wait_for(lambda: len(script.told) >= 2 and "other" in script.got, timeout=10), "it went on")
-        self.assertIn("allowed that one web call", script.told[1])
+        self.assertIn("allowed that one call", script.told[1])
         self.assertTrue(self.fake_browser.loads)
         self.assertIn(pages_query.split()[0], self.fake_browser.loads[0])
         card = self.wait_card()
@@ -586,7 +595,7 @@ class OpenThingTests(ThingsApp):
     def test_a_document_opens_at_once_on_the_owners_word(self) -> None:
         script = Script(("find", "files_find", {"words": "Budget"}),
                         ("open", "open_thing", lambda got: {"ref": ref_in(got["find"], "Budget 2026.xlsx")}))
-        self.go(script, goal="open my Budget")
+        self.go(script, goal="open my Budget 2026")
         self.ended()
         self.assertEqual(self.fake.opened_methods(), ["open_document"])
         self.assertIn("It is open", script.text("open"))
@@ -666,7 +675,7 @@ class PcControlTests(ThingsApp):
     def test_a_timers_label_stays_only_in_the_owners_words(self) -> None:
         script = Script(("timer", "pc_control", {"kind": "timer", "minutes": 10, "label": "tea"}),
                         ("other", "pc_control", {"kind": "timer", "minutes": 11, "label": f"{SECRET_WORD} visits"}))
-        self.go(script, goal="set a timer for tea")
+        self.go(script, goal="set a timer for 10 minutes tea")
         self.ended()
         labels = [timer.label for timer in self.desktop.timers.running()]
         self.assertIn("tea", labels)
@@ -902,8 +911,11 @@ class WhatIsOfferedTests(ThingsApp):
             self.assertNotIn(name, allowed)
         self.assertIn("web_search", allowed)
 
-    def test_a_bad_value_is_the_default_and_an_unknown_entry_grants_nothing(self) -> None:
-        self.assertIn("mail_search", self.started_with(agent='private = "mail"\n'))
+    def test_a_value_that_is_not_a_list_grants_nothing(self) -> None:
+        allowed = self.started_with(agent='private = "mail"\n')
+        for name in ("calendar_find", "contacts_find", "memory_read", "conversation_read", "mail_search", "files_find",
+                     "file_read"):
+            self.assertNotIn(name, allowed)
 
     def test_no_consent_no_task_at_all(self) -> None:
         self.make_things(Script(), desktop_consent=2)
@@ -939,8 +951,11 @@ class CanaryTests(ThingsApp):
                         ("search", "mail_search", {"words": SUBJECT_WORD}), ("read", "mail_read",
                                                                              {"thread": THREAD_ID}),
                         ("said", "conversation_read", {}),
+                        ("plan", "update_plan", {"found": f"{CANARY} is the one to read next.",
+                                                 "steps": [{"text": f"Read {CANARY}", "status": "doing"}]}),
                         ("find", "files_find", {"words": CANARY}),
                         ("file", "file_read", lambda got: {"ref": ref_in(got["find"], f"{CANARY}.txt")}),
+                        ("line", "say", {"text": f"I have read {CANARY} now."}),
                         ("refused", "mail_search", {"words": CANARY}),
                         ("todo", "propose_action",
                          {"lines": [f"Todo: title={CANARY} | due=2026-11-06 10:00 | block= | acct= | link="]}),
@@ -964,6 +979,278 @@ class CanaryTests(ThingsApp):
         self.assertIn(CANARY, script.text("file"))
         leaked = [line for line in lines if CANARY in line or CANARY.lower() in line.lower()]
         self.assertEqual(leaked, [])
+
+
+class VoiceGateTests(ThingsApp):
+    """ars-6: a line the model wrote reaches the voice (Microsoft's online service) only if the run holds nothing
+    private, or it has no tainted word and, in a strict run, no foreign word. There is one gate; here is everything that
+    reaches it."""
+
+    GOAL = f"read the {SUBJECT_WORD} mail"
+    CANARY_LINE = f"{BODY_WORD} says the figures are 42."
+    READ = (("search", "mail_search", {"words": SUBJECT_WORD}), ("read", "mail_read", {"thread": THREAD_ID}))
+
+    def play(self, *steps: Any, summary: str = DONE, outcome: str = "done", **harness: Any) -> None:
+        """The steps, then a finish with ``summary``: the caption is recorded along the way."""
+
+        def script(engine: FakeEngine) -> None:
+            engine.wait_message()
+            for _key, name, args in steps:
+                engine.call(name, **args)
+            engine.call("finish", summary=summary, outcome=outcome)
+            engine.end_turn("Done.")
+
+        self.make_things(script, **harness)
+        self.captions: list[str] = []
+        real = self.c.ask.show_note
+        self.c.ask.show_note = lambda text, *args, **kwargs: (self.captions.append(text),
+                                                              real(text, *args, **kwargs))[1]
+        self.start()
+
+    def assert_kept_from_the_voice(self, *words: str) -> None:
+        said = " ".join(self.said())
+        for word in words:
+            self.assertNotIn(word, said)
+            self.assertIn(word, " ".join(self.captions), "it stays on the caption")
+
+    def test_a_say_line_in_a_strict_run(self) -> None:
+        self.play(*self.READ, ("line", "say", {"text": self.CANARY_LINE}))
+        self.ended()
+        self.assert_kept_from_the_voice(BODY_WORD)
+        self.assertNotIn("It's on the card", " ".join(line for line in self.said() if "done" not in line))
+
+    def test_found_in_a_strict_run(self) -> None:
+        self.play(*self.READ, ("plan", "update_plan", {"found": self.CANARY_LINE,
+                                                       "steps": [{"text": "Read it", "status": "doing"}]}))
+        self.ended()
+        self.assert_kept_from_the_voice(BODY_WORD)
+        self.assertEqual([step.text for step in self.feed._steps], ["Read it"])
+
+    def test_a_question_in_a_strict_run(self) -> None:
+        def script(engine: FakeEngine) -> None:
+            engine.wait_message()
+            for _key, name, args in self.READ:
+                engine.call(name, **args)
+            engine.call("ask_owner", question=f"Shall I go on with {BODY_WORD}?", choices=["Yes", "No"])
+            engine.end_turn("Asked.")
+            engine.wait_message()
+            engine.call("finish", summary=DONE, outcome="done")
+            engine.end_turn("Done.")
+
+        self.make_things(script)
+        self.captions = []
+        real = self.c.ask.show_note
+        self.c.ask.show_note = lambda text, *args, **kwargs: (self.captions.append(text),
+                                                              real(text, *args, **kwargs))[1]
+        self.start()
+        card = self.wait_card()
+        self.assertIn(BODY_WORD, card.task().body)
+        self.assert_kept_from_the_voice(BODY_WORD)
+        self.assertIn("I've a question for you, sir. It's on the card.", self.said())
+        self.press_card("choice:0")
+        self.ended()
+
+    def a_report(self, outcome: str, line: str) -> None:
+        self.play(*self.READ, summary=f"{BODY_WORD} says the figures are 42. All of it is here.", outcome=outcome)
+        end = self.ended()
+        self.assert_kept_from_the_voice(BODY_WORD)
+        self.assertIn(line, self.said())
+        self.assertIn(BODY_WORD, end.summary)
+        self.assertIn(BODY_WORD, self.feed.card.task().body)         # the whole report on its card
+
+    def test_a_report_in_a_strict_run(self) -> None:
+        self.a_report("done", "That's done, sir. It's on the card.")
+
+    def test_a_partial_report_in_a_strict_run(self) -> None:
+        self.a_report("partial", "That's partly done, sir. It's on the card.")
+
+    def test_a_failed_report_in_a_strict_run(self) -> None:
+        self.a_report("failed", "That failed, sir. It's on the card.")
+
+    def test_a_line_with_a_tainted_word_in_a_run_that_is_not_strict(self) -> None:
+        calendar = ("calendar", "calendar_find", {"from": "2026-11-05", "to": "2026-11-12"})
+        self.play(calendar, ("line", "say", {"text": f"{SECRET_WORD} is coming to dinner."}))
+        self.ended()
+        self.assert_kept_from_the_voice(SECRET_WORD)
+
+    def test_a_line_with_no_tainted_word_is_said_in_a_run_that_is_not_strict(self) -> None:
+        calendar = ("calendar", "calendar_find", {"from": "2026-11-05", "to": "2026-11-12"})
+        self.play(calendar, ("line", "say", {"text": "Reading three reviews now."}))
+        self.ended()
+        self.assertIn("Reading three reviews now.", self.said())
+
+    def test_a_line_of_common_words_is_said_in_a_strict_run(self) -> None:
+        self.play(*self.READ, ("line", "say", {"text": "That is done."}))
+        self.ended()
+        self.assertIn("That is done.", self.said())
+
+    def test_a_foreign_word_stays_on_the_caption_in_a_strict_run(self) -> None:
+        self.play(*self.READ, ("line", "say", {"text": "Reading three reviews now."}))
+        self.ended()
+        self.assert_kept_from_the_voice("Reading three reviews now.")
+
+    def test_a_clean_run_speaks_as_before(self) -> None:
+        def script(engine: FakeEngine) -> None:
+            engine.wait_message()
+            engine.call("say", text="Reading three reviews now.")
+            engine.call("ask_owner", question="Blue or Red?", choices=["Blue", "Red"])
+            engine.end_turn("Asked.")
+            engine.wait_message()
+            engine.call("finish", summary="Blue is the one. It came first.", outcome="done")
+            engine.end_turn("Done.")
+
+        self.go(script, goal="compare the laptops")
+        self.wait_card()
+        self.press_card("choice:0")
+        self.ended()
+        said = self.said()
+        self.assertIn("Reading three reviews now.", said)
+        self.assertIn("Blue or Red?", said)
+        self.assertIn("Blue is the one. It came first.", said)
+        self.assertNotIn("It's on the card", " ".join(said))
+
+    def test_jarvis_s_own_lines_are_not_gated(self) -> None:
+        def script(engine: FakeEngine) -> None:
+            engine.wait_message()
+            for _key, name, args in self.READ:
+                engine.call(name, **args)
+            engine.end_turn("Stopping.")
+            engine.wait_message()
+            engine.end_turn("Still stopping.")
+
+        self.go(script)
+        end = self.ended()
+        self.assertEqual(end.code, ar.C_NO_FINISH)
+        self.assertEqual(self.said().count(end.summary), 1)
+
+    def test_the_firewall_s_card_is_never_said(self) -> None:
+        script = Script(*self.READ, ("web", "web_search", {"query": f"{BODY_WORD} prices"}), ("wait",))
+        self.go(script)
+        card = self.wait_card()
+        self.assertNotIn(BODY_WORD, " ".join(self.said()))
+        self.assertIn(BODY_WORD, card.task().body)
+        self.press_card("choice:1")
+        self.ended()
+
+    def test_speak_private_true_skips_the_gate(self) -> None:
+        self.play(*self.READ, ("line", "say", {"text": self.CANARY_LINE}), agent="speak_private = true\n")
+        self.ended()
+        self.assertIn(self.CANARY_LINE, self.said())
+
+    def test_speak_private_is_off_by_default_and_a_bad_value_means_off(self) -> None:
+        self.assertFalse(load_agent("").speak_private)
+        self.assertTrue(load_agent("[agent]\nspeak_private = true\n").speak_private)
+        with self.assertLogs("briefing_reader.config", "WARNING") as logs:
+            self.assertFalse(load_agent('[agent]\nspeak_private = "yes"\n').speak_private)
+        self.assertIn("agent.speak_private", "\n".join(logs.output))
+
+    def test_with_no_run_nothing_of_the_model_s_is_said(self) -> None:
+        self.make_things(Script())
+        self.assertEqual(self.c.agent.spoken("Any line."), "")
+        self.assertEqual(self.c.agent.spoken_question("Any question?"),
+                         "I've a question for you, sir. It's on the card.")
+
+
+class ALetterBehindTheStopTests(ThingsApp):
+    """ars-9: a Stop between the tool's check and the hop to the GUI thread: no live card after the task ended."""
+
+    def stop_on_the_way(self, name: str) -> None:
+        """The Stop runs on the GUI thread just before ``name``'s own hop, after the tool's check, as when the tool's
+        thread lost the race. (That one hop: any earlier one would stop the run before it had a card to show.)"""
+        things = self.c.agent._things
+        real = getattr(things, name)
+        stopped: list[bool] = []
+
+        def hop(*args: Any, **kwargs: Any) -> Any:
+            things._hop.run(lambda: self.c.agent.stop("stop"))
+            stopped.append(True)
+            return real(*args, **kwargs)
+
+        setattr(things, name, hop)
+        self.addCleanup(lambda: self.assertEqual(stopped, [True], "the Stop came on the way to that hop"))
+
+    def test_a_card_of_file_steps_never_shows(self) -> None:
+        script = Script(("list", "files_list", {"place": "Downloads"}),
+                        ("bin", "propose_files", lambda got: {"steps": [
+                            {"skill": "recycle_files", "files": [ref_in(got["list"], "letter.txt")]}]}),
+                        ("hold",))
+        self.make_things(script)
+        self.stop_on_the_way("show_run")
+        self.start("delete my letter from Downloads")
+        script.gate.set()
+        self.assertEqual(self.ended().outcome, ar.OUTCOME_STOPPED)
+        settle()
+        self.assertIsNone(self.desktop.tidy())
+        self.assertIsNone(self.desktop.results.tidy())
+        self.assertFalse(self.feed.waits())
+        self.assertTrue(self.on_disk(LETTER))
+
+    def test_an_open_s_card_never_shows(self) -> None:
+        script = Script(("find", "files_find", {"words": "Budget"}),
+                        ("open", "open_thing", lambda got: {"ref": ref_in(got["find"], "Budget 2026.xlsx")}), ("hold",))
+        self.make_things(script)
+        self.stop_on_the_way("show_run")
+        self.start("find Budget for me")
+        script.gate.set()
+        self.assertEqual(self.ended().outcome, ar.OUTCOME_STOPPED)
+        settle()
+        self.assertEqual(self.desktop.results.entries(), [])
+        self.assertEqual(self.fake.opened, [])
+
+    def test_ask_cards_never_show(self) -> None:
+        line = "Todo: title=Thing | due=2026-11-06 10:00 | block= | acct= | link="
+        script = Script(("todo", "propose_action", {"lines": [line]}), ("hold",))
+        self.make_things(script)
+        self.stop_on_the_way("take_cards")
+        self.start()
+        script.gate.set()
+        self.assertEqual(self.ended().outcome, ar.OUTCOME_STOPPED)
+        settle()
+        self.assertEqual(self.ask_cards(), [])
+
+    def test_a_card_that_showed_first_goes_with_the_stop(self) -> None:
+        line = "Todo: title=Thing | due=2026-11-06 10:00 | block= | acct= | link="
+        script = Script(("todo", "propose_action", {"lines": [line]}), ("hold",))
+        self.go(script)
+        self.assertTrue(wait_for(lambda: bool(self.ask_cards()), timeout=10), "its card shows")
+        self.c.agent.stop("stop")
+        script.gate.set()
+        self.ended()
+        self.assertEqual(self.ask_cards(), [])
+
+
+class NotKeptOnThisPcTests(ThingsApp):
+    """ars-10 (D11): a report and a question may quote a mail or a file: on screen, never in conversation.json."""
+
+    def test_a_question_and_a_report_stay_on_screen_only(self) -> None:
+        def script(engine: FakeEngine) -> None:
+            engine.wait_message()
+            engine.call("ask_owner", question="QuestionCanary shall I go on?", choices=["Yes", "No"])
+            engine.end_turn("Asked.")
+            engine.wait_message()
+            engine.call("finish", summary="ReportCanary: the mail says the PIN is 4821.", outcome="done")
+            engine.end_turn("Done.")
+
+        self.go(script, goal="compare the laptops")
+        self.wait_card()
+        self.press_card("choice:0")
+        self.ended()
+        settle()
+        talk = self.talk()
+        self.assertIn("QuestionCanary", talk)
+        self.assertIn("ReportCanary", talk)
+        kept = " ".join(turn.text for turn in self.c._conversation_turns())
+        self.assertNotIn("QuestionCanary", kept)
+        self.assertNotIn("ReportCanary", kept)
+
+    def test_jarvis_s_own_words_for_how_it_ended_are_kept(self) -> None:
+        self.go(lambda engine: (engine.wait_message(), engine.end_turn("One."),
+                                engine.wait_message(), engine.end_turn("Two.")),
+                goal="compare the laptops")
+        end = self.ended()
+        settle()
+        self.assertTrue(end.own_words)
+        self.assertIn(end.summary, " ".join(turn.text for turn in self.c._conversation_turns()))
 
 
 class LiveTests(ThingsApp):

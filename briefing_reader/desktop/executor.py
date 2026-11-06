@@ -596,6 +596,7 @@ _CARD_NOUNS = {dv.MOVE_FILES: "moving the files", dv.COPY_FILES: "copying the fi
 WAITING_NOUNS = ((dv.FLAG_SCRIPT, "a file that can run macros or scripts"), (dv.FLAG_SHORTCUT, "a shortcut"),
                  (dv.FLAG_HIDDEN_CHARS, "a file with hidden characters in its name"),
                  (dv.FLAG_NOT_NAMED, "an app you didn't name exactly"),
+                 (dv.FLAG_TASK_ASKED, "something your words didn't name"),
                  (dv.FLAG_SUGGESTED, "a web page you didn't type"),
                  (dv.FLAG_BARE_HOST, "a web page"))
 

@@ -565,9 +565,10 @@ class OfferedTests(unittest.TestCase):
         self.assertEqual(parse({}).private, app_config.AGENT_PRIVATE)
         self.assertEqual(parse({"agent": {"private": ["mail", " Calendar "]}}).private, ("calendar", "mail"))
         self.assertEqual(parse({"agent": {"private": []}}).private, ())
-        with self.assertLogs("briefing_reader.config", "WARNING") as told:
-            self.assertEqual(parse({"agent": {"private": "mail"}}).private, app_config.AGENT_PRIVATE)
-        self.assertNotIn("mail", told.output[0].split("private")[0])
+        for value in ("mail", "calendar", "none", "", False, 0, {"a": 1}):     # present and not a list: nothing
+            with self.subTest(value=value), self.assertLogs("briefing_reader.config", "WARNING") as told:
+                self.assertEqual(parse({"agent": {"private": value}}).private, ())
+                self.assertIn("grants nothing", told.output[0])
         with self.assertLogs("briefing_reader.config", "WARNING"):
             self.assertEqual(parse({"agent": {"private": ["mail", "photos", 3]}}).private, ("mail",))
 
