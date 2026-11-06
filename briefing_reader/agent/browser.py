@@ -520,6 +520,7 @@ class AgentBrowser(PageCamera):
         self._status_address = ""          # ... and the address that answered it
         self._owner_hid = False            # the strip's Hide: off the screen until the panel's Show
         self._away = False                 # the owner brought the Jarvis window back: off the screen meanwhile
+        self._rest = False                 # a file card waits: off the screen meanwhile (agent_feed)
         self._showable = False             # it has been shown, or would have been: it may come back
         self._tag = READING_TAG
         self._owner_view = False           # a task's file the owner asked to see: the wheel scrolls it
@@ -599,7 +600,7 @@ class AgentBrowser(PageCamera):
         this window - back on the screen - where the wheel scrolls it. Never the owner's browser or a default app."""
         self._owner_view = True
         self._tag = SHOWING_TAG
-        self._owner_hid = self._away = False
+        self._owner_hid = self._away = self._rest = False
         self.load_file(name, folder, snapshots.TIMEOUT_S, done or (lambda _result: None))
 
     def set_hidden(self, *, owner: bool | None = None, away: bool | None = None) -> None:
@@ -609,17 +610,25 @@ class AgentBrowser(PageCamera):
             self._owner_hid = bool(owner)
         if away is not None:
             self._away = bool(away)
+        self._follow_held()
+
+    def set_resting(self, resting: bool) -> None:
+        """Off the screen while a file card waits, or back on it (the owner's own Hide still holds then)."""
+        self._rest = bool(resting)
+        self._follow_held()
+
+    def _follow_held(self) -> None:
         window = self._window
         if window is None:
             return
-        if self._owner_hid or self._away:
+        if self.is_held():
             if window.isVisible():
                 _quietly(window.hide)
         elif self._showable and not window.isVisible():
             self._show_window(window)
 
     def is_held(self) -> bool:
-        return self._owner_hid or self._away
+        return self._owner_hid or self._away or self._rest
 
     def other_way(self, host: str, reading: bool) -> None:
         """fetch_text starts or ends: the strip says this page is being read another way, not shown here."""
@@ -966,7 +975,8 @@ class AgentBrowser(PageCamera):
                 self._settle.start(self._settle_ms)   # a redirect by script: the page it leads to is the one to read
                 return
             view = self._view
-            if not final and shot.tries < snapshots.BLANK_RETRIES and view is not None \
+            # (A view off the screen grabs blank every time, and its text is what is read: no second for a picture.)
+            if not final and shot.tries < snapshots.BLANK_RETRIES and view is not None and not self.is_held() \
                     and snapshot_engine._uniform(view.grab().toImage()):
                 shot.tries += 1            # nothing drawn yet: a moment more, as the camera gives one
                 self._settle.start(self._retry_ms)
@@ -1096,6 +1106,7 @@ class BrowserClient(QObject):
         self._ended = threading.Event()
         self._owner_hid = False
         self._away = False
+        self._rest = False
         self._post.connect(self._run, Qt.ConnectionType.QueuedConnection)
         self._drop.connect(self._dropped, Qt.ConnectionType.QueuedConnection)
         self._note.connect(self._on_note, Qt.ConnectionType.QueuedConnection)
@@ -1179,6 +1190,9 @@ class BrowserClient(QObject):
             hidden = getattr(self._browser, "set_hidden", None)
             if callable(hidden):
                 hidden(owner=self._owner_hid, away=self._away)
+            resting = getattr(self._browser, "set_resting", None)
+            if callable(resting):
+                resting(self._rest)
         return self._browser
 
     def _on_hide_asked(self) -> None:
@@ -1198,8 +1212,23 @@ class BrowserClient(QObject):
         if self._browser is not None:
             self._browser.set_hidden(owner=owner, away=away)
 
+    def set_resting(self, resting: bool) -> None:
+        """AgentBrowser.set_resting; it holds for the window yet to come too."""
+        self._rest = bool(resting)
+        if self._browser is not None:
+            self._browser.set_resting(self._rest)
+
+    def _has_window(self) -> bool:
+        return self._browser is not None and self._browser.window() is not None
+
+    def resting(self) -> bool:
+        """A window that is there is off the screen for a file card."""
+        return self._rest and self._has_window()
+
     def owner_hid(self) -> bool:
-        return self._owner_hid
+        """The owner's Hide holds: while the run goes on (for the window yet to come too), and after it for as long as
+        there is a window to bring back: a hidden window goes with the run's end, and Show would bring nothing."""
+        return self._owner_hid and (not self._ended.is_set() or self._has_window())
 
     def window_rect(self) -> QRect | None:
         """Where the window is, while it shows."""
@@ -1212,7 +1241,7 @@ class BrowserClient(QObject):
 
     def show_for_owner(self, name: str, folder: TaskFolder, done: Callable[[Any], None] | None = None) -> None:
         """The owner's Show on the result card, after the run (GUI thread): AgentBrowser.show_for_owner."""
-        self._owner_hid = self._away = False
+        self._owner_hid = self._away = self._rest = False
         self._ensure().show_for_owner(name, folder, done)
 
     def _run(self, job: _Job) -> None:

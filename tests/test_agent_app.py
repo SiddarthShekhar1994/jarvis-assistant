@@ -553,8 +553,8 @@ class OneTaskAtATimeTests(AgentApp):
         self.assertTrue(wait_for(lambda: "First line." in self.said() or self.c.agent.running, timeout=10))
         self.started_task()
         run = self.c.agent.run()
-        self.c.agent.stop("test")
-        run._emit(ar.AgentEvent(ar.E_SAY, text="A late line."))     # as if it were still on its way
+        run._emit(ar.AgentEvent(ar.E_SAY, text="A late line."))     # queued for this thread just before the Stop ...
+        self.c.agent.stop("test")                                   # ... which no event has been let through ahead of
         self.ended()
         self.assertNotIn("A late line.", self.said())
 
@@ -641,7 +641,7 @@ class LimitInTheAppTests(AgentApp):
         self.type_it(TYPED)
         self.assertTrue(wait_for(lambda: noticed, timeout=10))
         text, tone = noticed[0]
-        self.assertEqual(tone, hud.TONE_WARN)
+        self.assertEqual(tone, hud.TONE_ERROR)                       # no decision waits: no amber; coral, as a limit is
         self.assertIn("limit is reached, sir", text)
         self.assertIn("I've paused this task", text)
         self.assertIn(text, self.said())
@@ -672,16 +672,16 @@ class RefusalsInTheAppTests(AgentApp):
         self.assertTrue(self.c.agent.offered())
         self.type_it(TYPED)
         self.ended()
-        self.assertFalse(self.c.agent.offered())
+        self.assertTrue(self.c.agent.offered())                     # only the count stops it: start() says so, in words
         noticed: list[str] = []
         self.c.agent.noticed.connect(lambda text, _tone: noticed.append(text))
         self.assertFalse(self.c.agent.start("again"))
         self.assertEqual(noticed, ["That's the most tasks for one day (1), sir; nothing was started."])
         self.type_it("another request")
         self.assertTrue(wait_for(lambda: len(self.runs()) == 3, timeout=10))
-        third = self.runs()[2].argv                                 # the router is not offered it now
-        self.assertNotIn("agent_task", third[third.index("--json-schema") + 1])
-        self.assertEqual(third[third.index("--system-prompt-file") + 1], str(cli.PROMPT_FILE))
+        third = self.runs()[2].argv                                 # the router still may hand over (test_agent_waits)
+        self.assertIn("agent_task", third[third.index("--json-schema") + 1])
+        self.assertEqual(third[third.index("--system-prompt-file") + 1], str(cli.PROMPT_FILE_AGENT))
 
     def test_a_workspace_under_onedrive_is_refused_in_plain_words(self) -> None:
         self.make_agent()
@@ -716,16 +716,18 @@ class RefusalsInTheAppTests(AgentApp):
         self.assertTrue(blocked.engine.killed)
         self.assertEqual(self.ended().outcome, ar.OUTCOME_STOPPED)
 
-    def test_a_claude_code_without_what_a_task_needs_is_not_offered_it(self) -> None:
+    def test_a_claude_code_without_what_a_task_needs_hears_why_it_can_t(self) -> None:
         self.make_agent()
         base = self.c.agent._engine.base
         real = base.readiness()
         with mock.patch.object(base, "readiness", return_value=mock.Mock(ok=True, agent_missing=("--restricted",))):
-            self.assertFalse(self.c.agent.offered())
+            self.assertTrue(self.c.agent.offered())                 # the planner can run: start() says why not, in words
+            self.assertIn("too old for tasks", self.c.agent.refusal())
         with mock.patch.object(base, "readiness", return_value=mock.Mock(ok=False, agent_missing=())):
             self.assertFalse(self.c.agent.offered())
         self.assertTrue(real.ok)
         self.assertTrue(self.c.agent.offered())
+        self.assertEqual(self.c.agent.refusal(), "")
 
     def test_a_broken_gate_check_is_not_offered(self) -> None:
         self.make_agent()

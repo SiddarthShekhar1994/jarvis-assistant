@@ -906,10 +906,11 @@ def main(case: str) -> dict[str, Any]:
         client.hideAsked.connect(lambda: asked_hide.append(True))
         window.hide_button.click()
         pump(0.1)
-        report["hidden"] = {"visible": window.isVisible(), "asked": asked_hide, "owner": client.owner_hid()}
+        report["hidden"] = {"visible": window.isVisible(), "asked": list(asked_hide), "owner": client.owner_hid()}
         second, _took = in_thread(lambda: tool(context, "open_page", url="https://www.example.org/second"))
         report["second"] = describe(second)
         report["second_visible"] = window.isVisible()
+        report["second_tries"] = browser._shot.tries     # off the screen a view grabs blank: no second spent on a picture
         look, _took = in_thread(lambda: tool(context, "look_at_page"))
         report["look_hidden"] = describe(look)
         client.set_hidden(owner=False)
@@ -936,6 +937,25 @@ def main(case: str) -> dict[str, Any]:
         report["after_other_way_tag"] = window.strip_texts()[0]
         report["focus_kept"] = QApplication.focusWidget() is other or QApplication.focusWidget() is None
         report["took_focus"] = window.isActiveWindow()
+        # A file card's rest: off the screen, back at its end; the owner's Hide still holds after it.
+        client.set_resting(True)
+        pump(0.1)
+        report["resting"] = {"visible": window.isVisible(), "says": client.resting()}
+        client.set_resting(False)
+        pump(0.2)
+        report["rest_over"] = {"visible": window.isVisible(), "says": client.resting()}
+        window.hide_button.click()
+        pump(0.1)
+        client.set_resting(True)
+        pump(0.05)
+        client.set_resting(False)
+        pump(0.2)
+        report["hide_holds_visible"] = window.isVisible()
+        # Hidden as the run ends, the window goes with it: no Show is offered for a window that is not there.
+        report["hidden_at_the_end"] = client.owner_hid()
+        client.end_run(linger=True, hold=True)
+        pump(0.1)
+        report["hidden_end"] = {"owner": client.owner_hid(), "window": client.browser().window() is not None}
         other.hide()
         client.shutdown()
     elif case == "owner_show":
@@ -1121,6 +1141,7 @@ def feed_task(pages: dict[str, Any], html_for: Any, root: Path, wait_until: Any,
 
     class Desktop(QObject):
         hudChanged = Signal(bool)
+        hudLanded = Signal()
         waits = 0
         revealed: list[str] = []
 

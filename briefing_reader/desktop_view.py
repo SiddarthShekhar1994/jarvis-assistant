@@ -403,7 +403,7 @@ class WaitingRow(QWidget):
         super().__init__(parent)
         self.setObjectName("DesktopWaitingRow")
         self._count = 0
-        self.label = body_label(WAITING_TEXT, "body_sm", holo.AMBER_TX)
+        self.label = body_label(WAITING_TEXT, "body_sm", holo.AMBER_TX, wrap=False)
         self.dot = body_label("\u00b7", "body_sm", holo.AMBER_TX2)
         self.show_me = holo.HoloButton(SHOW_ME_TEXT, holo.LINK, size=holo.SIZE_SM)
         self.show_me.setAccessibleName(SHOW_ME_TEXT + ": " + WAITING_TEXT)

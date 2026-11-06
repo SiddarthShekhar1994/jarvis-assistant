@@ -1,9 +1,10 @@
 """The conversation Jarvis keeps on this PC for a day: ``%LOCALAPPDATA%\\briefing-reader\\conversation.json``.
 
-    Turn(role, text, at, tone="", context=True)   one entry as the window showed it: who said it (ROLE_YOU,
-                                    the owner's request as typed; ROLE_JARVIS, Jarvis's words), when (aware),
+    Turn(role, text, at, tone="", context=True, note=False)   one entry as the window showed it: who said it
+                                    (ROLE_YOU, the owner's request as typed; ROLE_JARVIS, Jarvis's words), when (aware),
                                     its text, the tone it was shown in and whether Ask may be given it
-                                    (False: a web research's request or answer, kept on screen only)
+                                    (False: a web research's request or answer, kept on screen only). ``note``: a line
+                                    of Jarvis's own for Ask's <conversation> alone, never shown (how a task ended)
     recent(turns, now)              the turns of the last KEEP (24 hours), the newest MAX_TURNS, in order
     ConversationStore(path, *, clock=None)
         turns()                     what the file held when it was read: the last 24 hours, at most
@@ -67,6 +68,7 @@ class Turn:
     at: datetime        # aware
     tone: str = ""      # hud.TONE_* ("" for the window's default)
     context: bool = True    # given to Ask as <conversation> (False: a web research's exchange, never)
+    note: bool = False      # for Ask only: the window never shows it
 
     def __repr__(self) -> str:   # never the text
         return f"Turn({self.role}, {len(self.text)} chars)"
@@ -96,7 +98,7 @@ def _turn_from(item: Any) -> Turn | None:
     context = item.get("context", True)
     if role not in ROLES or not isinstance(text, str) or not text.strip() or not isinstance(at, str):
         return None
-    if not isinstance(context, bool):
+    if not isinstance(context, bool) or not isinstance(item.get("note", False), bool):
         return None
     if not isinstance(tone, str) or (tone and not _TONE_RE.fullmatch(tone)):
         return None
@@ -106,7 +108,7 @@ def _turn_from(item: Any) -> Turn | None:
         return None
     if moment.utcoffset() is None:
         return None
-    return Turn(role, _cut(text), moment, tone, context)
+    return Turn(role, _cut(text), moment, tone, context, item.get("note", False))
 
 
 def _parse(raw: bytes) -> list[Turn]:
@@ -125,6 +127,8 @@ def _serialize(turns: Sequence[Turn]) -> str:
                                "at": turn.at.isoformat(timespec="seconds"), "tone": turn.tone}
         if not turn.context:
             row["context"] = False        # a web research's exchange: shown again, never given to Ask
+        if turn.note:
+            row["note"] = True            # never shown again: for Ask only
         rows.append(row)
     return json.dumps({"version": FILE_VERSION, "turns": rows}, ensure_ascii=True, indent=1) + "\n"
 

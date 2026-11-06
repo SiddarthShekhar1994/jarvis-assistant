@@ -835,6 +835,10 @@ class AskController(QObject):
             return
         self._status(text, tone, hud_text=hud_text)
 
+    def forget_task_meta(self) -> None:
+        """The task the last request was handed to did not start (agent_ui): its meta line says nothing of one."""
+        self._show_meta()
+
     def cancel(self) -> None:
         running = self._running
         if running is None or running.cancel_requested:

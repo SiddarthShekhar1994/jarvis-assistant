@@ -5,8 +5,8 @@ and Home's chip. Qt, GUI thread; made by the app only while [agent] is on (off: 
         A task moves to the HUD as a desktop request does. While it runs: the panel under the bar, with its header, its
         rows and Jarvis's own activity line, moving even when the model does not update its plan; Stop on it, and Show
         when the owner hid the watch window. If the owner brings the Jarvis window back, the task carries on: the panel
-        and the watch window hide, Home shows "Working - 3 of 6" (click: Live) with a Stop, and the HUD key brings them
-        back.
+        and the watch window hide, Home shows "Working - 3 of 6" (click: Live; while a card waits "Waiting for you", click:
+        the HUD, where the card is) with a Stop, and the HUD key brings them back.
     spoken_summary(summary)  the first sentence or two of a report, at most about 200 characters: only that is said
     aloud activity words come from agent.tools.doing_words: hosts only, on screen only, never logged, never spoken
 
@@ -17,10 +17,14 @@ The cards (hud_overlay.TaskCard, one at a time, amber while it waits, counted in
 * the firewall's: the exact words or address, Don't and Allow. Keep going, and its plan-limit twin. These are click
 only:
   they take no keyboard, the bar's words never reach them (agent.runner), a click passes the app's guards and a card
-  that has only just appeared does not take one yet.
+  that has only just appeared - or has just come up with the HUD - does not take one yet. Words typed at one are told
+  it needs a click, and how to reach it (``clickNeeded``), and so is a card asked for while the HUD is away.
 * one that times out goes, with words saying so.
 * a card of file steps (propose_files) is the desktop's own, with its own guards, journal and Undo: here the panel only
-  says WAITING, in amber, until its end. It counts in "N need your OK" as it always does.
+  says WAITING, in amber, until the owner's click starts its batch, and then that it is at work, until its end. It counts
+  in "N need your OK" as it always does. On no screen does that card have the room with the watch window beside the
+  panel, and the task is resting anyway, so the window is off the screen until the card's end; the panel's Show brings
+  it back at once, and the owner's own Hide still holds after.
 
 The result card: the outcome, the steps and the time in its kicker, the whole report (scrolling), the outputs with Show
 (in the sealed watch window: agent_ui.show_output) and Folder (the guarded backend's way of showing a file in Explorer:
@@ -49,8 +53,10 @@ from . import orb as orb_mod
 from .agent import firewall as agent_firewall
 from .agent import runner as agent_runner
 from .agent.tools import OUTCOME_DONE, OUTCOME_FAILED, OUTCOME_PARTIAL, STEP_DOING, STEP_DONE, STEP_FAILED
+from .hotkey import describe_combo
 from .hud_overlay import CardButton, PanelContent, PlanRow, TaskContent, TaskRow
 from .persona import sentences, with_address
+from .settings_view import effective_hud_key
 
 logger = logging.getLogger(__name__)
 
@@ -61,11 +67,13 @@ END_TONES = {OUTCOME_DONE: hud_overlay.TONE_DONE, OUTCOME_PARTIAL: hud_overlay.T
              OUTCOME_FAILED: hud_overlay.TONE_CORAL, agent_runner.OUTCOME_STOPPED: hud_overlay.TONE_CORAL}
 CHIP_WORKING = "Working"
 CHIP_COUNT = "Working - {step} of {steps}"
+CHIP_WAITING = "Waiting for you"
 CHIP_ENDED = {OUTCOME_DONE: "Task done", OUTCOME_PARTIAL: "Task partly done", OUTCOME_FAILED: "Task failed",
               agent_runner.OUTCOME_STOPPED: "Task stopped"}
 STARTING_ACTIVITY = "Working out the steps"
 THINKING_ACTIVITY = "Thinking it over"
 WAITING_ACTIVITY = "Waiting for you"
+AT_WORK_ACTIVITY = "Carrying out the card's steps"
 ENDED_ACTIVITY = "Finished"
 STOPPED_ACTIVITY = "Stopped"
 QUESTION_KICKER = "A question for you"
@@ -81,6 +89,19 @@ EXPIRED_WORDS = {agent_runner.Q_TASK: "No answer came, so that question went, {s
                  agent_runner.Q_RESUME: "No answer came, so the task stops here, {sir}.",
                  agent_runner.Q_WEB: "No answer came, so Jarvis left that out, {sir}. The task goes on.",
                  agent_runner.Q_CARD: "No answer came, so nothing was changed, {sir}. The task goes on."}
+# Words came while only a click can answer: what came of them, and that the click is what counts.
+_NO_CLICK_WORDS = "Only a click answers that card, {sir}, and none came, so the task stops here."
+EXPIRED_TYPED_WORDS = {agent_runner.Q_KEEP_GOING: _NO_CLICK_WORDS, agent_runner.Q_RESUME: _NO_CLICK_WORDS,
+                       agent_runner.Q_WEB: "Only a click allows that, {sir}, and none came, so Jarvis left it out. "
+                                           "The task goes on.",
+                       agent_runner.Q_CARD: "Only a click carries that out, {sir}, and none came, so nothing was changed. "
+                                            "The task goes on."}
+# (One sentence, of about 85 characters at most: all the window's status line and Home's caption show at once.)
+CLICK_LEADS = {"sent": "Passed on, {sir}, but", "held": "Held for now, {sir}, but"}
+CLICK_ON_THE_HUD = "only a click answers that card."
+CLICK_IN_THE_WINDOW = "that card needs a click: {reach}"
+REACH_WORDS = "Show me in Approvals, or {key}."
+REACH_NO_KEY_WORDS = "Show me in Approvals."
 NOT_SHOWN_TEXT = "That file couldn't be shown in the window, {sir}."
 SPOKEN_CAP = 200
 QUIET_MS = 4000                 # no tool at work for this long: "Thinking it over"
@@ -183,10 +204,13 @@ class TaskFeed(QObject):
         agent.questionAsked.connect(self._on_question)
         agent.questionGone.connect(self._on_question_gone)
         agent.questionExpired.connect(self._on_question_expired)
+        agent.clickNeeded.connect(self._on_click_needed)
+        agent.cardAtWork.connect(self._on_card_at_work)
         agent.taskEnded.connect(self._on_ended)
         agent.windowHidden.connect(self._on_window_hidden)
         agent.windowPlaced.connect(self._place)
         desktop.hudChanged.connect(self._on_hud_changed)
+        desktop.hudLanded.connect(self._on_hud_landed)
         self.overlay.hud.shapeChanged.connect(self._on_hud_shape)
         reading.taskChipClicked.connect(self._on_chip)
         reading.taskStopClicked.connect(self._on_stop)
@@ -335,10 +359,30 @@ class TaskFeed(QObject):
         if entered:
             self._render()
 
+    def _on_hud_landed(self) -> None:
+        """The HUD's windows have just shown (the instant swap, or with the default motion well after ``hudChanged``): the
+        card that comes up with them has only just appeared, so it gets the same guard as one that appears on the HUD; and
+        the watch window, placed while they were still on their way, keeps clear."""
+        if self._shut or not self.active():
+            return
+        if self.card is not None:
+            self._card_at = self._clock()
+        self.agent.keep_window_clear()
+        self._place()
+
+    def reach_words(self) -> str:
+        """How to reach a card while the HUD is away ("" on the HUD: it is there)."""
+        if self.desktop.is_hud():
+            return ""
+        key = effective_hud_key(self.agent.config)
+        return REACH_WORDS.format(key=describe_combo(key)) if key else REACH_NO_KEY_WORDS
+
     def _sync_chip(self) -> None:
         """Home's chip while the HUD is away: what the task is at, and its Stop; after its end, how it ended."""
         if self._ended is not None:
             text = CHIP_ENDED.get(self._ended.outcome, CHIP_ENDED[OUTCOME_PARTIAL])
+        elif self._waiting:
+            text = CHIP_WAITING
         elif self._running:
             step, count = plan_counts(self._steps)
             text = CHIP_COUNT.format(step=step, steps=count) if count else CHIP_WORKING
@@ -347,8 +391,10 @@ class TaskFeed(QObject):
         self.reading.set_task_chip(text, can_stop=self._running)
 
     def _on_chip(self) -> None:
-        """Working: Live, with this task in view; ended: onto the HUD, where its result card waits."""
-        if self._running:
+        """Working: Live, with this task in view; waiting, or ended: onto the HUD, where its card is."""
+        if self._waiting:
+            self.desktop.enter_hud()
+        elif self._running:
             task = self.agent.live_task_id()
             if task:
                 self._reveal_live(f"live:{task}")
@@ -407,6 +453,9 @@ class TaskFeed(QObject):
         if question.kind != agent_runner.Q_CARD:           # its card is the desktop's, which counts itself
             self.desktop.set_task_waiting(1)
             self._new_card(self._question_content(question))
+        else:
+            self.agent.set_window_resting(True)            # (the module docs)
+        self._sync_chip()
         self._render()
         logger.info("Task feed: a card waits (%s)", question.kind)
 
@@ -435,6 +484,7 @@ class TaskFeed(QObject):
         self._settle_question()
 
     def _settle_question(self) -> None:
+        self._end_rest()
         self._question = None
         self._waiting = False
         self.desktop.set_task_waiting(0)
@@ -443,13 +493,42 @@ class TaskFeed(QObject):
         if self._running:
             self.reading.set_task_look(orb_mod.THINKING)
             self._activity = THINKING_ACTIVITY
+            self._sync_chip()
             self._render()
 
+    def _end_rest(self) -> None:
+        """A file card's wait is over: the watch window that rested comes back (the owner's own Hide still holds)."""
+        if self._question is not None and self._question.kind == agent_runner.Q_CARD:
+            self.agent.set_window_resting(False)
+
     def _on_question_expired(self, question: Any) -> None:
-        """A card that timed out goes, with words saying so. Not said aloud: the owner may be anywhere."""
-        words = EXPIRED_WORDS.get(getattr(question, "kind", ""), EXPIRED_WORDS[agent_runner.Q_TASK])
-        logger.info("Task feed: a card timed out (%s)", getattr(question, "kind", ""))
-        self._words(with_address(words, self._address), hud.TONE_IDLE, speak=False)
+        """A card that timed out goes, with words saying so: what came of it, and when words were typed at it that only a
+        click counts. Not said aloud: the owner may be anywhere. Not in the idle tone: the HUD's caption shows none."""
+        kind = getattr(question, "kind", "")
+        words = EXPIRED_TYPED_WORDS.get(kind) if getattr(question, "typed", False) else None
+        words = words or EXPIRED_WORDS.get(kind, EXPIRED_WORDS[agent_runner.Q_TASK])
+        logger.info("Task feed: a card timed out (%s)", kind)
+        self._words(with_address(words, self._address), hud.TONE_DONE, speak=False)
+
+    def _on_click_needed(self, status: str) -> None:
+        """Words came while only a click can answer: the bar says what came of them, that the click is what counts, and
+        how to reach the card. Shown, not said, as an acknowledgement is. In amber: a decision waits."""
+        lead = with_address(CLICK_LEADS.get(status, CLICK_LEADS["sent"]), self._address)
+        reach = self.reach_words()
+        rest = CLICK_IN_THE_WINDOW.format(reach=reach) if reach else CLICK_ON_THE_HUD
+        self._words(f"{lead} {rest}", hud.TONE_WARN, speak=False)
+
+    def _on_card_at_work(self, working: bool) -> None:
+        """The owner's click started a file card's batch: no decision waits while it works (False: it ran nothing, and the
+        card waits on). Its end settles the rest, the window's rest with it."""
+        if not self._running or self._question is None:
+            return
+        self._waiting = not working
+        self._quiet.stop()
+        self._activity = AT_WORK_ACTIVITY if working else WAITING_ACTIVITY
+        self.reading.set_task_look(orb_mod.THINKING if working else orb_mod.NEEDS)
+        self._sync_chip()
+        self._render()
 
     def _on_card_click(self, key: str) -> None:
         if key.startswith(CHOICE_KEY):
@@ -500,6 +579,7 @@ class TaskFeed(QObject):
         self._running = False
         self._tick.stop()
         self._quiet.stop()
+        self._end_rest()
         self._waiting = False
         self._question = None
         self.desktop.set_task_waiting(0)

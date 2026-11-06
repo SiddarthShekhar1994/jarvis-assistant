@@ -145,8 +145,11 @@ hook). It keeps the owner's rules:
 * A task's way in (Jarvis, a true agent, part A4; agent.owner through agent_ui.AppThings, only while [agent] is on):
   ``task_job`` gives the desktop thread a task's reads and carry-outs, with THE CONSENT GATE as ever; ``task_show`` shows
   what they came to as a request's cards, with the same click guards, journal and Undo, and a click right after one comes
-  up is ignored (a task's card can come at any moment, under the pointer); ``tidyEnded`` tells how a card of file steps
-  ended; ``withdraw_task`` takes back what a stopped task left undecided.
+  up is ignored (a task's card can come at any moment, under the pointer); ``tidyAtWork`` tells when the owner's click
+  starts a card of file steps' batch and ``tidyEnded`` how it ended; ``withdraw_task`` takes back what a stopped task left
+  undecided. A card that waits for the owner is never replaced by a task's: ``task_show`` says no, and the model is told.
+  A task's one-click card that still waits for its click comes back with the HUD after a visit to the window, and counts
+  in the window meanwhile: the task's report says it waits.
 
 Logs: statuses, durations, screen numbers, run ids, skill kinds, counts and refusal codes only - never what was
 typed, a name or a path.
@@ -163,6 +166,7 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import CancelledError, Future
 from concurrent.futures import TimeoutError as FutureTimeout
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
 
 import shiboken6
@@ -535,6 +539,8 @@ class DesktopController(QObject):
     consentChanged = Signal(bool)      # his Turn on (True) or Turn off (False) was stored
     waitingChanged = Signal(int)       # NEEDS YOUR OK cards of file steps waiting for him (P2.3: Approvals' reminder)
     tidyEnded = Signal(object, str)    # a card of file steps ended (its state, tidy.ENDED_*): a task on it hears
+    tidyAtWork = Signal(object, bool)  # the owner's click started its batch (False: it ran nothing and the card waits on)
+    hudLanded = Signal()               # the HUD's windows have just shown (the instant swap, or the flight's handover)
     timerEnded = Signal(str)           # P2.4: a Jarvis timer ended - the toast's line (the app posts it)
     focusChanged = Signal(bool)        # P2.5: focus mode started (True: Jarvis quiet) or ended (False: let go)
 
@@ -607,6 +613,7 @@ class DesktopController(QObject):
         # A request's result cards that came while Jarvis was not on the HUD (in the window, or the switch back on its
         # way): (its run, the windows before it) - data only, shown when the HUD next shows.
         self._held: tuple[Any, frozenset[int]] | None = None
+        self._task_held: list[tuple[Any, frozenset[int]]] = []   # a task's one-click cards that wait for the HUD
         # Desktop requests (P1.8): the desktop thread and its service, made at the first request; the backend made
         # there (``backend_factory``; the real one by default). ``context_source(words)``: the tests' stand-in for
         # this PC's candidates (None: this PC's, from the desktop thread).
@@ -879,6 +886,7 @@ class DesktopController(QObject):
         turned_off.set()
         self.results.clear()
         self._held = None
+        self._task_held = []
         self._set_tidy(None)                                 # its card goes; a batch on its way stops at the next row
         self.pending, self.found = (), ()
         dropped = self.timers.clear()                        # P2.4: Jarvis's timers go (nothing ends after it)
@@ -988,6 +996,7 @@ class DesktopController(QObject):
             logger.info("Desktop: Jarvis is in control; the window waits (Esc or Stop first)")
             return False
         target = self.return_screen() if screen is None else int(screen)
+        self._keep_task_cards()
         self.results.clear()                                 # the result cards are the HUD's: they go with it
         self._keyboard_wanted = False
         self.overlay.hud.give_back_keyboard(False, "back to the window")    # the window takes it, on the owner's click
@@ -1331,6 +1340,7 @@ class DesktopController(QObject):
             return False
         self.results.clear()
         self._held = None                                    # the last request's cards that waited for the HUD too
+        self._task_held = []
         self._set_tidy(None)                                 # ... and a NEEDS YOUR OK card not at work
         self._before = self.results.snapshot()               # the window an open brings is the one not among these
         if self._housekept != datetime.now().date():
@@ -1506,24 +1516,47 @@ class DesktopController(QObject):
         if self._hud and not self._leaving():
             self.results.show_run(run, self._before)
             return
-        self._held = (run, self._before)
+        if getattr(run, "run_id", "") in self._task_shown and any(
+                getattr(card, "kind", "") == card_results.WAITING for card in run.shown):
+            self._task_held.append((run, self._before))    # the task's report says it waits: never another's place
+            self._waits_changed()
+        else:
+            self._held = (run, self._before)
         logger.info("Desktop %s: %d result card(s) wait for the HUD", getattr(run, "run_id", "") or "-",
                     len(run.shown))
+
+    def _keep_task_cards(self) -> None:
+        """The HUD goes, and its result cards with it; but a task told its model that a one-click card waits for the
+        owner's click, and may say so in a report many minutes later: such a card comes back with the HUD."""
+        kept = [entry for entry in self.results.entries() if not isinstance(entry, desktop_results.TidyEntry)
+                and getattr(entry.card, "kind", "") == card_results.WAITING
+                and getattr(entry.card, "run_id", "") in self._task_shown]
+        for entry in kept:
+            self._task_held.append((SimpleNamespace(run_id=entry.card.run_id, shown=(entry.card,)), entry.before))
+            logger.info("Desktop %s: a task's card waits for the HUD", entry.card.run_id or "-")
+        if kept:
+            self._waits_changed()
+
+    def _waits_changed(self) -> None:
+        self.sync_glance()
+        self.waitingChanged.emit(self.waiting_count())
 
     def _show_held(self) -> None:
         """The HUD's windows have just shown (the instant swap, or the flight's handover): the result cards that
         waited for it show with them - unless a request typed meanwhile took them away."""
         held, self._held = self._held, None
         if self._shut or not self._hud or not self.consent_given():
-            return
+            return                                           # (a task's wait on: its Stop or a Turn off takes them)
+        kept, self._task_held = self._task_held, []
         self._show_tidy()
-        if held is None:
-            return
-        run, before = held
-        self._mark_up(getattr(run, "run_id", ""))
-        shown = self.results.show_run(run, before)
-        logger.info("Desktop %s: %d result card(s) that waited show on the HUD", getattr(run, "run_id", "") or "-",
-                    shown)
+        for run, before in (*kept, *((held,) if held is not None else ())):
+            self._mark_up(getattr(run, "run_id", ""))
+            shown = self.results.show_run(run, before)
+            logger.info("Desktop %s: %d result card(s) that waited show on the HUD", getattr(run, "run_id", "") or "-",
+                        shown)
+        if kept:
+            self._waits_changed()
+        self.hudLanded.emit()
 
     def _carry_out_for(self, context: DesktopContext) -> Callable[..., Any]:
         """The planner's way to carry its checked plan out: on the desktop thread, with this request's candidates for
@@ -1662,8 +1695,9 @@ class DesktopController(QObject):
         return self._tidy
 
     def waiting_count(self) -> int:
-        """NEEDS YOUR OK cards waiting for the owner's decision (the chip counts them): file steps, and a task's."""
-        return (1 if self._tidy is not None and self._tidy.waiting() else 0) + self._task_waiting
+        """NEEDS YOUR OK cards waiting for the owner's decision (the chip counts them): file steps, and a task's (those
+        that wait for the HUD to come back too)."""
+        return (1 if self._tidy is not None and self._tidy.waiting() else 0) + self._task_waiting + len(self._task_held)
 
     def set_task_waiting(self, count: int) -> None:
         """A card of a task waits, or no longer does (agent_feed): it counts as a card of file steps does."""
@@ -1744,11 +1778,16 @@ class DesktopController(QObject):
     def task_show(self, run: Any) -> bool:
         """What a task's open_thing or propose_files came to shows as a desktop request's does: its result cards, its
         one NEEDS YOUR OK card (at once on the HUD, else with it; ``tidyEnded`` says how that card ends). False, and
-        nothing shown, when a card can't take over now: another desktop job is at work, or Jarvis is closing or off."""
+        nothing shown, when a card can't take over now: another desktop job is at work, another run's card waits for the
+        owner's decision (the rule that a new card replaces the old one is for the owner's own requests), or Jarvis is
+        closing or off."""
         if self._shut or self._quitting or not self.consent_for_tasks():
             return False
-        if self.busy() and any(isinstance(card, desktop_tidy.TidyCard) for card in getattr(run, "shown", ())):
-            return False
+        if any(isinstance(card, desktop_tidy.TidyCard) for card in getattr(run, "shown", ())):
+            state = self._tidy
+            if self.busy() or (state is not None and state.waiting()
+                               and state.card.run_id != getattr(run, "run_id", "")):
+                return False
         self._task_shown[getattr(run, "run_id", "")] = time.monotonic()
         self._keep(run)
         self._show_or_hold(run)
@@ -1791,6 +1830,9 @@ class DesktopController(QObject):
                 self.results.remove(entry)
         if self._held is not None and getattr(self._held[0], "run_id", "") in ids:
             self._held = None
+        if any(getattr(run, "run_id", "") in ids for run, _before in self._task_held):
+            self._task_held = [item for item in self._task_held if getattr(item[0], "run_id", "") not in ids]
+            self._waits_changed()
 
     def _journal_folder(self) -> Any:
         folder = self.journal_folder
@@ -1972,6 +2014,8 @@ class DesktopController(QObject):
         future.add_done_callback(lambda done, seq=seq: _deliver(bridge, seq, done, "tidy_done"))
         self._refresh_tidy()
         self._tidy_changed()
+        if not undo:
+            self.tidyAtWork.emit(state, True)
 
     def _stop_tidy(self, reason: str) -> None:
         """Stop on the card (or Esc, or a Turn off): the job stops after the row on its way."""
@@ -2052,6 +2096,8 @@ class DesktopController(QObject):
             soft = bool(outcome.code) or len(state.done_numbers()) != len(state.chosen)
             if state.stage != desktop_tidy.WAITING:          # (stopped before anything ran: it waits on)
                 self.tidyEnded.emit(state, desktop_tidy.ENDED_CARRIED)
+            else:
+                self.tidyAtWork.emit(state, False)
         said = desktop_tidy.said(state, self._address)
         if dropped:
             said, soft = desktop_tidy.turned_off_words(state), True
@@ -2480,6 +2526,7 @@ class DesktopController(QObject):
         self._dnd_timer.stop()                               # P2.5: and focus mode in its own (quiet after a restart)
         self._dnd_reads = []
         self._held = None
+        self._task_held = []
         self.results.clear()                                 # the cards, their brackets, hooks and timers go
         if self._worker is not None:
             self._worker.stop()                              # the job running ends as it is; nothing new starts

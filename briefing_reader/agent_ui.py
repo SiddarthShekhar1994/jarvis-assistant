@@ -2,20 +2,23 @@
 
     AgentController(config, planner, live=, consent=, ...)     made by the app only while agent.policy.agent_on(config)
         offered()              may a first planner run hand a request to a task now? (any thread: on, the owner's
-                               Turn on, no task running, tasks left today, Claude Code able, no extra-usage pause).
-                               AskPlanner.agent_allowed asks it
+                               Turn on, no task running, Claude Code able to plan, no extra-usage pause).
+                               AskPlanner.agent_allowed asks it. The day's tasks used up, or a Claude Code too old for
+                               tasks, still offer it: start() then says so, in words, where a plain Ask could not know
+        refusal()              why a task can't start now, in Jarvis's own words; "" when it can
         start(words)           one task, with the owner's own words (R1: only the owner's request starts one). False and
-        a
-                               plain reason when it can't start
+                               a plain reason when it can't start
         take_request(text)     AskController's gate (D4): while a task runs, what is typed goes in as the owner's
-                               message (the answer, when a question waits), or stops it ("stop", "cancel"). Nothing
-                               runs: False
+                               message (the answer, when a question waits; its own choice's word is that answer, whatever
+                               the word), or stops it ("stop", "cancel", with what is said around them: stop_words).
+                               While a card only a click answers waits, the bar says so (clickNeeded). Nothing runs: False
         answer(id, text)       the owner-question seam: a card's click and the tests answer through it
         stop(reason)           ends the task at once (R8): the process is killed and anything late is dropped
         set_window_hidden(h), set_window_away(a), window_hidden(), window_rect(), keep_window_clear(), close_window()
                                the watch window, for the feed (agent_feed): the owner's Hide and Show, the Jarvis window
                                coming back, where it is. The page goes on behind it
         worked_s(), tools_running(), live_task_id()   for the panel's clock and activity line, and Home's chip
+        set_window_resting(r)  a file card waits (agent_feed): the watch window is off the screen meanwhile
         spoken(line, instead=), spoken_question(text), spoken_report(end, opening)
                                the one gate on the way to the voice for a line the model wrote (the module docs)
         outputs_for(end), show_output(name), output_path(name)   the result card's Show (the sealed window) and Folder
@@ -29,6 +32,8 @@
         said(str)              a line it said (the say tool): the app's caption and voice
         noticed(str, str)      Jarvis's own words about the task and their tone (paused by the plan's limit ...)
         acknowledged(str)      a few words that what was typed went in (shown, not said)
+        clickNeeded(str)       words came while a card only a click answers waits ("sent" or "held"): the feed says so
+        cardAtWork(bool)       the owner's click started a file card's batch (False: it ran nothing, and the card waits on)
         questionAsked(object)  a runner.OwnerQuestion for the owner, its {sir} filled in
         questionGone(object)   it is not waiting any more (answered, or the task moved on)
         questionExpired(object)  it timed out (just before questionGone)
@@ -97,8 +102,11 @@ from .persona import with_address
 
 logger = logging.getLogger(__name__)
 
-STOP_RE = re.compile(r"(?:jarvis[,:]?\s+)?(?:please\s+)?(?:stop|cancel)"
-                     r"(?:\s+(?:it|that|this|the task|now|please))*[.!]?", re.IGNORECASE)
+# "Stop" or "cancel" with what is said around them, on words with their commas and capitals gone (plain_words): a whole
+# message of these. A sentence that merely holds the word ("stop at the second shop", "don't stop looking") is not one.
+STOP_RE = re.compile(r"(?:(?:ok|okay|hey|hi|oh|um|uh|right|no|wait|please|jarvis) )*(?:stop|cancel)(?: (?:stop|cancel))*"
+                     r"(?: (?:it|that|this|this task|the task|now|right now|here|there|please|jarvis|thanks|thank you))*")
+STOP_CAP = 80                     # longer than this is not a bare "stop"
 REQUEST_STEP = "Your request"
 TOOLS_TEXT = "{count} - Jarvis's own, on this PC; nothing else"
 BUDGET_TEXT = "{turns} turns and {minutes} minutes, then it asks you"
@@ -109,7 +117,9 @@ RUNNING_TEXT = "A task is running already, {sir}; say stop first if you want ano
 LIMIT_TEXT = "That's the most tasks for one day ({count}), {sir}; nothing was started."
 HOLD_TEXT = "Tasks are paused until your plan's limit resets, {sir}: Claude Code said a run would use extra usage."
 OFF_TEXT = "Tasks need Jarvis on your desktop turned on, {sir}; nothing was started."
+TOO_OLD_TEXT = "This Claude Code is too old for tasks, {sir}: update it and ask again. Nothing was started."
 TAKEN_TEXT = {"sent": "Passing that on, {sir}.", "answered": "Thank you, {sir}."}
+TURNED_OFF = "turned off"         # stop()'s reason for a Turn off: nothing stays, even a report
 # What is said in place of a line of the model's that may hold something private (AgentController.spoken).
 QUESTION_LINE = "I've a question for you, {sir}. It's on the card."
 REPORT_LINES = {OUTCOME_DONE: "That's done, {sir}. It's on the card.",
@@ -121,6 +131,7 @@ END_STATUS = {OUTCOME_DONE: live_events.STATUS_OK, OUTCOME_FAILED: live_events.S
 END_WORDS = {OUTCOME_DONE: "done", OUTCOME_FAILED: "failed", agent_runner.OUTCOME_STOPPED: "stopped"}
 PARTLY = "partly done"
 LIMIT_ACTIVITY = "Waiting for your plan's limit to reset"
+WENT_WELL = (agent_runner.HOW_ALLOWED, agent_runner.HOW_ANSWERED, agent_runner.HOW_KEEP_GOING, agent_runner.HOW_CARRY_ON)
 MAX_LISTED = 20                   # files a result card lists when the model did not name them
 HOP_S = 10.0                      # what a tool waits for the GUI thread at most, for something to show
 CODE_WORDS = {agent_runner.HELD: "held - the task is waiting or stopping",
@@ -141,9 +152,23 @@ CODE_WORDS = {agent_runner.HELD: "held - the task is waiting or stopping",
               web.W_TEST_RUN: "no page is opened in a test run"}
 
 
+def plain_words(text: str) -> str:
+    """Typed or dictated words with their punctuation and capitals gone (an apostrophe stays: "don't" is its own word)."""
+    return " ".join(re.sub(r"[^\w']+", " ", text or "").split()).casefold()
+
+
 def stop_words(text: str) -> bool:
-    """The owner's words are "stop" or "cancel" (D4), not a sentence that happens to use them."""
-    return STOP_RE.fullmatch(" ".join((text or "").split())) is not None
+    """The owner's words are "stop" or "cancel" (D4), as they come typed or dictated ("Stop, please.", "Okay, stop."), not
+    a sentence that happens to use them, nor a question ("stop?")."""
+    plain = plain_words(text)
+    return "?" not in (text or "") and len(plain) <= STOP_CAP and STOP_RE.fullmatch(plain) is not None
+
+
+def tokens_text(end: AgentEnd) -> str:
+    """Live's Tokens row: all the input the model was given, cached or not, and its output. Never a cost."""
+    given = end.input_tokens + end.cache_read_tokens + end.cache_write_tokens
+    cached = f" ({end.cache_read_tokens:,} from cache)" if end.cache_read_tokens else ""
+    return f"{given:,} in{cached} / {end.output_tokens:,} out"
 
 
 class _Bridge(QObject):
@@ -208,6 +233,9 @@ class AppThings:
 
     def listen(self, slot: Callable[[Any, str], None]) -> None:
         self.desktop.tidyEnded.connect(slot)
+
+    def listen_at_work(self, slot: Callable[[Any, bool], None]) -> None:
+        self.desktop.tidyAtWork.connect(slot)
 
     def connected(self) -> frozenset[str]:
         """What may be offered now, asked of this PC only (GUI thread, as a task starts). Unknown: not connected."""
@@ -286,6 +314,9 @@ class _Feed:
     def __init__(self, live: Any, words: str, config: Any, folder_name: str, tools: int) -> None:
         self.task = live_events.NO_TASK
         self.steps: dict[int, Any] = {}
+        self.wait_step: Any = None        # the step of the wait that is on (WAITING): it says how it went when it ends
+        self.waiting = False
+        self.how_came = ""                # it ended before its tool's own step did
         self._make(live, words, config, folder_name, tools)
 
     @live_events.quiet()
@@ -320,11 +351,19 @@ class _Feed:
             step.done(live_events.STATUS_WARN, status_text=HELD_STATUS, summary=result.note or CODE_WORDS[result.code])
         elif result.code == agent_firewall.WAITING:
             step.done(live_events.STATUS_WARN, status_text=WAITING_STATUS, summary=result.note)
+            if self.waiting and self.wait_step is None:
+                self.wait_step = step
         elif result.is_error:
             words = CODE_WORDS.get(result.code) or ERROR_CODES.get(result.code, result.code)
             step.done(live_events.STATUS_WARN, summary=result.note or words)
         else:
             step.done(live_events.STATUS_WARN if result.warn else live_events.STATUS_OK, summary=result.note)
+        how, self.how_came = self.how_came, ""
+        if how and result.code == agent_firewall.WAITING:
+            self.wait_step = None
+            self._stamp(step, how)
+        elif how:
+            self.task.note(how)
 
     @staticmethod
     def _picture(step: Any, shot: Any) -> None:
@@ -347,25 +386,51 @@ class _Feed:
 
     @live_events.quiet()
     def asked(self, question: OwnerQuestion) -> None:
+        self.waiting, self.wait_step, self.how_came = True, None, ""
         if question.kind not in (agent_runner.Q_TASK, agent_runner.Q_WEB, agent_runner.Q_CARD):   # their tools' steps
             step = self.task.step(live_events.AGENT_TOOL, "Asked you", fields=[("Question", question.text)])
             step.done(live_events.STATUS_WARN, status_text="WAITING", summary="waiting for you")
+            self.wait_step = step
 
     @live_events.quiet()
-    def you_said(self, status: str) -> None:
-        self.task.note({"answered": "You answered", "held": "Your message waits for the plan's limit",
-                        "sent": "Your message went in"}.get(status, "Your message came too late"))
+    def gone(self, how: str) -> None:
+        """A wait ended: the step that waited says how it went, in Jarvis's own words (a question's own step said only
+        that it was asked: a note says it)."""
+        step, self.wait_step = self.wait_step, None
+        self.waiting = False
+        if not how:
+            return
+        if step is not None:
+            self._stamp(step, how)
+        elif self.steps:
+            self.how_came = how           # its tool's own step is still on its way
+        else:
+            self.task.note(how)
+
+    @staticmethod
+    def _stamp(step: Any, how: str) -> None:
+        good = how in WENT_WELL or how.startswith(agent_owner.CARD_HOW_DONE)
+        step.done(live_events.STATUS_OK if good else live_events.STATUS_WARN, summary=how)
+
+    @live_events.quiet()
+    def you_said(self, status: str, click: bool = False) -> None:
+        """What was typed. "answered": gone() says so, for a click or for words."""
+        if status != "answered":
+            self.task.note({"held": "Your message waits", "sent": "Your message went in"}.get(
+                status, "Your message came too late") + (": the card still needs a click" if click else ""))
 
     @live_events.quiet()
     def ended(self, end: AgentEnd) -> None:
         for step in self.steps.values():
             step.done(live_events.STATUS_CANCELLED, summary="dropped")
         self.steps.clear()
+        if self.wait_step is not None:
+            self.gone(agent_runner.HOW_ENDED)
         words = END_WORDS.get(end.outcome, PARTLY)
         step = self.task.step(live_events.AGENT_END, "How it ended", fields=[
             ("Outcome", words), ("Why", end.code), ("Turns", str(end.turns)), ("Tool calls", str(end.tools)),
             ("Worked", live_events.elapsed_text(end.worked_s)),
-            ("Tokens", f"{end.input_tokens:,} in / {end.output_tokens:,} out")])
+            ("Tokens", tokens_text(end))])
         for name in end.outputs:
             step.item(name)
         status = END_STATUS.get(end.outcome, live_events.STATUS_WARN)
@@ -381,6 +446,8 @@ class AgentController(QObject):
     said = Signal(str)
     noticed = Signal(str, str)
     acknowledged = Signal(str)
+    clickNeeded = Signal(str)
+    cardAtWork = Signal(bool)
     questionAsked = Signal(object)
     questionGone = Signal(object)
     taskEnded = Signal(object)
@@ -423,6 +490,8 @@ class AgentController(QObject):
         self._owner: agent_owner.OwnerAccess | None = None
         if things is not None:
             things.listen(self._on_card_ended)
+            things.listen_at_work(self._on_card_at_work)
+        self._too_old = False             # this Claude Code plans, but lacks what a task needs (offered says)
         self._run: AgentRun | None = None
         self._seq = 0
         self._feed: _Feed | None = None
@@ -447,10 +516,11 @@ class AgentController(QObject):
         """Any thread (the ask thread asks before each first run). Fail-closed."""
         try:
             if (self._shut or self._run is not None or not policy.agent_on(self.config) or self._consent() is not True
-                    or not self.tasks.allowed() or self.planner.usage.hold_until() is not None):
+                    or self.planner.usage.hold_until() is not None):
                 return False
             ready = self._engine.base.readiness()
-            return bool(ready.ok) and not ready.agent_missing
+            self._too_old = bool(ready.agent_missing)
+            return bool(ready.ok)
         except Exception as exc:  # noqa: BLE001 - unknown: not offered
             logger.warning("Agent: could not tell whether a task may start (%s)", type(exc).__name__)
             return False
@@ -567,24 +637,51 @@ class AgentController(QObject):
             return self._words(OFF_TEXT)
         if not self.tasks.allowed():
             return self._words(LIMIT_TEXT.replace("{count}", str(self.tasks.per_day)))
+        if self._too_old:
+            return self._words(TOO_OLD_TEXT)
         if self.planner.usage.hold_until() is not None:
             return self._words(HOLD_TEXT)
         return ""
 
+    def refusal(self) -> str:
+        """Why start() would refuse now, in Jarvis's own words ("": it would not): the app asks before it says that a
+        task starts, so nothing promises work that won't happen."""
+        refused = self._refusal()
+        if refused:
+            return refused
+        try:
+            workspace_root(self.config.agent.workspace, self._environ)
+        except WorkspaceRefused as why:
+            return self._words(why.text)
+        return ""
+
+    @staticmethod
+    def _its_choice(run: AgentRun, text: str) -> bool:
+        """The words are one of the choices of the question that waits: that is its answer, whatever the word. Only for
+        ask_owner's question: the click-only cards' words are nobody's answer."""
+        question = run.waiting
+        if question is None or question.kind != agent_runner.Q_TASK:
+            return False
+        return plain_words(text) in {plain_words(choice) for choice in question.choices}
+
     def take_request(self, text: str) -> bool:
-        """AskController's gate (D4). True: it was taken - the task stops, or the words went in as the owner's."""
+        """AskController's gate (D4). True: it was taken - the task stops, or the words went in as the owner's. Typed or
+        dictated words never answer a card only a click answers: clickNeeded says so, and how to reach it."""
         run = self._run
         if run is None or run.ended is not None:
             return False
-        if stop_words(text):
+        if stop_words(text) and not self._its_choice(run, text):
             self.stop("typed")
             return True
         status = run.owner_says(text)
         if status == "refused":
             return False
+        click = status in ("sent", "held") and run.click_awaited() is not None
         if self._feed is not None:
-            self._feed.you_said(status)
-        if status in TAKEN_TEXT:
+            self._feed.you_said(status, click)
+        if click:
+            self.clickNeeded.emit(status)
+        elif status in TAKEN_TEXT:
             self.acknowledged.emit(self._words(TAKEN_TEXT[status]))
         return True
 
@@ -600,8 +697,15 @@ class AgentController(QObject):
         return call(*args, **kwargs) if callable(call) else default
 
     def set_window_hidden(self, hidden: bool) -> None:
-        """The owner's Hide and Show: the task carries on behind it."""
+        """The owner's Hide and Show: the task carries on behind it. Their Show wins over a file card's rest too."""
+        if not hidden:
+            self._browser_call("set_resting", None, False)
         self._browser_call("set_hidden", None, owner=bool(hidden))
+
+    def set_window_resting(self, resting: bool) -> None:
+        """A file card waits, or its batch works: the task is resting and the card needs the room on every screen, so
+        the watch window is off the screen meanwhile. As it ends, the owner's own Hide still holds."""
+        self._browser_call("set_resting", None, bool(resting))
 
     def set_window_away(self, away: bool) -> None:
         """The Jarvis window is back (True): the watch window hides meanwhile. On the HUD again it comes back."""
@@ -609,7 +713,8 @@ class AgentController(QObject):
         self._browser_call("set_hidden", None, away=self._away)
 
     def window_hidden(self) -> bool:
-        return bool(self._browser_call("owner_hid", False))
+        """It is off the screen for a reason a Show can lift, and there is a window to bring back."""
+        return bool(self._browser_call("owner_hid", False)) or bool(self._browser_call("resting", False))
 
     def window_rect(self) -> Any:
         return self._browser_call("window_rect", None)
@@ -683,15 +788,27 @@ class AgentController(QObject):
         """A card of file steps ended: the run that waits on it hears how, in plain words, as its next message."""
         run = self._run
         if run is not None:
-            run.card_ended(state.card.run_id, agent_owner.card_message(state, ending))
+            run.card_ended(state.card.run_id, agent_owner.card_message(state, ending),
+                           agent_owner.card_how(state, ending))
+
+    def _on_card_at_work(self, state: Any, working: bool) -> None:
+        """The owner's click started that card's batch, or it ran nothing and the card waits on: the run's clock for it
+        stops, or starts again."""
+        run = self._run
+        if run is not None and run.card_at_work(state.card.run_id, working):
+            self.cardAtWork.emit(bool(working))
 
     def stop(self, reason: str = "stop") -> None:
+        """R8. In the moment after the model's finish the task is done with: a Stop ends it now as it would have ended,
+        with its report and what that report says waits. A Turn off leaves nothing, report or not."""
         run = self._run
+        reported = run is not None and run.reported and reason != TURNED_OFF
         if run is not None:
-            self._stopping = True         # what is still on its way to this thread is dropped
+            self._stopping = not reported     # what is still on its way to this thread is dropped
             run.stop(reason)
-            self._withdraw(cards=True)
-        if self._browser is not None:
+            if not reported:
+                self._withdraw(cards=True)
+        if self._browser is not None and not reported:
             self._browser.stop()          # R8: a load is released at once, the page and the window go
 
     def shutdown(self) -> None:
@@ -743,7 +860,9 @@ class AgentController(QObject):
             feed.note(event.text)
         elif kind == agent_runner.E_NOTICE:
             feed.note(self._words(event.text))
-            self.noticed.emit(self._words(event.text), hud.TONE_WARN if event.code == LIMIT else hud.TONE_DONE)
+            # The plan's limit: nothing can be decided now, so never amber (a decision waiting); a limit is coral, as a
+            # desktop request's is, and it shows on the HUD's caption, as an idle tone would not.
+            self.noticed.emit(self._words(event.text), hud.TONE_ERROR if event.code == LIMIT else hud.TONE_DONE)
             if event.code == LIMIT:
                 self.activityChanged.emit(LIMIT_ACTIVITY)
         elif kind == agent_runner.E_QUESTION and event.question is not None:
@@ -753,6 +872,7 @@ class AgentController(QObject):
             feed.asked(question)
             self.questionAsked.emit(question)
         elif kind == agent_runner.E_QUESTION_GONE:
+            feed.gone(event.text)
             if event.code == agent_runner.C_NO_ANSWER:
                 self.questionExpired.emit(event.question)
                 if event.question.kind == agent_runner.Q_CARD:   # the model was told nothing changed: so it stays

@@ -18,10 +18,12 @@ and goes in once the process has connected to the endpoint (its init then shows 
 A wait ends the turn (D5): ask_owner returns at once with "end your turn", the ``result`` event means the model is idle
 (it uses nothing then), and the answer goes in as the next message; a choice clicked or words typed answer it. The
 firewall's card waits the same way (kind Q_WEB), but only a click answers it: answer(id, "Allow"), and so does "Keep
-going?" (Q_KEEP_GOING, Q_RESUME). What is typed meanwhile goes in as the owner's words and allows nothing; no answer in
-time to the firewall's card is a refusal, and the task goes on. A file card waits too (Q_CARD: propose_files'; the card
-is the desktop's own), and only its own end says anything: card_ended(id, message) puts that in as the next message, and
-finish waits for it unless the task is stopping. A choice clicked answers, but it is the model's words, so it licenses
+going?" (Q_KEEP_GOING, Q_RESUME). What is typed meanwhile goes in as the owner's words and allows nothing (at the resume
+card it waits for the click, with the pause), and the wait's end says so, never "no answer came"; no answer in time to
+the firewall's card is a refusal, and the task goes on. A file card waits too (Q_CARD: propose_files'; the card is the
+desktop's own), and only its own end says anything: card_at_work(id) stops its clock when the owner's click starts the
+batch, card_ended(id, message) puts its end in as the next message, and finish waits for it unless the task is
+stopping. A choice clicked answers, but it is the model's words, so it licenses
 nothing and clears nothing; words typed are the owner's. A ``result`` with no wait pending and no finish gets
 one prompt to carry on or finish, and after another one the task ends as partial. A message sent mid-run is delivered by
 Claude Code after the running tool returns (``--replay-user-messages`` shows when; a ``result`` while one is on its way
@@ -31,9 +33,10 @@ The budget (agent.policy.Budget): reaching a turn or minute cap asks "Keep going
 then return "end your turn" until the answer. Yes: as much again. No, or no answer: the model is told to report and
 finish, gets a short while for it and the task ends as partial. The clock rests while the owner is waited for.
 
-The plan's limit (stream.rate_limit_signal): a run that would use extra usage is killed at once (the owner's rule: no
-paid calls). The plan's own limit pauses the task with words saying when, and when that time comes asks whether to carry
-on.
+The plan's limit (stream.rate_limit_signal, or a failed result's text): a run that would use extra usage is killed at
+once (the owner's rule: no paid calls). The plan's own limit pauses the task with words saying when, and when that time
+comes asks whether to carry on; with no time given it waits for the owner's word, LIMIT_WAIT_HOURS at most, and then ends
+as partial. Whatever is said or answered meanwhile goes in with the resume, in the order it came.
 
 The guard (R2): anything but this run's tools in a tool_use, a stream chunk or an init kills the run. Its command line
 is cli.build_agent_argv's; the bearer token goes only into the MCP config file in the run's own folder under the data
@@ -48,6 +51,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import math
 import re
 import secrets
 import shutil
@@ -63,8 +67,8 @@ from .. import config as app_config
 from ..ask import cli
 from ..ask.context import COMMAND_CAP, data, now_line
 from ..ask.stream import (CLI_UNSUPPORTED, ERROR, GUARD, LIMIT, NOT_SIGNED_IN, AskFailure, GuardTrip, InitSummary,
-                          LimitSignal, classify_text, clock_words, exit_failure, failure, limit_reset_words,
-                          parse_event, rate_limit_signal)
+                          LimitSignal, classify_text, clock_words, exit_failure, failure, limit_reset_time,
+                          limit_reset_words, parse_event, rate_limit_signal)
 from ..desktop.backend import real_backend_blocked
 from ..gcal import local_timezone
 from . import policy
@@ -87,6 +91,7 @@ Q_TASK, Q_KEEP_GOING, Q_RESUME, Q_WEB, Q_CARD = "task", "keep_going", "resume", 
 # Why it ended (AgentEnd.code: fixed words, safe to log).
 C_FINISHED, C_STOPPED, C_NO_FINISH, C_NO_ANSWER, C_OWNER_NO, C_MAX_TURNS, C_OVERAGE = (
     "finished", "stopped", "no_finish", "no_answer", "owner_no", "max_turns", "overage")
+C_NO_CLICK, C_LIMIT_WAIT = "no_click", "limit_wait"     # words came but no click; the limit held, with no word
 C_TEST_GUARD, C_INTERNAL, C_EXIT, C_GARBLED = "test_guard", "internal", "exit", "garbled"
 HELD = "held"                          # a tool result's code: the call was not made, the model is told to end its turn
 WEB_ALLOW_WORD = "Allow"               # the one word on the firewall's card that allows anything
@@ -106,11 +111,17 @@ WRAP_UP_SILENT = ("Jarvis: the owner did not answer, so the task stops here. Cal
 PAUSED_TEXT = ("Jarvis has paused the task: it has reached its budget and the owner is being asked whether to keep "
                "going. End your turn now with one short sentence. The answer will come to you as your next message.")
 WRAP_UP_TOOL_TEXT = "The task is stopping. Call finish now, and nothing else."
+WRAP_UP_NO_CLICK = ("Jarvis: the owner's words came in, but only a click answers that card and none came, so the task "
+                    "stops here. Call finish now with outcome partial: what you did, what you produced and what is "
+                    "left. Call nothing else.")
 WEB_ALLOWED_TEXT = "Jarvis: the owner allowed that one call. Make it again now, exactly as it was."
 WEB_DECLINED_TEXT = ("Jarvis: the owner said no, so that call was not made. Do not try it again: carry on without "
                      "it, find another way, or say so in your report.")
 WEB_UNANSWERED_TEXT = ("Jarvis: the owner did not answer, so that call was not made. Do not try it again: carry on "
                        "without it, find another way, or say so in your report.")
+WEB_NO_CLICK_TEXT = ("Jarvis: the owner's words came in, but only a click allows a call and none came, so that call "
+                     "was not made. Do not try it again: carry on without it, find another way, or say so in your "
+                     "report.")
 CARD_UNANSWERED_TEXT = ("Jarvis: nobody clicked the card in time, so nothing was changed. Do not propose it again: "
                         "carry on without it, or say so in your report.")
 CARD_WAITS_TEXT = ("A card waits for the owner, so the task is not finished yet. End your turn now; what they decide "
@@ -125,17 +136,22 @@ CARD_WORDS = "That needs your OK on its card, {sir}."
 RESUME_WORDS = "Your Claude plan's limit has reset, {sir}. Shall I carry on with this task?"
 LIMIT_WORDS = ("Your Claude plan's limit is reached, {sir}. I've paused this task: it resets {when}, and I'll ask you "
                "then.")
+LIMIT_WAIT_HOURS = 6                   # the limit holds with no time given: this long with no word, and the task ends
 LIMIT_NO_TIME_WORDS = ("Your Claude plan's limit is reached, {sir}. I've paused this task: tell me to carry on once "
-                       "your plan has reset, or say stop.")
+                       f"your plan has reset, or say stop. With no word in {LIMIT_WAIT_HOURS} hours I'll stop it there.")
 OVERAGE_WORDS = ("I stopped this task, {sir}: Claude Code said it would use extra usage. Turn usage credits off at "
                  "claude.ai/settings/usage. Files already written stay in the workspace.")
 LIMIT_ENDED_WORDS = ("Your Claude plan's limit is reached, {sir}, and Claude Code stopped. Any files are in the "
                      "workspace.")
 HELD_WORDS = "I'll pass that on when the plan's limit has reset, {sir}."
+LIMIT_WAITED_WORDS = (f"The plan's limit held this task for {LIMIT_WAIT_HOURS} hours with no word, so I stopped there, "
+                      "{sir}. Live has its steps, and any files are in the workspace.")
 STOPPED_WORDS = "Stopped, {sir}. Files already written stay in the workspace."
 NO_FINISH_WORDS = "The task ended without a report, {sir}. Live has its steps, and any files are in the workspace."
 OWNER_NO_WORDS = "Stopped there, as you said, {sir}. Live has its steps, and any files are in the workspace."
 NO_ANSWER_WORDS = "No answer came, so I stopped there, {sir}. Live has its steps, and any files are in the workspace."
+NO_CLICK_WORDS = ("You typed while the card waited, {sir}, but only a click answers it and none came, so I stopped "
+                  "there. Live has its steps, and any files are in the workspace.")
 MAX_TURNS_WORDS = "That ran past what Claude Code allows one task, {sir}. Any files are in the workspace."
 GUARD_WORDS = "Claude Code started with something a task does not allow, so I stopped it, {sir}."
 GARBLED_WORDS = "Claude Code's output could not be read, so I stopped the task, {sir}."
@@ -143,6 +159,13 @@ EXIT_WORDS = "Claude Code stopped before the task was finished, {sir}. Any files
 INTERNAL_WORDS = "The task stopped because of an unexpected error, {sir}. Any files are in the workspace."
 TEST_GUARD_WORDS = "The real Claude Code is never started while the tests run."
 AGENT_UNSUPPORTED_MESSAGE = "This Claude Code lacks what a task needs ({flags}); nothing was started"
+# How a wait ended, for Live (E_QUESTION_GONE's text): Jarvis's own words.
+HOW_ALLOWED, HOW_DECLINED, HOW_NO_ANSWER = "You allowed it", "You said no, so it was not made", "No answer came"
+HOW_NO_CLICK = "You typed, but no click came"
+HOW_KEEP_GOING, HOW_STOP_HERE, HOW_CARRY_ON = "You said keep going", "You said stop here", "You said carry on"
+HOW_ANSWERED = "You answered"
+HOW_ENDED = "The task ended first"
+HELD_NOTE = "not made: the task was waiting for you"
 _WORD_RE = re.compile(r"[A-Za-z0-9._\-\[\]]{1,80}")
 
 
@@ -162,6 +185,7 @@ class OwnerQuestion:
     kind: str
     text: str = field(repr=False)
     choices: tuple[str, ...] = field(default=(), repr=False)
+    typed: bool = False                 # E_QUESTION_GONE with C_NO_ANSWER: words came meanwhile, but only a click counts
 
 
 @dataclass(frozen=True)
@@ -177,9 +201,11 @@ class AgentEnd:
     turns: int = 0
     tools: int = 0
     worked_s: float = 0.0
-    input_tokens: int = 0
+    input_tokens: int = 0               # the result events' usage, summed: the part not cached ...
     output_tokens: int = 0
     resets_at: datetime | None = None   # a run that would use extra usage: when the plan's limit resets
+    cache_read_tokens: int = 0          # ... the input read from the prompt cache, and what was written to it
+    cache_write_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -197,6 +223,8 @@ class AgentEvent:
     tools: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -215,6 +243,7 @@ class Timing:
     replay_s: float = 5.0               # a message sent never showed as delivered and nothing came: idle after all
     tool_s: float = TOOL_TIMEOUT_S
     resume_margin_s: float = 30.0       # past the limit's reset time by this much before asking
+    limit_wait_s: float = LIMIT_WAIT_HOURS * 3600.0   # the limit holds, no time given: this long with no word
 
 
 # --------------------------------------------------------------------------
@@ -312,6 +341,8 @@ class _Wait:
     question: OwnerQuestion
     deadline: float
     on_answer: Callable[[bool], None] | None = None     # the firewall's card: told of the click, or of no answer
+    typed: bool = False                 # words came while it waited (only a click answers all but ask_owner's)
+    at_work: bool = False               # a file card: the click came and its batch is at work: its clock has stopped
 
 
 # --------------------------------------------------------------------------
@@ -352,6 +383,8 @@ class AgentRun:
         self._tool_count = 0
         self._input_tokens = 0
         self._output_tokens = 0
+        self._cache_read_tokens = 0
+        self._cache_write_tokens = 0
         self._started_at = clock()
         self._init: InitSummary | None = None
         self._wait: _Wait | None = None
@@ -368,7 +401,8 @@ class AgentRun:
         self._wrap_up_deadline = 0.0
         self._paused = False                # the plan's limit holds
         self._paused_until: datetime | None = None
-        self._held_owner: list[str] = []    # the owner's words while the limit holds
+        self._paused_at = 0.0
+        self._held_owner: list[str] = []    # what waits for the limit: the owner's words, a card's answer
         self._garbage = 0
         self._card_id = ""                  # the file card a Q_CARD wait hangs on
         self._context = RunContext(run_id=self.run_id, folder=folder, clock=clock, on_plan=self._tool_plan,
@@ -406,6 +440,16 @@ class AgentRun:
         wait = self._wait
         return wait.question if wait is not None else None
 
+    @property
+    def reported(self) -> bool:
+        """The model has called finish: the report stands, whatever comes now."""
+        return self._finished is not None
+
+    def click_awaited(self) -> OwnerQuestion | None:
+        """The card only a click answers that waits for that click now (not ask_owner's, not a batch at work), or None."""
+        wait = self._wait
+        return wait.question if wait is not None and wait.question.kind != Q_TASK and not wait.at_work else None
+
     def _note_owner(self, words: str) -> None:
         """The owner's own words: the firewall never counts them as private, and addresses in them as seen."""
         heard = getattr(self._firewall, "owner_said", None)
@@ -413,29 +457,42 @@ class AgentRun:
             heard(words)
 
     def stop(self, reason: str = C_STOPPED) -> None:
-        """Kills at once (R8): whatever a tool still comes back with is dropped. ``reason``: the log's word."""
+        """Kills at once (R8): whatever a tool still comes back with is dropped. ``reason``: the log's word. After finish
+        the task is done with: only its last words are left to come, so its report and its outcome stand."""
         logger.info("Agent %s: stopped (%s)", self.run_id, reason)
+        with self._lock:
+            if self._finished is not None and self._end is None:
+                self._end_finished()
+                return
         self._finish_run(OUTCOME_STOPPED, C_STOPPED, STOPPED_WORDS)
 
     def owner_says(self, text: str) -> str:
         """The owner's words while the task runs: "answered" (the question that waits), "sent", "held" (the plan's limit
-        holds: they go in when it has reset) or "refused" (it has ended)."""
+        holds, or its card waits: they go in with the resume) or "refused" (it has ended). Never past what is on its way
+        already: they go in the order they were said."""
         with self._lock:
             if self._end is not None or self._stop.is_set() or self._finished is not None:
                 return "refused"
             self._note_owner(text)
             wait = self._wait
             if wait is not None and wait.question.kind == Q_TASK:   # only ask_owner's: the others are click only
+                if self._paused and not self._limit_holds():
+                    self._resume("", [])                 # past the reset, or no time given: what is typed tries again
                 self.answer(wait.question.id, text)
                 return "answered"
+            if wait is not None and not wait.at_work:
+                wait.typed = True                        # its end says so: never "no answer came"
             if self._paused:
-                if (self._paused_until is not None and self._now() < self._paused_until) or wait is not None:
+                if self._limit_holds() or wait is not None:
                     self._held_owner.append(owner_message(text))     # a click on the card lets them go, with the pause
-                    self._emit(AgentEvent(E_NOTICE, text=HELD_WORDS, code="held"))
+                    if wait is None or wait.at_work:     # (a click awaited: the app says so: agent_ui.take_request)
+                        self._emit(AgentEvent(E_NOTICE, text=HELD_WORDS, code="held"))
                     return "held"
-                self._paused = False
-                self._paused_until = None
-            self._send(owner_message(text))
+                self._resume("", [owner_message(text)])  # what waited goes first: the order they were said in
+            elif self._outbox:
+                self._outbox.append(owner_message(text))  # after what waits for the next result: never past it
+            else:
+                self._send(owner_message(text))
             logger.info("Agent %s: a message from the owner went in", self.run_id)
             return "sent"
 
@@ -449,7 +506,7 @@ class AgentRun:
                 return False
             self._wait = None
             question = wait.question
-            self._emit(AgentEvent(E_QUESTION_GONE, question=question))
+            self._emit(AgentEvent(E_QUESTION_GONE, question=question, text=_how_answered(question, text)))
             logger.info("Agent %s: question %s answered", self.run_id, question.kind)
             if question.kind == Q_WEB:
                 allowed = text == WEB_ALLOW_WORD
@@ -593,12 +650,13 @@ class AgentRun:
                 return
             self._stop.set()
             end = AgentEnd(outcome, code, summary, outputs, own_words, self.budget.turns, self._tool_count,
-                           self.budget.worked_s, self._input_tokens, self._output_tokens, resets_at)
+                           self.budget.worked_s, self._input_tokens, self._output_tokens, resets_at,
+                           self._cache_read_tokens, self._cache_write_tokens)
             self._end = end
             process = self._process
             wait, self._wait = self._wait, None
             if wait is not None:
-                self._emit(AgentEvent(E_QUESTION_GONE, question=wait.question))
+                self._emit(AgentEvent(E_QUESTION_GONE, question=wait.question, text=HOW_ENDED))
         if process is not None:
             try:
                 process.kill()
@@ -607,8 +665,10 @@ class AgentRun:
         endpoint = self._endpoint
         if endpoint is not None:
             endpoint.close()
-        logger.info("Agent %s: ended %s (%s), %d turn(s), %d tool call(s), %.0f s, %d in / %d out tokens", self.run_id,
-                    outcome, code, end.turns, end.tools, end.worked_s, end.input_tokens, end.output_tokens)
+        logger.info("Agent %s: ended %s (%s), %d turn(s), %d tool call(s), %.0f s, %d in (%d from cache) / %d out tokens",
+                    self.run_id, outcome, code, end.turns, end.tools, end.worked_s,
+                    end.input_tokens + end.cache_read_tokens + end.cache_write_tokens, end.cache_read_tokens,
+                    end.output_tokens)
         self._emit(AgentEvent(E_ENDED, end=end))
 
     def _emit(self, event: AgentEvent) -> None:
@@ -639,13 +699,18 @@ class AgentRun:
             if wait is not None:
                 if now >= wait.deadline:
                     self._wait = None
-                    self._emit(AgentEvent(E_QUESTION_GONE, question=wait.question, code=C_NO_ANSWER))
-                    logger.info("Agent %s: no answer to question %s", self.run_id, wait.question.kind)
+                    typed = wait.typed and wait.question.kind != Q_TASK
+                    self._emit(AgentEvent(E_QUESTION_GONE, question=replace(wait.question, typed=typed), code=C_NO_ANSWER,
+                                          text=HOW_NO_CLICK if typed else HOW_NO_ANSWER))
+                    logger.info("Agent %s: no %s to question %s", self.run_id, "click" if typed else "answer",
+                                wait.question.kind)
                     if wait.question.kind == Q_WEB:
                         _tell(wait, False)
-                        self._deliver(WEB_UNANSWERED_TEXT)
+                        self._deliver(WEB_NO_CLICK_TEXT if typed else WEB_UNANSWERED_TEXT)
                     elif wait.question.kind == Q_CARD:
-                        self._deliver(CARD_UNANSWERED_TEXT)
+                        self._deliver(CARD_UNANSWERED_TEXT)    # (nobody clicked: true however many words came)
+                    elif typed:
+                        self._start_wrap_up(C_NO_CLICK, WRAP_UP_NO_CLICK)
                     else:
                         self._start_wrap_up(C_NO_ANSWER, WRAP_UP_SILENT)
                 return
@@ -653,6 +718,9 @@ class AgentRun:
                 until = self._paused_until
                 if until is not None and self._now() >= until + timedelta(seconds=self.timing.resume_margin_s):
                     self._ask(Q_RESUME, RESUME_WORDS, KEEP_GOING_CHOICES, self.timing.keep_going_s)
+                elif until is None and now - self._paused_at >= self.timing.limit_wait_s:
+                    logger.info("Agent %s: the limit held with no time and no word", self.run_id)
+                    self._finish_run(OUTCOME_PARTIAL, C_LIMIT_WAIT, LIMIT_WAITED_WORDS)
                 return
             if self._replay_since is not None and now - self._replay_since >= self.timing.replay_s:
                 self._replay_since = None
@@ -698,7 +766,8 @@ class AgentRun:
         self._deliver(message)
 
     def _end_unreported(self, code: str) -> None:
-        words = {C_OWNER_NO: OWNER_NO_WORDS, C_NO_ANSWER: NO_ANSWER_WORDS}.get(code, NO_FINISH_WORDS)
+        words = {C_OWNER_NO: OWNER_NO_WORDS, C_NO_ANSWER: NO_ANSWER_WORDS, C_NO_CLICK: NO_CLICK_WORDS}.get(code,
+                                                                                                           NO_FINISH_WORDS)
         self._finish_run(OUTCOME_PARTIAL, code, words)
 
     def _end_finished(self) -> None:
@@ -772,7 +841,8 @@ class AgentRun:
 
     def _report_usage(self) -> None:
         self._emit(AgentEvent(E_USAGE, turns=self.budget.turns, tools=self._tool_count,
-                              input_tokens=self._input_tokens, output_tokens=self._output_tokens))
+                              input_tokens=self._input_tokens, output_tokens=self._output_tokens,
+                              cache_read_tokens=self._cache_read_tokens, cache_write_tokens=self._cache_write_tokens))
 
     def _on_user(self, event: Mapping[str, Any]) -> None:
         if event.get("isReplay") is True and self._unreplayed > 0:
@@ -783,6 +853,8 @@ class AgentRun:
         usage = event.get("usage") if isinstance(event.get("usage"), Mapping) else {}
         self._input_tokens += _count(usage.get("input_tokens"))
         self._output_tokens += _count(usage.get("output_tokens"))
+        self._cache_read_tokens += _count(usage.get("cache_read_input_tokens"))
+        self._cache_write_tokens += _count(usage.get("cache_creation_input_tokens"))
         if self._finished is not None:
             self._end_finished()
             return
@@ -804,11 +876,13 @@ class AgentRun:
     def _on_failed_result(self, subtype: Any, text: str, status: Any) -> None:
         if self._paused:                    # the limit said so already: the call it stopped fails like this
             self._idle = True
+            until = limit_reset_time(text, now=self._now) if self._paused_until is None else None
+            if until is not None:           # ... and its text says when, as the event did not: it asks at that time
+                self._pause(until, limit_reset_words(text, now=self._now))
             return
         found = classify_text(text, now=self._now, status=status)
         if found is not None and found.kind == LIMIT:
-            if not self._paused:
-                self._pause(None, limit_reset_words(text, now=self._now))
+            self._pause(limit_reset_time(text, now=self._now), limit_reset_words(text, now=self._now))
             self._idle = True
             return
         if found is not None and found.kind == NOT_SIGNED_IN:
@@ -852,8 +926,11 @@ class AgentRun:
         self.budget.work()
 
     def _deliver(self, message: str) -> None:
-        """At once when the model is idle, else as soon as its turn ends (D5)."""
-        if self._idle:
+        """At once when the model is idle, else as soon as its turn ends (D5); while the plan's limit holds, with the
+        resume: nothing could answer it now."""
+        if self._paused:
+            self._held_owner.append(message)
+        elif self._idle:
             self._send(message)
         else:
             self._outbox.append(message)
@@ -895,18 +972,24 @@ class AgentRun:
         self._pause(signal.resets_at, when)
 
     def _pause(self, until: datetime | None, when: str) -> None:
+        """A time the words name is a time it asks at; with none it waits for the owner, or LIMIT_WAIT_HOURS (_tick)."""
         self._paused = True
         self._paused_until = until
+        self._paused_at = self._clock()
         self.budget.rest()
         logger.info("Agent %s: paused by the plan's limit", self.run_id)
-        words = LIMIT_WORDS.replace("{when}", when) if when else LIMIT_NO_TIME_WORDS
+        words = LIMIT_WORDS.replace("{when}", when) if when and until is not None else LIMIT_NO_TIME_WORDS
         self._emit(AgentEvent(E_NOTICE, text=words, code=LIMIT))
 
+    def _limit_holds(self) -> bool:
+        return self._paused and self._paused_until is not None and self._now() < self._paused_until
+
     def _resume(self, message: str, extra: list[str]) -> None:
+        """The limit let go: everything that waited goes in, in the order it came."""
         self._paused = False
         self._paused_until = None
         held, self._held_owner = self._held_owner, []
-        for text in [message, *held, *extra]:
+        for text in [*([message] if message else []), *self._take_outbox(), *held, *extra]:
             self._send(text)
 
     # ---- the tools (HTTP threads) ----------------------------------------------------------------------
@@ -961,11 +1044,11 @@ class AgentRun:
         if not ends:
             wait = self._wait
             if wait is not None and wait.question.kind not in (Q_TASK, Q_WEB, Q_CARD):
-                return ToolResult(PAUSED_TEXT, code=HELD, note="waiting for you")
+                return ToolResult(PAUSED_TEXT, code=HELD, note=HELD_NOTE)
             reached = self.budget.reached() if wait is None and not self._paused else ""
             if reached:
                 self._ask_keep_going(reached)
-                return ToolResult(PAUSED_TEXT, code=HELD, note="waiting for you")
+                return ToolResult(PAUSED_TEXT, code=HELD, note=HELD_NOTE)
         return None
 
     def _tool_plan(self, steps: tuple[PlanStep, ...]) -> None:
@@ -1008,15 +1091,30 @@ class AgentRun:
                 self._wait = None
                 self._emit(AgentEvent(E_QUESTION_GONE, question=wait.question))
 
-    def card_ended(self, card_id: str, message: str) -> bool:
+    def card_at_work(self, card_id: str, working: bool = True) -> bool:
+        """The owner's click started the batch of the file card this run waits on (``working``), or it stopped before
+        anything ran and the card waits on: from a click on the clock rests, and only the card's own end speaks (a batch
+        has its own limits and its own Stop: nothing here may say "nothing was changed" while it is at work). False when
+        nothing waits on that card."""
+        with self._lock:
+            wait = self._wait
+            if wait is None or wait.question.kind != Q_CARD or self._card_id != card_id or self._end is not None:
+                return False
+            wait.at_work = bool(working)
+            wait.deadline = math.inf if working else self._clock() + self.timing.card_s
+            logger.info("Agent %s: a file card's batch %s", self.run_id, "is at work" if working else "did not run")
+            return True
+
+    def card_ended(self, card_id: str, message: str, how: str = "") -> bool:
         """The file card this run waits on ended (the owner's click and what came of it, Not now, its time): ``message``
-        goes in as the model's next message. False when nothing waits on that card: nothing happens."""
+        goes in as the model's next message; ``how``: Live's words for it. False when nothing waits on that card: nothing
+        happens."""
         with self._lock:
             wait = self._wait
             if wait is None or wait.question.kind != Q_CARD or self._card_id != card_id or self._end is not None:
                 return False
             self._wait = None
-            self._emit(AgentEvent(E_QUESTION_GONE, question=wait.question))
+            self._emit(AgentEvent(E_QUESTION_GONE, question=wait.question, text=how))
             logger.info("Agent %s: a file card ended", self.run_id)
             self._deliver(message)
             return True
@@ -1029,7 +1127,18 @@ class AgentRun:
             self._finished_at = self._clock()
             wait, self._wait = self._wait, None
             if wait is not None:
-                self._emit(AgentEvent(E_QUESTION_GONE, question=wait.question))
+                self._emit(AgentEvent(E_QUESTION_GONE, question=wait.question, text=HOW_ENDED))
+
+
+def _how_answered(question: OwnerQuestion, text: str) -> str:
+    """Live's words for how a question went: its click, or that words answered it; never the words themselves."""
+    if question.kind == Q_WEB:
+        return HOW_ALLOWED if text == WEB_ALLOW_WORD else HOW_DECLINED
+    if question.kind == Q_TASK:
+        return HOW_ANSWERED
+    if policy.yes_or_no(text) is False:
+        return HOW_STOP_HERE
+    return HOW_CARRY_ON if question.kind == Q_RESUME else HOW_KEEP_GOING
 
 
 def _tell(wait: _Wait, allowed: bool) -> None:

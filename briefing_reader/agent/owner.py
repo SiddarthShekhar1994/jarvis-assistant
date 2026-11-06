@@ -130,7 +130,8 @@ CARD_WAIT_TEXT = ("It is on a card for the owner now, and nothing has changed: {
                   "short sentence. What they decide comes to you as your next message.")
 ANOTHER_CARD_TEXT = ("A card waits for the owner already, so no second one was made. End your turn now; what they "
                      "decide comes as your next message.")
-CARD_NOT_SHOWN_TEXT = "The card could not be shown just now: this PC is busy with another change. Try once more later."
+CARD_NOT_SHOWN_TEXT = ("The card could not be shown just now: another card waits for the owner, or this PC is busy with "
+                       "another change. Try once more later, or say so in your report.")
 ACTION_WAIT_TEXT = ("{count} on a card for the owner's OK, in Approvals and on the HUD. Nothing has been sent or "
                     "changed, and nothing will be unless the owner clicks. Do not wait for it: carry on, and say in "
                     "your report what is waiting.")
@@ -191,6 +192,7 @@ CARD_EXPIRED_TEXT = ("Jarvis: the card timed out with no click, so nothing was c
                      "carry on without it, or say so in your report.")
 CARD_DROPPED_TEXT = ("Jarvis: the card was taken away before any click, so nothing was changed. Carry on without it, "
                      "or say so in your report.")
+CARD_HOW_DONE = "You clicked it: "     # Live's words for how a file card went (card_how)
 
 
 def card_message(state: Any, ending: str) -> str:
@@ -205,6 +207,10 @@ def card_message(state: Any, ending: str) -> str:
     outcome = getattr(state, "outcome", None)
     if outcome is None or getattr(outcome, "code", ""):
         return CARD_REFUSED_TEXT
+    return CARD_DONE_TEXT.format(what=_card_counts(state, outcome))
+
+
+def _card_counts(state: Any, outcome: Any) -> str:
     done = len(state.done_numbers())
     chosen = len(state.chosen)
     counts = outcome.counts()
@@ -217,7 +223,21 @@ def card_message(state: Any, ending: str) -> str:
         parts.append(f"{left} left as they were")
     if state.stopped():
         parts.append("the owner stopped it part-way")
-    return CARD_DONE_TEXT.format(what=", ".join(parts))
+    return ", ".join(parts)
+
+
+def card_how(state: Any, ending: str) -> str:
+    """Live's words for how a file card went, for the owner to read: counts only; never a name."""
+    if ending == CARD_NOT_NOW:
+        return "You chose Not now, so nothing was changed"
+    if ending == CARD_EXPIRED:
+        return "No click came, so nothing was changed"
+    if ending != CARD_CARRIED:
+        return "It was taken away, so nothing was changed"
+    outcome = getattr(state, "outcome", None)
+    if outcome is None or getattr(outcome, "code", ""):
+        return "You clicked it, but its plan had expired or changed, so nothing was changed"
+    return CARD_HOW_DONE + _card_counts(state, outcome)
 
 
 class Things(Protocol):

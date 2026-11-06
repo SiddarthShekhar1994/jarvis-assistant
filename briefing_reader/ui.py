@@ -3807,6 +3807,9 @@ ASK_CANCELLED_ENTRY = "Cancelled; nothing was proposed."   # the conversation's 
 ASK_ACK_KEY = "ask-ack"                  # "One moment, sir." while an Ask plans (dropped when it ends first)
 ASK_ACK_HOLD_MS = 1500                   # ... said only when no word of the answer has come by this long after the request
 ASK_SAY_KEY = "ask-say"                  # an Ask's say, spoken as soon as it is written (Stop, a new request: it goes)
+TASK_SAY_KEY = "task-say"                # what a task says: a Stop takes it, playing or queued, and nothing else
+# How a task ended, for later Asks (Turn.note): never a word of its report or of what a page said.
+TASK_ENDED_LINE = "That task has ended ({how}). Its report is on the owner's screen and not here: say so if asked about it."
 # Memory (the productivity bundle): the conversation's links and texts (shown only; never logged).
 MEMORY_UNDO_LINK = "mem-undo:"           # + an opaque counter: Undo a note saved or forgotten
 MEMORY_SAVE_LINK = "mem-save:"           # + an opaque counter: Remember this (a suggestion)
@@ -8585,7 +8588,7 @@ class AppController(QObject):
                         logger.info("Ask reply not spoken as written (it claimed something was done)")
                     spoken = reply.text
                 self._correct_say(stream, spoken)
-                self._say(KIND_REPLY, spoken)
+                self._say(KIND_REPLY, spoken, key=TASK_SAY_KEY if getattr(outcome, "agent_task", "") else "")
             elif stream is not None and stream.shown != ask_final_shown(outcome):
                 self.window.reading.correct_caption(ask_final_shown(outcome), spoken=False)
             return
@@ -8700,6 +8703,8 @@ class AppController(QObject):
             self._on_desktop_outcome(outcome)
             return
         self._offer_running = 0
+        if outcome.ok and getattr(outcome, "agent_task", "") and self._task_cant_start(outcome):
+            return
         self._converse_ask(outcome)
         if outcome.ok and getattr(outcome, "agent_task", ""):
             self._activity(hud.TAG_ASK, "Handed to a task", f"{outcome.duration_ms / 1000:.1f} s")
@@ -9759,8 +9764,10 @@ class AppController(QObject):
 
     def _hud_reach(self) -> Any:
         """Where the HUD is, while it shows: the window Jarvis reads in keeps clear of it."""
-        overlay = getattr(getattr(self, "desktop", None), "overlay", None)
-        return overlay.hud.occupied_rect() if overlay is not None and overlay.is_shown() else None
+        desktop = getattr(self, "desktop", None)
+        overlay = getattr(desktop, "overlay", None)
+        # (On its way too, in flight: the HUD is placed already, and it lands where the window would be.)
+        return overlay.hud.occupied_rect() if overlay is not None and (overlay.is_shown() or desktop.is_hud()) else None
 
     def _start_agent(self, words: str) -> None:
         """A first planner run handed the request to a task: it starts with the owner's own words."""
@@ -9770,7 +9777,33 @@ class AppController(QObject):
         if self._task_update_due():
             self._task_update_needed(words)
             return
-        agent.start(words)
+        if not agent.start(words) and self.ask is not None:
+            self.ask.bar.give_back(words)      # refused, in words (``noticed``): they wait in the bar to send again later
+
+    def _task_cant_start(self, outcome: Any) -> bool:
+        """A first planner run handed the request to a task, and the task can't start now: nothing says it does. Its say
+        goes, spoken or on its way, with no entry of "a task: Live has its steps"; the conversation has the true words,
+        and the owner's come back to the bar (_start_agent says why, as ever). False: it may start."""
+        agent = getattr(self, "agent", None)
+        if agent is None or self.state == STATE_QUITTING:
+            return False
+        update = self._task_update_due()
+        why = agent.refusal() if not update else ""
+        if not update and not why:
+            return False
+        if update:
+            from .desktop_ui import TASK_UPDATE_HUD_TEXT, TASK_UPDATE_TEXT
+
+            why = with_address(TASK_UPDATE_HUD_TEXT if self._hud_active() else TASK_UPDATE_TEXT,
+                               self.config.assistant.address)
+        self._voice_call("cancel_key", ASK_ACK_KEY)
+        self._say_failed(why, not update)
+        if self.ask is not None:
+            self.ask.forget_task_meta()
+        self._jarvis(why, tone=hud.TONE_ERROR)
+        self._activity(hud.TAG_STOP, "A task was not started", f"{outcome.duration_ms / 1000:.1f} s")
+        self._start_agent(outcome.agent_task)
+        return True
 
     def _task_update_needed(self, words: str) -> None:
         """A task asked for while the owner's OK is on a card that did not list tasks: nothing starts, the bar says why
@@ -9799,7 +9832,7 @@ class AppController(QObject):
             self.ask.show_note(shown, tone, hud_text=shown)
         voice = (text if said is None else said) if speak else ""
         if voice and self.config.assistant.speak_replies:
-            self._say(KIND_REPLY, voice)
+            self._say(KIND_REPLY, voice, key=TASK_SAY_KEY)
         elif self.state == STATE_READING:
             self.window.reading.say_caption(shown, spoken=False)
 
@@ -9815,18 +9848,24 @@ class AppController(QObject):
         amber (a decision waits). What is typed next answers ask_owner's (AgentController.take_request). The firewall's
         (kind "web") is never said aloud or kept on this PC, and only a click on its card answers it: its words may be
         private. ask_owner's (kind "task") is the model's, so it goes through the voice's gate and is not kept on this
-        PC either. Keep going is said, and answered by a click too."""
+        PC either. Keep going is said, and answered by a click too. With the HUD away, those only a click answers say on
+        screen how to reach the card: nothing else there shows that one waits for a click."""
         web_card, asked = question.kind == "web", question.kind == "task"   # (a file card says only that it waits)
-        self._agent_words(question.text, hud.TONE_WARN, speak=not web_card,
-                          said=self.agent.spoken_question(question.text) if asked else None)
-        self._jarvis(question.text, tone=hud.TONE_WARN, keep=not (web_card or asked), context=False)
+        feed = getattr(self, "task_feed", None)
+        reach = feed.reach_words() if feed is not None and not asked else ""
+        shown = f"{question.text} {reach}" if reach else question.text
+        self._agent_words(shown, hud.TONE_WARN, speak=not web_card,
+                          said=self.agent.spoken_question(question.text) if asked else question.text)
+        self._jarvis(shown, tone=hud.TONE_WARN, keep=not (web_card or asked), context=False)
 
     def _on_agent_ended(self, end: Any) -> None:
         """The task ended: the whole report (or Jarvis's own words) on its result card and in the conversation, its
         first sentence or two on the caption and, through the voice's gate when the model wrote them, said aloud
         (agent_feed.spoken_summary), and one row of counts in ACTIVITY. Never given to a later Ask as the conversation:
         it may hold what pages said; and a report is never kept on this PC (D11): it may quote a mail or a file.
-        Jarvis's own words for how a task ended are."""
+        Jarvis's own words for how a task ended are, and a later Ask hears only that it ended (_note_task_ended). A task
+        that was stopped stops talking: the line being said and those behind it go (under their own keys: a briefing
+        reads on, and nothing else the voice is at is touched)."""
         from .agent.tools import OUTCOME_DONE, OUTCOME_FAILED
         from .agent_feed import spoken_summary
 
@@ -9834,6 +9873,10 @@ class AppController(QObject):
             return
         tone = {OUTCOME_FAILED: hud.TONE_ERROR, "stopped": hud.TONE_IDLE}.get(end.outcome, hud.TONE_DONE)
         words = {OUTCOME_DONE: "done", OUTCOME_FAILED: "failed", "stopped": "stopped"}.get(end.outcome, "partly done")
+        if end.outcome == "stopped":
+            self._voice_call("stop_key", TASK_SAY_KEY)
+            self._voice_call("stop_key", ASK_SAY_KEY)       # (its spoken start: no other Ask runs beside a task)
+        self._note_task_ended(words)
         opening = spoken_summary(end.summary)
         self._agent_words(opening, tone, speak=end.outcome != "stopped",
                           said=None if end.own_words else self.agent.spoken_report(end, opening))
@@ -9841,6 +9884,15 @@ class AppController(QObject):
         sub = [f"task {words}", _plural(end.tools, "step"), _live.elapsed_text(end.worked_s)]
         self._jarvis(end.summary + files, tone=tone, sub=f" {DOT} ".join(sub), keep=end.own_words, context=False)
         self._activity(hud.TAG_ASK, f"Task: {words}", f" {DOT} ".join(sub[1:]))
+
+    def _note_task_ended(self, how: str) -> None:
+        """One line of Jarvis's own for later Asks, never shown: without it <conversation> ends on the promise to do the
+        task, and a follow-up has nothing to stand on. Not a word of the report: it may hold what pages said."""
+        now = self._now()
+        self._task_notes = [*recent_turns(self._task_notes, now),
+                            Turn(hud.ROLE_JARVIS, TASK_ENDED_LINE.format(how=how), now if now.utcoffset() is not None
+                                 else now.astimezone(), hud.TONE_DONE, note=True)]
+        self._on_conversation_changed()
 
     # ---- offers (the productivity bundle) ----------------------------------------------------------
 
@@ -11780,9 +11832,11 @@ class AppController(QObject):
         self._conversation_store = ConversationStore(self.config.data_dir / CONVERSATION_FILE, clock=self._now)
         reading = self.window.reading
         turns = self._conversation_store.turns()
+        self._task_notes = [turn for turn in turns if turn.note]   # how tasks ended, for later Asks: never shown
         for turn in turns:
-            reading.conversation.add(turn.role, turn.text, when=turn.at, stamp=self._turn_stamp(turn.at),
-                                     tone=turn.tone or hud.TONE_DONE, context=turn.context)
+            if not turn.note:
+                reading.conversation.add(turn.role, turn.text, when=turn.at, stamp=self._turn_stamp(turn.at),
+                                         tone=turn.tone or hud.TONE_DONE, context=turn.context)
         if turns:
             logger.info("Conversation: %d entr%s of the last day shown again", len(turns),
                         "y" if len(turns) == 1 else "ies")
@@ -11811,6 +11865,8 @@ class AppController(QObject):
                 continue
             turns.append(Turn(role, text, when if when.utcoffset() is not None else when.astimezone(), tone,
                               context))
+        if self._task_notes:
+            turns = sorted((*turns, *self._task_notes), key=lambda turn: turn.at)
         return recent_turns(turns, self._now())
 
     def _on_conversation_changed(self) -> None:
@@ -11838,6 +11894,7 @@ class AppController(QObject):
             return
         conversation = self.window.reading.conversation
         count = len(conversation.entry_widgets())
+        self._task_notes = []
         conversation.clear()
         self._conversation_timer.stop()
         self._conversation_store.clear()
@@ -13946,6 +14003,8 @@ class AppController(QObject):
             return
         self._shut_down = True
         logger.info("Shutting down")
+        if getattr(getattr(self, "agent", None), "running", False):
+            self._note_task_ended("stopped")   # closing ends it, and a later Ask sees that, not only its promise
         self._save_conversation()      # the conversation as it is now stays on this PC (its timers stop below)
         self._conversation_prune_timer.stop()
         self.live.set_listener(None)   # the LIVE view's feed hears nothing more

@@ -816,7 +816,19 @@ class FeedWindowTests(ProbeCase):
         self.assertFalse(report["second"]["is_error"])               # the task carries on behind it
         self.assertIn("Words", report["second"]["text"])
         self.assertFalse(report["second_visible"])                   # a new page does not bring it back
+        self.assertEqual(report["second_tries"], 0)                  # and takes no second more for a picture it can't have
         self.assertTrue(report["back_visible"])
+
+    def test_a_file_card_s_rest_and_the_owner_s_hide_over_it(self) -> None:
+        report = self.report("feed_window")
+        self.assertEqual(report["resting"], {"visible": False, "says": True})
+        self.assertEqual(report["rest_over"], {"visible": True, "says": False})
+        self.assertFalse(report["hide_holds_visible"])
+
+    def test_hidden_as_the_run_ends_no_show_is_offered_for_what_went(self) -> None:
+        report = self.report("feed_window")
+        self.assertTrue(report["hidden_at_the_end"])
+        self.assertEqual(report["hidden_end"], {"owner": False, "window": False})
 
     def test_a_picture_while_hidden_is_a_picture_or_says_it_is_hidden(self) -> None:
         look = self.report("feed_window")["look_hidden"]

@@ -124,6 +124,8 @@ _UNKNOWN_OPTION_RE = re.compile(r"unknown option|unknown command|error: option .
 _RESET_RE = re.compile(r"resets?\s+(?:at\s+)?([0-9]{1,2}(?::[0-9]{2})?\s*(?:[ap]\.?m\.?)?"
                        r"(?:\s*\([A-Za-z_/+\-]{1,40}\))?)", re.IGNORECASE)
 _RESET_EPOCH_RE = re.compile(r"\|\s*(\d{10})\b")
+_RESET_PARTS_RE = re.compile(r"([0-9]{1,2})(?::([0-9]{2}))?\s*(?:([ap])\.?m\.?)?(?:\s*\(([A-Za-z_/+\-]{1,40})\))?",
+                             re.IGNORECASE)
 _FENCE_RE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
 
 
@@ -509,6 +511,46 @@ def _reset_words(text: str, now: Callable[[], datetime]) -> str:
         hour = moment.hour % 12 or 12
         return f"{hour}:{moment.minute:02d} {'AM' if moment.hour < 12 else 'PM'}"
     return ""
+
+
+def limit_reset_time(text: str, *, now: Callable[[], datetime] = lambda: datetime.now().astimezone()) -> datetime | None:
+    """When a usage-limit text says the limit resets, as a moment: "resets 3pm (Europe/London)" the next 3pm there (in
+    this PC's own zone when Python has no such zone: no tzdata here), "resets 15:30" the next 15:30, "...|1762300000"
+    that moment. None when it names no time a clock can read: "resets 3" says neither morning nor afternoon."""
+    match = _RESET_RE.search(text or "")
+    if match is None:
+        epoch = _RESET_EPOCH_RE.search(text or "")
+        return _epoch_time(int(epoch.group(1)), now) if epoch else None
+    parts = _RESET_PARTS_RE.fullmatch(" ".join(match.group(1).split()))
+    if parts is None:
+        return None
+    hour, minute = int(parts.group(1)), int(parts.group(2) or 0)
+    meridiem = (parts.group(3) or "").casefold()
+    if meridiem:
+        if not 1 <= hour <= 12:
+            return None
+        hour = hour % 12 + (12 if meridiem == "p" else 0)
+    elif parts.group(2) is None or hour > 23:
+        return None
+    if minute > 59:
+        return None
+    current = now()
+    zone = _named_zone(parts.group(4))
+    local = current.astimezone(zone) if zone is not None else current
+    moment = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    return moment if moment > local else moment + timedelta(days=1)
+
+
+def _named_zone(name: str | None) -> Any:
+    """The zone a limit text names, or None: not named, not known, or no time zone database here."""
+    if not name:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+
+        return ZoneInfo(name)
+    except (ImportError, KeyError, OSError, ValueError):       # ZoneInfoNotFoundError is a KeyError
+        return None
 
 
 def classify_text(text: str, *, now: Callable[[], datetime] = lambda: datetime.now().astimezone(),

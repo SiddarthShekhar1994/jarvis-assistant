@@ -650,7 +650,7 @@ class QuestionCardTests(FeedApp):
             self.asked_card()
             self.assertTrue(wait_for(lambda: expired, timeout=5))
             settle()
-        words.assert_called_once_with("No answer came, so that question went, sir.", hud.TONE_IDLE, speak=False)
+        words.assert_called_once_with("No answer came, so that question went, sir.", hud.TONE_DONE, speak=False)
         end = self.ended()
         self.assertEqual(end.outcome, "partial")                      # the owner never answered: never "all of it"
         self.assertEqual(self.desktop.waiting_count(), 0)
@@ -763,7 +763,10 @@ class KeepGoingCardTests(FeedApp):
             engine.call("say", text="One.")
             engine.call("write_file", name="a.md", text="a")
             engine.end_turn("Waiting.")
-            engine.wait_message()
+            told = engine.wait_message()
+            while told.startswith(ar.OWNER_LABEL):         # words typed at the card: a model may just say it heard them
+                engine.end_turn("Noted.")
+                told = engine.wait_message()
             engine.call("finish", summary="All of it.", outcome="done")
             engine.end_turn()
 
@@ -802,7 +805,7 @@ class KeepGoingCardTests(FeedApp):
             self.asked_card()
             self.assertTrue(wait_for(lambda: expired, timeout=5))
             settle()
-        words.assert_called_once_with("No answer came, so the task stops here, sir.", hud.TONE_IDLE, speak=False)
+        words.assert_called_once_with("No answer came, so the task stops here, sir.", hud.TONE_DONE, speak=False)
         self.assertEqual(self.ended().outcome, "partial")
         self.assertEqual(self.desktop.waiting_count(), 0)
 
@@ -895,20 +898,21 @@ class StopTests(FeedApp):
 
     def test_a_late_line_after_the_stop_is_dropped(self) -> None:
         stages = Stages()
-        answer: dict[str, Any] = {}
+        said = threading.Event()
 
         def script(engine: FakeEngine) -> None:
             engine.wait_message()
             stages.reach(1)
-            try:
-                answer["late"] = engine.call("say", text="A late line.")
-            except Exception:  # noqa: BLE001 - it is gone, as it should be
-                answer["late"] = None
+            engine.call("say", text="A late line.")        # its tool has returned; the line is on its way to the GUI thread
+            said.set()
+            stages.reach(2)
 
         self.start(script)
         self.reached(stages, 1)
-        self.c.agent.stop("test")
         stages.go(1)
+        self.assertTrue(said.wait(10))                     # (no event is let through here)
+        self.c.agent.stop("test")
+        stages.go(2)
         self.ended()
         settle()
         self.assertNotIn("A late line.", self.said())

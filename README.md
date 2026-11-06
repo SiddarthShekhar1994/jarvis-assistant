@@ -2453,20 +2453,30 @@ Jarvis writes himself from what he is doing ("Searching the web", "Reading www.e
 "Writing a file", "Waiting for you"): sites' names only, on screen only, never logged or said.
 The panel lets clicks through, but for its buttons, and never takes the focus. If you bring the
 window back the task carries on: the panel and the watch window hide, Home shows
-"Working - 3 of 6" (click it for Live) with a **Stop**, and the HUD key brings them back.
+"Working - 3 of 6" (click it for Live; while a card waits, "Waiting for you", and a click takes you
+to it) with a **Stop**, and the HUD key brings them back.
 
-**Stopping it.** The panel's **Stop**, Home's, typing or dictating "stop" or "cancel" in the bar,
-**Turn off** or quitting: the process is killed at once, anything late is dropped, a card that
-waits is withdrawn and the plan is stamped. **Esc** stops it too, but only while the HUD's bar
+**Stopping it.** The panel's **Stop**, Home's, typing or dictating "stop" or "cancel" in the bar
+(as people say it: "Stop, please.", "Okay, stop.", "cancel this task"; "stop at the second shop"
+is a message to the task), **Turn off** or quitting: the process is killed at once, anything late
+is dropped, a card that waits is withdrawn, what he was saying goes (the line and those behind it;
+a briefing reads on) and the plan is stamped. In the seconds after his report is in, a Stop keeps
+the report. **Esc** stops it too, but only while the HUD's bar
 has the keyboard. Jarvis does not hold Esc across the system for a task, as it does for the
 seconds a batch of file moves takes: a task can run for 20 minutes while you work in other apps,
 and Esc stays theirs.
 
 **Cards.** A question he asks waits on a card with its choices as buttons, and what you type or
-dictate in the bar answers it too. "Keep going?" and the card for a step that needs your OK (a web
-step, or a change to your PC your words don't plainly ask for) take a **click only**: words in the
-bar reach the task as your message and answer neither. A card counts in "N need your OK", and one
-that times out goes, with words saying so. A question never asks for a password, a code or a card
+dictate in the bar answers it too (one of its own choices is that answer, even a "Cancel"). "Keep
+going?", the card for a step that needs your OK (a web step, or a change to your PC your words don't
+plainly ask for) and a card of file steps take a **click only**: words in the bar reach the task as
+your message and answer none of them, and the bar says so, with how to reach the card when you are
+back in the window ("that card needs a click: Show me in Approvals, or Ctrl+Alt+H"). A card counts in "N need your
+OK", and one that times out goes, with words saying so; if you typed at it, its words say that only a
+click counts. While a card of file steps waits, or its batch works, the watch window is off the screen,
+to leave the card the room (the panel's **Show** brings it back at once, and your own Hide still holds
+after); from your click on, only the batch's own end says how it went. A card that comes up with the
+HUD takes no click for its first 0.6 s. A question never asks for a password, a code or a card
 number (he refuses to put one on a card, and tells you so in LIVE), and every question's card says
 "Jarvis never needs a password or a code."
 
@@ -2593,8 +2603,15 @@ at once: the process is killed and anything it was still doing is dropped. The b
 **Its budget.** After `[agent] max_turns` turns or `max_minutes` minutes of work he asks
 "Keep going?" (the clock rests while he waits for you). No, or no answer, and he reports
 where things stand and stops. If your plan's limit is reached the task pauses, says
-when it resets and asks you then; a run that would use extra usage is killed at once.
-`tasks_per_day` limits how many start in 24 hours.
+when it resets and asks you then; with no time named it waits for you to say carry on, 6 hours at
+most, and then stops there. What you say or answer meanwhile goes in with the resume, in the order
+you said it. A run that would use extra usage is killed at once. `tasks_per_day` limits how many
+start in 24 hours: the next one is told so, and your words wait in the bar.
+
+**After a task.** Its report stays on its result card and in the Transcript, and is never kept or
+given to a later Ask. A later Ask is told only that it ended and how, in one line of Jarvis's own
+that is not shown ("That task has ended (done). Its report is on the owner's screen and not here: say
+so if asked about it."), so it says where the answer is rather than guess.
 
 **Safe by design.** Claude Code runs with no tool of its own: its only tools are served
 by Jarvis on `127.0.0.1`, behind a token that exists for that run alone and never goes

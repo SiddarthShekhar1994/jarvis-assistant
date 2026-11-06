@@ -142,7 +142,7 @@ from PySide6.QtGui import (
     QTextLayout,
     QTextOption,
 )
-from PySide6.QtWidgets import QAbstractButton, QApplication, QFrame, QScrollArea, QSizePolicy, QWidget
+from PySide6.QtWidgets import QAbstractButton, QApplication, QFrame, QScrollArea, QScrollBar, QSizePolicy, QWidget
 
 from . import alive, holo, hud, offer_view, settings_view
 from . import orb as orb_mod
@@ -2100,6 +2100,7 @@ DESK_WORDS_LINE = 18           # ... and why it wasn't done (or was left as it i
 DESK_SLOT = 18                 # the tick box's column
 DESK_NAME = 172                # the name's column (DesktopB grid: 18px 172px 1fr, 12 px gaps)
 DESK_GAP = 12
+DESK_BAR = 12                  # what its rows leave for their scroll bar, when they scroll (set_room)
 SEP_DOT = " \u00b7 "            # a middle dot between spaces: a kicker breaks there first
 MARK_TICK, MARK_IDLE, MARK_DONE, MARK_NOW, MARK_FAIL, MARK_NONE, MARK_INFO = (
     "tick", "idle", "done", "now", "fail", "none", "info")
@@ -2192,7 +2193,8 @@ class DesktopCard(ResultCard):
     then each row's mark as the batch goes -, the note, the buttons (``buttonClicked``: Not now, "Move 5 files" -
     disabled while nothing is ticked -, Stop) and the Undo link with its note on the stamp. Tool, frameless, on top,
     never the focus (ResultCard's flags); every button and tick box NoFocus, acting on click. ``set_desk(content)``;
-    ``desk()``; ``ticks()``; ``buttons()`` (the link too)."""
+    ``desk()``; ``ticks()``; ``buttons()`` (the link too). ``set_room(height)``: the most it may take (a task's card, which
+    stays under the HUD's bar): when its rows don't fit they scroll in what is left, its title and buttons in view."""
 
     tickToggled = Signal(int, bool)
 
@@ -2212,7 +2214,34 @@ class DesktopCard(ResultCard):
         self._words_font = hud.body_font(12)
         self._note_font = hud.body_font(12)
         self._row_rects: dict[int, QRectF] = {}
+        self._room = 0                                 # the most it may take (0: all it wants)
+        self._row_clip = QRectF()                      # where its rows show, when they scroll
+        self._rows_scroll = 0
+        self._row_bar: QScrollBar | None = None
         self.setFixedSize(DESK_WIDTH, 120)
+
+    def set_room(self, height: int) -> None:
+        height = max(0, int(height))
+        if height != self._room:
+            self._room = height
+            self._relayout()
+
+    def rows_scroll(self) -> QScrollBar | None:
+        """Its rows' scroll bar while they scroll (tests and the harness)."""
+        return self._row_bar if self._row_bar is not None and not self._row_bar.isHidden() else None
+
+    def wheelEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        bar = self.rows_scroll()
+        if bar is None:
+            super().wheelEvent(event)
+            return
+        bar.setValue(bar.value() - round(event.angleDelta().y() / 120 * DESK_ROW))
+        event.accept()
+
+    def _on_rows_scrolled(self, value: int) -> None:
+        if value != self._rows_scroll:
+            self._rows_scroll = int(value)
+            self._relayout()
 
     def desk(self) -> DeskContent:
         return self._desk
@@ -2324,6 +2353,49 @@ class DesktopCard(ResultCard):
         if not hasattr(self, "_desk_buttons"):
             super()._relayout()
             return
+        height = self._lay_out(0)
+        rows = sum(self._row_height(row) for row in content.rows)
+        view = max(2 * DESK_ROW, rows - (height - self._room))
+        if self._room and height > self._room and view < rows:
+            height = self._lay_out(view)
+        self.setFixedSize(DESK_WIDTH, math.ceil(height))
+        self.update()
+
+    def _keep_at_work_in_view(self, view: int, rows: int) -> None:
+        """The row on its way stays in view while the batch goes; and nothing scrolls past the last row."""
+        top = 0
+        for row in self._desk.rows:
+            height = self._row_height(row)
+            if row.mark == MARK_NOW:
+                self._rows_scroll = min(self._rows_scroll, top) if top < self._rows_scroll else max(
+                    self._rows_scroll, top + height - view)
+                break
+            top += height
+        self._rows_scroll = max(0, min(self._rows_scroll, rows - view))
+
+    def _place_row_bar(self, top: float, view: int, rows: int) -> None:
+        bar = self._row_bar
+        if not view:
+            if bar is not None:
+                bar.hide()
+            return
+        if bar is None:
+            bar = self._row_bar = QScrollBar(Qt.Orientation.Vertical, self)
+            bar.setStyleSheet(_SCROLL_STYLE)
+            bar.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            bar.valueChanged.connect(self._on_rows_scrolled)
+        bar.blockSignals(True)
+        bar.setRange(0, rows - view)
+        bar.setPageStep(view)
+        bar.setSingleStep(DESK_ROW)
+        bar.setValue(self._rows_scroll)
+        bar.blockSignals(False)
+        bar.setGeometry(round(CARD_PAD[1] + self._inner() - 8), round(top), 8, view)
+        bar.show()
+
+    def _lay_out(self, view: int) -> float:
+        """Everything in its place; its height. ``view``: the height its rows scroll in (0: all of them show)."""
+        content = self._desk
         pad_v, pad_h = CARD_PAD
         inner = self._inner()
         rects: dict[str, QRectF] = {}
@@ -2335,18 +2407,28 @@ class DesktopCard(ResultCard):
         rects["title"] = QRectF(pad_h, y, inner, 24 * len(title))
         y += 24 * len(title)
         self._row_rects = {}
+        self._row_clip = QRectF()
         if content.rows:
             y += 10
+            top = y
+            total = sum(self._row_height(row) for row in content.rows)
+            if view:
+                self._keep_at_work_in_view(view, total)
             for row in content.rows:
                 height = self._row_height(row)
-                box = QRectF(pad_h, y, inner, height)
+                box = QRectF(pad_h, y - (self._rows_scroll if view else 0), inner - (DESK_BAR if view else 0), height)
                 self._row_rects[row.number] = box
                 tick = self._ticks.get(row.number)
                 if tick is not None:
                     side = _TickBox.HIT
                     tick.setGeometry(round(box.left() + DESK_SLOT / 2 - side / 2),
                                      round(box.top() + DESK_ROW / 2 - side / 2), side, side)
+                    tick.setVisible(not view or top <= box.top() <= top + view - DESK_ROW)
                 y += height
+            self._place_row_bar(top, view, total)
+            if view:
+                y = top + view
+                self._row_clip = QRectF(pad_h, top, inner, view)
         note = self._wrap_desk(content.note, self._note_font, self.NOTE_LINES)
         if note:
             y += 8
@@ -2391,8 +2473,7 @@ class DesktopCard(ResultCard):
                                         room, 18 * len(lines))
             y += height
         self._rows = rects
-        self.setFixedSize(DESK_WIDTH, math.ceil(y + pad_v))
-        self.update()
+        return y + pad_v
 
     def row_rect(self, name: str) -> QRectF:
         if name.startswith("row:") and name[4:].isdigit():
@@ -2481,9 +2562,15 @@ class DesktopCard(ResultCard):
             painter.setPen(QColor(holo.AMBER_TX if tone == TONE_AMBER else holo.INK_1))
             for index, line in enumerate(self._title_lines()):
                 painter.drawText(QRectF(title.left(), title.top() + 24 * index, title.width(), 24), align, line)
+            scrolls = not self._row_clip.isEmpty()
+            if scrolls:
+                painter.save()
+                painter.setClipRect(self._row_clip)
             for row in content.rows:
                 self._paint_desk_row(painter, row, tone, ink, QColor(name_ink), QColor(to_ink), QColor(struck_ink),
                                      align)
+            if scrolls:
+                painter.restore()
             note = self.row_rect("note")
             painter.setFont(self._note_font)
             painter.setPen(QColor(_DESK_TEXT_TONES.get(content.note_tone, holo.INK_3)))
@@ -2949,6 +3036,7 @@ class TaskCard(ResultCard):
         self.body = _PlainBody(self._column)
         self._names: list[QWidget] = []
         self._row_notes: dict[int, _OutputName] = {}     # a row's plain words, by its place
+        self._column_rows: list[list[QAbstractButton]] = []    # choices in the scrolling column, when the room is short
         self.scroll = QScrollArea(self)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.scroll.setStyleSheet(_SCROLL_STYLE)
@@ -3012,13 +3100,39 @@ class TaskCard(ResultCard):
             if button.text() != spec.text:
                 button.setToolTip(hud.plain_tooltip(spec.text))
 
-    def _button_rows(self, inner: int) -> list[list[QAbstractButton]]:
-        """Its buttons in one row when they fit, else one under another."""
+    def _button_rows(self, inner: int, *, flow: bool = False) -> list[list[QAbstractButton]]:
+        """Its buttons in one row when they fit, else one under another; ``flow`` (the room is short): as many to a row
+        as fit."""
         buttons = list(self._buttons.values())
         margin = holo.HoloButton.MARGIN
         wide = sum(button.sizeHint().width() - 2 * margin for button in buttons)
         wide += holo.BUTTON_GAP * max(0, len(buttons) - 1)
-        return [buttons] if wide <= inner else [[button] for button in buttons]
+        if wide <= inner:
+            return [buttons]
+        if not flow:
+            return [[button] for button in buttons]
+        rows: list[list[QAbstractButton]] = [[]]
+        used = 0
+        for button in buttons:
+            width = button.sizeHint().width() - 2 * margin
+            if rows[-1] and used + holo.BUTTON_GAP + width > inner:
+                rows.append([])
+                used = 0
+            used += (holo.BUTTON_GAP if rows[-1] else 0) + width
+            rows[-1].append(button)
+        return rows
+
+    @staticmethod
+    def _rows_height(rows: Sequence[Sequence[QAbstractButton]]) -> int:
+        return (holo.SIZE_MD + 6) * len(rows) - 6 if rows else 0
+
+    def _house_buttons(self, in_column: bool) -> None:
+        """Its buttons are the card's own, or, when even so they leave its words no room, its scrolling column's."""
+        home = self._column if in_column else self
+        for button in self._buttons.values():
+            if button.parentWidget() is not home:
+                button.setParent(home)
+                button.show()
 
     def _relayout(self) -> None:
         if not hasattr(self, "scroll"):
@@ -3030,10 +3144,21 @@ class TaskCard(ResultCard):
         margin = holo.HoloButton.MARGIN
         note = offer_view.wrap_lines(content.note, self._note_font, inner, self.NOTE_LINES) if content.note else []
         self._fit_buttons(inner)
+        self._column_rows = []
         rows = self._button_rows(inner) if self._buttons else []
-        below = (12 + 20 * len(note) if note else 0) + (14 + (holo.SIZE_MD + 6) * len(rows) - 6 if rows else 0)
         above = 14 + 10
+        fixed = 2 * pad_v + above + (12 + 20 * len(note) if note else 0)
         wanted = self._column_height(inner)
+        least = min(TASK_CARD_MIN_BODY, wanted)
+        if self._max_height and len(rows) > 1 and fixed + 14 + self._rows_height(rows) + least > self._max_height:
+            rows = self._button_rows(inner, flow=True)   # the room is short: two to a row, and more when they fit
+            if fixed + 14 + self._rows_height(rows) + least > self._max_height:
+                self._fit_buttons(inner - 12)            # still too much: they scroll with its words
+                self._column_rows = self._button_rows(inner - 12, flow=True)
+                rows = []
+                wanted = self._column_height(inner)
+        self._house_buttons(bool(self._column_rows))
+        below = fixed - 2 * pad_v - above + (14 + self._rows_height(rows) if rows else 0)
         room = (self._max_height - 2 * pad_v - above - below) if self._max_height else wanted
         shown = max(min(TASK_CARD_MIN_BODY, wanted), min(wanted, room))
         scrolls = wanted > shown
@@ -3066,7 +3191,8 @@ class TaskCard(ResultCard):
 
     def _column_height(self, width: int) -> int:
         height = self.body.height_for(width)
-        return height + (10 + TASK_ROW * len(self._names) + TASK_ROW_NOTE * len(self._row_notes) if self._names else 0)
+        height += 10 + TASK_ROW * len(self._names) + TASK_ROW_NOTE * len(self._row_notes) if self._names else 0
+        return height + (14 + self._rows_height(self._column_rows) if self._column_rows else 0)
 
     def _place_column(self, width: int, height: int) -> None:
         self._column.setFixedSize(width, height)
@@ -3088,6 +3214,16 @@ class TaskCard(ResultCard):
                 note.setGeometry(0, y, width, TASK_ROW_NOTE)
                 note.show()
                 y += TASK_ROW_NOTE
+        if self._column_rows:                            # (only a question's choices: it has no outputs)
+            y = self.body.height() + 14
+            margin = holo.HoloButton.MARGIN
+            for row in self._column_rows:
+                x = -margin
+                for button in row:
+                    hint = button.sizeHint()
+                    button.setGeometry(x, y - margin, hint.width(), hint.height())
+                    x += hint.width() - 2 * margin + holo.BUTTON_GAP
+                y += holo.SIZE_MD + 6
 
     def row_notes(self) -> list[str]:
         """The plain words under its rows, as they show (tests and the harness)."""
@@ -3648,6 +3784,8 @@ class HudOverlay(QObject):
         if self._feed is not None and self._feed_shown:   # a task's panel and watch window (place_feed): off, never so
             clear.append(self._feed[0].geometry())
             clear += [rect for rect in (self._feed_watch, self._feed_card) if rect is not None and rect.isValid()]
+        if isinstance(card, DesktopCard):
+            card.set_room(self._under_the_bar(area) if self._feed is not None and self._feed_shown else 0)
         rect = card.place_beside(target, area, [*clear, *avoid])
         if card in self._cards and card not in self._placed:
             self._placed.append(card)
@@ -3656,6 +3794,11 @@ class HudOverlay(QObject):
             self.restack()
         self._apply_decor()
         return rect
+
+    def _under_the_bar(self, area: QRect | None) -> int:
+        """The height left under the HUD's bar and chips, kept on screen (0: not known)."""
+        area = QRect(area) if area is not None else self.hud.area()
+        return max(0, area.bottom() - CARD_MARGIN - self.hud.occupied_rect().bottom() - CARD_GAP) if area.isValid() else 0
 
     # ---- a task's feed (the agent, part A3) ----------------------------------------------------------
 
@@ -3738,8 +3881,8 @@ class HudOverlay(QObject):
                 card.move(x - PANEL_GAP - card.width() if beside_left >= wide else x + width + PANEL_GAP, top)
             else:
                 panel.set_limits(width, PANEL_COMPACT)      # the least it takes: the rest is the card's, as it needs
-                card.set_limits(right - left, max(0, room - panel.height() - PANEL_GAP))
-                panel.set_limits(width, room - card.height() - PANEL_GAP)
+                card.set_limits(right - left, max(1, room - panel.height() - PANEL_GAP))    # (0 would mean no limit)
+                panel.set_limits(width, max(PANEL_COMPACT, room - card.height() - PANEL_GAP))
                 panel.move(x, top)
                 card.move(max(left, min(x, right - card.width())), top + panel.height() + PANEL_GAP)
         self._feed_card = QRect(card.geometry()) if card is not None else None

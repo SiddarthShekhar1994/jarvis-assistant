@@ -311,6 +311,9 @@ class DoNotDisturbAppTests(FocusApp):
                 reads = self.pc.methods().count("dnd_state")
                 self.desktop._on_dnd_timer()
                 self.assertTrue(wait_for(lambda reads=reads: self.pc.methods().count("dnd_state") > reads))
+                # The fake counts the call as it starts: the read itself comes back a moment later, through its thread.
+                self.assertTrue(wait_for(lambda shown=shown: chip.text() == f"Do Not Disturb{DOT}{shown}"))
+                self.desktop._worker.submit(lambda: None).result(10)
                 settle()
                 self.assertEqual(chip.text(), f"Do Not Disturb{DOT}{shown}")
         self.pc.dnd = "on"

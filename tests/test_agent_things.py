@@ -17,9 +17,10 @@ import threading
 import unittest
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
@@ -35,7 +36,7 @@ from briefing_reader.conversation import ROLE_YOU, Turn
 from briefing_reader.desktop import cardplan, fileops
 from briefing_reader.desktop import tidy as desktop_tidy
 from briefing_reader.desktop import validate as dv
-from tests.agent_fakes import FAST, FakeBrowser, FakeEngine, FakePage
+from tests.agent_fakes import FAST, FakeBrowser, FakeEngine, FakePage, rate_limit_event, result_event
 from tests.ask_fakes import FakeReader
 from tests.desktop_fakes import DOCS, DOWNLOADS, FakePc, FakeRecycleBin, FakeStopKeys, desktop_disk
 from tests.owner_fakes import (BODY_WORD, CONTENT_WORD, EVENT_ID, FILE_WORD, GUEST_ADDRESS, LETTER, NOTE_WORD, NOW,
@@ -233,6 +234,14 @@ class EachPrivateToolTests(ThingsApp):
         self.assertNotIn(SAY, script.told[0])
 
 
+# The bar's words for what is typed while only a click can answer; a wait's short times, for words typed at it.
+WAIT_TIMING = replace(FAST, tool_s=30.0, wrap_up_s=30.0, after_finish_s=30.0)
+WORDS_SENT = "Passed on, sir, but only a click answers that card."
+WORDS_HELD = "Held for now, sir, but only a click answers that card."
+WHEN = datetime(2026, 11, 4, 18, 30, tzinfo=timezone.utc)
+RESET = WHEN + timedelta(hours=2)
+
+
 class FirewallThroughToTheCardTests(ThingsApp):
     def test_a_private_word_goes_to_the_card_and_allow_lets_that_one_call_go(self) -> None:
         pages_query = f"{SECRET_WORD} shop"
@@ -259,7 +268,7 @@ class FirewallThroughToTheCardTests(ThingsApp):
 
     def test_typing_never_allows(self) -> None:
         script = Script(("calendar", "calendar_find", {"from": "2026-11-05", "to": "2026-11-12"}),
-                        ("asked", "web_search", {"query": SECRET_WORD}), ("wait",))
+                        ("asked", "web_search", {"query": SECRET_WORD}), ("wait",), ("hold",))
         self.go(script)
         self.wait_card()
         self.type_it("Allow")
@@ -770,6 +779,7 @@ class StopAndTurnOffTests(ThingsApp):
         self.ended()
 
     def test_stop_while_its_batch_is_at_work_stops_after_the_row_and_keeps_the_stamp(self) -> None:
+        """(test_agent_waits: with a second row, that never starts.)"""
         release = threading.Event()
         in_call = threading.Event()
 
@@ -1262,6 +1272,187 @@ class LiveTests(ThingsApp):
                  if step.title == "Looked through your folders"]
         self.assertEqual(len(steps), 1)
         self.assertEqual(steps[0].kind, live.AGENT_TOOL)
+
+
+class TypedAtEveryWaitTests(ThingsApp):
+    """Every kind of wait: words typed there get true words back, nothing is allowed by them, and the wait ends by itself
+    from then on."""
+
+    GOAL = "move my letter from Downloads into Documents"
+
+    def status(self) -> str:
+        return self.c.ask.bar.status()
+
+    def watch(self) -> list[str]:
+        talk: list[str] = []
+        self.c.agent.clickNeeded.connect(lambda status: talk.append(f"click:{status}"))
+        self.c.agent.acknowledged.connect(lambda text: talk.append(text))
+        return talk
+
+    def test_a_question(self) -> None:
+        script = Script(("ask", "ask_owner", {"question": "Which?", "choices": ["Blue", "Red"]}), ("wait",))
+        self.go(script)
+        self.wait_card()
+        talk = self.watch()
+        self.type_it("the red one")
+        self.assertEqual(talk, ["Thank you, sir."])                  # words answer this one
+        self.assertEqual(self.ended().outcome, "done")
+        self.assertEqual(script.told[-1], "The owner answers your question: the red one")
+
+    def test_a_question_nobody_answers_ends_by_itself(self) -> None:
+        def play(engine: FakeEngine) -> None:
+            engine.wait_message()
+            engine.call("ask_owner", question="Which?", choices=["Blue", "Red"])
+            engine.end_turn("Asked.")
+            engine.wait_message()
+            engine.end_turn("Noted.")
+
+        self.go(play, timing=replace(WAIT_TIMING, question_s=0.3))
+        end = self.ended()
+        self.assertEqual((end.outcome, end.code, end.summary), ("partial", ar.C_NO_ANSWER,
+                                                                "No answer came, so I stopped there, sir. Live has its "
+                                                                "steps, and any files are in the workspace."))
+
+    def test_a_firewall_card(self) -> None:
+        told: list[str] = []
+
+        def play(engine: FakeEngine) -> None:
+            engine.wait_message()
+            engine.call("calendar_find", **{"from": "2026-11-05", "to": "2026-11-12"})
+            engine.call("web_search", query=SECRET_WORD)
+            engine.end_turn("Waiting.")
+            while not told or ar.WEB_NO_CLICK_TEXT not in told:
+                told.append(engine.wait_message())
+                engine.end_turn("Noted.") if ar.WEB_NO_CLICK_TEXT not in told else None
+            engine.call("finish", summary="Left that out.", outcome="partial")
+            engine.end_turn()
+
+        self.go(play, timing=replace(WAIT_TIMING, web_card_s=4.0))
+        self.wait_card()
+        for words in ("yes", "allow it"):
+            self.type_it(words)
+            self.assertEqual(self.status(), WORDS_SENT, words)
+            self.assertTrue(self.feed.waits(), words)
+        self.assertEqual(self.fake_browser.loads, [])
+        self.assertEqual(self.c.ask.bar.text(), "")
+        self.assertTrue(wait_for(lambda: self.feed.waits() == 0, timeout=10), "it ends by itself")
+        settle()
+        self.assertEqual(self.status(), "Only a click allows that, sir, and none came, so Jarvis left it out. "
+                                        "The task goes on.")
+        end = self.ended()
+        self.assertEqual((end.outcome, end.summary), ("partial", "Left that out."))
+        self.assertEqual(told[-1], ar.WEB_NO_CLICK_TEXT)
+        self.assertEqual(self.fake_browser.loads, [])
+
+    def test_a_file_card(self) -> None:
+        told: list[str] = []
+
+        def play(engine: FakeEngine) -> None:
+            engine.wait_message()
+            roots = engine.call("files_list")
+            down = engine.call("files_list", place="Downloads")
+            engine.call("propose_files", steps=[{"skill": "move_files", "files": [ref_in(down, "letter.txt")],
+                                                 "to": ref_in(roots, "Documents")}])
+            engine.end_turn("I'll wait.")
+            while ar.CARD_UNANSWERED_TEXT not in told:
+                told.append(engine.wait_message())
+                engine.end_turn("Noted.") if ar.CARD_UNANSWERED_TEXT not in told else None
+            engine.call("finish", summary="Nothing was moved.", outcome="partial")
+            engine.end_turn()
+
+        self.go(play, timing=replace(WAIT_TIMING, card_s=4.0))
+        self.tidy_entry()
+        self.wait_waiting()
+        self.type_it("yes move them")
+        self.assertEqual(self.status(), WORDS_SENT)
+        self.assertTrue(self.on_disk(LETTER))
+        self.assertEqual(self.fake.asked("move_item"), [])
+        self.assertTrue(wait_for(lambda: self.feed.waits() == 0, timeout=10), "it ends by itself")
+        settle()
+        self.assertEqual(self.status(), "Only a click carries that out, sir, and none came, so nothing was changed. "
+                                        "The task goes on.")
+        self.assertEqual(self.ended().summary, "Nothing was moved.")
+        self.assertTrue(self.on_disk(LETTER))
+        self.assertEqual(told[-1], ar.CARD_UNANSWERED_TEXT)
+
+    def test_keep_going(self) -> None:
+        told: list[str] = []
+
+        def play(engine: FakeEngine) -> None:
+            engine.wait_message()
+            engine.call("say", text="One.")
+            engine.call("write_file", name="a.md", text="a")
+            engine.end_turn("Waiting.")
+            while ar.WRAP_UP_NO_CLICK not in told:
+                told.append(engine.wait_message())
+                engine.end_turn("Noted.") if ar.WRAP_UP_NO_CLICK not in told else None
+            engine.call("finish", summary="Written so far.", outcome="done")
+            engine.end_turn()
+
+        self.make_things(play, timing=replace(WAIT_TIMING, keep_going_s=4.0))
+        self.c.agent._engine.agent = mock.Mock(max_turns=1, max_minutes=20, model="opus", effort="")
+        self.start()
+        self.wait_card()
+        self.type_it("yes keep going")
+        self.assertEqual(self.status(), WORDS_SENT)
+        self.assertTrue(self.feed.waits())
+        end = self.ended()
+        self.assertEqual((end.outcome, end.summary), ("partial", "Written so far."))
+        self.assertIn(ar.WRAP_UP_NO_CLICK, told)
+        self.assertNotIn(ar.WRAP_UP_SILENT, told)
+
+    def test_the_plan_s_limit_and_its_card(self) -> None:
+        wall = [WHEN]
+
+        def play(engine: FakeEngine) -> None:
+            engine.wait_message()
+            engine.emit(rate_limit_event(resets_at=RESET.timestamp()))
+            engine.emit(result_event("limit", is_error=True, api_error_status=429))
+            threading.Event().wait(30)
+
+        self.make_things(play, timing=replace(WAIT_TIMING, keep_going_s=4.0))
+        self.c.agent._now = lambda: wall[0]
+        self.start()
+        run = self.c.agent.run()
+        self.assertTrue(wait_for(lambda: run._paused and run._idle, timeout=10))
+        settle()
+        self.type_it("use the blue one")
+        self.assertEqual(self.status(), "I'll pass that on when the plan's limit has reset, sir.")   # true: it has not
+        wall[0] = RESET + timedelta(seconds=1)
+        self.wait_card()
+        self.assertEqual(self.feed._question.kind, ar.Q_RESUME)
+        self.type_it("yes carry on")
+        self.assertEqual(self.status(), WORDS_HELD)                  # never "when the limit has reset": the card says it has
+        self.assertTrue(self.feed.waits())
+        end = self.ended()
+        self.assertEqual((end.outcome, end.code), ("partial", ar.C_NO_CLICK))
+        self.assertEqual(end.summary, "You typed while the card waited, sir, but only a click answers it and none came, "
+                                      "so I stopped there. Live has its steps, and any files are in the workspace.")
+        self.assertIn("You typed while the card waited", self.talk())
+
+
+    def test_the_plan_s_limit_with_no_time_named(self) -> None:
+        told: list[str] = []
+
+        def play(engine: FakeEngine) -> None:
+            engine.wait_message()
+            engine.emit(result_event("You've hit your limit", is_error=True, api_error_status=429))
+            told.append(engine.wait_message())
+            engine.emit(result_event("You've hit your limit", is_error=True, api_error_status=429))
+            threading.Event().wait(30)
+
+        self.make_things(play, timing=replace(WAIT_TIMING, limit_wait_s=4.0))
+        self.start()
+        run = self.c.agent.run()
+        self.assertTrue(wait_for(lambda: run._paused and run._idle, timeout=10))
+        settle()
+        self.assertIn("tell me to carry on once your plan has reset", self.status())
+        self.type_it("carry on now")                                 # it says what it does: they go in, to try again
+        self.assertTrue(wait_for(lambda: told == ["The owner says: carry on now"], timeout=10))
+        end = self.ended()                                           # the limit still holds, and nobody says more
+        self.assertEqual((end.outcome, end.code), ("partial", ar.C_LIMIT_WAIT))
+        self.assertIn("held this task for 6 hours with no word", end.summary)
+        self.assertIn("with no word", self.talk())
 
 
 class HopTests(unittest.TestCase):

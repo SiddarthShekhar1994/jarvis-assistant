@@ -323,6 +323,7 @@ class FakeBrowser:
         self.holds: list[bool] = []
         self.owner_hidden = False
         self.away = False
+        self.rest = False                     # a file card waits: the window is off the screen
         self.rect: Any = None                 # window_rect(): where the window is (None: not showing)
         self.other_ways: list[tuple[str, bool]] = []
         self.shown: list[str] = []            # what the owner's Show asked for
@@ -396,11 +397,17 @@ class FakeBrowser:
         if away is not None:
             self.away = bool(away)
 
+    def set_resting(self, resting: bool) -> None:
+        self.rest = bool(resting)
+
+    def resting(self) -> bool:
+        return self.rest and self.rect is not None
+
     def owner_hid(self) -> bool:
         return self.owner_hidden
 
     def window_rect(self) -> Any:
-        return self.rect
+        return None if self.rest else self.rect
 
     def keep_clear(self) -> None:
         self.kept_clear += 1
