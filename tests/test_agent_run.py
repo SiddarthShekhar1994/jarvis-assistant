@@ -995,7 +995,7 @@ class GuardTests(RunCase):
     def assert_guard(self, reason: str) -> None:
         end = self.end()
         self.assertEqual((end.outcome, end.code), ("failed", f"guard:{reason}"))
-        self.assertEqual(end.summary, ar.GUARD_WORDS)
+        self.assertEqual(end.summary, ar.GUARD_TOOL_WORDS if reason == "tool_use" else ar.GUARD_WORDS)
         self.assertTrue(self.engine.killed)
         self.assert_clean()
 
@@ -1072,6 +1072,18 @@ class GuardTests(RunCase):
 
         self.go(script)
         self.assert_guard("tool_use")
+
+    def test_a_wrong_name_on_our_own_server_is_only_a_wrong_name(self) -> None:
+        """Nothing can run it, and a task must not die of it: seen once in nine real tasks."""
+        def script(engine: FakeEngine) -> None:
+            engine.wait_message()
+            engine.chunk_start({"type": "tool_use", "id": "toolu_x", "name": "mcp__jarvis__calendar_search", "input": {}})
+            engine.assistant([{"type": "tool_use", "id": "toolu_x", "name": "mcp__jarvis__calendar_search", "input": {}}])
+            engine.call("finish", summary="Done.", outcome="done")
+            engine.end_turn()
+
+        self.go(script)
+        self.assertEqual(self.end().outcome, "done")
 
     def test_seen_in_the_stream_first(self) -> None:
         def script(engine: FakeEngine) -> None:

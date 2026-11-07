@@ -2576,13 +2576,14 @@ yours, a later message that names such a word or an address clears nothing and m
 whatever it says ("no, don't search for that", "yes, search for that"). Your words still reach him
 and still count for what you ask of him, but that search takes a click, and that click clears the word
 for the task; another address takes a click of its own. The words of your request, and a word that
-was not private when you said it, stay yours and are never held up. So do the words you type while
-a task runs, but they turn these checks on for the rest of the task, so an address not seen yet takes
-a click, one you typed among them: a page may have told him what to ask, in a question or in a line
-he says. The same from the start if your request itself plainly holds a password, a code, an email
-address or a long number, though the addresses in your request still open. A link you wrote yourself
-can still go on one of his cards, where the click on that card is what sends it. And he never says a
-line that asks you for a password or a code, as he never asks one. Words are matched as they would read: look-alike
+was not private when you said it, stay yours and are never held up. An ordinary follow-up changes
+nothing. But words you type once he has asked you something turn these checks on for the rest of the
+task, so an address not seen yet takes a click, one you typed among them: a page may have told him
+what to ask, in a question or in a line he says. So do words that plainly hold a password, a code, an
+email address or a long number, in your request (from the start, though its own addresses still open)
+or in a later message. A link you wrote yourself can still go on one of his cards, where the click on
+that card is what sends it. And he never says a line that asks you for a password or a code, as he
+never asks one. Words are matched as they would read: look-alike
 letters, accents, invisible characters, cuts and glue aside, reversed, in ROT13 or with digits for
 letters, numbers in any form of digit, reversed or with zeros before them, and short words in base64.
 How a word is written counts too, in such a task, so nothing can ride on a word that reads as yours:
@@ -2629,7 +2630,7 @@ either. (A briefing being read aloud reads on.) The bar says
 after your request.
 
 **Its budget.** After `[agent] max_turns` turns or `max_minutes` minutes of work he asks
-"Keep going?" (the clock rests while he waits for you). Reached while a card is up or a batch is at
+"Keep going?" (the clock rests while he waits for you and while the PC sleeps). Reached while a card is up or a batch is at
 work, his calls are held and he asks when that has ended. No, or no answer, and he reports
 where things stand and stops. If your plan's limit is reached the task pauses, says
 when it resets and asks you then; with no time named, or a day or a date beside it, it waits for you

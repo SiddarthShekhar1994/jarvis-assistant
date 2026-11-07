@@ -500,6 +500,81 @@ class KeepGoingRoadTests(RunCase):
         run.stop()
 
 
+class ThePcSleepsTests(RunCase):
+    """Nothing works and nobody can answer while the PC sleeps: no clock of a task counts that time. In the app ``clock`` and
+    ``real_clock`` are one clock, which counts through a sleep."""
+
+    def clocks(self) -> tuple[list[float], Any]:
+        now = [1000.0]
+
+        def jump(seconds: float, *, real: bool = True) -> None:
+            now[0] += seconds
+            if real:
+                real_now[0] += seconds
+            time.sleep(0.15)                                         # the run looks at its clocks
+
+        real_now = [5000.0]
+        self.real_now = real_now
+        return now, jump
+
+    def test_a_card_does_not_run_out_while_the_pc_sleeps(self) -> None:
+        now, jump = self.clocks()
+
+        def script(engine: FakeEngine) -> None:
+            engine.wait_message()
+            engine.call("ask_owner", question="Which town?")
+            engine.end_turn("Asked.")
+            threading.Event().wait(30)
+
+        run = self.go(script, clock=lambda: now[0],
+                      timing=replace(FAST, init_s=1e9, question_s=60.0, real_clock=lambda: self.real_now[0]))
+        self.question()
+        jump(2000.0)                                                 # past its time, all of it asleep
+        self.assertIsNotNone(run.waiting)
+        self.assertEqual([event for event in self.of(ar.E_QUESTION_GONE) if event.code == ar.C_NO_ANSWER], [])
+        jump(61.0, real=False)                                       # awake: its time runs on, and ends as ever
+        self.until(lambda: [event for event in self.of(ar.E_QUESTION_GONE) if event.code == ar.C_NO_ANSWER])
+        run.stop("test")
+
+    def test_the_budget_does_not_count_a_sleep(self) -> None:
+        now, jump = self.clocks()
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+
+        def script(engine: FakeEngine) -> None:
+            engine.wait_message()
+            engine.call("say", text="One.")
+            gate.wait(15)
+
+        run = self.go(script, clock=lambda: now[0], timing=replace(FAST, init_s=1e9, real_clock=lambda: self.real_now[0]))
+        self.until(lambda: self.kinds(ar.E_SAY))
+        before = run.budget.worked_s
+        jump(2000.0)
+        self.assertLess(run.budget.worked_s, before + 1.0)
+        jump(30.0, real=False)                                       # awake: this counts
+        self.assertGreaterEqual(run.budget.worked_s, before + 30.0)
+        run.stop("test")
+        gate.set()
+
+    def test_a_short_gap_is_no_sleep(self) -> None:
+        now, jump = self.clocks()
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+
+        def script(engine: FakeEngine) -> None:
+            engine.wait_message()
+            engine.call("say", text="One.")
+            gate.wait(15)
+
+        run = self.go(script, clock=lambda: now[0], timing=replace(FAST, init_s=1e9, real_clock=lambda: self.real_now[0]))
+        self.until(lambda: self.kinds(ar.E_SAY))
+        before = run.budget.worked_s
+        jump(30.0)
+        self.assertGreaterEqual(run.budget.worked_s, before + 30.0)
+        run.stop("test")
+        gate.set()
+
+
 class FileCardClockTests(RunCase):
     """arf-7 at the run: what the click does to its clock. (FileCardRoadTests: through the real desktop.)"""
 
@@ -880,19 +955,62 @@ class AnswersToTheModelsQuestionTests(RunCase):
         self.assertFalse(wall.private)
         self.assertEqual(self.end().outcome, "done")
 
-    def test_a_message_with_no_question_waiting_does_too(self) -> None:
-        """A line the model said can ask as well as a question can."""
+    def after_a_line(self, line: str) -> tuple[Any, Any]:
+        """A run that has said ``line``, nobody having typed anything, and waits for a message."""
         wall = WebFirewall(web.AddressBook())
+        said = threading.Event()
 
         def script(engine: FakeEngine) -> None:
             engine.wait_message()
+            engine.call("say", text=line)
+            said.set()
             engine.wait_message()
             engine.call("finish", summary="Done.", outcome="done")
             engine.end_turn()
 
         run = self.go(script, firewall=wall)
-        self.until(lambda: self.kinds(ar.E_STARTED))
-        self.assertEqual(run.owner_says(f"and see {self.EVIL}"), "sent")
+        self.assertTrue(said.wait(15))
+        return run, wall
+
+    def test_an_ordinary_follow_up_with_nothing_asked_does_not(self) -> None:
+        run, wall = self.after_a_line("Reading three reviews now.")
+        address = "https://www.example.org/hours"
+        self.assertEqual(run.owner_says(f"only ones open on Sundays, and see {address}"), "sent")
+        self.assertFalse(wall.private)
+        self.assertTrue(wall.book.seen(address))
+        self.assertEqual(self.end().outcome, "done")
+
+    def test_a_message_after_a_line_that_asks_does(self) -> None:
+        """A line the model said can ask as well as a question can."""
+        for line in ("What was the reference on that letter?", "Please type the reference on that letter."):
+            with self.subTest(line=line):
+                run, wall = self.after_a_line(line)
+                self.assertEqual(run.owner_says(f"AB-12, and see {self.EVIL}"), "sent")
+                self.assertTrue(wall.private)
+                self.assertFalse(wall.book.seen(self.EVIL))
+                self.assertEqual(self.end().outcome, "done")
+
+    def test_a_message_after_the_model_s_own_text_that_asks_does(self) -> None:
+        """Live shows that text, so it can ask too."""
+        wall = WebFirewall(web.AddressBook())
+
+        def script(engine: FakeEngine) -> None:
+            engine.wait_message()
+            engine.assistant([{"type": "text", "text": "What was the reference on that letter?"}])
+            engine.wait_message()
+            engine.call("finish", summary="Done.", outcome="done")
+            engine.end_turn()
+
+        run = self.go(script, firewall=wall)
+        self.until(lambda: self.kinds(ar.E_TEXT))
+        self.assertEqual(run.owner_says(f"AB-12, and see {self.EVIL}"), "sent")
+        self.assertTrue(wall.private)
+        self.assertFalse(wall.book.seen(self.EVIL))
+        self.assertEqual(self.end().outcome, "done")
+
+    def test_a_message_that_plainly_holds_something_private_does(self) -> None:
+        run, wall = self.after_a_line("Reading three reviews now.")
+        self.assertEqual(run.owner_says(f"my code is 482913, and see {self.EVIL}"), "sent")
         self.assertTrue(wall.private)
         self.assertFalse(wall.book.seen(self.EVIL))
         self.assertEqual(self.end().outcome, "done")

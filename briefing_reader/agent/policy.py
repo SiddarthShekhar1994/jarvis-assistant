@@ -150,6 +150,12 @@ class Budget:
             if self._since is None:
                 self._since = self._clock()
 
+    def slept(self, seconds: float) -> None:
+        """The PC slept this long just now: that was no work."""
+        with self._lock:
+            if self._since is not None:
+                self._since += seconds
+
     def _settle(self) -> None:
         if self._since is not None:
             now = self._clock()

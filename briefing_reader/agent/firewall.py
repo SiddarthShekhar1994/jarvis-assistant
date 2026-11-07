@@ -16,10 +16,10 @@ never the size of the taint set, which a note holding only short words leaves em
         owner_said(words)        the owner's words: what is not tainted now never taints, and while the run holds nothing
                                  private their addresses count as seen; said() gives them back, joined, and messages()
                                  one by one: the words a licence is read from (agent.owner)
-        note_private()           a private tool answered, whatever it fed, or the owner typed something while the task ran
+        note_private()           a private tool answered, whatever it fed, or the owner typed words the model had asked for
                                  (agent.runner): the checks are on from now on, for good
-        note_goal(words)         the same, from the start, when the request itself plainly holds something private
-                                 (holds_something_private): its words stay the owner's and its addresses seen
+        note_if_private(words)   the same when what the owner said plainly holds something private
+                                 (holds_something_private): their words stay theirs
         owner_wrote(address)     that address stands in the owner's own words: for a card's link, never a page's load
         go_strict()              the run has read a mail's body, a file's contents or the conversation (strict)
         check(tool, args)        before web_search, open_page, fetch_text and open_thing's site: None, or what goes back
@@ -283,8 +283,8 @@ def _digits(text: str) -> str:
 
 
 def holds_something_private(words: str) -> bool:
-    """The owner's request itself plainly holds what must not leave by an address a page names: a key or a word for a
-    secret, an email address, a long number. Only ever turns the checks on (WebFirewall.note_goal)."""
+    """What the owner said plainly holds what must not leave by an address a page names: a key or a word for a secret, an
+    email address, a long number. Only ever turns the checks on (WebFirewall.note_if_private)."""
     plain = _ascii_digits(words or "")
     return (guard.holds_secret(plain) or guard.asks_for_secret(plain) or _EMAIL_RE.search(plain) is not None
             or _REQUEST_NUMBER_RE.search(plain) is not None
@@ -727,10 +727,10 @@ class WebFirewall:
         no word in, so the checks are on for good. Nothing the owner says or clicks turns them off."""
         self.private = True
 
-    def note_goal(self, words: str) -> None:
-        """The task's request, once owner_said has heard it: if it plainly holds something private the checks are on from
-        the start, for a page could tell the model to carry that off by an address. Its words stay the owner's and its
-        addresses seen."""
+    def note_if_private(self, words: str) -> None:
+        """What the owner said plainly holds something private: the checks are on from now on, for a page could tell the
+        model to carry that off by an address. Their words stay theirs. Called after owner_said for the task's request (its
+        addresses stay seen), before it for a message that comes later (an address in that one is not)."""
         if holds_something_private(words):
             self.note_private()
 

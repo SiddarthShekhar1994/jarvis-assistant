@@ -25,8 +25,9 @@ desktop's own), and only its own end says anything: card_at_work(id) gives its c
 owner's click starts the batch, card_ended(id, message) puts its end in as the next message, and finish waits for it
 unless the task is stopping. With no row ended for BATCH_QUIET_MINUTES (card_progress(id) starts the watch again) the run
 stops waiting on it, in true words: the batch is still at work, untouched, and its card has the truth. A choice clicked
-answers, but it is the model's words, so it licenses nothing and clears nothing; words typed are the owner's, and any
-typed while the task runs turn the firewall on for the rest of the run. A ``result`` with no wait pending and no
+answers, but it is the model's words, so it licenses nothing and clears nothing; words typed are the owner's, and those
+the model asked for, or that plainly hold something private, turn the firewall on for the rest of the run (_typed). A
+``result`` with no wait pending and no
 finish gets one prompt to carry on or finish, and after another one the task ends as partial. A message sent mid-run is
 delivered by Claude Code after the running tool returns (``--replay-user-messages`` shows when; a ``result`` while one is
 on its way is not idle). Words typed before the goal has gone in go in right after it, in order.
@@ -71,6 +72,7 @@ from ..ask.context import COMMAND_CAP, data, now_line
 from ..ask.stream import (CLI_UNSUPPORTED, ERROR, GUARD, LIMIT, NOT_SIGNED_IN, AskFailure, GuardTrip, InitSummary,
                           LimitSignal, classify_text, clock_words, exit_failure, failure, limit_reset_time,
                           limit_reset_words, parse_event, rate_limit_signal)
+from ..desktop import guard
 from ..desktop.backend import real_backend_blocked
 from ..gcal import local_timezone
 from . import policy
@@ -168,6 +170,8 @@ BATCH_QUIET_WORDS = (f"No row of that card's batch has ended for {BATCH_QUIET_MI
                      "work and its card has the truth. The task goes on without it.")
 MAX_TURNS_WORDS = "That ran past what Claude Code allows one task, {sir}. Any files are in the workspace."
 GUARD_WORDS = "Claude Code started with something a task does not allow, so I stopped it, {sir}."
+GUARD_TOOL_WORDS = ("Claude Code tried to use something a task does not allow, so I stopped it, {sir}. Any files are in "
+                    "the workspace.")
 GARBLED_WORDS = "Claude Code's output could not be read, so I stopped the task, {sir}."
 EXIT_WORDS = "Claude Code stopped before the task was finished, {sir}. Any files are in the workspace."
 INTERNAL_WORDS = "The task stopped because of an unexpected error, {sir}. Any files are in the workspace."
@@ -256,6 +260,8 @@ class Timing:
     web_card_s: float = 10 * 60.0       # ... to the firewall's card: then that one call is refused and the task goes on
     card_s: float = 16 * 60.0           # ... to a file card: its own 15 minutes end first; this only if they did not
     at_work_s: float = BATCH_QUIET_MINUTES * 60.0     # its batch at work: this long with no row ended
+    sleep_gap_s: float = 60.0           # this long between two looks at real_clock: the PC slept (_note_sleep)
+    real_clock: Callable[[], float] = time.monotonic  # counts through a sleep, on Windows
     wrap_up_s: float = 60.0             # told to report and finish: this long, then it ends as partial
     after_finish_s: float = 20.0        # finish recorded: this long for its last words
     replay_s: float = 5.0               # a message sent never showed as delivered and nothing came: idle after all
@@ -424,6 +430,8 @@ class AgentRun:
         self._held_owner: list[str] = []    # what waits for the limit: the owner's words, a card's answer
         self._garbage = 0
         self._card_id = ""                  # the file card a Q_CARD wait hangs on
+        self._line_asked = False            # a line of the model's has asked the owner something (_typed)
+        self._last_real = timing.real_clock()     # when the clock was last looked at (_note_sleep)
         self._context = RunContext(run_id=self.run_id, folder=folder, clock=clock, on_plan=self._tool_plan,
                                    on_say=self._tool_say, on_question=self._tool_question, on_finish=self._tool_finish,
                                    web=web, tool_s=timing.tool_s, fetch=fetch, owner=owner, on_card=self._tool_card,
@@ -432,9 +440,7 @@ class AgentRun:
         if callable(attach):
             attach(self.ask_web)
         self._note_owner(goal)
-        note_goal = getattr(firewall, "note_goal", None)
-        if callable(note_goal):
-            note_goal(goal)
+        self._note_if_private(goal)
 
     def __repr__(self) -> str:              # never the goal
         return f"AgentRun({self.run_id})"
@@ -479,13 +485,20 @@ class AgentRun:
         if callable(heard):
             heard(words)
 
-    def _checks_on(self) -> None:
-        """Words typed while the task runs, and a page may have told the model to ask for them, in a question or in a line
-        it said, whatever the words of the asking. The firewall's checks are on from now on, before those words are noted:
-        an address in them is not seen, so the address rule stands between them and any page not seen in this run."""
-        note = getattr(self._firewall, "note_private", None)
+    def _note_if_private(self, words: str) -> None:
+        note = getattr(self._firewall, "note_if_private", None)
         if callable(note):
+            note(words)
+
+    def _typed(self, text: str, kind: str = "") -> None:
+        """Words typed while the task runs, before they are noted. A page may have told the model to ask for them, in a
+        question or in a line it said, whatever the words of the asking, and they may hold something private whatever came
+        before. Then the firewall's checks are on from now on: an address in them is not seen, so the address rule stands
+        between them and any page not seen in this run. An ordinary follow-up, nobody having asked, changes nothing."""
+        note = getattr(self._firewall, "note_private", None)
+        if (kind == Q_TASK or self._line_asked) and callable(note):
             note()
+        self._note_if_private(text)
 
     def stop(self, reason: str = C_STOPPED, *, keep_report: bool = True) -> None:
         """Kills at once (R8): whatever a tool still comes back with is dropped. ``reason``: the log's word. After finish
@@ -506,7 +519,7 @@ class AgentRun:
             if self._end is not None or self._stop.is_set() or self._finished is not None:
                 return "refused"
             wait = self._wait
-            self._checks_on()
+            self._typed(text, wait.question.kind if wait is not None else "")
             self._note_owner(text)
             if wait is not None and wait.question.kind == Q_TASK:   # only ask_owner's: the others are click only
                 if self._paused and not self._limit_holds():
@@ -547,7 +560,7 @@ class AgentRun:
                 self._deliver(WEB_ALLOWED_TEXT if allowed else WEB_DECLINED_TEXT)
                 return True
             if text not in question.choices:    # a choice clicked is the model's words: never the owner's own
-                self._checks_on()
+                self._typed(text, question.kind)
                 self._note_owner(text)
             if question.kind == Q_TASK:
                 self._deliver(owner_message(text, ANSWER_LABEL))
@@ -655,7 +668,8 @@ class AgentRun:
                     self._on_stream(event)
             except GuardTrip as trip:
                 logger.warning("Agent %s: the guard stopped it (%s)", self.run_id, trip.reason)
-                self._finish_run(OUTCOME_FAILED, f"{GUARD}:{trip.reason}", GUARD_WORDS)
+                self._finish_run(OUTCOME_FAILED, f"{GUARD}:{trip.reason}",
+                                 GUARD_TOOL_WORDS if trip.reason == "tool_use" else GUARD_WORDS)
                 return
 
     def _clean_up(self) -> None:
@@ -716,10 +730,30 @@ class AgentRun:
 
     # ---- what the clock says -------------------------------------------------------------------------
 
+    def _note_sleep(self) -> None:
+        """The PC slept: the clock jumped between two looks at it. Nothing worked and nobody could answer meanwhile, so no
+        clock of this run counts that time: "That's 32 minutes on this task" would be false, and a card must not have run
+        out while its owner's PC was asleep."""
+        real = self.timing.real_clock()
+        gap, self._last_real = real - self._last_real, real
+        if gap < self.timing.sleep_gap_s:
+            return
+        logger.info("Agent %s: the PC slept (about %d minute(s))", self.run_id, round(gap / 60))
+        self.budget.slept(gap)
+        if self._wait is not None:
+            self._wait.deadline += gap
+        if self._replay_since is not None:
+            self._replay_since += gap
+        self._wrap_up_deadline += gap
+        self._finished_at += gap
+        self._paused_at += gap
+        self._started_at += gap
+
     def _tick(self) -> None:
         with self._lock:
             if self._end is not None:
                 return
+            self._note_sleep()
             now = self._clock()
             if self._init is None and now - self._started_at >= self.timing.init_s:
                 logger.warning("Agent %s: no init event in time", self.run_id)
@@ -851,8 +885,15 @@ class AgentRun:
             self._emit(AgentEvent(E_STARTED))
 
     def _check_tool(self, name: Any) -> None:
-        if name not in self._expected:
-            raise GuardTrip("tool_use")
+        """Anything but this run's tools trips the guard, but for a wrong name on Jarvis's own server: the model got a name
+        wrong, and nothing can run it (that server is Jarvis's alone and serves only the run's tools, and Claude Code
+        answers that there is no such tool). The task goes on."""
+        if name in self._expected:
+            return
+        if isinstance(name, str) and name.startswith(f"mcp__{SERVER}__"):
+            logger.info("Agent %s: the model named a tool that does not exist", self.run_id)
+            return
+        raise GuardTrip("tool_use")
 
     def _check_chunk(self, event: Mapping[str, Any]) -> None:
         """A chunk of --include-partial-messages: a tool outside the set is seen here first."""
@@ -874,6 +915,7 @@ class AgentRun:
             if block.get("type") in TOOL_BLOCKS:
                 self._check_tool(block.get("name"))
             elif block.get("type") == "text" and isinstance(block.get("text"), str) and block["text"].strip():
+                self._line_asked = self._line_asked or guard.line_asks(block["text"])     # (Live shows it)
                 self._emit(AgentEvent(E_TEXT, text=block["text"]))
         if self.budget.turns != before:
             self._report_usage()
@@ -1099,6 +1141,7 @@ class AgentRun:
         self._emit(AgentEvent(E_PLAN, steps=steps))
 
     def _tool_say(self, text: str) -> None:
+        self._line_asked = self._line_asked or guard.line_asks(text)
         self._emit(AgentEvent(E_SAY, text=text))
 
     def _tool_question(self, text: str, choices: tuple[str, ...]) -> bool:

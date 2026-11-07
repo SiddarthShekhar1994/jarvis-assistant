@@ -177,7 +177,7 @@ class WhatARequestHoldsTests(unittest.TestCase):
         wall = WebFirewall(web.AddressBook())
         goal = "my reference is 482913, look it up on https://www.example.org/status"
         wall.owner_said(goal)
-        wall.note_goal(goal)
+        wall.note_if_private(goal)
         self.assertTrue(wall.private)
         self.assertFalse(wall.strict)
         self.assertTrue(wall.book.seen("https://www.example.org/status"))
@@ -186,7 +186,7 @@ class WhatARequestHoldsTests(unittest.TestCase):
     def test_a_clean_request_leaves_the_run_clean(self) -> None:
         wall = WebFirewall(web.AddressBook())
         wall.owner_said("find me a cheap laptop")
-        wall.note_goal("find me a cheap laptop")
+        wall.note_if_private("find me a cheap laptop")
         self.assertFalse(wall.private)
 
     def test_a_long_request_is_read_in_time(self) -> None:
