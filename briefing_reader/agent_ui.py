@@ -10,7 +10,8 @@
                                a plain reason when it can't start
         take_request(text)     AskController's gate (D4): while a task runs, what is typed goes in as the owner's
                                message (the answer, when a question waits; its own choice's word is that answer, whatever
-                               the word), or stops it ("stop", "cancel", with what is said around them: stop_words).
+                               the word, but a stop word only once a task), or stops it ("stop", "cancel", with what is
+                               said around them: stop_words).
                                While a card only a click answers waits, the bar says so (clickNeeded). Nothing runs: False
         answer(id, text)       the owner-question seam: a card's click and the tests answer through it
         stop(reason)           ends the task at once (R8): the process is killed and anything late is dropped.
@@ -50,8 +51,9 @@ what was typed, searched for or read.
 
 The voice: every line the model wrote (the plan's "found", say, a question, the report's opening) comes to spoken()
 before it reaches the voice, whose words go to Microsoft's online service as an Ask's answers do. Such a line goes on
-only while the run holds nothing private, or when it has no tainted word in it and, in a strict run, no foreign word
-(WebFirewall.speakable); else it stays on the caption and on its card, unsaid, with Jarvis's own fixed words in its
+only while the run holds nothing private, or when it has no tainted word in it, no key, email address or long number of
+its own and, in a strict run, no foreign word (WebFirewall.speakable); else it stays on the caption and on its card,
+unsaid, with Jarvis's own fixed words in its
 place for a question or a report. [agent] speak_private = true skips the gate. Jarvis's own fixed lines never come here.
 
 The owner's things (part A4): ``things`` (AppThings, made by the app) is what a run's agent.owner.OwnerAccess reads and
@@ -503,6 +505,7 @@ class AgentController(QObject):
         self._stopping = False
         self._shut = False
         self.stopped_by = ""              # this task: the owner's Stop or Turn off came (TURNED_OFF, STOPPED_BY_OWNER)
+        self._stop_chosen = False         # this task: a stop word has answered a question that offered it (take_request)
         self.last_end: AgentEnd | None = None
         self.last_folder: TaskFolder | None = None
 
@@ -565,6 +568,7 @@ class AgentController(QObject):
         self._stopping = False
         self.stopped_by = ""
         self.last_folder = folder
+        self._stop_chosen = False
 
         def on_event(event: AgentEvent, seq: int = seq) -> None:
             try:
@@ -676,13 +680,17 @@ class AgentController(QObject):
 
     def take_request(self, text: str) -> bool:
         """AskController's gate (D4). True: it was taken - the task stops, or the words went in as the owner's. Typed or
-        dictated words never answer a card only a click answers: clickNeeded says so, and how to reach it."""
+        dictated words never answer a card only a click answers: clickNeeded says so, and how to reach it. A stop word
+        that is the waiting question's own choice answers it, once a task: a page may have had the model offer "Stop" to
+        swallow the owner's, so a second stop word stops the task, whatever the question offers."""
         run = self._run
         if run is None or run.ended is not None:
             return False
-        if stop_words(text) and not self._its_choice(run, text):
-            self.stop("typed")
-            return True
+        if stop_words(text):
+            if self._stop_chosen or not self._its_choice(run, text):
+                self.stop("typed")
+                return True
+            self._stop_chosen = True
         status = run.owner_says(text)
         if status == "refused":
             return False
@@ -795,11 +803,13 @@ class AgentController(QObject):
             logger.warning("Agent: its cards could not be withdrawn (%s)", type(exc).__name__)
 
     def _on_card_ended(self, state: Any, ending: str) -> None:
-        """A card of file steps ended: the run that waits on it hears how, in plain words, as its next message."""
+        """A card of file steps ended: the run that waits on it hears how, in plain words, as its next message (and
+        whether the owner clicked it: their word while the plan's limit holds)."""
         run = self._run
         if run is not None:
             run.card_ended(state.card.run_id, agent_owner.card_message(state, ending),
-                           agent_owner.card_how(state, ending))
+                           agent_owner.card_how(state, ending),
+                           clicked=ending in (agent_owner.CARD_CARRIED, agent_owner.CARD_NOT_NOW))
 
     def _on_card_at_work(self, state: Any, working: bool) -> None:
         """The owner's click started that card's batch, or it ran nothing and the card waits on: the run's clock for it

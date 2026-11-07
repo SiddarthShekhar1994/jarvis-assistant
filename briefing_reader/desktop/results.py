@@ -10,7 +10,8 @@ or a card's click) and turns its results into ``Card`` s - the result cards the 
   card and its exe to find its window by) and, for a file, the other matches as "Open this instead" rows;
 * ``WAITING``: a step held for the owner's click (hard rule 4): ONE_CLICK - an app he did not name exactly, a web
   page he did not type or typed without its https:// (its host shown), a file whose name has hidden characters
-  (spelled out as <U+202E>) - or CARD, amber - a document that can run macros or scripts, a shortcut (its real target
+  (spelled out as <U+202E>), in a task what his words there did not plainly ask to open (agent.owner: its note says
+  so) - or CARD, amber - a document that can run macros or scripts, a shortcut (its real target
   shown first: backend.link_target, read and never resolved; it opens only when that is a document in his folders);
 * ``FOUND``: what a find found, as rows to open (or show in their folder: a type Jarvis never opens).
 
@@ -76,7 +77,8 @@ NOT_NOW_TEXT = "Not now"
 SCRIPT_NOTE = "It can run macros or scripts, so it opens only when you click Open. Open it only if you trust it."
 HIDDEN_NOTE = "Its name had hidden characters (spelled out above). Check it is the file you want before you open it."
 NOT_NAMED_NOTE = "You didn't name this app exactly, so it opens only on your click."
-TASK_ASKED_NOTE = "Your words in this task didn't name it, so it opens only on your click."
+TASK_ASKED_NOTE = "Your words in this task didn't plainly ask to open it, so it opens only on your click."
+TASK_ASKED_SITE_NOTE = TASK_ASKED_NOTE + " Check the site first."
 SUGGESTED_NOTE = "You didn't type this address, so it opens only on your click. Check the site first."
 BARE_HOST_NOTE = "You typed it without https://, so it opens only on your click. Check the site first."
 LINK_NOTE = "It leads to {name}{where}. Open opens that file."
@@ -539,10 +541,12 @@ def _waiting_text(card: Card) -> CardText:
                         + (("open", OPEN_TEXT, COMMIT, True),), note_first=True)
     buttons = (("open", OPEN_TEXT, PRIMARY, False),) + folder + (("dismiss", NOT_NOW_TEXT, SECONDARY, True),)
     if card.skill == dv.OPEN_APP:
-        return CardText(f"APP{SEP}YOUR CLICK OPENS IT", card.name, "", NOT_NAMED_NOTE, NOTE_INFO, CYAN, buttons,
+        note = TASK_ASKED_NOTE if dv.FLAG_TASK_ASKED in flags else NOT_NAMED_NOTE      # (a task's: agent.owner)
+        return CardText(f"APP{SEP}YOUR CLICK OPENS IT", card.name, "", note, NOTE_INFO, CYAN, buttons,
                         note_first=True)
     if card.skill == dv.OPEN_URL:
-        note = BARE_HOST_NOTE if dv.FLAG_BARE_HOST in flags else SUGGESTED_NOTE
+        note = (BARE_HOST_NOTE if dv.FLAG_BARE_HOST in flags else TASK_ASKED_SITE_NOTE if dv.FLAG_TASK_ASKED in flags
+                else SUGGESTED_NOTE)
         return CardText(f"WEB PAGE{SEP}YOUR CLICK OPENS IT", card.host, card.address, note, NOTE_INFO, CYAN, buttons,
                         note_first=True)
     kicker = f"{card.type_words}{SEP}NAME HAD HIDDEN CHARACTERS" if dv.FLAG_HIDDEN_CHARS in flags \

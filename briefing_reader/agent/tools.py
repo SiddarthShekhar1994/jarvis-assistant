@@ -17,8 +17,8 @@
 
 What a line in Jarvis's voice may be (the plan's "found", say, ask_owner): cleaned of what no one can see, never a run
 of words a page, a mail or a file just gave (RunContext.read_words: agent.firewall.ReadWords), and neither a question nor
-a line asks for a password, a code or a card number (guard.asks_for_secret, guard.line_asks_for_secret). The voice has
-its own gate after that (agent_ui).
+a line asks for a password, a code or a card number (guard.asks_for_secret, guard.line_asks_for_secret); nor does a plan's
+step, which the owner reads as well. The voice has its own gate after that (agent_ui).
 
 Jarvis's own words go back to the model; a bad input gets a clear error result (isError), never an exception. A handler
 that raises gives an error result that names only the exception's type. Live may show what ToolResult.fields holds, in
@@ -280,6 +280,9 @@ def _too_soon(ctx: RunContext) -> float:
 
 def _update_plan(args: Mapping[str, Any], ctx: RunContext) -> ToolResult:
     steps = tuple(PlanStep(_line(step["text"], PLAN_TEXT_CAP), step["status"]) for step in args["steps"])
+    asking = next((step.text for step in steps if guard.line_asks_for_secret(step.text)), "")
+    if asking:                           # the owner watches the plan: a step may ask no more than a line may
+        return ToolResult(ASKS_SECRET_TEXT, is_error=True, code=ASKS_SECRET, fields=(("Not shown", asking),))
     ctx.on_plan(steps)
     done = sum(1 for step in steps if step.status == STEP_DONE)
     fields = tuple((step.status.upper(), step.text) for step in steps)
@@ -342,8 +345,9 @@ def _finish(args: Mapping[str, Any], ctx: RunContext) -> ToolResult:
         return error(f"{len(missing)} of those outputs is not a file in the task folder. Check with list_files, then "
                      "call finish again with what really exists.", REFUSED)
     ctx.on_finish(args["outcome"], summary, outputs)
-    return ToolResult("Recorded. End your turn now with one short sentence.", note=args["outcome"],
-                      fields=(("Summary", summary),))
+    # No field holds the report: this step stays in Live, and a Turn off in the seconds after must leave nothing of the
+    # report. It is on its card, and Live's "How it ended" opens with it at a natural end or a Stop.
+    return ToolResult("Recorded. End your turn now with one short sentence.", note=args["outcome"])
 
 
 def _folder_refusal(refused: WorkspaceRefused) -> ToolResult:

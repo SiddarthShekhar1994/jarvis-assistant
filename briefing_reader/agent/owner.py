@@ -9,8 +9,8 @@
 What it holds to:
 
 * Every private result tells the firewall a private tool answered (note_private: its checks are on from then on, for
-  good) and feeds its taint set before it goes back (addresses, numbers, words of 4+ letters of names, titles, subjects
-  and file names). A mail's body, a file's contents or the conversation make the run strict (agent.firewall). All of it
+  good) and feeds its taint set before it goes back (addresses, numbers, words of 4+ letters of names, titles, subjects,
+  and the names of files, apps and saved sites). A mail's body, a file's contents or the conversation make the run strict (agent.firewall). All of it
   goes back inside untrusted blocks (R5), its strong signs of an order flagged. A mail's and a file's words are kept as
   what a line in Jarvis's voice may not repeat (firewall.read_words).
 * Turn off stops them at once: ``things.consent()`` (version 3 of the card) is asked at every call.
@@ -18,19 +18,36 @@ What it holds to:
   over this run's own index: the owner's words, and people the calendar supplied whose name they said). What only mail,
   a note or the conversation supplied never grounds one.
 * A file is reached only by a ref issued in this run (desktop.refs, one index a run) and re-checked right before each
-  read (desktop.service.read_text): scope, identity, the NEVER list, a name or a folder named for secrets, a text
-  plainly holding a key, type, online-only. No parser: other types can't be read yet, and it says so. A mail's message
-  plainly holding a key is left out of what mail_read gives back, with a warning in Live.
+  read (desktop.service.read_text): scope, identity, the NEVER list, a name or a folder named for secrets, type,
+  online-only. No parser: other types can't be read yet, and it says so.
+* What plainly is a key or a password goes back as guard.SECRET_MARK and never as itself, the rest as written: in a
+  mail's subject or body, a part of a file, a note, an earlier turn or an event's title (guard.scrub_secrets). The model
+  is told a value was left out, Live warns of it with no word of it, and the taint set and the voice's check see only
+  what is left. A value is looked for in the text as it came, up to what is kept plus a margin, then cut: a cut leaves no
+  part of one.
 * Changes are licensed by the owner's own words only: ``firewall.said()``, the goal and their typed messages; never the
   model's reasoning, a clicked choice the model wrote, a file's name, a page or a mail. A later message takes back what
   an earlier one licensed (dv.withdrawn_skills). Everything goes through the desktop's validator
-  (desktop.validate.check_plan) or Ask's (ask.validate.to_cards) as it stands, and their tiers stand: never demoted;
-  only ever raised, where a task's model has read other people's text first and the keyword alone would act at once:
-  - open_thing opens at once only what the owner's words name (dv.names_item); anything else waits on a one-click card.
+  (desktop.validate.check_plan) or Ask's (ask.validate.to_cards) as it stands, and their tiers stand: never lowered but
+  by the owner's click; only ever raised, where a task's model has read other people's text first and the keyword alone
+  would act at once:
+  - A change at once comes only from a plain request of the owner's (_pieces): a message of PLAIN_CAP characters or
+    fewer that is no answer to the model's own question, with no ':' before it (what follows one is brought in: a
+    paste), in a sentence with no ':', no condition word and no '?' but after "can you" and the like, and no question,
+    how-to, reported or negating word before it ("how", "she wrote", "can't"), not taken back since, in the same
+    message ("mute. no, pause") or a later one ("no", "scratch that").
+  - open_thing opens at once only what such a request names, in a clause that opens with an opening word ("open the
+    Bramblemoor letter", "find the report, then open https://..."); a paste, a how-to, a question or someone else's
+    words naming it wait on the one-click card, and so does anything else. A site the firewall's card asked about first
+    has had that click when the owner allowed it (firewall.clicked): it opens then, so one site takes one click.
   - pc_control acts at once only on what the local routes' own parser (and a task's own plainer wordings of the same)
-    reads in the owner's words as a request (_pc_asks): "turn the volume down" is one, "the trading volume" is a noun,
-    and a keyword in a list is none. The same kind and the same direction, level, minutes or window, a step no bigger
-    (_same_ask). A licence with no such words goes on the firewall's card first (firewall.ask_once).
+    reads in such a request: as a chain from its start ("mute and pause"), straight after a then, an after that or a
+    next, or a whole request with its verb first after "and", "also", a comma or a new sentence ("find the report and
+    set the volume to 30"). "the trading volume" is a noun, and a bare keyword after "and" or in a list is none ("find
+    the report and mute"). The same kind and the same direction, level, minutes or window, a step no bigger
+    (_same_ask), a timer's label only from the request's own, and once for each time they asked: a repeat takes a card.
+    A licence with no such words goes on the firewall's card first (firewall.ask_once), which states a volume step
+    other than the usual one.
 * propose_files is a wait (D5): the card is the desktop's own (frozen plan, ticks, journal, Undo) and its end comes back
   as a message (``card_message``). propose_action is not: its cards wait in Approvals and the task goes on. Nothing here
   claims anything was sent or done.
@@ -53,7 +70,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import CancelledError, Future
 from concurrent.futures import TimeoutError as FutureTimeout
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time as clock_time, timedelta
 from datetime import timezone as fixed_zone
 from typing import Any, Protocol
@@ -63,7 +80,8 @@ from ..ask.context import (MAIL_NOTE, SOURCE_BRIEFING, SOURCE_CONVERSATION, SOUR
                            ContextIndex, addresses_in, conversation_block, conversation_exchanges, data, day_window,
                            event_row, event_start, index_event, index_thread, memory_block, memory_notes_shown,
                            person_row, recipients_named, thread_text)
-from ..ask.mail import MAX_THREADS, MailThread, QueryRefused, check_query, search_words, thread_from_api, trim_threads
+from ..ask.mail import (CUT_MARK, MAX_THREADS, MailThread, QueryRefused, check_query, search_words, thread_from_api,
+                        trim_threads)
 from ..ask.validate import LINE_CARD, to_cards
 from ..desktop import executor as dx
 from ..desktop import cardplan, guard, journal, pcctl, tidy
@@ -156,16 +174,18 @@ MAIL_NOT_RUN_TEXT = ("That search was not run: {reason}. Mail is searched only w
 UNKNOWN_THREAD_TEXT = ("Jarvis reads only a thread a mail_search of this task found. Search first, with the owner's "
                        "words.")
 MAIL_FAILED_TEXT = "Jarvis couldn't read that mail right now. Try once more later, or say so in your report."
-MAIL_LEFT_OUT_TEXT = "[Jarvis left this message out: it holds what looks like a key or a password]"
-MAIL_LEFT_OUT_NOTE = "{count}: what looks like a key or a password, never read"     # Live's: never a word of it
+SECRET_NOTE = "{count} left out: what looks like a key or a password"     # Live's: never a word of it
+SECRET_TOLD = ("(Jarvis took out {count} here, marked {mark}: what looks like a key or a password, never read. The "
+               "rest is as written. It is not missing, and the owner need not give it to you: carry on, and if it "
+               "matters say in your report that it was left out.)")
 NO_MAIL_TEXT = "No mail is connected for reading. Say so in your report."
 NOTHING_FOUND_TEXT = "Nothing matched."
 BAD_DAY_TEXT = '"from" and "to" must be days written YYYY-MM-DD, "from" first, at most {days} days apart.'
 READ_WORDS = {desktop_service.READ_TYPE:
               "Jarvis can't read that type of file yet: only plain text-like files ({types})",
               desktop_service.READ_ONLINE: "it is online-only, and reading it would download it",
-              desktop_service.READ_SECRET: "its name, its folder's or what it holds says secrets or sign-ins, and "
-                                           "Jarvis never reads those",
+              desktop_service.READ_SECRET: "its name or its folder's says secrets or sign-ins, and Jarvis never reads "
+                                           "those",
               desktop_service.READ_BINARY: "it doesn't read as text",
               desktop_service.READ_STOPPED: "the task was stopped",
               desktop_service.READ_UNAVAILABLE: "Jarvis can't reach this PC's files right now",
@@ -177,29 +197,51 @@ READ_NOT_DONE_TEXT = "That was not read: {reason}."
 READ_MORE_NOTE = "(There is more: call file_read with this ref and offset {offset}.)"
 READ_CUT_NOTE = "(Jarvis reads only the first 8 MB of a file.)"
 READ_END_TEXT = "That was all of this file."
-# How the owner's words are read for a PC control: clause by clause, each through the local routes' own parser
-# (desktop.routes.pc_request, a full match), the words around a request and a task's own plainer wordings aside. A run of
-# marks is tried once, not from each of its marks: this runs on whatever was pasted, and re holds the GIL throughout.
+# How the owner's words are read for a change at once, a PC control or an open (_pieces): clause by clause, a PC control
+# through the local routes' own parser (desktop.routes.pc_request, a full match), the words around a request and a
+# task's own plainer wordings aside, an open as a clause that opens with an opening word. A run of marks is tried once,
+# not from each of its marks: this runs on whatever was pasted, and re holds the GIL throughout.
 _CLAUSE_RE = re.compile(r"(?<![.,;:!?])[.,;:!?]+(?:\s+|$)|\s+(?:and then|and|then|but|also|after that|afterwards)\s+",
                         re.IGNORECASE)
 CLAUSE_CAP = 200                      # no PC request is this long: a longer clause is none, and is not read
-ASKS_CAP = 8                          # a message's PC requests that are read: no one asks for more at once
+ASKS_CAP = 8                          # a message's requests that are read: no one asks for more at once
+PLAIN_CAP = 300                       # a longer message asks for nothing at once: a paste, whatever it says (pc-2)
 _THEN_BREAKS = frozenset({"and then", "then", "after that", "afterwards"})
 _THEN_RE = re.compile(r"(?:and\s+)?(?:then|after\s+that|afterwards)(?:[,:]?\s+|$)|next\s+", re.IGNORECASE)
-_NO_CLAUSE_RE = re.compile(r"jarvis|please|kindly|now|just|ok|okay|hey|hi|yes|yeah|right|sure|well|actually|thanks"
-                           r"|thank you", re.IGNORECASE)     # said around a request, between commas: no clause of its own
+_NO_WORDS = r"jarvis|please|kindly|now|just|ok|okay|hey|hi|yes|yeah|right|sure|well|actually|thanks|thank you"
+_NO_CLAUSE_RE = re.compile(rf"(?:{_NO_WORDS})(?:\s+(?:{_NO_WORDS}))*", re.IGNORECASE)  # said around a request, between
+#                                                                     commas, no clause of its own ("hey jarvis, mute")
 _CONDITION_WORDS = frozenset({"if", "when", "whenever", "while", "until", "unless", "once", "whether"})
-_LEAD_IN_RE = re.compile(r"(?:(?:jarvis|please|kindly|now|just|and then|and|then|also|but|could you|can you|would you|"
-                         r"will you)[,:]?\s+)+", re.IGNORECASE)
+# pc-2: a word before a piece in its sentence that makes it no request of theirs: a question, a how-to, someone else's
+# words, a supposition, a negation dv.negated does not know ("can't": "can" and "t").
+_VOID_WORDS = frozenset({"how", "what", "why", "should", "explain", "suppose", "imagine", "said", "wrote", "told",
+                         "says", "steps", "manual", "guide", "couldn", "wouldn", "isn", "cannot", "cant", "couldnt",
+                         "wouldnt", "isnt"})
+_POLITE_RE = re.compile(r"(?:(?:jarvis|hey|hi|ok|okay|please)[,:]?\s+)*(?:can|could|would|will)\s+you\b", re.IGNORECASE)
+# A whole plain request, its verb first with its object ("set the volume to 30", "pause the music", "take a
+# screenshot"): it counts after "and", "also", a comma or a new sentence too (_WHOLE_AFTER), where a bare keyword does
+# not ("find the report and mute").
+_REQUEST_VERBS = frozenset({"set", "turn", "put", "change", "lower", "raise", "make", "mute", "unmute", "pause", "play",
+                            "resume", "skip", "stop", "start", "take", "cancel", "end", "go", "switch", "remind"})
+_WHOLE_AFTER = frozenset({"and", "also"})
+_CORRECTIONS = frozenset({"no", "not", "actually"})     # pc-6: a clause opening with one takes back the piece before it
+_OPENING_WORDS = next(licence.phrases for licence in dv.LICENCES if dv.OPEN_URL in licence.skills)
+_OPEN_KINDS = dv.OPEN_SKILLS | {dv.FIND_FILES}
+_LEAD_IN_RE = re.compile(r"(?:(?:jarvis|please|kindly|now|just|first|and then|and|then|also|but|could you|can you|"
+                         r"would you|will you)[,:]?\s+)+", re.IGNORECASE)
 _TAIL_RE = re.compile(r"(?:\s+(?:please|now|a bit|a little|for me|right now|straight away|again))+$", re.IGNORECASE)
+_LABEL_RE = re.compile(r"\b(?:minutes?|mins?|hour)(?:\s+timer)?\s+(\S.*)$", re.IGNORECASE)     # a timer's label, as said
 # A whole later message that says no, as guard.words reads it: it takes back the last message's asks.
-_SAYS_NO_RE = re.compile(r"(?:(?:actually|sorry|oh|hold on) )*(?:no|nope|wait|don t|dont|do not|not that)"
-                         r"(?: (?:no|nope|wait|don t|dont|do not|not that|actually|sorry|thanks|please))*")
+_SAYS_NO_WORDS = (r"no|nope|wait|don t|dont|do not|not that(?: one)?|not this one|not yet|not now|no need|hold on|hang on"
+                  r"|on second thoughts?|(?:i (?:ve |have )?)?changed my mind|scratch that|scratch it")
+_SAYS_NO_RE = re.compile(rf"(?:(?:actually|sorry|oh|please|hold on|hang on) )*(?:{_SAYS_NO_WORDS})"
+                         rf"(?: (?:{_SAYS_NO_WORDS}|actually|sorry|thanks|please))*")
 SAYS_NO_CAP = 40
 # A task's own wordings of what the local routes know, each plainly that request and a full match: routes._PC stays as it
 # is, for the app with no task.
 _WORDINGS = tuple((re.compile(pattern, re.IGNORECASE), form) for pattern, form in (
     (r"turn\s+(?:the\s+)?sound\s+(up|down)", r"volume \1"),
+    (r"turn\s+(?:the\s+)?volume\s+(up|down)", r"volume \1"),
     (r"turn\s+(up|down)\s+(?:the\s+)?(?:volume|sound)", r"volume \1"),
     (r"lower\s+(?:the\s+)?(?:volume|sound)", "volume down"),
     (r"raise\s+(?:the\s+)?(?:volume|sound)", "volume up"),
@@ -208,12 +250,14 @@ _WORDINGS = tuple((re.compile(pattern, re.IGNORECASE), form) for pattern, form i
     (r"unmute\s+(?:it|the\s+sound|the\s+volume)", "unmute"),
     (r"(?:set|put|change|turn)\s+(?:the\s+)?(?:volume|sound)\s+(?:to|at)\s+(\d{1,3})\s*(?:%|percent)?", r"volume \1"),
     (r"set\s+(?:the\s+)?(?:volume|sound)\s+(\d{1,3})\s*(?:%|percent)?", r"volume \1"),
-    (r"(?:the\s+)?(?:volume|sound)\s+to\s+(\d{1,3})\s*(?:%|percent)?", r"volume \1"),
+    (r"(?:the\s+)?(?:volume|sound)\s+(?:to|at)\s+(\d{1,3})\s*(?:%|percent)?", r"volume \1"),
+    (r"(?:volume|sound)\s+(\d{1,3})\s*percent", r"volume \1"),
     (r"stop\s+(?:the\s+)?(?:music|song|track|video)", "pause"),
     (r"play\s+some\s+music", "play"),
     (r"skip\s+this\s+(?:song|track|video)", "next"),
     (r"go\s+back\s+a\s+(?:song|track)", "previous"),
     (r"(?:(?:set|start)\s+)?(?:a\s+)?(\d{1,3})[\s-]*(?:minute|min)\s+timer(?:\s+(\S.*))?", r"timer \1 minutes \2"),
+    (r"(?:set|start)\s+timer\s+(?:for\s+)?(\d{1,3})\s*(?:minutes?|mins?)(?:\s+(\S.*))?", r"timer \1 minutes \2"),
     (r"(?:(?:set|start)\s+)?(?:a\s+)?timer\s+for\s+an?\s+hour(?:\s+(\S.*))?", r"timer 60 minutes \1"),
     (r"(?:(?:set|start)\s+)?(?:a\s+)?timer\s+for\s+half\s+an\s+hour(?:\s+(\S.*))?", r"timer 30 minutes \1"),
     (r"(?:turn|switch)\s+on\s+(focus(?:\s+mode)?\s+for\s+\S.*)", r"\1")))
@@ -334,23 +378,102 @@ def _count_of(count: int, one: str, many: str = "") -> str:
     return f"{count} {one if count == 1 else (many or one + 's')}"
 
 
-def _without_secrets(thread: MailThread) -> tuple[MailThread, int]:
-    """The thread with each message that plainly holds a key (guard.holds_secret) left out, as a file holding one is: its
-    headers stay, the rest of the thread goes on. How many went."""
-    messages = [replace(message, text=MAIL_LEFT_OUT_TEXT, cut=False) if guard.holds_secret(message.text) else message
-                for message in thread.messages]
-    return replace(thread, messages=tuple(messages)), sum(message.text == MAIL_LEFT_OUT_TEXT for message in messages)
+def _left_out(count: int) -> tuple[str, tuple[tuple[str, str], ...]]:
+    """What a result says of the values taken out of it: (the words for the model, the field for Live). No word of
+    them."""
+    if not count:
+        return "", ()
+    values = _count_of(count, "value")
+    return (SECRET_TOLD.format(count=values, mark=guard.SECRET_MARK), (("Left out", SECRET_NOTE.format(count=values)),))
+
+
+def _unmarked(text: str) -> str:
+    """``text`` without Jarvis's own marks: no word of the owner's, for the taint set or for a line to repeat."""
+    return text.replace(guard.SECRET_MARK, " ")
+
+
+def _marks_in(texts: Iterable[Any]) -> int:
+    return sum(text.count(guard.SECRET_MARK) for text in texts if isinstance(text, str))
+
+
+def _subjects_scrubbed(thread: MailThread) -> tuple[MailThread, int]:
+    """The thread with its subjects as guard.scrub_secrets gives them, and how many values the one it shows held."""
+    subject, count = guard.scrub_secrets(thread.subject)
+    messages = tuple(replace(message, subject=guard.scrub_secrets(message.subject)[0]) for message in thread.messages)
+    return replace(thread, subject=subject, messages=messages), count
+
+
+def _kept_text(whole: str, kept: str) -> tuple[str, int]:
+    """A message's text as trim_threads kept it (``kept``), from the text as it came (``whole``), its values taken out.
+    One it cut is looked at past the cut as well (service.SECRET_MARGIN), then cut in the same place: no part of a value
+    stays, and what stands far beyond it, which can be 200,000 characters, is never read."""
+    if whole == kept or not kept.endswith(CUT_MARK):
+        return guard.scrub_secrets(kept)
+    keep = len(kept) - len(CUT_MARK)
+    if whole[:keep] != kept[:keep]:
+        return guard.scrub_secrets(kept)
+    shown, count = guard.scrub_part(whole, 0, keep, desktop_service.SECRET_MARGIN)
+    return shown + CUT_MARK, count
+
+
+def _without_secrets(thread: MailThread, fit: MailThread) -> tuple[MailThread, int]:
+    """``fit`` (trim_threads' of ``thread``) with what plainly is a key or a password taken out of its subject and its
+    messages' text. How many values went."""
+    scrubbed, count = _subjects_scrubbed(fit)
+    wholes = {message.gmail_id: message.text for message in thread.messages}
+    messages = []
+    for message in scrubbed.messages:
+        text, found = _kept_text(wholes.get(message.gmail_id, message.text), message.text)
+        messages.append(replace(message, text=text))
+        count += found
+    return replace(scrubbed, messages=tuple(messages)), count
+
+
+def _scrubbed_turn(turn: Any) -> Any:
+    text, found = guard.scrub_secrets(getattr(turn, "text", ""))
+    return replace(turn, text=text) if found else turn
+
+
+def _plain(clause: str) -> str:
+    """A clause with the words around a request taken off: "please", "can you", "and then" before it, "now", "for me"
+    after it."""
+    lead = _LEAD_IN_RE.match(clause)
+    return _TAIL_RE.sub("", clause[lead.end():] if lead is not None else clause)
 
 
 def _clause_ask(clause: str) -> pcctl.PcAsk | None:
-    """What one clause asks for, as the local routes' own parser reads it, the words around a request aside."""
-    lead = _LEAD_IN_RE.match(clause)
-    plain = _TAIL_RE.sub("", clause[lead.end():] if lead is not None else clause)
+    """What one clause asks for, as the local routes' own parser reads it, the words around a request aside. A timer
+    with a label counts only when its label says what it is for, with no negation ("for tea", "to stretch"): "5 minute
+    timer apps" and "timer for 5 minutes isn't long enough" are no request (pc-4; routes._PC stays as it is)."""
+    plain = _plain(clause)
+    asked = None
     for pattern, form in _WORDINGS:
         match = pattern.fullmatch(plain)
         if match is not None:
-            return desktop_routes.pc_request(match.expand(form))
-    return desktop_routes.pc_request(plain)
+            asked = desktop_routes.pc_request(match.expand(form))
+            break
+    else:
+        asked = desktop_routes.pc_request(plain)
+    if asked is not None and asked.label:
+        said = _LABEL_RE.search(plain)
+        label = said.group(1).casefold() if said is not None else ""
+        if not label.startswith(("for ", "to ")) or dv.negated(label):
+            return None
+    return asked
+
+
+def _whole_request(clause: str) -> bool:
+    """The clause is a whole plain request, its verb first with its object ("set the volume to 30", "pause the
+    music"), not a bare keyword ("mute", "volume up")."""
+    words = _plain(clause).casefold().split()
+    return len(words) >= 2 and words[0] in _REQUEST_VERBS
+
+
+def _opening(clause: str) -> bool:
+    """The clause opens with an opening word ("open", "show", "go to" ...: the validator's own), the words around a
+    request aside: what it names is what the owner asked to open."""
+    words = guard.words(_plain(clause), camel=False)
+    return any(tuple(words[:len(phrase)]) == phrase for phrase in _OPENING_WORDS)
 
 
 def _clauses(text: str) -> list[tuple[int, int, str]]:
@@ -365,13 +488,14 @@ def _clauses(text: str) -> list[tuple[int, int, str]]:
 
 
 def _no_clause(clause: str) -> bool:
-    """Nothing of a request or against one: empty, or only what is said around a request ("Jarvis, mute, please")."""
-    return not clause or _NO_CLAUSE_RE.fullmatch(clause) is not None
+    """Nothing of a request or against one: empty, or only what is said around a request ("Jarvis, mute, please",
+    "hey jarvis, mute")."""
+    return not clause or (len(clause) <= CLAUSE_CAP and _NO_CLAUSE_RE.fullmatch(clause) is not None)
 
 
 def _opens_with_next(text: str, clauses: Sequence[tuple[int, int, str]], number: int, sentence: int) -> bool:
-    """That clause is a bare "next" that opens its sentence with more to come ("Next, mute"), so a sequencing word. Never
-    in a list ("play, pause, next, previous"), and never by itself ("next"): that is the request."""
+    """That clause is a bare "next" that opens its sentence with more to come ("Next, mute"), so a sequencing word.
+    Never in a list ("play, pause, next, previous"), and never by itself ("next"): that is the request."""
     start, end, _before = clauses[number]
     if start != sentence or text[start:end].strip().casefold() != "next":
         return False
@@ -382,28 +506,73 @@ def _opens_with_next(text: str, clauses: Sequence[tuple[int, int, str]], number:
     return False
 
 
-def _voids(words: str) -> bool:
-    """A negation or a condition stands in ``words``: what comes after them in their sentence is not asked for ("don't
-    mute, then pause", "if it is loud then mute", "explain what happens when I press mute and then play")."""
-    return dv.negated(words) or not _CONDITION_WORDS.isdisjoint(guard.words(words, camel=False))
+def _sentences_void(text: str, clauses: Sequence[tuple[int, int, str]]) -> list[tuple[int, bool]]:
+    """For each clause: where its sentence starts in ``text``, and whether the whole sentence says it is no request
+    (pc-2, pc-3): a ':' anywhere in it ("summarise this: ... then mute", "Resume and cover letter: proofread them"), a
+    condition word anywhere in it ("Mute, if it gets loud") or a '?' ("Mute? What does that do?") unless it opens with
+    can you, could you, would you or will you ("can you mute?")."""
+    found: list[tuple[int, bool]] = []
+    first = 0
+    for number in range(len(clauses) + 1):
+        if number < len(clauses) and (number == 0 or not any(mark in clauses[number][2] for mark in ".!?")):
+            continue
+        if number > first:                    # clauses[first:number] are one sentence; clauses[number]'s break ends it
+            begin, finish = clauses[first][0], clauses[number - 1][1]
+            breaks = [clauses[index][2] for index in range(first + 1, min(number + 1, len(clauses)))]
+            words = text[begin:finish]
+            void = (any(":" in mark for mark in breaks)
+                    or not _CONDITION_WORDS.isdisjoint(guard.words(words, camel=False))
+                    or (any("?" in mark for mark in breaks) and _POLITE_RE.match(words) is None))
+            found += [(begin, void)] * (number - first)
+        first = number
+    return found
 
 
-def _pc_asks(message: str) -> list[pcctl.PcAsk]:
-    """The PC controls one of the owner's messages asks for, as the local routes' own parser reads its clauses. A clause
-    counts only as a chain from the message's start, every clause before it being a whole request too ("mute and pause"),
-    or straight after a sequencing word with no negation or condition earlier in its sentence ("find the report, then
-    mute"). So a keyword in a list asks for nothing ("compare the play, pause and next buttons", "never mute and pause"):
-    what its licence allows goes on a card (pc_control). What the message goes on to say may take it back
-    (dv.taken_back: "mute. no, actually don't"). Bounded: each clause is read once, none past CLAUSE_CAP, and at most
-    ASKS_CAP asks are looked at."""
+def _void_before(words: str) -> bool:
+    """A negation (dv.negated) or a word of _VOID_WORDS stands in ``words``, what comes before a piece in its sentence:
+    "don't mute, then pause", "how do I open ...", "she wrote ... then set the volume to 100", "I can't mute"."""
+    if dv.negated(words):
+        return True
+    tokens = guard.words(words, camel=False)
+    return not _VOID_WORDS.isdisjoint(tokens) or any(word == "can" and after == "t"
+                                                     for word, after in zip(tokens, tokens[1:]))
+
+
+@dataclass(frozen=True)
+class _Piece:
+    """A plain request of one message: a PC control (``asked``), or an open (``asked`` None: ``words`` is its clause,
+    which names what opens); where its clause starts and ends, and its number."""
+
+    asked: pcctl.PcAsk | None
+    words: str
+    start: int
+    end: int
+    number: int
+
+
+def _pieces(message: str) -> list[_Piece]:
+    """The plain requests of one of the owner's messages, as a change at once may be read from them. Nothing in a
+    message longer than PLAIN_CAP (a paste, whatever it says), nothing after a ':' anywhere before it in the message
+    (what it brings in: "Summarise this mail for me: Hi Sam ... Please open ..."), and nothing in a sentence that says
+    it is no request (_sentences_void) or after a word that says so (_void_before). An open: a clause that opens with
+    an opening word (_opening), wherever it stands ("find the report, then open https://..."). A PC control: as a chain
+    from the message's start, every clause before it a whole request too ("mute and pause"); straight after a
+    sequencing word ("find the report, then mute"); or, when it is a whole plain request, its verb first with its
+    object, after "and", "also", a comma or a new sentence too ("find the report and set the volume to 30"). So a
+    keyword in a list asks for nothing ("compare the play, pause and next buttons", "find the report and mute"). What
+    the message goes on to say may take one back (_kept). Bounded: each clause is read once, none past CLAUSE_CAP, at
+    most ASKS_CAP are found."""
     text = " ".join((message or "").split())
+    if not text or len(text) > PLAIN_CAP:
+        return []
     clauses = _clauses(text)
-    found: list[tuple[pcctl.PcAsk, int]] = []
-    chain, then, voided = True, False, False
-    sentence = read_to = 0                    # where its sentence starts, and how far that is read for _voids
+    voids = _sentences_void(text, clauses)
+    found: list[_Piece] = []
+    chain, then, pasted = True, False, False
     for number, (start, end, before) in enumerate(clauses):
-        if any(mark in before for mark in ".!?"):
-            sentence, read_to, voided = start, start, False
+        sentence, void = voids[number]
+        pasted = pasted or ":" in before      # what follows a ':' is what it brings in, to the message's end
+        void = void or pasted
         then = then or before in _THEN_BREAKS
         clause = text[start:end].strip()
         if _no_clause(clause):
@@ -421,35 +590,95 @@ def _pc_asks(message: str) -> list[pcctl.PcAsk]:
             then, clause = True, clause[word.end():]
             if _no_clause(clause):            # on its own: "then, mute"
                 continue
+        void = void or _void_before(text[sentence:start])
         asked = _clause_ask(clause)
         if asked is None:
+            if not void and _opening(clause):
+                found.append(_Piece(None, clause, start, end, number))
             chain = then = False
-            continue
-        if not chain and then:
-            voided = voided or _voids(text[read_to:start])
-            read_to = start
-        counts = chain or (then and not voided)
-        then = False
-        if counts:
-            found.append((asked, end))
-            if len(found) >= ASKS_CAP:
-                break
-    asks: list[pcctl.PcAsk] = []
+        else:
+            whole = (before in _WHOLE_AFTER or any(mark in before for mark in ",.!?")) and _whole_request(clause)
+            if (chain or then or whole) and not void:
+                found.append(_Piece(asked, "", start, end, number))
+            then = False
+        if len(found) >= ASKS_CAP:
+            break
+    return _kept(text, clauses, found)
+
+
+def _kept(text: str, clauses: Sequence[tuple[int, int, str]], found: Sequence[_Piece]) -> list[_Piece]:
+    """``found`` without what the message goes on to take back: what it names after a piece (dv.taken_back: "pause,
+    never mind", "mute and pause. Actually, don't touch the music"), a whole no after it ("mute. no, actually don't",
+    "mute. hold on"), or a correction: the clause after it opens with no, not or actually ("mute. no, pause", "set the
+    volume to 50, no, 30"; pc-6). The text after each is read once, the last first."""
+    kept: list[_Piece] = []
     gone: frozenset[str] = frozenset()
     stop = len(text)
-    for asked, end in reversed(found):        # what is said after it, the last first: the text is read once
-        gone |= dv.taken_back(text[end:stop])
-        stop = end
-        if asked.kind not in gone:
-            asks.insert(0, asked)
-    return asks
+    for index in range(len(found) - 1, -1, -1):
+        piece = found[index]
+        gone |= dv.taken_back(text[piece.end:stop], task=True)
+        stop = piece.end
+        upto = found[index + 1].start if index + 1 < len(found) else len(text)
+        after = next((text[start:end].strip() for start, end, _break in clauses[piece.number + 1:]
+                      if text[start:end].strip()), "")
+        first = guard.words(after, camel=False)[:1]
+        if (piece.asked.kind in gone if piece.asked is not None else not gone.isdisjoint(_OPEN_KINDS)) \
+                or _says_no(text[piece.end:upto]) or (first and first[0] in _CORRECTIONS):
+            continue
+        kept.insert(0, piece)
+    return kept
+
+
+def _pc_asks(message: str) -> list[pcctl.PcAsk]:
+    """The PC controls one of the owner's messages asks for at once (_pieces)."""
+    return [piece.asked for piece in _pieces(message) if piece.asked is not None]
 
 
 def _says_no(message: str) -> bool:
-    """A whole message of no, no wait, don't, not that, actually no: it takes back the last message's asks."""
+    """A whole message of no: no wait, don't, not that, actually no, hold on, not yet, I changed my mind ... (pc-7). It
+    takes back the last message's asks."""
     if len(message or "") > SAYS_NO_CAP:
         return False
     return _SAYS_NO_RE.fullmatch(" ".join(guard.words(message, camel=False))) is not None
+
+
+def _wanted(heard: Sequence[tuple[str, bool]]) -> tuple[list[tuple[tuple[int, int], pcctl.PcAsk]], list[str]]:
+    """(the PC controls the owner's messages ask for at once, each keyed by (its message, its place there); the
+    clauses of the opens they ask for at once), less what was taken back since: by naming it (dv.taken_back, a task's
+    reading), or by a whole message of no, which takes back what the last message that asked for any asked. A message
+    that answered the model's own question asks for nothing at once (pc-8: the question was the model's); it may still
+    take back."""
+    asks: list[tuple[tuple[int, int], pcctl.PcAsk]] = []
+    opens: list[tuple[int, str]] = []
+    last = -1
+    for number, (message, answered) in enumerate(heard):
+        if number:
+            gone = dv.taken_back(message, task=True)
+            asks = [(key, asked) for key, asked in asks if asked.kind not in gone]
+            if not gone.isdisjoint(_OPEN_KINDS):
+                opens = []
+            if _says_no(message):
+                asks = [(key, asked) for key, asked in asks if key[0] != last]
+                opens = [(said, words) for said, words in opens if said != last]
+                last = -1
+        pieces = [] if answered else _pieces(message)
+        for place, piece in enumerate(pieces):
+            if piece.asked is not None:
+                asks.append(((number, place), piece.asked))
+            else:
+                opens.append((number, piece.words))
+        last = number if pieces else last
+    return asks, [words for _said, words in opens]
+
+
+def _asked_to_open(step: Any, opens: Sequence[str]) -> bool:
+    """One of the owner's opening clauses names what ``step`` opens: its item (dv.names_item) or its address, typed
+    word for word (dv.typed_url)."""
+    if step.targets:
+        label = dv.item_label(step.targets[0])
+        return any(dv.names_item(words, label) for words in opens)
+    url = getattr(step.planned, "url", "") if step.planned is not None else ""
+    return bool(url) and any(dv.typed_url(words, url) for words in opens)
 
 
 def _same_ask(asked: pcctl.PcAsk, wanted: pcctl.PcAsk) -> bool:
@@ -469,6 +698,25 @@ def _same_ask(asked: pcctl.PcAsk, wanted: pcctl.PcAsk) -> bool:
     return asked.step is None or wanted.step is None or asked.step <= wanted.step
 
 
+def _label_within(asked: pcctl.PcAsk, wanted: pcctl.PcAsk) -> pcctl.PcAsk:
+    """At once, a timer keeps the model's label only when its words all stand in the label the request itself gave
+    ("a 5 minute timer for tea": "tea"); else it goes with none, for only its end's toast would show it (pc-14)."""
+    if asked.kind != dv.TIMER or not asked.label:
+        return asked
+    theirs = set(agent_firewall.call_words(wanted.label))
+    words = agent_firewall.call_words(asked.label)
+    return asked if words and all(word in theirs for word in words) else replace(asked, label="")
+
+
+def _card_what(asked: pcctl.PcAsk) -> str:
+    """The firewall's card's words for a PC control: the local routes' own, with a volume step other than theirs
+    ("turn the volume up by 30"; pc-13). A timer's label is never on it."""
+    what = desktop_routes.pc_what(asked)
+    if asked.kind == dv.VOLUME and asked.action in ("up", "down") and asked.step not in (None, pcctl.VOLUME_STEP):
+        what = f"{what} by {asked.step}"
+    return what
+
+
 class OwnerAccess:
     """See the module docs. Thread-safe: tool calls may come side by side; its lock is never held across a read, a job
     or a hop to the GUI thread."""
@@ -485,6 +733,7 @@ class OwnerAccess:
         self._threads: dict[str, MailThread] = {}
         self._counts: dict[str, int] = {}
         self._people: dict[str, tuple[str, str]] | None = None  # the people the calendar and the briefing name
+        self._spent: set[tuple[int, int]] = set()  # the owner's asks a PC control has used at once (pc-5: _wanted's keys)
         self.card_ids: list[str] = []          # propose_action's cards (withdrawn on a Stop; decided ones stay)
         self.run_ids: list[str] = []           # open_thing's and propose_files' runs (their result cards)
         self.waiting_card = ""                 # the file card a wait hangs on (GUI thread's business)
@@ -508,7 +757,7 @@ class OwnerAccess:
     def _taint(self, fragments: Iterable[Any]) -> None:
         """A private tool is answering, whatever this holds: the firewall's checks are on from now on (note_private)."""
         self.firewall.note_private()
-        self.firewall.taint.add(text for text in fragments if isinstance(text, str) and text)
+        self.firewall.taint.add(_unmarked(text) for text in fragments if isinstance(text, str) and text)
 
     def _take(self, what: str, cap: int, words: str) -> ToolResult | None:
         """One of ``what`` is used, or none is left: a plain error."""
@@ -575,6 +824,8 @@ class OwnerAccess:
                 notes.append(f"The {data(account.alias, 24)} calendar could not be read.")
                 continue
             for brief in briefs:
+                title, found = guard.scrub_secrets(brief.title)
+                brief = replace(brief, title=title) if found else brief
                 if not wanted or wanted & search_words(" ".join(text for text in _brief_people(brief) if text)):
                     rows.append((event_start(brief), account.alias, brief))
         rows.sort(key=lambda row: (row[0], row[1]))
@@ -587,9 +838,11 @@ class OwnerAccess:
         if len(rows) > len(shown):
             lines.append(f"[{len(rows) - len(shown)} later event(s) left out: ask for fewer days]")
         text = untrusted("the owner's calendar", "\n".join(lines) or "No events there.")
-        logger.info("Agent %s: calendar read, %d event(s)", self.run_id or "-", len(shown))
-        return ToolResult("\n".join([text, *notes]), note=_count_of(len(shown), "event"),
-                          fields=(("Days", f"{first.isoformat()} to {last.isoformat()}"),))
+        left = _marks_in(brief.title for _at, _alias, brief in shown)
+        told, field = _left_out(left)
+        logger.info("Agent %s: calendar read, %d event(s), %d value(s) left out", self.run_id or "-", len(shown), left)
+        return ToolResult("\n".join([text, *notes, *([told] if told else [])]), note=_count_of(len(shown), "event"),
+                          warn=bool(left), fields=(("Days", f"{first.isoformat()} to {last.isoformat()}"), *field))
 
     def _known_people(self, ctx: Any) -> dict[str, tuple[str, str]]:
         """The people Ask's <contacts> names: the calendar's guests and organisers, the briefing's recipients. Read once
@@ -652,22 +905,25 @@ class OwnerAccess:
             return refused
         with self._lock:
             said = self._sync()
-        notes = tuple(note for note in self.things.memory() if isinstance(note, str) and note)
+        notes = tuple(guard.scrub_secrets(note)[0] for note in self.things.memory() if isinstance(note, str) and note)
         shown = memory_notes_shown(notes, said)
         self._taint(shown)
         with self._lock:
             for note in shown:
                 for found in addresses_in(note):
                     self._index.add_address(found, SOURCE_MEMORY)
-        logger.info("Agent %s: notes read, %d", self.run_id or "-", len(shown))
-        return ToolResult(untrusted("the owner's notes", memory_block(notes, command=said)),
-                          note=_count_of(len(shown), "note"))
+        left = _marks_in(shown)
+        told, field = _left_out(left)
+        logger.info("Agent %s: notes read, %d, %d value(s) left out", self.run_id or "-", len(shown), left)
+        return ToolResult("\n".join([untrusted("the owner's notes", memory_block(notes, command=said)),
+                                     *([told] if told else [])]),
+                          note=_count_of(len(shown), "note"), warn=bool(left), fields=field)
 
     def conversation_read(self, _args: Mapping[str, Any], ctx: Any) -> ToolResult:
         refused = self._refused_first(ctx)
         if refused is not None:
             return refused
-        turns = list(self.things.conversation())
+        turns = [_scrubbed_turn(turn) for turn in self.things.conversation()]
         exchanges = list(conversation_exchanges(turns))[-CONVERSATION_EXCHANGES:]
         said = [turn for exchange in exchanges for turn in exchange]
         self.firewall.go_strict()             # before anything of it goes back
@@ -676,12 +932,16 @@ class OwnerAccess:
             for turn in said:
                 for found in addresses_in(data(getattr(turn, "text", ""))):
                     self._index.add_address(found, SOURCE_CONVERSATION)
-        logger.info("Agent %s: the conversation read, %d turn(s)", self.run_id or "-", len(said))
+        left = _marks_in(getattr(turn, "text", "") for turn in said)
+        told, field = _left_out(left)
+        logger.info("Agent %s: the conversation read, %d turn(s), %d value(s) left out", self.run_id or "-", len(said),
+                    left)
         if not said:
             return ToolResult("Nothing was said before this task.", note="no turns")
         zone = self.things.now().tzinfo
-        return ToolResult(untrusted("what was said earlier", conversation_block(exchanges, zone=zone)),
-                          note=_count_of(len(said), "turn"))
+        return ToolResult("\n".join([untrusted("what was said earlier", conversation_block(exchanges, zone=zone)),
+                                     *([told] if told else [])]),
+                          note=_count_of(len(said), "turn"), warn=bool(left), fields=field)
 
     # ---- mail -----------------------------------------------------------------------------------------------------
 
@@ -723,16 +983,21 @@ class OwnerAccess:
             except Exception as exc:  # noqa: BLE001 - said plainly; its words may name something
                 logger.info("Agent %s: a mail search failed (%s)", self.run_id or "-", type(exc).__name__)
                 return ToolResult(MAIL_FAILED_TEXT, is_error=True, code=MAIL_FAILED, fields=fields)
-        self._taint(text for thread in found for text in _people(thread))
+        scrubbed = [_subjects_scrubbed(thread) for thread in found]
+        self._taint(text for thread, _left in scrubbed for text in _people(thread))
         with self._lock:
             for thread in found:
                 self._threads[thread.thread_id] = thread
                 index_thread(self._index, thread)
-        logger.info("Agent %s: a mail search found %d thread(s)", self.run_id or "-", len(found))
-        block = "\n".join(thread_text(thread, redact=True) for thread in found) or NOTHING_FOUND_TEXT
-        return ToolResult("Their text is not here: mail_read reads one by its thread id.\n"
-                          + untrusted("the owner's mail: subjects and people", block),
-                          note=_count_of(len(found), "thread"), fields=fields)
+        left = sum(count for _thread, count in scrubbed)
+        told, field = _left_out(left)
+        logger.info("Agent %s: a mail search found %d thread(s), %d value(s) left out", self.run_id or "-", len(found),
+                    left)
+        block = "\n".join(thread_text(thread, redact=True) for thread, _left in scrubbed) or NOTHING_FOUND_TEXT
+        return ToolResult("\n".join(["Their text is not here: mail_read reads one by its thread id.",
+                                     untrusted("the owner's mail: subjects and people", block),
+                                     *([told] if told else [])]),
+                          note=_count_of(len(found), "thread"), warn=bool(left), fields=(*fields, *field))
 
     def mail_read(self, args: Mapping[str, Any], ctx: Any) -> ToolResult:
         refused = self._refused_first(ctx)
@@ -745,18 +1010,19 @@ class OwnerAccess:
         over = self._take("mail reads", MAIL_READ_CAP, "emails read")
         if over is not None:
             return over
-        fit, kept_back = _without_secrets(trim_threads([thread])[0])
-        read = [message.text for message in fit.messages if message.text != MAIL_LEFT_OUT_TEXT]
+        fit, left = _without_secrets(thread, trim_threads([thread])[0])
+        read = [_unmarked(message.text) for message in fit.messages]
         self.firewall.go_strict()             # before anything of it goes back
         self._taint([*_people(fit), *read])
         for words in read:
             self.firewall.read_words.feed(words)
         text = thread_text(fit)
         flag, flagged, warn = _page_flags("\n".join(read))
-        logger.info("Agent %s: a thread read, %d message(s), %d left out", self.run_id or "-", len(fit.messages), kept_back)
-        fields = ((("Left out", MAIL_LEFT_OUT_NOTE.format(count=_count_of(kept_back, "message"))),) if kept_back else ())
-        return ToolResult(f"{MAIL_NOTE}\n{untrusted('an email', text)}{flag}", warn=warn or bool(kept_back),
-                          note=f"{fit.chars:,} characters", fields=(*flagged, *fields))
+        told, field = _left_out(left)
+        logger.info("Agent %s: a thread read, %d message(s), %d value(s) left out", self.run_id or "-",
+                    len(fit.messages), left)
+        return ToolResult("\n".join([f"{MAIL_NOTE}\n{untrusted('an email', text)}{flag}", *([told] if told else [])]),
+                          warn=warn or bool(left), note=f"{fit.chars:,} characters", fields=(*flagged, *field))
 
     # ---- files ----------------------------------------------------------------------------------------------------
 
@@ -825,12 +1091,15 @@ class OwnerAccess:
         file_rows, left = self._file_rows(found.files, ids, FIND_ROWS, ctx)
         self._taint(item.name for item in shown)
         self._taint(part for place in found.places for part in place.parts)
+        sites = [site for site in found.sites
+                 if isinstance(site, SiteItem) and search_words(words) & search_words(site.title)]
+        self._taint(app.name for app in found.apps)          # an app's or a saved site's name is the owner's too
+        self._taint(site.title for site in sites)
         with self._lock:
             app_rows = [f"{self._refs.issue(APP, app, app.name)} {desktop_mode._quoted(app.name, desktop_mode.APP_CAP)}"
                         for app in found.apps]
             site_rows = [f"{self._refs.issue(SITE, site, site.title)} "
-                         f"{desktop_mode._quoted(site.title, desktop_mode.TITLE_CAP)}" for site in found.sites
-                         if isinstance(site, SiteItem) and search_words(words) & search_words(site.title)]
+                         f"{desktop_mode._quoted(site.title, desktop_mode.TITLE_CAP)}" for site in sites]
         blocks = []
         if place_rows:
             blocks.append("Places:\n" + "\n".join(place_rows))
@@ -942,8 +1211,10 @@ class OwnerAccess:
                               code=UNREADABLE, fields=fields)
         self.firewall.go_strict()             # before anything of it goes back
         self._taint([part.text])
-        self.firewall.read_words.feed(part.text)
-        logger.info("Agent %s: a file read, %d characters", self.run_id or "-", part.last - part.first)
+        self.firewall.read_words.feed(_unmarked(part.text))
+        told, field = _left_out(part.left_out)
+        logger.info("Agent %s: a file read, %d characters, %d value(s) left out", self.run_id or "-",
+                    part.last - part.first, part.left_out)
         if not part.text:
             return ToolResult(READ_END_TEXT, note="the end of the file", fields=fields)
         clean = web.clean_text(part.text)
@@ -953,8 +1224,10 @@ class OwnerAccess:
             notes.append(READ_MORE_NOTE.format(offset=part.last))
         elif part.cut:
             notes.append(READ_CUT_NOTE)
-        return ToolResult("\n".join(notes) + flag, warn=warn, note=f"{part.last - part.first:,} characters",
-                          fields=(*fields, *flagged))
+        if told:
+            notes.append(told)
+        return ToolResult("\n".join(notes) + flag, warn=warn or bool(part.left_out),
+                          note=f"{part.last - part.first:,} characters", fields=(*fields, *flagged, *field))
 
     # ---- changes: the desktop's validator and its cards ------------------------------------------------------------
 
@@ -970,8 +1243,12 @@ class OwnerAccess:
             return None, ""
         with self._lock:
             said = self._sync()
-            withdrawn = dv.withdrawn_skills(self.firewall.messages(), self._listed_names())
-            return dv.check_plan(answer, self._refs, said, run_id=run_id, withdrawn=withdrawn), said
+            names = self._listed_names()
+            refs = self._refs.snapshot()
+        # Read with the lock free: a long paste's words take a while, and every other tool of the run waits on it. A
+        # task's reading of a take-back ("scratch that", "no, open the report": pc-7, pc-10).
+        withdrawn = dv.withdrawn_skills(self.firewall.messages(), names, task=True)
+        return dv.check_plan(answer, refs, said, run_id=run_id, withdrawn=withdrawn), said
 
     @staticmethod
     def _refusals(plan: Any) -> str:
@@ -1024,7 +1301,9 @@ class OwnerAccess:
     def open_thing(self, args: Mapping[str, Any], ctx: Any) -> ToolResult:
         """The desktop's open skills at their own tiers (validate decides them, from the resolved target): at once, or
         on a card for the owner's click, which the task need not wait for. A task's model has read other people's text,
-        so at once only what the owner's words name (_named_or_click)."""
+        so at once only what a plain request of the owner's names (_named_or_click). A site whose firewall card the
+        owner has just allowed has had its click (_clicked_at_once): one click for one site."""
+        clicked = self.firewall.clicked("open_thing", args.get("site"))    # taken first: one click is one call
         refused = self._refused_first(ctx)
         if refused is not None:
             return refused
@@ -1050,7 +1329,9 @@ class OwnerAccess:
             self._take("web pages", URLS_CAP, "web pages opened") if step["skill"] == dv.OPEN_URL else None)
         if over is not None:
             return over
-        plan = self._named_or_click(plan, said)
+        plan = self._named_or_click(plan)
+        if clicked:
+            plan = self._clicked_at_once(plan)
         with self._lock:
             self.run_ids.append(run_id)
         self.things.before_open()
@@ -1070,18 +1351,27 @@ class OwnerAccess:
         reason = dx.code_words(code) or REASONS.get(code, "") or "Jarvis's checks stopped it"
         return ToolResult(OPEN_NOT_DONE_TEXT.format(reason=reason), is_error=True, code=code or dx.REFUSED)
 
-    @staticmethod
-    def _named_or_click(plan: Any, said: str) -> Any:
-        """A file, place, app or saved site opens at once only when the owner's words name it; else on a one-click card.
-        Only ever raises a tier (dv.promote), so what the validator asks a card for stays on its card."""
+    def _named_or_click(self, plan: Any) -> Any:
+        """A file, place, app or site opens at once only from a plain request of the owner's that names it (_pieces: a
+        clause that opens with an opening word, in a message of PLAIN_CAP characters or fewer, in no sentence that says
+        it is no request, not taken back since, not an answer to the model's question); else on a one-click card. A
+        paste, a how-to, a question or someone else's words naming it take that card. Only ever raises a tier
+        (dv.promote), so what the validator asks a card for stays on its card."""
+        _asks, opens = _wanted(self.firewall.heard())
         steps = []
         for step in plan.steps:
-            if step.ok and step.tier == dv.INSTANT and step.targets \
-                    and not dv.names_item(said, dv.item_label(step.targets[0])):
+            if step.ok and step.tier == dv.INSTANT and not _asked_to_open(step, opens):
                 step = replace(step, tier=dv.promote(step.tier, dv.ONE_CLICK),
                                flags=step.flags | {dv.FLAG_TASK_ASKED})
             steps.append(step)
         return replace(plan, steps=tuple(steps))
+
+    @staticmethod
+    def _clicked_at_once(plan: Any) -> Any:
+        """The owner's Allow on the firewall's card for this very site, which showed its address, is the click its
+        one-click card would wait for: such a step goes at once. One that needs more than a click (dv.CARD) stays."""
+        return replace(plan, steps=tuple(replace(step, tier=dv.INSTANT) if step.ok and step.tier == dv.ONE_CLICK
+                                         else step for step in plan.steps))
 
     def _open_step(self, ref_id: str, show: bool) -> dict[str, Any] | ToolResult | None:
         parsed = parse_ref(ref_id)
@@ -1132,28 +1422,10 @@ class OwnerAccess:
             return pcctl.PcAsk(kind, pcctl.ACTIVE_WINDOW if args.get("window") else pcctl.SCREEN)
         return None
 
-    @staticmethod
-    def _pc_wanted(messages: Sequence[str]) -> list[pcctl.PcAsk]:
-        """The PC controls the owner's messages ask for and have not taken back since: by naming them, or by a whole
-        message of no, which takes back the asks of the last message that had any."""
-        wanted: list[pcctl.PcAsk] = []
-        last: list[pcctl.PcAsk] = []
-        for number, message in enumerate(messages):
-            if number:
-                gone = dv.taken_back(message)
-                wanted = [asked for asked in wanted if asked.kind not in gone]
-                if _says_no(message):
-                    wanted = [asked for asked in wanted if asked not in last]
-                    last = []
-            asks = _pc_asks(message)
-            wanted += asks
-            last = asks or last
-        return wanted
-
     def pc_control(self, args: Mapping[str, Any], ctx: Any) -> ToolResult:
         """The existing skills, licensed by the owner's own words as a desktop request's are, with chips and Undo. At
-        once only when the local routes' parser reads the same thing in those words (the module docs); a licence with no
-        such words goes on the firewall's card first."""
+        once only when the local routes' parser reads the same thing in a plain request of theirs (the module docs),
+        once for each time they asked (pc-5); anything else their words license goes on the firewall's card first."""
         refused = self._refused_first(ctx)
         if refused is not None:
             return refused
@@ -1163,17 +1435,27 @@ class OwnerAccess:
             names = self._listed_names()
         messages = self.firewall.messages()
         asked = self._pc_ask(args)
-        routed = asked is not None and any(_same_ask(asked, wanted) for wanted in self._pc_wanted(messages))
-        if not routed and kind not in (dv.licensed_skills(said, names, dv.TASK_LICENCES)
-                                       - dv.withdrawn_skills(messages, names, dv.TASK_LICENCES)):
+        asks, _opens = _wanted(self.firewall.heard()) if asked is not None else ([], [])
+        with self._lock:                       # an ask is used by one call at once: a repeat goes to the card
+            fits = [(key, wanted) for key, wanted in asks if key not in self._spent and _same_ask(asked, wanted)]
+            match = next((fit for fit in fits if _label_within(asked, fit[1]) == asked), fits[0] if fits else None)
+            if match is not None:
+                self._spent.add(match[0])
+        routed = match is not None
+        # A repeat of what they asked, used up, goes to the card whatever licence words they used ("turn it down").
+        mine = routed or (asked is not None and any(_same_ask(asked, wanted) for _key, wanted in asks))
+        if not mine and kind not in (dv.licensed_skills(said, names, dv.TASK_LICENCES, task=True)
+                                     - dv.withdrawn_skills(messages, names, dv.TASK_LICENCES, task=True)):
             logger.info("Agent %s: a PC control was refused (not licensed)", self.run_id or "-")
             return ToolResult(PC_REFUSED_TEXT, is_error=True, code=dv.INTENT_NOT_LICENSED, note=NOT_ASKED)
         if asked is None:
             return error(PC_SHAPE_TEXT, "bad_input")
-        if not routed:
+        if match is not None:
+            asked = _label_within(asked, match[1])
+        else:
             held = self.firewall.ask_once("pc_control", repr((asked.kind, asked.action, asked.level, asked.step,
                                                               asked.minutes, asked.label)),
-                                          PC_CARD_TEXT.format(what=desktop_routes.pc_what(asked)))
+                                          PC_CARD_TEXT.format(what=_card_what(asked)))
             if held is not None:
                 logger.info("Agent %s: a PC control waits on a card", self.run_id or "-")
                 return held

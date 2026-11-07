@@ -32,8 +32,9 @@ from briefing_reader import orb as orb_mod
 from briefing_reader.agent import browser as agent_browser
 from briefing_reader.agent import owner, web
 from briefing_reader.agent import runner as ar
-from briefing_reader.agent.firewall import WebFirewall
-from briefing_reader.ask.stream import limit_reset_time, limit_reset_words
+from briefing_reader.agent.firewall import WebFirewall, holds_something_private
+from briefing_reader.ask.stream import (LIMIT, NOT_SIGNED_IN, SERVER_BUSY, limit_reset_time, limit_reset_words,
+                                        task_failure)
 from briefing_reader.conversation import CONVERSATION_FILE, ROLE_JARVIS, ConversationStore, Turn
 from briefing_reader.desktop import results as card_results
 from briefing_reader.desktop import tidy as desktop_tidy
@@ -126,6 +127,30 @@ class ResetTimeTests(unittest.TestCase):
 
     def test_ask_s_own_words_for_it_stay_as_they_were(self) -> None:
         self.assertEqual(limit_reset_words("resets 5am Mon"), "5am")
+
+    def test_none_with_anything_but_its_zone_after_the_time(self) -> None:
+        """run-6: a day counted, a next, a week, a zone outside brackets (the time is not read in it) or any other word
+        after the time in its clause: the next such time may be far too soon, so the task waits as with no time."""
+        for text in ("Your weekly limit resets 5am in 3 days", "Your weekly limit resets 5am next week",
+                     "limit reached - resets 00:00 UTC", "resets 5pm GMT", "resets 3pm in 2 weeks",
+                     "resets 5am, next week", "resets at 00:00, UTC", "resets 3pm (UTC+05:30)", "resets 3pm or later",
+                     "Your limit resets 5am. It resets weekly, in 1 week"):
+            with self.subTest(text=text):
+                self.assertIsNone(self.at(text))
+
+    def test_the_real_words_seen_today_read_a_time(self) -> None:
+        """Claude Code's own words for the plan's limit, as seen on this PC: a time in its zone (this PC's own when there
+        is no zone data here), and the end of its clause after it changes nothing."""
+        for text in ("You've hit your 5-hour limit \u00b7 resets 6pm (America/Los_Angeles)",
+                     "resets 6pm (America/Los_Angeles)", "You've hit your limit \u00b7 resets 6pm (America/Los_Angeles). "
+                     "/upgrade to increase your usage limit.", "resets 6pm (America/Los_Angeles) \u00b7 /upgrade",
+                     "resets 6pm - try again then", "resets 6pm\n"):
+            with self.subTest(text=text):
+                moment = self.at(text)
+                self.assertIsNotNone(moment)
+                self.assertEqual((moment.hour, moment.minute), (18, 0))
+        self.assertIsNone(self.at("resets 00:00 UTC"))
+        self.assertIsNotNone(self.at("resets 00:00 (UTC)"))          # a zone in brackets is its zone
 
 
 def limit_by_text(engine: FakeEngine, text: str = LIMIT_TEXT) -> None:
@@ -231,6 +256,280 @@ class LimitInItsTextTests(RunCase):
         now[0] = WHEN + timedelta(days=1)
         self.assertEqual(self.question().kind, ar.Q_RESUME)
         run.stop()
+
+
+class NotThePlansLimitTests(RunCase):
+    """run-3: a failure that is not the plan's limit was told as the plan's limit, with a 6-hour wait: a context, budget or
+    subagent limit, a bare "limit reached", a server limiting requests (Claude Code's own words: "not your usage limit")
+    or any 429. A task pauses only on the plan's own words now (stream.task_failure), and Ask's reading is its own."""
+
+    PLAN = ("You've hit your 5-hour limit \u00b7 resets 6pm (America/Los_Angeles)", "You've hit your limit",
+            "You've hit your limit \u00b7 resets 5am Mon", "Claude usage limit reached|1762300000", "Usage limit reached",
+            "Your weekly limit resets 5am in 3 days", "Lower-priority mode ended \u00b7 you have reached your weekly usage "
+            "limit", "5-hour limit reached - resets 3pm", "Session limit reached", "You've reached your limit",
+            "You're out of extra usage")
+    NOT_A_LIMIT = ("Context limit reached \u00b7 /compact or /clear to continue",
+                   "Budget limit reached ($5.00 spent of the $5.00 maximum). New agents cannot be started.",
+                   "Concurrent subagent limit reached. You can run 3 subagents at once.", "limit reached",
+                   "Subagent nesting limit reached (depth 3 of 3).", "Fast mode disabled \u00b7 usage credit limit reached",
+                   "Prompt is too long", "")
+    SERVER = ("Server is temporarily limiting requests (not your usage limit)",
+              "API Error: 429 rate_limit_error: slow down")
+
+    def test_what_a_task_reads_as_the_plan_s_limit(self) -> None:
+        for text in self.PLAN:
+            with self.subTest(text=text):
+                self.assertEqual(task_failure(text, now=lambda: WHEN).kind, LIMIT)
+                self.assertEqual(task_failure(text, now=lambda: WHEN, status=429).kind, LIMIT)
+        for text in self.NOT_A_LIMIT:
+            with self.subTest(text=text):
+                self.assertIsNone(task_failure(text, now=lambda: WHEN))
+                self.assertEqual(task_failure(text, now=lambda: WHEN, status=429).kind, SERVER_BUSY)   # a bare 429
+        for text in self.SERVER:
+            with self.subTest(text=text):
+                self.assertEqual(task_failure(text, now=lambda: WHEN).kind, SERVER_BUSY)
+        self.assertEqual(task_failure("Please run /login", now=lambda: WHEN).kind, NOT_SIGNED_IN)
+        self.assertEqual(task_failure("", now=lambda: WHEN, status=401).kind, NOT_SIGNED_IN)
+
+    def failing(self, text: str, status: Any = None) -> ar.AgentEnd | None:
+        def script(engine: FakeEngine) -> None:
+            engine.wait_message()
+            engine.emit(result_event(text, is_error=True, api_error_status=status))
+            time.sleep(30)
+
+        run = self.go(script, timing=replace(FAST, limit_wait_s=1e9))
+        self.until(lambda: run.ended is not None or run._paused)
+        return run.ended
+
+    def test_another_limit_ends_the_task_as_any_failure_does(self) -> None:
+        for text in self.NOT_A_LIMIT[:4]:
+            with self.subTest(text=text):
+                self.setUp()
+                end = self.failing(text)
+                self.assertIsNotNone(end)
+                self.assertEqual((end.outcome, end.code, end.summary), ("failed", ar.ERROR, ar.EXIT_WORDS))
+                self.assertEqual([event for event in self.of(ar.E_NOTICE) if event.code == LIMIT], [])
+                self.assertFalse(self.run_._paused)
+
+    def test_the_server_limiting_requests_ends_it_in_words_that_say_so(self) -> None:
+        for text, status in ((self.SERVER[0], None), (self.SERVER[0], 429), ("", 429),
+                             ("API Error: Request rejected (429) \u00b7 this may be a temporary capacity issue", 429)):
+            with self.subTest(text=text, status=status):
+                self.setUp()
+                end = self.failing(text, status)
+                self.assertIsNotNone(end)
+                self.assertEqual((end.outcome, end.code, end.summary), ("failed", ar.C_SERVER_BUSY, ar.SERVER_BUSY_WORDS))
+                self.assertEqual(self.of(ar.E_NOTICE), [])
+        self.assertIn("isn't your plan's limit", ar.SERVER_BUSY_WORDS)
+        self.assertNotIn("reached", ar.SERVER_BUSY_WORDS)
+
+    def test_the_real_words_seen_today_pause_it_until_their_time(self) -> None:
+        self.assertIsNone(self.failing("You've hit your 5-hour limit \u00b7 resets 6pm (America/Los_Angeles)"))
+        self.assertIsNotNone(self.run_._paused_until)
+        self.assertEqual(self.run_._paused_until.hour, 18)
+        self.assertIn("it resets 6pm (America/Los_Angeles), and I'll ask you then.", self.of(ar.E_NOTICE)[0].text)
+
+    def test_a_process_that_ends_by_itself_reads_its_words_the_same_way(self) -> None:
+        for tail, code, words in (("Context limit reached \u00b7 /compact or /clear to continue", ar.C_EXIT, ar.EXIT_WORDS),
+                                  ("You've hit your limit \u00b7 resets 6pm", LIMIT, ar.LIMIT_ENDED_WORDS),
+                                  ("Server is temporarily limiting requests (not your usage limit)", ar.C_SERVER_BUSY,
+                                   ar.SERVER_BUSY_WORDS)):
+            with self.subTest(tail=tail):
+                self.setUp()
+
+                def script(engine: FakeEngine) -> None:
+                    engine.wait_message()
+                    raise SystemExit
+
+                self.go(script, engine_kwargs={"stderr": tail})
+                end = self.end()
+                self.assertEqual((end.code, end.summary), (code, words))
+
+
+class TheOwnersWordAtAPauseTests(RunCase):
+    """run-1: the plan's limit holds with no time named while a card is up. The owner's click on it, their answer, or the
+    words they typed at it waited unseen for a typed line that might never come, and after 6 hours the end said "with no
+    word". Now the card's end lets what waited go in, as a typed line does then, and the task tries again. A card that only
+    ran out of time leaves the pause waiting for their word, and "with no word" stays true."""
+
+    NO_TIME = "You've hit your limit \u00b7 resets 5am Mon"
+
+    def fails_on_the_limit(self, told: list[str], up: threading.Event, more: int = 1) -> Any:
+        def script(engine: FakeEngine) -> None:
+            engine.wait_message()
+            up.wait(10)                                         # the test puts its card up
+            engine.emit(result_event(self.NO_TIME, is_error=True))
+            for _message in range(more):
+                told.append(engine.wait_message())
+            engine.call("finish", summary="Done after the wait.", outcome="done")
+            engine.end_turn()
+
+        return script
+
+    def paused(self, run: ar.AgentRun) -> None:
+        self.until(lambda: run._paused and run._idle)
+        self.assertIsNone(run._paused_until)
+
+    def test_a_click_on_the_firewall_s_card_carries_on_with_the_words_typed_at_it(self) -> None:
+        told: list[str] = []
+        up = threading.Event()
+        self.addCleanup(up.set)
+        run = self.go(self.fails_on_the_limit(told, up, more=2))
+        self.until(lambda: self.kinds(ar.E_STARTED))
+        heard: list[bool] = []
+        self.assertTrue(run.ask_web("Jarvis wants to open this", ("Allow", "Don't"), heard.append))
+        question = run.waiting
+        up.set()
+        self.paused(run)
+        self.assertEqual(run.owner_says("carry on please"), "held")
+        self.assertEqual(told, [])
+        self.assertTrue(run.answer(question.id, "Allow"))
+        self.assertEqual(self.end().outcome, "done")
+        self.assertEqual(told, ["The owner says: carry on please", ar.WEB_ALLOWED_TEXT])
+        self.assertEqual(heard, [True])
+        self.assertIn(ar.E_LIMIT_GONE, self.kinds())
+
+    def test_a_click_alone_on_keep_going_carries_on(self) -> None:
+        told: list[str] = []
+
+        def script(engine: FakeEngine) -> None:
+            engine.wait_message()
+            engine.call("say", text="One.")
+            engine.call("write_file", name="a.md", text="a")     # held: Keep going asks
+            engine.emit(result_event(self.NO_TIME, is_error=True))
+            told.append(engine.wait_message())
+            engine.call("finish", summary="Done after the wait.", outcome="done")
+            engine.end_turn()
+
+        run = self.go(script, agent={"max_turns": 1})
+        question = self.question()
+        self.assertEqual(question.kind, ar.Q_KEEP_GOING)
+        self.paused(run)
+        self.assertTrue(run.answer(question.id, "Keep going"))
+        self.assertEqual(self.end().outcome, "done")
+        self.assertEqual(told, [ar.KEEP_GOING_YES])
+
+    def test_a_choice_clicked_on_the_model_s_question_carries_on(self) -> None:
+        told: list[str] = []
+        up = threading.Event()
+        self.addCleanup(up.set)
+        run = self.go(self.fails_on_the_limit(told, up))
+        self.until(lambda: self.kinds(ar.E_STARTED))
+        self.assertTrue(run._tool_question("Blue or Red?", ("Blue", "Red")))
+        question = run.waiting
+        up.set()
+        self.paused(run)
+        self.assertTrue(run.answer(question.id, "Blue"))
+        self.assertEqual(self.end().outcome, "done")
+        self.assertEqual(told, ["The owner answers your question: Blue"])
+
+    def test_words_at_a_batch_at_work_go_in_as_it_ends(self) -> None:
+        told: list[str] = []
+        up = threading.Event()
+        self.addCleanup(up.set)
+        run = self.go(self.fails_on_the_limit(told, up, more=2), timing=replace(FAST, init_s=1e9, at_work_s=1000.0))
+        self.until(lambda: self.kinds(ar.E_STARTED))
+        self.assertTrue(run._tool_card("card1"))
+        self.assertTrue(run.card_at_work("card1"))
+        up.set()
+        self.paused(run)
+        self.assertEqual(run.owner_says("carry on please"), "held")
+        self.assertEqual(self.of(ar.E_NOTICE)[-1].text, ar.HELD_AT_WORK_WORDS)     # never "when the limit has reset"
+        self.assertTrue(run.card_ended("card1", "Jarvis: the owner clicked the card. Done 1 of 1."))
+        self.assertEqual(self.end().outcome, "done")
+        self.assertEqual(told, ["The owner says: carry on please", "Jarvis: the owner clicked the card. Done 1 of 1."])
+
+    def test_a_file_card_clicked_carries_on_and_one_that_ran_out_does_not(self) -> None:
+        for clicked in (True, False):
+            with self.subTest(clicked=clicked):
+                self.setUp()
+                told: list[str] = []
+                up = threading.Event()
+                self.addCleanup(up.set)
+                run = self.go(self.fails_on_the_limit(told, up), timing=replace(FAST, init_s=1e9, limit_wait_s=1e9))
+                self.until(lambda: self.kinds(ar.E_STARTED))
+                self.assertTrue(run._tool_card("card1"))
+                up.set()
+                self.paused(run)
+                self.assertTrue(run.card_ended("card1", "Jarvis: the owner chose Not now.", clicked=clicked))
+                if clicked:
+                    self.assertEqual(self.end().outcome, "done")
+                    self.assertEqual(told, ["Jarvis: the owner chose Not now."])
+                else:
+                    time.sleep(0.2)
+                    self.assertTrue(run._paused)
+                    self.assertEqual(told, [])
+                    self.assertEqual(run._held_owner, ["Jarvis: the owner chose Not now."])
+                    run.stop("test")
+
+    def test_words_typed_at_a_card_that_then_runs_out_go_in_as_it_ends(self) -> None:
+        told: list[str] = []
+        up = threading.Event()
+        self.addCleanup(up.set)
+        run = self.go(self.fails_on_the_limit(told, up, more=2), timing=replace(FAST, web_card_s=0.6, limit_wait_s=1e9))
+        self.until(lambda: self.kinds(ar.E_STARTED))
+        self.assertTrue(run.ask_web("Jarvis wants to open this", ("Allow", "Don't"), lambda _allowed: None))
+        up.set()
+        self.paused(run)
+        self.assertEqual(run.owner_says("carry on please"), "held")
+        self.assertEqual(self.end().outcome, "done")
+        self.assertEqual(told, ["The owner says: carry on please", ar.WEB_NO_CLICK_TEXT])
+
+    def test_a_word_counts_for_its_own_pause_only(self) -> None:
+        """A click let the first pause go; the next pause, with a card that only runs out, waits for a word of its own."""
+        told: list[str] = []
+        up, again = threading.Event(), threading.Event()
+        self.addCleanup(up.set)
+        self.addCleanup(again.set)
+
+        def script(engine: FakeEngine) -> None:
+            engine.wait_message()
+            up.wait(10)
+            engine.emit(result_event(self.NO_TIME, is_error=True))
+            told.append(engine.wait_message())
+            again.wait(10)                                      # the test puts a second card up
+            engine.emit(result_event(self.NO_TIME, is_error=True))
+            time.sleep(30)
+
+        run = self.go(script, timing=replace(FAST, web_card_s=0.6, limit_wait_s=2.0))
+        self.until(lambda: self.kinds(ar.E_STARTED))
+        self.assertTrue(run.ask_web("Jarvis wants to open this", ("Allow", "Don't"), lambda _allowed: None))
+        first = run.waiting
+        up.set()
+        self.paused(run)
+        self.assertTrue(run.answer(first.id, "Allow"))
+        self.until(lambda: told)
+        self.assertTrue(run.ask_web("Jarvis wants to open that", ("Allow", "Don't"), lambda _allowed: None))
+        again.set()
+        self.until(lambda: run._paused and run._idle)
+        end = self.end()
+        self.assertEqual((end.code, end.summary), (ar.C_LIMIT_WAIT, ar.LIMIT_WAITED_WORDS))
+        self.assertEqual(told, [ar.WEB_ALLOWED_TEXT])
+        self.assertEqual(len(self.engine.sent), 2)
+
+    def test_a_card_that_only_ran_out_leaves_the_pause_and_with_no_word_stays_true(self) -> None:
+        up = threading.Event()
+        self.addCleanup(up.set)
+
+        def script(engine: FakeEngine) -> None:
+            engine.wait_message()
+            up.wait(10)
+            engine.emit(result_event(self.NO_TIME, is_error=True))
+            time.sleep(30)
+
+        run = self.go(script, timing=replace(FAST, web_card_s=0.6, limit_wait_s=2.0))
+        self.until(lambda: self.kinds(ar.E_STARTED))
+        self.assertTrue(run.ask_web("Jarvis wants to open this", ("Allow", "Don't"), lambda _allowed: None))
+        up.set()
+        self.paused(run)
+        self.assertIsNotNone(run.waiting)                       # the card is still up as the limit holds
+        self.until(lambda: [event for event in self.of(ar.E_QUESTION_GONE) if event.code == ar.C_NO_ANSWER])
+        time.sleep(0.1)
+        self.assertTrue(run._paused)
+        end = self.end()
+        self.assertEqual((end.outcome, end.code, end.summary), ("partial", ar.C_LIMIT_WAIT, ar.LIMIT_WAITED_WORDS))
+        self.assertEqual(len(self.engine.sent), 1)              # the goal: nothing went in with no word from the owner
+        self.assertEqual([event for event in self.of(ar.E_NOTICE) if event.code == LIMIT][1:], [])   # one notice
 
 
 class WordsInOrderTests(RunCase):
@@ -1008,6 +1307,37 @@ class AnswersToTheModelsQuestionTests(RunCase):
         self.assertFalse(wall.book.seen(self.EVIL))
         self.assertEqual(self.end().outcome, "done")
 
+    def asking_then_plain_words(self, way: str) -> None:
+        """What turns the firewall on is the asking, by a line it said or by its own text: these words plainly hold
+        nothing private (EVIL's number in them would turn it on by itself)."""
+        address = "https://evil.example/collect"
+        words = f"AB-12, and see {address}"
+        self.assertFalse(holds_something_private(words))
+        wall = WebFirewall(web.AddressBook())
+
+        def script(engine: FakeEngine) -> None:
+            engine.wait_message()
+            if way == "say":
+                engine.call("say", text="What was the reference on that letter?")
+            else:
+                engine.assistant([{"type": "text", "text": "What was the reference on that letter?"}])
+            engine.wait_message()
+            engine.call("finish", summary="Done.", outcome="done")
+            engine.end_turn()
+
+        run = self.go(script, firewall=wall)
+        self.until(lambda: self.kinds(ar.E_SAY if way == "say" else ar.E_TEXT))
+        self.assertEqual(run.owner_says(words), "sent")
+        self.assertTrue(wall.private)
+        self.assertFalse(wall.book.seen(address))
+        self.assertEqual(self.end().outcome, "done")
+
+    def test_after_a_line_that_asks_words_holding_nothing_private_do_too(self) -> None:
+        self.asking_then_plain_words("say")
+
+    def test_after_the_model_s_own_text_that_asks_words_holding_nothing_private_do_too(self) -> None:
+        self.asking_then_plain_words("text")
+
     def test_a_message_that_plainly_holds_something_private_does(self) -> None:
         run, wall = self.after_a_line("Reading three reviews now.")
         self.assertEqual(run.owner_says(f"my code is 482913, and see {self.EVIL}"), "sent")
@@ -1330,6 +1660,107 @@ class FileCardRoadTests(ThingsApp):
         self.assertEqual(len(state.done_numbers()), 1)
         self.assertTrue(state.undoable())
 
+    @staticmethod
+    def fails_on_the_limit_at_the_card(told: list[str], more: int = 1) -> Any:
+        """A model whose turn fails on the plan's limit, with no time named, right after it proposed the card."""
+        def play(engine: FakeEngine) -> None:
+            engine.wait_message()
+            roots = engine.call("files_list")
+            down = engine.call("files_list", place="Downloads")
+            engine.call("propose_files", steps=[{"skill": "move_files", "files": [ref_in(down, "letter.txt")],
+                                                 "to": ref_in(roots, "Documents")}])
+            engine.emit(result_event("You've hit your limit \u00b7 resets 5am Mon", is_error=True))
+            for _message in range(more):
+                told.append(engine.wait_message(20.0))
+            engine.call("finish", summary=DONE, outcome="done")
+            engine.end_turn("Done.")
+
+        return play
+
+    def test_the_limit_with_no_time_and_the_owner_s_not_now_carries_on(self) -> None:
+        """run-1, the whole road: Not now is the owner's click, and it lets the task try again."""
+        told: list[str] = []
+        self.go(self.fails_on_the_limit_at_the_card(told), timing=replace(PATIENT, limit_wait_s=1e9))
+        self.tidy_entry()
+        run = self.c.agent.run()
+        self.assertTrue(wait_for(lambda: run._paused and run._idle, timeout=10), "the limit holds")
+        self.press_tidy(desktop_tidy.DISMISS_KEY, wait=False)
+        end = self.ended()
+        self.assertEqual((end.outcome, end.summary), ("done", DONE))
+        self.assertEqual(len(told), 1)
+        self.assertIn("Not now", told[0])
+        self.assertTrue(self.on_disk(LETTER))
+
+    def test_the_limit_with_no_time_and_words_at_the_batch_go_in_as_it_ends(self) -> None:
+        """run-1, the whole road: the owner's click starts the batch, the limit holds, they type; the batch's end lets
+        their words and its end go in, in that order, and the bar never said "when the plan's limit has reset"."""
+        release, in_call = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def slow(method: str, _argument: str) -> None:
+            if method == "move_item":
+                in_call.set()
+                release.wait(15.0)
+
+        told: list[str] = []
+        said: list[str] = []
+        self.go(self.fails_on_the_limit_at_the_card(told, more=2), timing=replace(PATIENT, limit_wait_s=1e9))
+        self.c.agent.noticed.connect(lambda text, _tone: said.append(text))
+        self.tidy_entry()
+        run = self.c.agent.run()
+        self.assertTrue(wait_for(lambda: run._paused and run._idle, timeout=10), "the limit holds")
+        self.fake.on_call = slow
+        self.press_tidy(desktop_tidy.GO_KEY, wait=False)
+        self.assertTrue(wait_for(in_call.is_set, timeout=10), "the batch is at work")
+        settle()
+        self.type_it("carry on once it has moved")
+        self.assertIn(ar.HELD_AT_WORK_WORDS.replace("{sir}", "sir"), said)
+        self.assertNotIn(ar.HELD_WORDS.replace("{sir}", "sir"), said)
+        self.assertEqual(told, [])
+        release.set()
+        end = self.ended()
+        self.assertEqual((end.outcome, end.summary), ("done", DONE))
+        self.assertEqual(told, ["The owner says: carry on once it has moved",
+                                "Jarvis: the owner clicked the card. Done 1 of 1."])
+        self.assertFalse(self.on_disk(LETTER))
+
+    def test_a_card_that_could_not_show_after_the_model_s_turn_ended_gets_it_going_again(self) -> None:
+        """run-2, the whole road: the card's hop to the GUI thread comes back "not shown" only after the endpoint gave up
+        on the tool and the model ended its turn. Nothing waits and nothing is on its way: it gets its one prompt."""
+        told: list[str] = []
+        turned = threading.Event()
+        self.addCleanup(turned.set)
+
+        def play(engine: FakeEngine) -> None:
+            engine.wait_message()
+            roots = engine.call("files_list")
+            down = engine.call("files_list", place="Downloads")
+            told.append(engine.text_of(engine.call("propose_files", steps=[{
+                "skill": "move_files", "files": [ref_in(down, "letter.txt")], "to": ref_in(roots, "Documents")}])))
+            engine.end_turn("I'll carry on without it.")
+            turned.set()
+            told.append(engine.wait_message(20.0))
+            engine.call("finish", summary=DONE, outcome="partial")
+            engine.end_turn("Done.")
+
+        def busy_gui(_run: Any, _cancelled: Any = lambda: False) -> bool:
+            """The GUI thread is busy past the tool's time and the model's turn: "not shown" comes after both."""
+            turned.wait(15.0)
+            run = self.c.agent.run()
+            deadline = time.monotonic() + 10.0                           # (this is the tool's thread: no Qt here)
+            while run is not None and not run._idle and time.monotonic() < deadline:
+                time.sleep(0.01)
+            return False
+
+        self.make_things(play, timing=replace(PATIENT, tool_s=1.0))
+        self.c.agent._things.show_run = busy_gui
+        self.start()
+        end = self.ended()
+        self.assertEqual((end.outcome, end.summary), ("partial", DONE))
+        self.assertEqual(told[1], ar.CONTINUE_TEXT)
+        self.assertIn("too long", told[0])
+        self.assertTrue(self.on_disk(LETTER))
+
 
 class InTheWindowTests(FeedApp):
     """arf-8: the owner back in the Jarvis window, where no card shows."""
@@ -1468,6 +1899,58 @@ class TypedChoiceTests(FeedApp):
         self.question("Blue", "Red")
         self.type_it("Cancel")
         self.assertEqual(self.ended().outcome, ar.OUTCOME_STOPPED)
+
+    def asks_twice(self, told: list[str], *choices: str) -> Any:
+        def script(engine: FakeEngine) -> None:
+            engine.wait_message()
+            for _question in range(2):
+                engine.call("ask_owner", question="Shall I go on with the laptops?", choices=list(choices))
+                engine.end_turn("Asked.")
+                told.append(engine.wait_message())
+            engine.call("finish", summary="Went on regardless.", outcome="done")
+            engine.end_turn()
+
+        return script
+
+    def next_question(self, before: str) -> str:
+        self.assertTrue(wait_for(lambda: self.c.agent.run() is not None and self.c.agent.run().waiting is not None
+                                 and self.c.agent.run().waiting.id != before, timeout=10), "the next question")
+        settle()
+        return self.c.agent.run().waiting.id
+
+    def test_a_second_stop_word_stops_the_task_whatever_is_offered(self) -> None:
+        """run-7: a page may steer the model to offer "Stop" as a choice, to swallow every stop the owner types or says.
+        The first answers the question, as its own choice; the next stops the task, whatever the question offers."""
+        told: list[str] = []
+        self.start(self.asks_twice(told, "Stop", "Cancel", "Carry on"))
+        first = self.next_question("")
+        self.type_it("Stop!")
+        self.next_question(first)
+        self.assertEqual(told, ["The owner answers your question: Stop!"])
+        self.assertIsNone(self.c.agent.last_end)
+        self.type_it("Cancel.")                                     # offered too: it stops the task all the same
+        end = self.ended()
+        self.assertEqual(end.outcome, ar.OUTCOME_STOPPED)
+        self.assertEqual(told, ["The owner answers your question: Stop!"])
+
+    def test_the_next_task_s_first_stop_word_answers_its_question_again(self) -> None:
+        told: list[str] = []
+        self.start(self.asks_twice(told, "Stop", "Carry on"))
+        self.next_question("")
+        self.type_it("stop")                                        # this task's own choice: its answer
+        self.assertTrue(wait_for(lambda: told, timeout=10))
+        self.c.agent.stop("test")
+        self.ended()
+        self.feed._dismiss()
+        again: list[str] = []
+        self.harness.factory.runner.runs.append(FakeEngine(self.asks_twice(again, "Stop", "Carry on")))
+        self.assertTrue(self.c.agent.start("another task"))
+        self.started_task()
+        self.next_question("")
+        self.type_it("Stop")
+        self.assertTrue(wait_for(lambda: again, timeout=10))
+        self.assertEqual(again, ["The owner answers your question: Stop"])
+        self.c.agent.stop("test")
 
     def test_at_a_card_only_a_click_answers_its_words_are_nobody_s_answer(self) -> None:
         def script(engine: FakeEngine) -> None:
@@ -2958,6 +3441,90 @@ class StopAfterFinishTests(ThingsApp):
         settle()
         self.assertIn("Stopped, sir.", self.talk())
         self.assertIn("(stopped)", self.c._task_notes[-1].text)
+
+    REPORT = "The whole report: Quillfeather's letter is drafted. A second sentence of it. A third sentence."
+
+    def ended_by_itself(self, *, line: str = "", hold: threading.Event | None = None, focus: bool = False) -> None:
+        begun = threading.Event()                                    # the task is seen running before it ends
+        self.addCleanup(begun.set)
+
+        def play(engine: FakeEngine) -> None:
+            engine.wait_message()
+            begun.wait(10)
+            if line:
+                engine.call("say", text=line)
+            if hold is not None:
+                hold.wait(25)
+            engine.call("finish", summary=self.REPORT, outcome="done")
+            engine.end_turn("Done.")
+
+        self.make_things(play, timing=PATIENT)
+        if focus:
+            self.desktop.focus.start(60)
+        self.start()
+        begun.set()
+        if hold is None:
+            self.ended()
+            settle()
+
+    def test_a_turn_off_after_it_ended_by_itself_stops_what_it_says(self) -> None:
+        """run-4: no run is left for a Turn off to stop, so it stops the task's voice itself: the report's opening goes,
+        and nothing else the voice is at."""
+        self.ended_by_itself()
+        voice = self.harness.voice
+        keys, stops, said = len(voice.stopped_keys), voice.stops, len(voice.said)
+        self.c._on_desktop_turn_off()
+        settle()
+        self.assertIn(ui.TASK_SAY_KEY, voice.stopped_keys[keys:])
+        self.assertIn(ui.ASK_SAY_KEY, voice.stopped_keys[keys:])
+        self.assertEqual(voice.stops, stops)                         # never the whole voice: a briefing reads on
+        self.assertEqual(voice.said[said:], [])
+
+    def test_a_turn_off_in_focus_mode_hands_none_of_the_task_to_the_voice(self) -> None:
+        """run-4: focus mode held the report's opening; the Turn off ends focus mode, which would have said it."""
+        self.ended_by_itself(focus=True)
+        self.assertIn(ui.TASK_SAY_KEY, [key for _kind, _text, key in self.c._focus_speech])
+        voice = self.harness.voice
+        said = len(voice.said)
+        self.c._on_desktop_turn_off()
+        settle()
+        self.assertFalse(self.desktop.in_focus())
+        self.assertEqual([text for _kind, text, _key in voice.said[said:]], [])
+        self.assertNotIn(ui.TASK_SAY_KEY, [key for _kind, _text, key in self.c._focus_speech])
+
+    def test_a_turn_off_in_focus_mode_mid_task_hands_none_of_it_to_the_voice(self) -> None:
+        hold = threading.Event()
+        self.addCleanup(hold.set)
+        self.ended_by_itself(line="Reading the first review of Quillfeather now.", hold=hold, focus=True)
+        self.assertTrue(wait_for(lambda: bool(self.c._focus_speech), timeout=10), "focus mode holds its line")
+        voice = self.harness.voice
+        said = len(voice.said)
+        self.c._on_desktop_turn_off()
+        self.ended()
+        settle()
+        self.assertEqual([text for _kind, text, _key in voice.said[said:]], [])
+
+    def live_texts(self) -> list[str]:
+        texts: list[str] = []
+        for task in self.agent_tasks():
+            for step in task.steps:
+                texts += [step.title, step.summary, *(field.value for field in step.fields),
+                          *(note.text for note in step.notes), *(item.text for item in step.items)]
+        return texts
+
+    def test_a_turn_off_in_those_seconds_leaves_no_report_in_live(self) -> None:
+        """run-5: the finish step's own field held the whole report, so Live kept it after a Turn off though nothing of
+        the task stays. Live's "How it ended" opens with the report at a natural end, and says Jarvis's words after it."""
+        self.finished()
+        self.assertFalse([text for text in self.live_texts() if "The whole report" in text])
+        self.c._on_desktop_turn_off()
+        self.ended()
+        settle()
+        self.assertFalse([text for text in self.live_texts() if "The whole report" in text])
+
+    def test_at_a_natural_end_live_opens_its_end_with_the_report(self) -> None:
+        self.ended_by_itself()
+        self.assertTrue([text for text in self.live_texts() if text.startswith("The whole report")])
 
     def test_the_next_task_starts_with_a_clean_slate(self) -> None:
         self.finished()

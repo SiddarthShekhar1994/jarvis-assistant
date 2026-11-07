@@ -73,8 +73,9 @@ Tiers ``INSTANT``, ``ONE_CLICK``, ``CARD``, ``NEVER`` (``TIERS``), ``promote(tie
 a tier went up, or what a card row must show). ``PlannedStep``, ``DesktopAnswer`` (the planner's answer as read),
 ``CheckedStep``, ``DesktopPlan`` (``accepted()``, ``refused()``, ``counts()``, ``skills_text()``,
 ``codes_text()``), ``check_plan(answer, refs, owner_words, run_id=, path_check=, names=, withdrawn=)``,
-``licensed_skills(words, names=, extra=)``, ``taken_back(message)`` and ``withdrawn_skills(messages, names=, extra=)`` (a
-task's: what a later message took back; ``TASK_LICENCES``: its own words for the same skills, for ``extra``),
+``licensed_skills(words, names=, extra=, task=)``, ``taken_back(message, task=)`` and ``withdrawn_skills(messages,
+names=, extra=, task=)`` (a task's: what a later message took back; ``TASK_LICENCES``: its own words for the same skills,
+for ``extra``; ``task``: a task's own reading of a negation and of a take-back, which no desktop request asks for),
 ``negated(words)``, ``names_item(words, label)``, ``named_exactly(words, label)``, ``typed_url(words, url,
 bare=)``, ``places_named(words, places)`` (the places scope licensing reads in the owner's words; desktop.index searches
 them first).
@@ -427,12 +428,11 @@ def _find(tokens: Sequence[str], phrase: Sequence[str]) -> list[int]:
     if "*" in phrase:
         cut = list(phrase).index("*")
         head, tail = list(phrase[:cut]), list(phrase[cut + 1:])
-        found = []
-        for start in _find(tokens, head):
-            rest = tokens[start + len(head):]
-            if not tail or _find(rest, tail):
-                found.append(start)
-        return found
+        found = _find(tokens, head)
+        if not tail:
+            return found
+        ends = _find(tokens, tail)         # looked for once: a head counts when the last of them stands after it
+        return [start for start in found if ends and start + len(head) <= ends[-1]]
     size = len(phrase)
     return [i for i in range(len(tokens) - size + 1) if size and tuple(tokens[i:i + size]) == tuple(phrase)]
 
@@ -445,16 +445,18 @@ def _lead(tokens: Sequence[str]) -> int:
     return index
 
 
-def licensed_skills(owner_words: Any, names: Iterable[Any] = (), extra: Sequence[Licence] = ()) -> frozenset[str]:
+def licensed_skills(owner_words: Any, names: Iterable[Any] = (), extra: Sequence[Licence] = (), *,
+                    task: bool = False) -> frozenset[str]:
     """The skills the owner's typed words license (SPEC 4.5): deterministic, on his words only. ``names``: the names of
     what this request lists (files, folders, apps, sites): his words that are one of them - or that he put in quotes -
     are only that name, never a licence ("open Jarvis, delete all files.docx" licenses opening only). Names only ever
     take words away: what is licensed with them is always part of what his words alone license. A negation takes
     away every licence word after it in its clause, and the Recycle Bin's after it in its sentence (_licences).
-    ``extra``: licences besides SPEC 4.5's (TASK_LICENCES: a task's own)."""
+    ``extra``: licences besides SPEC 4.5's (TASK_LICENCES: a task's own). ``task``: a task's reading of a negation
+    (_licences): no desktop request asks for it."""
     said = _read(owner_words, [(name, False) for name in names])
     tokens, marks, _after = _clause_tokens(owner_words)
-    return _licences(tokens, marks, extra) & _licences(said.licence, said.marks, extra)
+    return _licences(tokens, marks, extra, task=task) & _licences(said.licence, said.marks, extra, task=task)
 
 
 # ---- the owner's words, read with the names in them (P2.2) -----------------------------------------------
@@ -468,6 +470,19 @@ _QUOTE_PAIRS = (('"', '"'), (chr(0x201C), chr(0x201D)), (chr(0x2018), chr(0x2019
 _QUOTED_RE = re.compile("|".join(f"{re.escape(left)}([^{re.escape(right)}]+){re.escape(right)}"
                                  for left, right in _QUOTE_PAIRS)
                         + r"|(?:(?<=\s)|^)'([^']+)'(?=\s|$|[.,;:!?)\]])")
+_OPENS_NOTHING = "\x00"
+
+
+def _quote_search_text(text: str) -> str:
+    """``text`` as _QUOTED_RE is run over it, of the same length and with the same matches: an opener with no closer of
+    its kind after it, which opens nothing, as a plain character. Left in, each such opener runs to the text's end and
+    back, one match with the GIL held, and a paste of them takes minutes with nothing else running, Stop neither."""
+    for left, right in _QUOTE_PAIRS:
+        if left != right:
+            last = text.rfind(right) + 1
+            if text.find(left, last) >= 0:
+                text = text[:last] + text[last:].replace(left, _OPENS_NOTHING)
+    return text
 
 
 @dataclass(frozen=True)
@@ -531,9 +546,9 @@ def _read(owner_words: Any, names: Iterable[tuple[Any, bool]] = ()) -> _Said:
     spans: list[tuple[int, int, bool, str]] = []         # (start, end, is a place's name, how: quoted/whole/run)
     position = 0
     pending = _NO_BREAK
-    for match in _QUOTED_RE.finditer(text):
+    for match in _QUOTED_RE.finditer(_quote_search_text(text)):
         pending = _add_words(tokens, marks, text[position:match.start()], pending)
-        inner = _tokens(next(group for group in match.groups() if group is not None))
+        inner = _tokens(text[slice(*match.span(match.lastindex))])
         if inner:
             spans.append((len(tokens), len(tokens) + len(inner), wanted.get(tuple(inner), False), "quoted"))
             tokens += inner
@@ -581,11 +596,11 @@ def _read(owner_words: Any, names: Iterable[tuple[Any, bool]] = ()) -> _Said:
     return _Said(tuple(licence), tuple(scope), tuple(licence_marks))
 
 
-def _negations(tokens: Sequence[str]) -> list[bool]:
+def _negations(tokens: Sequence[str], extra: Sequence[Licence] = ()) -> list[bool]:
     """Which of ``tokens`` negate what follows them (_NEGATIONS, but never a word of a licence's own phrase: "do not
-    disturb")."""
+    disturb"; ``extra``'s phrases too: a task's "don't disturb")."""
     negating = [token in _NEGATIONS for token in tokens]
-    for licence in LICENCES:
+    for licence in (*LICENCES, *extra):
         for phrase in licence.phrases:
             if "*" not in phrase and any(word in _NEGATIONS for word in phrase):
                 for start in _find(tokens, phrase):
@@ -602,48 +617,80 @@ def _a_list(words: Sequence[str]) -> bool:
     return len(others) <= 1 or all(word in _VERBS for word in others)
 
 
-def _clause_starts(tokens: Sequence[str], marks: Sequence[int],
-                   negating: Sequence[bool]) -> tuple[list[int], list[int]]:
+def _clause_starts(tokens: Sequence[str], marks: Sequence[int], negating: Sequence[bool], *,
+                   task: bool = False) -> tuple[list[int], list[int]]:
     """For each of ``tokens``: where its clause starts and where its sentence starts (``marks``: the break before each
     word; a clause also starts after "but", "just", "only" and "and then"; a comma in a negated list of verbs is
-    none)."""
+    none). ``task`` (pc-10, a task's reading): a bare "no" or "not that" before a comma is no list ("no, mute"), and
+    "no" or "without" before a word that is no verb negates only as far as the next "and" or comma ("research laptops
+    without a fan and turn the volume down", "no typos, mute")."""
     clauses: list[int] = []
     sentences: list[int] = []
     clause = sentence = 0
     listing: int | None = None                  # where a negated list of verbs goes on from (its negation or comma)
+    soft = False                                # the clause's negation is a task's "no" / "without" before a noun
     for index, token in enumerate(tokens):
         mark = marks[index] if index < len(marks) else _NO_BREAK
-        if mark == _COMMA and listing is not None and _a_list(tokens[listing:index]):
+        if mark == _COMMA and listing is not None and _a_list(tokens[listing:index]) and not soft \
+                and not (task and _bare_no(tokens[listing:index])):
             listing = index
         elif mark >= _COMMA:
-            clause, listing = index, None
+            clause, listing, soft = index, None, False
             if mark >= _SENTENCE:
                 sentence = index
+        elif soft and token == "and":
+            clause, listing, soft = index + 1, None, False
         clauses.append(clause)
         sentences.append(sentence)
         if negating[index]:
             listing = index + 1
+            soft = task and token in _SOFT_NEGATIONS and index + 1 < len(tokens) and tokens[index + 1] not in _VERBS
         if token in _CLAUSE_WORDS or (token == "then" and index and tokens[index - 1] == "and"):
-            clause, listing = index + 1, None
+            clause, listing, soft = index + 1, None, False
     return clauses, sentences
 
 
-def _licences(tokens: Sequence[str], marks: Sequence[int] = (), extra: Sequence[Licence] = ()) -> frozenset[str]:
+# pc-10, a task's reading of a negation (``task``): what stands between a "no" or a "not" and the comma after it when it
+# is bare ("no, mute", "not that, mute"), and the negations that reach only as far as the next "and" before a noun.
+_BARE_NO = frozenset({"that", "this", "one", "t"})
+_SOFT_NEGATIONS = frozenset({"no", "without"})
+
+
+def _bare_no(words: Sequence[str]) -> bool:
+    return all(word in _BARE_NO for word in words)
+
+
+def _before(negating: Sequence[bool], marks: Sequence[int], start: int, task: bool) -> bool:
+    """A negation is one of the two words before ``start``; for a task (pc-10) never across a comma or a sentence's
+    end ("no, mute")."""
+    low = max(0, start - 2)
+    if task:
+        for index in range(start, low, -1):
+            if index < len(marks) and marks[index] >= _COMMA:
+                low = index
+                break
+    return any(negating[low:start])
+
+
+def _licences(tokens: Sequence[str], marks: Sequence[int] = (), extra: Sequence[Licence] = (), *,
+              task: bool = False) -> frozenset[str]:
     """The skills SPEC 4.5's table (and ``extra``) gives for ``tokens`` (the owner's words, names already read as names;
     ``marks``: the break before each word). A licence word after a negation does not count: one of the two words before
     it ("don't delete"), or any earlier in its clause - a negation covers the whole list of verbs after it ("zip the
     photos, don't move or delete the originals" licenses the zip only; p2r-12); and the Recycle Bin's words never
-    after a negation anywhere earlier in their sentence ("don't keep them, just bin them" bins nothing)."""
+    after a negation anywhere earlier in their sentence ("don't keep them, just bin them" bins nothing). ``task``: a
+    task's reading (pc-10, _clause_starts and _before): "no, mute" and "without a fan and turn the volume down"
+    negate nothing of the request."""
     lead = _lead(tokens)
-    negating = _negations(tokens)
-    clauses, sentences = _clause_starts(tokens, marks, negating)
+    negating = _negations(tokens, extra)
+    clauses, sentences = _clause_starts(tokens, marks, negating, task=task)
     allowed: set[str] = set()
     for licence in (*LICENCES, *extra):
         for phrase in licence.phrases:
             for start in _find(tokens, phrase):
                 if licence.lead and start != lead:
                     continue
-                if any(negating[max(0, start - 2):start]) or any(negating[clauses[start]:start]):
+                if _before(negating, marks, start, task) or any(negating[clauses[start]:start]):
                     continue
                 if RECYCLE_FILES in licence.skills and any(negating[sentences[start]:start]):
                     continue
@@ -659,11 +706,23 @@ def _licences(tokens: Sequence[str], marks: Sequence[int] = (), extra: Sequence[
 # click card, and are never refused as not asked for. No desktop request reads them.
 TASK_LICENCES = (Licence(_p("sound"), frozenset({VOLUME})),
                  Licence(_p("stop the music", "stop the song", "stop the track", "go back a song", "go back a track"),
-                         frozenset({MEDIA})))
+                         frozenset({MEDIA})),
+                 # pc-9: what is playing ("turn down the music", "stop this song", "turn that down")
+                 Licence(_p("music", "song", "songs", "track", "tracks", "video", "videos", "playing", "podcast",
+                            "podcasts", "turn that", "turn this"), frozenset({VOLUME, MEDIA})),
+                 Licence(_p("alarm", "reminder", "remind me"), frozenset({TIMER, CANCEL_TIMER})),
+                 Licence(_p("capture", "screen capture", "print screen"), frozenset({SCREENSHOT})),
+                 Licence(_p("don t disturb", "dont disturb"), frozenset({FOCUS_MODE})))
 _ALL_LICENSED = frozenset(skill for licence in LICENCES for skill in licence.skills)
 _TAKE_ALL_BACK = _p("never mind", "nevermind", "forget it", "forget that", "scrap that", "scrap it", "cancel that",
                     "leave it", "leave them", "leave that", "leave those", "leave everything", "do nothing",
                     "don t do that", "don t do it", "dont do that", "dont do it")
+# pc-7, a task's (``task``): more ways of saying it, and "cancel", "forget" or "leave" before a thing ("cancel the
+# screenshot", "actually no, leave the sound").
+_TASK_TAKE_ALL_BACK = _p("scratch that", "scratch it", "do not do that", "do not do it", "do not do anything",
+                         "don t do anything", "dont do anything", "forget about it", "forget about that")
+_CALL_OFF = frozenset({"cancel", "forget", "leave"})
+_CALL_OFF_SPAN = 4                    # "cancel the screenshot", "forget about the music": the words after it read
 # What the owner calls what a licence is about, when they take it back: "no music please", "leave the volume alone".
 _THINGS = {"volume": (VOLUME,), "sound": (VOLUME,), "music": (MEDIA,), "song": (MEDIA,), "songs": (MEDIA,),
            "track": (MEDIA,), "tracks": (MEDIA,), "timer": (TIMER, CANCEL_TIMER), "timers": (TIMER, CANCEL_TIMER),
@@ -681,18 +740,21 @@ def _skills_of_word(word: str) -> frozenset[str]:
     return frozenset(found)
 
 
-def taken_back(message: Any) -> frozenset[str]:
+def taken_back(message: Any, *, task: bool = False) -> frozenset[str]:
     """What one of the owner's later messages takes away from what earlier ones licensed: a licence word or a thing it
     is about, negated as ``_licences`` reads a negation ("actually don't delete anything", "do not touch the volume",
     "no music please"); "leave the volume alone"; and all of it for "leave them alone", "never mind", "forget it" and
-    the like. Only ever takes away: reading too much here costs a click or a refusal, never a change."""
+    the like. ``task``: a task's reading (pc-7, pc-10): a negation as ``_licences`` reads it for a task, more ways of
+    taking all of it back ("scratch that", "forget about it"), and what "cancel", "forget" or "leave" names ("cancel
+    the screenshot", "leave the sound"; "cancel the timer" takes back a new timer only, for it is the request to cancel
+    one). Only ever takes away: reading too much here costs a click or a refusal, never a change."""
     tokens, marks, _after = _clause_tokens(message)
     negating = _negations(tokens)
-    clauses, _sentences = _clause_starts(tokens, marks, negating)
+    clauses, _sentences = _clause_starts(tokens, marks, negating, task=task)
     gone: set[str] = set()
 
     def negated(start: int) -> bool:
-        return any(negating[max(0, start - 2):start]) or any(negating[clauses[start]:start])
+        return _before(negating, marks, start, task) or any(negating[clauses[start]:start])
 
     for licence in LICENCES:
         for phrase in licence.phrases:
@@ -705,20 +767,41 @@ def taken_back(message: Any) -> frozenset[str]:
             between = tokens[start + 1:tokens.index("alone", start + 1)]
             named = {skill for word in between for skill in _skills_of_word(word)}
             gone |= named or _ALL_LICENSED
-    if any(_find(tokens, phrase) for phrase in _TAKE_ALL_BACK):
+        if task and token in _CALL_OFF and not negated(start):         # (never "don't forget the timer")
+            gone |= _called_off(tokens, marks, start)
+    if any(_find(tokens, phrase) for phrase in (*_TAKE_ALL_BACK, *(_TASK_TAKE_ALL_BACK if task else ()))):
         gone |= _ALL_LICENSED
     return frozenset(gone)
 
 
-def withdrawn_skills(messages: Iterable[Any], names: Iterable[Any] = (), extra: Sequence[Licence] = ()) -> frozenset[str]:
+def _called_off(tokens: Sequence[str], marks: Sequence[int], start: int) -> frozenset[str]:
+    """What "cancel", "forget" or "leave" at ``start`` names in the few words after it, in its clause (pc-7): a thing or
+    a licence word ("cancel the screenshot", "forget the music"). A timer's is a new one only: "cancel the timer" asks
+    for that."""
+    found: set[str] = set()
+    for index in range(start + 1, min(len(tokens), start + 1 + _CALL_OFF_SPAN)):
+        if index < len(marks) and marks[index] >= _COMMA:
+            break
+        found |= _skills_of_word(tokens[index])
+    if tokens[start] == "leave":                  # "leave the files in Downloads and move the photos": no take-back
+        found &= _PC_SKILLS
+    return frozenset(found - {CANCEL_TIMER})
+
+
+_PC_SKILLS = frozenset({VOLUME, MEDIA, TIMER, CANCEL_TIMER, SCREENSHOT, FOCUS_MODE})
+
+
+def withdrawn_skills(messages: Iterable[Any], names: Iterable[Any] = (), extra: Sequence[Licence] = (), *,
+                     task: bool = False) -> frozenset[str]:
     """The skills the owner's words license no more: taken back by a later message and not licensed again since. The
-    first message has nothing to take back. ``names`` and ``extra``: as ``licensed_skills``'."""
+    first message has nothing to take back. ``names``, ``extra`` and ``task``: as ``licensed_skills``' (``task`` reads
+    ``taken_back`` as a task's too)."""
     listed = tuple(names)
     gone: set[str] = set()
     for number, message in enumerate(messages):
-        taken = taken_back(message) if number else frozenset()
+        taken = taken_back(message, task=task) if number else frozenset()
         # ("leave the volume alone" licenses none)
-        gone = (gone | taken) - (licensed_skills(message, listed, extra) - taken)
+        gone = (gone | taken) - (licensed_skills(message, listed, extra, task=task) - taken)
     return frozenset(gone)
 
 

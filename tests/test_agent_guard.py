@@ -137,7 +137,9 @@ class ReadmeTests(unittest.TestCase):
         self.assertIn("A page can hide words", self.words())
 
     def test_it_says_what_the_secret_rule_is(self) -> None:
-        self.assertIn("named for secrets, or plainly holding keys", self.words())
+        self.assertIn("never a file named for secrets", self.words())
+        self.assertIn("What plainly is a key or a password never reaches him", self.words())
+        self.assertIn("the value goes and the rest stays", self.words())
 
 
 class EnvironmentTests(unittest.TestCase):

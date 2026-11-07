@@ -29,13 +29,15 @@
                              validated plan stays the source of truth
     run_planner(...)         run_cli with the planner's checks and read_result (web research uses
                              run_cli with its own: ask.research.run_research); ``on_words`` feeds a SayWatch
+    task_failure(text, status=)   a task's run's own reading of a failure (agent.runner): only the plan's own words
+                             are its limit, and a server limiting requests is server_busy; Ask's is classify_text
 
 Failure kinds (AskFailure.kind): not_signed_in, limit, max_turns, schema_retries, timeout,
-cancelled, guard, garbled, cli_unsupported, error, research_cap. Their messages are Jarvis's own words (the only
-model or CLI text in one is a sanitized usage-limit reset time) and are safe to show and log; the
-stream itself (the plan, the result text, stderr) is never logged (RunResult.reply, kept only with
-``capture`` for the LIVE view, never is either). ``total_cost_usd`` is a
-client-side estimate, not a charge on a subscription: it is never read.
+cancelled, guard, garbled, cli_unsupported, error, research_cap (and server_busy, from task_failure alone). Their
+messages are Jarvis's own words (the only model or CLI text in one is a sanitized usage-limit reset time) and are safe
+to show and log; the stream itself (the plan, the result text, stderr) is never logged (RunResult.reply, kept only with
+``capture`` for the LIVE view, never is either). ``total_cost_usd`` is a client-side estimate, not a charge on a
+subscription: it is never read.
 """
 
 from __future__ import annotations
@@ -125,12 +127,24 @@ _RESET_RE = re.compile(r"resets?\s+(?:at\s+)?([0-9]{1,2}(?::[0-9]{2})?\s*(?:[ap]
                        r"(?:\s*\([A-Za-z_/+\-]{1,40}\))?)", re.IGNORECASE)
 _RESET_EPOCH_RE = re.compile(r"\|\s*(\d{10})\b")
 # A day or a date anywhere in a limit's words: "resets 5am Mon" is not the next 5am, and a pause must never be shorter than
-# the real one.
+# the real one. So too a day counted ("in 3 days"), a next or a week, and a zone not in brackets ("00:00 UTC"), which the
+# time is not read in.
 _RESET_DAY_RE = re.compile(r"\b(?:mon|tue|tues|wed|weds|thu|thur|thurs|fri|sat|sun"
                            r"|(?:mon|tues|wednes|thurs|fri|satur|sun)day"
                            r"|today|tonight|tomorrow|jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february"
                            r"|march|april|june|july|august|september|october|november|december)\b"
-                           r"|\b\d{1,2}(?:st|nd|rd|th)\b|\b\d{4}-\d{1,2}|\b\d{1,2}[/.]\d{1,2}\b", re.IGNORECASE)
+                           r"|\b\d{1,2}(?:st|nd|rd|th)\b|\b\d{4}-\d{1,2}|\b\d{1,2}[/.]\d{1,2}\b"
+                           r"|\bin\s+\d+\s+(?:days?|weeks?)\b|\bnext\b|\bweeks?\b|(?<![(/])\b(?:utc|gmt)\b", re.IGNORECASE)
+# What may follow a reset time (and its bracketed zone) for a clock to read it: the end of its clause, nothing else.
+_RESET_END_RE = re.compile(r"\s*(?:$|[.;,:!?|)\]\u00b7\u2022\u2013\u2014\r\n]|-(?:\s|$))")
+# A task's own reading of a failed result (task_failure; Ask's classify_text stays as it is): only the plan's own words
+# are the plan's limit, never "not your usage limit"; a server limiting requests is not it either.
+_PLAN_LIMIT_RE = re.compile(r"\b(?:usage|session|weekly|5-hour)(?:\s+usage)?\s+limits?\b|\b(?:hit|reached) your limits?\b"
+                            r"|\bout of (?:extra )?usage\b", re.IGNORECASE)
+_NOT_THE_PLAN_RE = re.compile(r"\bnot (?:your|the) (?:usage )?limits?\b", re.IGNORECASE)
+_SERVER_LIMIT_RE = re.compile(r"limiting requests|rate.?limit", re.IGNORECASE)
+SERVER_BUSY = "server_busy"   # task_failure's kind: Claude's server is limiting requests, and it is not the plan's limit
+SERVER_BUSY_MESSAGE = "Claude's server is limiting requests; it is not your plan's usage limit"
 _RESET_PARTS_RE = re.compile(r"([0-9]{1,2})(?::([0-9]{2}))?\s*(?:([ap])\.?m\.?)?(?:\s*\(([A-Za-z_/+\-]{1,40})\))?",
                              re.IGNORECASE)
 _FENCE_RE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
@@ -524,14 +538,15 @@ def limit_reset_time(text: str, *, now: Callable[[], datetime] = lambda: datetim
     """When a usage-limit text says the limit resets, as a moment: "resets 3pm (Europe/London)" the next 3pm there (in
     this PC's own zone when Python has no such zone: no tzdata here), "resets 15:30" the next 15:30, "...|1762300000"
     that moment. None when it names no time a clock can read: "resets 3" says neither morning nor afternoon, and with a
-    day or a date beside the time ("resets 5am Mon") the next such time may be far too soon: a pause must never be
-    shorter than the real one, so the task waits as with no time given."""
+    day or a date beside the time ("resets 5am Mon", "in 3 days", "next week"), a zone outside brackets ("00:00 UTC") or
+    anything else after it in its clause, the next such time may be far too soon: a pause must never be shorter than the
+    real one, so the task waits as with no time given. Only a task's run reads this (agent.runner)."""
     match = _RESET_RE.search(text or "")
     if match is None:
         epoch = _RESET_EPOCH_RE.search(text or "")
         return _epoch_time(int(epoch.group(1)), now) if epoch else None
     parts = _RESET_PARTS_RE.fullmatch(" ".join(match.group(1).split()))
-    if parts is None or _RESET_DAY_RE.search(text):
+    if parts is None or _RESET_DAY_RE.search(text) or not _RESET_END_RE.match(text, match.end()):
         return None
     hour, minute = int(parts.group(1)), int(parts.group(2) or 0)
     meridiem = (parts.group(3) or "").casefold()
@@ -572,6 +587,26 @@ def classify_text(text: str, *, now: Callable[[], datetime] = lambda: datetime.n
         message = (f"Your Claude plan's usage limit is reached (it resets {reset}); {NOTHING}" if reset
                    else MESSAGES[LIMIT])
         return failure(LIMIT, "limit", message)
+    return None
+
+
+def task_failure(text: str, *, now: Callable[[], datetime] = lambda: datetime.now().astimezone(),
+                 status: Any = None) -> AskFailure | None:
+    """classify_text as a task's run reads a failed result or the stderr of a process that ended (agent.runner; Ask's
+    own reading stays as it is). A sign-in problem as there. The plan's limit (LIMIT) only in the plan's own words: a
+    usage, session, weekly or 5-hour limit, "hit your limit", "out of usage", never "not your usage limit"; so a context,
+    budget or subagent limit, or a bare "limit reached", is not it. A 429 or a server limiting requests with none of
+    those words is SERVER_BUSY. None for anything else."""
+    if status in (401, 403) or (text and _AUTH_RE.search(text)):
+        return failure(NOT_SIGNED_IN, "auth")
+    plain = _NOT_THE_PLAN_RE.sub(" ", text or "")
+    if _PLAN_LIMIT_RE.search(plain):
+        reset = _reset_words(text or "", now)
+        message = (f"Your Claude plan's usage limit is reached (it resets {reset}); {NOTHING}" if reset
+                   else MESSAGES[LIMIT])
+        return failure(LIMIT, "limit", message)
+    if status == 429 or _SERVER_LIMIT_RE.search(plain):
+        return failure(SERVER_BUSY, SERVER_BUSY, SERVER_BUSY_MESSAGE)
     return None
 
 

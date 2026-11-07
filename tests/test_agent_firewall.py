@@ -162,7 +162,8 @@ class WhatARequestHoldsTests(unittest.TestCase):
         for goal in ("my wifi password is hunter2, why won't it connect", "what does reference 482913 mean",
                      "look up order 114-3928475-9912345", "email bob@example.org about the party",
                      "card 4111 1111 1111 1111 was declined, why", "what is sk-ant-abcdefgh12345678",
-                     "٤٨٢٩١٣ is what the letter says"):
+                     "what is ghp_abcdefghijklmnopqrstuvwxyzABCDEFGHIJ for",       # a key with no long number in it
+                     "٤٨٢٩١٣ is what the letter says", "DOB 12/05/1990 - which vaccines"):
             with self.subTest(goal=goal):
                 self.assertTrue(fw.holds_something_private(goal))
 
@@ -349,7 +350,8 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(self.asked[0][0], 'Jarvis wants to search the web for "antha"')
         self.answers[0](True)
         self.assertIsNone(self.firewall.check(SEARCH, {"query": "antha"}))
-        self.assertEqual(self.firewall.taint.hits("Samantha"), ())
+        # fw-3: the card showed "antha", never "samantha": that one call went, and the word stays private.
+        self.assertEqual(self.firewall.taint.hits("Samantha"), ("samantha",))
 
     def test_what_matters_on_a_long_address_comes_first_above_any_fold(self) -> None:
         self.taint()

@@ -47,9 +47,9 @@ there, one at a time, so nothing in it is shared with the GUI or the Ask thread.
 * A task's reads (agent.owner, part A4): ``find_for_task(words)`` (the files its words find, the places they are in and
   the apps they name: names only), ``list_for_task(place)`` (what one place holds, or the roots), ``read_text(item,
   start=, cap=)`` (a part of a text-like file: re-checked right before the read - the scope as it is now, the same item
-  - and never a secret, an online-only file or any other type), ``in_secret_folders(paths)`` (which of them lie in a
-  folder named for secrets) and ``pc_for_task(asked, ...)`` (a PC control asked for by a task, carried out as a local
-  route is). ``cancel`` stops each before it touches anything.
+  - never a file named for secrets, an online-only file or any other type, and a key or a password in it only as a
+  mark), ``in_secret_folders(paths)`` (which of them lie in a folder named for secrets) and ``pc_for_task(asked, ...)``
+  (a PC control asked for by a task, carried out as a local route is). ``cancel`` stops each before it touches anything.
 
 Each job's ``cancel`` (anything with ``is_set()``) holds the app's stop and THE CONSENT GATE (desktop_ui: the owner's
 Turn off): the executor asks it before each step and right before each OS call - once it is set nothing opens, and
@@ -119,7 +119,7 @@ _DAYS = ((("today",), 1), (("yesterday",), 2), (("this", "week"), 7), (("last", 
 READABLE_TYPES = frozenset({"txt", "text", "md", "markdown", "rst", "csv", "tsv", "json", "jsonl", "ndjson", "log",
                             "html", "htm", "xml", "yaml", "yml", "srt", "vtt", "tex", "bib"})
 READ_BYTES_CAP = 8 * 1024 * 1024        # of a file: the first this much, and it says so
-SECRET_MARGIN = 256                     # characters either side of a part looked at for a key cut by its end
+SECRET_MARGIN = 256                     # characters round a part looked at for a value that runs over its edge
 LIST_ENTRIES_CAP = 2000                 # entries of a folder looked at for a task
 READ_TYPE, READ_ONLINE, READ_SECRET, READ_BINARY, READ_STOPPED, READ_UNAVAILABLE, READ_FAILED = (
     "read_type", "read_online", "read_secret", "read_binary", "read_stopped", "read_unavailable", "read_failed")
@@ -146,7 +146,8 @@ def decode_text(raw: bytes, *, cut: bool = False) -> str | None:
 class TextPart:
     """A part of a text file, or why not (``code``): characters ``first`` to ``last`` of what was read; ``more``: there
     are more of them; ``cut``: the file is longer than Jarvis reads; ``hidden``: it holds a hidden message (read before
-    such characters are cleaned away). Memory only."""
+    such characters are cleaned away); ``left_out``: how many values ``text`` shows only as guard.SECRET_MARK. ``first``
+    and ``last`` count in the file as it is, whatever was taken out. Memory only."""
 
     code: str = ""
     text: str = field(default="", repr=False)
@@ -155,6 +156,7 @@ class TextPart:
     more: bool = False
     cut: bool = False
     hidden: bool = False
+    left_out: int = 0
 
     def __repr__(self) -> str:
         return f"TextPart({self.code or 'read'}, {self.last - self.first} characters)"
@@ -682,9 +684,9 @@ class DesktopService:
         """Characters ``start`` on of a listed text file, ``cap`` at most. Right before the read it is re-checked in the
         scope as it is now (the same final path, the same identity: executor.check_file), it is a type Jarvis reads as
         text, neither its name nor a folder of it below the root says secrets, and its content is on this PC; the handle
-        read from must be that same item (backend.read_head). A part that plainly holds a key is refused too
-        (guard.holds_secret), with a margin either side, so a key cut by the part's end is still seen. ``cancel``, once
-        set: nothing is read."""
+        read from must be that same item (backend.read_head). What plainly is a key or a password in the part goes back
+        as a mark, and the rest of the part as written (guard.scrub_part): a key that began before the part goes too,
+        and one its end cuts, with a margin past it. ``cancel``, once set: nothing is read."""
         executor = self.executor()
         if executor is None:
             return TextPart(READ_UNAVAILABLE)
@@ -713,11 +715,9 @@ class DesktopService:
             return TextPart(READ_BINARY)
         first = max(0, int(start))
         part = whole[first:first + int(cap)]
-        if guard.holds_secret(whole[max(0, first - SECRET_MARGIN):first + int(cap) + SECRET_MARGIN]):
-            logger.info("Desktop: a file was not read for a task: it holds what looks like a key")
-            return TextPart(READ_SECRET)
-        return TextPart("", part, first, first + len(part), first + len(part) < len(whole), len(raw) > READ_BYTES_CAP,
-                        guard.hidden_message(part))
+        shown, left_out = guard.scrub_part(whole, first, first + int(cap), SECRET_MARGIN)
+        return TextPart("", shown, first, first + len(part), first + len(part) < len(whole), len(raw) > READ_BYTES_CAP,
+                        guard.hidden_message(part), left_out)
 
     def pc_for_task(self, asked: pcctl.PcAsk, *, words: str = "", run_id: str = "", cancel: Any = None,
                     hud: Sequence[int] = ()) -> DesktopRun:

@@ -196,13 +196,15 @@ class MailTests(Base):
         self.assertFalse(bench.call("mail_search", words="Orionhold").is_error)
         return bench, bench.call("mail_read", thread=THREAD_ID)
 
-    def test_a_message_holding_a_key_is_left_out_and_the_rest_of_the_thread_goes_on(self) -> None:
+    def test_a_key_in_a_message_goes_and_the_message_and_the_thread_go_on(self) -> None:
         bench, result = self.holding_a_key()
         self.assertFalse(result.is_error)
         self.assertNotIn("BEGIN OPENSSH", result.text)
+        self.assertNotIn("b3BlbnNz", result.text)
         self.assertNotIn("Hunter2", result.text)
-        self.assertNotIn("Here is the new key", result.text)
-        self.assertIn(owner.MAIL_LEFT_OUT_TEXT, result.text)
+        self.assertIn("Here is the new key", result.text)            # the words round it read
+        self.assertIn(f"password: {guard.SECRET_MARK} for Ravenscar", result.text)
+        self.assertEqual(result.text.count(guard.SECRET_MARK), 3)    # the block, the password, and what the model is told
         self.assertIn(BODY_WORD, result.text)                        # the rest goes on
         self.assertIn(GUEST_ADDRESS, result.text)                    # and its headers
         self.assertTrue(bench.firewall.strict)
@@ -210,18 +212,20 @@ class MailTests(Base):
     def test_live_warns_of_it_with_no_word_of_it(self) -> None:
         _bench, result = self.holding_a_key()
         self.assertTrue(result.warn)
-        self.assertEqual(dict(result.fields)["Left out"], "1 message: what looks like a key or a password, never read")
+        self.assertEqual(dict(result.fields)["Left out"], "2 values left out: what looks like a key or a password")
         shown = " ".join([result.note, *(value for _label, value in result.fields)])
         for word in ("Hunter2", "OPENSSH", "Ravenscar", "new key"):
             self.assertNotIn(word, shown)
 
     def test_what_was_left_out_feeds_nothing_and_jarvis_s_own_words_taint_nothing(self) -> None:
         bench, _result = self.holding_a_key()
-        self.assertEqual(bench.firewall.taint.hits("Ravenscar"), ())
+        self.assertTrue(bench.firewall.taint.hits("Ravenscar"))      # what stays is read, and is held as any mail's words
         self.assertEqual(bench.firewall.taint.hits("Hunter2Hunter2Hunter2"), ())
-        self.assertEqual(bench.firewall.taint.hits("holds looks password"), ())
+        self.assertEqual(bench.firewall.taint.hits("b3BlbnNzaC1rZXktdjEAAAAA"), ())
+        self.assertEqual(bench.firewall.taint.hits("looks"), ())     # Jarvis's own mark is no word of theirs
         self.assertTrue(bench.firewall.taint.hits(BODY_WORD))
-        self.assertFalse(bench.firewall.read_words.holds("[Jarvis left this message out: it holds what looks like a key"))
+        self.assertFalse(bench.firewall.read_words.holds(guard.SECRET_MARK))
+        self.assertFalse(bench.firewall.read_words.holds("Hunter2Hunter2Hunter2"))
 
     def test_an_ordinary_thread_has_no_warning_for_it(self) -> None:
         bench = self.bench("find the Orionhold mail")
@@ -229,7 +233,8 @@ class MailTests(Base):
         result = bench.call("mail_read", thread=THREAD_ID)
         self.assertFalse(result.warn)
         self.assertNotIn("Left out", dict(result.fields))
-        self.assertNotIn(owner.MAIL_LEFT_OUT_TEXT, result.text)
+        self.assertNotIn(guard.SECRET_MARK, result.text)
+        self.assertNotIn("took out", result.text)
 
     def test_only_a_thread_a_search_of_this_task_found(self) -> None:
         bench = self.bench("find the Orionhold mail")
