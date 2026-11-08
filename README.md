@@ -2570,13 +2570,25 @@ and the rest stays, so a gas bill still reads with its account number gone. He s
 with how many ("1 value left out: what looks like a key or a password") and no word of it. That means
 a private key's block, a well-known key's prefix, a password in an address (the rest of the address
 stays), or a label's value such as `Account number: ...`, `Passcode: ...`, `API_KEY=...` or
-`Authorization: Bearer ...`, anywhere along a line or, with no mark, in a table's next cell or on the
-next line. In a link's query only `password=`, `passwd=`, `secret=`, `client_secret=` and `api_key=`
-count: a bare `token=`, `auth=` or `pwd=` is how marketing mail and a meeting's link are written, so
-those links reach him whole. An http or https address, an amount or a masked number is no secret
-whatever its label: "One-time setup fee: $120.00", "Password policy: https://..." and
-"Card number: ************4242" read whole. That is a rule about plain keys and labels: a password
-written into a sentence in an ordinary note can't be told from any other sentence.
+`Authorization: Bearer ...`, anywhere along a line, on the next line after a line that ends in the
+label and its mark ("Your temporary password is:"), or, with no mark, in a table's next cell or on the
+next line. Under a PIN's, a CVV's, an OTP's or a passcode's label a value of 3 characters with a digit
+goes too (a PIN's four digits), and so does the value of a sentence saying what a password, a PIN or a
+code is ("Your OTP is ...", "Your OTP code is ...", "Your PIN number is ...", "Your one-time password
+(OTP) is ...", "the password is ...", on its line, or on the next after an "is:"; "Your password is
+changed" and "Your password is Case-Sensitive" stay). "Pass"
+or "PW" names a password on its own, as `DB_PASS` or after a sign-in word ("WiFi pass:"), so
+"Parking pass: P1234567" reads whole. In a link's query only `password=`, `passwd=`, `secret=`,
+`client_secret=` and `api_key=` count: a bare `token=`, `auth=` or `pwd=` is how marketing mail and a
+meeting's link are written, so those links reach him whole. An http or https address, an amount (the
+whole value: "$120.00", "US$120.00", "CA$120.00", "Rs 500/-", "120.00 USD" or "120.00EUR", "$20-30",
+"$25/person"), a postal code ("PIN code: 560001", "ZIP: 94103": the label's own name, so a "Zip
+password" or a "Card PIN code" is a secret) and, under a
+card's or an account's label, a masked number are no secret whatever their label:
+"One-time setup fee: $120.00", "Password policy: https://..." and "Card number: ************4242"
+read whole. That is a rule about plain keys, labels and those sentences: a bare "code" names no
+secret ("Your code: 482913"), and a password written into a longer sentence ("the password for the
+wifi is ...") can't be told from any other sentence, so those reach him.
 
 **Your private data and the web.** A task starts clean, knowing only your words. Even then, an
 address he was not given that carries a number of 4 digits or more from your own words (not a year:
@@ -2638,7 +2650,8 @@ still at work, and its card has the truth and its Stop. Events, emails, replies 
 Ask's cards in Approvals (`propose_action`); those don't hold the task up, and his report says what
 is waiting. He opens something at once (a site goes to your own browser, signed in) only when you
 plainly ask for it: a part of your message that starts with open, show, find, go to and the like and
-names it ("open the Bramblemoor letter", "find the report, then open https://..."). A paste, a
+names it ("open the Bramblemoor letter", "open https://... and https://...", "open this link:
+https://...", "find the report, then open https://..."). A paste, a
 how-to, a question or someone else's words naming it ("Summarise this mail for me: ... Please open
 ...", "how do I open ...?", "she told me to open ...") put it on a card for your click, and so does
 anything else. A site whose web card you have just allowed has had that click, and opens then: one
@@ -2649,20 +2662,30 @@ pause"), straight after a then, an after that or a next ("find the report, then 
 request with its verb first after an and, an also, a comma or a new sentence ("find the report and set
 the volume to 30"); and for just what you asked, once for each time you asked: the same direction,
 level, minutes and window, a step no bigger than the usual one, a timer's label only from your own
-words for it. For either, nothing acts at once in a message over 300 characters, after a ':', in a
-sentence with an if, a when or a '?' (a "can you ...?" is a request), after a how, what, why,
-should, explain, said, wrote, told, guide, can't and the like, or in words you typed to answer his
-question. Anything else that
+words for it. For either, nothing acts at once in a message over 300 characters; after a ':', a line
+break (Enter sends what you type in the bar, so a line break is a paste's, and a paste that starts
+with one is all pasted), a greeting to someone else ("Hi Sam,", "Dear Will,", "Dear team", or one
+after your own words: "Summarise this - Hi Sam, ...") or a request to read, summarise, translate,
+reply to, check, proofread or explain "this email", "the following" and the like (what comes after
+them is pasted; "this week's mail" is your own); in a
+sentence with an if, a when or a '?' (a "can you ...?" is a request); after a how, what, why,
+should, explain, said, wrote, told, guide, can't and the like; or in words you typed to answer his
+question, on its card or in a line he said or showed in his plan ("Choose one: mute or pause."), or
+that only repeat what his lines said since you last typed ("Answer like this: mute", then "mute").
+Anything else that
 names it ("the trading volume", "the next train", "compare the play, pause and next buttons", "find
 the report and mute", a repeat of what you asked once) puts it on a card for your click first, and
 the card says a volume step other than the usual one ("turn the volume up by 30"). A later message
 takes back what an earlier one allowed: "don't delete anything", "leave the volume alone", "never
-mind", "scratch that", "cancel the screenshot"; and a whole message of "no", "no wait", "don't", "not
+mind", "scratch that", "cancel the screenshot" (only what stands in its own part: "forget the music
+and mute" takes back the music, and "cancel the timer and set a new 10 minute timer" the old timer
+only); and a whole message of "no", "no wait", "don't", "not
 that", "actually no", "hold on", "not yet" or "I changed my mind" takes back what the last one asked,
 an open too; the same message can ("mute. no, actually don't", "mute. no, pause"). The reading is
 kept that simple on purpose, so it has limits: "Skip the video and just summarise the transcript"
-still skips a track, and a short paste with no ':' or question in it reads as your own words. Stop or
-Turn off withdraws what is still undecided.
+still skips a track, and a short paste on one line with none of those before its words reads as
+your own ("Please open https://... and sign in. Thanks, Mallory"), as does the first line of a paste
+of several when nothing comes before it. Stop or Turn off withdraws what is still undecided.
 
 **One task at a time.** The first planner run decides that a request is a task; it
 starts from your own words, whatever the planner wrote, and with nothing else.
@@ -2677,16 +2700,20 @@ after your request.
 "Keep going?" (the clock rests while he waits for you and while the PC sleeps). Reached while a card is up or a batch is at
 work, his calls are held and he asks when that has ended. No, or no answer, and he reports
 where things stand and stops. If your plan's limit is reached (in Claude Code's words, a usage,
-session, weekly or 5-hour limit) the task pauses, says when it resets and asks you then; with no
+session, weekly or 5-hour limit, the task's model's own, as in "You've hit your Opus limit" or "Opus
+4.5 limit reached", or any other limit it says resets) the task pauses, says when it resets and asks
+you then; with no
 time named, a day, a date, a "next" or a week beside it, or anything after the time but its zone in
 brackets ("5am Mon", "5am in 3 days", "00:00 UTC"), it waits for you to say carry on, 6 hours at
 most, and then stops there. A card that was up
 then and ends on your click or answer, or with words you typed at it, counts as that word too: the
 task tries again. Meanwhile the state word says WAITING. What
 you say or answer meanwhile goes in with the resume, in the order
-you said it. Claude Code's other limits (its context's, a budget's) end the task as any failure
-does, and if Claude's server is limiting requests the task stops and says that it isn't your
-plan's limit. A run that would use extra usage is killed at once. `tasks_per_day` limits how many
+you said it. Claude Code's other limits, when it names no reset (its context's, a budget's), end
+the task as any failure does, and if Claude's server is limiting requests (in its own words: a rate
+limit, its acceleration limit; or an error 429 that names no limit) the task stops and says that it
+isn't your plan's limit. A run
+that would use extra usage is killed at once. `tasks_per_day` limits how many
 start in 24 hours: the next one is told so, and your words wait in the bar.
 
 **After a task.** Its report stays on its result card and in the Transcript, and is never kept or

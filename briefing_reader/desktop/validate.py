@@ -85,6 +85,7 @@ Pure: nothing is logged, opened or read here, and every repr names skills, codes
 
 from __future__ import annotations
 
+import bisect
 import ntpath
 import re
 import unicodedata
@@ -749,38 +750,91 @@ def taken_back(message: Any, *, task: bool = False) -> frozenset[str]:
     the screenshot", "leave the sound"; "cancel the timer" takes back a new timer only, for it is the request to cancel
     one). Only ever takes away: reading too much here costs a click or a refusal, never a change."""
     tokens, marks, _after = _clause_tokens(message)
+    return frozenset(skill for skills, _start in _takings(tokens, marks, task) for skill in skills)
+
+
+def _takings(tokens: Sequence[str], marks: Sequence[int], task: bool) -> list[tuple[frozenset[str], int]]:
+    """What taken_back reads in ``tokens``, each with where it stands: (the skills, the word it was read at - for "leave
+    ... alone" its "alone")."""
     negating = _negations(tokens)
     clauses, _sentences = _clause_starts(tokens, marks, negating, task=task)
-    gone: set[str] = set()
+    found: list[tuple[frozenset[str], int]] = []
 
     def negated(start: int) -> bool:
         return _before(negating, marks, start, task) or any(negating[clauses[start]:start])
 
     for licence in LICENCES:
         for phrase in licence.phrases:
-            if any(negated(start) for start in _find(tokens, phrase)):
-                gone |= licence.skills
+            found += [(licence.skills, start) for start in _find(tokens, phrase) if negated(start)]
     for start, token in enumerate(tokens):
         if token in _THINGS and negated(start):
-            gone.update(_THINGS[token])
+            found.append((frozenset(_THINGS[token]), start))
         if token == "leave" and "alone" in tokens[start + 1:start + _LEAVE_SPAN]:
-            between = tokens[start + 1:tokens.index("alone", start + 1)]
-            named = {skill for word in between for skill in _skills_of_word(word)}
-            gone |= named or _ALL_LICENSED
+            alone = tokens.index("alone", start + 1)
+            named = frozenset(skill for word in tokens[start + 1:alone] for skill in _skills_of_word(word))
+            found.append((named or _ALL_LICENSED, alone))
         if task and token in _CALL_OFF and not negated(start):         # (never "don't forget the timer")
-            gone |= _called_off(tokens, marks, start)
-    if any(_find(tokens, phrase) for phrase in (*_TAKE_ALL_BACK, *(_TASK_TAKE_ALL_BACK if task else ()))):
-        gone |= _ALL_LICENSED
+            found.append((_called_off(tokens, marks, start), start))
+    for phrase in (*_TAKE_ALL_BACK, *(_TASK_TAKE_ALL_BACK if task else ())):
+        found += [(_ALL_LICENSED, start) for start in _find(tokens, phrase)]
+    return found
+
+
+# C4, a task's: where a "cancel ..." clause ends besides a comma or a sentence's end, and the words a clause that asks for
+# something opens with (the validator's own verbs and the PC's: "set a new 10 minute timer", "open the letter").
+_CLAUSE_ENDS = frozenset({"and", "then", "but", "also"})
+_ASKING_VERBS = _VERBS | frozenset({"set", "turn", "put", "change", "lower", "raise", "take", "stop", "switch", "cancel",
+                                    "end"})
+
+
+def _ends_here(tokens: Sequence[str], marks: Sequence[int], index: int) -> bool:
+    return (index < len(marks) and marks[index] >= _COMMA) or tokens[index] in _CLAUSE_ENDS
+
+
+def _clause_asks(tokens: Sequence[str], marks: Sequence[int], extra: Sequence[Licence]) -> frozenset[str]:
+    """What one clause asks for, as a task's _licences reads it, when it opens with a verb, the words around a request
+    aside ("and set a new 10 minute timer", "then open the letter"); a clause of nouns asks for nothing ("and the music
+    alone")."""
+    lead = 0
+    while lead < len(tokens) and (tokens[lead] in _CLAUSE_ENDS or tokens[lead] in _LEAD_INS):
+        lead += 1
+    if lead < len(tokens) and tokens[lead] in _ASKING_VERBS:
+        return _licences(tokens, marks, extra, task=True)
+    return frozenset()
+
+
+def _taken_back_here(message: Any, licensed: frozenset[str], extra: Sequence[Licence]) -> frozenset[str]:
+    """taken_back(message, task=True), less what a later clause of the same message asks for (C4): "cancel the timer
+    and set a new 10 minute timer" takes back no timer, for it asks for one, and "forget the essay and open the letter"
+    no open. ``licensed``: what the whole message licenses (licensed_skills): a later clause gives back only that. Each
+    clause is read once, whatever was pasted."""
+    tokens, marks, _after = _clause_tokens(message)
+    takings = _takings(tokens, marks, True)
+    if not takings:
+        return frozenset()
+    bounds = [0, *(index for index in range(1, len(tokens)) if _ends_here(tokens, marks, index)), len(tokens)]
+    later: list[frozenset[str]] = [frozenset()] * len(bounds)       # later[k]: what clauses k and after ask for
+    read: dict[tuple[tuple[str, ...], tuple[int, ...]], frozenset[str]] = {}    # a clause pasted again is read once
+    for number in range(len(bounds) - 2, -1, -1):
+        begin, stop = bounds[number], bounds[number + 1]
+        key = (tuple(tokens[begin:stop]), tuple(marks[begin:stop]))
+        if key not in read:
+            read[key] = _clause_asks(tokens[begin:stop], marks[begin:stop], extra)
+        later[number] = later[number + 1] | read[key]
+    gone: set[str] = set()
+    for skills, start in takings:
+        gone |= skills - (later[bisect.bisect_right(bounds, start)] & licensed)
     return frozenset(gone)
 
 
 def _called_off(tokens: Sequence[str], marks: Sequence[int], start: int) -> frozenset[str]:
-    """What "cancel", "forget" or "leave" at ``start`` names in the few words after it, in its clause (pc-7): a thing or
-    a licence word ("cancel the screenshot", "forget the music"). A timer's is a new one only: "cancel the timer" asks
-    for that."""
+    """What "cancel", "forget" or "leave" at ``start`` names in the few words after it, in its clause (pc-7; it ends at
+    a comma, a sentence's end or an "and", "then", "but" or "also": C4): a thing or a licence word ("cancel the
+    screenshot", "forget the music"; "forget the music and mute" takes back no mute). A timer's is a new one only:
+    "cancel the timer" asks for that."""
     found: set[str] = set()
     for index in range(start + 1, min(len(tokens), start + 1 + _CALL_OFF_SPAN)):
-        if index < len(marks) and marks[index] >= _COMMA:
+        if _ends_here(tokens, marks, index):
             break
         found |= _skills_of_word(tokens[index])
     if tokens[start] == "leave":                  # "leave the files in Downloads and move the photos": no take-back
@@ -795,13 +849,19 @@ def withdrawn_skills(messages: Iterable[Any], names: Iterable[Any] = (), extra: 
                      task: bool = False) -> frozenset[str]:
     """The skills the owner's words license no more: taken back by a later message and not licensed again since. The
     first message has nothing to take back. ``names``, ``extra`` and ``task``: as ``licensed_skills``' (``task`` reads
-    ``taken_back`` as a task's too)."""
+    ``taken_back`` as a task's too, and what a later clause of the same message asks for stays licensed:
+    _taken_back_here)."""
     listed = tuple(names)
     gone: set[str] = set()
     for number, message in enumerate(messages):
-        taken = taken_back(message, task=task) if number else frozenset()
-        # ("leave the volume alone" licenses none)
-        gone = (gone | taken) - (licensed_skills(message, listed, extra, task=task) - taken)
+        licensed = licensed_skills(message, listed, extra, task=task)
+        if not number:
+            taken: frozenset[str] = frozenset()
+        elif task:
+            taken = _taken_back_here(message, licensed, extra)
+        else:
+            taken = taken_back(message)
+        gone = (gone | taken) - (licensed - taken)          # ("leave the volume alone" licenses none)
     return frozenset(gone)
 
 

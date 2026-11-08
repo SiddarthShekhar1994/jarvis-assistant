@@ -16,8 +16,8 @@ never the size of the taint set, which a note holding only short words leaves em
         owner_said(words, answer=)   the owner's words: what is not tainted now never taints, and while the run holds
                                  nothing private their addresses count as seen; said() gives them back, joined, and
                                  messages() one by one: the words a licence is read from (agent.owner); heard() each as
-                                 it was said, its last "?" kept, and whether it answered the model's own question
-                                 (``answer``: agent.runner), which asks for nothing at once
+                                 it was said, its line breaks and last "?" kept, and whether it answered the model's own
+                                 question (``answer``: agent.runner), which asks for nothing at once
         note_private()           a private tool answered, whatever it fed, or the owner typed words the model had asked for
                                  (agent.runner): the checks are on from now on, for good
         note_if_private(words)   the same when what the owner said plainly holds something private
@@ -105,6 +105,7 @@ from typing import Any
 from urllib.parse import unquote_plus, urlsplit
 
 from ..actions import link_host, web_link_problem
+from ..ask.context import kept_lines
 from ..ask.research import normalize_url
 from ..desktop import guard
 from ..format_chars import invisible_char
@@ -888,8 +889,10 @@ class WebFirewall:
             return tuple(self._said)
 
     def heard(self) -> tuple[tuple[str, bool], ...]:
-        """The same messages as they were said, spaces collapsed and their last "?" kept (a question asks for nothing at
-        once: agent.owner), each with whether it answered the model's own question (ask_owner)."""
+        """The same messages as they were said, spaces collapsed, their line breaks (ask.context.kept_lines: a paste's
+        sign) and their last "?" kept (what follows a break, and a question, ask for nothing at once: agent.owner), each
+        with whether it answered the model's own question (ask_owner's, or one a line of the model's asked:
+        agent.runner)."""
         with self._lock:
             return tuple(self._heard)
 
@@ -912,15 +915,17 @@ class WebFirewall:
         """Their words, whenever they come: for said(), messages() and heard(), and on their list as note_owner says.
         ``answer``: they answered the model's own question (agent.runner), so they ask for nothing at once (heard). An
         address in them counts as seen only while the run holds nothing private: after that, as a word already tainted,
-        it goes to a card, and a click answers it. Typed or spoken words never do, whatever the sentence says."""
-        self.taint.note_owner(words)
-        addresses = owner_addresses(words)
-        numbers = {found for found in _digit_runs(words or "")
+        it goes to a card, and a click answers it. Typed or spoken words never do, whatever the sentence says. Only
+        heard() keeps their line breaks: everything else reads them as one line."""
+        flat = " ".join(words.split()) if isinstance(words, str) else words
+        self.taint.note_owner(flat)
+        addresses = owner_addresses(flat)
+        numbers = {found for found in _digit_runs(flat or "")
                    if len(found) >= OWNER_NUMBER_MIN and not _YEAR_RE.fullmatch(found)}
         with self._lock:
             if words:
-                self._said.append(" ".join(words.split()).rstrip(" .!?"))
-                self._heard.append((" ".join(words.split()), bool(answer)))
+                self._said.append(flat.rstrip(" .!?"))
+                self._heard.append((kept_lines(words), bool(answer)))
             self._wrote.update(addresses)
             self._numbers |= numbers
         if self.private or self.strict:

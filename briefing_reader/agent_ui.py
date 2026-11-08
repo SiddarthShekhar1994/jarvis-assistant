@@ -101,6 +101,7 @@ from .agent.runner import AgentEnd, AgentEngine, AgentEvent, AgentRun, OwnerQues
 from .agent.tools import ERROR_CODES, OUTCOME_DONE, OUTCOME_FAILED, OUTCOME_PARTIAL, Registry, Tool
 from .agent.web import WebSession
 from .agent.workspace import TaskFolder, WorkspaceRefused, check_name, workspace_root
+from .ask.context import kept_lines
 from .ask.stream import GUARD, LIMIT
 from .persona import with_address
 
@@ -535,7 +536,10 @@ class AgentController(QObject):
             return False
 
     def start(self, words: str) -> bool:
-        """One task with the owner's own words. False: it did not start, and ``noticed`` says why."""
+        """One task with the owner's own words. False: it did not start, and ``noticed`` says why. The run has them with
+        their line breaks (ask.context.kept_lines), for its reading of what they ask for at once (agent.owner: what
+        follows a break is pasted); everything shown, named or logged has them as one line."""
+        lines = kept_lines(words or "")
         words = " ".join((words or "").split())
         if self._shut or not words:
             return False
@@ -576,7 +580,7 @@ class AgentController(QObject):
             except RuntimeError:
                 pass                      # the bridge went with the app: nothing to tell
 
-        run = AgentRun(words, engine=self._engine, registry=registry, folder=folder, on_event=on_event,
+        run = AgentRun(lines, engine=self._engine, registry=registry, folder=folder, on_event=on_event,
                        clock=self._clock, now=self._now, timing=self.timing, on_overage=self._pause_for_overage,
                        firewall=self.firewall, web=session, fetch=self._new_fetcher().fetch, owner=owner)
         if owner is not None:
@@ -682,12 +686,14 @@ class AgentController(QObject):
         """AskController's gate (D4). True: it was taken - the task stops, or the words went in as the owner's. Typed or
         dictated words never answer a card only a click answers: clickNeeded says so, and how to reach it. A stop word
         that is the waiting question's own choice answers it, once a task: a page may have had the model offer "Stop" to
-        swallow the owner's, so a second stop word stops the task, whatever the question offers."""
+        swallow the owner's, so a second stop word stops the task, whatever the question offers. ``text`` may keep its
+        line breaks (AskController.submit): only the run's own reading of what it asks for sees them."""
         run = self._run
         if run is None or run.ended is not None:
             return False
-        if stop_words(text):
-            if self._stop_chosen or not self._its_choice(run, text):
+        flat = " ".join((text or "").split())
+        if stop_words(flat):
+            if self._stop_chosen or not self._its_choice(run, flat):
                 self.stop("typed")
                 return True
             self._stop_chosen = True

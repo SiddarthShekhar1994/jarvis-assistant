@@ -69,6 +69,13 @@ ANOTHER_QUESTION_TEXT = ("A question is waiting for the owner already. End your 
                          "next message.")
 FETCH_QUESTION_CAP = 300
 NO_FETCH_TEXT = "Reading a page another way isn't available now. Try another source, or say so in your report."
+# A page's address in a call (open_page's and fetch_text's url, open_thing's site): one longer than this is no page's,
+# and the call is refused before anything reads it (address_too_long): no check, and the panel's words name no host.
+PAGE_ADDRESS_CAP = 8192
+ADDRESS_FIELDS = {"open_page": "url", "fetch_text": "url", "open_thing": "site"}
+TOO_LONG_ADDRESS = "address_too_long"
+TOO_LONG_ADDRESS_TEXT = (f"That address is too long to be a page (over {PAGE_ADDRESS_CAP:,} characters), so Jarvis did "
+                         "not open it. Do not try it again: carry on without it, or say so in your report.")
 # The few words the panel's activity line shows for a tool call (doing_words): Jarvis's own, on screen only.
 DOING = {"web_search": "Searching the web", "read_more": "Reading on", "look_at_page": "Looking at the page",
          "write_file": "Writing a file", "read_file": "Reading a file back", "list_files": "Checking the task's files",
@@ -95,7 +102,8 @@ ASKS_SECRET_TEXT = ("Not asked: Jarvis never asks the owner for a password, a co
                     "nothing here needs one: you cannot sign in to anything. Say in your report what is left for them.")
 # What Live says of a result's code when its tool's module has words for it (agent.owner adds its own).
 ERROR_CODES: dict[str, str] = {NO_OWNER: "it is not connected", WORDS_READ: "not said: those are a page's words",
-                               ASKS_SECRET: "not asked: Jarvis never asks for a password or a code"}
+                               ASKS_SECRET: "not asked: Jarvis never asks for a password or a code",
+                               TOO_LONG_ADDRESS: "not opened: that address is too long to be a page"}
 PRIVATE_SEARCH_WORDS = 200
 LINE_TEXT_CAP = 4000
 MAX_PROPOSED_STEPS = 12
@@ -159,6 +167,7 @@ class RunContext:
     on_card: Callable[[str], bool] = lambda _card: False     # a file card waits: False when another wait is on already
     card_gone: Callable[[str], None] = lambda _card: None    # ... it could not be shown after all
     read_words: Any = None            # what this run has read (agent.firewall.ReadWords; None: nothing is kept)
+    on_shown: Callable[[str], None] = lambda _text: None     # a line of the model's Live shows but no one said
 
 
 def _object(**props: Any) -> dict[str, Any]:
@@ -301,6 +310,8 @@ def _update_plan(args: Mapping[str, Any], ctx: RunContext) -> ToolResult:
         fields += (("Not said", "too soon after the last line"),)
     else:
         ctx.on_say(found)
+        return ToolResult(told, note=f"{done} of {len(steps)} done", fields=fields, warn=warn)
+    ctx.on_shown(found)                  # not said, but Live shows it (its "Found"): it may still ask (agent.runner)
     return ToolResult(told, note=f"{done} of {len(steps)} done", fields=fields, warn=warn)
 
 
@@ -551,10 +562,20 @@ def _doing_host(address: Any, known: str, unknown: str) -> str:
     return known.format(host=host) if host else unknown
 
 
+def address_too_long(name: str, args: Any) -> bool:
+    """The call asks for a page by an address longer than any page's (PAGE_ADDRESS_CAP): the run refuses it at once,
+    before its checks (agent.runner), and only its length is read."""
+    field_name = ADDRESS_FIELDS.get(name) if isinstance(name, str) else None
+    value = args.get(field_name) if field_name is not None and isinstance(args, Mapping) else None
+    return isinstance(value, str) and len(value) > PAGE_ADDRESS_CAP
+
+
 def doing_words(name: str, args: Mapping[str, Any], ctx: RunContext) -> str:
     """What the panel's activity line says for this tool call ("" when it changes nothing: the plan, a say line). On
-    screen only: never logged, never spoken."""
+    screen only: never logged, never spoken. An address too long to be a page's is not read for its host."""
     try:
+        if address_too_long(name, args):
+            return {"open_page": READING_PAGE, "fetch_text": READING_OTHER_PAGE}.get(name, DOING.get(name, ""))
         if name == "open_page":
             address = args.get("url") if "url" in args or ctx.web is None else ctx.web.book.address(args.get("number"))
             return _doing_host(address, READING_HOST, READING_PAGE)

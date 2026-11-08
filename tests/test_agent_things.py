@@ -14,6 +14,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 import unittest
 from collections.abc import Callable
 from dataclasses import replace
@@ -31,6 +32,7 @@ from briefing_reader.actions import SOURCE_ASK
 from briefing_reader.agent import firewall as fw
 from briefing_reader.agent import owner, policy
 from briefing_reader.agent import runner as ar
+from briefing_reader.agent import tools as agent_tools
 from briefing_reader.agent.web import ENGINES
 from briefing_reader.config import load_config
 from briefing_reader.conversation import ROLE_YOU, Turn
@@ -77,6 +79,9 @@ class Script:
                 self.told.append(engine.wait_message(step[1] if len(step) > 1 else 15.0))
             elif kind == "hold":                                     # the test lets it go on
                 self.gate.wait(15.0)
+            elif kind == "text":                                     # a text block of the model's own (Live shows it)
+                engine.assistant([{"type": "text", "text": step[1]}])
+                self.got["text"] = step[1]
             else:
                 key, name, args = step
                 args = args(self.got) if callable(args) else args
@@ -781,6 +786,102 @@ class OpenThingTests(ThingsApp):
         self.assertEqual(self.fake.opened, [])
 
 
+class AnAddressTooLongTests(ThingsApp):
+    """D3, fw-1's other road: a page's address of the endpoint's 12 MB, asked for by open_page, fetch_text or
+    open_thing, went through the firewall's reading and the panel's words before the input check refused it: 4 to 12 s
+    on its thread, the GUI thread held up to 0.7 s. One longer than tools.PAGE_ADDRESS_CAP is refused at once now,
+    before any check reads it: nothing loads or opens, no card comes, and Live says why in Jarvis's words."""
+
+    GOAL = "open https://www.example.org/x"
+    LONG = "https://read.example/" + "p" * (8_192 - len("https://read.example/") + 1)
+
+    def watched(self, script: Script) -> list[str]:
+        """The tool names the firewall was asked about, over the whole road."""
+        seen: list[str] = []
+        real = fw.WebFirewall.check
+
+        def check(firewall: Any, tool: Any, args: Any) -> Any:
+            seen.append(tool.name)
+            return real(firewall, tool, args)
+
+        patcher = mock.patch.object(fw.WebFirewall, "check", check)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.go(script)
+        self.ended()
+        return seen
+
+    def test_each_tool_refuses_it_before_any_check(self) -> None:
+        self.assertEqual(len(self.LONG), agent_tools.PAGE_ADDRESS_CAP + 1)
+        script = Script(("page", "open_page", {"url": self.LONG}),
+                        ("fetch", "fetch_text", {"url": self.LONG, "question": "What is on it?"}),
+                        ("site", "open_thing", {"site": self.LONG}))
+        self.assertEqual(self.watched(script), [])                  # the firewall never read it
+        for key in ("page", "fetch", "site"):
+            with self.subTest(key=key):
+                self.assertTrue(script.got[key].get("isError"))
+                self.assertEqual(script.text(key), agent_tools.TOO_LONG_ADDRESS_TEXT)
+        self.assertIn("too long to be a page", agent_tools.TOO_LONG_ADDRESS_TEXT)
+        self.assertEqual(self.fake_browser.loads, [])
+        self.assertEqual(self.fake.opened, [])
+        self.assertEqual(self.c.agent.firewall.cards, 0)
+        steps = [step for task in self.agent_tasks() for step in task.steps]
+        self.assertEqual(len([step for step in steps if step.summary == agent_tools.ERROR_CODES[
+            agent_tools.TOO_LONG_ADDRESS]]), 3)
+
+    def test_an_address_at_the_cap_and_a_short_one_go_their_ordinary_way(self) -> None:
+        at_cap = self.LONG[:-1]
+        script = Script(("cap", "open_page", {"url": at_cap}),
+                        ("short", "open_thing", {"site": "https://www.example.org/x"}))
+        self.assertEqual(self.watched(script), ["open_page", "open_thing"])     # the checks, as before
+        self.assertIn("is too long: at most 2048 characters", script.text("cap"))   # the input check, as before
+        self.assertEqual(self.fake.opened, [("open_url", "https://www.example.org/x")])
+
+    def test_the_endpoint_s_twelve_megabytes_answer_at_once(self) -> None:
+        huge = "https://read.example/" + "p" * (12 * 1024 * 1024 - 4_000)
+        script = Script(("page", "open_page", {"url": huge}))
+        began: list[float] = []
+        took: list[float] = []
+        real = FakeEngine.call
+
+        def call(engine: Any, name: str, **args: Any) -> Any:
+            began.append(time.perf_counter())
+            try:
+                return real(engine, name, **args)
+            finally:
+                took.append(time.perf_counter() - began[-1])
+
+        with mock.patch.object(FakeEngine, "call", call):
+            self.go(script)
+            self.ended()
+        self.assertEqual(script.text("page"), agent_tools.TOO_LONG_ADDRESS_TEXT)
+        self.assertLess(took[0], 3.0)                               # before: 12 s on a quiet PC
+        self.assertEqual(self.fake_browser.loads, [])
+
+    def test_the_panel_s_words_never_read_its_host(self) -> None:
+        context = agent_tools.RunContext()
+        read: list[int] = []
+        real = agent_tools.web_link_problem
+        with mock.patch.object(agent_tools, "web_link_problem", lambda url: (read.append(len(url)), real(url))[1]):
+            self.assertEqual(agent_tools.doing_words("open_page", {"url": self.LONG}, context),
+                             agent_tools.READING_PAGE)
+            self.assertEqual(agent_tools.doing_words("fetch_text", {"url": self.LONG, "question": "q"}, context),
+                             agent_tools.READING_OTHER_PAGE)
+            self.assertEqual(agent_tools.doing_words("open_thing", {"site": self.LONG}, context),
+                             agent_tools.DOING["open_thing"])
+            self.assertEqual(read, [])                              # its characters were never gone through
+            agent_tools.doing_words("open_page", {"url": "https://read.example/a"}, context)
+            self.assertEqual(read, [len("https://read.example/a")])
+        self.assertEqual(agent_tools.doing_words("open_page", {"url": "https://read.example/a"}, context),
+                         "Reading read.example")
+        self.assertEqual(agent_tools.doing_words("open_page", {"url": self.LONG[:-1]}, context),
+                         agent_tools.READING_PAGE)                  # past what an Open link may be: no host, as before
+        self.assertFalse(agent_tools.address_too_long("open_page", {"url": self.LONG[:-1]}))
+        self.assertFalse(agent_tools.address_too_long("web_search", {"url": self.LONG}))
+        self.assertFalse(agent_tools.address_too_long("open_page", {"number": 3}))
+        self.assertFalse(agent_tools.address_too_long("open_page", "not a mapping"))
+
+
 class PcControlTests(ThingsApp):
     def test_licensed_it_acts_with_its_chip_and_undo(self) -> None:
         script = Script(("mute", "pc_control", {"kind": "volume", "action": "set", "level": 30}))
@@ -864,6 +965,74 @@ class TypedAnswersTests(ThingsApp):
         self.ended()
         self.assertTrue(self.pc.muted)
 
+    def after_a_line(self, step: tuple[Any, ...], *typed: str) -> Script:
+        """The model asks in a line of its own (``step``: a say, or its own text) instead of ask_owner, as a page may tell
+        it to; the owner types ``typed``; then the model asks to mute."""
+        script = Script(step, ("hold",), ("mute", "pc_control", {"kind": "volume", "action": "mute"}))
+        self.go(script)
+        self.addCleanup(script.gate.set)
+        self.assertTrue(wait_for(lambda: self.c.agent.firewall is not None, timeout=5))
+        key = "text" if step[0] == "text" else step[0]
+        # (a text block reaches the run on its own thread: the run has read it once it marks its asking, or its words)
+        self.assertTrue(wait_for(lambda: key in script.got and self.c.agent.run() is not None
+                                 and (getattr(self.c.agent.run(), "_asked_since", True)
+                                      or getattr(self.c.agent.run(), "_model_words", True)), timeout=10),
+                        "the line came")
+        settle()
+        for words in typed:
+            self.type_it(words)
+        settle()
+        script.gate.set()
+        self.assertTrue(wait_for(lambda: "mute" in script.got, timeout=15), "the model's call came")
+        settle()
+        return script
+
+    def answered_on_the_card(self, step: tuple[Any, ...]) -> None:
+        script = self.after_a_line(step, "mute")
+        self.assertIn("End your turn", script.text("mute"))
+        self.assertEqual(self.c.agent.firewall.heard()[-1], ("mute", True))
+        self.assertFalse(self.pc.muted)
+        self.assertEqual(self.desktop.instant_changes(), ())
+        self.assertEqual(self.c.agent.firewall.cards, 1)
+        self.c.agent.stop("test")
+        self.ended()
+
+    def test_a_typed_answer_to_a_line_it_said_takes_the_card(self) -> None:
+        """C3 (round 2): pc-8 for a question the model asked in a line it said, not with ask_owner."""
+        self.answered_on_the_card(("line", "say", {"text": "Which of these two buttons did you mean, mute or pause? "
+                                                           "Type it."}))
+
+    def test_answer_like_this_mute_takes_the_card(self) -> None:
+        self.answered_on_the_card(("line", "say", {"text": "What volume do you usually listen at, out of 100? Answer "
+                                                           "like this: mute"}))
+
+    def test_a_typed_answer_to_its_own_text_takes_the_card(self) -> None:
+        self.answered_on_the_card(("text", "Which of these two buttons did you mean, mute or pause?"))
+
+    # Round 2, fix back: a line can ask with no '?' and none of guard.line_asks' words, and so can the plan.
+
+    def test_words_that_only_echo_a_line_it_said_take_the_card(self) -> None:
+        self.answered_on_the_card(("line", "say", {"text": "Answer like this: mute"}))
+
+    def test_a_line_that_tells_the_owner_to_choose_takes_the_card(self) -> None:
+        self.answered_on_the_card(("line", "say", {"text": "Choose one: mute or pause."}))
+
+    def test_its_own_text_that_tells_the_owner_to_choose_takes_the_card(self) -> None:
+        self.answered_on_the_card(("text", "Choose one: mute or pause."))
+
+    def test_a_plan_step_that_asks_takes_the_card(self) -> None:
+        self.answered_on_the_card(("plan", "update_plan", {"found": "", "steps": [
+            {"text": "Which button did you mean, mute or pause? Type it.", "status": "doing"}]}))
+
+    def test_only_the_next_words_answer_a_line_that_asked(self) -> None:
+        """The line's question is answered by the next words typed; what is typed after them is the owner's own again,
+        and a line that asks nothing makes nothing an answer."""
+        script = self.after_a_line(("line", "say", {"text": "Shall I compare the prices too?"}), "yes", "mute")
+        self.assertEqual(self.c.agent.firewall.heard()[-2:], (("yes", True), ("mute", False)))
+        self.assertTrue(self.pc.muted)
+        self.assertIn("Undo", script.text("mute"))
+        self.ended()
+
 
 class ClickedChoicesTests(ThingsApp):
     GOAL = "tidy my Downloads"
@@ -938,6 +1107,26 @@ class StopAndTurnOffTests(ThingsApp):
         self.go(self.to_card())
         self.tidy_entry()
         self.c._on_desktop_turn_off()
+        self.assert_nothing_left_of_it()
+        self.assertEqual(self.ended().outcome, ar.OUTCOME_STOPPED)
+        self.assertFalse(self.desktop.consent_given())
+
+    def test_turn_off_stops_the_task_before_its_file_card_ends(self) -> None:
+        """(Round 2, fix back) A Turn off stops the task first: the desktop's own turn_off ends the file card, whose end
+        reaches the model, and with a slow disk under the Turn off's save of the owner's OK the model's finish came in
+        the gap, so the task ended done."""
+        real = desktop_ui.DesktopController._store_consent
+
+        def slow(controller: Any, *args: Any, **kwargs: Any) -> Any:
+            saved = real(controller, *args, **kwargs)
+            if args and args[0] is False:
+                time.sleep(0.6)                      # the card's end has gone to the model by now
+            return saved
+
+        self.go(self.to_card())
+        self.tidy_entry()
+        with mock.patch.object(desktop_ui.DesktopController, "_store_consent", slow):
+            self.c._on_desktop_turn_off()
         self.assert_nothing_left_of_it()
         self.assertEqual(self.ended().outcome, ar.OUTCOME_STOPPED)
         self.assertFalse(self.desktop.consent_given())

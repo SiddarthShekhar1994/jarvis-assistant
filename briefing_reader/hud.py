@@ -7992,6 +7992,11 @@ class CommandBar(QWidget):
         """The field's text with its whitespace collapsed (what Enter submits)."""
         return " ".join(self.input.text().split())
 
+    def raw_text(self) -> str:
+        """The field's text as it stands, a paste's line breaks and all. Only a task reads it (ask_ui: a line break is
+        a sign of a paste, agent.owner); what Enter submits is text()."""
+        return self.input.text()
+
     def set_text(self, text: str) -> None:
         self.input.setText(text[:COMMAND_MAX_LENGTH])
 

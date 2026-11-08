@@ -231,6 +231,20 @@ def data(text: Any, cap: int = 0) -> str:
     return text
 
 
+def kept_lines(text: Any) -> str:
+    """``text`` as ``" ".join(text.split())`` has it, but with its line breaks kept: a run of whitespace that holds one
+    (any of str.splitlines' breaks) is one "\\n", every other run a space, and no line is empty; whitespace before the
+    first word that holds one is a "\\n" too (a paste that starts on the line below), and after the last word none. So
+    ``kept_lines(t).lstrip("\\n").replace("\\n", " ") == " ".join(t.split())``, character for character. Only a task
+    reads the owner's words this way (a line break is a sign of a paste: agent.owner); everything else reads them as one
+    line."""
+    if not isinstance(text, str):
+        return ""
+    kept = "\n".join(" ".join(line.split()) for line in text.splitlines() if line.strip())
+    lead = text[:len(text) - len(text.lstrip())]
+    return "\n" + kept if kept and lead and lead.splitlines()[0] != lead else kept
+
+
 def _keep_bars(text: Any, cap: int) -> str:
     """A whole proposal or command line: like data() but "|" stays (it separates the fields)."""
     if not isinstance(text, str):

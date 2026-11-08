@@ -32,13 +32,17 @@ What it holds to:
   by the owner's click; only ever raised, where a task's model has read other people's text first and the keyword alone
   would act at once:
   - A change at once comes only from a plain request of the owner's (_pieces): a message of PLAIN_CAP characters or
-    fewer that is no answer to the model's own question, with no ':' before it (what follows one is brought in: a
-    paste), in a sentence with no ':', no condition word and no '?' but after "can you" and the like, and no question,
-    how-to, reported or negating word before it ("how", "she wrote", "can't"), not taken back since, in the same
-    message ("mute. no, pause") or a later one ("no", "scratch that").
+    fewer that is no answer to the model's own question (ask_owner's, or one a line of the model's asked), with no
+    ':', line break, greeting to someone else ("Hi Sam,") or request to read what is pasted ("Summarise this email.")
+    before it (what follows one is brought in: a paste; the owner can't type a line break in the bar), in a sentence
+    with no ':', no condition word and no '?' but after "can you" and the like, and no question, how-to, reported or
+    negating word before it ("how", "she wrote", "can't"), not taken back since, in the same message ("mute. no,
+    pause") or a later one ("no", "scratch that").
   - open_thing opens at once only what such a request names, in a clause that opens with an opening word ("open the
-    Bramblemoor letter", "find the report, then open https://..."); a paste, a how-to, a question or someone else's
-    words naming it wait on the one-click card, and so does anything else. A site the firewall's card asked about first
+    Bramblemoor letter", "find the report, then open https://..."), with the names listed after it ("open X and Y")
+    or, after a ':' when it names nothing, what follows to its sentence's end ("open this link: https://..."); a
+    paste, a how-to, a question or someone else's words naming it wait on the one-click card, and so does anything
+    else. A site the firewall's card asked about first
     has had that click when the owner allowed it (firewall.clicked): it opens then, so one site takes one click.
   - pc_control acts at once only on what the local routes' own parser (and a task's own plainer wordings of the same)
     reads in such a request: as a chain from its start ("mute and pause"), straight after a then, an after that or a
@@ -78,8 +82,8 @@ from typing import Any, Protocol
 from ..ask import desktop_mode
 from ..ask.context import (MAIL_NOTE, SOURCE_BRIEFING, SOURCE_CONVERSATION, SOURCE_GUEST, SOURCE_MEMORY, SOURCE_OWNER,
                            ContextIndex, addresses_in, conversation_block, conversation_exchanges, data, day_window,
-                           event_row, event_start, index_event, index_thread, memory_block, memory_notes_shown,
-                           person_row, recipients_named, thread_text)
+                           event_row, event_start, index_event, index_thread, kept_lines, memory_block,
+                           memory_notes_shown, person_row, recipients_named, thread_text)
 from ..ask.mail import (CUT_MARK, MAX_THREADS, MailThread, QueryRefused, check_query, search_words, thread_from_api,
                         trim_threads)
 from ..ask.validate import LINE_CARD, to_cards
@@ -227,6 +231,46 @@ _WHOLE_AFTER = frozenset({"and", "also"})
 _CORRECTIONS = frozenset({"no", "not", "actually"})     # pc-6: a clause opening with one takes back the piece before it
 _OPENING_WORDS = next(licence.phrases for licence in dv.LICENCES if dv.OPEN_URL in licence.skills)
 _OPEN_KINDS = dv.OPEN_SKILLS | {dv.FIND_FILES}
+# C2: what starts a paste in a one-line message too. A greeting to someone other than Jarvis opens one ("Hi Sam",
+# "Dear team", "Good morning all", "Hi, Sam, ..."): a word after it that is no name of someone else ("Hey Jarvis",
+# "hi, mute the sound", "hey can you ...") makes it none.
+_GREETINGS = (("hi",), ("hello",), ("hey",), ("dear",), ("good", "morning"), ("good", "afternoon"), ("good", "evening"))
+_GROUPS = frozenset({"team", "all", "everyone", "everybody", "guys", "folks"})
+_LICENCE_VERBS = frozenset(phrase[0] for licence in dv.LICENCES for phrase in licence.phrases)    # the validator's
+_NO_NAME = (_REQUEST_VERBS | _LICENCE_VERBS | frozenset(word for phrase in _OPENING_WORDS for word in phrase)
+            | frozenset(_NO_WORDS.replace("|", " ").split()) | _VOID_WORDS | _CONDITION_WORDS | _CORRECTIONS
+            | frozenset({"jarvis", "there", "can", "could", "would", "will", "you", "i", "we", "it", "me", "my", "so",
+                         "and", "to", "the", "a", "an", "again", "is", "are", "do", "does", "then", "next", "after",
+                         "afterwards"}))
+NAME_WORDS = 3                        # "Hi, Sam, ...": at most this many words of a name alone in its clause
+# ... a word of a request is a name there too when it is written as one ("Hi Will,", "Dear Will,"), but for these; and
+# a filler never is ("Hi, quick one, ...", "Hey, sorry, ...").
+_NEVER_NAMES = frozenset({"jarvis", "there", "again", "you", "yourself", "it", "me", "i"})
+_FILLERS = frozenset({"sorry", "quick", "quickly", "one", "um", "uh", "er", "erm", "hmm", "oh", "so", "ok", "okay",
+                      "also", "btw", "question", "thing", "real", "sec", "moment", "minute"})
+_SHOWN_WORD_RE = re.compile(r"[^\W_]+")              # a clause's words as written, for their capitals
+# C5: a word that ends a list of names after an open ("open X and Y"): a verb of a request, the validator's or an opening
+# word's, a correction, a question's or a condition's word, a sequencing word.
+_LIST_STOPS = (_REQUEST_VERBS | _LICENCE_VERBS | frozenset(phrase[0] for phrase in _OPENING_WORDS) | _CORRECTIONS
+               | _VOID_WORDS | _CONDITION_WORDS | frozenset({"then", "next", "after", "afterwards"}))
+# ... and so does what follows a clause asking to read, summarise, translate, reply to, check, proofread or explain
+# what is pasted: "this <mail ...>" (within POINTER_REACH words of the verb, the noun within 3 of "this"), or "the
+# following", "below", "attached" ("Summarise this email. Hi team, ...", "translate the following").
+_PASTE_VERBS = frozenset({"read", "summarise", "summarize", "translate", "check", "proofread", "explain"})
+_PASTE_VERB_PAIRS = frozenset({("reply", "to"), ("proof", "read")})
+_PASTE_POINTERS = frozenset({"this", "these"})
+_PASTE_PLACES = frozenset({"following", "below", "attached"})
+_PASTE_NOUNS = frozenset({"mail", "mails", "email", "emails", "message", "messages", "text", "texts", "note", "notes",
+                          "letter", "letters", "doc", "docs", "document", "documents", "page", "pages", "article",
+                          "articles", "post", "posts", "thread", "threads", "chat", "chats", "paragraph", "paragraphs"})
+# ... but not the owner's own, named by its time ("this week's mail", "this morning's emails"): a time's word, or a
+# possessive's "s", before the noun.
+_OWN_TIMES = frozenset({"s", "week", "weeks", "weekend", "morning", "afternoon", "evening", "night", "tonight", "today",
+                        "month", "months", "year", "years", "quarter", "term", "semester", "season"})
+POINTER_REACH = 6
+# C6: what an opening clause may hold and still name nothing ("open this link:", "go to:", "open this:").
+_POINTING = frozenset({"this", "that", "the", "these", "those", "following", "link", "links", "site", "website", "page",
+                       "address", "url", "here", "it", "one", "for", "me"})
 _LEAD_IN_RE = re.compile(r"(?:(?:jarvis|please|kindly|now|just|first|and then|and|then|also|but|could you|can you|"
                          r"would you|will you)[,:]?\s+)+", re.IGNORECASE)
 _TAIL_RE = re.compile(r"(?:\s+(?:please|now|a bit|a little|for me|right now|straight away|again))+$", re.IGNORECASE)
@@ -476,13 +520,21 @@ def _opening(clause: str) -> bool:
     return any(tuple(words[:len(phrase)]) == phrase for phrase in _OPENING_WORDS)
 
 
-def _clauses(text: str) -> list[tuple[int, int, str]]:
-    """Where each clause of ``text`` starts and ends, and the break before it (no spaces, lower case)."""
+def _clauses(text: str, breaks: frozenset[int] = frozenset()) -> list[tuple[int, int, str]]:
+    """Where each clause of ``text`` starts and ends, and the break before it (no spaces, lower case). ``breaks``: where
+    ``text`` had a line break (the space it is now: ask.context.kept_lines): one ends a clause too, and the break before
+    the next clause then holds a "\\n"."""
+    cuts = [(cut.start(), cut.end(), cut.group().strip().casefold()) for cut in _CLAUSE_RE.finditer(text)]
+    if breaks:
+        covered = {index for start, end, _mark in cuts for index in range(start, end)}
+        cuts = sorted([(start, end, mark + "\n" if not breaks.isdisjoint(range(start, end)) else mark)
+                       for start, end, mark in cuts] + [(index, index + 1, "\n") for index in breaks
+                                                         if index not in covered])
     found: list[tuple[int, int, str]] = []
     at, before = 0, ""
-    for cut in _CLAUSE_RE.finditer(text):
-        found.append((at, cut.start(), before))
-        at, before = cut.end(), cut.group().strip().casefold()
+    for start, end, mark in cuts:
+        found.append((at, start, before))
+        at, before = end, mark
     found.append((at, len(text), before))
     return found
 
@@ -506,11 +558,14 @@ def _opens_with_next(text: str, clauses: Sequence[tuple[int, int, str]], number:
     return False
 
 
-def _sentences_void(text: str, clauses: Sequence[tuple[int, int, str]]) -> list[tuple[int, bool]]:
+def _sentences_void(text: str, clauses: Sequence[tuple[int, int, str]],
+                    naming: frozenset[int] = frozenset()) -> list[tuple[int, bool]]:
     """For each clause: where its sentence starts in ``text``, and whether the whole sentence says it is no request
-    (pc-2, pc-3): a ':' anywhere in it ("summarise this: ... then mute", "Resume and cover letter: proofread them"), a
-    condition word anywhere in it ("Mute, if it gets loud") or a '?' ("Mute? What does that do?") unless it opens with
-    can you, could you, would you or will you ("can you mute?")."""
+    (pc-2, pc-3): a ':' anywhere in it ("summarise this: ... then mute", "Resume and cover letter: proofread them") but,
+    for an open's reading, one that brings in an open's own name (``naming``: the clauses such a ':' stands before,
+    _named_by_colon; a PC control in that sentence stays void), a condition word anywhere in it ("Mute, if it gets loud") or a '?' ("Mute? What does that do?") unless it opens with
+    can you, could you, would you or will you ("can you mute?"). A line break ends no sentence: a paste's next line
+    can still void its first."""
     found: list[tuple[int, bool]] = []
     first = 0
     for number in range(len(clauses) + 1):
@@ -518,7 +573,8 @@ def _sentences_void(text: str, clauses: Sequence[tuple[int, int, str]]) -> list[
             continue
         if number > first:                    # clauses[first:number] are one sentence; clauses[number]'s break ends it
             begin, finish = clauses[first][0], clauses[number - 1][1]
-            breaks = [clauses[index][2] for index in range(first + 1, min(number + 1, len(clauses)))]
+            breaks = [clauses[index][2] for index in range(first + 1, min(number + 1, len(clauses)))
+                      if index not in naming]
             words = text[begin:finish]
             void = (any(":" in mark for mark in breaks)
                     or not _CONDITION_WORDS.isdisjoint(guard.words(words, camel=False))
@@ -538,10 +594,133 @@ def _void_before(words: str) -> bool:
                                                      for word, after in zip(tokens, tokens[1:]))
 
 
+def _a_name(word: str) -> bool:
+    """``word`` (guard.words') may be someone's name, or a group's, after a greeting: no word of a request or of what is
+    said around one ("Hey Jarvis", "hi there", "hey can you"), and no filler ("Hi quick question", "Hey sorry")."""
+    return word in _GROUPS or (word.isalpha() and word not in _NO_NAME and word not in _FILLERS)
+
+
+def _name_word(word: str, written: str | None) -> bool:
+    """``word`` (guard.words'; ``written``: as the text has it, None when that is not known) is a name's word here, the
+    rest of its clause after a greeting: one a name may be (_a_name), or one written as a name ("Will", not "will" or
+    "WILL") that is no filler and never names someone else (Jarvis, there, again, you)."""
+    if word in _FILLERS or word in _NEVER_NAMES:
+        return False
+    return _a_name(word) or (written is not None and written[:1].isupper() and not written.isupper())
+
+
+def _named_from(clause: str, words: list[str], at: int) -> bool:
+    """``words[at:]`` (guard.words' of ``clause``) are someone's name or a group's, all the rest of the clause: 1 to
+    NAME_WORDS words, each a name's word (_name_word: "Sam", "Will", "team"; "quick one", "sorry", "there" are none)."""
+    rest = words[at:]
+    if not 0 < len(rest) <= NAME_WORDS:
+        return False
+    shown = _SHOWN_WORD_RE.findall(clause)
+    written = shown[len(shown) - len(rest):] if len(shown) == len(words) else [None] * len(rest)
+    return all(_name_word(word, form) for word, form in zip(rest, written))
+
+
+def _greeting(clause: str) -> str:
+    """How ``clause`` opens with a greeting (C2): "named" for one with someone else's name or a group after it ("Hi Sam",
+    "Dear Mr Smith", "Good morning all", "Hi Will", "Dear Will": a name written as one that is the whole rest of the
+    clause), "alone" for a greeting by itself ("Hi", "Good morning"), else "" ("Hey Jarvis, ...", "hi, mute", "hello can
+    you mute", "hey mute")."""
+    words = guard.words(clause, camel=False)
+    for phrase in _GREETINGS:
+        if tuple(words[:len(phrase)]) == phrase:
+            rest = words[len(phrase):]
+            if not rest:
+                return "alone"
+            return "named" if _a_name(rest[0]) or _named_from(clause, words, len(phrase)) else ""
+    return ""
+
+
+def _greets_at_its_end(clause: str) -> bool:
+    """``clause`` ends in a greeting to someone else after words of its own ("Summarise this - Hi Sam", "Summarise
+    this (Hi team", "Thoughts on this one Hi Sam"): a greeting, then a name or a group to the clause's end."""
+    words = guard.words(clause, camel=False)
+    return any(tuple(words[at:at + len(phrase)]) == phrase and _named_from(clause, words, at + len(phrase))
+               for at in range(1, len(words)) for phrase in _GREETINGS)
+
+
+def _greeted(text: str, clauses: Sequence[tuple[int, int, str]]) -> frozenset[int]:
+    """The clauses a greeting to someone other than Jarvis opens (C2: "Hi Sam, please open ...", "Is this phishing? Hi
+    Sam, ..."; a greeting alone counts when a name stands alone in the clause after it: "Hi, Sam, ...") or ends, after
+    words of the owner's, before a ',' or a '!' ("Summarise this - Hi Sam, please open ..."). What is pasted starts
+    there."""
+    found: set[int] = set()
+    for number, (start, end, _before) in enumerate(clauses):
+        after = clauses[number + 1][2] if number + 1 < len(clauses) else ""
+        how = _greeting(text[start:end])
+        if how == "alone" and after == ",":
+            following = text[clauses[number + 1][0]:clauses[number + 1][1]]
+            how = "named" if _named_from(following, guard.words(following, camel=False), 0) else ""
+        if how == "named" or (not how and any(mark in after for mark in ",!") and _greets_at_its_end(text[start:end])):
+            found.add(number)
+    return frozenset(found)
+
+
+def _asks_about_a_paste(clause: str) -> bool:
+    """``clause`` asks to read, summarise, translate, reply to, check, proofread or explain what is pasted (C2): "this
+    email" and the like, "the following", "the text below", "the attached letter" ("Summarise this mail for me", "Can
+    you translate the following"). Not "summarise my latest mail": that names nothing pasted."""
+    words = guard.words(clause, camel=False)
+    for index, word in enumerate(words):
+        if word in _PASTE_VERBS:
+            after = index + 1
+        elif tuple(words[index:index + 2]) in _PASTE_VERB_PAIRS:
+            after = index + 2
+        else:
+            continue
+        near = words[after:after + POINTER_REACH]
+        for at, pointer in enumerate(near):
+            if pointer in _PASTE_PLACES or (pointer in _PASTE_POINTERS and _points_at_a_paste(near[at + 1:at + 4])):
+                return True
+    return False
+
+
+def _points_at_a_paste(words: Sequence[str]) -> bool:
+    """The words after a "this" or a "these" name what is pasted: a noun of a mail's or a text's comes before any word
+    of a time or a possessive's "s" ("this email", "this long message"; not "this week's mail", "this morning's
+    emails": the owner's own)."""
+    for word in words:
+        if word in _OWN_TIMES:
+            return False
+        if word in _PASTE_NOUNS:
+            return True
+    return False
+
+
+def _names_nothing(clause: str) -> bool:
+    """``clause`` opens with an opening word and names nothing after it ("open this link", "go to", "open this"): a ':'
+    straight after it brings in its name (C6)."""
+    words = guard.words(_plain(clause), camel=False)
+    return any(tuple(words[:len(phrase)]) == phrase and _POINTING.issuperset(words[len(phrase):])
+               for phrase in _OPENING_WORDS)
+
+
+def _named_by_colon(text: str, clauses: Sequence[tuple[int, int, str]]) -> frozenset[int]:
+    """The clauses a ':' stands before that ends an opening clause naming nothing (C6: "open this link: https://..."):
+    from there to its sentence's end is that clause's name."""
+    return frozenset(number for number in range(1, len(clauses)) if clauses[number][2] == ":"
+                     and _names_nothing(text[clauses[number - 1][0]:clauses[number - 1][1]].strip()))
+
+
+def _just_a_name(clause: str) -> bool:
+    """A clause after an open that holds only a name (C5: "the Bramblemoor letter", "https://www.example.org/y"): no
+    verb of a request, the validator's or an opening word's, no negation, correction, question or condition word, no
+    PC request."""
+    if _no_clause(clause) or len(clause) > CLAUSE_CAP:
+        return False
+    words = guard.words(_plain(clause), camel=False)
+    return bool(words) and _LIST_STOPS.isdisjoint(words) and not dv.negated(clause) and _clause_ask(clause) is None
+
+
 @dataclass(frozen=True)
 class _Piece:
     """A plain request of one message: a PC control (``asked``), or an open (``asked`` None: ``words`` is its clause,
-    which names what opens); where its clause starts and ends, and its number."""
+    which names what opens, with the names its words run on to: _name_runs_to); where its words start and end, and the
+    number of their last clause."""
 
     asked: pcctl.PcAsk | None
     words: str
@@ -550,29 +729,65 @@ class _Piece:
     number: int
 
 
+def _name_runs_to(text: str, clauses: Sequence[tuple[int, int, str]], number: int, named: frozenset[int],
+                  greeted: frozenset[int], asking: Sequence[bool]) -> int:
+    """The last clause the words of the open at clause ``number`` run on to: its own; or, when a ':' after it brings in
+    its name (C6: "open this link: https://..."), its sentence's last, never past a line break; or the clauses after it
+    in its sentence, joined by "and" or a comma, that hold only a name (C5: "open X and Y", "open X, Y and Z"). Never
+    past another ':' or what C2 says is pasted."""
+    last = number
+    for index in range(number + 1, len(clauses)):
+        start, end, before = clauses[index]
+        if index in greeted or asking[index - 1]:
+            break
+        if number + 1 in named:
+            if index > number + 1 and any(mark in before for mark in ".!?:\n"):
+                break
+        elif before not in ("and", ",") or not _just_a_name(text[start:end].strip()):
+            break
+        last = index
+    return last
+
+
 def _pieces(message: str) -> list[_Piece]:
     """The plain requests of one of the owner's messages, as a change at once may be read from them. Nothing in a
-    message longer than PLAIN_CAP (a paste, whatever it says), nothing after a ':' anywhere before it in the message
-    (what it brings in: "Summarise this mail for me: Hi Sam ... Please open ..."), and nothing in a sentence that says
-    it is no request (_sentences_void) or after a word that says so (_void_before). An open: a clause that opens with
-    an opening word (_opening), wherever it stands ("find the report, then open https://..."). A PC control: as a chain
-    from the message's start, every clause before it a whole request too ("mute and pause"); straight after a
-    sequencing word ("find the report, then mute"); or, when it is a whole plain request, its verb first with its
-    object, after "and", "also", a comma or a new sentence too ("find the report and set the volume to 30"). So a
-    keyword in a list asks for nothing ("compare the play, pause and next buttons", "find the report and mute"). What
-    the message goes on to say may take one back (_kept). Bounded: each clause is read once, none past CLAUSE_CAP, at
-    most ASKS_CAP are found."""
-    text = " ".join((message or "").split())
-    if not text or len(text) > PLAIN_CAP:
-        return []
-    clauses = _clauses(text)
+    message longer than PLAIN_CAP (a paste, whatever it says); nothing after what brings a paste in, to the message's
+    end: a ':' anywhere before it in the message ("Summarise this mail for me: Hi Sam ... Please open ..."), a line
+    break (C1: the owner can't type one in the bar, so it is a paste's; one before the first word makes all of it a
+    paste), a greeting to someone other than Jarvis in a clause ("Hi Sam, ...", "Dear team", "Summarise this - Hi Sam,
+    ..."; C2, from that clause on) or a clause asking to read, summarise, translate, reply to, check, proofread or
+    explain what is pasted ("Summarise this email. ..."; C2, after it); and
+    nothing in a sentence that says it is no request (_sentences_void) or after a word that says so (_void_before). An
+    open: a clause that opens with an opening word (_opening), wherever it stands ("find the report, then open
+    https://..."), with the names after it in a list ("open X and Y": C5), or, after a ':' straight after it when it
+    names nothing, what follows to its sentence's end ("open this link: https://...": C6). A PC control: as a chain from
+    the message's start, every clause before it a whole request too ("mute and pause"); straight after a sequencing
+    word ("find the report, then mute"); or, when it is a whole plain request, its verb first with its object, after
+    "and", "also", a comma or a new sentence too ("find the report and set the volume to 30"). So a keyword in a list
+    asks for nothing ("compare the play, pause and next buttons", "find the report and mute"). What the message goes on
+    to say may take one back (_kept). Bounded: each clause is read a few times at most, none past CLAUSE_CAP, at most
+    ASKS_CAP are found."""
+    lined = kept_lines(message or "")
+    text = lined.replace("\n", " ")       # " ".join(message.split()), its line breaks known
+    if not text or len(text) > PLAIN_CAP or lined.startswith("\n"):
+        return []                         # (a message that opens with a line break is a paste from its first word)
+    clauses = _clauses(text, frozenset(index for index, char in enumerate(lined) if char == "\n"))
     voids = _sentences_void(text, clauses)
+    named = _named_by_colon(text, clauses)
+    opens_void = _sentences_void(text, clauses, named) if named else voids     # for an open: its name's ':' aside
+    greeted = _greeted(text, clauses)
+    asking = [_asks_about_a_paste(text[start:end]) for start, end, _before in clauses]
     found: list[_Piece] = []
     chain, then, pasted = True, False, False
     for number, (start, end, before) in enumerate(clauses):
         sentence, void = voids[number]
-        pasted = pasted or ":" in before      # what follows a ':' is what it brings in, to the message's end
-        void = void or pasted
+        open_void = opens_void[number][1]
+        # What follows a ':' (one that brings an open's name in too), a line break, a greeting to someone else or a
+        # request to read what is pasted is what they bring in, to the message's end.
+        pasted = (pasted or ":" in before or "\n" in before or number in greeted
+                  or (number > 0 and asking[number - 1]))
+        if pasted:
+            break                             # nothing after asks for anything at once (_kept still reads it)
         then = then or before in _THEN_BREAKS
         clause = text[start:end].strip()
         if _no_clause(clause):
@@ -590,11 +805,13 @@ def _pieces(message: str) -> list[_Piece]:
             then, clause = True, clause[word.end():]
             if _no_clause(clause):            # on its own: "then, mute"
                 continue
-        void = void or _void_before(text[sentence:start])
+        said_void = _void_before(text[sentence:start])
+        void, open_void = void or said_void, open_void or said_void
         asked = _clause_ask(clause)
         if asked is None:
-            if not void and _opening(clause):
-                found.append(_Piece(None, clause, start, end, number))
+            if not open_void and _opening(clause):
+                last = _name_runs_to(text, clauses, number, named, greeted, asking)
+                found.append(_Piece(None, clause + text[end:clauses[last][1]], start, clauses[last][1], last))
             chain = then = False
         else:
             whole = (before in _WHOLE_AFTER or any(mark in before for mark in ",.!?")) and _whole_request(clause)
@@ -646,18 +863,19 @@ def _wanted(heard: Sequence[tuple[str, bool]]) -> tuple[list[tuple[tuple[int, in
     """(the PC controls the owner's messages ask for at once, each keyed by (its message, its place there); the
     clauses of the opens they ask for at once), less what was taken back since: by naming it (dv.taken_back, a task's
     reading), or by a whole message of no, which takes back what the last message that asked for any asked. A message
-    that answered the model's own question asks for nothing at once (pc-8: the question was the model's); it may still
-    take back."""
+    that answered the model's own question, ask_owner's or one a line of the model's asked (agent.runner), asks for
+    nothing at once (pc-8, C3: the question was the model's); it may still take back."""
     asks: list[tuple[tuple[int, int], pcctl.PcAsk]] = []
     opens: list[tuple[int, str]] = []
     last = -1
     for number, (message, answered) in enumerate(heard):
         if number:
-            gone = dv.taken_back(message, task=True)
+            flat = " ".join(message.split())          # (heard() keeps line breaks for _pieces alone)
+            gone = dv.taken_back(flat, task=True)
             asks = [(key, asked) for key, asked in asks if asked.kind not in gone]
             if not gone.isdisjoint(_OPEN_KINDS):
                 opens = []
-            if _says_no(message):
+            if _says_no(flat):
                 asks = [(key, asked) for key, asked in asks if key[0] != last]
                 opens = [(said, words) for said, words in opens if said != last]
                 last = -1

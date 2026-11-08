@@ -11,6 +11,7 @@ the real endpoint on loopback. Every value is invented; files go only to tempora
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 import threading
 import time
@@ -33,6 +34,7 @@ from briefing_reader.agent import browser as agent_browser
 from briefing_reader.agent import owner, web
 from briefing_reader.agent import runner as ar
 from briefing_reader.agent.firewall import WebFirewall, holds_something_private
+from briefing_reader.ask import stream as ask_stream
 from briefing_reader.ask.stream import (LIMIT, NOT_SIGNED_IN, SERVER_BUSY, limit_reset_time, limit_reset_words,
                                         task_failure)
 from briefing_reader.conversation import CONVERSATION_FILE, ROLE_JARVIS, ConversationStore, Turn
@@ -152,6 +154,64 @@ class ResetTimeTests(unittest.TestCase):
         self.assertIsNone(self.at("resets 00:00 UTC"))
         self.assertIsNotNone(self.at("resets 00:00 (UTC)"))          # a zone in brackets is its zone
 
+    def test_a_long_text_is_read_in_its_time(self) -> None:
+        """D2: a failed result's line may be 4 MB. The zone's branch of the day pattern opened with its lookbehind,
+        which cost about ten times the rest on such a text (1 s, with the run's lock held). CPU seconds on this
+        thread."""
+        for text in ("resets 1" + " " * 4_000_000 + "x", "a" * 4_000_000):
+            with self.subTest(text=text[:10]):
+                began = time.thread_time()
+                self.assertIsNone(self.at(text))
+                self.assertLess(time.thread_time() - began, 0.45)
+        for text, found in (("resets 5am UTC", "UTC"), ("resets 5am (UTC)", None), ("resets 5am /gmt", None),
+                            ("resets 5am xgmt", None), ("resets 5am GMT+1", "GMT")):
+            with self.subTest(text=text):
+                match = ask_stream._RESET_DAY_RE.search(text)        # noqa: SLF001 - the zone's branch alone
+                self.assertEqual(match.group(0) if match else None, found)
+
+    def test_a_model_s_version_is_no_date(self) -> None:
+        """(Round 2, fix back) "Opus 4.5" read as the date 4.5: the time went, and the task waited for the owner's word."""
+        for text, hour in (("Opus 4.5 limit reached \u00b7 resets 6pm (America/Los_Angeles)", 18),
+                           ("You've hit your Opus 4.5 limit \u00b7 resets 6pm", 18),
+                           ("Claude Opus 4.1 limit reached \u00b7 resets 6pm", 18),
+                           ("Sonnet 4.5 limit reached \u00b7 resets 9pm", 21), ("Opus 4 limit reached \u00b7 resets 6pm", 18),
+                           ("resets 6pm \u00b7 Opus 4.5 is back then", 18)):
+            with self.subTest(text=text):
+                self.assertEqual(self.at(text).hour, hour)
+        for text in ("Opus 4.5 limit reached \u00b7 resets 5am Mon", "Weekly limit: resets 8/11 5am",
+                     "Opus 4.5 limit reached \u00b7 resets 6pm on 4.11"):
+            with self.subTest(text=text):
+                self.assertIsNone(self.at(text))
+
+    @staticmethod
+    def best_cpu(work: Any) -> float:
+        took = []
+        for _round in range(3):
+            began = time.thread_time()
+            work()
+            took.append(time.thread_time() - began)
+        return min(took)
+
+    def test_a_long_failed_text_is_read_for_its_limit_in_its_time(self) -> None:
+        """(Round 2, fix back) task_failure reads a failed result's line of up to 4 MB under the run's lock. A model's
+        name takes a version of three numbers at most, so a crafted ".1" two million times costs what any 4 MB text
+        does (unbounded, it held the GIL 1.4 s); and a rate limit's "rate" must open a word ("a separate limit" holds
+        none), read past its "r" so that the server's words are found as fast as before. CPU seconds on this thread,
+        each against the same length of plain text, measured beside it."""
+        crafted, plain = "opus 1" + ".1" * 2_000_000, "x " * 2_000_003
+        plan = ask_stream._PLAN_LIMIT_RE                              # noqa: SLF001
+        self.assertLess(self.best_cpu(lambda: plan.search(crafted)), 1.5 * self.best_cpu(lambda: plan.search(plain)) + 0.1)
+        self.assertIsNone(plan.search("Opus 4.5.1.2 limit reached"))
+        self.assertIsNotNone(plan.search("Claude Opus 4.5 limit reached"))
+        server = ask_stream._SERVER_LIMIT_RE                          # noqa: SLF001
+        before = re.compile(r"limiting requests|rate.?limits?", re.IGNORECASE)    # round 1's: no word start
+        self.assertLess(self.best_cpu(lambda: server.search(plain)), 1.6 * self.best_cpu(lambda: before.search(plain)) + 0.02)
+        self.assertIsNone(server.search("Opus uses a separate limit; a moderate limit"))
+        self.assertIsNotNone(server.search('"type":"rate_limit_error"'))
+        began = time.thread_time()
+        ask_stream.task_failure(crafted, now=lambda: WHEN)
+        self.assertLess(time.thread_time() - began, 5.0)
+
 
 def limit_by_text(engine: FakeEngine, text: str = LIMIT_TEXT) -> None:
     engine.wait_message()
@@ -261,33 +321,63 @@ class LimitInItsTextTests(RunCase):
 class NotThePlansLimitTests(RunCase):
     """run-3: a failure that is not the plan's limit was told as the plan's limit, with a 6-hour wait: a context, budget or
     subagent limit, a bare "limit reached", a server limiting requests (Claude Code's own words: "not your usage limit")
-    or any 429. A task pauses only on the plan's own words now (stream.task_failure), and Ask's reading is its own."""
+    or any 429. A task pauses only on the plan's limit now (stream.task_failure), and Ask's reading is its own.
+
+    D1 (round 2): tasks run on one model ("opus"), and its own cap is the plan's too ("a plan limit (session, weekly or
+    per-model)", in Claude Code's own words), as is any limit Claude Code says resets: they pause, with a 429 or
+    without. The server's words come only for its own words or a 429 that names no limit: "It isn't your plan's limit"
+    is never said over another limit's words, which end the task as any failure does, a 429 with them or not."""
 
     PLAN = ("You've hit your 5-hour limit \u00b7 resets 6pm (America/Los_Angeles)", "You've hit your limit",
             "You've hit your limit \u00b7 resets 5am Mon", "Claude usage limit reached|1762300000", "Usage limit reached",
             "Your weekly limit resets 5am in 3 days", "Lower-priority mode ended \u00b7 you have reached your weekly usage "
             "limit", "5-hour limit reached - resets 3pm", "Session limit reached", "You've reached your limit",
             "You're out of extra usage")
+    MODEL_AND_RESET = ("You've hit your Opus limit \u00b7 resets 6pm (America/Los_Angeles)",
+                       "Opus limit reached \u00b7 resets 6pm (America/Los_Angeles)", "You've hit your Opus limit",
+                       "Opus limit reached", "You've hit your daily limit",
+                       "You've hit your Sonnet limit \u00b7 resets 9pm",
+                       "Opus 4.5 limit reached \u00b7 resets 6pm", "Opus \u00b7 limit resets 6pm (America/Los_Angeles)",
+                       "You've used 100% \u00b7 Your Opus limit resets 6pm", "Daily limit reached \u00b7 resets 6pm",
+                       "Fast limit reached and temporarily disabled \u00b7 resets in 8m",
+                       "spend limit reached (daily; resets 2026-08-08 00:00 UTC)",
+                       # (fix back) "separate" holds no rate limit
+                       "Opus uses a separate limit \u00b7 resets 6pm",
+                       "You have hit a separate limit for Opus \u00b7 resets 6pm")
     NOT_A_LIMIT = ("Context limit reached \u00b7 /compact or /clear to continue",
                    "Budget limit reached ($5.00 spent of the $5.00 maximum). New agents cannot be started.",
                    "Concurrent subagent limit reached. You can run 3 subagents at once.", "limit reached",
                    "Subagent nesting limit reached (depth 3 of 3).", "Fast mode disabled \u00b7 usage credit limit reached",
-                   "Prompt is too long", "")
+                   "You've hit your context limit", "You've hit your budget limit", "individual spend limit reached")
+    NO_LIMIT_NAMED = ("Prompt is too long", "", "API Error: Request rejected (429) \u00b7 this may be a temporary "
+                      "capacity issue")
     SERVER = ("Server is temporarily limiting requests (not your usage limit)",
-              "API Error: 429 rate_limit_error: slow down")
+              "Server is temporarily limiting requests (not your usage limit) \u00b7 resets in 30s",     # still its own
+              "API Error: 429 rate_limit_error: slow down",
+              'API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"Number of request tokens '
+              'has exceeded your per-minute rate limit"}}',
+              # (fix back) the API's acceleration limit, its own words too
+              'API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed '
+              "your organization's maximum usage increase rate for input tokens per minute. Please scale up your input "
+              'tokens usage more gradually to stay within the acceleration limit."}}')
 
     def test_what_a_task_reads_as_the_plan_s_limit(self) -> None:
-        for text in self.PLAN:
+        for text in (*self.PLAN, *self.MODEL_AND_RESET):
             with self.subTest(text=text):
                 self.assertEqual(task_failure(text, now=lambda: WHEN).kind, LIMIT)
                 self.assertEqual(task_failure(text, now=lambda: WHEN, status=429).kind, LIMIT)
         for text in self.NOT_A_LIMIT:
             with self.subTest(text=text):
                 self.assertIsNone(task_failure(text, now=lambda: WHEN))
+                self.assertIsNone(task_failure(text, now=lambda: WHEN, status=429))    # it names a limit: never "busy"
+        for text in self.NO_LIMIT_NAMED:
+            with self.subTest(text=text):
+                self.assertIsNone(task_failure(text, now=lambda: WHEN))
                 self.assertEqual(task_failure(text, now=lambda: WHEN, status=429).kind, SERVER_BUSY)   # a bare 429
         for text in self.SERVER:
             with self.subTest(text=text):
                 self.assertEqual(task_failure(text, now=lambda: WHEN).kind, SERVER_BUSY)
+                self.assertEqual(task_failure(text, now=lambda: WHEN, status=429).kind, SERVER_BUSY)
         self.assertEqual(task_failure("Please run /login", now=lambda: WHEN).kind, NOT_SIGNED_IN)
         self.assertEqual(task_failure("", now=lambda: WHEN, status=401).kind, NOT_SIGNED_IN)
 
@@ -302,14 +392,43 @@ class NotThePlansLimitTests(RunCase):
         return run.ended
 
     def test_another_limit_ends_the_task_as_any_failure_does(self) -> None:
-        for text in self.NOT_A_LIMIT[:4]:
-            with self.subTest(text=text):
+        for text, status in ((self.NOT_A_LIMIT[0], None), (self.NOT_A_LIMIT[1], None), (self.NOT_A_LIMIT[2], None),
+                             (self.NOT_A_LIMIT[3], None), (self.NOT_A_LIMIT[0], 429), (self.NOT_A_LIMIT[1], 429),
+                             (self.NOT_A_LIMIT[5], 429)):
+            with self.subTest(text=text, status=status):
                 self.setUp()
-                end = self.failing(text)
+                end = self.failing(text, status)
                 self.assertIsNotNone(end)
                 self.assertEqual((end.outcome, end.code, end.summary), ("failed", ar.ERROR, ar.EXIT_WORDS))
+                self.assertNotIn("isn't your plan's limit", end.summary)
                 self.assertEqual([event for event in self.of(ar.E_NOTICE) if event.code == LIMIT], [])
                 self.assertFalse(self.run_._paused)
+
+    def test_the_task_s_model_s_own_limit_pauses_it_until_its_time(self) -> None:
+        """D1: "opus" is the tasks' model, and its cap is the plan's: with a 429, as the plan's limit comes, or without,
+        the task pauses until 6pm, never "Claude's server was limiting requests"."""
+        for text in ("You've hit your Opus limit \u00b7 resets 6pm (America/Los_Angeles)",
+                     "Opus limit reached \u00b7 resets 6pm (America/Los_Angeles)",
+                     # (fix back) a model's version is no date
+                     "Opus 4.5 limit reached \u00b7 resets 6pm (America/Los_Angeles)",
+                     "You've hit your Opus 4.5 limit \u00b7 resets 6pm (America/Los_Angeles)",
+                     "Opus uses a separate limit \u00b7 resets 6pm (America/Los_Angeles)"):
+            for status in (429, None):
+                with self.subTest(text=text, status=status):
+                    self.setUp()
+                    self.assertIsNone(self.failing(text, status))
+                    self.assertTrue(self.run_._paused)
+                    self.assertEqual(self.run_._paused_until.hour, 18)
+                    self.assertIn("it resets 6pm (America/Los_Angeles), and I'll ask you then.",
+                                  self.of(ar.E_NOTICE)[0].text)
+                    self.assertEqual(self.of(ar.E_NOTICE)[0].code, LIMIT)
+                    self.run_.stop("test")
+        self.setUp()
+        self.assertIsNone(self.failing("You've hit your Opus limit \u00b7 resets Mon 5am", 429))
+        self.assertTrue(self.run_._paused)
+        self.assertIsNone(self.run_._paused_until)               # a day beside it: it waits for the owner's word
+        self.assertEqual(self.of(ar.E_NOTICE)[0].text, ar.LIMIT_NO_TIME_WORDS)
+        self.run_.stop("test")
 
     def test_the_server_limiting_requests_ends_it_in_words_that_say_so(self) -> None:
         for text, status in ((self.SERVER[0], None), (self.SERVER[0], 429), ("", 429),
@@ -332,6 +451,7 @@ class NotThePlansLimitTests(RunCase):
     def test_a_process_that_ends_by_itself_reads_its_words_the_same_way(self) -> None:
         for tail, code, words in (("Context limit reached \u00b7 /compact or /clear to continue", ar.C_EXIT, ar.EXIT_WORDS),
                                   ("You've hit your limit \u00b7 resets 6pm", LIMIT, ar.LIMIT_ENDED_WORDS),
+                                  ("You've hit your Opus limit \u00b7 resets 6pm", LIMIT, ar.LIMIT_ENDED_WORDS),
                                   ("Server is temporarily limiting requests (not your usage limit)", ar.C_SERVER_BUSY,
                                    ar.SERVER_BUSY_WORDS)):
             with self.subTest(tail=tail):
@@ -1344,6 +1464,85 @@ class AnswersToTheModelsQuestionTests(RunCase):
         self.assertTrue(wall.private)
         self.assertFalse(wall.book.seen(self.EVIL))
         self.assertEqual(self.end().outcome, "done")
+
+    def answered_after(self, way: str, line: str) -> WebFirewall:
+        """C3 (round 2): the words typed next after a line of the model's that asks answer it for the firewall's heard()
+        (they ask for nothing at once: agent.owner), those after them do not; ``way``: said, or its own text."""
+        wall = WebFirewall(web.AddressBook())
+
+        def script(engine: FakeEngine) -> None:
+            engine.wait_message()
+            if way == "say":
+                engine.call("say", text=line)
+            elif way == "plan":                         # (fix back) a step of its plan, which Live shows
+                engine.call("update_plan", found="", steps=[{"text": line, "status": "doing"}])
+            elif way == "found":                        # ... and a found line too soon after a say: shown, not said
+                engine.call("say", text="Reading three reviews now.")
+                engine.call("update_plan", found=line, steps=[{"text": "Read the reviews", "status": "doing"}])
+            else:
+                engine.assistant([{"type": "text", "text": line}])
+            for _message in range(2):
+                engine.wait_message()
+            engine.call("finish", summary="Done.", outcome="done")
+            engine.end_turn()
+
+        run = self.go(script, firewall=wall)
+        self.until(lambda: self.kinds({"say": ar.E_SAY, "plan": ar.E_PLAN, "found": ar.E_PLAN}.get(way, ar.E_TEXT)))
+        self.assertEqual(run.owner_says("mute"), "sent")
+        self.assertEqual(run.owner_says("pause"), "sent")
+        self.assertEqual(self.end().outcome, "done")
+        return wall
+
+    def test_the_next_words_after_a_line_it_said_that_asks_are_its_answer(self) -> None:
+        wall = self.answered_after("say", "Which of these two buttons did you mean, mute or pause?")
+        self.assertEqual(wall.heard()[1:], (("mute", True), ("pause", False)))
+
+    def test_the_next_words_after_its_own_text_that_asks_are_its_answer(self) -> None:
+        wall = self.answered_after("text", "Which of these two buttons did you mean, mute or pause?")
+        self.assertEqual(wall.heard()[1:], (("mute", True), ("pause", False)))
+
+    def test_after_a_line_that_asks_nothing_they_are_no_answer(self) -> None:
+        wall = self.answered_after("say", "Reading three reviews now.")
+        self.assertEqual(wall.heard()[1:], (("mute", False), ("pause", False)))
+
+    def test_after_its_own_text_that_asks_nothing_they_are_no_answer(self) -> None:
+        wall = self.answered_after("text", "Reading three reviews now.")
+        self.assertEqual(wall.heard()[1:], (("mute", False), ("pause", False)))
+
+    # Round 2, fix back: a line may ask with no '?' and none of guard.line_asks' words; so may the plan's lines. (One
+    # run a test: the events are the test's.)
+
+    def answer_then_not(self, way: str, line: str) -> None:
+        self.assertEqual(self.answered_after(way, line).heard()[1:], (("mute", True), ("pause", False)))
+
+    def test_after_a_line_that_tells_to_choose(self) -> None:
+        self.answer_then_not("say", "Choose one: mute or pause.")
+
+    def test_after_a_line_that_says_let_me_know(self) -> None:
+        self.answer_then_not("say", "Let me know which you meant.")
+
+    def test_after_its_own_text_that_tells_to_pick(self) -> None:
+        self.answer_then_not("text", "Pick the button you meant and I'll carry on.")
+
+    def test_words_that_only_echo_a_line_it_said(self) -> None:
+        self.answer_then_not("say", "Answer like this: mute")
+
+    def test_words_that_only_echo_its_own_text(self) -> None:
+        self.answer_then_not("text", "Confirm by typing mute.")
+
+    def test_after_a_plan_step_that_asks(self) -> None:
+        self.answer_then_not("plan", "Which button did you mean, mute or pause? Type it.")
+
+    def test_after_a_found_line_shown_but_not_said(self) -> None:
+        self.answer_then_not("found", "Choose one: mute or pause.")
+
+    def test_after_a_plan_step_that_asks_nothing_they_are_no_answer(self) -> None:
+        self.assertEqual(self.answered_after("plan", "Compare the prices").heard()[1:],
+                         (("mute", False), ("pause", False)))
+
+    def test_after_a_line_that_names_the_answer_as_a_noun_they_are_no_answer(self) -> None:
+        self.assertEqual(self.answered_after("say", "The answer is in the second review.").heard()[1:],
+                         (("mute", False), ("pause", False)))
 
 
 class TheFirstSecondsTests(RunCase):

@@ -100,7 +100,9 @@ of it (AskOutcome.message), never Claude's say or question; a Cancel after somet
 A task (Jarvis, a true agent; only while the agent is on): ``set_agent_gate(gate)`` makes ``submit`` ask ``gate(words)``
 first. While a task runs the gate takes whatever is typed (agent_ui.AgentController.take_request: it goes to the task as
 the owner's message, or stops it) and it leaves the bar; no Ask starts (D4). Off: no gate, nothing here changes. A
-planner that hands a request to a task says so in AskOutcome.agent_task; the app starts it (ui).
+planner that hands a request to a task says so in AskOutcome.agent_task; the app starts it (ui). The gate and that task
+have the words with the line breaks a paste left in the bar's field (``_lines_of``): only a task's reading of what they
+ask for at once sees them (agent.owner); the planner, the bar, Live and the conversation have them as one line.
 
 Web research: a request that starts with "web:" (or "research:") is a WEB task (live.TASK_WEB;
 ``running_kind``) whose "Your request" says nothing is read from the accounts; the command still
@@ -133,7 +135,7 @@ from .actions import is_web_open, link_host
 from .ask import desktop_mode
 from .ask import planner as ask_planner
 from .ask import prestart as ask_prestart
-from .ask.context import COMMAND_CAP, MEMORY_PROMPT_CAP, conversation_exchanges
+from .ask.context import COMMAND_CAP, MEMORY_PROMPT_CAP, conversation_exchanges, kept_lines
 from .ask.modes import (MODE_DESKTOP, MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_TASKS, MODE_TITLES,
                         ORIGIN_AUTO, ORIGIN_CHOICE, ORIGIN_TYPED, ModeInputs, ModeRequest)
 from .ask.research import forced_question
@@ -297,6 +299,9 @@ class _Running:
     words: str = dataclasses.field(default="", repr=False)
     # What may be shown of its say so far (memory only, never logged): the HUD's caption line while it runs.
     said: str = dataclasses.field(default="", repr=False)
+    # The same words with a paste's line breaks (only while the agent is on; memory only, never logged): what a task
+    # they are handed to starts with (_on_planned), "" when they had none.
+    lines: str = dataclasses.field(default="", repr=False)
 
 
 class _AskBridge(QObject):
@@ -446,6 +451,7 @@ class AskController(QObject):
         # route there (None), or hands back the planner's job (ask.desktop_mode.DesktopJob). None: no desktop.
         self._desktop_request = desktop_request
         self._agent_gate: Callable[[str], bool] | None = None   # a task running takes what is typed (None: agent off)
+        self._typed_lines = ("", "")          # the last words submitted and their line breaks (agent on: _lines_of)
         self.last_task_id = 0                  # the LIVE view task of the last finished Ask (0: none)
         # While outcomeReady is handled: the LIVE task of that answer (still open; NO_TASK otherwise).
         self.finishing_task: LiveTask = NO_TASK
@@ -487,8 +493,19 @@ class AskController(QObject):
 
     def set_agent_gate(self, gate: Callable[[str], bool] | None) -> None:
         """While the agent is on: ``gate(words)`` is asked first for what is typed; True: it was taken (see the module
-        docs)."""
+        docs). It has them with a paste's line breaks (_lines_of)."""
         self._agent_gate = gate
+
+    def _lines_of(self, text: str) -> str:
+        """While the agent is on: ``text`` (submitted, whitespace collapsed) with the line breaks the bar's field holds
+        (a paste keeps them: hud.CommandBar.raw_text), when the field holds those words; else ``text``. A task's reading
+        of what they ask for at once is all that sees them (agent.owner): what follows a break is pasted. Off: ``text``,
+        and nothing is read."""
+        if self._agent_gate is None:
+            return text
+        raw = getattr(self.bar, "raw_text", None)
+        lines = kept_lines(raw()) if callable(raw) else ""
+        return lines if lines != text and lines.lstrip("\n").replace("\n", " ") == text else text
 
     # ---- the bar (the window's, or the desktop HUD's while it shows) -------------------------------
 
@@ -655,7 +672,9 @@ class AskController(QObject):
         text = " ".join((text or "").split())
         if self._stop.is_set():
             return
-        if text and self._agent_gate is not None and self._agent_gate(text):
+        lines = self._lines_of(text)
+        self._typed_lines = (text, lines) if lines != text else ("", "")
+        if text and self._agent_gate is not None and self._agent_gate(lines):
             logger.info("Ask: typed words went to the running task")
             self.bar.take_request(text)        # taken: the words leave the bar (Up brings them back)
             return
@@ -709,7 +728,7 @@ class AskController(QObject):
                              conversation=len(conversation_exchanges(earlier))
                              if kind == TASK_ASK and self._conversation is not None else None)
         running = _Running(self._seq, threading.Event(), self._monotonic(), task=task, kind=kind, words=text,
-                           bar=self.bar)
+                           bar=self.bar, lines=lines if lines != text else "")
         self._running = running
         logger.info("Ask %d started", running.seq)
         self._worker.put(_PlanJob(running.seq, text, briefing, tuple(page_ids), running.cancel,
@@ -761,9 +780,10 @@ class AskController(QObject):
         # plan gets none.
         task = _mode_task(self.live, request, words, kind=kind,
                           memory=None if request.mode in (MODE_MEETING, MODE_DESKTOP) else self._memory_given(""))
+        last, lines = self._typed_lines          # a desktop request typed here: its line breaks, for a task (agent on)
         running = _Running(self._seq, threading.Event(), self._monotonic(), task=task, kind=kind,
                            typed=request.typed_route, mode=request.mode, words=words if request.typed_route else "",
-                           bar=self.bar)
+                           bar=self.bar, lines=lines if request.typed_route and last and last == words else "")
         self._running = running
         logger.info("Ask %d started (mode %s, %s)", running.seq, request.mode, request.origin)
         self._worker.put(_ModeJob(running.seq, request, inputs, briefing, tuple(page_ids), running.cancel,
@@ -894,6 +914,8 @@ class AskController(QObject):
         if running is None or seq != running.seq:
             return   # cancelled and replaced, or the app is closing
         self._running = None
+        if running.lines and getattr(outcome, "agent_task", ""):
+            outcome = _with_lines(outcome, running.lines)
         self._tick.stop()
         self._notice_until = 0.0
         self.bar.set_running(False)
@@ -1288,6 +1310,17 @@ def _card_words(card: Any, hour24: bool = False) -> str:
         return " - ".join(["NUDGE REPLY", *ask_planner.card_details(card, hour24)])
     kind = {"rsvp": "RSVP"}.get(card.kind, card.kind.upper())
     return " - ".join([f"ASK {kind}", *ask_planner.card_details(card, hour24)])
+
+
+def _with_lines(outcome: Any, lines: str) -> Any:
+    """An outcome that hands the owner's words to a task (``agent_task``, only while the agent is on), with the line
+    breaks they were typed with: the same words, character for character, as far as the planner kept them. The task
+    alone reads the breaks (agent.owner), one before the first word too; anything else it holds is as it was."""
+    task = outcome.agent_task
+    body = lines.lstrip("\n")
+    if not dataclasses.is_dataclass(outcome) or body.replace("\n", " ")[:len(task)] != task:
+        return outcome
+    return dataclasses.replace(outcome, agent_task=lines[:len(lines) - len(body) + len(task)])
 
 
 @quiet()

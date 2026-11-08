@@ -9443,7 +9443,8 @@ class AppController(QObject):
         panel says it will be on again after a restart), and what is on its way stops at once - the desktop's own jobs
         (desktop_ui.turn_off: nothing opens after it), a desktop request's planner run and an Ask whose words are
         coming (cancelled). With tasks on, the voice's task and Ask lines go first (a task's start is an Ask's), the task
-        ended or not, and what focus mode held of them, so that focus ending here hands none of them to the voice."""
+        ended or not, and what focus mode held of them, so that focus ending here hands none of them to the voice; then
+        the task stops, before the desktop's own turn_off ends its file card (that card's end would reach its model)."""
         from .desktop_view import TURN_OFF_NOT_SAVED_TEXT
 
         desktop = getattr(self, "desktop", None)
@@ -9452,11 +9453,12 @@ class AppController(QObject):
         if getattr(self, "agent", None) is not None:
             self._voice_call("stop_key", TASK_SAY_KEY)
             self._voice_call("stop_key", ASK_SAY_KEY)      # (a task's spoken start)
+            # R8: a task ends at once, and none is offered while it is off; first, for the desktop's turn_off ends the
+            # task's file card, and the model must not hear of that and finish before the Stop
+            self.agent.stop("turned off")
         saved = desktop.turn_off()
-        if getattr(self, "agent", None) is not None:
-            self.agent.stop("turned off")    # R8: a task ends at once, and none is offered while it is off
-            if self.task_feed is not None:
-                self.task_feed.consent_gone()   # a result card up: nothing of it stays
+        if getattr(self, "agent", None) is not None and self.task_feed is not None:
+            self.task_feed.consent_gone()   # a result card up: nothing of it stays
         ask = self.ask
         if ask is not None and ask.running_mode == MODE_DESKTOP:
             logger.info("Desktop: turned off while a desktop request's planner run was on its way; cancelled")

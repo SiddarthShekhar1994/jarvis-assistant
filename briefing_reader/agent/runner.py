@@ -27,8 +27,10 @@ unless the task is stopping. With no row ended for BATCH_QUIET_MINUTES (card_pro
 stops waiting on it, in true words: the batch is still at work, untouched, and its card has the truth. A choice clicked
 answers, but it is the model's words, so it licenses nothing and clears nothing; words typed are the owner's, and those
 the model asked for, or that plainly hold something private, turn the firewall on for the rest of the run (_typed).
-Words typed in answer to ask_owner's question are marked so for the firewall (owner_said's ``answer``): they license
-what they say, but ask for nothing at once, for the question was the model's (agent.owner). A
+Words typed in answer to ask_owner's question, or the first typed after a line of the model's that asked something (a
+say, its own text or its plan's: guard.line_asks, or one telling the owner to choose), or that only echo what its lines
+said since the owner last typed, are marked so for the firewall (owner_said's ``answer``): they license what they
+say, but ask for nothing at once, for the question was the model's (agent.owner). A
 ``result`` with no wait pending and no
 finish gets one prompt to carry on or finish, and after another one the task ends as partial. A message sent mid-run is
 delivered by Claude Code after the running tool returns (``--replay-user-messages`` shows when; a ``result`` while one is
@@ -39,13 +41,15 @@ then return "end your turn" until the answer. Yes: as much again. No, or no answ
 finish, gets a short while for it and the task ends as partial. The clock rests while the owner is waited for. Reached
 while a card or a batch is up, tool calls but finish are held the same way, and "Keep going?" comes when that wait ends.
 
-The plan's limit (stream.rate_limit_signal, or a failed result's text in the plan's own words: stream.task_failure): a
-run that would use extra usage is killed at once (the owner's rule: no paid calls). The plan's own limit pauses the task
-with words saying when, and when that time comes asks whether to carry on; with no time given it waits for the owner's
-word, LIMIT_WAIT_HOURS at most, and then ends as partial. That word is a line typed, or a wait that was up ending on
-their click or answer, or with words they typed at it (_let_go): what waited goes in and the task tries again. Whatever
-is said or answered meanwhile goes in with the resume, in the order it came. Another limit (a context's, a budget's)
-ends the task as any failure does, and Claude's server limiting requests ends it in words that say it isn't the plan's.
+The plan's limit (stream.rate_limit_signal, or a failed result's text: stream.task_failure, the plan's own words, the
+task's model's own cap, or a limit with its reset named): a run that would use extra usage is killed at once (the
+owner's rule: no paid calls). The plan's own limit pauses the task with words saying when, and when that time comes asks
+whether to carry on; with no time given it waits for the owner's word, LIMIT_WAIT_HOURS at most, and then ends as
+partial. That word is a line typed, or a wait that was up ending on their click or answer, or with words they typed at
+it (_let_go): what waited goes in and the task tries again. Whatever is said or answered meanwhile goes in with the
+resume, in the order it came. Another limit with no reset named (a context's, a budget's) ends the task as any failure
+does, a 429 with it too; Claude's server limiting requests, in its own words or as a 429 that names no limit, ends it in
+words that say it isn't the plan's.
 
 The guard (R2): anything but this run's tools in a tool_use, a stream chunk or an init kills the run. Its command line
 is cli.build_agent_argv's; the bearer token goes only into the MCP config file in the run's own folder under the data
@@ -82,8 +86,8 @@ from ..desktop.backend import real_backend_blocked
 from ..gcal import local_timezone
 from . import policy
 from .endpoint import TOOL_TIMEOUT_S, TOO_LONG_CODE, TOO_LONG_TEXT, Call, Endpoint
-from .tools import (OUTCOME_DONE, OUTCOME_FAILED, OUTCOME_PARTIAL, PlanStep, Registry, RunContext, ToolResult,
-                    doing_words, error)
+from .tools import (OUTCOME_DONE, OUTCOME_FAILED, OUTCOME_PARTIAL, TOO_LONG_ADDRESS, TOO_LONG_ADDRESS_TEXT, PlanStep,
+                    Registry, RunContext, ToolResult, address_too_long, doing_words, error)
 from .workspace import TaskFolder
 
 logger = logging.getLogger(__name__)
@@ -369,6 +373,39 @@ def _count(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
+# C3: a line of the model's can ask with no '?' and none of guard.line_asks' words: it tells the owner to choose, at a
+# sentence's start ("Choose one: mute or pause.", "Pick the one you meant"), or to let it know. And words the owner
+# types that only echo what the model's lines said since he last typed ("Answer like this: mute", then "mute") answer
+# them, whatever those lines asked.
+_CHOOSING = frozenset({"choose", "pick", "select", "confirm", "respond", "decide"})
+_SENTENCE_BREAK_RE = re.compile(r"[.!?:;\n]+")
+_LEADING = frozenset({"please", "just", "now", "so", "then", "and", "kindly", "ok", "okay"})
+_ECHO_EXTRAS = frozenset({"please", "ok", "okay", "yes", "yeah", "sure", "the", "a", "an", "it", "that", "one", "just",
+                          "now", "then", "and", "go", "with", "do", "thanks", "thank", "you", "jarvis"})
+MODEL_WORDS_CAP = 20_000                # the model's words kept at most till the owner types (memory only)
+
+
+def _tells_to_choose(line: Any) -> bool:
+    """``line`` tells the owner to choose or to answer: a sentence of it opens with choose, pick, select, confirm,
+    respond or decide, or it says "let me know"."""
+    if not isinstance(line, str):
+        return False
+    for sentence in _SENTENCE_BREAK_RE.split(line):
+        words = guard.words(sentence, camel=False)
+        lead = next((word for word in words if word not in _LEADING), "")
+        if lead in _CHOOSING:
+            return True
+    words = guard.words(line, camel=False)
+    return any(words[index:index + 3] == ["let", "me", "know"] for index in range(len(words) - 2))
+
+
+def _echoes(flat: str, said: set[str]) -> bool:
+    """The owner's words ``flat`` only echo ``said`` (the model's lines' words since he last typed): every word of them
+    but a please, an ok or the like stands in those lines ("mute" after "Answer like this: mute")."""
+    words = set(guard.words(flat, camel=False)) - _ECHO_EXTRAS
+    return bool(words) and words <= said
+
+
 @dataclass
 class _Wait:
     question: OwnerQuestion
@@ -441,16 +478,19 @@ class AgentRun:
         self._garbage = 0
         self._card_id = ""                  # the file card a Q_CARD wait hangs on
         self._line_asked = False            # a line of the model's has asked the owner something (_typed)
+        self._asked_since = False           # ... since the owner last typed: their next words answer it (owner_says)
+        self._model_words: set[str] = set()     # the words of the model's lines since the owner last typed (C3)
         self._last_real = timing.real_clock()     # when the clock was last looked at (_note_sleep)
         self._context = RunContext(run_id=self.run_id, folder=folder, clock=clock, on_plan=self._tool_plan,
                                    on_say=self._tool_say, on_question=self._tool_question, on_finish=self._tool_finish,
                                    web=web, tool_s=timing.tool_s, fetch=fetch, owner=owner, on_card=self._tool_card,
-                                   card_gone=self._tool_card_gone, read_words=getattr(firewall, "read_words", None))
+                                   card_gone=self._tool_card_gone, read_words=getattr(firewall, "read_words", None),
+                                   on_shown=self._noted_asking)
         attach = getattr(firewall, "attach", None)
         if callable(attach):
             attach(self.ask_web)
-        self._note_owner(goal)
-        self._note_if_private(goal)
+        self._note_owner(goal)              # with its line breaks, if it has any (agent_ui.start): a paste's sign
+        self._note_if_private(" ".join((goal or "").split()))
 
     def __repr__(self) -> str:              # never the goal
         return f"AgentRun({self.run_id})"
@@ -490,8 +530,8 @@ class AgentRun:
 
     def _note_owner(self, words: str, *, answer: bool = False) -> None:
         """The owner's own words, for the firewall (WebFirewall.owner_said: they clear nothing, once it holds anything
-        private). ``answer``: typed in answer to ask_owner's question, which the model wrote, so they ask for nothing
-        at once (pc-8: agent.owner); they still license what they say."""
+        private). ``answer``: typed in answer to ask_owner's question or to a line of the model's that asked (owner_says),
+        which the model wrote, so they ask for nothing at once (pc-8, C3: agent.owner); they still license what they say."""
         heard = getattr(self._firewall, "owner_said", None)
         if callable(heard):
             if answer:
@@ -529,13 +569,22 @@ class AgentRun:
         """The owner's words while the task runs: "answered" (the question that waits), "sent", "held" (the plan's limit
         holds, or a card waits while it is paused: they go in with the resume, or, with no time given, as that card ends)
         or "refused" (it has ended). Never past what is on its way already, the goal among it: they go in the order they
-        were said."""
+        were said. They answer the model's question when ask_owner's waits, or when a line of the model's (say, its own
+        text or its plan's) has asked something since they last typed, or only echo what such lines said ("Answer like
+        this: mute", then "mute": C3, a page can as well tell the model to ask in a line): then they ask for nothing at
+        once (agent.owner). Only the firewall's heard() keeps their line breaks."""
+        flat = " ".join((text or "").split())
         with self._lock:
             if self._end is not None or self._stop.is_set() or self._finished is not None:
                 return "refused"
             wait = self._wait
-            self._typed(text, wait.question.kind if wait is not None else "")
-            self._note_owner(text, answer=wait is not None and wait.question.kind == Q_TASK)
+            self._typed(flat, wait.question.kind if wait is not None else "")
+            answered = ((wait is not None and wait.question.kind == Q_TASK) or self._asked_since
+                        or _echoes(flat, self._model_words))
+            self._asked_since = False
+            self._model_words = set()
+            self._note_owner(text, answer=answered)
+            text = flat
             if wait is not None and wait.question.kind == Q_TASK:   # only ask_owner's: the others are click only
                 if self._paused and not self._limit_holds():
                     self._resume("", [])                 # past the reset, or no time given: what is typed tries again
@@ -937,7 +986,7 @@ class AgentRun:
             if block.get("type") in TOOL_BLOCKS:
                 self._check_tool(block.get("name"))
             elif block.get("type") == "text" and isinstance(block.get("text"), str) and block["text"].strip():
-                self._line_asked = self._line_asked or guard.line_asks(block["text"])     # (Live shows it)
+                self._noted_asking(block["text"])                                          # (Live shows it)
                 self._emit(AgentEvent(E_TEXT, text=block["text"]))
         if self.budget.turns != before:
             self._report_usage()
@@ -983,7 +1032,7 @@ class AgentRun:
             if until is not None:           # ... and its text says when, as the event did not: it asks at that time
                 self._pause(until, limit_reset_words(text, now=self._now))
             return
-        found = task_failure(text, now=self._now, status=status)    # only the plan's own words are its limit
+        found = task_failure(text, now=self._now, status=status)    # the plan's limit in its own words, or a model's
         if found is not None and found.kind == LIMIT:
             self._pause(limit_reset_time(text, now=self._now), limit_reset_words(text, now=self._now))
             self._idle = True
@@ -1054,7 +1103,7 @@ class AgentRun:
         tail = process.stderr_tail() if process is not None else ""
         found = exit_failure(tail, code, now=self._now)
         logger.info("Agent %s: Claude Code ended by itself (%s)", self.run_id, found.detail or found.kind)
-        said = task_failure(tail, now=self._now)        # a limit in the plan's own words only, as for a failed result
+        said = task_failure(tail, now=self._now)        # the plan's limit read as for a failed result
         if found.kind in (CLI_UNSUPPORTED, NOT_SIGNED_IN):
             self._finish_run(OUTCOME_FAILED, found.kind, found.message)
         elif said is not None and said.kind == LIMIT:
@@ -1120,8 +1169,9 @@ class AgentRun:
         return self._stop.is_set() or call.abandoned.is_set()
 
     def _invoke(self, name: str, args: Any, call: Call) -> ToolResult:
-        """One tools/call, on its own thread: the run's gates, then the tool through the registry. After a Stop, or past
-        the timeout, nothing it does is reported: its result is dropped."""
+        """One tools/call, on its own thread: the run's gates (a page's address too long to be one is refused before the
+        firewall or the input check reads it: tools.address_too_long), then the tool through the registry. After a Stop,
+        or past the timeout, nothing it does is reported: its result is dropped."""
         if self._stop.is_set():
             return error(STOPPED_TOOL_TEXT, STOPPED_CODE)
         number = next(self._calls)
@@ -1135,6 +1185,8 @@ class AgentRun:
             self._nudged = False
             held = self._held(name)
         result = held
+        if result is None and address_too_long(name, args):     # no page's: refused before any check reads it (D3)
+            result = error(TOO_LONG_ADDRESS_TEXT, TOO_LONG_ADDRESS)
         if result is None and tool is not None:
             result = policy.gate(tool, args if isinstance(args, Mapping) else {}, self._firewall)
         if result is None:
@@ -1178,11 +1230,29 @@ class AgentRun:
         return None
 
     def _tool_plan(self, steps: tuple[PlanStep, ...]) -> None:
+        for step in steps:                  # (Live shows them: a step can ask as a line can)
+            self._noted_asking(step.text)
         self._emit(AgentEvent(E_PLAN, steps=steps))
 
     def _tool_say(self, text: str) -> None:
-        self._line_asked = self._line_asked or guard.line_asks(text)
+        self._noted_asking(text)
         self._emit(AgentEvent(E_SAY, text=text))
+
+    def _noted_asking(self, line: str) -> None:
+        """A line of the model's the owner sees, said, its own text or its plan's (a step, a found line not said): one
+        that asks (guard.line_asks) turns on what typed words do for the rest of the run (_typed), and makes the owner's
+        next words an answer (owner_says); so does one that tells them to choose ("Choose one: mute or pause.":
+        _tells_to_choose). Its words are kept till the owner next types: words that only echo them answer it too."""
+        asks = guard.line_asks(line)
+        offers = asks or _tells_to_choose(line)
+        said = guard.words(line, camel=False)
+        with self._lock:
+            if asks:
+                self._line_asked = True
+            if offers:
+                self._asked_since = True
+            if len(self._model_words) < MODEL_WORDS_CAP:
+                self._model_words.update(said)
 
     def _tool_question(self, text: str, choices: tuple[str, ...]) -> bool:
         with self._lock:

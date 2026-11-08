@@ -44,6 +44,7 @@ import fnmatch
 import re
 import unicodedata
 from bisect import bisect_left, bisect_right
+from functools import lru_cache
 from itertools import islice
 from typing import Any
 from urllib.parse import urlsplit
@@ -552,8 +553,8 @@ def sensitive_folder_name(name: Any) -> bool:
 
 
 # What plainly is a key or a password in a text a task would read (scrub_secrets): the value goes, the text stays. A
-# private key's block, a well-known key's prefix, a password in an address, and a line naming a secret with a value that
-# looks like one.
+# private key's block, a well-known key's prefix, a password in an address, a line naming a secret with a value that
+# looks like one, and a sentence saying what a strong secret is.
 SECRET_MARK = "[left out: looks like a key or a password]"
 _KEY_HEADER_RE = re.compile(r"-----BEGIN [A-Z0-9 ]{0,32}PRIVATE KEY(?: BLOCK)?-----|PuTTY-User-Key-File-\d")
 _KEY_END_RE = re.compile(r"-----END [A-Z0-9 ]{0,32}PRIVATE KEY(?: BLOCK)?-----")
@@ -580,45 +581,114 @@ _SECRET_LINE_RE = re.compile(r"([A-Za-z][A-Za-z0-9_.\-/ ]{0,63})"
                              r"(\s{0,4}(?:\([^()\n]{0,40}\)|\[[^\[\]\n]{0,40}\]|#\d{1,4}|\*{1,3}"
                              r"|for\s[^\s:=@]{1,64}@[^\s:=]{1,64}))?"
                              r"[\"']?\s{0,40}(=>|->|:=|[:=|])\s{0,40}[\"']?"
-                             r"((?:(?:[Bb]earer|[Bb]asic|[Tt]oken|[Aa]pi[Kk]ey)\s+)?[^\s\"',;]{1,400})")
+                             r"((?:(?:[Bb]earer|[Bb]asic|[Tt]oken|[Aa]pi[Kk]ey)[ \t]{1,4})?[^\s\"',;]{1,400})")
 _LABEL_MARK_RE = re.compile(r"=>|->|:=|[:=|]")
+# What must follow a mark for a label to end in it: a value's first character ("pin : ," has none). (":=" and "=>" have
+# one in their second character, as ":" and "=".)
+_VALUE_AFTER_RE = re.compile(r"\s{0,40}[\"']?[^\s\"',;]")
 _NAME_REACH, _VALUE_REACH = 240, 480             # as far as the pattern can reach before a mark and after it
+# The longest a label can be from its name's start to its value's first character (64 + 137 + 1 + 40 + 2 + 40 + 1 + 1):
+# a search of a stretch that found none rules out a label starting more than this before the stretch's end. A stretch
+# is this long at least, so that what such a search looks at again is little.
+_LONGEST_LABEL, _STRETCH = 286, 4096
+# What may stand right before a label's mark, past its spaces (a name's own, 63 at most, and the pattern's 40): a
+# name's last character, a bracket's, a star's, a digit's ("#1"), a quote, or within 65 after an "@" the end of "for
+# bob@example.com". A mark after anything else ends no label ("aaa#:a"), so it is not searched round.
+_BEFORE_MARK = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-/)]*\"'")
+_SPACES_BEFORE_MARK = 103
 _VALUE_END_RE = re.compile(r"[^\s\"',;]*")      # a value past the pattern's reach goes whole
 _LINK_END_RE = re.compile(r"[^\s\"']*")
 _VALUE_STOPS = " \t\r\n\"',;"
 _JOINED_RE = re.compile(r"(?:[,;][^\s\"',;]+)+")    # "Hun,Hunter22": a label's value with a mark in it
 _VALUE_GOES_ON_RE = re.compile(r" [A-Z0-9]|[,;][^\s\"',;]")   # after a first word: a digit group, or that
-# Digit groups: "4111 1111 1111 1111", "078 05 1120", and an IBAN's letters after its first group.
+# Digit groups: "4111 1111 1111 1111", "078 05 1120", and an IBAN's letters after its first group. A group ends at
+# anything but a letter or a digit ("789#", '1111"').
 _DIGIT_GROUPS_RE = re.compile(r"(?:(?<=[A-Z]{2}\d{2}) [A-Z]{4}(?=\s\d))?"
-                              r"(?: (?=[A-Z]{0,7}\d)[A-Z0-9]{1,8}(?=\s|$|[,.;:)])){1,12}")
+                              r"(?: (?=[A-Z]{0,7}\d)[A-Z0-9]{1,8}(?![A-Za-z0-9])){1,12}")
 _DIGITS_IN_GROUPS = 6
-_SECRET_VALUE_MIN, _LONG_VALUE_MIN = 6, 16
-# Not a secret whatever the label: an http or https address (a password in it goes on its own), an amount, a masked
-# value.
+_SECRET_VALUE_MIN, _LONG_VALUE_MIN, _SHORT_VALUE_MIN = 6, 16, 3
+# Not a secret whatever the label: an http or https address (a password in it goes on its own), an amount, and under a
+# card's or an account's label a masked number. An amount is the whole value: a currency's mark or code (a country's
+# letters before a $) or word and digits, maybe a sign or a bracket before it and a mark after it ("($120.00)",
+# "US$120.00", "Rs 500/-", "120.00 USD"), a range ("$20-30", "$130-$165") or an amount a person, a night or a month
+# ("$25/person"); glued after the digits, a mark or a code only after a decimal or thousands mark ("120.00\u20ac").
+# "$3cur3Pass", "$5/Hunter" and "483920$" are none.
 _MONEY_CODE, _MONEY_MARK = r"USD|EUR|GBP|INR|AUD|CAD|CHF|JPY|NZD|SGD|AED|Rs\.?|RS\.?", "[$\u20ac\u00a3\u00a5\u20b9]"
-_PLAIN_VALUE_RE = re.compile(r"(?i:https?://)"
-                             rf"|{_MONEY_MARK}\s?\d|(?:{_MONEY_CODE})\s?\d"
-                             rf"|\d[\d,.]*\s?(?:{_MONEY_MARK}|(?:{_MONEY_CODE})\b"
-                             r"|(?i:dollars?|pounds?|euros?|rupees?|bucks|pence|cents?)\b)")
-_MASKED_RE = re.compile(r"(?=[*xX\u2022\u00b7#\-.]*[*xX\u2022\u00b7#])[*xX\u2022\u00b7#\-.]{4,}\d{0,4}")
-_WORD_WITH_A_NUMBER_RE = re.compile(r"\d+-[a-z]+")    # "Secret 3-step plan": a word, for a line with no mark
-_LABELS_PER_LINE_CAP = 20_000                         # past anything a part of a file, a kept message or the bar holds
+_MONEY_WORD = r"(?i:dollars?|pounds?|euros?|rupees?|bucks|pence|cents?)"
+_MONEY_COUNTRY = r"(?:US|CA|AU|CDN|NZ|HK|NT|MX|A|C|S|R)?"        # before a $: US$, CA$, A$, R$ ...
+_PER_UNIT = (r"(?i:/(?:person|pp|head|adult|child|kid|guest|couple|family|night|day|week|wk|month|mo|year|yr|hour|hr"
+             r"|session|class|lesson|seat|ticket|unit|item|user|member|student|kg|lb))")
+_LINK_RE = re.compile(r"[<(]?(?i:https?://)")
+_AMOUNT_RE = re.compile(r"[(\-+<\[]?"
+                        rf"(?:(?:{_MONEY_COUNTRY}{_MONEY_MARK}|(?:{_MONEY_CODE})(?![A-Za-z])|{_MONEY_WORD}\s)"
+                        r"\s?\d[\d,.]*"
+                        rf"(?:\s?[-\u2013]\s?{_MONEY_COUNTRY}(?:{_MONEY_MARK})?\d[\d,.]*)?"
+                        rf"|\d[\d,]*[.,]\d+\s?(?:{_MONEY_MARK}|(?:{_MONEY_CODE})(?![A-Za-z]))"
+                        rf"|\d[\d,.]*\s(?:{_MONEY_MARK}|(?:{_MONEY_CODE}|{_MONEY_WORD})(?![A-Za-z])))"
+                        rf"{_PER_UNIT}?"
+                        r"(?:/-|\)[.,]?|[.,\]>])?(?=[\s\"',;]|\Z)")
+# Masked: two marks or more (or four, one a mark), then four digits at most and maybe a full stop, a comma or a bracket.
+_MASKED_RE = re.compile(r"([*xX\u2022\u00b7#\-.]{2,})\d{0,4}[.,)]?")
+_MASK_MARKS = "*xX\u2022\u00b7#"
+# "The Secret 5-Minute Trick", "Pin 3rd-party apps": a word, for a line with no mark.
+_WORD_WITH_A_NUMBER_RE = re.compile(r"(?i:\d+(?:st|nd|rd|th)?-[a-z]+)")
+# Past the marks of any line read: the bar holds 32,767 characters, and a part of a file or a kept message is read from
+# its reach and margin before it (scrub_part), 12,000 + 1,232 at most.
+_LABELS_PER_LINE_CAP = 20_000
 _KEY_NAMES = _phrases("api key", "apikey", "api token", "private key", "privatekey", "access key", "accesskey", "auth",
                       "authorization", "bearer", "credential", "credentials", "token", "client secret", "secret key")
 _NOT_A_SECRET_VALUE = _phrases("expiry", "expiration", "exp date", "routing")  # sensitive_label's, with plain values
+# A postal code is no secret: "PIN code: 560001", "ZIP: 94103". Only as the label's own name: at its end (maybe before
+# "no" or "number"), and with no word of a card's, a lock's or a password's before it: "Card PIN code: 482913" and "Zip
+# password: ..." are secrets.
+_POSTAL_NAMES = _phrases("pin code", "pincode", "postal code", "postcode", "post code", "zip", "zip code", "zipcode")
+_POSTAL_TAILS = frozenset({"no", "number", "num"})
+_PIN_OWNERS = frozenset({"card", "atm", "debit", "credit", "bank", "account", "login", "upi", "sim", "phone", "door",
+                         "lock", "safe", "alarm", "gate", "garage", "voicemail"})
 # Labels of a task's reading only, beside sensitive_label's, which the desktop's fields use: Indian identity and bank
-# forms. "PAN" counts only in capitals: a frying pan is no number.
+# forms. "PAN" counts only in capitals and as the name's last word or before No, Number, Card or "is": a frying pan is
+# no number, and nor is a "PAN India launch".
 _AC_LABELS = _phrases("a c no", "a c number", "ac no")
 _MORE_SECRET_LABELS = (*_phrases("mpin", "tpin", "aadhaar", "aadhar", "ifsc", "voter id", "voterid"), *_AC_LABELS)
-_PAN_RE = re.compile(r"\bPAN\b")
-_PASS_WORDS = _phrases("pass", "pw")                  # at a name's end: DB_PASS=, "PW:"
+_PAN_RE = re.compile(r"\bPAN\b(?:[\s._/-]*(?i:no|number|num|card|is)\b\.?){0,3}[\s.]*$")
+# Under these, a short value goes: 3 characters holding a digit ("PIN: 4821", "CVV: 123").
+_SHORT_LABELS = _phrases("pin", "mpin", "tpin", "cvv", "cvv2", "cvc", "cvc2", "otp", "passcode", "security code",
+                         "securitycode")
+_SHORT_TAILS = frozenset({"number", "no", "num", "code", "is"})          # "PIN number", "OTP code", "PIN is"
+# A masked number is one only under a card's or an account's label, never a password's.
+_NUMBER_NAMES = _phrases("card", "cardnumber", "account", "accountnumber", "acct", "a c", "ac no", "iban", "aadhaar",
+                         "aadhar", "ssn", "social security", "national insurance", "passport", "voter id", "voterid",
+                         "pan")
+_PASSWORD_NAMES = _phrases("password", "passwd", "pwd", "passcode", "passphrase", "pin", "pincode", "mpin", "tpin",
+                           "otp", "one time", "onetime", "totp", "2fa", "mfa", "cvv", "cvv2", "cvc", "cvc2",
+                           "security code", "securitycode", "verification code", "secret", "token", "key", "pass", "pw")
+# "pass" and "pw" are a password's name alone, joined to the word before by "_" (DB_PASS), or after a sign-in word;
+# otherwise only a value of 16 characters or more goes ("Parking pass: P1234567" reads).
+_PASS_WORDS = _phrases("pass", "pw")
+_SIGN_IN_WORDS = frozenset({"wifi", "db", "user", "login", "admin", "root", "email", "account", "router", "network"})
+_JOINED_PASS_RE = re.compile(r"[A-Za-z0-9]_(?:pass|pw)\s*$", re.IGNORECASE)
 _EVERYDAY_PASSES = _phrases("boarding pass", "bus pass", "rail pass", "train pass", "travel pass", "transit pass",
                             "metro pass", "season pass", "day pass", "ski pass", "gym pass", "guest pass",
                             "visitor pass", "festival pass", "hall pass")
+_SHORT, _SECRET, _PASS = "short", "secret", "pass"   # what a label takes: a short value, a value, only a long one
+_LABEL_WORDS = (*SENSITIVE_WORDS, *_MORE_SECRET_LABELS)
 # What a name must hold for it to say anything (every phrase's first word): most names need no further reading.
 _NAME_HINT_RE = re.compile("|".join(sorted({re.escape(phrase[0]) for phrase in (
     *SENSITIVE_WORDS, *_KEY_NAMES, *_MORE_SECRET_LABELS, *_PASS_WORDS, ("key",), ("pan",)) if phrase not in _AC_LABELS},
-    key=len, reverse=True)) + r"|a\W?c\W?n", re.IGNORECASE)
+    key=len, reverse=True)) + r"|a\W{0,3}c\W{0,3}n", re.IGNORECASE)
+# A sentence saying what a strong secret is: "Your OTP is 483920", "the password is Hunter22Zq", "login code = 483920",
+# "Your OTP code is 483920", "Your PIN number is 4821", "Your one-time password (OTP) is 483920". Its name stands at a
+# line's start or after a space, a bracket, a quote, a star or a mark: never in a link's query. A PIN's "code" is a
+# postal code's ("Your PIN code is 560001"). Each run of spaces is read once (possessive): a long one with no value
+# after it costs its length, not its square.
+_SENTENCE_RE = re.compile(r"(?<![^\s(\[\"'\u201c\u2018*>:])"
+                          r"(?:(?:password|passcode|mpin|otp|cvv)(?:[ \t]++(?:code|number|no)\b\.?)?"
+                          r"|pin(?:[ \t]++(?:number|no)\b\.?)?|one[ \t-]?time[ \t]++(?:code|password)"
+                          r"|(?:verification|security|log[ \t-]?in|sign[ \t-]?in|access|authentication|2fa)[ \t]++code)"
+                          r"(?:[ \t]{0,4}+\([^()\n\r\x0b\x0c\x1c-\x1e\x85\u2028\u2029]{0,40}+\))?"
+                          r"(?:[ \t]++is\b[ \t]*+:?|[ \t]*+=)[ \t]*+[\"'\u201c\u2018]?([^\s\"',;\u201d\u2019]{1,400})",
+                          re.IGNORECASE)
+_SENTENCE_END = ".!?)"
 _NOT_ASCII_RE = re.compile(r"[^\x00-\x7f]")
 _LINE_WORD_RE = re.compile(r"\S+")
 _BARE_NAME_WORDS = 5                                  # a label with no mark is a few words at a line's start
@@ -629,16 +699,60 @@ def _ends_with(tokens: list[str], phrases: tuple[tuple[str, ...], ...]) -> bool:
     return any(len(tokens) >= len(phrase) and tuple(tokens[-len(phrase):]) == phrase for phrase in phrases)
 
 
-def _pass_name(name: str) -> bool:
-    """A name ending in "pass" or "pw" (DB_PASS, "PW"), but for an everyday pass."""
-    return any(_ends_with(tokens, _PASS_WORDS) and not _ends_with(tokens, _EVERYDAY_PASSES)
-               for tokens in _readings(name))
+def _pass_kind(name: str, readings: tuple[list[str], list[str]]) -> str:
+    """What a name ending in "pass" or "pw" takes (``readings``: its _readings), but for an everyday pass: alone
+    ("Pass", "PW"), joined by "_" to the word before (DB_PASS) or after a sign-in word ("WiFi pass") it is a
+    password's (_SECRET); otherwise only a long value (_PASS: "Parking pass: P1234567" reads); "" for none."""
+    kind = ""
+    for tokens in readings:
+        if not _ends_with(tokens, _PASS_WORDS) or _ends_with(tokens, _EVERYDAY_PASSES):
+            continue
+        before = tokens[:-1]
+        if not before or before[-1] in _SIGN_IN_WORDS or before[-2:] == ["wi", "fi"] \
+                or _JOINED_PASS_RE.search(name) is not None:
+            return _SECRET
+        kind = _PASS
+    return kind
 
 
-def _secret_label(name: str) -> bool:
-    """A name that names a secret, for what a task reads: sensitive_label's words and these."""
-    return (sensitive_label(name) or _says(name, _MORE_SECRET_LABELS) or _PAN_RE.search(name) is not None
-            or _pass_name(name))
+def _short_label(tokens: list[str]) -> bool:
+    """These words end in a name a short value is a secret under (_SHORT_LABELS), maybe before "number", "code" or
+    "is"."""
+    return any(_ends_with(tokens[:cut], _SHORT_LABELS) and _SHORT_TAILS.issuperset(tokens[cut:])
+               for cut in range(len(tokens), max(0, len(tokens) - 2) - 1, -1))
+
+
+def _postal_name(readings: tuple[list[str], list[str]]) -> bool:
+    """A name that is a postal code's own (``readings``: its _readings): it ends in one (maybe before "no" or
+    "number"), and no word of a card's, a lock's or a password's stands before it ("Card PIN code", "Zip password")."""
+    for tokens in readings:
+        cut = len(tokens)
+        while cut and tokens[cut - 1] in _POSTAL_TAILS:
+            cut -= 1
+        for phrase in _POSTAL_NAMES:
+            if cut >= len(phrase) and tuple(tokens[cut - len(phrase):cut]) == phrase:
+                before = tokens[:cut - len(phrase)]
+                if _PIN_OWNERS.isdisjoint(before) and not _has_phrase(before, _LABEL_WORDS):
+                    return True
+    return False
+
+
+@lru_cache(maxsize=4096)            # a long text names the same few labels again and again
+def _label_kind(name: str, *, bare: bool = False) -> str:
+    """What the name of a label takes, for what a task reads: a short value (_SHORT: "PIN", "CVV"), a value (_SECRET:
+    sensitive_label's words and these), only a long one (_PASS), or nothing (""): a postal code's name, or one whose
+    value is plain (an expiry date). ``bare``: the label has no mark after it, so it must end in the secret's name, and
+    a short value never goes."""
+    readings = _readings(name)
+    if any(_has_phrase(tokens, _NOT_A_SECRET_VALUE) for tokens in readings) or _postal_name(readings):
+        return ""
+    if bare:
+        named = any(_ends_with(tokens, _LABEL_WORDS) for tokens in readings)
+    else:                            # sensitive_label's words, and these
+        named = any(_has_phrase(tokens, _LABEL_WORDS) for tokens in readings)
+    if named or _PAN_RE.search(name) is not None:
+        return _SHORT if not bare and any(_short_label(tokens) for tokens in readings) else _SECRET
+    return _pass_kind(name, readings)
 
 
 def _names_a_key(name: str) -> bool:
@@ -646,13 +760,30 @@ def _names_a_key(name: str) -> bool:
     return _says(name, _KEY_NAMES) or any(len(tokens) >= 2 and tokens[-1] == "key" for tokens in _readings(name))
 
 
-def _plain_value(line: str, start: int, value: str) -> bool:
-    """What stands at ``start`` is no secret whatever its label says: an address, an amount, a masked number."""
-    return _PLAIN_VALUE_RE.match(line, start) is not None or _MASKED_RE.fullmatch(value) is not None
+def _masked(name: str, value: str) -> bool:
+    """``value`` is a masked number under a card's or an account's label ``name`` ("****4242.", "XX5678"), never under a
+    password's."""
+    shown = _MASKED_RE.fullmatch(value)
+    if shown is None or not _says(name, _NUMBER_NAMES) or _says(name, _PASSWORD_NAMES):
+        return False
+    marks = sum(char in _MASK_MARKS for char in shown.group(1))
+    return marks >= 2 or (marks and len(shown.group(1)) >= 4)
 
 
-def _looks_secret(value: str) -> bool:
-    return len(value) >= _SECRET_VALUE_MIN and (len(value) >= _LONG_VALUE_MIN or any(char.isdigit() for char in value))
+def _plain_value(name: str, line: str, start: int, end: int) -> bool:
+    """What stands at ``start`` (its first word to ``end``) is no secret whatever its label ``name`` says: an address,
+    an amount, a masked number under a card's or an account's label."""
+    return (_LINK_RE.match(line, start) is not None or _AMOUNT_RE.match(line, start) is not None
+            or _masked(name, line[start:end]))
+
+
+def _looks_secret(value: str, kind: str = _SECRET) -> bool:
+    if kind == _PASS:
+        return len(value) >= _LONG_VALUE_MIN
+    digit = any(char.isdigit() for char in value)
+    if kind == _SHORT and len(value) >= _SHORT_VALUE_MIN and digit:
+        return True
+    return len(value) >= _SECRET_VALUE_MIN and (len(value) >= _LONG_VALUE_MIN or digit)
 
 
 def _label_value_end(line: str, start: int, end: int) -> int:
@@ -668,113 +799,224 @@ def _label_value_end(line: str, start: int, end: int) -> int:
     return end
 
 
-def _secret_end(line: str, match: re.Match[str]) -> int:
-    """Where the value a label before it names ends, or 0 when that is no secret."""
-    name, between, mark, value = match.groups()
-    start, end = match.span(4)
-    if _NAME_HINT_RE.search(name) is None or _plain_value(line, start, value):
+def _value_end(name: str, between: str | None, mark: str, line: str, start: int, end: int) -> int:
+    """Where the value whose first word stands at ``line[start:end]`` ends, after the label ``name`` (``between`` and
+    its ``mark``), or 0 when that is no secret."""
+    if _NAME_HINT_RE.search(name) is None or _plain_value(name, line, start, end):
         return 0
-    if len(value) < _SECRET_VALUE_MIN and _VALUE_GOES_ON_RE.match(line, end) is None:
+    kind = _label_kind(name)
+    least = _SHORT_VALUE_MIN if kind == _SHORT else _SECRET_VALUE_MIN
+    if end - start < least and _VALUE_GOES_ON_RE.match(line, end) is None:
         return 0                                         # too short to be one, whatever its name says: no need to read it
-    if _secret_label(name) and not _says(name, _NOT_A_SECRET_VALUE):
+    if kind:
         end = _label_value_end(line, start, end)
-        return end if _looks_secret(line[start:end]) else 0
-    if between is None and mark in (":", "=") and _names_a_key(name) and len(value) >= _LONG_VALUE_MIN \
-            and not value.isdigit():
+        return end if _looks_secret(line[start:end], kind) else 0
+    if between is None and mark in (":", "=") and _names_a_key(name) and end - start >= _LONG_VALUE_MIN \
+            and not line[start:end].isdigit():
         return _VALUE_END_RE.match(line, end).end()
     return 0
 
 
-def _labelled_values(line: str) -> list[tuple[int, int]]:
-    """Where the values of ``line``'s labels stand, anywhere along it. What was read as a value may be a label itself
-    ("FYI: password: ...", "login=bob:password=..."), so reading goes on from a value's start; but for a link, whose
-    query counts only as _QUERY_SECRET_RE reads it. Each read looks at the stretch round the next mark and moves on."""
+def _secret_end(line: str, match: re.Match[str]) -> int:
+    """Where the value a label before it names ends, or 0 when that is no secret. A value the stretch looked at cut
+    short is read to its end."""
+    name, between, mark, _value = match.groups()
+    start, end = match.span(4)
+    if end == match.endpos:
+        end = _VALUE_END_RE.match(line, end).end()
+    return _value_end(name, between, mark, line, start, end)
+
+
+def _labelled_values(line: str, until: int | None = None) -> list[tuple[int, int]]:
+    """Where the values of ``line``'s labels stand, anywhere along it (``until``: of the marks up to there only). What
+    was read as a value may be a label itself ("FYI: password: ...", "login=bob:password=..."), so reading goes on from
+    a value's start; but for a link, whose query counts only as _QUERY_SECRET_RE reads it. Each read looks at the
+    stretch from a label's reach before the next mark that a value can follow, for the first label in it, and moves
+    on; a stretch that holds none moves it on past where one could start."""
     found: list[tuple[int, int]] = []
-    at = 0
+    at = look = 0                                        # where a label may start; where the next mark is looked for
     for _read in range(_LABELS_PER_LINE_CAP):
-        mark = _LABEL_MARK_RE.search(line, at)
-        if mark is None:
+        mark = _LABEL_MARK_RE.search(line, look)
+        if mark is None or (until is not None and mark.start() > until):
             break
-        match = _SECRET_LINE_RE.search(line, max(at, mark.start() - _NAME_REACH), mark.end() + _VALUE_REACH)
+        look = mark.end()
+        if mark.end() - mark.start() == 1 or mark.group() == "->":
+            if _VALUE_AFTER_RE.match(line, mark.end()) is None:
+                continue                                 # no label ends in it: a later mark's stretch starts as far back
+        if not _name_may_end(line, mark.start()):
+            continue                                     # (the same)
+        begin = max(at, mark.start() - _NAME_REACH)
+        stop = max(mark.end() + _VALUE_REACH, begin + _STRETCH)
+        match = _SECRET_LINE_RE.search(line, begin, stop)
         if match is None:
-            at = mark.end()
+            if stop >= len(line):
+                break                                    # none starts anywhere from there on
+            at = look = max(mark.end(), stop - _LONGEST_LABEL)
             continue
         start = match.start(4)
         if line.startswith("//", start):
-            at = _LINK_END_RE.match(line, start).end()
+            at = look = _LINK_END_RE.match(line, start).end()
             found += [query.span(1) for query in _QUERY_SECRET_RE.finditer(line, start, at)
                       if _looks_secret(query.group(1))]
             continue
         end = _secret_end(line, match)
         if end:
             found.append((start, end))
-        at = end or start
+        at = look = end or start
     return found
 
 
-def _bare_label(name: str) -> bool:
-    """These words, with nothing after them on their line but a value, are a label: they end in a secret's name."""
-    if _says(name, _NOT_A_SECRET_VALUE):
+def _name_may_end(line: str, at: int) -> bool:
+    """A label's name (or what may stand between it and its mark) may end before a mark at ``at`` in ``line``
+    (_BEFORE_MARK)."""
+    before = at
+    while before > 0 and line[before - 1].isspace():
+        before -= 1
+        if at - before > _SPACES_BEFORE_MARK:
+            return False
+    if before == 0:
         return False
-    return (any(_ends_with(tokens, (*SENSITIVE_WORDS, *_MORE_SECRET_LABELS)) for tokens in _readings(name))
-            or _pass_name(name) or name.endswith("PAN"))
+    return line[before - 1] in _BEFORE_MARK or "@" in line[max(0, before - 66):before]
 
 
-def _bare_value(line: str, start: int) -> int:
-    """Where a value with no mark before it, starting at ``start``, ends, or 0 when it is no secret."""
+def _marked_end(line: str) -> str:
+    """``line`` up to its end, past spaces and the stars or underscores of bold, when it ends in a label's mark (":",
+    "=", "|"); else ""."""
+    ending = line.rstrip().rstrip("*_").rstrip()
+    return ending if ending.endswith((":", "=", "|")) else ""
+
+
+def _said_before_its_value(ending: str) -> bool:
+    """``ending`` (a line up to the mark it ends in) may end a sentence's words before its value: "... is:", "... =". """
+    if ending.endswith("="):
+        return True
+    words = ending[:-1].rstrip(" \t")
+    return words[-2:].casefold() == "is" and not words[-3:-2].isalnum()
+
+
+def _line_labels(lines: list[str], starts: list[int], number: int, until: int | None) -> list[tuple[int, int]]:
+    """_labelled_values of line ``number`` (``until``: of the marks up to there only), as places in the text. A line
+    ending in a label and its mark is read with the next line's first word after it (one blank line at most between),
+    as on one line: "Your temporary password is:" then "Drovers88x"; and so is a sentence ending in its mark, for the
+    value it gives there ("Your one-time password (OTP) is:" then "483920")."""
+    line, here = lines[number], starts[number]
+    ending = _marked_end(line)
+    for later in range(number + 1, min(number + 3, len(lines)) if ending else 0):
+        word = _LINE_WORD_RE.search(lines[later])
+        if word is None:
+            continue
+        joined = len(ending) + 1
+        there = starts[later] + word.start() - joined             # where the joined line's places past it stand
+        reach = joined if until is None else min(joined, until)
+        text = ending + " " + lines[later][word.start():]
+        spans = _labelled_values(text, reach)
+        if (until is None or until >= joined) and _said_before_its_value(ending):   # (one on the line: _line_values')
+            spans += [span for span in _sentence_values(text, joined + len(word.group())) if span[0] >= joined]
+        return [(here + start if start < joined else there + start, here + end if end <= len(ending) else there + end)
+                for start, end in spans]
+    return [(here + start, here + end) for start, end in _labelled_values(line, until)]
+
+
+def _said_secret(value: str) -> bool:
+    """A value a sentence gives a strong secret is one: it holds a digit (3 characters or more), or it is 8 or more
+    mixing letters with a symbol or a capital inside, after a small letter or a digit ("case-sensitive",
+    "Case-Sensitive", "EXPIRING" and "Wednesday" are words)."""
+    if len(value) >= _SHORT_VALUE_MIN and any(char.isdigit() for char in value):
+        return True
+    if len(value) < 8 or not any(char.isalpha() for char in value):
+        return False
+    return (any(not char.isalnum() and char not in "-'\u2019" for char in value)
+            or any(char.isupper() and (before.islower() or before.isdigit()) for before, char in zip(value, value[1:])))
+
+
+def _sentence_values(line: str, until: int | None = None) -> list[tuple[int, int]]:
+    """Where the values of ``line``'s sentences of the form "<a strong secret's name> is <value>" ("is:", "=") stand
+    (``until``: of those ending before there; ``line`` may be a whole text, for a sentence never runs past its line's
+    end): "Your OTP is valid for 10 minutes" gives none."""
+    found: list[tuple[int, int]] = []
+    for said in _SENTENCE_RE.finditer(line, 0, len(line) if until is None else min(len(line), until)):
+        start, end = said.span(1)
+        if _plain_value("", line, start, end):
+            continue
+        end = _label_value_end(line, start, end)
+        while end > start and line[end - 1] in _SENTENCE_END:
+            end -= 1                                     # the sentence's own mark stays
+        if _said_secret(line[start:end]):
+            found.append((start, end))
+    return found
+
+
+def _bare_value(name: str, kind: str, line: str, start: int) -> int:
+    """Where a value with no mark before it, starting at ``start``, ends after the label ``name`` that takes ``kind``,
+    or 0 when it is no secret."""
     end = _VALUE_END_RE.match(line, start).end()
-    if _plain_value(line, start, line[start:end]):
+    if _plain_value(name, line, start, end):
         return 0
     end = _label_value_end(line, start, end)
-    return end if _looks_secret(line[start:end]) else 0
+    return end if _looks_secret(line[start:end], kind) else 0
 
 
-def _next_line_value(lines: list[str], number: int) -> tuple[int, int, int] | None:
-    """The first word of the next line with anything on it, one blank line at most: (that line's number, where the value
-    starts and ends), or None when it is no value."""
+def _next_line_value(lines: list[str], number: int, name: str) -> list[tuple[int, int, int]]:
+    """The first word of the next line with anything on it, one blank line at most, as the value of line ``number``,
+    which is only the label ``name``: [(that line's number, where the value starts and ends)], or [] when it is none. A
+    word with a number ("5-Minute") is a word."""
     for later in range(number + 1, min(number + 3, len(lines))):
-        word = _LINE_WORD_RE.search(lines[later])
-        if word is not None:
-            end = _bare_value(lines[later], word.start())
-            return (later, word.start(), end) if end else None
-    return None
+        line = lines[later]
+        word = _LINE_WORD_RE.search(line)
+        if word is None:
+            continue
+        if _WORD_WITH_A_NUMBER_RE.fullmatch(word.group()) is not None:
+            return []
+        end = _bare_value(name, _label_kind(name, bare=True), line, word.start())
+        return [(later, word.start(), end)] if end else []
+    return []
 
 
-def _bare_values(line: str, lines: list[str], number: int) -> tuple[int, int, int] | None:
-    """A value with no mark before it, as _next_line_value says it: after a label at the start of line ``number``, a
-    word holding a digit (a table's cells: "Password Hunter22"); after a line that is only a label, the next line's
-    first word."""
+def _bare_values(line: str, lines: list[str], number: int) -> list[tuple[int, int, int]]:
+    """Values with no mark before them, as _next_line_value says it: after a label at the start of line ``number``, a
+    word holding a digit (a table's cells: "Password Hunter22"); after a line that is only a label, with no mark at its
+    end (that is _line_labels'), the next line's first word."""
+    found: list[tuple[int, int, int]] = []
     if _NAME_HINT_RE.search(line[:200]) is None:
-        return None
+        return found
     words = list(islice(_LINE_WORD_RE.finditer(line), _BARE_NAME_WORDS + 1))
     named: list[str] = []
     for word in words:
         shown = word.group()
         if named and any(char.isdigit() for char in shown):
-            if named[-1][-1] in ":=|" or not _bare_label(" ".join(named)) \
-                    or _WORD_WITH_A_NUMBER_RE.fullmatch(shown) is not None:
-                return None                      # (one with a mark is _labelled_values')
-            end = _bare_value(line, word.start())
-            return (number, word.start(), end) if end else None
+            kind = _label_kind(" ".join(named), bare=True)
+            if named[-1][-1] in ":=|" or not kind or _WORD_WITH_A_NUMBER_RE.fullmatch(shown) is not None:
+                return found                     # (one with a mark is _labelled_values')
+            end = _bare_value(" ".join(named), kind, line, word.start())
+            return [*found, (number, word.start(), end)] if end else found
         named.append(shown)
-    if named and len(words) <= _BARE_NAME_WORDS and _bare_label(" ".join(named).rstrip(_LABEL_END_MARKS)):
-        return _next_line_value(lines, number)
-    return None
+    name = " ".join(named).rstrip(_LABEL_END_MARKS)
+    if named and len(words) <= _BARE_NAME_WORDS and not _marked_end(line) and _label_kind(name, bare=True):
+        found += _next_line_value(lines, number, name)
+    return found
 
 
-def _line_values(text: str, *, first_whole: bool = True) -> list[tuple[int, int]]:
-    """Where the values line by line stand in ``text`` (_labelled_values, _bare_values). ``first_whole``: its first line
-    starts at its start (a part of a file may start inside one)."""
+def _line_values(text: str, *, first_whole: bool = True, until: int | None = None) -> list[tuple[int, int]]:
+    """Where the values line by line stand in ``text`` (_sentence_values over the whole of it, _line_labels,
+    _bare_values). ``first_whole``: its first line starts at its start (a part of a file may start inside one).
+    ``until``: only what a label whose mark, or a sentence whose words, stand before there names. A line with nothing
+    on it gives nothing (a value under a label is read from the label's line), and a line with no mark no label."""
     lines = text.splitlines(keepends=True)
     starts = [0]
     for line in lines:
         starts.append(starts[-1] + len(line))
-    found: list[tuple[int, int]] = []
+    found = _sentence_values(text, until)
     for number, line in enumerate(lines):
-        found += [(starts[number] + start, starts[number] + end) for start, end in _labelled_values(line)]
-        bare = _bare_values(line, lines, number) if number or first_whole else None
-        if bare is not None:
-            found.append((starts[bare[0]] + bare[1], starts[bare[0]] + bare[2]))
+        here = starts[number]
+        if until is not None and here > until:
+            break
+        if line.isspace():
+            continue
+        if _LABEL_MARK_RE.search(line) is not None:
+            found += _line_labels(lines, starts, number, None if until is None else until - here)
+        if number or first_whole:
+            found += [(starts[later] + start, starts[later] + end)
+                      for later, start, end in _bare_values(line, lines, number)]
     return found
 
 
@@ -845,12 +1087,15 @@ def scrub_secrets(text: Any) -> tuple[str, int]:
     goes, never the message. A private key's block whole, from its header to its end or the end of the text; a
     well-known key's token (sk-ant-, sk-proj-, AKIA, ghp_, xox, a JWT ...); a password in an address, the rest of the
     address staying; a label's value (``API_KEY=...``, ``"password": "..."``, ``Authorization: Bearer ...``), anywhere
-    along a line, the label staying. With no mark too: a label at a line's start before a word holding a digit, a line
-    that is only a label before the next line's first word. In a link's query only ``password=``, ``passwd=``,
-    ``secret=``, ``client_secret=`` and ``api_key=`` count. A value that is an http or https address, an amount or
-    masked is no secret, whatever its label. Not a promise about everything: a password in a sentence stays what it is.
-    Read as it will arrive, invisible characters aside. Bounded: every pattern looks at a bounded stretch, or a run it
-    then moves past."""
+    along a line, the label staying; after a line ending in a label and its mark, the next line's first word, as on one
+    line. With no mark too: a label at a line's start before a word holding a digit, a line that is only a label before
+    the next line's first word. Under a PIN's, a CVV's, an OTP's or a passcode's label a value of 3 characters holding
+    a digit goes. A sentence saying what a strong secret is ("Your OTP is 483920", "the password is Hunter22Zq") loses
+    its value. In a link's query only ``password=``, ``passwd=``, ``secret=``, ``client_secret=`` and ``api_key=``
+    count. A value that is an http or https address or an amount, or a masked number under a card's or an account's
+    label, is no secret, whatever its label; nor is a postal code. Not a promise about everything: a password in a
+    longer sentence stays what it is. Read as it will arrive, invisible characters aside. Bounded: every pattern looks
+    at a bounded stretch, or a run it then moves past."""
     if not isinstance(text, str) or not text:
         return text if isinstance(text, str) else "", 0
     spots = _invisible_spots(text)
@@ -861,19 +1106,28 @@ def scrub_secrets(text: Any) -> tuple[str, int]:
 def scrub_part(text: str, first: int, last: int, margin: int) -> tuple[str, int]:
     """``text[first:last]`` as scrub_secrets would give it read in its place, and how many, for a part of something
     longer. A block or a token is looked for from the text's start, so one that began before the part still goes; a
-    line's label from ``margin`` before the value standing at ``first``, so a long value's tail goes too; and both
-    ``margin`` past the part's end, so what the end cuts is still seen. ``first`` and ``last`` stay places in ``text``."""
+    line's labels from ``margin`` and a label's reach before ``first``, and the label of the value standing at
+    ``first`` from ``margin`` before that value's start, so a long value's tail goes too; and both ``margin`` past the
+    part's end, so what the end cuts is still seen. ``first`` and ``last`` stay places in ``text``."""
     last = min(last, len(text))
     head = text[:last + margin]
     spots = _invisible_spots(head)
     plain = _without_spots(head, spots)
     at = first - bisect_left(spots, first)
+    near = max(0, at - margin - _NAME_REACH - _VALUE_REACH)
+    spans = [*_key_values(plain), *_lines_from(plain, near)]
     run = max(plain.rfind(char, 0, at) for char in _VALUE_STOPS) + 1
-    near = max(0, run - margin)
-    whole = near == 0 or plain[near - 1] in "\r\n"
-    spans = [*_key_values(plain), *((near + start, near + end)
-                                    for start, end in _line_values(plain[near:], first_whole=whole))]
+    back = max(0, run - margin)
+    if back < near:                  # that value began before what is read: its own label, and only its own, from there
+        spans += _lines_from(plain, back, until=run + _LONGEST_LABEL)
     return _marked(text, _on_the_text(spans, spots), first, last)
+
+
+def _lines_from(plain: str, start: int, until: int | None = None) -> list[tuple[int, int]]:
+    """_line_values of ``plain`` from ``start`` on (``until``: of what starts before there), as places in ``plain``."""
+    whole = start == 0 or plain[start - 1] in "\r\n"
+    return [(start + first, start + last) for first, last in
+            _line_values(plain[start:], first_whole=whole, until=None if until is None else until - start)]
 
 
 def holds_secret(text: Any) -> bool:
