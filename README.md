@@ -2582,7 +2582,8 @@ or "PW" names a password on its own, as `DB_PASS` or after a sign-in word ("WiFi
 `client_secret=` and `api_key=` count: a bare `token=`, `auth=` or `pwd=` is how marketing mail and a
 meeting's link are written, so those links reach him whole. An http or https address, an amount (the
 whole value: "$120.00", "US$120.00", "CA$120.00", "Rs 500/-", "120.00 USD" or "120.00EUR", "$20-30",
-"$25/person"), a postal code ("PIN code: 560001", "ZIP: 94103": the label's own name, so a "Zip
+"$25/person"; a whole number before a code or a word is none, so "PIN: 4821 dollars" goes), a postal
+code ("PIN code: 560001", "ZIP: 94103": the label's own name, so a "Zip
 password" or a "Card PIN code" is a secret) and, under a
 card's or an account's label, a masked number are no secret whatever their label:
 "One-time setup fee: $120.00", "Password policy: https://..." and "Card number: ************4242"

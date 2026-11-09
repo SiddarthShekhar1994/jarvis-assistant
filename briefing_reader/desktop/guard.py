@@ -610,9 +610,10 @@ _SECRET_VALUE_MIN, _LONG_VALUE_MIN, _SHORT_VALUE_MIN = 6, 16, 3
 # Not a secret whatever the label: an http or https address (a password in it goes on its own), an amount, and under a
 # card's or an account's label a masked number. An amount is the whole value: a currency's mark or code (a country's
 # letters before a $) or word and digits, maybe a sign or a bracket before it and a mark after it ("($120.00)",
-# "US$120.00", "Rs 500/-", "120.00 USD"), a range ("$20-30", "$130-$165") or an amount a person, a night or a month
-# ("$25/person"); glued after the digits, a mark or a code only after a decimal or thousands mark ("120.00\u20ac").
-# "$3cur3Pass", "$5/Hunter" and "483920$" are none.
+# "US$120.00", "Rs 500/-"), a range ("$20-30", "$130-$165") or an amount a person, a night or a month ("$25/person");
+# after the digits, a mark or a code only after a decimal or thousands mark ("120.00 USD", "120.00\u20ac", "1,250 EUR").
+# "$3cur3Pass", "$5/Hunter" and "483920$" are none, and so is a whole number before a code or a word: "PIN: 4821
+# dollars" and "One-time password: 483920 USD" still go.
 _MONEY_CODE, _MONEY_MARK = r"USD|EUR|GBP|INR|AUD|CAD|CHF|JPY|NZD|SGD|AED|Rs\.?|RS\.?", "[$\u20ac\u00a3\u00a5\u20b9]"
 _MONEY_WORD = r"(?i:dollars?|pounds?|euros?|rupees?|bucks|pence|cents?)"
 _MONEY_COUNTRY = r"(?:US|CA|AU|CDN|NZ|HK|NT|MX|A|C|S|R)?"        # before a $: US$, CA$, A$, R$ ...
@@ -624,7 +625,7 @@ _AMOUNT_RE = re.compile(r"[(\-+<\[]?"
                         r"\s?\d[\d,.]*"
                         rf"(?:\s?[-\u2013]\s?{_MONEY_COUNTRY}(?:{_MONEY_MARK})?\d[\d,.]*)?"
                         rf"|\d[\d,]*[.,]\d+\s?(?:{_MONEY_MARK}|(?:{_MONEY_CODE})(?![A-Za-z]))"
-                        rf"|\d[\d,.]*\s(?:{_MONEY_MARK}|(?:{_MONEY_CODE}|{_MONEY_WORD})(?![A-Za-z])))"
+                        r")"
                         rf"{_PER_UNIT}?"
                         r"(?:/-|\)[.,]?|[.,\]>])?(?=[\s\"',;]|\Z)")
 # Masked: two marks or more (or four, one a mark), then four digits at most and maybe a full stop, a comma or a bracket.

@@ -3310,6 +3310,18 @@ class TheValueGoesInEveryForm(Corpus):
             with self.subTest(line=line):
                 self.assert_goes(line, secret)
 
+    def test_a_whole_number_before_a_code_or_a_word_is_no_amount(self) -> None:
+        # The owner's call (2026-11-09): a PIN or a password written as money still goes; a fee's line reads whole.
+        for line, secret in (("PIN: 4821 dollars", "4821"), ("PIN: 4821 GBP", "4821"),
+                             ("One-time password: 483920 USD", "483920"), ("Passcode: 483920 rupees", "483920"),
+                             ("Your PIN is 4821 dollars", "4821"), ("Password: 120.00 dollars", "120.00")):
+            with self.subTest(line=line):
+                self.assert_goes(line, secret)
+        for line in ("Monthly PIN fee: 8400 GBP", "Card PIN fee: 1200 dollars", "PIN charge: 4500 USD",
+                     "Passcode fee: 3000 rupees", "Monthly PIN fee: 1,250 EUR", "Total: 1200 dollars"):
+            with self.subTest(line=line):
+                self.assert_whole(line)
+
     def test_the_everyday_ways_of_writing_an_amount_a_link_or_a_masked_number(self) -> None:
         for line in ("One-time setup fee: US$120.00", "One-time setup fee: A$120.00", "One-time setup fee: C$ 120",
                      "One-time setup fee: S$120", "One-time setup fee: HK$120.00", "One-time setup fee: NZ$120.00",
