@@ -3409,6 +3409,23 @@ class TheValueGoesInEveryForm(Corpus):
             self.assertEqual(guard.scrub_secrets(f"pin : , pin : , Password: {self.PASSWORD}")[1], 1)
         self.assertEqual(len(searched), 1)
 
+    def test_a_stretch_with_no_label_is_not_read_again(self) -> None:
+        # A8: a stretch that held no label moves the reading on past it, so a line is looked at about once - counted,
+        # not timed, so a fast PC cannot hide a reading that goes back over each stretch for every mark in it.
+        looked: list[int] = []
+        real = guard._SECRET_LINE_RE                                          # noqa: SLF001
+
+        class Counted:
+            def search(self, line: str, pos: int = 0, endpos: int | None = None) -> Any:
+                end = len(line) if endpos is None else min(endpos, len(line))
+                looked.append(max(0, end - pos))
+                return real.search(line, pos, len(line) if endpos is None else endpos)
+
+        text = ("1:1 " * 8_192)[:32_767]
+        with mock.patch.object(guard, "_SECRET_LINE_RE", Counted()):
+            self.assertFalse(guard.holds_secret(text))
+        self.assertLess(sum(looked), 2 * len(text))
+
     # sec-2: the per-line cap, from where the part's reading starts ---------------------------------------------------
 
     def test_a_value_far_along_a_line_with_no_stops_goes_at_its_offset(self) -> None:

@@ -167,6 +167,16 @@ class WhatARequestHoldsTests(unittest.TestCase):
             with self.subTest(goal=goal):
                 self.assertTrue(fw.holds_something_private(goal))
 
+    def test_a_word_for_a_secret_alone_is_private(self) -> None:
+        # Naming a secret is enough: these hold no value (no key, address or long number), so only their words say it.
+        for goal in ("what is the 2FA code for my bank", "where is the CVV2 on my card",
+                     "find my account number for the gas bill", "my login details for the gym site stopped working",
+                     "reset the passcode on my phone", "what's my mother's maiden name on the bank form",
+                     "the 6 digit code they texted me isn't working"):
+            with self.subTest(goal=goal):
+                self.assertFalse(fw._holds_data(goal))                                     # noqa: SLF001
+                self.assertTrue(fw.holds_something_private(goal))
+
     def test_what_does_not(self) -> None:
         for goal in ("find me a cheap laptop", "what's on in Portland on 2026-11-06", "flights on 12/25/2026 under 1500",
                      "the population of Tokyo in 2020", "compare three 4K TVs under $800", "", "turn the volume down",
