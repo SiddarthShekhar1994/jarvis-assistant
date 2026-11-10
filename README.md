@@ -2797,6 +2797,46 @@ per kind, then "+N more". Its corner says "3 waiting . 1 owed", "scanning...",
 reads only mail headers, never while hidden or minimized; see
 [Follow-ups and nudges](#follow-ups-and-nudges).
 
+### Talk to Jarvis (the talk key)
+
+Off until you turn it on (below). Tap **Ctrl+Alt+Space**, say what you want, and
+Jarvis takes it after about half a second of quiet: "what's on my calendar
+today", "plan my day", "remember my exam is on the 14th". Tap the key again to
+end sooner, or press Esc to cancel. What he heard goes in exactly as if you had
+typed it in the bar, under the same rules: anything that sends, adds, moves or
+deletes still waits on its card for your click, because voice never approves or
+undoes anything. Words said while a task works go to the task, as typed words
+do, and "stop" stops it.
+
+- **He hears you only from the tap to the end.** The microphone opens on the
+  tap and closes when the talk ends; while it is open the orb says LISTENING and
+  moves with your voice, and the bar says so. Nothing listens in between: there
+  is no wake word.
+- **On this PC.** Your speech is turned into text here, by a speech model
+  (faster-whisper `small.en`, about 480 MB) downloaded only when you click
+  Download in Settings > Talk; the sound is kept in memory for the moment it
+  takes, never saved, and no log holds what you said (only how long and how
+  many characters). The model stays loaded for 10 minutes after a talk
+  (`[talk] keep_warm_minutes`), so the next one starts at once; the first after
+  a while takes a few seconds while it loads.
+- **The microphone** is the one picked in Settings > Meetings, else the Windows
+  default. When you tap, Jarvis stops talking and a playing briefing pauses, so
+  neither is heard; neither resumes by itself.
+- **Turning it on.** Install the two add-ons yourself (Jarvis never runs pip;
+  Settings > Talk shows the command), click Download in Settings > Talk, add
+  `JARVIS_TALK_ENABLED=true` to `.env` and restart the "Briefing hotkey" task.
+  The key (`[talk] key`), the model and the quiet that ends a talk (`[talk]
+  quiet_ms`) are in `config.toml`. It needs Ask Jarvis on.
+
+  ```powershell
+  C:/Users/<you>/AppData/Local/Programs/Python/Python313/python.exe -m pip install faster-whisper==1.2.1 PyAudioWPatch==0.2.12.9
+  ```
+
+If something is missing when you tap (an add-on, the model, a microphone), the
+bar says what and how to fix it, and the microphone does not open. Tapping the
+key while Jarvis is not running opens him, as the hotkey does; tap again to
+talk. Names Jarvis should expect ("Spotify", "Notion") go in `[talk] hints`.
+
 ## Catch-up and the hotkey
 
 **Catch-up.** The app keeps track of each scheduled briefing (a "slot", such as
@@ -2840,8 +2880,8 @@ then keeps its old behaviour (it reads the briefing at once). The "Briefing hotk
 (`--hotkey-agent`) from logon until you log off; it waits inside Windows and
 uses no CPU until the key is pressed, and it never loads the window code.
 Change the combination with `[hotkey] combo` in `config.toml` (ctrl, alt, shift,
-win plus one letter, digit or F1 to F24; a letter or digit needs ctrl, alt or
-win), or turn it off with `[hotkey] enabled = false`; then rerun
+win plus one letter, digit, space or F1 to F24; a letter, digit or space needs
+ctrl, alt or win), or turn it off with `[hotkey] enabled = false`; then rerun
 `install-schedule.ps1`, which restarts the agent (or removes it). If another
 program already uses the combination, the agent logs a warning and exits (see
 [Troubleshooting](#troubleshooting)).
@@ -4111,7 +4151,7 @@ log. Changes apply the next time the app starts.
 | `[schedule] am` | `"10:12"` | Time of the AM task (24-hour `HH:MM`); the default is only an example, set it a few minutes after your own briefing task runs. `install-schedule.ps1` uses it unless you pass `-AmTime`; the app uses it to tell which briefing an answer belongs to when it was started without `--slots`. Rerun the script after a change. |
 | `[schedule] pm` | `"23:42"` | Time of the PM task, the same way (`-PmTime`). |
 | `[hotkey] enabled` | `true` | The global hotkey that opens Jarvis. `false`: `install-schedule.ps1` does not install the hotkey task (and removes an existing one); an agent that is started anyway exits at once. |
-| `[hotkey] combo` | `"ctrl+alt+j"` | The global hotkey: `ctrl`, `alt`, `shift`, `win` plus one letter, digit or `F1`-`F24`, e.g. `"ctrl+shift+F9"`. A letter or digit needs ctrl, alt or win. Rerun `install-schedule.ps1` (or log off and on) after a change. |
+| `[hotkey] combo` | `"ctrl+alt+j"` | The global hotkey: `ctrl`, `alt`, `shift`, `win` plus one letter, digit, `space` or `F1`-`F24`, e.g. `"ctrl+shift+F9"`. A letter, digit or space needs ctrl, alt or win. Rerun `install-schedule.ps1` (or log off and on) after a change. |
 | `[agenda] evening_from_hour` | `18` | From this hour on, the TODAY panel shows tomorrow (0-24; 24 = always today). |
 | `[agenda] deadline_days` | `14` | How many days ahead DEADLINES looks (1-60). |
 | `[agenda] calendars` | `["primary"]` | The Google calendars listed in TODAY: `"primary"` or calendar ids (see `[calendar] calendar_id`). |
@@ -4194,6 +4234,12 @@ log. Changes apply the next time the app starts.
 | `[agent] workspace` | `""` | The tasks' folder: `""` = `Jarvis\Workspace` in your user folder, else a full folder path. Never under OneDrive: a task refuses to start there. |
 | `[agent] private` | `["calendar", "contacts", "memory", "mail", "files"]` | What a task may read of your things, when it needs them and only while it is connected. A shorter list narrows it (`"memory"` covers your notes and what you said before the task); an entry that is none of these grants nothing, and so does something that is not a list. |
 | `[agent] speak_private` | `false` | `true` also says aloud a task's line that may hold something private; such lines go to Microsoft's online voice. Off, they stay on screen. |
+| `[talk] enabled` | `false` | [Talk to Jarvis](#talk-to-jarvis-the-talk-key): the talk key opens the microphone for one request. Turn it on for this PC with `JARVIS_TALK_ENABLED=true` in `.env` (it overrides this both ways), then restart the "Briefing hotkey" task. Needs Ask Jarvis, the add-ons faster-whisper and PyAudioWPatch, and the speech model (Settings > Talk). |
+| `[talk] key` | `"ctrl+alt+space"` | The talk key; never the `[hotkey] combo` or the `[desktop] hud_key` (refused with a warning). |
+| `[talk] model` | `"small.en"` | The speech model on this PC: `"small.en"` (about 480 MB), `"base.en"` (about 145 MB, quicker, less sure) or `"medium.en"` (about 1.5 GB, the meetings' model). Downloaded only when you click Download in Settings > Talk. |
+| `[talk] keep_warm_minutes` | `10` | How long the speech model stays loaded after a talk, so the next starts at once (1..120). |
+| `[talk] quiet_ms` | `500` | How much quiet after you speak ends a talk, in milliseconds (300..2000). |
+| `[talk] hints` | `[]` | Names Jarvis should expect to hear, e.g. `["Spotify", "Notion"]` ("Jarvis" always is); at most 20 short names. |
 
 The offline voice uses the same `rate` and `volume`: the rate scales Windows'
 default 200 words per minute, and a volume above `+0%` cannot get louder than
@@ -4448,6 +4494,11 @@ moment, the (already hidden) app waits up to 15 seconds for it to finish and the
 deletes the folder; leftovers older than 12 hours are removed at the next start.
 
 ## Privacy and cost
+
+Talking to Jarvis ([the talk key](#talk-to-jarvis-the-talk-key)) sends nothing
+anywhere to be understood: the microphone is open only from the tap to the end,
+your speech becomes text on this PC, the sound is never saved and no log holds
+what you said. What he heard then goes where typed words go.
 
 The app talks to these services, all free:
 

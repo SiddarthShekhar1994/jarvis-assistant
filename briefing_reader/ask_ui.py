@@ -726,7 +726,8 @@ class AskController(QObject):
         task = _request_task(self.live, text, briefing, kind=kind,
                              memory=self._memory_given(text[:COMMAND_CAP]) if kind == TASK_ASK else None,
                              conversation=len(conversation_exchanges(earlier))
-                             if kind == TASK_ASK and self._conversation is not None else None)
+                             if kind == TASK_ASK and self._conversation is not None else None,
+                             spoken=getattr(self, "_spoken_now", False))
         running = _Running(self._seq, threading.Event(), self._monotonic(), task=task, kind=kind, words=text,
                            bar=self.bar, lines=lines if lines != text else "")
         self._running = running
@@ -742,6 +743,22 @@ class AskController(QObject):
         self._tick.start()
         # busyChanged(True) waits for the first stage: an Ask the planner refuses (Claude Code
         # missing or signed out, a limit) never pauses the briefing.
+
+    def submit_spoken(self, text: str) -> None:
+        """What the owner said with the talk key (talk_ui), exactly as typed words: the same routes and gates (a
+        running task's gate, the shortcuts, the planner), so a card still needs a click - voice never approves or
+        undoes. Only the LIVE view's "Your request" says "You said". Logged by its length, never its words."""
+        logger.info("Ask: spoken words (%d characters)", len(text or ""))
+        self._spoken_now = True
+        try:
+            self.submit(text)
+        finally:
+            self._spoken_now = False
+
+    def talk_status(self, text: str, tone: str, *, hud_text: str | None = None) -> None:
+        """A talk's state on the status line (talk_ui: listening, understanding, what is missing first); on the
+        desktop HUD's bar ``hud_text`` when given."""
+        self._put_status(text, tone, hud_text=hud_text)
 
     def submit_mode(self, request: ModeRequest, words: str) -> bool:
         """A planner mode run (the productivity bundle: a typed "plan my day", or a click on an offer):
@@ -1241,20 +1258,23 @@ def conversation_words(exchanges: int) -> str:
 
 @quiet(NO_TASK)
 def _request_task(live: LiveStream | None, text: str, briefing: Any, *, kind: str = TASK_ASK,
-                  memory: tuple[Sequence[str], int] | None = None, conversation: int | None = None) -> LiveTask:
+                  memory: tuple[Sequence[str], int] | None = None, conversation: int | None = None,
+                  spoken: bool = False) -> LiveTask:
     """A new Ask's LIVE view task and its "Your request" step (NO_TASK without the LIVE view).
     ``kind`` TASK_WEB: a "web:" request (web research only: nothing is read from the accounts).
     ``memory``: (the notes the planner gets, how many left out) while memory is on. ``conversation``:
-    how many earlier exchanges the planner gets (None: no conversation is kept)."""
+    how many earlier exchanges the planner gets (None: no conversation is kept). ``spoken``: said with the
+    talk key ("You said" instead of "You typed")."""
     if live is None:
         return NO_TASK
     task = live.task(kind, text)
     if task is NO_TASK:
         return NO_TASK
+    words = ("You said" if spoken else "You typed", text)
     if kind == TASK_WEB:
-        fields = [("You typed", text), ("Mode", WEB_MODE_TEXT), ("Briefing given", WEB_BRIEFING_TEXT)]
+        fields = [words, ("Mode", WEB_MODE_TEXT), ("Briefing given", WEB_BRIEFING_TEXT)]
     else:
-        fields = [("You typed", text), ("Briefing given", _briefing_words(briefing))]
+        fields = [words, ("Briefing given", _briefing_words(briefing))]
         if memory is not None:
             fields.append(("Memory given", memory_words(*memory)))
         if conversation is not None:

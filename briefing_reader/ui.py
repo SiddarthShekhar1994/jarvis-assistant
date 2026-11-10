@@ -5117,6 +5117,7 @@ class AppController(QObject):
         self._init_desktop(desktop_factory)             # [desktop]: the Dock's Desktop, Settings > Desktop, the HUD
         self.task_feed: Any = None                     # the task's panel and cards (agent_feed), with the agent
         self.agent: Any = self._create_agent(agent_factory)   # [agent]: a task worked through, or None while it is off
+        self.talk: Any = self._create_talk()            # [talk]: the talk key's listening, or None while it is off
         self.window.reading.set_find_actions(self.productivity is not None)   # offers' links in the Find list
         # Jarvis's own voice: silent unless injected; start() builds the real one ([assistant] speak).
         self._voice_injected = voice_factory is not None
@@ -13425,6 +13426,7 @@ class AppController(QObject):
                 reading.set_activity_state(hud.ORB_WORKING, False, ASK_PLANNING_LABEL)
             else:
                 reading.set_activity_state(hud.ORB_STANDBY if self._reading_error else hud.ORB_WORKING, False)
+            self._apply_talk_look(reading)
             self._update_sections()
             self._update_telemetry()
             return
@@ -13437,8 +13439,15 @@ class AppController(QObject):
             reading.set_activity_state(hud.ORB_WORKING, False, ASK_PLANNING_LABEL)
         else:
             reading.set_activity_state(_ORB_FOR_PLAYER.get(state, hud.ORB_STANDBY), state == PLAYING)
+        self._apply_talk_look(reading)
         self._update_sections()
         self._update_telemetry()
+
+    def _apply_talk_look(self, reading: Any) -> None:
+        """A talk's orb wins over the others while it lasts (talk_ui: listening, understanding)."""
+        look = getattr(self, "_talk_orb", None)
+        if look is not None:
+            reading.set_activity_state(look[0], False, look[1])
 
     def _reading_status(self, state: str) -> str:
         if state == WAITING:
@@ -13851,6 +13860,65 @@ class AppController(QObject):
         else:
             self._open_activation()
 
+    # ---- talking to Jarvis ([talk]) -------------------------------------------------------------------------
+
+    def _create_talk(self) -> Any:
+        """[talk] on, with Ask Jarvis (which takes what was heard): talk_ui.TalkController - the talk key's
+        listening - and Settings > Talk (the model's Download, the add-ons). Off: None, and the talk key opens Jarvis
+        as the window key does."""
+        self._talk_orb: tuple[str, str] | None = None
+        if not getattr(getattr(self.config, "talk", None), "enabled", False):
+            return None
+        if self.ask is None:
+            logger.info("Talk: [talk] is on but Ask Jarvis is off; the talk key opens Jarvis")
+            return None
+        from . import talk_ui
+
+        reading = self.window.reading
+        controller = talk_ui.TalkController(self.config, bring_forward=self._talk_bring_forward,
+                                            before_talk=self._talk_before, show_status=self.ask.talk_status,
+                                            submit=self.ask.submit_spoken, set_look=self._talk_look,
+                                            set_level=self._talk_level, parent=self)
+        panel = talk_ui.TalkSettingsPanel(talk_ui.pip_command())
+        controller.attach_panel(panel, refresh=reading.settings_page.refresh)
+        reading.settings_page.add_group(talk_ui.SETTINGS_KEY, talk_ui.SETTINGS_TITLE, note=talk_ui.SETTINGS_NOTE,
+                                        how=talk_ui.SETTINGS_HOW, rows=controller.settings_rows, extra=panel)
+        return controller
+
+    def _talk_bring_forward(self) -> None:
+        """A talk starts: Jarvis comes forward in the mode he is in (on the HUD its bar shows the talk; a hidden or
+        minimized window opens as the window key opens it)."""
+        if self._hud_active():
+            return
+        if self.state == STATE_READING and self.window.isVisible() and not self.window.isMinimized():
+            force_foreground(self.window)
+        elif self.state == STATE_WAITING:
+            self._activation_while_waiting(LAUNCH_OPEN, None)
+        else:
+            self._open_activation()
+
+    def _talk_before(self) -> None:
+        """The microphone opens: Jarvis stops talking (his queue goes) and a playing briefing pauses, as the owner's
+        Play or Pause would - neither is heard by the microphone, and neither resumes on its own."""
+        self._owner_playback()
+        if self._script is not None and self.player.state == PLAYING:
+            self.player.pause()
+        self._update_reading_controls()
+
+    def _talk_look(self, state: str) -> None:
+        """The orb while talking: LISTENING with the microphone's level, then working ("UNDERSTANDING") while the
+        speech model reads it; back to the app's own look after."""
+        from . import talk_ui
+
+        self._talk_orb = {talk_ui.LISTENING: (hud.ORB_LISTENING, "LISTENING"),
+                          talk_ui.UNDERSTANDING: (hud.ORB_WORKING, "UNDERSTANDING")}.get(state)
+        self._update_reading_controls()
+
+    def _talk_level(self, level: float | None) -> None:
+        orb = getattr(self.window.reading, "orb", None)
+        if orb is not None and hasattr(orb, "set_level"):
+            orb.set_level(level)
+
     def _legacy_activation(self, run: str | None, read: bool) -> None:
         """The classic prompt (or its snooze) and a SCHEDULED or READ message: as before (``read``:
         Read now, as the older ``now: true`` always did)."""
@@ -14081,6 +14149,8 @@ class AppController(QObject):
         self._conversation_prune_timer.stop()
         self.live.set_listener(None)   # the LIVE view's feed hears nothing more
         self._live_feed.stop()
+        if getattr(self, "talk", None) is not None:
+            self.talk.shutdown()       # the microphone closes; the speech process ends
         if getattr(self, "meetings", None) is not None:
             self.meetings.shutdown()   # a recording stops and is saved; the pill goes
         if getattr(self, "task_feed", None) is not None:
