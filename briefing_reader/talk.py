@@ -251,7 +251,8 @@ class TalkSession:
     is there, else the Windows default. :meth:`poll` reads what arrived (the device's own rate and channels, made
     16 kHz mono) and returns the end reason or ""; :meth:`end` ends it from outside (a second tap, Esc). Every end
     closes the stream at once. The audio stays in memory: :meth:`clip` is the part worth understanding, b"" when
-    nothing should be (nothing said, a cancel, a stopped or muted microphone)."""
+    nothing should be (nothing said, a cancel, a stopped or muted microphone). The stream's ``read_available`` gives
+    16 kHz mono int16 (meeting_audio's AudioStream contract)."""
 
     def __init__(self, stream: Any, *, quiet_ms: int = QUIET_MS, clock: Callable[[], float] = time.monotonic) -> None:
         self._stream = stream
@@ -298,15 +299,13 @@ class TalkSession:
     def poll(self) -> str:
         if self.endpointer.ended:
             return self.endpointer.ended
-        from .meeting_audio import to_mono16k
-
         try:
-            data = self._stream.read_available()
+            # meeting_audio's streams give 16 kHz mono int16 already (their rate and channels attributes are the
+            # device's own, used inside the stream): it is used as it comes.
+            pcm = self._stream.read_available()
         except OSError:
             return self.end(END_DEVICE)
-        if data:
-            pcm = to_mono16k(data, int(getattr(self._stream, "rate", SAMPLE_RATE)),
-                             int(getattr(self._stream, "channels", 1)), fmt=str(getattr(self._stream, "fmt", "int16")))
+        if pcm:
             self._audio += pcm
             if self.endpointer.feed(pcm):
                 self._close()

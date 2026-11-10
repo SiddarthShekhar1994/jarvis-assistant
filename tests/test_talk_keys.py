@@ -145,7 +145,7 @@ class TalkActivationTests(unittest.TestCase):
     def test_with_no_talk_controller_it_opens_jarvis_as_the_window_key_does(self) -> None:
         app = self.app()
         self.activate(app, dict(entry.TALK_ACTIVATION))
-        app._open_activation.assert_called_once_with()
+        app._open_activation.assert_called_once_with(ask=False)        # its keyword is required (review, finding 2)
         waiting = self.app(state=ui.STATE_WAITING)
         self.activate(waiting, dict(entry.TALK_ACTIVATION))
         waiting._activation_while_waiting.assert_called_once_with(ui.LAUNCH_OPEN, None)

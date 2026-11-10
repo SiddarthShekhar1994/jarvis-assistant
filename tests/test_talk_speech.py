@@ -12,7 +12,7 @@ import tempfile
 import threading
 import time
 import unittest
-from array import array
+
 from pathlib import Path
 
 from briefing_reader import talk, talk_speech
@@ -171,7 +171,7 @@ class SpeechClientTests(unittest.TestCase):
             procs.append(proc)
             return proc
 
-        client = SpeechClient(Path("C:/models/x"), spawn=spawn, **kwargs)
+        client = SpeechClient(Path("C:/models/x"), spawn=spawn, idle_s=idle_s, **kwargs)
         self.addCleanup(lambda: [proc.tidy() for proc in procs])
         self.addCleanup(client.close)
         return client, procs
@@ -212,6 +212,28 @@ class SpeechClientTests(unittest.TestCase):
         self.assertEqual(client.understand(b"\x00" * (talk_speech.MAX_CLIP_BYTES + 2)).error, talk_speech.ERR_TOO_LONG)
         self.assertEqual(procs, [])
 
+    def test_a_process_near_its_idle_end_is_replaced_not_raced(self) -> None:
+        client, procs = self.client(idle_s=6.0)              # replaced once within IDLE_MARGIN_S of going idle
+        self.assertTrue(client.understand(b"\x01\x00" * 3).ok)
+        client._last_used -= 2.0
+        heard = client.understand(b"\x01\x00" * 7)
+        self.assertEqual((heard.ok, heard.text, len(procs)), (True, "heard 7 samples", 2))
+
+    def test_a_process_that_ends_before_answering_is_started_again_once(self) -> None:
+        spawned = []
+
+        class Dying(EchoTranscriber):
+            def transcribe(self, pcm: bytes) -> str:
+                raise SystemExit                              # it ends with the clip unanswered
+
+        def load():
+            spawned.append(1)
+            return Dying() if len(spawned) == 1 else EchoTranscriber()
+
+        client, procs = self.client(load=load)
+        heard = client.understand(b"\x01\x00" * 5)
+        self.assertEqual((heard.ok, heard.text, len(procs)), (True, "heard 5 samples", 2))
+
     def test_close_ends_the_process(self) -> None:
         client, procs = self.client()
         client.understand(b"\x01\x00" * 2 * 2)
@@ -222,18 +244,15 @@ class SpeechClientTests(unittest.TestCase):
 
 
 class FakeStream:
-    """A device stream: 48 kHz stereo int16 given out in pieces, like meeting_audio's _QueueStream."""
+    """A device stream like meeting_audio's _QueueStream: its rate and channels say the device's own (48 kHz
+    stereo here), but ``read_available`` gives 16 kHz mono int16 (the AudioStream contract), in pieces. A talk that
+    converted it again would squash the audio (the review's first finding): the tests below would fail."""
 
     rate, channels, fmt = 48_000, 2, "int16"
 
     def __init__(self, mono16k: bytes, piece_ms: int = 100, fail_after: int | None = None) -> None:
-        samples = array("h")
-        samples.frombytes(mono16k)
-        stereo48 = array("h")
-        for sample in samples:                          # each 16 kHz sample three times, on both channels
-            stereo48.extend((sample, sample) * 3)
-        self._data = stereo48.tobytes()
-        self._piece = 48_000 * 2 * 2 * piece_ms // 1000
+        self._data = mono16k
+        self._piece = talk.SAMPLE_RATE * 2 * piece_ms // 1000
         self._reads = 0
         self._fail_after = fail_after
         self.closed = False
@@ -282,6 +301,14 @@ def talk_through(session: TalkSession, polls: int = 2000) -> str:
 
 
 class TalkSessionTests(unittest.TestCase):
+    def test_the_stream_s_audio_is_used_as_it_comes(self) -> None:
+        audio = noise(300, ROOM) + tone(1200, VOICE) + noise(2000, ROOM)
+        session = TalkSession.start(FakeBackend(FakeStream(audio)))
+        talk_through(session)
+        heard_ms = session.endpointer.frames * talk.FRAME_MS
+        self.assertGreaterEqual(heard_ms, 1500 + talk.QUIET_MS - talk.FRAME_MS)    # real time, not a third of it
+        self.assertLessEqual(heard_ms, 3500)
+
     def test_a_talk_ends_by_quiet_closes_the_mic_and_keeps_the_speech(self) -> None:
         stream = FakeStream(noise(300, ROOM) + tone(1200, VOICE) + noise(2000, ROOM))
         session = TalkSession.start(FakeBackend(stream))

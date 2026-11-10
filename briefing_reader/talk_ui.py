@@ -127,6 +127,7 @@ class TalkController(QObject):
     _heard = Signal(object, int)
     _download_progress = Signal(int, int)
     _downloaded = Signal(str)
+    _global_esc = Signal()          # the global Esc (desktop.stopkeys) fires on its own thread
 
     def __init__(self, config: Any, *, bring_forward: Callable[[], Any], before_talk: Callable[[], Any],
                  show_status: Callable[..., Any], submit: Callable[[str], Any],
@@ -136,7 +137,7 @@ class TalkController(QObject):
                  client_factory: Callable[[Path, str, float], Any] | None = None,
                  audio_missing: Callable[[], str] | None = None, speech_missing: Callable[[], str] | None = None,
                  downloader_factory: Callable[..., Any] | None = None, threaded: bool = True,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic, stopkeys: Any = None) -> None:
         super().__init__(parent)
         from . import meeting_audio, meeting_speech, meetings
 
@@ -179,6 +180,13 @@ class TalkController(QObject):
         self._panel: TalkSettingsPanel | None = None
         self._refresh_settings: Callable[[], Any] = lambda: None
         self._closing = False
+        if stopkeys is None:
+            from .desktop.stopkeys import default_stopkeys
+
+            stopkeys = default_stopkeys()      # a no-op under the test guard and off Windows
+        self._stopkeys = stopkeys
+        self._esc_armed = False
+        self._global_esc.connect(self.cancel, Qt.ConnectionType.QueuedConnection)
 
     # ---- state ----------------------------------------------------------------------------------------------
 
@@ -224,7 +232,9 @@ class TalkController(QObject):
         self._listen()
 
     def cancel(self) -> bool:
-        """Esc or Stop while listening: the talk ends with nothing going in. True when there was one."""
+        """Esc while listening (anywhere: a global Esc is held while the microphone is open, as during a desktop
+        batch; or the window losing its view of the talk): the talk ends with nothing going in. True when there
+        was one."""
         if self._state != LISTENING:
             return False
         self._finish(talk.END_CANCEL)
@@ -249,20 +259,30 @@ class TalkController(QObject):
             return
         self._backend, self._session = backend, session
         self._began = self._clock()
-        self._set_state(LISTENING)
-        self._show(f"Listening... tap {self._key} again when you're done, or Esc to cancel.", hud.TONE_WORKING,
-                   hud_text="Listening...")
-        self._watch_escape(True)
-        self._timer.start()
-        logger.info("Talk: listening")
+        try:
+            self._set_state(LISTENING)
+            self._show(f"Listening... tap {self._key} again when you're done, or Esc to cancel.", hud.TONE_WORKING,
+                       hud_text="Listening...")
+            self._watch_escape(True)
+            self._esc_armed = bool(self._stopkeys.arm(self._global_esc.emit))
+            self._timer.start()
+        except Exception as exc:  # noqa: BLE001 - the microphone never stays open behind a failure
+            logger.warning("Talk: starting to listen failed (%s)", type(exc).__name__)
+            self._finish(talk.END_DEVICE)
+            return
+        logger.info("Talk: listening (global Esc %s)", "held" if self._esc_armed else "not held")
 
     def _poll(self) -> None:
         session = self._session
         if session is None:
             self._timer.stop()
             return
-        reason = session.poll()
-        self._set_level(session.level)
+        try:
+            reason = session.poll()
+            self._set_level(session.level)
+        except Exception as exc:  # noqa: BLE001 - a failing read closes the microphone, never repeats
+            logger.warning("Talk: reading the microphone failed (%s)", type(exc).__name__)
+            reason = talk.END_DEVICE
         if reason:
             self._finish(reason)
 
@@ -270,7 +290,16 @@ class TalkController(QObject):
         session, self._session = self._session, None
         self._timer.stop()
         self._watch_escape(False)
-        self._set_level(None)
+        if self._esc_armed:
+            self._esc_armed = False
+            try:
+                self._stopkeys.disarm()
+            except Exception as exc:  # noqa: BLE001 - Esc goes back to the other programs either way
+                logger.warning("Talk: releasing Esc failed (%s)", type(exc).__name__)
+        try:
+            self._set_level(None)
+        except Exception:  # noqa: BLE001 - the look comes back with the state below
+            pass
         if session is None:
             return
         if not session.ended:
@@ -307,8 +336,14 @@ class TalkController(QObject):
         client = self._client
 
         def work() -> None:
+            from .talk_speech import ERR_FAILED, Heard
+
             began = time.monotonic()
-            heard = client.understand(clip)
+            try:
+                heard = client.understand(clip)
+            except Exception as exc:  # noqa: BLE001 - the talk key never stays dead behind a failure
+                logger.warning("Talk: understanding failed (%s)", type(exc).__name__)
+                heard = Heard(False, error=ERR_FAILED)
             took = int((time.monotonic() - began) * 1000)
             if self._threaded:
                 self._heard.emit(heard, took)

@@ -40,6 +40,7 @@ THREADS = 4
 READY_TIMEOUT_S = 90.0            # loading the model (the first talk after a while; a slow disk)
 ANSWER_TIMEOUT_S = 60.0           # understanding one clip (at most MAX_TALK_S of speech)
 CLOSE_WAIT_S = 3.0
+IDLE_MARGIN_S = 5.0               # a process this close to its idle end is replaced rather than raced
 BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
 CREATE_NO_WINDOW = 0x08000000
 SPEECH_MODULE = "faster_whisper"
@@ -214,6 +215,7 @@ class SpeechClient:
         self._lock = threading.Lock()
         self._proc: Any = None
         self._lines: queue.Queue = queue.Queue()
+        self._last_used = 0.0                  # when the process last answered (time.monotonic)
 
     def _command(self) -> list[str]:
         return [self._python, "-B", "-m", "briefing_reader.talk_speech", "--model", str(self.model_dir),
@@ -272,7 +274,7 @@ class SpeechClient:
         except queue.Empty:
             self._kill()
             return {"ok": False, "error": ERR_TIMEOUT}
-        return answer if isinstance(answer, dict) else {"ok": False, "error": ERR_ENDED}
+        return answer if isinstance(answer, dict) else None    # its output ended: it went idle, or failed
 
     def understand(self, pcm: bytes) -> Heard:
         if not pcm:
@@ -281,6 +283,8 @@ class SpeechClient:
             return Heard(False, error=ERR_TOO_LONG)
         with self._lock:
             load_ms = 0
+            if self.running() and time.monotonic() - self._last_used > self._idle_s - IDLE_MARGIN_S:
+                self._kill()                           # about to go idle on its own: a fresh one, not a race
             for attempt in range(2):
                 if not self.running():
                     error, load_ms = self._start()
@@ -288,10 +292,11 @@ class SpeechClient:
                         return Heard(False, error=error)
                 answer = self._send(pcm)
                 if answer is None and attempt == 0:
-                    self._kill()                       # it went idle just then: start it again, once
+                    self._kill()                       # it ended just then (idle, or failed): start it again, once
                     continue
                 if answer is None:
                     return Heard(False, error=ERR_ENDED, load_ms=load_ms)
+                self._last_used = time.monotonic()
                 if answer.get("ok"):
                     return Heard(True, str(answer.get("text") or ""), ms=int(answer.get("ms") or 0), load_ms=load_ms)
                 return Heard(False, error=str(answer.get("error") or ERR_FAILED), load_ms=load_ms)

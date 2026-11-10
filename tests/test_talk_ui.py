@@ -39,10 +39,32 @@ class FakeClient:
         self.closed = True
 
 
+class FakeStopKeys:
+    """desktop.stopkeys' seam: the global Esc, held while listening."""
+
+    def __init__(self, refuse: bool = False) -> None:
+        self.on_stop = None
+        self.held = False
+        self.refuse = refuse
+
+    def arm(self, on_stop) -> bool:
+        if self.refuse:
+            return False
+        self.on_stop, self.held = on_stop, True
+        return True
+
+    def disarm(self) -> None:
+        self.held = False
+
+    def armed(self) -> bool:
+        return self.held
+
+
 class TalkControllerTests(unittest.TestCase):
     def make(self, *, audio: bytes = SPEECH, heard: Heard | None = None, ready: bool = True, missing_audio: str = "",
              missing_speech: str = "", refuse: bool = False, devices=None, fail_after: int | None = None):
         self.stream = FakeStream(audio, fail_after=fail_after)
+        self.stopkeys = FakeStopKeys()
         self.backend = FakeBackend(self.stream, devices=devices, refuse=refuse)
         self.backend.close = mock.Mock()
         self.client = FakeClient(heard or Heard(True, SAID, ms=300))
@@ -64,7 +86,7 @@ class TalkControllerTests(unittest.TestCase):
             submit=calls.submitted.append, set_look=calls.looks.append, set_level=calls.levels.append,
             models_root=Path(folder), picked_mic=lambda: "", backend_loader=lambda: (self.backend, ""),
             client_factory=lambda _folder, _hints, _idle: self.client, audio_missing=lambda: missing_audio,
-            speech_missing=lambda: missing_speech, threaded=False)
+            speech_missing=lambda: missing_speech, threaded=False, stopkeys=self.stopkeys)
         controller._model_ready = lambda: ready
         self.addCleanup(controller.shutdown)
         return controller
@@ -117,6 +139,44 @@ class TalkControllerTests(unittest.TestCase):
         self.assertFalse(controller._watching_escape)
         self.assertFalse(controller.eventFilter(APP, event))            # Esc is the app's again
         self.assertFalse(controller.cancel())
+
+    def test_the_global_esc_is_held_only_while_listening_and_cancels(self) -> None:
+        controller = self.make(audio=noise(300, ROOM) + tone(4000, VOICE))
+        with self.assertLogs("briefing_reader.talk_ui", logging.INFO):
+            controller.toggle()
+            self.assertTrue(self.stopkeys.held)
+            controller._poll()
+            self.stopkeys.on_stop()                           # as the stop keys' own thread would
+            APP.processEvents()
+        self.assertEqual((controller.state, self.calls.submitted), (talk_ui.IDLE, []))
+        self.assertEqual(self.calls.statuses[-1][0], talk_ui.CANCELLED)
+        self.assertFalse(self.stopkeys.held)
+        self.assertTrue(self.stream.closed)
+
+    def test_the_global_esc_is_released_on_every_end(self) -> None:
+        controller = self.make()
+        with self.assertLogs("briefing_reader.talk_ui", logging.INFO):
+            controller.toggle()
+            self.talk_through(controller)
+        self.assertFalse(self.stopkeys.held)
+
+    def test_a_failing_read_closes_the_microphone_and_ends_the_talk(self) -> None:
+        controller = self.make(audio=noise(300, ROOM) + tone(4000, VOICE))
+        with self.assertLogs("briefing_reader.talk_ui", logging.INFO):
+            controller.toggle()
+            controller._session.poll = mock.Mock(side_effect=RuntimeError("boom"))
+            controller._poll()
+        self.assertEqual((controller.state, self.calls.submitted), (talk_ui.IDLE, []))
+        self.assertTrue(self.stream.closed)
+        self.assertFalse(self.stopkeys.held)
+
+    def test_a_failure_while_understanding_leaves_the_talk_key_working(self) -> None:
+        controller = self.make()
+        self.client.understand = mock.Mock(side_effect=RuntimeError("boom"))
+        with self.assertLogs("briefing_reader.talk_ui", logging.INFO):
+            controller.toggle()
+            self.talk_through(controller)
+        self.assertEqual((controller.state, self.calls.statuses[-1][0]), (talk_ui.IDLE, talk_ui.NOT_UNDERSTOOD))
 
     def test_what_is_missing_is_said_and_nothing_opens(self) -> None:
         for kwargs, words in (({"missing_audio": "PyAudioWPatch"}, "install the add-ons"),
@@ -299,8 +359,9 @@ class AppHookTests(unittest.TestCase):
         self.assertEqual((key, title), (talk_ui.SETTINGS_KEY, talk_ui.SETTINGS_TITLE))
 
     def test_the_orb_listens_then_understands_then_is_the_app_s_again(self) -> None:
-        stub = SimpleNamespace(_update_reading_controls=mock.Mock())
-        reading = SimpleNamespace(set_activity_state=mock.Mock())
+        reading = SimpleNamespace(set_activity_state=mock.Mock(), set_talking=mock.Mock())
+        stub = SimpleNamespace(_update_reading_controls=mock.Mock(), _pump_voice=mock.Mock(),
+                               window=SimpleNamespace(reading=reading))
         for state, look in ((talk_ui.LISTENING, (hud.ORB_LISTENING, "LISTENING")),
                             (talk_ui.UNDERSTANDING, (hud.ORB_WORKING, "UNDERSTANDING")), (talk_ui.IDLE, None)):
             ui.AppController._talk_look(stub, state)
@@ -311,6 +372,28 @@ class AppHookTests(unittest.TestCase):
                 reading.set_activity_state.assert_not_called()
             else:
                 reading.set_activity_state.assert_called_once_with(look[0], False, look[1])
+        self.assertEqual([call.args[0] for call in reading.set_talking.call_args_list], [True, False, False])
+        stub._pump_voice.assert_called_once_with()                    # the held voice may speak again
+
+    def test_the_voice_is_held_while_a_talk_lasts(self) -> None:
+        for state, held in ((talk_ui.LISTENING, True), (talk_ui.UNDERSTANDING, True), (talk_ui.IDLE, False)):
+            self.assertEqual(ui.AppController._talk_live(SimpleNamespace(talk=SimpleNamespace(state=state))), held)
+        self.assertFalse(ui.AppController._talk_live(SimpleNamespace(talk=None)))
+
+    def test_a_briefing_playing_or_waiting_to_play_on_is_paused(self) -> None:
+        for state, paused in ((ui.PLAYING, True), (ui.WAITING, True), (ui.PAUSED, False), (ui.FINISHED, False)):
+            with self.subTest(state=state):
+                stub = SimpleNamespace(_owner_playback=mock.Mock(), _update_reading_controls=mock.Mock(),
+                                       _script=object(), player=SimpleNamespace(state=state, pause=mock.Mock()))
+                ui.AppController._talk_before(stub)
+                stub._owner_playback.assert_called_once_with()
+                self.assertEqual(stub.player.pause.called, paused)
+
+    def test_the_level_goes_to_home_s_orb(self) -> None:
+        hero = SimpleNamespace(set_level=mock.Mock())
+        stub = SimpleNamespace(window=SimpleNamespace(reading=SimpleNamespace(hero=hero)))
+        ui.AppController._talk_level(stub, 0.4)
+        hero.set_level.assert_called_once_with(0.4)
 
 
 if __name__ == "__main__":

@@ -2802,16 +2802,19 @@ reads only mail headers, never while hidden or minimized; see
 Off until you turn it on (below). Tap **Ctrl+Alt+Space**, say what you want, and
 Jarvis takes it after about half a second of quiet: "what's on my calendar
 today", "plan my day", "remember my exam is on the 14th". Tap the key again to
-end sooner, or press Esc to cancel. What he heard goes in exactly as if you had
-typed it in the bar, under the same rules: anything that sends, adds, moves or
-deletes still waits on its card for your click, because voice never approves or
-undoes anything. Words said while a task works go to the task, as typed words
-do, and "stop" stops it.
+end sooner, or press Esc to cancel (while he listens, Esc works wherever you
+are, as it does while he tidies files). What he heard goes in exactly as if you
+had typed it in the bar, under the same rules: mail, calendar changes and file
+changes still wait on their cards for your click, because voice never approves
+or undoes anything; a note you ask him to remember or forget changes at once,
+with Undo, as when you type it. Words said while a task works go to the task,
+as typed words do, and "stop" stops it.
 
 - **He hears you only from the tap to the end.** The microphone opens on the
-  tap and closes when the talk ends; while it is open the orb says LISTENING and
-  moves with your voice, and the bar says so. Nothing listens in between: there
-  is no wake word.
+  tap and closes when the talk ends; while it is open the orbs say LISTENING
+  (Home's moves with your voice) and the bar says so, and his own voice waits.
+  Hiding or minimizing the window cancels the talk. Nothing listens in between:
+  there is no wake word.
 - **On this PC.** Your speech is turned into text here, by a speech model
   (faster-whisper `small.en`, about 480 MB) downloaded only when you click
   Download in Settings > Talk; the sound is kept in memory for the moment it
@@ -2820,8 +2823,8 @@ do, and "stop" stops it.
   (`[talk] keep_warm_minutes`), so the next one starts at once; the first after
   a while takes a few seconds while it loads.
 - **The microphone** is the one picked in Settings > Meetings, else the Windows
-  default. When you tap, Jarvis stops talking and a playing briefing pauses, so
-  neither is heard; neither resumes by itself.
+  default. When you tap, Jarvis stops talking and the briefing pauses (playing
+  or about to play on), so neither is heard; neither resumes by itself.
 - **Turning it on.** Install the two add-ons yourself (Jarvis never runs pip;
   Settings > Talk shows the command), click Download in Settings > Talk, add
   `JARVIS_TALK_ENABLED=true` to `.env` and restart the "Briefing hotkey" task.

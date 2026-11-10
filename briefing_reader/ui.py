@@ -1378,6 +1378,7 @@ class ReadingView(QWidget):
         self._agenda_slot: QVBoxLayout | None = None
         self._activity = hud.ORB_WORKING
         self._typing = False
+        self._talking = False           # the talk key's microphone is open (talk_ui): the orb listens
         self._pending = 0
         self._desktop_waiting = 0              # p2r-5: NEEDS YOUR OK cards waiting on the desktop HUD
         self._offers = 0
@@ -1811,7 +1812,7 @@ class ReadingView(QWidget):
         listening > needs you > waiting > idle)."""
         base = _ORB_BASE.get(self._activity, orb_mod.IDLE)
         if base not in (orb_mod.SPEAKING, orb_mod.THINKING):
-            if self._typing:
+            if self._typing or self._talking:
                 base = orb_mod.LISTENING
             elif self._task_look:
                 base = self._task_look   # a task works, or a card of it waits (set_task_look)
@@ -2211,6 +2212,13 @@ class ReadingView(QWidget):
         if typing:
             self.stage.context.dismiss()        # the owner types: the context tiles go
         self._sync_look()
+
+    def set_talking(self, talking: bool) -> None:
+        """The talk key's microphone is open (talk_ui): the orbs listen - Home's, the Dock's and the header's word -
+        on every screen, while it lasts, as when the owner types."""
+        if bool(talking) != self._talking:
+            self._talking = bool(talking)
+            self._sync_look()
 
     def _on_bar_status(self, text: str, tone: str) -> None:
         """What Jarvis is doing for a request becomes the caption's thinking line (no seconds)."""
@@ -5675,7 +5683,8 @@ class AppController(QObject):
         worker = SayWorker(factory, on_result)
         player = voice_ui.UtterancePlayer(self, volume=self._volume)
         voice = voice_ui.AssistantVoice(worker=worker, player=player, briefing_player=lambda: self.player,
-                                        hold_active=lambda: self._send_hold is not None or self._focus_quiet(),
+                                        hold_active=lambda: (self._send_hold is not None or self._focus_quiet()
+                                                             or self._talk_live()),
                                         prefs=self._prefs_store(), parent=self)
         bridge.sayResult.connect(voice.on_audio, Qt.ConnectionType.QueuedConnection)
         voice.speakingChanged.connect(self._on_voice_speaking)
@@ -13858,7 +13867,7 @@ class AppController(QObject):
         if self.state == STATE_WAITING:
             self._activation_while_waiting(LAUNCH_OPEN, None)
         else:
-            self._open_activation()
+            self._open_activation(ask=False)
 
     # ---- talking to Jarvis ([talk]) -------------------------------------------------------------------------
 
@@ -13881,6 +13890,9 @@ class AppController(QObject):
                                             set_level=self._talk_level, parent=self)
         panel = talk_ui.TalkSettingsPanel(talk_ui.pip_command())
         controller.attach_panel(panel, refresh=reading.settings_page.refresh)
+        visibility = getattr(self.window, "visibilityChanged", None)
+        if visibility is not None:
+            visibility.connect(self._talk_visibility)
         reading.settings_page.add_group(talk_ui.SETTINGS_KEY, talk_ui.SETTINGS_TITLE, note=talk_ui.SETTINGS_NOTE,
                                         how=talk_ui.SETTINGS_HOW, rows=controller.settings_rows, extra=panel)
         return controller
@@ -13895,29 +13907,57 @@ class AppController(QObject):
         elif self.state == STATE_WAITING:
             self._activation_while_waiting(LAUNCH_OPEN, None)
         else:
-            self._open_activation()
+            self._open_activation(ask=False)
 
     def _talk_before(self) -> None:
-        """The microphone opens: Jarvis stops talking (his queue goes) and a playing briefing pauses, as the owner's
-        Play or Pause would - neither is heard by the microphone, and neither resumes on its own."""
+        """The microphone opens: Jarvis stops talking (his queue goes; his voice is held while the talk lasts:
+        ``_talk_live``) and the briefing pauses - playing, or waiting between sections to play on - as the owner's
+        Play or Pause would: the microphone hears neither, and neither resumes on its own."""
         self._owner_playback()
-        if self._script is not None and self.player.state == PLAYING:
+        if self._script is not None and self.player.state in (PLAYING, WAITING):
             self.player.pause()
         self._update_reading_controls()
 
+    def _talk_live(self) -> bool:
+        """A talk listens or is being understood (Jarvis's voice holds its queue meanwhile: the microphone must not
+        hear him)."""
+        talk = getattr(self, "talk", None)
+        if talk is None:
+            return False
+        from . import talk_ui
+
+        return talk.state != talk_ui.IDLE
+
     def _talk_look(self, state: str) -> None:
-        """The orb while talking: LISTENING with the microphone's level, then working ("UNDERSTANDING") while the
-        speech model reads it; back to the app's own look after."""
+        """The orb while talking: listening (``ReadingView.set_talking``: Home's, the Dock's and the header's, on
+        every screen) with the microphone's level on Home's, then working ("UNDERSTANDING") while the speech model
+        reads it; back to the app's own look after, and the held voice may speak again."""
         from . import talk_ui
 
         self._talk_orb = {talk_ui.LISTENING: (hud.ORB_LISTENING, "LISTENING"),
                           talk_ui.UNDERSTANDING: (hud.ORB_WORKING, "UNDERSTANDING")}.get(state)
+        setter = getattr(self.window.reading, "set_talking", None)
+        if callable(setter):
+            setter(state == talk_ui.LISTENING)
         self._update_reading_controls()
+        if state == talk_ui.IDLE:
+            self._pump_voice()
 
     def _talk_level(self, level: float | None) -> None:
-        orb = getattr(self.window.reading, "orb", None)
-        if orb is not None and hasattr(orb, "set_level"):
-            orb.set_level(level)
+        """The microphone's level on Home's orb (the one the owner sees)."""
+        hero = getattr(self.window.reading, "hero", None)
+        if hero is not None and hasattr(hero, "set_level"):
+            hero.set_level(level)
+
+    def _talk_visibility(self) -> None:
+        """The window was hidden or minimised while listening (not by going onto the HUD, whose bar shows the
+        talk): the talk is cancelled, so the microphone is never open without the owner seeing that it is."""
+        talk = getattr(self, "talk", None)
+        if talk is None or self._hud_active():
+            return
+        if not self.window.isVisible() or self.window.isMinimized():
+            if talk.cancel():
+                logger.info("Talk: the window went out of view while listening; cancelled")
 
     def _legacy_activation(self, run: str | None, read: bool) -> None:
         """The classic prompt (or its snooze) and a SCHEDULED or READ message: as before (``read``:
