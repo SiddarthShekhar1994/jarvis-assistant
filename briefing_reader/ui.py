@@ -13794,6 +13794,7 @@ class AppController(QObject):
         now = message.get("now") is True
         ask = message.get("ask") is True
         desktop_key = message.get("desktop") is True
+        talk_key = message.get("talk") is True
         if message.get("read") is True:
             kind: str | None = LAUNCH_READ
         elif message.get("open") is True or ask:
@@ -13805,8 +13806,12 @@ class AppController(QObject):
         else:
             kind = None
         logger.info("Another launch asked this instance to come forward (run=%s, now=%s, ask=%s, desktop=%s, "
-                    "launch=%s, state=%s)", run or "-", now, ask, desktop_key, kind or "-", self.state)
+                    "talk=%s, launch=%s, state=%s)", run or "-", now, ask, desktop_key, talk_key, kind or "-",
+                    self.state)
         if self.state in (STATE_QUITTING, STATE_IDLE):
+            return
+        if talk_key:
+            self._talk_activation()
             return
         if desktop_key:
             self._desktop_activation()
@@ -13828,6 +13833,23 @@ class AppController(QObject):
             self._read_activation()
         else:
             self._open_activation(ask=ask)
+
+    def _talk_activation(self) -> None:
+        """The talk key ([talk] key: the hotkey agent's "talk" message): start listening, or end the talk under way
+        (TalkController.toggle, which brings Jarvis forward in the mode he is in). While Jarvis is in control on the
+        desktop it is ignored, like the window key (Esc or Stop first). With talking not set up here (no
+        controller) it opens Jarvis as the window key does."""
+        if self._hud_active() and self.desktop.in_control():
+            logger.info("The talk key while Jarvis is in control: ignored (Esc or Stop first)")
+            return
+        talk = getattr(self, "talk", None)
+        if talk is not None:
+            talk.toggle()
+            return
+        if self.state == STATE_WAITING:
+            self._activation_while_waiting(LAUNCH_OPEN, None)
+        else:
+            self._open_activation()
 
     def _legacy_activation(self, run: str | None, read: bool) -> None:
         """The classic prompt (or its snooze) and a SCHEDULED or READ message: as before (``read``:

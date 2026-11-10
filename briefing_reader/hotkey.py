@@ -55,6 +55,8 @@ DEBOUNCE_S = 2.0
 ACTIVATION_TIMEOUT_S = 5.0
 HOTKEY_ID = 0x4A52          # any id in 0x0000..0xBFFF works for a thread hotkey
 HUD_HOTKEY_ID = 0x4A48      # the HUD key's ([desktop] hud_key), registered only while [desktop] is on
+TALK_HOTKEY_ID = 0x4A54     # the talk key's ([talk] key), registered only while [talk] is on
+TALK_DEBOUNCE_S = 0.3       # each tap of the talk key counts (the second ends the talk), but not a bounce
 ASFW_ANY = 0xFFFFFFFF       # AllowSetForegroundWindow: any process (when the app's pid is unknown)
 
 MOD_ALT = 0x0001
@@ -373,7 +375,8 @@ def _allow_foreground(api: _Win32, handle: Any) -> None:
 
 def run_agent(combo: str, on_press: Callable[[], Any], stop_event: threading.Event | None = None,
               *, mutex_name: str | None = None, on_ready: Callable[[], None] | None = None,
-              hud_combo: str = "", on_hud_press: Callable[[], Any] | None = None) -> int:
+              hud_combo: str = "", on_hud_press: Callable[[], Any] | None = None,
+              talk_combo: str = "", on_talk_press: Callable[[], Any] | None = None) -> int:
     """Listen for ``combo`` until ``stop_event`` is set (or forever); the exit code.
 
     0: stopped, or another agent of this user already listens; 1: the combo
@@ -387,6 +390,10 @@ def run_agent(combo: str, on_press: Callable[[], Any], stop_event: threading.Eve
     presses go to ``on_hud_press``. Not valid, the same keys as ``combo``, or
     held by another program: a WARNING status only - ``combo`` keeps working
     and the exit code is as without it.
+
+    ``talk_combo`` with ``on_talk_press`` (the talk key, given only while
+    [talk] is on) is a third hotkey id, the same way: never the keys of
+    ``combo`` or of the HUD key.
     """
     if sys.platform != "win32":
         logger.warning("The global hotkey needs Windows")
@@ -397,6 +404,7 @@ def run_agent(combo: str, on_press: Callable[[], Any], stop_event: threading.Eve
         logger.warning("The hotkey %r is not valid (%s); not listening", combo, exc)
         return 2
     hud = _hud_key(hud_combo, on_hud_press, (modifiers, vk))
+    talk = _talk_key(talk_combo, on_talk_press, (modifiers, vk), hud)
     api = _api()
     name = mutex_name or agent_mutex_name()
     mutex = api.kernel32.CreateMutexW(None, False, name)
@@ -405,10 +413,28 @@ def run_agent(combo: str, on_press: Callable[[], Any], stop_event: threading.Eve
         if already:
             logger.info("Another hotkey agent is already running; this one exits")
             return 0
-        return _listen(api, combo, modifiers, vk, on_press, stop_event, on_ready, hud)
+        return _listen(api, combo, modifiers, vk, on_press, stop_event, on_ready, hud, talk)
     finally:
         if mutex:
             api.kernel32.CloseHandle(mutex)
+
+
+def _talk_key(talk_combo: str, on_talk_press: Callable[[], Any] | None, window_key: tuple[int, int],
+              hud: tuple[str, int, int, Callable[[], Any]] | None) -> tuple[str, int, int, Callable[[], Any]] | None:
+    """(combo, modifiers, vk, on_press) of the talk key to register, or None: none given, not valid, or the keys of
+    the window key or of the HUD key (a WARNING each; config.py refuses those already)."""
+    if not talk_combo or on_talk_press is None:
+        return None
+    try:
+        modifiers, vk = parse_combo(talk_combo)
+    except ValueError as exc:
+        logger.warning("The talk key %r is not valid (%s); not registered", str(talk_combo)[:40], exc)
+        return None
+    if (modifiers, vk) == window_key or (hud is not None and (modifiers, vk) == (hud[1], hud[2])):
+        logger.warning("The talk key %s is already the window key or the HUD key; not registered",
+                       describe_combo(talk_combo))
+        return None
+    return talk_combo, modifiers, vk, on_talk_press
 
 
 def _hud_key(hud_combo: str, on_hud_press: Callable[[], Any] | None,
@@ -430,7 +456,8 @@ def _hud_key(hud_combo: str, on_hud_press: Callable[[], Any] | None,
 
 def _listen(api: _Win32, combo: str, modifiers: int, vk: int, on_press: Callable[[], Any],
             stop_event: threading.Event | None, on_ready: Callable[[], None] | None,
-            hud: tuple[str, int, int, Callable[[], Any]] | None = None) -> int:
+            hud: tuple[str, int, int, Callable[[], Any]] | None = None,
+            talk: tuple[str, int, int, Callable[[], Any]] | None = None) -> int:
     msg = api.MSG()
     api.user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 0)   # creates this thread's queue
     if not api.user32.RegisterHotKey(None, HOTKEY_ID, modifiers | MOD_NOREPEAT, vk):
@@ -439,15 +466,20 @@ def _listen(api: _Win32, combo: str, modifiers: int, vk: int, on_press: Callable
                        "Choose another [hotkey] combo in config.toml.", describe_combo(combo), error)
         return 1
     on_hud_press: Callable[[], Any] | None = None
+    on_talk_press: Callable[[], Any] | None = None
     try:
         logger.info("Listening for the hotkey %s", describe_combo(combo))
         on_hud_press = _register_hud_key(api, hud, combo)
+        on_talk_press = _register_talk_key(api, talk, combo)
         if stop_event is not None:
             _watch_stop(api, stop_event, api.kernel32.GetCurrentThreadId())
         if on_ready is not None:
             on_ready()
-        return _message_loop(api, msg, on_press, on_hud_press)
+        return _message_loop(api, msg, on_press, on_hud_press, on_talk_press)
     finally:
+        if on_talk_press is not None and talk is not None:
+            api.user32.UnregisterHotKey(None, TALK_HOTKEY_ID)
+            logger.info("Talk key %s released", describe_combo(talk[0]))
         if on_hud_press is not None and hud is not None:
             api.user32.UnregisterHotKey(None, HUD_HOTKEY_ID)
             logger.info("HUD key %s released", describe_combo(hud[0]))
@@ -471,6 +503,22 @@ def _register_hud_key(api: _Win32, hud: tuple[str, int, int, Callable[[], Any]] 
     return None
 
 
+def _register_talk_key(api: _Win32, talk: tuple[str, int, int, Callable[[], Any]] | None,
+                       combo: str) -> Callable[[], Any] | None:
+    """The talk key as the third hotkey id; its ``on_press`` once registered, else None (a WARNING with the error
+    number: the window key ``combo`` works as before)."""
+    if talk is None:
+        return None
+    talk_combo, modifiers, vk, on_talk_press = talk
+    if api.user32.RegisterHotKey(None, TALK_HOTKEY_ID, modifiers | MOD_NOREPEAT, vk):
+        logger.info("Listening for the talk key %s", describe_combo(talk_combo))
+        return on_talk_press
+    logger.warning("Could not register the talk key %s (error %d): another program probably uses it. The hotkey %s "
+                   "works as before; choose another [talk] key in config.toml.", describe_combo(talk_combo),
+                   ctypes.get_last_error(), describe_combo(combo))
+    return None
+
+
 def _watch_stop(api: _Win32, stop_event: threading.Event, thread_id: int) -> None:
     """Wake the blocking GetMessage with WM_QUIT once ``stop_event`` is set."""
     def watch() -> None:
@@ -481,7 +529,8 @@ def _watch_stop(api: _Win32, stop_event: threading.Event, thread_id: int) -> Non
 
 
 def _message_loop(api: _Win32, msg: Any, on_press: Callable[[], Any],
-                  on_hud_press: Callable[[], Any] | None = None) -> int:
+                  on_hud_press: Callable[[], Any] | None = None,
+                  on_talk_press: Callable[[], Any] | None = None) -> int:
     while True:
         result = api.user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
         if result == 0:          # WM_QUIT
@@ -495,6 +544,8 @@ def _message_loop(api: _Win32, msg: Any, on_press: Callable[[], Any],
             _press(on_press)
         elif msg.wParam == HUD_HOTKEY_ID and on_hud_press is not None:
             _press(on_hud_press)
+        elif msg.wParam == TALK_HOTKEY_ID and on_talk_press is not None:
+            _press(on_talk_press)
 
 
 def _press(on_press: Callable[[], Any]) -> None:
