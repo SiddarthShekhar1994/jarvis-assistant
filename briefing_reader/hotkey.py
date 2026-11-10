@@ -72,6 +72,7 @@ _MODIFIER_ALIASES = {"ctrl": "ctrl", "control": "ctrl", "alt": "alt", "shift": "
                      "win": "win", "windows": "win"}
 _FKEY_RE = re.compile(r"f([1-9]|1[0-9]|2[0-4])")
 VK_F1 = 0x70
+VK_SPACE = 0x20             # the talk key's default is Ctrl+Alt+Space ([talk] key)
 
 _ERROR_FILE_NOT_FOUND = 2
 _ERROR_ACCESS_DENIED = 5
@@ -91,9 +92,9 @@ def parse_combo(text: str) -> tuple[int, int]:
     """``"ctrl+alt+j"`` -> ``(MOD_CONTROL | MOD_ALT, 0x4A)``; ValueError when invalid.
 
     Modifiers: ctrl (control), alt, shift, win (windows), any case, each at
-    most once. Key: one letter, one digit or F1..F24. A letter or digit needs
-    ctrl, alt or win (shift alone would capture ordinary typing); an F key
-    may stand alone. ``MOD_NOREPEAT`` is added at registration, not here.
+    most once. Key: one letter, one digit, space or F1..F24. A letter, digit or
+    space needs ctrl, alt or win (shift alone would capture ordinary typing); an
+    F key may stand alone. ``MOD_NOREPEAT`` is added at registration, not here.
     """
     if not isinstance(text, str) or not text.strip():
         raise ValueError("the hotkey is empty")
@@ -112,7 +113,7 @@ def parse_combo(text: str) -> tuple[int, int]:
         modifiers |= flag
     vk, is_function_key = _virtual_key(key)
     if not is_function_key and not modifiers & (MOD_CONTROL | MOD_ALT | MOD_WIN):
-        raise ValueError("a letter or digit needs ctrl, alt or win")
+        raise ValueError("a letter, digit or space needs ctrl, alt or win")
     return modifiers, vk
 
 
@@ -125,10 +126,12 @@ def _virtual_key(key: str) -> tuple[int, bool]:
         raise ValueError("the hotkey needs a key after the modifiers")
     if len(key) == 1 and ("a" <= key <= "z" or "0" <= key <= "9"):
         return ord(key.upper()), False
+    if key == "space":
+        return VK_SPACE, False
     match = _FKEY_RE.fullmatch(key)
     if match is not None:
         return VK_F1 + int(match.group(1)) - 1, True
-    raise ValueError(f"{key[:20]!r} is not a letter, digit or F1..F24")
+    raise ValueError(f"{key[:20]!r} is not a letter, digit, space or F1..F24")
 
 
 def normalize_combo(text: str) -> str:
@@ -151,6 +154,8 @@ def describe_combo(text: str) -> str:
 def _key_name(vk: int) -> str:
     if VK_F1 <= vk < VK_F1 + 24:
         return f"F{vk - VK_F1 + 1}"
+    if vk == VK_SPACE:
+        return "Space"
     return chr(vk)
 
 

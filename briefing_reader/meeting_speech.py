@@ -90,6 +90,27 @@ ERR_AUDIO = "audio_missing"
 ERR_WORKER = "worker_failed"
 
 
+@dataclass(frozen=True)
+class SpeechModel:
+    """A faster-whisper model on Hugging Face: what ModelDownloader fetches (only on the owner's click) and the
+    folder under the models root it lives in. Meetings use MEETING_MODEL; talking to Jarvis ([talk] model) any of
+    SPEECH_MODELS."""
+
+    name: str
+    repo: str
+    folder: str
+    size_text: str
+    files: tuple[str, ...] = MODEL_FILES
+    revision: str = MODEL_REVISION
+
+
+MEETING_MODEL = SpeechModel(MODEL_NAME, MODEL_REPO, MODEL_FOLDER, MODEL_SIZE_TEXT)
+SPEECH_MODELS = {model.name: model for model in (
+    SpeechModel("base.en", "Systran/faster-whisper-base.en", "faster-whisper-base.en", "about 145 MB"),
+    SpeechModel("small.en", "Systran/faster-whisper-small.en", "faster-whisper-small.en", "about 480 MB"),
+    MEETING_MODEL)}
+
+
 # --------------------------------------------------------------------------
 # What is missing
 # --------------------------------------------------------------------------
@@ -100,17 +121,18 @@ class Missing:
     text: str
 
 
-def model_dir(models_root: Path) -> Path:
-    return Path(models_root) / MODEL_FOLDER
+def model_dir(models_root: Path, model: SpeechModel | None = None) -> Path:
+    """Where ``model`` lives (the meetings' model when None)."""
+    return Path(models_root) / (model or MEETING_MODEL).folder
 
 
-def model_ready(folder: Path) -> bool:
+def model_ready(folder: Path, model: SpeechModel | None = None) -> bool:
     """Every model file there with the size its manifest recorded after the checks."""
     try:
         manifest = json.loads((Path(folder) / MANIFEST).read_text(encoding="utf-8"))
         files = manifest.get("files", {})
         return all((Path(folder) / name).is_file() and (Path(folder) / name).stat().st_size == int(files[name])
-                   for name in MODEL_FILES)
+                   for name in (model or MEETING_MODEL).files)
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return False
 
@@ -159,6 +181,12 @@ class ModelDownloader:
         self._progress = progress
         self._cancel = cancel or threading.Event()
         self.repo, self.revision, self.files = repo, revision, tuple(files)
+
+    @classmethod
+    def for_model(cls, models_root: Path, model: SpeechModel, **kwargs: Any) -> ModelDownloader:
+        """A downloader of ``model`` into its folder under ``models_root`` (session, progress, cancel as above)."""
+        return cls(model_dir(models_root, model), repo=model.repo, revision=model.revision, files=model.files,
+                   **kwargs)
 
     def cancel(self) -> None:
         self._cancel.set()

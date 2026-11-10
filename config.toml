@@ -145,8 +145,8 @@ pm = "23:42"
 # install-schedule.ps1 after a change. false: install-schedule.ps1 removes
 # the "Briefing hotkey" task.
 enabled = true
-# ctrl, alt, shift, win plus one letter, digit or F1..F24, e.g. "ctrl+alt+j"
-# or "ctrl+shift+F9". A letter or digit needs ctrl, alt or win.
+# ctrl, alt, shift, win plus one letter, digit, space or F1..F24, e.g.
+# "ctrl+alt+j" or "ctrl+shift+F9". A letter, digit or space needs ctrl, alt or win.
 combo = "ctrl+alt+j"
 
 [agenda]
@@ -382,3 +382,18 @@ search_engine = "duckduckgo"  # where his searches go: "duckduckgo", "bing" or "
 workspace = ""                # his files; "" = the Jarvis\Workspace folder in your user folder; never under OneDrive
 private = ["calendar", "contacts", "memory", "mail", "files"]   # what a task may read of your things, when it needs them
 speak_private = false         # true: a line that may hold something private is said aloud too (spoken lines go to Microsoft's online voice)
+
+[talk]
+# Talk to Jarvis: tap the talk key, say what you want, and he takes it after about half a second of quiet (tap
+# again to end sooner, Esc to cancel). He hears you only between the tap and the end, and he shows that he is
+# listening the whole time. Your speech is turned into text on this PC by a speech model downloaded only when you
+# click Download, and the sound is never saved; what he heard goes in as if you had typed it, so cards still need
+# your click: voice never approves or undoes anything. It needs the Python add-ons faster-whisper and PyAudioWPatch
+# (you install them; Jarvis never does). Off here; turn it on for this PC with JARVIS_TALK_ENABLED=true in .env, then
+# restart the "Briefing hotkey" task.
+enabled = false
+key = "ctrl+alt+space"        # the talk key; never the [hotkey] combo or the [desktop] hud_key
+model = "small.en"            # "small.en" (about 480 MB), "base.en" (145 MB, quicker, less sure) or "medium.en" (1.5 GB, the meetings' model)
+keep_warm_minutes = 10        # the speech model stays loaded this long after a talk, so the next starts at once (1..120)
+quiet_ms = 500                # this much quiet after you speak ends a talk, in milliseconds (300..2000)
+hints = []                    # names he should expect to hear, e.g. ["Spotify", "Notion"] ("Jarvis" always is)

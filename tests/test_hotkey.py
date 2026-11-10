@@ -127,7 +127,7 @@ class ParseComboTests(unittest.TestCase):
     def test_invalid_combos(self) -> None:
         bad = ["", "   ", "j", "shift+j", "shift+5", "ctrl+alt", "ctrl", "ctrl+alt+jj", "ctrl++j",
                "+j", "ctrl+alt+", "ctrl+ctrl+j", "control+ctrl+j", "ctrl+alt+F25", "ctrl+alt+F0",
-               "hyper+j", "ctrl+alt+-", "ctrl+alt+\u00e9", "ctrl+alt+space", None, 5]
+               "hyper+j", "ctrl+alt+-", "ctrl+alt+\u00e9", "ctrl+alt+tab", "space", "shift+space", None, 5]
         for text in bad:
             with self.subTest(text=text), self.assertRaises(ValueError):
                 parse_combo(text)  # type: ignore[arg-type]
