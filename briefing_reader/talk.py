@@ -24,8 +24,9 @@ from __future__ import annotations
 import math
 import re
 import sys
+import time
 from array import array
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 SAMPLE_RATE = 16_000
@@ -225,3 +226,115 @@ def hint_prompt(names: Iterable[str] = ()) -> str:
         chosen.append(text)
         length += len(text) + 2
     return ", ".join(chosen) + "." if chosen else ""
+
+
+# --------------------------------------------------------------------------
+# One talk's microphone
+# --------------------------------------------------------------------------
+
+ERR_NO_AUDIO_ADDON = "audio_addon_missing"     # neither PyAudioWPatch nor soundcard is installed
+ERR_NO_MICROPHONE = "no_microphone"
+ERR_MIC_BUSY = "mic_busy"                      # the microphone would not open
+BACKSTOP_S = MAX_TALK_S + 3.0                  # a talk ends by the clock too, whatever the microphone delivers
+
+
+class TalkError(RuntimeError):
+    """A talk that could not start; ``code`` is one of the ERR_* above."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+class TalkSession:
+    """One talk's microphone (no Qt). :meth:`start` opens it: the microphone picked in Settings > Meetings while it
+    is there, else the Windows default. :meth:`poll` reads what arrived (the device's own rate and channels, made
+    16 kHz mono) and returns the end reason or ""; :meth:`end` ends it from outside (a second tap, Esc). Every end
+    closes the stream at once. The audio stays in memory: :meth:`clip` is the part worth understanding, b"" when
+    nothing should be (nothing said, a cancel, a stopped or muted microphone)."""
+
+    def __init__(self, stream: Any, *, quiet_ms: int = QUIET_MS, clock: Callable[[], float] = time.monotonic) -> None:
+        self._stream = stream
+        self.endpointer = Endpointer(quiet_ms=quiet_ms)
+        self._audio = bytearray()
+        self._clock = clock
+        self._began = clock()
+
+    @classmethod
+    def start(cls, backend: Any, picked: str = "", *, quiet_ms: int = QUIET_MS,
+              clock: Callable[[], float] = time.monotonic) -> TalkSession:
+        from .meeting_audio import pick_device
+
+        if backend is None:
+            raise TalkError(ERR_NO_AUDIO_ADDON)
+        try:
+            device, _follows = pick_device(backend.inputs(), backend.default_input(), picked)
+        except Exception as exc:  # noqa: BLE001 - a device library that cannot list is no microphone
+            raise TalkError(ERR_NO_MICROPHONE) from exc
+        if device is None:
+            raise TalkError(ERR_NO_MICROPHONE)
+        try:
+            stream = backend.open_mic(device)
+        except Exception as exc:  # noqa: BLE001 - in use, unplugged, refused by Windows' privacy setting
+            raise TalkError(ERR_MIC_BUSY) from exc
+        return cls(stream, quiet_ms=quiet_ms, clock=clock)
+
+    @property
+    def ended(self) -> str:
+        return self.endpointer.ended
+
+    @property
+    def level(self) -> float:
+        return self.endpointer.level
+
+    @property
+    def muted(self) -> bool:
+        return self.endpointer.muted
+
+    @property
+    def closed(self) -> bool:
+        return self._stream is None
+
+    def poll(self) -> str:
+        if self.endpointer.ended:
+            return self.endpointer.ended
+        from .meeting_audio import to_mono16k
+
+        try:
+            data = self._stream.read_available()
+        except OSError:
+            return self.end(END_DEVICE)
+        if data:
+            pcm = to_mono16k(data, int(getattr(self._stream, "rate", SAMPLE_RATE)),
+                             int(getattr(self._stream, "channels", 1)), fmt=str(getattr(self._stream, "fmt", "int16")))
+            self._audio += pcm
+            if self.endpointer.feed(pcm):
+                self._close()
+                return self.endpointer.ended
+        if self._clock() - self._began >= BACKSTOP_S:
+            return self.end(END_CAP)
+        return ""
+
+    def end(self, reason: str) -> str:
+        reason = self.endpointer.end(reason)
+        self._close()
+        return reason
+
+    def _close(self) -> None:
+        stream, self._stream = self._stream, None
+        if stream is not None:
+            try:
+                stream.close()
+            except Exception:  # noqa: BLE001 - a device that went away
+                pass
+
+    def clip(self) -> bytes:
+        ep = self.endpointer
+        if ep.ended not in SAID_ENDS or ep.muted or (ep.ended != END_OWNER and not ep.heard_speech):
+            return b""
+        first, last = ep.span(len(self._audio))
+        return bytes(self._audio[first:last])
+
+    def forget(self) -> None:
+        """Drops the audio (once it was understood, or not needed)."""
+        self._audio = bytearray()
