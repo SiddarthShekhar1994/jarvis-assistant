@@ -23,13 +23,16 @@ class Folders(unittest.TestCase):
         self.root = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: shutil.rmtree(self.root, ignore_errors=True))
 
-    def wheels(self, *, cublas: bool = True, cudnn: bool = True) -> Path:
+    def wheels(self, *, cublas: bool = True, cudnn: bool = True, cudnn_ops: bool = True) -> Path:
         nvidia = self.root / "site-packages" / "nvidia"
-        for wanted, part, name in ((cublas, "cublas", "cublas64_12.dll"), (cudnn, "cudnn", "cudnn64_9.dll")):
+        for wanted, part, names in ((cublas, "cublas", ("cublas64_12.dll", "cublasLt64_12.dll")),
+                                    (cudnn, "cudnn", ("cudnn64_9.dll", "cudnn_cnn64_9.dll")),
+                                    (cudnn_ops, "cudnn", ("cudnn_ops64_9.dll",))):
             folder = nvidia / part / "bin"
             folder.mkdir(parents=True, exist_ok=True)
-            if wanted:
-                (folder / name).write_bytes(b"MZ")
+            for name in names:
+                if wanted:
+                    (folder / name).write_bytes(b"MZ")
         return nvidia
 
 
@@ -47,8 +50,12 @@ class LibraryTests(Folders):
         self.assertFalse(gpu.libraries_found(dirs, path_env=""))
         elsewhere = self.root / "cuda" / "bin"
         elsewhere.mkdir(parents=True)
-        (elsewhere / "cudnn64_9.dll").write_bytes(b"MZ")
+        for name in ("cudnn64_9.dll", "cudnn_cnn64_9.dll"):
+            (elsewhere / name).write_bytes(b"MZ")
         self.assertTrue(gpu.libraries_found(dirs, path_env=str(elsewhere)))
+
+    def test_a_part_of_cudnn_missing_is_no_gpu(self) -> None:
+        self.assertFalse(gpu.libraries_found(gpu.cuda_dirs([self.wheels(cudnn_ops=False)]), path_env=""))
 
     def test_the_driver_and_the_status(self) -> None:
         system32 = self.root / "System32"
@@ -82,7 +89,7 @@ class LibraryTests(Folders):
         self.assertEqual(gpu.runs_on_text(gpu.READY), "the GPU, from the next use")
         self.assertIn("fell back", gpu.runs_on_text(gpu.READY, gpu.CPU))
         self.assertIn("pip install", gpu.runs_on_text(gpu.ADDONS_MISSING))
-        self.assertEqual(gpu.runs_on_text(gpu.NO_GPU), "the CPU (no NVIDIA GPU found)")
+        self.assertEqual(gpu.runs_on_text(gpu.NO_GPU), "the CPU (no NVIDIA GPU or driver found)")
         self.assertEqual(gpu.runs_on_text(gpu.CPU_CHOSEN, setting="[talk] device"),
                          'the CPU ([talk] device = "cpu" in config.toml)')
 
@@ -221,6 +228,91 @@ class ProcessTests(unittest.TestCase):
                 mock.patch.object(gpu, "prepare") as prepared:
             self.assertEqual(meeting_speech.FasterWhisperTranscriber(Path("m"), device="cpu").device, gpu.CPU)
         prepared.assert_not_called()                     # "cpu": NVIDIA's libraries are never even looked for
+
+
+class FallbackTests(unittest.TestCase):
+    """Every way the GPU can fail ends on the CPU: a clip that fails, a process that crashes, hangs or never gets
+    ready, a meeting worker that dies or fails half way."""
+
+    def test_a_clip_that_fails_on_the_gpu_is_understood_again_on_the_cpu(self) -> None:
+        class Talk:
+            device = gpu.CUDA
+
+            def transcribe(self, _clip: bytes) -> str:
+                if self.device == gpu.CUDA:
+                    raise RuntimeError("CUDA failed with error out of memory")
+                return "what time is it"
+
+            def to_cpu(self) -> None:
+                self.device = gpu.CPU
+
+        out = io.StringIO()
+        clip = b"\x01\x00" * 400
+        talk_speech.serve(io.BytesIO(len(clip).to_bytes(4, "little") + clip + b"\0\0\0\0"), out, Talk, idle_s=1)
+        answer = json.loads(out.getvalue().splitlines()[1])
+        self.assertEqual((answer["ok"], answer["text"], answer["device"]), (True, "what time is it", "cpu"))
+        cpu_only = SimpleNamespace(device=gpu.CPU, transcribe=mock.Mock(side_effect=RuntimeError("x")))
+        out = io.StringIO()
+        talk_speech.serve(io.BytesIO(len(clip).to_bytes(4, "little") + clip + b"\0\0\0\0"), out, lambda: cpu_only,
+                          idle_s=1)
+        self.assertEqual(json.loads(out.getvalue().splitlines()[1]), {"ok": False, "error": talk_speech.ERR_FAILED})
+
+    def test_a_talk_process_that_never_gets_ready_starts_again_on_the_cpu(self) -> None:
+        commands: list[list[str]] = []
+        replies = iter([FakeProc([]), FakeProc([{"ready": True, "load_ms": 9, "device": "cpu"}])])
+        client = talk_speech.SpeechClient(Path("m"), spawn=lambda command: commands.append(command) or next(replies))
+        self.assertEqual(client._start(), ("", 9))
+        self.assertEqual([command[-1] for command in commands], ["auto", "cpu"])
+        self.assertEqual(client.device, gpu.CPU)
+
+    def test_a_crash_or_a_hang_on_the_gpu_keeps_the_cpu_for_the_run(self) -> None:
+        client = talk_speech.SpeechClient(Path("m"))
+        client.device = gpu.CUDA
+        client._gpu_gave_out(0)                                  # it went idle: nothing changes
+        self.assertEqual(client._command()[-1], "auto")
+        client._gpu_gave_out(3221226505)                         # crashed
+        self.assertEqual(client._command()[-1], "cpu")
+        hung = talk_speech.SpeechClient(Path("m"))
+        hung.device = gpu.CUDA
+        hung._gpu_gave_out(None)
+        self.assertEqual(hung._command()[-1], "cpu")
+
+    def test_a_meeting_worker_that_dies_without_a_word_runs_again_on_the_cpu(self) -> None:
+        meeting_speech._last_device.pop("fell_back", None)
+        self.addCleanup(meeting_speech._last_device.pop, "fell_back", None)
+        done: list[str] = []
+        process = meeting_speech.TranscriptionProcess(Path("meeting"), Path("model"), on_progress=lambda _p: None,
+                                                      on_done=done.append)
+        process._proc = FakeProc([{"device": "cuda"}, {"progress": 30}])
+        with mock.patch.object(process, "start") as started, self.assertLogs("briefing_reader.meeting_speech",
+                                                                             level="INFO"):
+            process._read()
+        started.assert_called_once_with()
+        self.assertEqual((process.device_setting, done), (gpu.DEVICE_CPU, []))
+        later = meeting_speech.TranscriptionProcess(Path("m2"), Path("model"), on_progress=lambda _p: None,
+                                                    on_done=lambda _e: None)
+        self.assertEqual(later.device_setting, gpu.DEVICE_CPU)   # the rest of this run stays on the CPU
+
+    def test_a_meeting_that_fails_half_way_on_the_gpu_is_done_again_on_the_cpu(self) -> None:
+        folder = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(folder, ignore_errors=True))
+        emitted: list[dict] = []
+        made = [SimpleNamespace(device="cuda"), SimpleNamespace(device="cpu")]
+        runs = iter([RuntimeError("CUDA error: out of memory"), None])
+
+        def transcribe(_folder, _transcriber, _progress):
+            failure = next(runs)
+            if failure is not None:
+                raise failure
+
+        with mock.patch.object(meeting_speech, "speech_missing", return_value=""), \
+                mock.patch.object(meeting_speech, "model_ready", return_value=True), \
+                mock.patch.object(meeting_speech, "FasterWhisperTranscriber", side_effect=made) as transcriber, \
+                mock.patch.object(meeting_speech, "transcribe_meeting", side_effect=transcribe), \
+                mock.patch.object(meeting_speech, "_emit", side_effect=emitted.append):
+            self.assertEqual(meeting_speech.main(["--meeting", str(folder), "--model", str(folder)]), 0)
+        self.assertEqual(transcriber.call_args_list[1].kwargs["device"], "cpu")
+        self.assertEqual(emitted, [{"device": "cuda"}, {"device": "cpu"}, {"done": True}])
 
 
 class ConfigTests(unittest.TestCase):

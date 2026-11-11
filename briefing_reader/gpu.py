@@ -22,6 +22,7 @@ CPU_CHOSEN, ``runs_on_text(state, reported)``, ``pip_line()``, ``cuda_dirs()``, 
 
 from __future__ import annotations
 
+import gc
 import importlib.util
 import os
 import sys
@@ -34,7 +35,8 @@ DEVICES = (DEVICE_AUTO, DEVICE_CPU)
 READY, NO_GPU, ADDONS_MISSING, CPU_CHOSEN = "ready", "no_gpu", "addons_missing", "cpu_chosen"
 CUDA, CPU = "cuda", "cpu"
 PACKAGES = ('"nvidia-cublas-cu12==12.*"', '"nvidia-cudnn-cu12==9.*"')
-LIBRARIES = ("cublas64_12.dll", "cudnn64_9.dll")       # what ctranslate2 4.x loads on Windows
+# What ctranslate2 4.x loads on Windows (cuDNN 9 comes in parts: a part missing would fail at the first use).
+LIBRARIES = ("cublas64_12.dll", "cublasLt64_12.dll", "cudnn64_9.dll", "cudnn_ops64_9.dll", "cudnn_cnn64_9.dll")
 _PACKAGE_DIRS = (("cublas", "bin"), ("cudnn", "bin"))
 
 
@@ -103,7 +105,7 @@ def runs_on_text(state: str, reported: str = "", *, setting: str = "device") -> 
     if state == CPU_CHOSEN:
         return f'the CPU ({setting} = "cpu" in config.toml)'
     if state == NO_GPU:
-        return "the CPU (no NVIDIA GPU found)"
+        return "the CPU (no NVIDIA GPU or driver found)"
     if state == ADDONS_MISSING:
         return f"the CPU - for the GPU, install NVIDIA's libraries: {pip_line()}"
     if reported == CUDA:
@@ -157,14 +159,16 @@ def load_model(factory: Callable[..., Any], folder: Path, *, device: str = DEVIC
     (``gpu_ready``: the libraries found and a CUDA device seen) the model loads on the GPU in float16 and ``warm(model)``
     runs it once; any failure there - or DEVICE_CPU - loads it on the CPU in int8 with ``threads`` threads."""
     if device != DEVICE_CPU:
+        model = None
         try:
             if (gpu_ready or _gpu_ready)():
                 model = factory(str(folder), device=CUDA, compute_type="float16", **kwargs)
                 if warm is not None:
                     warm(model)
                 return model, CUDA
-        except Exception:  # noqa: BLE001 - no GPU after all: the CPU, as before (any model on it is let go)
-            pass
+        except Exception:  # noqa: BLE001 - no GPU after all: the CPU, as before
+            model = None
+            gc.collect()                                 # the GPU's model is let go before the CPU's loads
     model = factory(str(folder), device=CPU, compute_type="int8", cpu_threads=max(1, int(threads)), **kwargs)
     return model, CPU
 

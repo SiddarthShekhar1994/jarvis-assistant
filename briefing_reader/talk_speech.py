@@ -20,6 +20,7 @@ went idle) is started again once. ``close()`` ends it. ``spawn`` (tests) replace
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import queue
@@ -81,8 +82,17 @@ class FasterWhisperTalk:
         self._hints = hints or None
         if device != gpu.DEVICE_CPU:
             gpu.prepare()                                # NVIDIA's libraries on this process's DLL search path
+        self._load_args = (WhisperModel, Path(model_dir), threads)
         self._model, self.device = gpu.load_model(WhisperModel, Path(model_dir), device=device, threads=threads,
                                                   warm=gpu.warm_up, local_files_only=True)
+
+    def to_cpu(self) -> None:
+        """The GPU failed on a clip: the CPU's model from now on (the GPU's is let go first)."""
+        factory, folder, threads = self._load_args
+        self._model = None
+        gc.collect()
+        self._model, self.device = gpu.load_model(factory, folder, device=gpu.DEVICE_CPU, threads=threads,
+                                                  local_files_only=True)
 
     def transcribe(self, pcm: bytes) -> str:
         samples = self._np.frombuffer(pcm[: len(pcm) - len(pcm) % 2], dtype=self._np.int16).astype(self._np.float32)
@@ -174,9 +184,25 @@ def serve(inp: IO[bytes], out: IO[str], load: Callable[[], Transcriber], *, idle
         try:
             text = transcriber.transcribe(clip)
         except Exception:  # noqa: BLE001 - one clip that fails never ends the process
-            _write(out, {"ok": False, "error": ERR_FAILED})
-            continue
-        _write(out, {"ok": True, "text": text, "ms": int((clock() - began) * 1000)})
+            text = _on_the_cpu(transcriber, clip)        # the GPU failed: the CPU's model, and this clip again
+            if text is None:
+                _write(out, {"ok": False, "error": ERR_FAILED})
+                continue
+        device = getattr(transcriber, "device", gpu.CPU)
+        _write(out, {"ok": True, "text": text, "ms": int((clock() - began) * 1000),
+                     "device": device if device in (gpu.CUDA, gpu.CPU) else gpu.CPU})
+
+
+def _on_the_cpu(transcriber: Any, clip: bytes) -> str | None:
+    """A clip failed: when the model ran on the GPU, it moves to the CPU and the clip is understood again there
+    (its words); None when it was on the CPU already, or the CPU fails too."""
+    if getattr(transcriber, "device", gpu.CPU) != gpu.CUDA or not hasattr(transcriber, "to_cpu"):
+        return None
+    try:
+        transcriber.to_cpu()
+        return transcriber.transcribe(clip)
+    except Exception:  # noqa: BLE001 - reported by its code
+        return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -254,6 +280,15 @@ class SpeechClient:
         lines.put(None)                               # the process's output ended
 
     def _start(self) -> tuple[str, int]:
+        """("" or an error code, load_ms). A process that ends, hangs or fails before it is ready while the GPU may be
+        used (it can take the process down rather than fail) is started again on the CPU, which stays for this run."""
+        error, load_ms = self._start_once()
+        if error in (ERR_ENDED, ERR_TIMEOUT, ERR_FAILED) and self._device_setting == gpu.DEVICE_AUTO:
+            self._device_setting = gpu.DEVICE_CPU
+            error, load_ms = self._start_once()
+        return error, load_ms
+
+    def _start_once(self) -> tuple[str, int]:
         """("" or an error code, load_ms)."""
         try:
             proc = self._spawn(self._command())
@@ -306,8 +341,13 @@ class SpeechClient:
                         return Heard(False, error=error)
                 answer = self._send(pcm)
                 if answer is None and attempt == 0:
+                    self._gpu_gave_out(self._exit_code())
                     self._kill()                       # it ended just then (idle, or failed): start it again, once
                     continue
+                if isinstance(answer, dict) and answer.get("error") == ERR_TIMEOUT:
+                    self._gpu_gave_out(None)           # hung: a GPU's hang would come back with the next talk
+                if isinstance(answer, dict) and answer.get("device") in (gpu.CUDA, gpu.CPU):
+                    self.device = answer["device"]
                 if answer is None:
                     return Heard(False, error=ERR_ENDED, load_ms=load_ms)
                 self._last_used = time.monotonic()
@@ -315,6 +355,20 @@ class SpeechClient:
                     return Heard(True, str(answer.get("text") or ""), ms=int(answer.get("ms") or 0), load_ms=load_ms)
                 return Heard(False, error=str(answer.get("error") or ERR_FAILED), load_ms=load_ms)
         return Heard(False, error=ERR_ENDED)
+
+    def _exit_code(self) -> int | None:
+        """The ended process's exit code (None: it has not ended within a second)."""
+        proc = self._proc
+        try:
+            return proc.wait(timeout=1.0) if proc is not None else 0
+        except (subprocess.TimeoutExpired, OSError, AttributeError):
+            return None
+
+    def _gpu_gave_out(self, code: int | None) -> None:
+        """On the GPU, a process that crashed (an exit code other than 0: 0 is going idle) or hung: the CPU from now
+        on, for this run."""
+        if self.device == gpu.CUDA and code != 0 and self._device_setting == gpu.DEVICE_AUTO:
+            self._device_setting = gpu.DEVICE_CPU
 
     def _kill(self) -> None:
         proc, self._proc = self._proc, None
