@@ -444,6 +444,9 @@ and the [license](#license).
 - For the page pictures of web research in LIVE only: PySide6 6.8 or newer
   (its web engine comes with the PySide6 package; see [Pictures in
   LIVE](#pictures-in-live)).
+- PySide6 below 6.12: under 6.12 Qt can call into parts of the window Python
+  has already cleared, which crashes the tests and could crash Jarvis, so
+  `requirements.txt` keeps it below 6.12 (6.11.2 is the version tested).
 
 ## Setup
 
