@@ -223,19 +223,41 @@ def remember_place(cache: NetCache, place: Place) -> None:
         cache.places[place.query.casefold()] = (place.latitude, place.longitude, place.shown)
 
 
+def _candidate_names(found: list[Mapping[str, Any]], town: str) -> list[str]:
+    """The leading candidates as the owner can say them back ("Springfield, Illinois"): two parts, with the province
+    instead of the country where two would read the same."""
+    shown = [_names(candidate, town)[3] for candidate in found]
+    if len(set(shown)) < len(shown):
+        shown = [f"{_names(candidate, town)[0]}, {candidate.get('admin1')}" if candidate.get("admin1") else name
+                 for candidate, name in zip(found, shown)]
+    return list(dict.fromkeys(shown))
+
+
 def find_place(town: str, *, get: Callable[[str, Mapping[str, Any], float], Any], cache: NetCache,
                monotonic: Callable[[], float] = time.monotonic) -> tuple[str, Any]:
     """Round 2: the place ``town`` names (see the module docs): (PLACE_FOUND, Place), (PLACE_SEVERAL, the leading
-    candidates' shown names), (PLACE_NONE, None) or (PLACE_FAILED, None). Never raises; logs statuses only."""
+    candidates' names as they can be said back), (PLACE_NONE, None) or (PLACE_FAILED, None). Words with no comma that
+    name no place are tried again with their last word, then last two, as the region ("san jose california"). Never
+    raises; logs statuses only."""
     started = monotonic()
     try:
-        status, found = _lookup(" ".join(str(town or "").split()), get)
+        town = " ".join(str(town or "").split())
+        status, found = _lookup(town, get)
+        words = town.split()
+        if status == PLACE_NONE and "," not in town:
+            for size in (1, 2):
+                if len(words) > size:
+                    again = f"{' '.join(words[:-size])}, {' '.join(words[-size:])}"
+                    status, found = _lookup(again, get)
+                    if status != PLACE_NONE:
+                        town = again
+                        break
         result: Any = None
         if status == PLACE_FOUND:
             result = _as_place(found[0], town)
             remember_place(cache, result)
         elif status == PLACE_SEVERAL:
-            result = list(dict.fromkeys(_names(candidate, town)[4] for candidate in found))
+            result = _candidate_names(found, town)
     except Exception as exc:  # noqa: BLE001 - no answer for sure: the town is left as it was
         logger.info("Instant: the place search gave no answer (%s, %d ms)", type(exc).__name__,
                     int((monotonic() - started) * 1000))

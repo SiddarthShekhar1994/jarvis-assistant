@@ -241,6 +241,20 @@ class ReminderTests(unittest.TestCase):
         self.assertIn("Your 5:00 PM reminder, while Jarvis was away: call mum.", texts)
         self.assertIn(("Your 5:00 PM reminder, while Jarvis was away: call mum.",
                        "Sir, your 5 PM reminder came while I was away."), self.ended)
+        second.shutdown()
+        self.clock.at += timedelta(hours=34)                    # closed again until Thursday 3:42 AM: Wednesday's 9 AM
+        self.ended.clear()
+        self.make()
+        self.assertEqual(self.ended, [("Your 9:00 AM reminder yesterday came while Jarvis was away.",
+                                       "Sir, your 9 AM reminder from yesterday came while I was away.")])
+
+    def test_a_reminder_missed_by_more_than_two_days_goes_quietly(self) -> None:
+        first = self.make()
+        self.remind(first, "remind me at 5 pm to call mum")
+        first.shutdown()
+        self.clock.at += timedelta(hours=51)
+        second = self.make()
+        self.assertEqual((self.ended, second.reminders()), ([], ()))
 
     def test_the_file_both_ways_and_the_limits(self) -> None:
         self.folder.mkdir(exist_ok=True)
@@ -421,16 +435,64 @@ class TownTests(unittest.TestCase):
             {"name": "Springfield", "latitude": 37.2, "longitude": -93.3, "country": "United States",
              "country_code": "US", "admin1": "Missouri", "population": 169176}]}
         several = self.say(controller, "my town is Springfield")
-        self.assertIn("There's more than one Springfield: Springfield, Missouri, United States; Springfield, "
-                      "Illinois, United States.", several.text)
+        self.assertEqual(several.text, "There's more than one Springfield: Springfield, Missouri; Springfield, "
+                                       "Illinois. Say the one you mean, like \"my town is Springfield, Missouri\". "
+                                       "Your weather town wasn't changed.")
         self.assertEqual(several.speech, "There's more than one Springfield, sir. Which state or country?")
+        suggested = instant.understand("my town is Springfield, Missouri", now=datetime.now().astimezone(),
+                                       flags=instant.InstantFlags(weather=True))
+        self.assertEqual(suggested.town, "Springfield, Missouri")       # what it suggests is understood
         self.geocode = {"generationtime_ms": 0.3}
-        self.assertEqual(self.say(controller, "I live in Xyzzy").text,
+        self.assertEqual(self.say(controller, "my town is Xyzzy").text,
                          "I couldn't find a place called Xyzzy. Your weather town wasn't changed.")
         self.geocode = OSError("no network")
         self.assertIn("couldn't be reached", self.say(controller, "use Paris for the weather").text)
         self.assertIsNone(controller.store.place())
         self.assertFalse((self.folder / instant_ui.INSTANT_FILE).exists())
+
+    def test_i_live_in_is_kept_only_for_a_place_found(self) -> None:
+        controller = self.make()
+        fallbacks: list[tuple] = []
+        controller.fallback.connect(lambda *args: fallbacks.append(args))
+        self.geocode = {"generationtime_ms": 0.3}
+        self.assertTrue(controller.take("I live in fear"))
+        settle()
+        self.assertEqual((fallbacks, self.answers), ([("I live in fear", False)], []))   # Claude's, as before
+        self.assertFalse(controller.take("I live in London and work in Paris"))       # not a town at all
+        self.geocode = {"results": [{"name": "San Jose", "latitude": 37.34, "longitude": -121.89,
+                                     "country": "United States", "country_code": "US", "admin1": "California",
+                                     "population": 1013240}]}
+        self.assertEqual(self.say(controller, "I live in San Jose").text, "Got it: San Jose, California, United States.")
+
+    def test_only_the_latest_town_asked_is_kept(self) -> None:
+        controller = self.make()
+        self.geocode = {"results": [{"name": "Oslo", "latitude": 59.9, "longitude": 10.7, "country": "Norway",
+                                     "country_code": "NO", "admin1": "Oslo", "population": 580000},
+                                    {"name": "San Jose", "latitude": 37.34, "longitude": -121.89,
+                                     "country": "United States", "country_code": "US", "admin1": "California",
+                                     "population": 1013240}]}
+        self.assertTrue(controller.take("my town is Oslo"))
+        self.assertTrue(controller.take("my town is San Jose"))        # asked before the first search answered
+        settle()
+        self.assertEqual([args[0].text for args in self.answers], ["Got it: San Jose, California, United States."])
+        self.assertEqual(controller.store.place().shown, "San Jose, California")
+
+    def test_typed_without_commas(self) -> None:
+        controller = self.make()
+        geocodes = []
+
+        def get(url, params, timeout):
+            geocodes.append(params.get("name"))
+            if str(params.get("name")).casefold() == "san jose":
+                return self.get(url, params, timeout)
+            return {"generationtime_ms": 0.2}
+
+        controller._get = get
+        reply = self.say(controller, "my town is san jose california")
+        self.assertEqual(reply.text, "Got it: San Jose, California, United States.")
+        self.assertEqual(geocodes, ["san jose california", "san jose"])
+        self.assertEqual(self.say(controller, "my town is San Jose, California, United States").text,
+                         "Got it: San Jose, California, United States.")
 
     def test_a_bad_file_the_real_data_folder_and_the_logs(self) -> None:
         (self.folder / instant_ui.INSTANT_FILE).write_text('{"version": 1, "town": {"name": "x"}}', encoding="utf-8")
@@ -550,20 +612,25 @@ class CalendarControllerTests(unittest.TestCase):
         stale.calendar_done(instant_calendar.CalendarRead(events={"personal": []}))   # no range: not for sure
         self.assertEqual(self.fallbacks[-1], ("what's my next meeting", False))
 
-    def test_an_account_not_read_is_said_and_not_kept_when_none_was(self) -> None:
+    def test_an_account_not_read_is_said_and_read_again_next_time(self) -> None:
         controller = self.make()
         controller.take("am I free at 2:30 pm")
         controller.calendar_done(self.a_read(problems={"work": "signedout"}))
         said = self.answers[0][0].speech
         self.assertIn("on your personal calendar", said)
         self.assertIn("your work calendar couldn't be read", said)
-        self.ticks.at += instant_ui.CALENDAR_KEEP_S + 1
-        controller.take("what's my next meeting")
+        self.ticks.at += 1
+        self.assertTrue(controller.take("what's my next meeting"))   # signed in meanwhile: read again, not the copy
+        self.assertEqual(self.reads, 2)
         controller.calendar_done(self.a_read(problems={"work": "signedout", "personal": "signedout"}))
         self.assertIn("I couldn't read your personal and work calendars", self.answers[-1][0].speech)
         self.ticks.at += 1
         self.assertTrue(controller.take("what's my next meeting"))
-        self.assertEqual(self.reads, 3)            # a read that read nothing is not kept: the next question reads again
+        self.assertEqual(self.reads, 3)                                # nothing kept: the next question reads again
+        controller.calendar_done(self.a_read())
+        self.ticks.at += 1
+        self.assertTrue(controller.take("what's my next meeting"))
+        self.assertEqual(self.reads, 3)                                # every account read: kept 2 minutes
 
     def test_the_logs_hold_no_titles(self) -> None:
         controller = self.make()
@@ -676,9 +743,16 @@ class AppWiringTests(unittest.TestCase):
         self.assertIn("1 calendar(s) read, 1 not", log_text)
         self.assertNotIn("Physio", log_text)
         reads = len(app.calendars["personal"].calls)
-        self.submit(app, "am I free at 3 pm")                            # within 2 minutes: from the copy
-        self.assertEqual(len(app.calendars["personal"].calls), reads)
+        self.submit(app, "am I free at 3 pm")           # the work calendar wasn't read: read again, never the copy
+        self.assertTrue(wait_for(lambda: len(app.calendars["personal"].calls) == reads + 1))
         self.assertFalse(app.factory.runner.started)
+        # One read at a time: a second ask while one is on its way waits for it.
+        settle()
+        self.assertTrue(wait_for(lambda: c._instant_calendar_job is None))
+        seq = c._instant_calendar_seq
+        self.assertTrue(c._instant_calendar_read())
+        self.assertTrue(c._instant_calendar_read())
+        self.assertEqual(c._instant_calendar_seq, seq + 1)
 
     def test_a_reminder_on_home_and_at_its_time(self) -> None:
         app = AppHarness(self)                                           # the app's clock: Sunday 1:52 PM

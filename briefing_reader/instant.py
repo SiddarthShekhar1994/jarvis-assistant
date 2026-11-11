@@ -165,10 +165,13 @@ class CalendarAsk:
 @dataclass(frozen=True)
 class TownAsk:
     """The weather's town: TOWN_SET ``town`` (as typed; the app looks it up and confirms the place it found),
-    TOWN_SAY or TOWN_FORGET. ``town`` is never logged."""
+    TOWN_SAY or TOWN_FORGET. ``town`` is never logged. ``loose``: a statement that may not be about the weather ("I
+    live in ...", "I moved to ..."): the app keeps it only when the search finds the place, else the words go to
+    Claude."""
 
     action: str
     town: str = field(default="", repr=False)
+    loose: bool = False
 
     def __repr__(self) -> str:
         return f"TownAsk({self.action})"
@@ -876,21 +879,24 @@ def _clock_of(match: re.Match, prefix: str = "") -> _Clock | None:
     get = lambda name: groups.get(prefix + name)  # noqa: E731
     if get("noon"):
         return _Clock(12, 0, True)
-    minute = 0
     if get("half"):
-        hour, said = int(get("hh")), " ".join(get("half").split())
-        minute = 30 if said.startswith("half") else 15 if said.endswith("past") else 45
-        if said.endswith(" to"):
-            hour = hour - 1 if hour > 1 else 12
-        meridiem = get("ap2")
-        digits = get("hh")
-    else:
-        digits = get("h") or ""
-        if not digits:
+        spoken, said = int(get("hh")), " ".join(get("half").split())
+        if not 1 <= spoken <= 12:
             return None
-        hour = int(digits)
-        minute = int(get("m")) if get("m") else 0
-        meridiem = get("ap")
+        before = said.endswith(" to")
+        meridiem = get("ap2")
+        if meridiem:                                     # "quarter to 12 pm": 15 minutes before noon, 11:45 AM
+            whole = (spoken % 12 + (12 if meridiem.startswith("p") else 0)) * 60
+            whole = (whole + (-15 if before else 30 if said.startswith("half") else 15)) % (24 * 60)
+            return _Clock(whole // 60, whole % 60, True)
+        minute = 30 if said.startswith("half") else 45 if before else 15
+        return _Clock(spoken - 1 if before and spoken > 1 else 12 if before else spoken, minute, False)
+    digits = get("h") or ""
+    if not digits:
+        return None
+    hour = int(digits)
+    minute = int(get("m")) if get("m") else 0
+    meridiem = get("ap")
     if not 0 <= minute <= 59:
         return None
     if meridiem:
@@ -1153,15 +1159,17 @@ def _calendar(words: str, now: datetime, flags: InstantFlags, _address: str, _ho
 # The weather's town (round 2)
 # --------------------------------------------------------------------------
 
-_TOWN_NAME = r"(?P<town>[a-zà-ÿ][a-zà-ÿ .'\-]{0,38}[a-zà-ÿ.](?:,\s*[a-zà-ÿ][a-zà-ÿ .'\-]{0,30}[a-zà-ÿ.])?)"
+_TOWN_NAME = (r"(?P<town>[a-zà-ÿ][a-zà-ÿ .'\-]{0,38}[a-zà-ÿ.](?:,\s*[a-zà-ÿ][a-zà-ÿ .'\-]{0,30}[a-zà-ÿ.]){0,2})")
 _TOWN_WORD = r"(?:weather\s+)?(?:town|city|location|home\s+town|hometown)"
-_TOWN_SET_FORMS = (
-    re.compile(r"my\s+(?:home\s+)?" + _TOWN_WORD + r"\s+is\s+(?:now\s+)?" + _TOWN_NAME),
-    re.compile(r"i\s+(?:live|am\s+based|'m\s+based)\s+in\s+" + _TOWN_NAME),
-    re.compile(r"i(?:\s+have|'ve)?\s+moved\s+to\s+" + _TOWN_NAME),
-    re.compile(r"(?:set|change|make|update|switch)\s+my\s+" + _TOWN_WORD + r"\s+to\s+" + _TOWN_NAME),
-    re.compile(r"(?:use|make)\s+" + _TOWN_NAME + r"\s+(?:for\s+(?:the\s+|my\s+)?weather|my\s+" + _TOWN_WORD + r")"),
+_TOWN_SET_FORMS = (   # (loose, pattern): a loose statement is kept only when its place is found (else Claude's)
+    (False, re.compile(r"my\s+(?:home\s+)?" + _TOWN_WORD + r"\s+is\s+(?:now\s+)?" + _TOWN_NAME)),
+    (True, re.compile(r"i\s+(?:live|am\s+based|'m\s+based)\s+in\s+" + _TOWN_NAME)),
+    (True, re.compile(r"i(?:\s+have|'ve)?\s+moved\s+to\s+" + _TOWN_NAME)),
+    (False, re.compile(r"(?:set|change|make|update|switch)\s+my\s+" + _TOWN_WORD + r"\s+to\s+" + _TOWN_NAME)),
+    (False, re.compile(r"(?:use|make)\s+" + _TOWN_NAME + r"\s+(?:for\s+(?:the\s+|my\s+)?weather|my\s+" + _TOWN_WORD
+                       + r")")),
 )
+_TOWN_JOINS = re.compile(r"\b(?:and|or|but|with|because|while|where|work|working)\b")
 _TOWN_SAY_RE = re.compile(
     _WHAT + r"\s+my\s+" + _TOWN_WORD + r"|where\s+do\s+i\s+live|(?:what|which)\s+(?:town|city)\s+(?:do\s+you\s+(?:have|use)"
     r"(?:\s+for\s+(?:me|the\s+weather))?|is\s+(?:the|my)\s+weather\s+for|am\s+i\s+in\s+for\s+the\s+weather)")
@@ -1174,14 +1182,16 @@ def _town(words: str) -> TownAsk | None:
         return TownAsk(TOWN_FORGET)
     if _TOWN_SAY_RE.fullmatch(words):
         return TownAsk(TOWN_SAY)
-    for pattern in _TOWN_SET_FORMS:
+    for loose, pattern in _TOWN_SET_FORMS:
         match = pattern.fullmatch(words)
         if not match:
             continue
-        town = " ".join(match.group("town").split()).strip(" .")
-        if not town or town in _NOT_TOWNS or _TIME_WORDS.search(town) or _NOT_A_TOWN.match(town):
+        parts = [" ".join(part.split()).strip(" .") for part in match.group("town").split(",")]
+        town = ", ".join(part for part in parts[:2] if part)      # "San Jose, California, United States": two parts
+        if not town or town in _NOT_TOWNS or _TIME_WORDS.search(town) or _NOT_A_TOWN.match(town) \
+                or _TOWN_JOINS.search(town):
             return None
-        return TownAsk(TOWN_SET, town=town)
+        return TownAsk(TOWN_SET, town=town, loose=loose)
     return None
 
 

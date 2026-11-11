@@ -191,7 +191,13 @@ class FindPlaceTests(unittest.TestCase):
     def test_several_none_and_failed(self) -> None:
         (status, names), _get, _cache = self.find("Springfield", SPRINGFIELD)
         self.assertEqual(status, instant_net.PLACE_SEVERAL)
-        self.assertEqual(names, ["Springfield, Missouri, United States", "Springfield, Illinois, United States"])
+        self.assertEqual(names, ["Springfield, Missouri", "Springfield, Illinois"])     # as they can be said back
+        twins = {"results": [{"name": "San Jose", "latitude": 9.9, "longitude": -84.1, "country": "Costa Rica",
+                              "country_code": "CR", "admin1": "San José", "population": 300000},
+                             {"name": "San Jose", "latitude": 10.9, "longitude": -85.1, "country": "Costa Rica",
+                              "country_code": "CR", "admin1": "Guanacaste", "population": 200000}]}
+        (status, names), _get, _cache = self.find("San Jose", twins)
+        self.assertEqual((status, names), (instant_net.PLACE_SEVERAL, ["San Jose, San José", "San Jose, Guanacaste"]))
         (status, place), _get, _cache = self.find("Springfield, Illinois", SPRINGFIELD)
         self.assertEqual((status, place.shown), (instant_net.PLACE_FOUND, "Springfield, Illinois"))
         self.assertEqual(self.find("Xyzzy", {"generationtime_ms": 0.4})[0], (instant_net.PLACE_NONE, None))

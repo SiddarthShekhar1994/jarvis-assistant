@@ -290,6 +290,12 @@ class RoundTwoParseTests(unittest.TestCase):
         self.assertEqual(at_local("am I busy at 5:30"), "Tue 17:30")
         self.assertEqual(at_local("am I free at 3 p.m.?"), "Wed 15:00")
         self.assertEqual(at_local("am i free at half past 4"), "Tue 16:30")
+        self.assertEqual(at_local("am i free at quarter to 12 pm"), "Wed 11:45")        # 15 minutes before noon
+        self.assertEqual(at_local("am i free at quarter to 12 am"), "Tue 23:45")        # ... before midnight
+        self.assertEqual(at_local("am i free at quarter to 1 pm"), "Wed 12:45")
+        self.assertEqual(at_local("am i free at half past 3 pm"), "Wed 15:30")
+        self.assertEqual(at_local("am i free at quarter past 5"), "Tue 17:15")
+        self.assertEqual(at_local("am i free at quarter to 12"), "Tue 23:45")           # bare: the next 11:45
         self.assertEqual(at_local("am i free at noon"), "Wed 12:00")
         self.assertEqual(at_local("am i free at 17:30"), "Tue 17:30")
         self.assertEqual(at_local("do I have anything at 4 tomorrow"), "Wed 16:00")   # only 4 PM is a waking hour

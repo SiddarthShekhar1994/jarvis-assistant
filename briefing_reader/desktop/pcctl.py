@@ -126,6 +126,7 @@ MAX_TIMERS = 5
 # ahead and at most MAX_REMINDERS at once (its own count: timers keep their five).
 TIMER_KIND, REMINDER_KIND = "timer", "reminder"
 REMINDER_MAX_S = 48 * 3600
+REMINDER_LATE_S = 48 * 3600          # a reminder missed while Jarvis was closed is still said this long after its time
 MAX_REMINDERS = 10
 TIMER_CHECK_S = 30.0                 # the app checks the timers at least this often (a resume is caught by then)
 TIMER_LATE_S = 12 * 3600             # an end missed by more than this (Jarvis was closed) is dropped quietly
@@ -1055,7 +1056,7 @@ class TimerBook:
 
     def take_due(self) -> tuple[list[tuple[Timer, float]], int]:
         """The timers whose end has come, taken out: (each with how many seconds late it is noticed, the number
-        dropped quietly - ended more than TIMER_LATE_S ago, while Jarvis was closed)."""
+        dropped quietly - ended more than TIMER_LATE_S ago, while Jarvis was closed; a reminder REMINDER_LATE_S)."""
         now = self._now()
         ended: list[tuple[Timer, float]] = []
         dropped = 0
@@ -1065,7 +1066,7 @@ class TimerBook:
                 late = (now - _like(timer.ends_at, now)).total_seconds()
                 if late < 0:
                     keep.append(timer)
-                elif late > TIMER_LATE_S:
+                elif late > (REMINDER_LATE_S if timer.reminder else TIMER_LATE_S):
                     dropped += 1
                 else:
                     ended.append((timer, late))

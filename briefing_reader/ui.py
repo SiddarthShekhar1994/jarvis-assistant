@@ -11423,7 +11423,7 @@ class AppController(QObject):
             return False
         from . import instant_calendar
 
-        start, end = instant_calendar.read_range(self._now())
+        start, end = instant_calendar.read_range(self._instant_now())
         self._instant_calendar_seq += 1
         self._instant_calendar_job = _InstantCalendarJob(self._instant_calendar_seq, start, end)
         worker.read_calendars(self._instant_calendar_job)

@@ -165,7 +165,8 @@ class TownStore:
 
 class _Bridge(QObject):
     done = Signal(object, str, bool, float, str)       # reply or None, words, spoken, started, kind
-    town = Signal(str, object, str, str, bool, float)  # PLACE_*, Place or candidates, town, words, spoken, started
+    town = Signal(str, object, object, str, bool, float)   # PLACE_*, Place or candidates, TownAsk, words, spoken,
+    #                                                        started
 
 
 class InstantController(QObject):
@@ -203,6 +204,7 @@ class InstantController(QObject):
         self._calendar_timer.timeout.connect(self._calendar_late)
         # Round 2: the weather's town set by voice or typing (wins over [instant] town); its place needs no search.
         self.store = store if store is not None else TownStore(None)
+        self._town_asked: TownAsk | None = None          # the latest "my town is ..." (an earlier search's result waits)
         self._bridge.town.connect(self._on_town, Qt.ConnectionType.QueuedConnection)
         if self.store.place() is not None:
             instant_net.remember_place(self._cache, self.store.place())
@@ -313,13 +315,16 @@ class InstantController(QObject):
         return True
 
     def calendar_done(self, read: instant_calendar.CalendarRead) -> None:
-        """The app's read of the calendars came back (GUI thread): kept while at least one account was read, and every
+        """The app's read of the calendars came back (GUI thread): kept only when every account was read (one that
+        couldn't be - signed out, say - is read again at the next question, so signing in shows at once), and every
         question waiting for it answered."""
         if self._shut:
             return
         self._calendar_timer.stop()
-        if any(alias not in read.problems for alias in read.events):
+        if read.events and not read.problems:
             self._calendar_copy = (self._monotonic(), read)
+        else:
+            self._calendar_copy = None
         waiting, self._calendar_waiting = self._calendar_waiting, []
         for ask, words, spoken, started in waiting:
             reply = self._calendar_reply(ask, read)
@@ -377,12 +382,12 @@ class InstantController(QObject):
                                                                     else "You hadn't set a town, {sir}."))
             self._answer(reply, words, spoken, started)
             return True
-        town = ask.town
+        self._town_asked = ask
 
         def work() -> None:
-            status, found = instant_net.find_place(town, get=self._get, cache=self._cache)
+            status, found = instant_net.find_place(ask.town, get=self._get, cache=self._cache)
             if not self._shut:
-                self._bridge.town.emit(status, found, town, words, spoken, started)
+                self._bridge.town.emit(status, found, ask, words, spoken, started)
 
         self.waiting.emit(WAITING_TEXT[instant.KIND_TOWN])
         if self._threaded:
@@ -391,10 +396,22 @@ class InstantController(QObject):
             work()
         return True
 
-    def _on_town(self, status: str, found: Any, town: str, words: str, spoken: bool, started: float) -> None:
-        """The place search came back (GUI thread): the town kept and confirmed, or plainly why not."""
+    def _on_town(self, status: str, found: Any, ask: TownAsk, words: str, spoken: bool, started: float) -> None:
+        """The place search came back (GUI thread): the town kept and confirmed, or plainly why not. A search asked
+        before the latest one changes nothing (the latest answers); "I live in ..." whose place isn't found is
+        Claude's, as before."""
         if self._shut:
             return
+        if ask is not self._town_asked:
+            logger.info("Instant: an earlier place search came back after a newer one; it changes nothing")
+            return
+        self._town_asked = None
+        if ask.loose and status != instant_net.PLACE_FOUND:
+            logger.info("Instant: a statement about where you live was not a place found (%s); it goes to Claude",
+                        status)
+            self.fallback.emit(words, spoken)
+            return
+        town = ask.town
         unchanged = " Your weather town wasn't changed."
         if status == instant_net.PLACE_FOUND and isinstance(found, instant_net.Place):
             saved = self.store.set(found)
@@ -406,8 +423,8 @@ class InstantController(QObject):
         elif status == instant_net.PLACE_SEVERAL:
             names = "; ".join(found or ())
             reply = InstantReply(instant.KIND_TOWN,
-                                 f"There's more than one {town}: {names}. Say the one you mean with its state or "
-                                 f"country, like \"my town is {(found or [town])[0]}\".{unchanged}",
+                                 f"There's more than one {town}: {names}. Say the one you mean, like \"my town is "
+                                 f"{(found or [town])[0]}\".{unchanged}",
                                  self._say(f"There's more than one {town}, {{sir}}. Which state or country?"),
                                  instant_net.PLACE_CREDIT)
         elif status == instant_net.PLACE_NONE:
@@ -734,9 +751,14 @@ class TimerController(QObject):
         local = self._local(reminder.ends_at)
         shown, said = format_time(local, hour24=self._hour24), spoken_clock(local)
         if late > 90:
-            text = (f"Your {shown} reminder, while Jarvis was away: {reminder.label}." if reminder.label else
-                    f"Your {shown} reminder came while Jarvis was away.")
-            return text, self._say(f"{{Sir}}, your {said} reminder came while I was away.")
+            today = self._local(self.book.now()).date()
+            day = "" if local.date() == today else "yesterday" if local.date() == today - timedelta(days=1) else \
+                f"{local:%A}"
+            when = f" {day}" if day == "yesterday" else f" on {day}" if day else ""
+            text = (f"Your {shown} reminder{when}, while Jarvis was away: {reminder.label}." if reminder.label else
+                    f"Your {shown} reminder{when} came while Jarvis was away.")
+            return text, self._say(f"{{Sir}}, your {said} reminder{' from ' + day if day else ''} came while I was "
+                                   f"away.")
         text = f"It's {shown}: {reminder.label}." if reminder.label else f"It's {shown}: your reminder."
         return text, self._say(f"{{Sir}}, your {said} reminder.")
 
