@@ -4964,6 +4964,10 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
   only when it was not announced, viewed or answered and the app is not open. Its decision is in the
   log, in a line starting with "Catch-up:". Check that "Briefing catch-up" exists
   in Task Scheduler (rerun `install-schedule.ps1`).
+- **The talk key does nothing**: Settings > Talk's "Talk key" row says when
+  another program has it ("another program has it; choose another [talk] key
+  in config.toml"). Pick another `[talk] key`, then restart the "Briefing
+  hotkey" task so the agent tries the new one.
 - **The hotkey does nothing**: look in the log for "Could not register the hotkey
   ...: another program probably uses it". Then pick another combination with
   `[hotkey] combo` in `config.toml` (for example `"ctrl+alt+shift+j"` or
