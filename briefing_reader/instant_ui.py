@@ -17,6 +17,13 @@ with ``calendar_done(read)``. No result within CALENDAR_WAIT_S (the worker may b
 question goes to Claude (``fallback``). ``calendar_read`` None, or False when asked (the calendar is off or not set
 up): Claude's, as before. ``forget_calendar()`` drops the copy (a card changed the calendar).
 
+Round 2, the weather's town by voice or typing: "my town is San Jose, California" looks the place up on a thread of
+its own (instant_net.find_place, the weather's own rule for places of one name), confirms the place it found and
+keeps it in ``TownStore`` - instant.json in the data folder, on this PC only (it is text, so never assistant.json,
+which holds no text) - where it wins over [instant] town; "what's my town" says it, "forget my town" clears it
+(``townChanged`` then). ``settings_rows()`` is Settings > Instant answers (SETTINGS_KEY): what is on, the town and
+the services the network answers use.
+
 ``TimerController``: the app's timers (desktop.pcctl.TimerBook in the data folder's "desktop" folder, so a restart
 restores them; the desktop's HUD shares the same book while [desktop] is on). Set, asked about and cancelled through
 ``handle(TimerAsk)``; at each end ``ended(text, speech)`` - the app posts its toast, plays the chime and says it - and
@@ -33,6 +40,7 @@ timer's countdown (``ticking()``: a countdown shows).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
@@ -46,33 +54,132 @@ from PySide6.QtCore import QObject, Qt, QTimer, Signal
 
 from . import instant, instant_calendar, instant_net
 from .desktop import pcctl
-from .instant import CalendarAsk, InstantFlags, InstantReply, NetAsk, ReminderAsk, TimerAsk, spoken_clock
+from .instant import (CalendarAsk, InstantFlags, InstantReply, NetAsk, ReminderAsk, TimerAsk, TownAsk,
+                      spoken_clock)
 from .persona import with_address
 from .text_prep import format_time
 
 logger = logging.getLogger(__name__)
 
 WAITING_TEXT = {instant.KIND_WEATHER: "Checking the weather...", instant.KIND_CURRENCY: "Checking the exchange rate...",
-                instant.KIND_CALENDAR: "Checking your calendar..."}
+                instant.KIND_CALENDAR: "Checking your calendar...", instant.KIND_TOWN: "Looking the place up..."}
 ON_THIS_PC = "on this PC"
 CALENDAR_KEEP_S = 120.0          # a read of the calendars answers follow-ups this long (owner decision 2026-11-11)
 CALENDAR_WAIT_S = 12.0           # a read that takes longer: the question goes to Claude
+INSTANT_FILE = "instant.json"    # round 2: the weather's town set by voice or typing (text: never assistant.json)
+SETTINGS_KEY = "instant"
+SETTINGS_TITLE = "Instant answers"
+SETTINGS_NOTE = ("Everyday questions Jarvis answers himself, typed or spoken, in well under a second and without your "
+                 "Claude plan. Anything he can't answer for sure goes to Claude as before.")
+SETTINGS_HOW = ("Set the weather's town by saying or typing \"my town is\" and its name; \"forget my town\" clears it. "
+                "The rest is [instant] in config.toml (JARVIS_INSTANT_ENABLED in .env turns them all on or off), then "
+                "restart Jarvis.")
+_TOWN_FIELDS = ("name", "region", "country", "shown", "full", "query")
+
+
+def instant_file(data_dir: Any) -> Path | None:
+    """Where the town is kept: instant.json in the data folder; None without one - and for the app's real data folder
+    while the tests run (they pass a temporary one)."""
+    if not data_dir:
+        return None
+    path = Path(data_dir) / INSTANT_FILE
+    if os.environ.get(instant_net.TEST_GUARD_ENV, "") == "1":
+        from .config import default_data_dir         # late: the config module is large
+
+        real = os.path.normcase(os.path.abspath(str(default_data_dir())))
+        mine = os.path.normcase(os.path.abspath(str(path)))
+        if mine.startswith(real + os.sep):
+            logger.info("Instant: the real data folder is never used while the tests run; the town stays in memory")
+            return None
+    return path
+
+
+class TownStore:
+    """The weather's town set by voice or typing (owner decision 2026-11-11): ``place()`` (an instant_net.Place) kept
+    in instant.json (``path``; None: memory only), read at the start. Never logged; ``saved`` is False after a save
+    failed (it then lasts until Jarvis closes)."""
+
+    def __init__(self, path: str | Path | None) -> None:
+        self.path = Path(path) if path else None
+        self._place: instant_net.Place | None = None
+        self.saved = True
+        self._load()
+
+    def place(self) -> instant_net.Place | None:
+        return self._place
+
+    def set(self, place: instant_net.Place) -> bool:
+        """Keep ``place`` (True: saved to the file)."""
+        self._place = place
+        return self._save()
+
+    def forget(self) -> bool:
+        """No town of its own any more (True: there was one)."""
+        had = self._place is not None
+        self._place = None
+        if had:
+            self._save()
+        return had
+
+    def _load(self) -> None:
+        if self.path is None or not self.path.is_file():
+            return
+        try:
+            town = json.loads(self.path.read_text(encoding="utf-8")).get("town")
+            if town is None:
+                return
+            texts = {name: town[name] for name in _TOWN_FIELDS}
+            if not all(isinstance(value, str) and len(value) <= 160 and value.isprintable() for value in texts.values()) \
+                    or not texts["query"] or not texts["shown"]:
+                raise ValueError("not a town")
+            latitude, longitude = (instant_net._number(town[name]) for name in ("latitude", "longitude"))
+            if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+                raise ValueError("not on Earth")
+            self._place = instant_net.Place(texts["name"], texts["region"], texts["country"], latitude, longitude,
+                                            texts["shown"], texts["full"], texts["query"])
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            logger.warning("Instant: the saved town could not be read (%s); none is used", type(exc).__name__)
+            self._place = None
+
+    def _save(self) -> bool:
+        """The file rewritten (a new file put in place: never half written)."""
+        if self.path is None:
+            return True
+        place = self._place
+        content: dict[str, Any] = {"version": 1}
+        if place is not None:
+            content["town"] = {**{name: getattr(place, name) for name in _TOWN_FIELDS},
+                               "latitude": place.latitude, "longitude": place.longitude}
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temp = self.path.with_name(self.path.name + ".new")
+            temp.write_text(json.dumps(content, ensure_ascii=False), encoding="utf-8")
+            os.replace(temp, self.path)
+            self.saved = True
+        except OSError as exc:
+            self.saved = False
+            logger.warning("Instant: the town could not be saved (%s %s)", type(exc).__name__,
+                           getattr(exc, "winerror", "") or "")
+        return self.saved
 
 
 class _Bridge(QObject):
     done = Signal(object, str, bool, float, str)       # reply or None, words, spoken, started, kind
+    town = Signal(str, object, str, str, bool, float)  # PLACE_*, Place or candidates, town, words, spoken, started
 
 
 class InstantController(QObject):
     answered = Signal(object, str, bool, int)          # InstantReply, the words, spoken, milliseconds
     waiting = Signal(str)                              # the bar's words while a network answer is on its way
     fallback = Signal(str, bool)                       # the words, spoken: no answer for sure - Claude, as before
+    townChanged = Signal()                             # round 2: the town was set or forgotten (Settings follows)
 
     def __init__(self, config: Any, *, timers: TimerController | None = None,
                  now: Callable[[], datetime] | None = None,
                  get: Callable[[str, Any, float], Any] | None = None, fahrenheit: bool | None = None,
                  threaded: bool = True, calendar_read: Callable[[], bool] | None = None,
-                 monotonic: Callable[[], float] = time.monotonic, parent: QObject | None = None) -> None:
+                 monotonic: Callable[[], float] = time.monotonic, store: TownStore | None = None,
+                 parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._config = config
         self.timers = timers
@@ -94,11 +201,18 @@ class InstantController(QObject):
         self._calendar_timer = QTimer(self)
         self._calendar_timer.setSingleShot(True)
         self._calendar_timer.timeout.connect(self._calendar_late)
+        # Round 2: the weather's town set by voice or typing (wins over [instant] town); its place needs no search.
+        self.store = store if store is not None else TownStore(None)
+        self._bridge.town.connect(self._on_town, Qt.ConnectionType.QueuedConnection)
+        if self.store.place() is not None:
+            instant_net.remember_place(self._cache, self.store.place())
 
     def flags(self) -> InstantFlags:
         cfg = self._config.instant
+        place = self.store.place()
         return InstantFlags(weather=bool(cfg.weather), currency=bool(cfg.currency), timers=self.timers is not None,
-                            town=str(cfg.town or ""), calendar=self._calendar_read is not None)
+                            town=place.query if place is not None else str(cfg.town or ""),
+                            calendar=self._calendar_read is not None)
 
     def _address(self) -> str:
         return str(getattr(getattr(self._config, "assistant", None), "address", "sir"))
@@ -121,6 +235,8 @@ class InstantController(QObject):
             return False
         if isinstance(found, CalendarAsk):
             return self._ask_calendar(found, words, spoken, started)
+        if isinstance(found, TownAsk):
+            return self._ask_town(found, words, spoken, started)
         if isinstance(found, (TimerAsk, ReminderAsk)):
             if self.timers is None:
                 return False
@@ -224,6 +340,108 @@ class InstantController(QObject):
     def forget_calendar(self) -> None:
         """The calendar changed (a card's event): the next question reads it again."""
         self._calendar_copy = None
+
+    # ---- round 2: the weather's town ----------------------------------------------------------------------------
+
+    def _say(self, template: str) -> str:
+        return with_address(template, self._address())
+
+    def _town_now(self) -> tuple[str, str]:
+        """(the town in use as shown, where it comes from), ("", "") without one."""
+        place = self.store.place()
+        if place is not None:
+            return place.full or place.shown, "you set it"
+        town = " ".join(str(getattr(self._config.instant, "town", "") or "").split())
+        return (town, "from config.toml") if town else ("", "")
+
+    def _ask_town(self, ask: TownAsk, words: str, spoken: bool, started: float) -> bool:
+        if ask.action == instant.TOWN_SAY:
+            town, where = self._town_now()
+            if town:
+                reply = InstantReply(instant.KIND_TOWN, f"Your weather town is {town} ({where}).",
+                                     self._say(f"Your weather town is {town}, {{sir}}."))
+            else:
+                reply = InstantReply(instant.KIND_TOWN, "No weather town is set. Say or type \"my town is\" and its "
+                                     "name.", self._say("You haven't set a town yet, {sir}."))
+            self._answer(reply, words, spoken, started)
+            return True
+        if ask.action == instant.TOWN_FORGET:
+            had = self.store.forget()
+            if had:
+                self.townChanged.emit()
+                logger.info("Instant: the weather town was forgotten")
+            town, _where = self._town_now()
+            after = f" The weather now uses {town} from config.toml." if town else ""
+            text = ("Forgot your weather town." if had else "You hadn't set a weather town.") + after
+            reply = InstantReply(instant.KIND_TOWN, text, self._say("Done, {sir}: I've forgotten your town." if had
+                                                                    else "You hadn't set a town, {sir}."))
+            self._answer(reply, words, spoken, started)
+            return True
+        town = ask.town
+
+        def work() -> None:
+            status, found = instant_net.find_place(town, get=self._get, cache=self._cache)
+            if not self._shut:
+                self._bridge.town.emit(status, found, town, words, spoken, started)
+
+        self.waiting.emit(WAITING_TEXT[instant.KIND_TOWN])
+        if self._threaded:
+            threading.Thread(target=work, name="instant-town", daemon=True).start()
+        else:
+            work()
+        return True
+
+    def _on_town(self, status: str, found: Any, town: str, words: str, spoken: bool, started: float) -> None:
+        """The place search came back (GUI thread): the town kept and confirmed, or plainly why not."""
+        if self._shut:
+            return
+        unchanged = " Your weather town wasn't changed."
+        if status == instant_net.PLACE_FOUND and isinstance(found, instant_net.Place):
+            saved = self.store.set(found)
+            self.townChanged.emit()
+            logger.info("Instant: the weather town was set%s", "" if saved else " (kept in memory only)")
+            kept = "" if saved else " (It lasts until Jarvis closes: the data folder couldn't be written.)"
+            reply = InstantReply(instant.KIND_TOWN, f"Got it: {found.full}.{kept}",
+                                 self._say(f"Got it, {{sir}}: {found.shown}."), instant_net.PLACE_CREDIT)
+        elif status == instant_net.PLACE_SEVERAL:
+            names = "; ".join(found or ())
+            reply = InstantReply(instant.KIND_TOWN,
+                                 f"There's more than one {town}: {names}. Say the one you mean with its state or "
+                                 f"country, like \"my town is {(found or [town])[0]}\".{unchanged}",
+                                 self._say(f"There's more than one {town}, {{sir}}. Which state or country?"),
+                                 instant_net.PLACE_CREDIT)
+        elif status == instant_net.PLACE_NONE:
+            reply = InstantReply(instant.KIND_TOWN, f"I couldn't find a place called {town}.{unchanged}",
+                                 self._say(f"I couldn't find {town}, {{sir}}."), instant_net.PLACE_CREDIT)
+        else:
+            reply = InstantReply(instant.KIND_TOWN, f"The place search couldn't be reached; try again in a moment."
+                                 f"{unchanged}", self._say("I couldn't reach the place search, {sir}."))
+        self._answer(reply, words, spoken, started)
+
+    def settings_rows(self) -> list[tuple[str, str]]:
+        """Settings > Instant answers: what is on, the weather's town and the services the network answers use."""
+        cfg = self._config.instant
+        rows = [("On this PC", "The time and dates, sums and conversions, timers and reminders - none of it leaves "
+                               "this PC")]
+        if self._calendar_read is not None:
+            calendar = ("On - every account's main calendar, read when you ask and kept 2 minutes; titles are shown, "
+                        "never said")
+        elif not getattr(cfg, "calendar", True):
+            calendar = "Off - [instant] calendar"
+        else:
+            calendar = "Off - Google Calendar is off or not set up"
+        rows.append(("Your calendars", calendar))
+        rows.append(("Weather", "On - Open-Meteo (open-meteo.com): a town's name, then its coordinates" if cfg.weather
+                     else "Off - [instant] weather"))
+        town, where = self._town_now()
+        rows.append(("Weather town", f"{town} - {where}" if town else
+                     "None - say or type \"my town is\" and its name"))
+        temperature = getattr(cfg, "temperature", "auto")
+        rows.append(("Temperature", {"celsius": "Celsius", "fahrenheit": "Fahrenheit"}.get(
+            temperature, f"Auto - {'Fahrenheit' if self._fahrenheit else 'Celsius'} (the Windows region)")))
+        rows.append(("Currencies", "On - Frankfurter (frankfurter.dev): the European Central Bank's daily rates"
+                     if cfg.currency else "Off - [instant] currency"))
+        return rows
 
     def shutdown(self) -> None:
         self._shut = True

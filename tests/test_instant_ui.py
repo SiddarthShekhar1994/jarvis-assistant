@@ -344,6 +344,125 @@ class Ticks:
         return self.at
 
 
+class TownTests(unittest.TestCase):
+    """Round 2: the weather's town by voice or typing - looked up, confirmed, kept in instant.json (never
+    assistant.json), said, forgotten, and shown in Settings > Instant answers."""
+
+    def setUp(self) -> None:
+        self.folder = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(self.folder, ignore_errors=True))
+        self.answers: list[tuple] = []
+        self.waits: list[str] = []
+        self.calls: list[tuple[str, dict]] = []
+        self.geocode: object = {"results": [{"name": "San Jose", "latitude": 37.34, "longitude": -121.89,
+                                             "country": "United States", "country_code": "US", "admin1": "California",
+                                             "population": 1013240}]}
+
+    def get(self, url, params, _timeout):
+        from briefing_reader import instant_net
+
+        self.calls.append((url, dict(params)))
+        if url == instant_net.GEOCODE_URL:
+            if isinstance(self.geocode, Exception):
+                raise self.geocode
+            return self.geocode
+        return {"current": {"temperature_2m": 18.0, "apparent_temperature": 18.0, "weather_code": 0},
+                "daily": {"weather_code": [0, 1], "temperature_2m_max": [21.0, 22.0], "temperature_2m_min": [9.0, 10.0],
+                          "precipitation_probability_max": [0, 5]}}
+
+    def make(self, **instant_values: object) -> instant_ui.InstantController:
+        store = instant_ui.TownStore(self.folder / instant_ui.INSTANT_FILE)
+        controller = instant_ui.InstantController(a_config(**instant_values), timers=None, get=self.get,
+                                                  fahrenheit=False, threaded=False, store=store)
+        controller.answered.connect(lambda *args: self.answers.append(args))
+        controller.waiting.connect(self.waits.append)
+        self.addCleanup(controller.shutdown)
+        return controller
+
+    def say(self, controller: instant_ui.InstantController, text: str):
+        self.assertTrue(controller.take(text), text)
+        settle()
+        return self.answers[-1][0]
+
+    def test_set_said_used_for_the_weather_and_forgotten(self) -> None:
+        controller = self.make(town="Oslo")
+        changes: list[int] = []
+        controller.townChanged.connect(lambda: changes.append(1))
+        got = self.say(controller, "my town is San Jose")
+        self.assertEqual(self.waits, ["Looking the place up..."])
+        self.assertEqual((got.text, got.speech), ("Got it: San Jose, California, United States.",
+                                                  "Got it, sir: San Jose, California."))
+        self.assertEqual(changes, [1])
+        self.assertEqual(controller.flags().town, "San Jose, California")       # it wins over [instant] town
+        saved = json.loads((self.folder / instant_ui.INSTANT_FILE).read_text(encoding="utf-8"))
+        self.assertEqual(saved["town"]["full"], "San Jose, California, United States")
+        weather = self.say(controller, "what's the weather")
+        self.assertIn("In San Jose, California:", weather.text)
+        self.assertEqual(sum(1 for url, _params in self.calls if "geocoding" in url), 1)   # no second search
+        said = self.say(controller, "what's my town")
+        self.assertEqual(said.text, "Your weather town is San Jose, California, United States (you set it).")
+        again = self.make(town="Oslo")                                         # Jarvis started again
+        self.assertEqual(again.flags().town, "San Jose, California")
+        gone = self.say(controller, "forget my town")
+        self.assertEqual(gone.text, "Forgot your weather town. The weather now uses Oslo from config.toml.")
+        self.assertEqual(gone.speech, "Done, sir: I've forgotten your town.")
+        self.assertEqual(controller.flags().town, "Oslo")
+        self.assertNotIn("town", json.loads((self.folder / instant_ui.INSTANT_FILE).read_text(encoding="utf-8")))
+        self.assertEqual(self.say(controller, "forget my town").text,
+                         "You hadn't set a weather town. The weather now uses Oslo from config.toml.")
+        none = self.make()
+        self.assertIn("No weather town is set", self.say(none, "what's my town").text)
+
+    def test_several_none_or_no_service_leave_it_as_it_was(self) -> None:
+        controller = self.make()
+        self.geocode = {"results": [
+            {"name": "Springfield", "latitude": 39.8, "longitude": -89.6, "country": "United States",
+             "country_code": "US", "admin1": "Illinois", "population": 114394},
+            {"name": "Springfield", "latitude": 37.2, "longitude": -93.3, "country": "United States",
+             "country_code": "US", "admin1": "Missouri", "population": 169176}]}
+        several = self.say(controller, "my town is Springfield")
+        self.assertIn("There's more than one Springfield: Springfield, Missouri, United States; Springfield, "
+                      "Illinois, United States.", several.text)
+        self.assertEqual(several.speech, "There's more than one Springfield, sir. Which state or country?")
+        self.geocode = {"generationtime_ms": 0.3}
+        self.assertEqual(self.say(controller, "I live in Xyzzy").text,
+                         "I couldn't find a place called Xyzzy. Your weather town wasn't changed.")
+        self.geocode = OSError("no network")
+        self.assertIn("couldn't be reached", self.say(controller, "use Paris for the weather").text)
+        self.assertIsNone(controller.store.place())
+        self.assertFalse((self.folder / instant_ui.INSTANT_FILE).exists())
+
+    def test_a_bad_file_the_real_data_folder_and_the_logs(self) -> None:
+        (self.folder / instant_ui.INSTANT_FILE).write_text('{"version": 1, "town": {"name": "x"}}', encoding="utf-8")
+        with self.assertLogs("briefing_reader.instant_ui", level="WARNING"):
+            self.assertIsNone(instant_ui.TownStore(self.folder / instant_ui.INSTANT_FILE).place())
+        from briefing_reader.config import default_data_dir
+
+        self.assertIsNone(instant_ui.instant_file(default_data_dir()))      # never the real one in the tests
+        self.assertEqual(instant_ui.instant_file(self.folder), self.folder / "instant.json")
+        controller = self.make()
+        with self.assertLogs("briefing_reader", level="INFO") as logs:
+            self.say(controller, "my town is San Jose")
+        self.assertNotIn("San Jose", "\n".join(logs.output))
+
+    def test_the_settings_rows(self) -> None:
+        controller = self.make(town="Oslo")
+        rows = dict(controller.settings_rows())
+        self.assertEqual(rows["Weather town"], "Oslo - from config.toml")
+        self.assertEqual(rows["Your calendars"], "Off - Google Calendar is off or not set up")
+        self.assertIn("Open-Meteo", rows["Weather"])
+        self.assertIn("Frankfurter", rows["Currencies"])
+        self.say(controller, "my town is San Jose")
+        self.assertEqual(dict(controller.settings_rows())["Weather town"],
+                         "San Jose, California, United States - you set it")
+        calendar = instant_ui.InstantController(a_config(), timers=None, threaded=False, calendar_read=lambda: True)
+        self.addCleanup(calendar.shutdown)
+        self.assertTrue(dict(calendar.settings_rows())["Your calendars"].startswith("On - every account's main"))
+        off = dict(self.make(weather=False, currency=False, calendar=False).settings_rows())
+        self.assertEqual((off["Weather"], off["Currencies"], off["Your calendars"]),
+                         ("Off - [instant] weather", "Off - [instant] currency", "Off - [instant] calendar"))
+
+
 def calendar_events(now: datetime) -> dict:
     """Two accounts' events around ``now``: the personal one's next at +40 minutes, the work one's at +2 hours."""
     from briefing_reader.gcal import CalendarEvent
@@ -581,6 +700,25 @@ class AppWiringTests(unittest.TestCase):
         self.assertIn("Sir, your 3 PM reminder.", said)
         self.assertFalse(any("stretch" in text for text in said))
         self.assertEqual(reading.timer_chip_text(), "")
+
+    def test_settings_has_the_instant_answers_group(self) -> None:
+        app = AppHarness(self)
+        app.reading()
+        settings = app.c.window.reading.settings_page
+        self.assertIn(instant_ui.SETTINGS_KEY, settings.group_buttons)
+        settings.select_group(instant_ui.SETTINGS_KEY)
+        rows = dict(settings.rows())
+        self.assertTrue(rows["Your calendars"].startswith("On - every account's main calendar"))
+        self.assertEqual(rows["Weather town"], "None - say or type \"my town is\" and its name")
+        self.assertIn("\"my town is\"", settings.text_label.text())
+        prefs = app.config.data_dir / "assistant.json"
+        before = prefs.read_bytes() if prefs.exists() else None
+        app.c.instant.store.set(instant_ui.instant_net.Place("Oslo", "", "Norway", 59.9, 10.7, "Oslo, Norway",
+                                                             "Oslo, Norway", "Oslo, Norway"))
+        app.c.instant.townChanged.emit()
+        self.assertEqual(dict(settings.rows())["Weather town"], "Oslo, Norway - you set it")
+        self.assertTrue((app.config.data_dir / instant_ui.INSTANT_FILE).is_file())
+        self.assertEqual(prefs.read_bytes() if prefs.exists() else None, before)   # never assistant.json
 
     def test_calendar_answers_are_off_without_the_calendar(self) -> None:
         app = AppHarness(self, config_extra="\n[instant]\ncalendar = false\n")

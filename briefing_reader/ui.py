@@ -11386,11 +11386,16 @@ class AppController(QObject):
         self._instant_calendar_job: Any = None          # round 2: the calendars' read on its way (one at a time)
         self._instant_calendar_seq = 0
         calendar_read = self._instant_calendar_read if self._any_calendar_configured() else None
+        store = instant_ui.TownStore(instant_ui.instant_file(self.config.data_dir))   # round 2: the weather's town
         controller = instant_ui.InstantController(self.config, timers=timers, calendar_read=calendar_read,
-                                                  now=self._instant_now, parent=self)
+                                                  now=self._instant_now, store=store, parent=self)
         controller.answered.connect(self._on_instant)
         controller.waiting.connect(self._on_instant_waiting)
         controller.fallback.connect(self._on_instant_fallback)
+        settings = self.window.reading.settings_page                   # round 2: Settings > Instant answers
+        settings.add_group(instant_ui.SETTINGS_KEY, instant_ui.SETTINGS_TITLE, note=instant_ui.SETTINGS_NOTE,
+                           how=instant_ui.SETTINGS_HOW, rows=controller.settings_rows)
+        controller.townChanged.connect(settings.refresh)
         timers.ended.connect(self._on_instant_timer_ended)
         timers.changed.connect(self._on_instant_timers_changed)
         self._timer_chip_tick = self._make_timer(self._sync_timer_chip, single_shot=False, interval_ms=1000)

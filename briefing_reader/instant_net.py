@@ -8,11 +8,18 @@ found, a reply of the wrong shape - is ``None``: the app then sends the request 
 hold kinds, statuses and durations only, never a town, an amount or a reply.
 
     answer(ask, *, get, cache, fahrenheit, address, monotonic) -> InstantReply | None
+    find_place(town, *, get, cache) -> (PLACE_*, Place | None | candidates)   round 2: the weather's town by voice
     real_get(url, params, timeout) -> object    the JSON reply (requests); refuses while the tests run
     fahrenheit_region() -> bool                 the Windows region measures in US units (Fahrenheit)
 
 ``NetCache`` keeps answers in memory only: places while Jarvis runs, the weather for WEATHER_KEEP_S, rates for
 RATES_KEEP_S. Credit lines (``source``): Open-Meteo's data is CC BY 4.0, so its answers carry WEATHER_CREDIT.
+
+Round 2 (owner decision 2026-11-11): "my town is San Jose, California" looks the place up with the same search and
+the same rule for places of one name (the bigger needs AMBIGUOUS_RATIO times the people), and ``find_place`` says
+which of PLACE_FOUND (with the Place: its name, region, country, coordinates and how it is shown), PLACE_NONE,
+PLACE_SEVERAL (with the leading candidates' names, to say which to pick) or PLACE_FAILED (the service couldn't be
+reached) it was. A place found is put in the cache, so its weather needs no second search.
 """
 
 from __future__ import annotations
@@ -40,7 +47,9 @@ TIMEOUT_S = 2.5
 WEATHER_KEEP_S = 10 * 60
 RATES_KEEP_S = 6 * 3600
 WEATHER_CREDIT = "Weather data by Open-Meteo.com"
+PLACE_CREDIT = "Place search by Open-Meteo.com"
 RATES_CREDIT = "European Central Bank reference rate, via Frankfurter"
+PLACE_FOUND, PLACE_NONE, PLACE_SEVERAL, PLACE_FAILED = "found", "none", "several", "failed"
 USER_AGENT = "JarvisAssistant/instant-answers"
 TEST_GUARD_ENV = "JARVIS_DESKTOP_TEST_GUARD"
 _WHOLE_CURRENCIES = {"JPY", "KRW", "HUF", "IDR", "ISK"}      # shown without cents
@@ -129,16 +138,33 @@ def _population(result: Mapping[str, Any]) -> int:
     return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0 else 0
 
 
-def _place(town: str, get, cache: NetCache) -> tuple[float, float, str] | None:
-    key = town.casefold()
-    with cache.lock:
-        if key in cache.places:
-            return cache.places[key]
+@dataclass(frozen=True)
+class Place:
+    """A place the search found (round 2): ``shown`` as the weather names it ("San Jose, California", "Oslo, Norway"),
+    ``full`` with its country too ("San Jose, California, United States"), ``query`` what finds it again. Never
+    logged: its repr says nothing of it."""
+
+    name: str
+    region: str
+    country: str
+    latitude: float
+    longitude: float
+    shown: str
+    full: str
+    query: str
+
+    def __repr__(self) -> str:
+        return "Place(...)"
+
+
+def _lookup(town: str, get) -> tuple[str, list[Mapping[str, Any]]]:
+    """The search for ``town`` ("name" or "name, region"): (PLACE_FOUND, [the one]), (PLACE_SEVERAL, the leading
+    candidates) when no place of that name stands out, or (PLACE_NONE, []). Raises what ``get`` raises."""
     name, _comma, region = (part.strip() for part in town.partition(","))
     data = get(GEOCODE_URL, {"name": name, "count": 10, "language": "en", "format": "json"}, TIMEOUT_S)
     results = data.get("results") if isinstance(data, Mapping) else None
     if not isinstance(results, list):
-        return None
+        return PLACE_NONE, []
     matches: list[Mapping[str, Any]] = []
     for result in results:
         if not isinstance(result, Mapping) or str(result.get("name", "")).casefold() != name.casefold():
@@ -150,20 +176,72 @@ def _place(town: str, get, cache: NetCache) -> tuple[float, float, str] | None:
                 continue
         matches.append(result)
     if not matches:
-        return None                                      # no place of that very name: Claude, as before
+        return PLACE_NONE, []                            # no place of that very name: Claude, as before
     matches.sort(key=_population, reverse=True)
     picked = matches[0]
     if len(matches) > 1 and _population(picked) < AMBIGUOUS_RATIO * max(1, _population(matches[1])):
-        return None                                      # two places of that name and neither stands out
-    latitude, longitude = _number(picked.get("latitude")), _number(picked.get("longitude"))
-    place = str(picked.get("name", name))
-    where = str(picked.get("admin1") or "") if str(picked.get("country_code", "")).upper() == "US" else \
-        str(picked.get("country") or "")
-    shown = f"{place}, {where}" if where and where.casefold() != place.casefold() else place
-    found = (latitude, longitude, shown)
+        return PLACE_SEVERAL, matches[:3]                # two places of that name and neither stands out
+    return PLACE_FOUND, [picked]
+
+
+def _names(picked: Mapping[str, Any], town: str) -> tuple[str, str, str, str, str]:
+    """(name, region - a US state, else "" -, country, shown, full) of one search result."""
+    name = str(picked.get("name") or town.partition(",")[0].strip())
+    us = str(picked.get("country_code", "")).upper() == "US"
+    region = str(picked.get("admin1") or "") if us else ""
+    country = str(picked.get("country") or "")
+    where = region if us else country
+    shown = f"{name}, {where}" if where and where.casefold() != name.casefold() else name
+    parts = [name, *(part for part in (region, country) if part and part.casefold() != name.casefold())]
+    return name, region, country, shown, ", ".join(dict.fromkeys(parts))
+
+
+def _as_place(picked: Mapping[str, Any], town: str) -> Place:
+    name, region, country, shown, full = _names(picked, town)
+    return Place(name, region, country, _number(picked.get("latitude")), _number(picked.get("longitude")), shown, full,
+                 shown)
+
+
+def _place(town: str, get, cache: NetCache) -> tuple[float, float, str] | None:
+    key = town.casefold()
     with cache.lock:
-        cache.places[key] = found
-    return found
+        if key in cache.places:
+            return cache.places[key]
+    status, found = _lookup(town, get)
+    if status != PLACE_FOUND:
+        return None
+    place = _as_place(found[0], town)
+    result = (place.latitude, place.longitude, place.shown)
+    with cache.lock:
+        cache.places[key] = result
+    return result
+
+
+def remember_place(cache: NetCache, place: Place) -> None:
+    """``place`` in the cache under its query: its weather needs no second search."""
+    with cache.lock:
+        cache.places[place.query.casefold()] = (place.latitude, place.longitude, place.shown)
+
+
+def find_place(town: str, *, get: Callable[[str, Mapping[str, Any], float], Any], cache: NetCache,
+               monotonic: Callable[[], float] = time.monotonic) -> tuple[str, Any]:
+    """Round 2: the place ``town`` names (see the module docs): (PLACE_FOUND, Place), (PLACE_SEVERAL, the leading
+    candidates' shown names), (PLACE_NONE, None) or (PLACE_FAILED, None). Never raises; logs statuses only."""
+    started = monotonic()
+    try:
+        status, found = _lookup(" ".join(str(town or "").split()), get)
+        result: Any = None
+        if status == PLACE_FOUND:
+            result = _as_place(found[0], town)
+            remember_place(cache, result)
+        elif status == PLACE_SEVERAL:
+            result = list(dict.fromkeys(_names(candidate, town)[4] for candidate in found))
+    except Exception as exc:  # noqa: BLE001 - no answer for sure: the town is left as it was
+        logger.info("Instant: the place search gave no answer (%s, %d ms)", type(exc).__name__,
+                    int((monotonic() - started) * 1000))
+        return PLACE_FAILED, None
+    logger.info("Instant: place search %s (%d ms)", status, int((monotonic() - started) * 1000))
+    return status, result
 
 
 def _weather(ask: NetAsk, get, cache: NetCache, fahrenheit: bool, address: str, monotonic) -> InstantReply | None:
