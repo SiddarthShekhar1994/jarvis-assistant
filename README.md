@@ -374,7 +374,6 @@ keep the same rules (proposals, your click, every step visible in LIVE):
   you can watch, and every submit waits for your click.
 - **Radar**: internships, hackathons, deadlines and subscriptions (renewals,
   trials that end) worth your attention.
-- **Push-to-talk voice**: hold a key and say your request.
 
 ## About the name
 
