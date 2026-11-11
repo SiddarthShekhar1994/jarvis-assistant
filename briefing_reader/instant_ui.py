@@ -23,6 +23,12 @@ restores them; the desktop's HUD shares the same book while [desktop] is on). Se
 ``changed()`` whenever the timers change (the app's chips follow). A precise single-shot QTimer waits for the next
 end and checks again at least every pcctl.TIMER_CHECK_S, so an end that came while the PC slept is said at the next
 check. The timers live in the app, not in the window: hiding the window changes nothing.
+
+Round 2: reminders at a clock time today or tomorrow (``handle_reminder(ReminderAsk)``: set, listed, cancelled) live
+in the same book and file (pcctl.REMINDER_KIND). At a reminder's time: the chime, the toast with its label ("It's 5:00
+PM: call mum") and his voice with no label ("Sir, your 5 PM reminder."). A timer's label is never said either (the
+owner's words never reach the online voice). Home's chip shows whichever comes first: "Reminder 5:00 PM", or the
+timer's countdown (``ticking()``: a countdown shows).
 """
 
 from __future__ import annotations
@@ -32,7 +38,7 @@ import os
 import threading
 import time
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -40,7 +46,7 @@ from PySide6.QtCore import QObject, Qt, QTimer, Signal
 
 from . import instant, instant_calendar, instant_net
 from .desktop import pcctl
-from .instant import CalendarAsk, InstantFlags, InstantReply, NetAsk, TimerAsk
+from .instant import CalendarAsk, InstantFlags, InstantReply, NetAsk, ReminderAsk, TimerAsk, spoken_clock
 from .persona import with_address
 from .text_prep import format_time
 
@@ -115,10 +121,11 @@ class InstantController(QObject):
             return False
         if isinstance(found, CalendarAsk):
             return self._ask_calendar(found, words, spoken, started)
-        if isinstance(found, TimerAsk):
+        if isinstance(found, (TimerAsk, ReminderAsk)):
             if self.timers is None:
                 return False
-            reply = self.timers.handle(found)
+            reply = (self.timers.handle(found) if isinstance(found, TimerAsk) else
+                     self.timers.handle_reminder(found))
             if reply is None:
                 return False
             found = reply
@@ -268,12 +275,13 @@ class TimerController(QObject):
 
     def __init__(self, folder: str | Path | None, *, address: str = "sir", hour24: bool = False,
                  now: Callable[[], datetime] | None = None, chime: Callable[[], None] | None = None,
-                 parent: QObject | None = None) -> None:
+                 local: Callable[[datetime], datetime] | None = None, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.book = pcctl.TimerBook(folder, now=now or (lambda: datetime.now(timezone.utc)))
         self._address = address
         self._hour24 = hour24
         self.chime = chime or _chime
+        self._local = local or (lambda moment: moment.astimezone())    # a moment on this PC's wall clock
         self._shut = False
         self._check = QTimer(self)
         self._check.setSingleShot(True)
@@ -297,13 +305,17 @@ class TimerController(QObject):
             self.changed.emit()
 
     def running(self) -> tuple[pcctl.Timer, ...]:
-        return self.book.running()
+        """The timers still to run (reminders are ``reminders()``)."""
+        return self.book.running(pcctl.TIMER_KIND)
+
+    def reminders(self) -> tuple[pcctl.Timer, ...]:
+        return self.book.running(pcctl.REMINDER_KIND)
 
     def _say(self, template: str) -> str:
         return with_address(template, self._address)
 
     def _ends_at(self, timer: pcctl.Timer) -> str:
-        return format_time(timer.ends_at.astimezone(), hour24=self._hour24)
+        return format_time(self._local(timer.ends_at), hour24=self._hour24)
 
     def handle(self, ask: TimerAsk) -> InstantReply | None:
         """The answer to a timer request (None: not Jarvis's to answer - a bare "how much time is left" with no
@@ -312,7 +324,7 @@ class TimerController(QObject):
             return None
         if ask.action == instant.TIMER_SET:
             return self._set(ask)
-        timers = self.book.running()
+        timers = self.running()
         if ask.action == instant.TIMER_LEFT:
             if not timers:
                 if ask.bare:
@@ -323,7 +335,7 @@ class TimerController(QObject):
             return InstantReply(instant.KIND_TIMER, "No timer is running; nothing was cancelled.",
                                 self._say("No timer is running, {sir}."))
         if ask.every:
-            gone = self.book.cancel_all()
+            gone = self.book.cancel_all(pcctl.TIMER_KIND)
             self._changed()
             count = len(gone)
             noun = "timer" if count == 1 else f"{count} timers"
@@ -381,13 +393,134 @@ class TimerController(QObject):
         return InstantReply(instant.KIND_TIMER, f"{len(parts)} timers: {lines}.",
                             self._say(f"{len(parts)} timers, {{sir}}; the next ends in {_left_words(left)}."))
 
+    # ---- round 2: reminders at a clock time -------------------------------------------------------------------
+
+    def _when(self, moment: datetime) -> tuple[str, str]:
+        """A reminder's time (shown, said): "5:00 PM" / "5 PM", with " tomorrow" when it is tomorrow's."""
+        local, today = self._local(moment), self._local(self.book.now()).date()
+        day = "" if local.date() == today else " tomorrow" if local.date() == today + timedelta(days=1) else \
+            f" on {local:%A}"
+        return format_time(local, hour24=self._hour24) + day, spoken_clock(local) + day
+
+    def handle_reminder(self, ask: ReminderAsk) -> InstantReply | None:
+        """The answer to a reminder request (instant.ReminderAsk): set, listed or cancelled. Never logged: the label
+        or the time."""
+        if self._shut:
+            return None
+        if ask.action == instant.REMINDER_SET:
+            return self._remind(ask)
+        reminders = self.reminders()
+        if ask.action == instant.REMINDER_LIST:
+            return self._list_reminders(reminders)
+        return self._cancel_reminder(ask, reminders)
+
+    def _remind(self, ask: ReminderAsk) -> InstantReply | None:
+        if ask.at is None:
+            return None
+        try:
+            reminder = self.book.add_until(ask.at, ask.label)
+        except pcctl.RemindersFull:
+            return InstantReply(instant.KIND_REMINDER, f"{pcctl.MAX_REMINDERS} reminders are set already; cancel one "
+                                f"first. Nothing was set.", self._say(f"You already have {pcctl.MAX_REMINDERS} "
+                                                                       f"reminders, {{sir}}."))
+        except ValueError:
+            return InstantReply(instant.KIND_REMINDER, "That time has passed; nothing was set.",
+                                self._say("That time has passed, {sir}."))
+        self._changed()
+        logger.info("Instant: a reminder was set (%d min ahead%s)", reminder.minutes,
+                    "" if self.book.saved else ", kept in memory only")
+        shown, said = self._when(reminder.ends_at)
+        label = f": {reminder.label}" if reminder.label else ""
+        return InstantReply(instant.KIND_REMINDER, f"Reminder set for {shown}{label}.",
+                            self._say(f"Reminder set for {said}, {{sir}}."))
+
+    def _timers_note(self) -> str:
+        count = len(self.running())
+        if not count:
+            return ""
+        return (f" {count} timer{'s' if count != 1 else ''} {'is' if count == 1 else 'are'} running: say \"how long "
+                f"is left\".")
+
+    def _list_reminders(self, reminders: tuple[pcctl.Timer, ...]) -> InstantReply:
+        if not reminders:
+            return InstantReply(instant.KIND_REMINDER, "No reminders are set." + self._timers_note(),
+                                self._say("You have no reminders, {sir}."))
+        lines = []
+        for reminder in reminders:
+            shown, _said = self._when(reminder.ends_at)
+            lines.append(f"• {shown}" + (f" - {reminder.label}" if reminder.label else ""))
+        first = self._when(reminders[0].ends_at)[1]
+        count = len(reminders)
+        said = (f"You have one reminder, {{sir}}, at {first}." if count == 1 else
+                f"You have {count} reminders, {{sir}}; the next is at {first}.")
+        return InstantReply(instant.KIND_REMINDER, f"{count} reminder{'s' if count != 1 else ''}:\n" + "\n".join(lines),
+                            self._say(said))
+
+    def _cancel_reminder(self, ask: ReminderAsk, reminders: tuple[pcctl.Timer, ...]) -> InstantReply:
+        if not reminders:
+            return InstantReply(instant.KIND_REMINDER, "No reminder is set; nothing was cancelled." + self._timers_note(),
+                                self._say("You have no reminders, {sir}."))
+        if ask.every:
+            gone = self.book.cancel_all(pcctl.REMINDER_KIND)
+            self._changed()
+            logger.info("Instant: %d reminder(s) cancelled", len(gone))
+            count = len(gone)
+            words = "your reminder" if count == 1 else f"all {count} reminders"
+            return InstantReply(instant.KIND_REMINDER, f"Cancelled {words}.", self._say(f"Cancelled {words}, {{sir}}."))
+        picked = list(reminders)
+        if ask.clocks:
+            today = self._local(self.book.now()).date()
+            picked = [reminder for reminder in reminders
+                      if (self._local(reminder.ends_at).hour, self._local(reminder.ends_at).minute) in ask.clocks
+                      and (ask.day < 0 or self._local(reminder.ends_at).date() == today + timedelta(days=ask.day))]
+            if not picked:
+                hour, minute = ask.clocks[-1]
+                asked = spoken_clock(datetime(2000, 1, 1, hour, minute))
+                return InstantReply(instant.KIND_REMINDER, f"No reminder is set for {asked}; nothing was cancelled.",
+                                    self._say(f"No reminder at {asked}, {{sir}}."))
+        if len(picked) > 1:
+            example = self._when(picked[0].ends_at)[1].split(" tomorrow")[0]
+            return InstantReply(instant.KIND_REMINDER,
+                                f"{len(picked)} reminders are set; say \"cancel the {example} reminder\" or \"cancel "
+                                f"all reminders\". Nothing was cancelled.",
+                                self._say(f"You have {len(picked)} reminders, {{sir}}. Which one?"))
+        reminder = picked[0]
+        self.book.cancel(reminder.timer_id)
+        self._changed()
+        logger.info("Instant: a reminder was cancelled")
+        shown, said = self._when(reminder.ends_at)
+        label = f" ({reminder.label})" if reminder.label else ""
+        return InstantReply(instant.KIND_REMINDER, f"Cancelled your {shown} reminder{label}.",
+                            self._say(f"Cancelled your {said} reminder, {{sir}}."))
+
     def chip_text(self) -> str:
-        """Home's chip while a timer runs: "Timer 4:59", or "2 timers - 4:59" (the next one's); "" without one."""
-        timers = self.book.running()
+        """Home's chip: whichever comes first - a timer's countdown ("Timer 4:59", "2 timers · 4:59") or the next
+        reminder ("Reminder 5:00 PM", "Reminder 9:00 AM tomorrow"); "" without either."""
+        timers, reminders = self.running(), self.reminders()
+        if reminders and (not timers or reminders[0].ends_at < timers[0].ends_at):
+            return f"Reminder {self._when(reminders[0].ends_at)[0]}"
         if not timers:
             return ""
-        left = self.book.seconds_left() or 0.0
+        now = self.book.now()
+        left = max(0.0, (timers[0].ends_at - now).total_seconds())
         return f"Timer {_clock_left(left)}" if len(timers) == 1 else f"{len(timers)} timers · {_clock_left(left)}"
+
+    def ticking(self) -> bool:
+        """Home's chip counts down (a timer comes first): it changes every second."""
+        timers, reminders = self.running(), self.reminders()
+        return bool(timers) and not (reminders and reminders[0].ends_at < timers[0].ends_at)
+
+    def _reminder_end(self, reminder: pcctl.Timer, late: float) -> tuple[str, str]:
+        """A reminder's time came: the toast's words (its label) and his (no label: "Sir, your 5 PM reminder.")."""
+        logger.info("Instant: a reminder came (%d s late)", int(late))
+        local = self._local(reminder.ends_at)
+        shown, said = format_time(local, hour24=self._hour24), spoken_clock(local)
+        if late > 90:
+            text = (f"Your {shown} reminder, while Jarvis was away: {reminder.label}." if reminder.label else
+                    f"Your {shown} reminder came while Jarvis was away.")
+            return text, self._say(f"{{Sir}}, your {said} reminder came while I was away.")
+        text = f"It's {shown}: {reminder.label}." if reminder.label else f"It's {shown}: your reminder."
+        return text, self._say(f"{{Sir}}, your {said} reminder.")
 
     def check(self) -> None:
         """The timers against the wall clock: each that has ended says so once (``ended``), then the next check."""
@@ -397,15 +530,18 @@ class TimerController(QObject):
         if dropped:
             logger.info("Instant: %d timer(s) ended long ago while Jarvis was closed; dropped", dropped)
         for timer, late in ended:
-            logger.info("Instant: a %d-second timer ended (%d s late)", timer.length_s, int(late))
-            name = _length_name(timer.length_s)
-            label = f" for {timer.label}" if timer.label else ""
-            if late > 90:
-                text = f"Your {name} timer{label} ended at {self._ends_at(timer)}, while Jarvis was away."
-                said = self._say(f"Your {name} timer ended a while ago, {{sir}}.")
+            if timer.reminder:
+                text, said = self._reminder_end(timer, late)
             else:
-                text = f"Your {name} timer{label} is done."
-                said = self._say(f"Your {name} timer{label} is done, {{sir}}.")
+                logger.info("Instant: a %d-second timer ended (%d s late)", timer.length_s, int(late))
+                name = _length_name(timer.length_s)
+                label = f" for {timer.label}" if timer.label else ""
+                if late > 90:
+                    text = f"Your {name} timer{label} ended at {self._ends_at(timer)}, while Jarvis was away."
+                    said = self._say(f"Your {name} timer ended a while ago, {{sir}}.")
+                else:
+                    text = f"Your {name} timer{label} is done."
+                    said = self._say(f"Your {name} timer is done, {{sir}}.")    # its label is shown, never said
             try:
                 self.chime()
             except Exception as exc:  # noqa: BLE001 - the toast and his voice still say it

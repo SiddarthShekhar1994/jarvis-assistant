@@ -13,6 +13,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from PySide6.QtWidgets import QApplication
 
@@ -68,7 +69,7 @@ class TimerControllerTests(unittest.TestCase):
         self.clock.at += timedelta(seconds=60)
         timers.check()
         self.assertEqual(self.ended, [("Your 1 minute 30 seconds timer for the tea is done.",
-                                       "Your 1 minute 30 seconds timer for the tea is done, sir.")])
+                                       "Your 1 minute 30 seconds timer is done, sir.")])     # round 2: label never said
         self.assertEqual(self.chimes, [1])
         self.assertEqual(timers.chip_text(), "")
         self.assertIsNone(timers.handle(instant.TimerAsk(instant.TIMER_LEFT, bare=True)))   # no timer: Claude's
@@ -142,6 +143,152 @@ class TimerControllerTests(unittest.TestCase):
             encoding="utf-8")
         timers = self.make()
         self.assertEqual([timer.length_s for timer in timers.running()], [600])
+
+
+PACIFIC = ZoneInfo("America/Los_Angeles")      # START is 3:42 PM here, a Tuesday
+
+
+class ReminderTests(unittest.TestCase):
+    """Round 2: reminders at a clock time in the one timer book - set, listed, cancelled, said at their time (the
+    label on screen only), restored after a restart, and every older timer file still loading."""
+
+    def setUp(self) -> None:
+        self.folder = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(self.folder, ignore_errors=True))
+        self.clock = Clock()
+        self.chimes: list[int] = []
+        self.ended: list[tuple[str, str]] = []
+
+    def make(self) -> instant_ui.TimerController:
+        timers = instant_ui.TimerController(self.folder, now=self.clock.now, chime=lambda: self.chimes.append(1),
+                                            local=lambda moment: moment.astimezone(PACIFIC))
+        timers.ended.connect(lambda text, said: self.ended.append((text, said)))
+        self.addCleanup(timers.shutdown)
+        timers.start()
+        return timers
+
+    def remind(self, timers: instant_ui.TimerController, text: str):
+        found = instant.understand(text, now=self.clock.now().astimezone(PACIFIC), flags=instant.InstantFlags())
+        self.assertIsInstance(found, instant.ReminderAsk, text)
+        return timers.handle_reminder(found)
+
+    def test_set_listed_and_said_at_its_time_with_no_label(self) -> None:
+        timers = self.make()
+        reply = self.remind(timers, "remind me at 5 pm to call mum")
+        self.assertEqual((reply.text, reply.speech), ("Reminder set for 5:00 PM: call mum.", "Reminder set for 5 PM, sir."))
+        self.assertEqual((timers.chip_text(), timers.ticking()), ("Reminder 5:00 PM", False))
+        tomorrow = self.remind(timers, "remind me tomorrow at 9 am to stretch")
+        self.assertEqual(tomorrow.text, "Reminder set for 9:00 AM tomorrow: stretch.")
+        self.assertEqual(tomorrow.speech, "Reminder set for 9 AM tomorrow, sir.")
+        listed = self.remind(timers, "what reminders do I have")
+        self.assertEqual(listed.text, "2 reminders:\n• 5:00 PM - call mum\n• 9:00 AM tomorrow - stretch")
+        self.assertEqual(listed.speech, "You have 2 reminders, sir; the next is at 5 PM.")
+        self.clock.at += timedelta(minutes=77)
+        timers.check()
+        self.assertEqual(self.ended, [])                                 # 4:59 PM: not yet
+        self.clock.at += timedelta(minutes=1)
+        timers.check()
+        self.assertEqual(self.ended, [("It's 5:00 PM: call mum.", "Sir, your 5 PM reminder.")])
+        self.assertEqual(self.chimes, [1])
+        self.assertEqual(timers.chip_text(), "Reminder 9:00 AM tomorrow")
+        for reply_text in (reply.speech, tomorrow.speech, listed.speech, self.ended[0][1]):
+            self.assertNotIn("mum", reply_text)
+            self.assertNotIn("stretch", reply_text)
+
+    def test_a_timer_that_comes_first_shows_its_countdown(self) -> None:
+        timers = self.make()
+        self.remind(timers, "remind me at 5 pm")
+        timers.handle(instant.TimerAsk(instant.TIMER_SET, seconds=600))
+        self.assertEqual((timers.chip_text(), timers.ticking()), ("Timer 10:00", True))
+        timers.handle(instant.TimerAsk(instant.TIMER_CANCEL, every=True))      # "cancel all timers": timers only
+        self.assertEqual(len(timers.reminders()), 1)
+        self.assertEqual(timers.chip_text(), "Reminder 5:00 PM")
+        left = timers.handle(instant.TimerAsk(instant.TIMER_LEFT, bare=True))
+        self.assertIsNone(left)                                           # no timer runs: Claude's, as before
+
+    def test_cancel_by_time_one_or_all(self) -> None:
+        timers = self.make()
+        self.assertEqual(self.remind(timers, "cancel my reminder").text, "No reminder is set; nothing was cancelled.")
+        self.remind(timers, "remind me at 5 pm to call mum")
+        self.remind(timers, "remind me at 6 pm")
+        which = self.remind(timers, "cancel my reminder")
+        self.assertIn("2 reminders are set; say \"cancel the 5 PM reminder\"", which.text)
+        self.assertEqual(len(timers.reminders()), 2)                     # nothing on a guess
+        self.assertEqual(self.remind(timers, "cancel the 7 pm reminder").text,
+                         "No reminder is set for 7 PM; nothing was cancelled.")
+        gone = self.remind(timers, "cancel the 5 pm reminder")
+        self.assertEqual((gone.text, gone.speech), ("Cancelled your 5:00 PM reminder (call mum).",
+                                                    "Cancelled your 5 PM reminder, sir."))
+        self.assertEqual(self.remind(timers, "cancel the 6 reminder").text, "Cancelled your 6:00 PM reminder.")
+        self.remind(timers, "remind me at 8 pm")
+        self.remind(timers, "remind me tomorrow at 8 am")
+        self.assertEqual(self.remind(timers, "cancel all reminders").text, "Cancelled all 2 reminders.")
+        self.assertEqual(timers.reminders(), ())
+
+    def test_a_restart_restores_them_and_one_missed_is_said(self) -> None:
+        first = self.make()
+        self.remind(first, "remind me at 5 pm to call mum")
+        self.remind(first, "remind me tomorrow at 9 am")
+        first.handle(instant.TimerAsk(instant.TIMER_SET, seconds=60))
+        first.shutdown()
+        saved = json.loads((self.folder / pcctl.TIMERS_FILE).read_text(encoding="utf-8"))
+        self.assertEqual(sorted(entry.get("kind", "timer") for entry in saved["timers"]), ["reminder", "reminder",
+                                                                                          "timer"])
+        self.clock.at += timedelta(hours=2)                     # Jarvis was closed at 5 PM
+        second = self.make()
+        self.assertEqual(len(second.reminders()), 1)
+        texts = sorted(text for text, _said in self.ended)
+        self.assertIn("Your 5:00 PM reminder, while Jarvis was away: call mum.", texts)
+        self.assertIn(("Your 5:00 PM reminder, while Jarvis was away: call mum.",
+                       "Sir, your 5 PM reminder came while I was away."), self.ended)
+
+    def test_the_file_both_ways_and_the_limits(self) -> None:
+        self.folder.mkdir(exist_ok=True)
+        ends = START + timedelta(hours=30)
+        entries = [{"id": "0123abcd", "minutes": 10, "label": "", "set_at": START.isoformat(),
+                    "ends_at": (START + timedelta(minutes=10)).isoformat()},
+                   {"id": "0123abce", "minutes": 1800, "label": "pay rent", "set_at": START.isoformat(),
+                    "ends_at": ends.isoformat(), "seconds": 108000, "kind": "reminder"},
+                   {"id": "0123abcf", "minutes": 1800, "label": "", "set_at": START.isoformat(),
+                    "ends_at": ends.isoformat(), "seconds": 108000},                # a timer can't be 30 hours
+                   {"id": "0123abd0", "minutes": 5, "label": "", "set_at": START.isoformat(),
+                    "ends_at": ends.isoformat(), "kind": "alarm"}]                  # no such kind
+        (self.folder / pcctl.TIMERS_FILE).write_text(json.dumps({"version": 1, "timers": entries}), encoding="utf-8")
+        timers = self.make()
+        self.assertEqual([(timer.kind, timer.label) for timer in timers.book.running()],
+                         [("timer", ""), ("reminder", "pay rent")])
+        book = timers.book
+        with self.assertRaises(ValueError):
+            book.add_until(START + timedelta(hours=49))
+        with self.assertRaises(ValueError):
+            book.add_until(START - timedelta(minutes=1))
+        for hour in range(pcctl.MAX_REMINDERS - 1):
+            book.add_until(START + timedelta(hours=hour + 1))
+        full = self.remind(timers, "remind me at 11 pm")
+        self.assertIn(f"{pcctl.MAX_REMINDERS} reminders are set already", full.text)
+        for _ in range(pcctl.MAX_TIMERS - 1):                   # timers keep their own five
+            book.add_seconds(60)
+        with self.assertRaises(pcctl.TimersFull):
+            book.add_seconds(60)
+        self.assertEqual(len(book.cancel_all(pcctl.TIMER_KIND)), pcctl.MAX_TIMERS)
+        self.assertEqual(len(book.running()), pcctl.MAX_REMINDERS)
+
+    def test_the_desktop_leaves_reminders_alone_and_its_chip_knows_them(self) -> None:
+        book = pcctl.TimerBook(self.folder, now=self.clock.now)
+        reminder = book.add_until(START + timedelta(hours=1), "call mum")
+        self.assertEqual(repr(reminder), f"Timer({reminder.timer_id}, reminder)")
+        self.assertIn("Reminder · ", pcctl.chip_text(book.running()))
+        timer = book.add(5)
+        self.assertEqual(pcctl.chip_text(book.running()), pcctl.chip_text([timer]) + " · 1 reminder")
+        from tests.desktop_fakes import FakePc
+
+        control = pcctl.PcControl(lambda: FakePc(), timers=book)
+        change = control.cancel_timers()
+        self.assertEqual(change.code, "")
+        self.assertEqual(book.running(), (reminder,))                  # the desktop's "cancel the timers"
+        self.assertEqual(control.cancel_timers().code, pcctl.NO_TIMER)
+        self.assertTrue(pcctl.end_words(reminder).endswith(" reminder, sir - call mum."))
+        self.assertEqual(book.clear(), 1)
 
 
 class InstantControllerTests(unittest.TestCase):
@@ -413,6 +560,27 @@ class AppWiringTests(unittest.TestCase):
         self.submit(app, "am I free at 3 pm")                            # within 2 minutes: from the copy
         self.assertEqual(len(app.calendars["personal"].calls), reads)
         self.assertFalse(app.factory.runner.started)
+
+    def test_a_reminder_on_home_and_at_its_time(self) -> None:
+        app = AppHarness(self)                                           # the app's clock: Sunday 1:52 PM
+        app.reading()
+        c = app.c
+        self.submit(app, "remind me at 3 pm to stretch")
+        self.assertFalse(app.factory.runner.started)
+        self.assertEqual(len(c.instant.timers.reminders()), 1)
+        reading = c.window.reading
+        self.assertEqual(reading.conversation.entries()[-1][2], "Reminder set for 3:00 PM: stretch.")
+        self.assertEqual(reading.timer_chip_text(), "Reminder 3:00 PM")
+        self.assertEqual(reading.timer_chip.accessibleName(), "Reminder")
+        self.assertEqual(c._timer_chip_tick.interval(), 30_000)          # no second-by-second ticking for it
+        app.clock.advance(minutes=68)
+        c.instant.timers.check()
+        settle()
+        self.assertEqual(reading.conversation.entries()[-1][2], "It's 3:00 PM: stretch.")
+        said = [text for _kind, text, _key in app.voice.said]
+        self.assertIn("Sir, your 3 PM reminder.", said)
+        self.assertFalse(any("stretch" in text for text in said))
+        self.assertEqual(reading.timer_chip_text(), "")
 
     def test_calendar_answers_are_off_without_the_calendar(self) -> None:
         app = AppHarness(self, config_extra="\n[instant]\ncalendar = false\n")

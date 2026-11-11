@@ -63,7 +63,7 @@ import threading
 import time
 import traceback
 from collections.abc import Callable, Mapping, Sequence
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -2410,16 +2410,19 @@ class ReadingView(QWidget):
         self.task_chip.setVisible(bool(text))
         self.task_stop.setVisible(bool(text) and can_stop)
 
-    def set_timer_chip(self, text: str) -> None:
-        """Home's chip of Jarvis's timers (instant answers): "Timer 4:59", "2 timers - 4:59"; "" none. Made when one
-        first runs: without a timer Home is as it was."""
+    def set_timer_chip(self, text: str, *, reminder: bool = False) -> None:
+        """Home's chip of Jarvis's timers (instant answers): "Timer 4:59", "2 timers - 4:59", or - round 2, when a
+        reminder comes first (``reminder``) - "Reminder 5:00 PM"; "" none. Made when one first runs: without a timer
+        Home is as it was."""
         if self.timer_chip is None:
             if not text:
                 return
             self.timer_chip = holo.ActionChip(text, holo.CHIP_CYAN)
-            self.timer_chip.setAccessibleName("Timer")
-            self.timer_chip.setToolTip('Say or type "how long is left" or "cancel the timer"')
             self._chip_row.layout().insertWidget(1, self.timer_chip)
+        if text:
+            self.timer_chip.setAccessibleName("Reminder" if reminder else "Timer")
+            self.timer_chip.setToolTip('Say or type "what reminders do I have" or "cancel my reminder"' if reminder
+                                       else 'Say or type "how long is left" or "cancel the timer"')
         if text and self.timer_chip.text() != text:
             self.timer_chip.setText(text)
             self.timer_chip.updateGeometry()
@@ -11373,8 +11376,13 @@ class AppController(QObject):
         except Exception as exc:  # noqa: BLE001 - the timers then last until Jarvis closes
             logger.warning("Instant: no folder for the timers (%s); they are kept in memory only", type(exc).__name__)
             folder = None
+        from .instant import wall
+
+        # The app's clock for the timers too (round 2: a reminder's time is read on it), on this PC's wall clock.
         timers = instant_ui.TimerController(folder, address=self.config.assistant.address,
-                                            hour24=self.config.display.hour24, parent=self)
+                                            hour24=self.config.display.hour24,
+                                            now=lambda: self._instant_now().astimezone(timezone.utc),
+                                            local=lambda moment: wall(moment, self._instant_now()), parent=self)
         self._instant_calendar_job: Any = None          # round 2: the calendars' read on its way (one at a time)
         self._instant_calendar_seq = 0
         calendar_read = self._instant_calendar_read if self._any_calendar_configured() else None
@@ -11485,12 +11493,16 @@ class AppController(QObject):
             return
         text = instant.timers.chip_text()
         tick = self._timer_chip_tick
+        # Round 2: a reminder's chip changes only at midnight ("tomorrow") or when the timers change.
+        interval = 1000 if instant.timers.ticking() else 30_000
+        if text and tick.interval() != interval:
+            tick.setInterval(interval)
         if text and not tick.isActive():
             tick.start()
         elif not text and tick.isActive():
             tick.stop()
         if not text or self.window.isVisible() or not self.window.reading.timer_chip_text():
-            self.window.reading.set_timer_chip(text)
+            self.window.reading.set_timer_chip(text, reminder=bool(text) and not instant.timers.ticking())
 
     def _on_followups_route(self, text: str) -> None:
         """A typed "any follow-ups?" (R45): the YOU entry and one JARVIS entry from the list as it is
