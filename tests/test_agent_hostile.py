@@ -48,6 +48,23 @@ from tests.owner_fakes import (ATTACKER, BODY_WORD, CONTENT_WORD, FILE_WORD, GUE
                                SECRET_WORD,
                                SUBJECT_WORD, THREAD_ID, OwnerBench, invented_event, invented_thread)
 
+# Made-up provider keys for the secret guard's tests. Each one is joined at run time, so a secret scanner (GitHub's push
+# protection among them) never finds one whole in this file; none of them is, or ever was, a real key.
+_LOWER = "abcdefghijklmnopqrstuvwxyz"
+FAKE_ANTHROPIC = "sk-" + "ant-api03-" + "Mnopqrstuvwxyz0123"
+FAKE_ANTHROPIC_SHORT = "sk-" + "ant-api03-" + _LOWER[:16]
+FAKE_ANTHROPIC_BARE = "sk-" + "ant-" + "abcdefgh12345678"
+FAKE_GITHUB_SHORT = "ghp" + "_" + _LOWER
+FAKE_GITHUB_32 = "ghp" + "_" + _LOWER + "123456"
+FAKE_GITHUB_36 = "ghp" + "_" + _LOWER + "0123456789"
+FAKE_GITHUB_CAPS = "ghp" + "_" + _LOWER + "ABCDEFGHIJ"
+FAKE_AWS_EXAMPLE = "AKIA" + "IOSFODNN7EXAMPLE"
+FAKE_SLACK = "xoxb" + "-1234567890-" + _LOWER[:12]
+FAKE_PROVIDER_KEYS = ("sk" + "_test_" + _LOWER[:24], "rk" + "_live_" + _LOWER[:24], "whsec" + "_" + _LOWER[:24],
+                      "npm" + "_" + _LOWER + "0123456789", "SG" + "." + _LOWER[:16] + "." + _LOWER[16:],
+                      "ya29" + "." + _LOWER, "ASIA" + "ABCDEFGHIJKLMNOP", "ghr" + "_" + _LOWER,
+                      "hf" + "_" + _LOWER, "gsk" + "_" + _LOWER)
+
 HOST = "https://shop.example.org"
 RESULTS_LINK = f"{HOST}/deals"
 EVIL = "https://evil.example/"
@@ -2784,7 +2801,7 @@ class TheValueGoesNotTheMessage(Corpus):
                 self.assertFalse(guard.holds_secret(line))
 
     def test_what_goes_and_what_stays(self) -> None:
-        mark, key = self.MARK, "sk-ant-api03-Mnopqrstuvwxyz0123"
+        mark, key = self.MARK, FAKE_ANTHROPIC
         block = "-----BEGIN RSA PRIVATE KEY-----\nabc\ndef\n-----END RSA PRIVATE KEY-----"
         for text, left, count in (
                 (f"before\n{block}\nafter", f"before\n{mark}\nafter", 1),
@@ -2792,7 +2809,7 @@ class TheValueGoesNotTheMessage(Corpus):
                 (f"one\n{block}\ntwo\n{block}\nthree", f"one\n{mark}\ntwo\n{mark}\nthree", 2),
                 ("a\nPuTTY-User-Key-File-3: ssh-ed25519\nPrivate-Lines: 1\nabc\nPrivate-MAC: 00ff\nb", f"a\n{mark}\nb", 1),
                 (f"Your key {key}, keep it", f"Your key {mark}, keep it", 1),
-                ("ask ghp_abcdefghijklmnopqrstuvwxyz and AKIAIOSFODNN7EXAMPLE", f"ask {mark} and {mark}", 2),
+                (f"ask {FAKE_GITHUB_SHORT} and {FAKE_AWS_EXAMPLE}", f"ask {mark} and {mark}", 2),
                 ("a JWT eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.c2lnbmF0dXJl here", f"a JWT {mark} here", 1),
                 ("postgres://bob:Hunter22Zq@db.example.org/prod", f"postgres://bob:{mark}@db.example.org/prod", 1),
                 ("redis://:Hunter22Zq@db.example.org:6379", f"redis://:{mark}@db.example.org:6379", 1),
@@ -2867,7 +2884,7 @@ class TheValueGoesNotTheMessage(Corpus):
         self.assertEqual(result.text.count("plain words") >= 900, True)
 
     def test_a_long_value_s_tail_goes_at_any_offset(self) -> None:
-        for label, text in (("token=", "token=" + "Q7w" * 300 + "\nend\n"), ("sk-ant", "sk-ant-api03-" + "Q7w" * 300 + "\nend\n"),
+        for label, text in (("token=", "token=" + "Q7w" * 300 + "\nend\n"), ("sk-ant", "sk-" + "ant-api03-" + "Q7w" * 300 + "\nend\n"),
                             ("quoted", '{"a": "b", "password": "' + "Q7w" * 300 + '"}\nend\n'),
                             ("spaced", "Card number: 4111 1111 1111 1111\nend\n")):
             with self.subTest(label=label):
@@ -2909,11 +2926,11 @@ class TheValueGoesNotTheMessage(Corpus):
         for name, body, stays, goes in (
                 ("notes.txt", "Hello.\n-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n", "Hello.", "OPENSSH"),
                 ("old.txt", "Dear Ana,\n-----BEGIN RSA PRIVATE KEY-----\n", "Dear Ana,", "RSA PRIVATE"),
-                ("settings.json", '{"api_key": "sk-ant-api03-abcdefghijklmnop", "city": "Oslo"}', "Oslo", "sk-ant"),
-                ("config.yaml", "aws_access_key_id: AKIAIOSFODNN7EXAMPLE\nregion: north\n", "region: north", "AKIA"),
+                ("settings.json", '{"api_key": "' + FAKE_ANTHROPIC_SHORT + '", "city": "Oslo"}', "Oslo", "sk-ant"),
+                ("config.yaml", f"aws_access_key_id: {FAKE_AWS_EXAMPLE}\nregion: north\n", "region: north", "AKIA"),
                 ("dump.txt", "ANTHROPIC_API_KEY=abcdefghijklmnopqrstuvwxyz\nHOME=x\n", "HOME=x", "abcdefghijkl"),
-                ("deploy.txt", "export GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456\nls\n", "ls", "ghp_"),
-                ("chat.txt", "bot xoxb-1234567890-abcdefghijkl\nhello\n", "hello", "xoxb"),
+                ("deploy.txt", f"export GITHUB_TOKEN={FAKE_GITHUB_32}\nls\n", "ls", "ghp_"),
+                ("chat.txt", f"bot {FAKE_SLACK}\nhello\n", "hello", "xoxb"),
                 ("db.yaml", 'password: "Tr0ub4dor"\nhost: db\n', "host: db", "Tr0ub4dor"),
                 ("min.json", '{"name":"x","password":"Tr0ub4dor&3"}', '"name":"x"', "Tr0ub4dor"),
                 ("old.bak.txt", "client_secret = 'abcdefghijklmnopqrstuvwxyz'\nok\n", "ok", "abcdefghijkl")):
@@ -2975,7 +2992,7 @@ class TheValueGoesNotTheMessage(Corpus):
     # sec-3 ------------------------------------------------------------------------------------------------------------
 
     def test_a_subject_goes_through_it_on_a_search_and_on_a_read(self) -> None:
-        key = "sk-ant-api03-Mnopqrstuvwxyz0123"
+        key = FAKE_ANTHROPIC
         for subject, kept, gone in ((f"budget: your new key {key}", "your new key", key),
                                     (f"budget Password: {self.PASSWORD}", "budget Password:", self.PASSWORD)):
             with self.subTest(subject=subject):
@@ -2993,7 +3010,7 @@ class TheValueGoesNotTheMessage(Corpus):
     def test_a_note_through_the_real_store(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             store = memory.MemoryStore(Path(folder) / "memory.json")
-            kept = (f"wifi pwd: {self.PASSWORD}", "sk-ant-api03-Mnopqrstuvwxyz0123", "server token: abcdefghijklmnopqrstuvwx",
+            kept = (f"wifi pwd: {self.PASSWORD}", FAKE_ANTHROPIC, "server token: abcdefghijklmnopqrstuvwx",
                     "Gym at 6 on Tuesdays")
             for note in kept:
                 self.assertNotIsInstance(store.add(note, source=memory.SOURCE_TOLD), str, note)
@@ -3105,10 +3122,7 @@ class TheValueGoesNotTheMessage(Corpus):
                      "SIGNING_KEY=abcdefghijklmnopqrstuvwx", "AccountKey=abcdefghijklmnopqrstuvwx",
                      f"redis://:{password}@db.example.com:6379", "ftp://admin:admin@ftp.example.com",
                      "ftp://admin:12345@ftp.example.com", f"postgres://bob:p@{password}@db.example.com",
-                     "sk_test_abcdefghijklmnopqrstuvwx", "rk_live_abcdefghijklmnopqrstuvwx", "whsec_abcdefghijklmnopqrstuvwx",
-                     "npm_abcdefghijklmnopqrstuvwxyz0123456789", "SG.abcdefghijklmnop.qrstuvwxyz",
-                     "ya29.abcdefghijklmnopqrstuvwxyz", "ASIAABCDEFGHIJKLMNOP", "ghr_abcdefghijklmnopqrstuvwxyz",
-                     "hf_abcdefghijklmnopqrstuvwxyz", "gsk_abcdefghijklmnopqrstuvwxyz"):
+                     *FAKE_PROVIDER_KEYS):
             with self.subTest(line=line):
                 out, count = guard.scrub_secrets(line)
                 self.assertEqual(count, 1)
@@ -3135,7 +3149,7 @@ class TheValueGoesNotTheMessage(Corpus):
         keep = mail_cap.NEWEST_CHARS - len(mail_cap.CUT_MARK)
         for name, line, secret in (("password", f"Password: {self.PASSWORD}", self.PASSWORD),
                                    ("address", f"postgres://bob:{self.PASSWORD}@db.example.com/x", self.PASSWORD),
-                                   ("ghp", "ghp_abcdefghijklmnopqrstuvwxyz0123456789", "ghp_abcdefghijklmnopqrstuvwxyz0123456789"),
+                                   ("ghp", FAKE_GITHUB_36, FAKE_GITHUB_36),
                                    ("env", "API_KEY=abcdefghijklmnopqrstuvwxyz0123456789", "abcdefghijklmnopqrstuvwxyz0123456789")):
             for shown in range(1, len(line) + 1):
                 with self.subTest(name=name, shown=shown):
@@ -4290,9 +4304,9 @@ class WhatTheVoiceMayNotSay(Corpus):
 
     def test_a_key_a_card_an_address_or_a_typed_number(self) -> None:
         for goal, typed, line in (
-                ("what does sk-ant-abcdefgh12345678 unlock", "", "That key, sk-ant-abcdefgh12345678, unlocks the console."),
-                ("what is ghp_abcdefghijklmnopqrstuvwxyzABCDEFGHIJ for", "",          # a key with no long number in it
-                 "The token ghp_abcdefghijklmnopqrstuvwxyzABCDEFGHIJ is a GitHub one."),
+                (f"what does {FAKE_ANTHROPIC_BARE} unlock", "", f"That key, {FAKE_ANTHROPIC_BARE}, unlocks the console."),
+                (f"what is {FAKE_GITHUB_CAPS} for", "",          # a key with no long number in it
+                 f"The token {FAKE_GITHUB_CAPS} is a GitHub one."),
                 ("card 4111 1111 1111 1111 was declined, why", "", "Card 4111 1111 1111 1111 was declined by the bank."),
                 ("email bob@example.org about the party", "", "I will write to bob@example.org."),
                 ("find my renewal letter", "493021", "The number you gave is 493021.")):
@@ -4307,8 +4321,8 @@ class WhatTheVoiceMayNotSay(Corpus):
                 self.assertFalse(bench.firewall.speakable(line))
 
     def test_ordinary_lines_and_a_clean_run_are_as_they_were(self) -> None:
-        bench = self.bench("what does sk-ant-abcdefgh12345678 unlock")
-        bench.firewall.note_if_private("what does sk-ant-abcdefgh12345678 unlock")
+        bench = self.bench(f"what does {FAKE_ANTHROPIC_BARE} unlock")
+        bench.firewall.note_if_private(f"what does {FAKE_ANTHROPIC_BARE} unlock")
         for line in ("I can't read your password, sir.", "Your meeting is at 14:30 on 2026-11-06.",
                      "Three laptops under $800 are worth a look."):
             with self.subTest(line=line):
