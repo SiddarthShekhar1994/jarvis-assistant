@@ -407,6 +407,7 @@ class MeetingsConfig:
     Settings > Meetings (the Windows defaults are followed otherwise)."""
 
     enabled: bool = False
+    device: str = "auto"            # writing a meeting down: one of SPEECH_DEVICES
 
 
 DEFAULT_HUD_KEY = "ctrl+alt+h"     # owner decision D1: the HUD key, separate from the window key ([hotkey] combo)
@@ -463,7 +464,8 @@ class AgentConfig:
 
 
 DEFAULT_TALK_KEY = "ctrl+alt+space"   # owner decision 2026-11-09: tap it, speak, and a short quiet ends the talk
-TALK_MODELS = ("small.en", "base.en", "medium.en")   # faster-whisper models on this PC (owner decision: small.en)
+TALK_MODELS = ("small.en", "base.en", "medium.en", "distil-large-v3")   # faster-whisper models (default: small.en)
+SPEECH_DEVICES = ("auto", "cpu")     # "auto": an NVIDIA GPU when it works (gpu.py), else the CPU; "cpu": never the GPU
 TALK_RANGES = {"keep_warm_minutes": (1, 120), "quiet_ms": (300, 2000)}
 TALK_HINTS_MAX = 20                  # names the speech model should expect ("Jarvis" is always one)
 TALK_HINT_CHARS = 40
@@ -500,6 +502,7 @@ class TalkConfig:
     enabled: bool = False
     key: str = DEFAULT_TALK_KEY     # canonical spelling; "" = no talk key
     model: str = "small.en"         # one of TALK_MODELS
+    device: str = "auto"            # one of SPEECH_DEVICES
     keep_warm_minutes: int = 10     # the speech model stays loaded this long after the last talk (1..120)
     quiet_ms: int = 500             # this much quiet after speech ends a talk (300..2000 ms)
     hints: tuple[str, ...] = ()     # names the speech model should expect, besides "Jarvis" (at most 20)
@@ -1222,7 +1225,7 @@ def _parse_meetings(doc: Mapping[str, Any], environ: Mapping[str, str] | None = 
     d = MeetingsConfig()
     r = _TableReader(doc, "meetings", _field_names(MeetingsConfig))
     enabled = _enabled_override(r.boolean("enabled", d.enabled), environ, MEETINGS_ENABLED_ENV, "meetings.enabled")
-    return MeetingsConfig(enabled=enabled)
+    return MeetingsConfig(enabled=enabled, device=r.choice("device", d.device, SPEECH_DEVICES))
 
 
 DESKTOP_ENABLED_ENV = "JARVIS_DESKTOP_ENABLED"
@@ -1376,6 +1379,7 @@ def _parse_talk(doc: Mapping[str, Any], environ: Mapping[str, str] | None = None
     elif listed is not _MISSING:
         logger.warning("config.toml: talk.hints is not a list of names; none are used")
     return TalkConfig(enabled=enabled, key=key, model=r.choice("model", d.model, TALK_MODELS),
+                      device=r.choice("device", d.device, SPEECH_DEVICES),
                       keep_warm_minutes=r.integer("keep_warm_minutes", d.keep_warm_minutes,
                                                   *TALK_RANGES["keep_warm_minutes"]),
                       quiet_ms=r.integer("quiet_ms", d.quiet_ms, *TALK_RANGES["quiet_ms"]),

@@ -128,8 +128,9 @@ class MeetingsController(QObject):
         self.audio_missing: Callable[[], str] = ma.backend_missing
         self.speech_missing: Callable[[], str] = sp.speech_missing
         self.process_factory: Callable[..., Any] = (
-            lambda folder, model, on_progress, on_done: sp.TranscriptionProcess(folder, model, on_progress=on_progress,
-                                                                                on_done=on_done))
+            lambda folder, model, on_progress, on_done: sp.TranscriptionProcess(
+                folder, model, on_progress=on_progress, on_done=on_done,
+                device=getattr(getattr(self.config, "meetings", None), "device", "auto")))
         self.downloader_factory: Callable[..., Any] = (
             lambda target, progress, cancel: sp.ModelDownloader(target, progress=progress, cancel=cancel))
         self.threaded = True
@@ -842,12 +843,19 @@ class MeetingsController(QObject):
                 ("Audio", "Kept 7 days on this PC, then deleted; never uploaded"),
                 ("Transcript and summary", "Kept 30 days on this PC, then deleted"),
                 ("Speech to text", f"On this PC ({sp.MODEL_NAME}); the audio never leaves it"),
+                ("Runs on", self._runs_on()),
                 ("Summary", SUMMARY_ROW_ON if self.summaries_on() else "Needs Ask Jarvis (your Claude Code) on"),
                 ("Follow-ups", "Drafts to the invite's guests only (a linked meeting); nothing is sent until you "
                                "click Send"),
                 ("Record offer", "Shortly before a meeting with guests (with the productivity bundle); it only opens "
                                  "the start card"),
                 ("Kept in", "The meetings folder inside the data folder")]
+
+    def _runs_on(self) -> str:
+        from . import gpu
+
+        setting = getattr(getattr(self.config, "meetings", None), "device", gpu.DEVICE_AUTO)
+        return gpu.runs_on_text(gpu.status(setting), sp.last_device(), setting="[meetings] device")
 
     def refresh_settings(self) -> None:
         """The device rows (what is connected now) and the model's line."""

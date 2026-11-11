@@ -342,6 +342,7 @@ reserve_ask_runs = 3          # Ask runs kept free each hour for your own reques
 # some other places need everyone's consent: the tick is your confirmation, not legal advice. Off here;
 # turn it on for this PC with JARVIS_MEETINGS_ENABLED=true in .env.
 enabled = false
+device = "auto"               # writing a meeting down: "auto" (an NVIDIA GPU when it works, else the CPU) or "cpu"
 
 [desktop]
 # Jarvis on your desktop: he opens the files, apps, folders and sites you name, and (in later versions) tidies
@@ -393,7 +394,8 @@ speak_private = false         # true: a line that may hold something private is 
 # restart the "Briefing hotkey" task.
 enabled = false
 key = "ctrl+alt+space"        # the talk key; never the [hotkey] combo or the [desktop] hud_key
-model = "small.en"            # "small.en" (about 480 MB), "base.en" (145 MB, quicker, less sure) or "medium.en" (1.5 GB, the meetings' model)
+model = "small.en"            # "small.en" (about 480 MB), "base.en" (145 MB, quicker, less sure), "medium.en" (1.5 GB, the meetings' model) or "distil-large-v3" (1.5 GB, the most accurate: best on an NVIDIA GPU)
+device = "auto"               # "auto": an NVIDIA GPU when it works (README "Speech on an NVIDIA GPU"), else the CPU; "cpu": never the GPU
 keep_warm_minutes = 10        # the speech model stays loaded this long after a talk, so the next starts at once (1..120)
 quiet_ms = 500                # this much quiet after you speak ends a talk, in milliseconds (300..2000)
 hints = []                    # names he should expect to hear, e.g. ["Spotify", "Notion"] ("Jarvis" always is)

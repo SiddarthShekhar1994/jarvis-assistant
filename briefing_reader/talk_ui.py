@@ -333,7 +333,7 @@ class TalkController(QObject):
     def _new_client(self, folder: Path, hints: str, idle_s: float) -> Any:
         from .talk_speech import SpeechClient
 
-        return SpeechClient(folder, hints=hints, idle_s=idle_s)
+        return SpeechClient(folder, hints=hints, idle_s=idle_s, device=getattr(self._cfg, "device", "auto"))
 
     def _understand(self, clip: bytes) -> None:
         if self._client is None:
@@ -426,8 +426,14 @@ class TalkController(QObject):
         key = self._key if self._cfg.key else "None"
         if self._cfg.key and key_taken(self._data_dir, "talk", self._cfg.key) is not None:
             key = KEY_TAKEN_TEXT.format(key=self._key)
+        from . import gpu
+
+        reported = str(getattr(self._client, "device", "") or "") if self._client is not None else ""
+        runs_on = gpu.runs_on_text(gpu.status(getattr(self._cfg, "device", gpu.DEVICE_AUTO)), reported,
+                                   setting="[talk] device")
         return [("Talk key", key),
                 ("Speech model", model),
+                ("Runs on", runs_on),
                 ("Add-ons", "installed" if not missing else "missing: " + ", ".join(missing)),
                 ("Microphone", "the one picked in Settings > Meetings, else the Windows default"),
                 ("Quiet that ends a talk", f"{self._cfg.quiet_ms} ms"),
