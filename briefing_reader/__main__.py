@@ -517,7 +517,9 @@ def _run_hotkey_agent(config: Any, slots: Mapping[str, str]) -> int:
             debounce_s=hotkey.TALK_DEBOUNCE_S, label="Talk key", purpose="listen",
         ))
         logger.info("Hotkey agent: [talk] is on; the talk key is listened for too")
-    return hotkey.run_agent(config.hotkey.combo, dispatcher, **keys)
+    # What could be registered goes to Settings as a small status file in the data folder (statuses only).
+    return hotkey.run_agent(config.hotkey.combo, dispatcher,
+                            on_status=lambda statuses: hotkey.write_key_status(config.data_dir, statuses), **keys)
 
 
 def _agent_hud_key(config: Any) -> str:

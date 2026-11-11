@@ -1456,6 +1456,7 @@ class ReadingView(QWidget):
         self.answer_chip = holo.ActionChip("", holo.CHIP_CYAN)
         self.answer_chip.clicked.connect(self._on_answer_chip)
         self.task_chip: holo.ActionChip | None = None    # a task's chip and its Stop (set_task_chip): made as they show
+        self.timer_chip: holo.ActionChip | None = None   # Jarvis's timers (set_timer_chip): made as one first runs
         self.task_stop: holo.HoloButton | None = None
         self._task_look = ""
         self._task_word = ""
@@ -2408,6 +2409,24 @@ class ReadingView(QWidget):
             self.task_chip.updateGeometry()
         self.task_chip.setVisible(bool(text))
         self.task_stop.setVisible(bool(text) and can_stop)
+
+    def set_timer_chip(self, text: str) -> None:
+        """Home's chip of Jarvis's timers (instant answers): "Timer 4:59", "2 timers - 4:59"; "" none. Made when one
+        first runs: without a timer Home is as it was."""
+        if self.timer_chip is None:
+            if not text:
+                return
+            self.timer_chip = holo.ActionChip(text, holo.CHIP_CYAN)
+            self.timer_chip.setAccessibleName("Timer")
+            self.timer_chip.setToolTip('Say or type "how long is left" or "cancel the timer"')
+            self._chip_row.layout().insertWidget(1, self.timer_chip)
+        if text and self.timer_chip.text() != text:
+            self.timer_chip.setText(text)
+            self.timer_chip.updateGeometry()
+        self.timer_chip.setVisible(bool(text))
+
+    def timer_chip_text(self) -> str:
+        return self.timer_chip.text() if self.timer_chip is not None and not self.timer_chip.isHidden() else ""
 
     def task_chip_text(self) -> str:
         return self.task_chip.text() if self.task_chip is not None and not self.task_chip.isHidden() else ""
@@ -5119,6 +5138,7 @@ class AppController(QObject):
         self._init_live_view()
         self._init_memory_state()
         self.ask: Any = self._create_ask(ask_factory)   # ask_ui.AskController, or None while [ask] is off
+        self.instant: Any = self._create_instant()      # [instant]: Jarvis's own answers and timers, or None
         self._create_memory()                           # the productivity bundle's memory (needs Ask)
         self.productivity: Any = self._create_productivity()   # the bundle's day read and offers (needs Ask)
         self.meetings: Any = self._create_meetings()    # [meetings]: the meeting recorder, or None while it is off
@@ -9223,7 +9243,7 @@ class AppController(QObject):
             address=self.config.assistant.address, live=self.live,
             backend_factory=getattr(self, "_desktop_backend", None), consent_store=self._prefs_store,
             window_api=getattr(self, "_desktop_window_api", None), click_guard=self._desktop_click_guard,
-            parent=self)
+            timers=self._shared_timer_book(), parent=self)
         controller.hudChanged.connect(self._on_hud_changed)
         controller.answered.connect(self._on_desktop_answered)
         controller.plannerNeeded.connect(self._on_desktop_planner)
@@ -9231,6 +9251,9 @@ class AppController(QObject):
         controller.consentChanged.connect(lambda _on: self._sync_desktop_settings())
         controller.timerEnded.connect(lambda line: self._post_toast(line, TOAST_TIMER_TEXT, TOAST_TIMER))
         controller.focusChanged.connect(self._on_focus_changed)
+        instant = getattr(self, "instant", None)
+        if instant is not None and instant.timers is not None:
+            controller.shared_timers_changed = instant.timers.poke   # a timer set on the HUD: the app checks it
         meetings = getattr(self, "meetings", None)
         if meetings is not None:
             meetings.pillCreated.connect(controller.set_rec_pill)
@@ -11272,6 +11295,98 @@ class AppController(QObject):
         task = getattr(ask, "finishing_task", _live.NO_TASK) if ask is not None else _live.NO_TASK
         step = task.find(_live.ASK_VALIDATE)
         step.note(text)
+
+    # ---- instant answers ([instant]: Jarvis's own answers, typed or spoken, and his timers) -----------------------
+
+    def _create_instant(self) -> Any:
+        """instant_ui.InstantController and its TimerController while [instant] and the Ask bar are on, else None. The
+        timers are restored once the app runs (a timer that ended while Jarvis was closed is said then)."""
+        cfg = getattr(self.config, "instant", None)
+        if self.ask is None or cfg is None or not getattr(cfg, "enabled", False):
+            return None
+        from . import instant_ui
+        from .desktop import pcctl
+
+        try:
+            folder = pcctl.timers_folder(self.config.data_dir)
+        except Exception as exc:  # noqa: BLE001 - the timers then last until Jarvis closes
+            logger.warning("Instant: no folder for the timers (%s); they are kept in memory only", type(exc).__name__)
+            folder = None
+        timers = instant_ui.TimerController(folder, address=self.config.assistant.address,
+                                            hour24=self.config.display.hour24, parent=self)
+        controller = instant_ui.InstantController(self.config, timers=timers, parent=self)
+        controller.answered.connect(self._on_instant)
+        controller.waiting.connect(self._on_instant_waiting)
+        controller.fallback.connect(self._on_instant_fallback)
+        timers.ended.connect(self._on_instant_timer_ended)
+        timers.changed.connect(self._on_instant_timers_changed)
+        self._timer_chip_tick = self._make_timer(self._sync_timer_chip, single_shot=False, interval_ms=1000)
+        self.ask.set_instant(controller.take)
+        QTimer.singleShot(0, timers.start)
+        logger.info("Instant answers are on (weather %s, currency %s)", "on" if cfg.weather else "off",
+                    "on" if cfg.currency else "off")
+        return controller
+
+    def _shared_timer_book(self) -> Any:
+        """The one timer book the desktop's HUD shares while instant answers are on (None: the desktop keeps its own)."""
+        instant = getattr(self, "instant", None)
+        return instant.timers.book if instant is not None and instant.timers is not None else None
+
+    def _on_instant(self, reply: Any, words: str, spoken: bool, ms: int) -> None:
+        """Jarvis's own answer (no planner run, nothing of the Claude plan): YOU and JARVIS in the conversation (kept,
+        and given to a later Ask), the bar's status line (on the HUD his short words) and his voice ([assistant]
+        speak_replies). Never logged: the words or the answer."""
+        if self.state == STATE_QUITTING:
+            return
+        self._you(words)
+        sub = f"{reply.source} {DOT} {ms / 1000:.1f} s" if reply.source else f"on this PC {DOT} {ms} ms"
+        self._jarvis(reply.text, sub=sub)
+        if self.ask is not None:
+            self.ask.show_note(reply.text, hud_text=reply.speech)
+        if self.config.assistant.speak_replies:
+            self._say(KIND_RESULT, reply.speech)
+
+    def _on_instant_waiting(self, text: str) -> None:
+        if self.ask is not None and self.state != STATE_QUITTING:
+            self.ask.show_note(text, hud.TONE_WORKING)
+
+    def _on_instant_fallback(self, words: str, spoken: bool) -> None:
+        """The weather or the rate could not be had for sure: the words go to Claude exactly as before."""
+        if self.ask is None or self.state == STATE_QUITTING:
+            return
+        if self.ask.busy:
+            logger.info("Instant: no answer, and another request is running; nothing was sent on")
+            return
+        self.ask.submit_claude(words, spoken)
+
+    def _on_instant_timer_ended(self, text: str, speech: str) -> None:
+        """A timer ended (its chime has played): Jarvis's toast, a JARVIS entry (never given to Ask) and his voice."""
+        if self.state == STATE_QUITTING:
+            return
+        self._post_toast(text, TOAST_TIMER_TEXT, TOAST_TIMER)
+        self._jarvis(text, context=False)
+        self._say(KIND_RESULT, speech)
+
+    def _on_instant_timers_changed(self) -> None:
+        self._sync_timer_chip()
+        desktop = getattr(self, "desktop", None)
+        if desktop is not None and hasattr(desktop, "timers_changed"):
+            desktop.timers_changed()                     # the HUD's timer chip
+
+    def _sync_timer_chip(self) -> None:
+        """Home's timer chip follows the timers, ticking once a second while one runs (the text changes only while
+        the window shows)."""
+        instant = getattr(self, "instant", None)
+        if instant is None or instant.timers is None or self.state == STATE_QUITTING:
+            return
+        text = instant.timers.chip_text()
+        tick = self._timer_chip_tick
+        if text and not tick.isActive():
+            tick.start()
+        elif not text and tick.isActive():
+            tick.stop()
+        if not text or self.window.isVisible() or not self.window.reading.timer_chip_text():
+            self.window.reading.set_timer_chip(text)
 
     def _on_followups_route(self, text: str) -> None:
         """A typed "any follow-ups?" (R45): the YOU entry and one JARVIS entry from the list as it is
@@ -14189,6 +14304,8 @@ class AppController(QObject):
         self._conversation_prune_timer.stop()
         self.live.set_listener(None)   # the LIVE view's feed hears nothing more
         self._live_feed.stop()
+        if getattr(self, "instant", None) is not None:
+            self.instant.shutdown()    # no network answer lands after this; the timers stay in their file
         if getattr(self, "talk", None) is not None:
             self.talk.shutdown()       # the microphone closes; the speech process ends
         if getattr(self, "meetings", None) is not None:

@@ -48,6 +48,9 @@ class PcApp(DesktopRequestApp):
     def make_pc(self, **harness: Any) -> None:
         self.pc = FakePc()
         self.clock = FakeClock(self.START)
+        # The desktop's own PC controls and timers, as with [instant] off (with it on, timer words are instant
+        # answers' and the desktop shares their book: tests/test_instant_ui.py).
+        harness["extra"] = "\n[instant]\nenabled = false\n" + str(harness.get("extra", ""))
         self.make_ask(**harness)
         self.desktop.pc_factory = lambda: self.pc
         self.desktop.timer_clock = self.clock.now

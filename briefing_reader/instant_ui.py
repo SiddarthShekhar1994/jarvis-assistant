@@ -1,0 +1,347 @@
+"""Instant answers in the app (Qt): :class:`InstantController` takes what Ask hands it before Claude, and
+:class:`TimerController` keeps Jarvis's one timer book (owner decisions 2026-11-10).
+
+``InstantController.take(words, spoken)`` (AskController.submit asks it after a running task's gate, "web:" and the
+memory, follow-up, plan and prep shortcuts, and before the desktop's words): True when Jarvis answers the request
+himself. An answer on this PC comes at once (``answered``); a timer request goes to the TimerController; a network
+question (instant_net: the weather, a currency) runs on a short-lived thread of its own - never the GUI thread -
+with ``waiting`` saying so on the bar meanwhile, and comes back as ``answered``, or as ``fallback`` when the
+service gave no answer for sure: the app then sends the words to Claude exactly as before. Nothing here logs a
+request, a town, an amount or an answer: kinds, statuses and durations only.
+
+``TimerController``: the app's timers (desktop.pcctl.TimerBook in the data folder's "desktop" folder, so a restart
+restores them; the desktop's HUD shares the same book while [desktop] is on). Set, asked about and cancelled through
+``handle(TimerAsk)``; at each end ``ended(text, speech)`` - the app posts its toast, plays the chime and says it - and
+``changed()`` whenever the timers change (the app's chips follow). A precise single-shot QTimer waits for the next
+end and checks again at least every pcctl.TIMER_CHECK_S, so an end that came while the PC slept is said at the next
+check. The timers live in the app, not in the window: hiding the window changes nothing.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import threading
+import time
+from collections.abc import Callable
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
+
+from . import instant, instant_net
+from .desktop import pcctl
+from .instant import InstantFlags, InstantReply, NetAsk, TimerAsk
+from .persona import with_address
+from .text_prep import format_time
+
+logger = logging.getLogger(__name__)
+
+WAITING_TEXT = {instant.KIND_WEATHER: "Checking the weather...", instant.KIND_CURRENCY: "Checking the exchange rate..."}
+ON_THIS_PC = "on this PC"
+
+
+class _Bridge(QObject):
+    done = Signal(object, str, bool, float, str)       # reply or None, words, spoken, started, kind
+
+
+class InstantController(QObject):
+    answered = Signal(object, str, bool, int)          # InstantReply, the words, spoken, milliseconds
+    waiting = Signal(str)                              # the bar's words while a network answer is on its way
+    fallback = Signal(str, bool)                       # the words, spoken: no answer for sure - Claude, as before
+
+    def __init__(self, config: Any, *, timers: TimerController | None = None,
+                 now: Callable[[], datetime] | None = None,
+                 get: Callable[[str, Any, float], Any] | None = None, fahrenheit: bool | None = None,
+                 threaded: bool = True, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._config = config
+        self.timers = timers
+        self._now = now or (lambda: datetime.now().astimezone())
+        self._get = get or instant_net.real_get
+        self._cache = instant_net.NetCache()
+        temperature = getattr(config.instant, "temperature", "auto")
+        self._fahrenheit = fahrenheit if fahrenheit is not None else (
+            temperature == "fahrenheit" or (temperature == "auto" and instant_net.fahrenheit_region()))
+        self._threaded = threaded
+        self._shut = False
+        self._bridge = _Bridge(self)
+        self._bridge.done.connect(self._on_done, Qt.ConnectionType.QueuedConnection)
+
+    def flags(self) -> InstantFlags:
+        cfg = self._config.instant
+        return InstantFlags(weather=bool(cfg.weather), currency=bool(cfg.currency), timers=self.timers is not None,
+                            town=str(cfg.town or ""))
+
+    def _address(self) -> str:
+        return str(getattr(getattr(self._config, "assistant", None), "address", "sir"))
+
+    def take(self, words: str, spoken: bool = False) -> bool:
+        """True when Jarvis answers ``words`` himself (see the module docs); False: Claude's, as before."""
+        if self._shut or not words:
+            return False
+        started = time.perf_counter()
+        try:
+            found = instant.understand(words, now=self._now(), flags=self.flags(), address=self._address(),
+                                       hour24=bool(getattr(getattr(self._config, "display", None), "hour24", False)))
+        except Exception as exc:  # noqa: BLE001 - a request that can't be read is Claude's, as before
+            logger.warning("Instant: a request could not be read (%s)", type(exc).__name__)
+            return False
+        if found is None:
+            return False
+        if isinstance(found, TimerAsk):
+            if self.timers is None:
+                return False
+            reply = self.timers.handle(found)
+            if reply is None:
+                return False
+            found = reply
+        if isinstance(found, InstantReply):
+            self._answer(found, words, spoken, started)
+            return True
+        if isinstance(found, NetAsk):
+            self.waiting.emit(WAITING_TEXT.get(found.kind, "One moment..."))
+            self._ask_network(found, words, spoken, started)
+            return True
+        return False
+
+    def _answer(self, reply: InstantReply, words: str, spoken: bool, started: float) -> None:
+        ms = max(0, int((time.perf_counter() - started) * 1000))
+        logger.info("Instant: a %s answer (%d ms%s)", reply.kind, ms, ", spoken" if spoken else "")
+        self.answered.emit(reply, words, spoken, ms)
+
+    def _ask_network(self, ask: NetAsk, words: str, spoken: bool, started: float) -> None:
+        def work() -> None:
+            reply = instant_net.answer(ask, get=self._get, cache=self._cache, fahrenheit=self._fahrenheit,
+                                       address=self._address())
+            if not self._shut:
+                self._bridge.done.emit(reply, words, spoken, started, ask.kind)
+
+        if self._threaded:
+            threading.Thread(target=work, name="instant-net", daemon=True).start()
+        else:
+            work()
+
+    def _on_done(self, reply: Any, words: str, spoken: bool, started: float, kind: str) -> None:
+        if self._shut:
+            return
+        if reply is None:
+            logger.info("Instant: no %s answer; the request goes to Claude", kind)
+            self.fallback.emit(words, spoken)
+            return
+        self._answer(reply, words, spoken, started)
+
+    def shutdown(self) -> None:
+        self._shut = True
+        if self.timers is not None:
+            self.timers.shutdown()
+
+
+def _length_name(seconds: int) -> str:
+    """"10-minute", "90-second", "2-hour", "1 hour 30 minutes" (a timer's length as said before "timer")."""
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600}-hour"
+    if seconds < 3600 and seconds % 60 == 0:
+        return f"{seconds // 60}-minute"
+    if seconds < 60:
+        return f"{seconds}-second"
+    return instant.duration_words(seconds)
+
+
+def _left_words(seconds: float) -> str:
+    whole = max(0, int(round(seconds)))
+    return instant.duration_words(whole) if whole else "less than a second"
+
+
+def _clock_left(seconds: float) -> str:
+    """"4:59" / "1:02:03" for the chip."""
+    whole = max(0, int(seconds + 0.999))
+    hours, rest = divmod(whole, 3600)
+    minutes, secs = divmod(rest, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
+
+
+def _chime() -> None:
+    """A timer's end sound: Windows' own "asterisk" sound, not waited for. Never while the tests run."""
+    if os.environ.get(instant_net.TEST_GUARD_ENV, "") == "1":
+        return
+    try:
+        import winsound
+
+        winsound.MessageBeep(winsound.MB_ICONASTERISK)
+    except Exception as exc:  # noqa: BLE001 - the toast and his voice still say it
+        logger.info("Instant: no timer sound (%s)", type(exc).__name__)
+
+
+class TimerController(QObject):
+    ended = Signal(str, str)        # the end's words: shown (the toast) and said
+    changed = Signal()
+
+    def __init__(self, folder: str | Path | None, *, address: str = "sir", hour24: bool = False,
+                 now: Callable[[], datetime] | None = None, chime: Callable[[], None] | None = None,
+                 parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.book = pcctl.TimerBook(folder, now=now or (lambda: datetime.now(timezone.utc)))
+        self._address = address
+        self._hour24 = hour24
+        self.chime = chime or _chime
+        self._shut = False
+        self._check = QTimer(self)
+        self._check.setSingleShot(True)
+        self._check.setTimerType(Qt.TimerType.PreciseTimer)
+        self._check.timeout.connect(self.check)
+
+    def start(self) -> None:
+        """The timers kept from before (one whose end came while Jarvis was closed is said now, or dropped quietly
+        when that was more than pcctl.TIMER_LATE_S ago), then the next check."""
+        count = self.book.load()
+        if count:
+            logger.info("Instant: %d timer(s) restored", count)
+        self.check()
+        if count:
+            self.changed.emit()                          # the chips show what was restored
+
+    def poke(self) -> None:
+        """The shared book changed elsewhere (the desktop's HUD set or cancelled a timer): check again and say so."""
+        if not self._shut:
+            self._arm()
+            self.changed.emit()
+
+    def running(self) -> tuple[pcctl.Timer, ...]:
+        return self.book.running()
+
+    def _say(self, template: str) -> str:
+        return with_address(template, self._address)
+
+    def _ends_at(self, timer: pcctl.Timer) -> str:
+        return format_time(timer.ends_at.astimezone(), hour24=self._hour24)
+
+    def handle(self, ask: TimerAsk) -> InstantReply | None:
+        """The answer to a timer request (None: not Jarvis's to answer - a bare "how much time is left" with no
+        timer running goes to Claude)."""
+        if self._shut:
+            return None
+        if ask.action == instant.TIMER_SET:
+            return self._set(ask)
+        timers = self.book.running()
+        if ask.action == instant.TIMER_LEFT:
+            if not timers:
+                if ask.bare:
+                    return None
+                return InstantReply(instant.KIND_TIMER, "No timer is running.", self._say("No timer is running, {sir}."))
+            return self._left(timers)
+        if not timers:
+            return InstantReply(instant.KIND_TIMER, "No timer is running; nothing was cancelled.",
+                                self._say("No timer is running, {sir}."))
+        if ask.every:
+            gone = self.book.cancel_all()
+            self._changed()
+            count = len(gone)
+            noun = "timer" if count == 1 else f"{count} timers"
+            return InstantReply(instant.KIND_TIMER, f"Cancelled {'your' if count == 1 else 'all'} "
+                                f"{noun if count == 1 else noun}.", self._say(f"Cancelled {noun}, {{sir}}."))
+        picked = [timer for timer in timers if not ask.seconds or timer.length_s == ask.seconds]
+        if not picked:
+            return InstantReply(instant.KIND_TIMER, f"No {_length_name(ask.seconds)} timer is running; nothing was "
+                                f"cancelled.", self._say(f"No {_length_name(ask.seconds)} timer is running, {{sir}}."))
+        if len(picked) > 1 and not ask.seconds:
+            return InstantReply(instant.KIND_TIMER,
+                                f"{len(timers)} timers are running; say \"cancel all timers\" or name one, like "
+                                f"\"cancel the {_length_name(picked[0].length_s)} timer\". Nothing was cancelled.",
+                                self._say(f"You have {len(timers)} timers, {{sir}}. Which one?"))
+        timer = picked[0]
+        self.book.cancel(timer.timer_id)
+        self._changed()
+        logger.info("Instant: a timer was cancelled")
+        name = _length_name(timer.length_s)
+        return InstantReply(instant.KIND_TIMER, f"Cancelled your {name} timer.",
+                            self._say(f"Cancelled your {name} timer, {{sir}}."))
+
+    def _set(self, ask: TimerAsk) -> InstantReply | None:
+        try:
+            timer = self.book.add_seconds(ask.seconds, ask.label)
+        except pcctl.TimersFull:
+            return InstantReply(instant.KIND_TIMER, f"{pcctl.MAX_TIMERS} timers are running already; cancel one "
+                                f"first. Nothing was set.", self._say(f"You already have {pcctl.MAX_TIMERS} timers, "
+                                                                       f"{{sir}}."))
+        except ValueError:
+            return None
+        self._changed()
+        logger.info("Instant: a %d-second timer was set%s", timer.length_s, "" if self.book.saved else
+                    " (kept in memory only)")
+        length = instant.duration_words(timer.length_s)
+        label = f" for {timer.label}" if timer.label else ""
+        return InstantReply(instant.KIND_TIMER, f"Timer set for {length}{label}; it ends at {self._ends_at(timer)}.",
+                            self._say(f"Timer set for {length}, {{sir}}."))
+
+    def _left(self, timers: tuple[pcctl.Timer, ...]) -> InstantReply:
+        now = self.book.now()
+        parts = []
+        for timer in timers:
+            left = max(0.0, (timer.ends_at - now).total_seconds())
+            parts.append((timer, left))
+        first, left = parts[0]
+        name = _length_name(first.length_s)
+        if len(parts) == 1:
+            label = f" for {first.label}" if first.label else ""
+            return InstantReply(instant.KIND_TIMER,
+                                f"{_left_words(left)} left on your {name} timer{label} (it ends at "
+                                f"{self._ends_at(first)}).",
+                                self._say(f"{_left_words(left)} left, {{sir}}."))
+        lines = "; ".join(f"{_left_words(seconds)} on the {_length_name(timer.length_s)} one" for timer, seconds in parts)
+        return InstantReply(instant.KIND_TIMER, f"{len(parts)} timers: {lines}.",
+                            self._say(f"{len(parts)} timers, {{sir}}; the next ends in {_left_words(left)}."))
+
+    def chip_text(self) -> str:
+        """Home's chip while a timer runs: "Timer 4:59", or "2 timers - 4:59" (the next one's); "" without one."""
+        timers = self.book.running()
+        if not timers:
+            return ""
+        left = self.book.seconds_left() or 0.0
+        return f"Timer {_clock_left(left)}" if len(timers) == 1 else f"{len(timers)} timers · {_clock_left(left)}"
+
+    def check(self) -> None:
+        """The timers against the wall clock: each that has ended says so once (``ended``), then the next check."""
+        if self._shut:
+            return
+        ended, dropped = self.book.take_due()
+        if dropped:
+            logger.info("Instant: %d timer(s) ended long ago while Jarvis was closed; dropped", dropped)
+        for timer, late in ended:
+            logger.info("Instant: a %d-second timer ended (%d s late)", timer.length_s, int(late))
+            name = _length_name(timer.length_s)
+            label = f" for {timer.label}" if timer.label else ""
+            if late > 90:
+                text = f"Your {name} timer{label} ended at {self._ends_at(timer)}, while Jarvis was away."
+                said = self._say(f"Your {name} timer ended a while ago, {{sir}}.")
+            else:
+                text = f"Your {name} timer{label} is done."
+                said = self._say(f"Your {name} timer{label} is done, {{sir}}.")
+            try:
+                self.chime()
+            except Exception as exc:  # noqa: BLE001 - the toast and his voice still say it
+                logger.info("Instant: no timer sound (%s)", type(exc).__name__)
+            self.ended.emit(text, said)
+        if ended or dropped:
+            self._changed()
+        else:
+            self._arm()
+
+    def _changed(self) -> None:
+        self._arm()
+        self.changed.emit()
+
+    def _arm(self) -> None:
+        if self._shut:
+            return
+        left = self.book.seconds_left()
+        if left is None:
+            self._check.stop()
+        else:
+            self._check.start(int(min(left, pcctl.TIMER_CHECK_S) * 1000) + 20)
+
+    def shutdown(self) -> None:
+        """Jarvis closes: the checks stop; the timers stay in their file for the next start."""
+        self._shut = True
+        self._check.stop()

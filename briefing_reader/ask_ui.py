@@ -104,6 +104,13 @@ planner that hands a request to a task says so in AskOutcome.agent_task; the app
 have the words with the line breaks a paste left in the bar's field (``_lines_of``): only a task's reading of what they
 ask for at once sees them (agent.owner); the planner, the bar, Live and the conversation have them as one line.
 
+Instant answers (instant_ui.InstantController, only while [instant] is on): ``set_instant(take)`` makes ``submit``
+ask ``take(words, spoken)`` after a running task's gate, "web:" and the memory, follow-up, plan and prep shortcuts,
+and before the desktop's words (so a timer never flies Jarvis onto the HUD) - also while a request runs or a sign-in
+is open, since it needs neither Claude nor Google. True: Jarvis answers it himself (the words leave the bar; no
+planner run, no caps, no askStarted; the app shows and says the answer). A network question that comes back with no
+answer for sure is handed to ``submit_claude``: the normal path, as if instant answers were off for those words.
+
 Web research: a request that starts with "web:" (or "research:") is a WEB task (live.TASK_WEB;
 ``running_kind``) whose "Your request" says nothing is read from the accounts; the command still
 goes to planner.plan() as typed, which runs only the research (ask.research). A request the
@@ -451,6 +458,8 @@ class AskController(QObject):
         # route there (None), or hands back the planner's job (ask.desktop_mode.DesktopJob). None: no desktop.
         self._desktop_request = desktop_request
         self._agent_gate: Callable[[str], bool] | None = None   # a task running takes what is typed (None: agent off)
+        self._instant: Callable[[str, bool], bool] | None = None  # Jarvis's own answers first ([instant] on)
+        self._instant_skip = False                                # submit_claude: these words are Claude's
         self._typed_lines = ("", "")          # the last words submitted and their line breaks (agent on: _lines_of)
         self.last_task_id = 0                  # the LIVE view task of the last finished Ask (0: none)
         # While outcomeReady is handled: the LIVE task of that answer (still open; NO_TASK otherwise).
@@ -495,6 +504,20 @@ class AskController(QObject):
         """While the agent is on: ``gate(words)`` is asked first for what is typed; True: it was taken (see the module
         docs). It has them with a paste's line breaks (_lines_of)."""
         self._agent_gate = gate
+
+    def set_instant(self, take: Callable[[str, bool], bool] | None) -> None:
+        """While [instant] is on: ``take(words, spoken)`` is asked before the planner (see the module docs); True: Jarvis
+        answered it himself."""
+        self._instant = take
+
+    def submit_claude(self, text: str, spoken: bool = False) -> None:
+        """``text`` the normal way, Jarvis's own answers left out (a network answer that could not be had): the
+        shortcuts, the desktop, the planner - exactly as with [instant] off."""
+        self._instant_skip, self._spoken_now = True, bool(spoken)
+        try:
+            self.submit(text)
+        finally:
+            self._instant_skip, self._spoken_now = False, False
 
     def _lines_of(self, text: str) -> str:
         """While the agent is on: ``text`` (submitted, whitespace collapsed) with the line breaks the bar's field holds
@@ -700,6 +723,16 @@ class AskController(QObject):
             logger.info("Ask: a typed %s shortcut", found.kind)
             self.submit_mode(ModeRequest(MODE_PREP, ORIGIN_TYPED, target=found.payload, typed_route=True), text)
             return
+        if text and self._instant is not None and not self._instant_skip and forced_question(text) is None:
+            try:
+                taken = bool(self._instant(text, bool(getattr(self, "_spoken_now", False))))
+            except Exception as exc:  # noqa: BLE001 - what Jarvis can't answer himself is Claude's, as before
+                logger.warning("Ask: an instant answer failed (%s)", type(exc).__name__)
+                taken = False
+            if taken:
+                logger.info("Ask: answered by Jarvis himself (no planner run)")
+                self.bar.take_request(text)    # taken: the words leave the bar (Up brings them back)
+                return
         if found.kind == ROUTE_DESKTOP and self._desktop_request is not None:
             self._submit_desktop(text)
             return

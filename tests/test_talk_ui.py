@@ -293,6 +293,19 @@ class TalkControllerTests(unittest.TestCase):
         self.assertEqual(rows["Speech model"], "small.en (about 480 MB): not downloaded yet")
         self.assertEqual(rows["Add-ons"], "missing: PyAudioWPatch")
 
+    def test_the_key_row_says_when_another_program_has_the_talk_key(self) -> None:
+        from briefing_reader import hotkey
+
+        controller = self.make()
+        folder = controller._data_dir
+        hotkey.write_key_status(folder, {"talk": {"key": "ctrl+alt+space", "status": hotkey.KEY_TAKEN, "error": 1409}})
+        self.assertEqual(dict(controller.settings_rows())["Talk key"],
+                         "Ctrl+Alt+Space - another program has it; choose another [talk] key in config.toml")
+        hotkey.write_key_status(folder, {"talk": {"key": "ctrl+alt+space", "status": hotkey.KEY_LISTENING}})
+        self.assertEqual(dict(controller.settings_rows())["Talk key"], "Ctrl+Alt+Space")
+        hotkey.write_key_status(folder, {"talk": {"key": "ctrl+alt+t", "status": hotkey.KEY_TAKEN, "error": 1409}})
+        self.assertEqual(dict(controller.settings_rows())["Talk key"], "Ctrl+Alt+Space")   # another key's status
+
     def test_the_pip_line_is_python_exe_and_quoted_only_with_a_space(self) -> None:
         self.assertEqual(talk_ui.pip_command("C:/Py313/pythonw.exe"),
                          "C:/Py313/python.exe -m pip install faster-whisper==1.2.1 PyAudioWPatch==0.2.12.9")

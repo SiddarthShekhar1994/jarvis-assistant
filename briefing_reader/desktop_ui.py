@@ -553,7 +553,8 @@ class DesktopController(QObject):
                  address: str = "sir", flight_clock: Callable[[], float] | None = None,
                  live: Any = None, backend_factory: Callable[[], Any] | None = None,
                  consent_store: Callable[[], Any] | None = None, window_api: Any = None,
-                 click_guard: Callable[[str], bool] | None = None, parent: QObject | None = None) -> None:
+                 click_guard: Callable[[str], bool] | None = None, timers: Any = None,
+                 parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.config = config
         self.window = window
@@ -678,7 +679,12 @@ class DesktopController(QObject):
         # Win32RecycleBin, which refuses to be made while the tests run - then nothing is binned, said plainly).
         self.recycle_factory: Callable[[], Any] | None = None
         self.timer_clock: Callable[[], datetime] | None = None
-        self.timers = pcctl.TimerBook(self._timers_folder(), now=self._timer_now)
+        # Instant answers on ([instant]): the app's one timer book (instant_ui.TimerController), which loads them, ends
+        # them and says so - here they only show on the HUD's chip and answer the HUD's own timer words. Else this
+        # controller's own book, as before.
+        self._shared_timers = timers is not None
+        self.shared_timers_changed: Callable[[], Any] | None = None   # the app's TimerController.poke (shared book)
+        self.timers = timers if timers is not None else pcctl.TimerBook(self._timers_folder(), now=self._timer_now)
         self._timer_check = QTimer(self)
         self._timer_check.setSingleShot(True)
         self._timer_check.setTimerType(Qt.TimerType.PreciseTimer)     # a coarse one may fire up to 5 % early
@@ -891,7 +897,7 @@ class DesktopController(QObject):
         self._task_held = []
         self._set_tidy(None)                                 # its card goes; a batch on its way stops at the next row
         self.pending, self.found = (), ()
-        dropped = self.timers.clear()                        # P2.4: Jarvis's timers go (nothing ends after it)
+        dropped = 0 if self._shared_timers else self.timers.clear()   # P2.4: its timers go (instant answers' stay)
         if dropped:
             logger.info("Desktop: %d timer(s) dropped (turned off)", dropped)
         self._end_focus("turned off")                        # P2.5: the app lets go of what focus held
@@ -2157,7 +2163,7 @@ class DesktopController(QObject):
         dropped quietly when that was long ago)."""
         if self._shut:
             return
-        count = self.timers.load()
+        count = 0 if self._shared_timers else self.timers.load()   # a shared book is loaded by the app
         if count:
             logger.info("Desktop: %d timer(s) restored", count)
         session = self.focus.load()                          # P2.5: focus mode set before a restart stays on
@@ -2167,13 +2173,18 @@ class DesktopController(QObject):
             logger.info("Desktop: focus mode restored (%d min left)", int((self.focus.seconds_left() or 0) // 60))
         self._arm_timers()
 
-    def _arm_timers(self) -> None:
+    def timers_changed(self) -> None:
+        """Instant answers set, cancelled or ended a timer in the shared book: the HUD's chip follows."""
+        self._arm_timers(notify=False)
+
+    def _arm_timers(self, notify: bool = True) -> None:
         """The next check: at the first timer's end - or focus mode's (P2.5) - and within pcctl.TIMER_CHECK_S at most
         (the wall clock is read again then, so a timer whose end came while the PC slept ends at the first check after
         the resume); none without a timer or focus. The HUD chips follow."""
         if self._shut:
             return
-        lefts = [left for left in (self.timers.seconds_left(), self.focus.seconds_left()) if left is not None]
+        own = None if self._shared_timers else self.timers.seconds_left()   # shared: the app checks the timers
+        lefts = [left for left in (own, self.focus.seconds_left()) if left is not None]
         if not lefts:
             self._timer_check.stop()
         else:
@@ -2181,6 +2192,8 @@ class DesktopController(QObject):
         if self._hud and shiboken6.isValid(self.overlay.hud):
             self.overlay.hud.set_timer(pcctl.chip_text(self.timers.running(), self._hour24))
             self._sync_instant()
+        if notify and self._shared_timers and self.shared_timers_changed is not None:
+            self.shared_timers_changed()                     # a timer set or cancelled here: the app's check and chips
 
     def _on_timer_check(self) -> None:
         """The timers against the wall clock: each one that has ended says so once - the toast's line
@@ -2189,13 +2202,13 @@ class DesktopController(QObject):
         if self._shut:
             return
         if not self.consent_given():
-            dropped = self.timers.clear()
+            dropped = 0 if self._shared_timers else self.timers.clear()
             if dropped:
                 logger.info("Desktop: %d timer(s) dropped (not turned on)", dropped)
             self._end_focus("not turned on")
             self._arm_timers()
             return
-        ended, dropped = self.timers.take_due()
+        ended, dropped = ([], 0) if self._shared_timers else self.timers.take_due()   # shared: the app ends them
         if dropped:
             logger.info("Desktop: %d timer(s) ended long ago while Jarvis was closed; dropped", dropped)
         for timer, late in ended:

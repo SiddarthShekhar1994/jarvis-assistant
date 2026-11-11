@@ -116,6 +116,7 @@ _CHIP_OF = {dv.FOCUS_MODE: CHIP_FOCUS, dv.MEDIA: CHIP_MUSIC, dv.VOLUME: CHIP_VOL
 VOLUME_STEP = 10                     # "louder", "volume up": this many points (the planner's step: 5-30)
 VOLUME_CAP_S = 0.3                   # at most one volume change per 300 ms (SPEC 2.1)
 TIMER_MINUTES = (1, 240)
+TIMER_SECONDS = (10, 240 * 60)       # instant answers' timers (add_seconds): 10 seconds to 4 hours
 LABEL_MAX = 40
 MAX_TIMERS = 5
 TIMER_CHECK_S = 30.0                 # the app checks the timers at least this often (a resume is caught by then)
@@ -231,9 +232,15 @@ class Timer:
     set_at: datetime
     ends_at: datetime
     label: str = field(default="", repr=False)
+    seconds: int = 0           # instant answers' timers: the length in seconds (0: ``minutes`` whole minutes)
 
     def __repr__(self) -> str:
         return f"Timer({self.timer_id}, {self.minutes} min)"
+
+    @property
+    def length_s(self) -> int:
+        """How long the timer runs, in seconds."""
+        return self.seconds or self.minutes * 60
 
 
 @dataclass(frozen=True)
@@ -932,6 +939,22 @@ class TimerBook:
             self._save()
         return timer
 
+    def add_seconds(self, seconds: int, label: str = "") -> Timer:
+        """Instant answers' timer of ``seconds`` (TIMER_SECONDS: else ValueError), kept and saved like ``add`` (its
+        ``minutes`` rounded up, so a file read by an older Jarvis still holds a good timer; TimersFull at MAX_TIMERS)."""
+        if isinstance(seconds, bool) or not isinstance(seconds, int) \
+                or not TIMER_SECONDS[0] <= seconds <= TIMER_SECONDS[1]:
+            raise ValueError("a timer runs 10 seconds to 4 hours")
+        now = self._now()
+        timer = Timer(uuid.uuid4().hex[:8], max(1, -(-seconds // 60)), now, now + timedelta(seconds=seconds),
+                      clean_label(label), seconds)
+        with self._lock:
+            if len(self._timers) >= self._max:
+                raise TimersFull("too many timers")
+            self._timers = sorted([*self._timers, timer], key=lambda item: item.ends_at)
+            self._save()
+        return timer
+
     def cancel(self, timer_id: str) -> Timer | None:
         with self._lock:
             found = next((timer for timer in self._timers if timer.timer_id == timer_id), None)
@@ -1000,7 +1023,8 @@ class TimerBook:
         if self.folder is None:
             return
         entries = [{"id": timer.timer_id, "minutes": timer.minutes, "label": timer.label,
-                    "set_at": timer.set_at.isoformat(), "ends_at": timer.ends_at.isoformat()}
+                    "set_at": timer.set_at.isoformat(), "ends_at": timer.ends_at.isoformat(),
+                    **({"seconds": timer.seconds} if timer.seconds else {})}
                    for timer in self._timers]
         try:
             self.folder.mkdir(parents=True, exist_ok=True)
@@ -1023,8 +1047,12 @@ def _timer_from(entry: Any) -> Timer | None:
         timer_id = str(entry["id"])
         if not re.fullmatch(r"[0-9a-f]{8}", timer_id):
             return None
+        seconds = entry.get("seconds", 0)
+        if isinstance(seconds, bool) or not isinstance(seconds, int) \
+                or (seconds and not TIMER_SECONDS[0] <= seconds <= TIMER_SECONDS[1]):
+            return None
         return Timer(timer_id, minutes, datetime.fromisoformat(str(entry["set_at"])),
-                     datetime.fromisoformat(str(entry["ends_at"])), clean_label(entry.get("label", "")))
+                     datetime.fromisoformat(str(entry["ends_at"])), clean_label(entry.get("label", "")), seconds)
     except (KeyError, TypeError, ValueError, AttributeError):
         return None
 

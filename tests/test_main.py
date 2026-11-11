@@ -416,7 +416,7 @@ class HotkeyAgentTests(unittest.TestCase):
                 combo, dispatcher = run_agent.call_args.args
                 self.assertEqual(combo, "ctrl+alt+j")
                 self.assertIsInstance(dispatcher, hotkey.PressDispatcher)
-                self.assertEqual(run_agent.call_args.kwargs, {})          # exactly as before: one key
+                self.assertEqual(sorted(run_agent.call_args.kwargs), ["on_status"])   # one key, and its status
 
     def test_with_desktop_on_the_agent_listens_for_the_hud_key_too(self) -> None:
         with mock.patch.object(hotkey, "run_agent", return_value=0) as run_agent, \
@@ -426,7 +426,7 @@ class HotkeyAgentTests(unittest.TestCase):
         combo, dispatcher = run_agent.call_args.args
         self.assertEqual(combo, "ctrl+alt+j")
         kwargs = run_agent.call_args.kwargs
-        self.assertEqual(sorted(kwargs), ["hud_combo", "on_hud_press"])
+        self.assertEqual(sorted(kwargs), ["hud_combo", "on_hud_press", "on_status"])
         self.assertEqual(kwargs["hud_combo"], "ctrl+alt+h")                # read from config at the agent's start
         hud = kwargs["on_hud_press"]
         self.assertIsInstance(hud, hotkey.PressDispatcher)

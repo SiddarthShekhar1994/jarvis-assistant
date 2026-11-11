@@ -17,7 +17,9 @@ approves or undoes). Logs hold kinds, counts and times only: never what was said
 
 Settings > Talk (:class:`TalkSettingsPanel`, :meth:`TalkController.settings_rows`): the key, the model and whether
 it is downloaded (Download, only on the owner's click: meeting_speech.ModelDownloader into its own folder), the
-add-ons and the command that installs them (the owner runs it; Jarvis never runs pip).
+add-ons and the command that installs them (the owner runs it; Jarvis never runs pip). The key's row also says when
+the hotkey agent - another process - last found it held by another program (hotkey.key_taken: the agent's status
+file in the data folder, statuses only).
 """
 
 from __future__ import annotations
@@ -34,7 +36,10 @@ from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from . import hud, talk
-from .hotkey import describe_combo
+from .hotkey import describe_combo, key_taken
+
+# Settings > Talk's key row when the hotkey agent found the talk key held by another program.
+KEY_TAKEN_TEXT = "{key} - another program has it; choose another [talk] key in config.toml"
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +147,7 @@ class TalkController(QObject):
         from . import meeting_audio, meeting_speech, meetings
 
         self._cfg = config.talk
+        self._data_dir = getattr(config, "data_dir", None)   # where the hotkey agent keeps its key status
         self._model = meeting_speech.SPEECH_MODELS[self._cfg.model]
         self._models_root = Path(models_root) if models_root is not None else meetings.models_root(config)
         self._folder = meeting_speech.model_dir(self._models_root, self._model)
@@ -417,7 +423,10 @@ class TalkController(QObject):
         model = f"{self._model.name} ({self._model.size_text}): " + (
             "on this PC" if ready else f"downloading, {self._download_percent}%" if self._downloading
             else "not downloaded yet")
-        return [("Talk key", self._key if self._cfg.key else "None"),
+        key = self._key if self._cfg.key else "None"
+        if self._cfg.key and key_taken(self._data_dir, "talk", self._cfg.key) is not None:
+            key = KEY_TAKEN_TEXT.format(key=self._key)
+        return [("Talk key", key),
                 ("Speech model", model),
                 ("Add-ons", "installed" if not missing else "missing: " + ", ".join(missing)),
                 ("Microphone", "the one picked in Settings > Meetings, else the Windows default"),

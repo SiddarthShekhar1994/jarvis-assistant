@@ -21,6 +21,14 @@ nothing is read until the owner presses Play. The HUD key has a dispatcher of
 its own (its message adds ``"desktop": true``).
 The work runs on a short-lived thread, so the message loop never blocks.
 
+What the agent could register goes to the app, another process, as a small
+status file (:func:`write_key_status`, ``on_status`` of :func:`run_agent`):
+``hotkey_status.json`` in the app's data folder holds, for the window key, the
+HUD key and the talk key, the canonical spelling, "listening" or "taken" and
+the Windows error number - statuses only, never anything typed or said.
+Settings > Talk reads it (:func:`read_key_status`) to say when another
+program has the talk key.
+
 The agent received the key press, so Windows lets it set the foreground
 window; before every message it writes, it hands that right to the app
 (``AllowSetForegroundWindow`` with the app's process id from the pipe -
@@ -44,11 +52,16 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any
 
 from . import APP_NAME
 
 logger = logging.getLogger(__name__)
+
+KEY_STATUS_FILE = "hotkey_status.json"     # what the agent could register, for Settings (statuses only)
+KEY_LISTENING, KEY_TAKEN = "listening", "taken"
+KEY_NAMES = ("window", "hud", "talk")
 
 DEFAULT_COMBO = "ctrl+alt+j"
 DEBOUNCE_S = 2.0
@@ -376,8 +389,13 @@ def _allow_foreground(api: _Win32, handle: Any) -> None:
 def run_agent(combo: str, on_press: Callable[[], Any], stop_event: threading.Event | None = None,
               *, mutex_name: str | None = None, on_ready: Callable[[], None] | None = None,
               hud_combo: str = "", on_hud_press: Callable[[], Any] | None = None,
-              talk_combo: str = "", on_talk_press: Callable[[], Any] | None = None) -> int:
+              talk_combo: str = "", on_talk_press: Callable[[], Any] | None = None,
+              on_status: Callable[[dict[str, dict[str, Any]]], Any] | None = None) -> int:
     """Listen for ``combo`` until ``stop_event`` is set (or forever); the exit code.
+
+    ``on_status`` (the agent's: :func:`write_key_status`) is called once the
+    keys were tried, with each key's canonical spelling, KEY_LISTENING or
+    KEY_TAKEN and, when taken, the Windows error number.
 
     0: stopped, or another agent of this user already listens; 1: the combo
     could not be registered (another program uses it; logged as a WARNING)
@@ -413,7 +431,7 @@ def run_agent(combo: str, on_press: Callable[[], Any], stop_event: threading.Eve
         if already:
             logger.info("Another hotkey agent is already running; this one exits")
             return 0
-        return _listen(api, combo, modifiers, vk, on_press, stop_event, on_ready, hud, talk)
+        return _listen(api, combo, modifiers, vk, on_press, stop_event, on_ready, hud, talk, on_status)
     finally:
         if mutex:
             api.kernel32.CloseHandle(mutex)
@@ -457,20 +475,26 @@ def _hud_key(hud_combo: str, on_hud_press: Callable[[], Any] | None,
 def _listen(api: _Win32, combo: str, modifiers: int, vk: int, on_press: Callable[[], Any],
             stop_event: threading.Event | None, on_ready: Callable[[], None] | None,
             hud: tuple[str, int, int, Callable[[], Any]] | None = None,
-            talk: tuple[str, int, int, Callable[[], Any]] | None = None) -> int:
+            talk: tuple[str, int, int, Callable[[], Any]] | None = None,
+            on_status: Callable[[dict[str, dict[str, Any]]], Any] | None = None) -> int:
     msg = api.MSG()
     api.user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 0)   # creates this thread's queue
+    statuses: dict[str, dict[str, Any]] = {}
     if not api.user32.RegisterHotKey(None, HOTKEY_ID, modifiers | MOD_NOREPEAT, vk):
         error = ctypes.get_last_error()
         logger.warning("Could not register the hotkey %s (error %d): another program probably uses it. "
                        "Choose another [hotkey] combo in config.toml.", describe_combo(combo), error)
+        statuses["window"] = _key_status(combo, error)
+        _report(on_status, statuses)
         return 1
     on_hud_press: Callable[[], Any] | None = None
     on_talk_press: Callable[[], Any] | None = None
     try:
         logger.info("Listening for the hotkey %s", describe_combo(combo))
-        on_hud_press = _register_hud_key(api, hud, combo)
-        on_talk_press = _register_talk_key(api, talk, combo)
+        statuses["window"] = _key_status(combo)
+        on_hud_press = _register_hud_key(api, hud, combo, statuses)
+        on_talk_press = _register_talk_key(api, talk, combo, statuses)
+        _report(on_status, statuses)
         if stop_event is not None:
             _watch_stop(api, stop_event, api.kernel32.GetCurrentThreadId())
         if on_ready is not None:
@@ -488,35 +512,136 @@ def _listen(api: _Win32, combo: str, modifiers: int, vk: int, on_press: Callable
 
 
 def _register_hud_key(api: _Win32, hud: tuple[str, int, int, Callable[[], Any]] | None,
-                      combo: str) -> Callable[[], Any] | None:
+                      combo: str, statuses: dict[str, dict[str, Any]] | None = None) -> Callable[[], Any] | None:
     """The HUD key as the second hotkey id; its ``on_press`` once registered, else None (a WARNING with the error
-    number: the window key ``combo`` works as before and the Dock's Desktop still switches)."""
+    number: the window key ``combo`` works as before and the Dock's Desktop still switches). ``statuses`` gets its
+    status ("hud")."""
     if hud is None:
         return None
     hud_combo, modifiers, vk, on_hud_press = hud
     if api.user32.RegisterHotKey(None, HUD_HOTKEY_ID, modifiers | MOD_NOREPEAT, vk):
         logger.info("Listening for the HUD key %s", describe_combo(hud_combo))
+        if statuses is not None:
+            statuses["hud"] = _key_status(hud_combo)
         return on_hud_press
+    error = ctypes.get_last_error()
     logger.warning("Could not register the HUD key %s (error %d): another program probably uses it. The hotkey %s "
                    "works as before, and the Dock's Desktop still switches; choose another [desktop] hud_key in "
-                   "config.toml.", describe_combo(hud_combo), ctypes.get_last_error(), describe_combo(combo))
+                   "config.toml.", describe_combo(hud_combo), error, describe_combo(combo))
+    if statuses is not None:
+        statuses["hud"] = _key_status(hud_combo, error)
     return None
 
 
 def _register_talk_key(api: _Win32, talk: tuple[str, int, int, Callable[[], Any]] | None,
-                       combo: str) -> Callable[[], Any] | None:
+                       combo: str, statuses: dict[str, dict[str, Any]] | None = None) -> Callable[[], Any] | None:
     """The talk key as the third hotkey id; its ``on_press`` once registered, else None (a WARNING with the error
-    number: the window key ``combo`` works as before)."""
+    number: the window key ``combo`` works as before). ``statuses`` gets its status ("talk")."""
     if talk is None:
         return None
     talk_combo, modifiers, vk, on_talk_press = talk
     if api.user32.RegisterHotKey(None, TALK_HOTKEY_ID, modifiers | MOD_NOREPEAT, vk):
         logger.info("Listening for the talk key %s", describe_combo(talk_combo))
+        if statuses is not None:
+            statuses["talk"] = _key_status(talk_combo)
         return on_talk_press
+    error = ctypes.get_last_error()
     logger.warning("Could not register the talk key %s (error %d): another program probably uses it. The hotkey %s "
                    "works as before; choose another [talk] key in config.toml.", describe_combo(talk_combo),
-                   ctypes.get_last_error(), describe_combo(combo))
+                   error, describe_combo(combo))
+    if statuses is not None:
+        statuses["talk"] = _key_status(talk_combo, error)
     return None
+
+
+# --------------------------------------------------------------------------
+# What the agent could register, for Settings (statuses only)
+# --------------------------------------------------------------------------
+
+def _key_status(combo: str, error: int | None = None) -> dict[str, Any]:
+    """One key's status: its canonical spelling, KEY_LISTENING, or KEY_TAKEN with the Windows error number."""
+    try:
+        key = normalize_combo(combo)
+    except ValueError:
+        key = ""
+    if error is None:
+        return {"key": key, "status": KEY_LISTENING}
+    return {"key": key, "status": KEY_TAKEN, "error": int(error)}
+
+
+def _report(on_status: Callable[[dict[str, dict[str, Any]]], Any] | None,
+            statuses: dict[str, dict[str, Any]]) -> None:
+    if on_status is None:
+        return
+    try:
+        on_status(dict(statuses))
+    except Exception as exc:  # noqa: BLE001 - the keys work whether or not Settings can be told
+        logger.warning("The hotkey agent could not keep its key status (%s)", type(exc).__name__)
+
+
+def write_key_status(folder: Path | str | None, statuses: Mapping[str, Mapping[str, Any]]) -> bool:
+    """Keep what the agent could register in ``folder``/KEY_STATUS_FILE for Settings (the app is another process):
+    for each of KEY_NAMES that was tried, its canonical spelling, KEY_LISTENING or KEY_TAKEN and the error number -
+    statuses only. Written whole (a temporary file, then a rename); False when it could not be (a WARNING with the
+    error's kind only)."""
+    if folder is None:
+        return False
+    keys: dict[str, dict[str, Any]] = {}
+    for name in KEY_NAMES:
+        status = statuses.get(name)
+        if not isinstance(status, Mapping) or status.get("status") not in (KEY_LISTENING, KEY_TAKEN):
+            continue
+        entry: dict[str, Any] = {"key": str(status.get("key") or ""), "status": status["status"]}
+        if status["status"] == KEY_TAKEN and isinstance(status.get("error"), int):
+            entry["error"] = int(status["error"])
+        keys[name] = entry
+    path = Path(folder) / KEY_STATUS_FILE
+    temporary = path.with_name(path.name + ".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(json.dumps({"version": 1, "keys": keys}, sort_keys=True) + "\n", encoding="utf-8")
+        temporary.replace(path)
+    except OSError as exc:
+        logger.warning("The hotkey agent could not keep its key status (%s)", type(exc).__name__)
+        return False
+    return True
+
+
+def read_key_status(folder: Path | str | None) -> dict[str, dict[str, Any]]:
+    """What the agent last kept (write_key_status): {name: {"key", "status"[, "error"]}} for each of KEY_NAMES it
+    tried; {} without a folder, a file or a good shape."""
+    if folder is None:
+        return {}
+    try:
+        data = json.loads((Path(folder) / KEY_STATUS_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    keys = data.get("keys") if isinstance(data, dict) else None
+    if not isinstance(keys, dict):
+        return {}
+    found: dict[str, dict[str, Any]] = {}
+    for name in KEY_NAMES:
+        entry = keys.get(name)
+        if isinstance(entry, dict) and entry.get("status") in (KEY_LISTENING, KEY_TAKEN) \
+                and isinstance(entry.get("key"), str):
+            found[name] = {key: entry[key] for key in ("key", "status", "error") if key in entry}
+    return found
+
+
+def key_taken(folder: Path | str | None, name: str, combo: str) -> int | None:
+    """The Windows error number when the agent last found ``combo`` (key ``name``: one of KEY_NAMES) held by another
+    program, else None - also when the agent last tried another key (the config changed since) or never said."""
+    if not combo:
+        return None
+    try:
+        wanted = normalize_combo(combo)
+    except ValueError:
+        return None
+    entry = read_key_status(folder).get(name)
+    if entry is None or entry.get("key") != wanted or entry.get("status") != KEY_TAKEN:
+        return None
+    error = entry.get("error")
+    return int(error) if isinstance(error, int) else 0
 
 
 def _watch_stop(api: _Win32, stop_event: threading.Event, thread_id: int) -> None:

@@ -374,7 +374,6 @@ keep the same rules (proposals, your click, every step visible in LIVE):
   you can watch, and every submit waits for your click.
 - **Radar**: internships, hackathons, deadlines and subscriptions (renewals,
   trials that end) worth your attention.
-- **Push-to-talk voice**: hold a key and say your request.
 
 ## About the name
 
@@ -444,6 +443,9 @@ and the [license](#license).
 - For the page pictures of web research in LIVE only: PySide6 6.8 or newer
   (its web engine comes with the PySide6 package; see [Pictures in
   LIVE](#pictures-in-live)).
+- PySide6 below 6.12: under 6.12 Qt can call into parts of the window Python
+  has already cleared, which crashes the tests and could crash Jarvis, so
+  `requirements.txt` keeps it below 6.12 (6.11.2 is the version tested).
 
 ## Setup
 
@@ -2840,6 +2842,58 @@ bar says what and how to fix it, and the microphone does not open. Tapping the
 key while Jarvis is not running opens him, as the hotkey does; tap again to
 talk. Names Jarvis should expect ("Spotify", "Notion") go in `[talk] hints`.
 
+### Instant answers
+
+Everyday questions are answered by Jarvis himself, typed in the bar or said
+with the talk key, in well under a second and without your Claude plan:
+
+- **The time and date**: "what time is it", "what's the date", and the time in
+  another place ("time in Tokyo": about 150 cities, countries with one time
+  zone, and US zone names such as "Pacific time").
+- **Dates**: "what day is the 25th", "is Christmas on a Friday", "days until
+  Christmas", "how many days since 1 January", "days between 1 March and 1
+  June", "what's the date in 3 weeks", "10 days ago". Only fixed holidays
+  (Christmas, New Year, Valentine's Day, Halloween, St Patrick's Day ...);
+  Easter and Thanksgiving move, so they go to Claude.
+- **Sums and percentages**: "12 x 7", "15% of 80", "(3+4)^2", "square root of
+  144", "80 is what percent of 200", "increase 80 by 15%", "20% off 50".
+  Jarvis works them out with his own small calculator (it never runs your
+  words as code); "80 + 15%" means different things on different
+  calculators, so that one goes to Claude.
+- **Conversions**: length, weight, volume (US cups, pints and gallons;
+  imperial ones by name), temperature, speed, area, time and data sizes:
+  "5 km in miles", "70 f in c", "how many ounces in a pound".
+- **Timers**: "set a timer for 10 minutes", "a 90 second timer", "remind me
+  in 20 minutes to stretch", "how long is left on my timer", "cancel the
+  timer" (or "cancel all timers"). From 10 seconds to 4 hours, at most five
+  at once. Home shows a chip counting down; at the end you hear a chime, see
+  Jarvis's toast and he says it. Timers live in Jarvis, not in his window, so
+  hiding the window changes nothing, and they come back after a restart. With
+  [Jarvis on your desktop](#jarvis-on-your-desktop-the-hud) on, the HUD
+  shows the same timers.
+- **The weather** (`[instant] weather`): "weather in Paris", "will it rain
+  tomorrow", "what's the temperature". Only the town's name goes to
+  Open-Meteo's place search, then that place's coordinates to its forecast;
+  the answer names the place it found ("In Paris, France: ...") so a wrong
+  Springfield is easy to spot. Without a town in the request, Jarvis uses
+  `[instant] town`; with no town at all the question goes to Claude.
+  Weather data by [Open-Meteo.com](https://open-meteo.com/) (CC BY 4.0).
+- **Currencies** (`[instant] currency`): "100 dollars in euros", "50 GBP to
+  USD", "exchange rate yen to rupees". Only the two currency codes go to
+  [Frankfurter](https://frankfurter.dev/), which serves the European Central
+  Bank's daily reference rates (the answer gives the rate's date). A name
+  that fits several currencies ("pesos", "kroner") is not guessed.
+
+Anything else, or anything Jarvis can't read for sure, goes to Claude exactly
+as before, and so does a weather or currency question when the service can't
+be reached within a few seconds. A request that starts with `web:` is always
+web research, and a running task still takes what you type. The conversation
+shows each instant answer with "on this PC" (or the service's credit) where
+an Ask shows its time, and his voice says it when "Speaks his answers" is on.
+The logs hold only the kind of answer and how long it took. Turn instant
+answers off with `[instant] enabled = false` (or `JARVIS_INSTANT_ENABLED=false`
+in `.env`); they need Ask Jarvis on, because they answer in its bar.
+
 ## Catch-up and the hotkey
 
 **Catch-up.** The app keeps track of each scheduled briefing (a "slot", such as
@@ -4243,6 +4297,11 @@ log. Changes apply the next time the app starts.
 | `[talk] keep_warm_minutes` | `10` | How long the speech model stays loaded after a talk, so the next starts at once (1..120). |
 | `[talk] quiet_ms` | `500` | How much quiet after you speak ends a talk, in milliseconds (300..2000). |
 | `[talk] hints` | `[]` | Names Jarvis should expect to hear, e.g. `["Spotify", "Notion"]` ("Jarvis" always is); at most 20 short names. |
+| `[instant] enabled` | `true` | [Instant answers](#instant-answers): the time, dates, sums, conversions and timers on this PC, the weather and currencies from free services. `JARVIS_INSTANT_ENABLED` in `.env` overrides it both ways. Needs Ask Jarvis. |
+| `[instant] weather` | `true` | Weather answers: only a town's name (then its coordinates) goes to Open-Meteo. |
+| `[instant] currency` | `true` | Currency answers: only two currency codes go to Frankfurter (European Central Bank rates). |
+| `[instant] town` | `""` | The weather's town when a request names none, e.g. `"Oslo"` or `"Springfield, Illinois"`; `""` = none (the question goes to Claude). Never logged. |
+| `[instant] temperature` | `"auto"` | `"auto"` follows the Windows region (US units: Fahrenheit), else `"celsius"` or `"fahrenheit"`. |
 
 The offline voice uses the same `rate` and `volume`: the rate scales Windows'
 default 200 words per minute, and a volume above `+0%` cannot get louder than
@@ -4502,6 +4561,12 @@ Talking to Jarvis ([the talk key](#talk-to-jarvis-the-talk-key)) sends nothing
 anywhere to be understood: the microphone is open only from the tap to the end,
 your speech becomes text on this PC, the sound is never saved and no log holds
 what you said. What he heard then goes where typed words go.
+
+[Instant answers](#instant-answers) about the time, dates, sums, conversions
+and timers never leave this PC. A weather question sends only the town's name
+to Open-Meteo (then that place's coordinates), and a currency question only
+the two currency codes to Frankfurter; nothing else goes with them, and the
+logs never hold the town, the amount or the answer.
 
 The app talks to these services, all free:
 
@@ -4962,6 +5027,10 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
   only when it was not announced, viewed or answered and the app is not open. Its decision is in the
   log, in a line starting with "Catch-up:". Check that "Briefing catch-up" exists
   in Task Scheduler (rerun `install-schedule.ps1`).
+- **The talk key does nothing**: Settings > Talk's "Talk key" row says when
+  another program has it ("another program has it; choose another [talk] key
+  in config.toml"). Pick another `[talk] key`, then restart the "Briefing
+  hotkey" task so the agent tries the new one.
 - **The hotkey does nothing**: look in the log for "Could not register the hotkey
   ...: another program probably uses it". Then pick another combination with
   `[hotkey] combo` in `config.toml` (for example `"ctrl+alt+shift+j"` or

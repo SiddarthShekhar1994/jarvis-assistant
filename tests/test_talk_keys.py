@@ -4,8 +4,12 @@ test_hotkey, nothing reaches the real user32 or kernel32 (FakeWin32), and the ap
 
 from __future__ import annotations
 
+import json
 import logging
+import shutil
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -66,6 +70,77 @@ class TalkKeyAgentTests(NoRealCase):
         self.assertNotIn(("UnregisterHotKey", hotkey.TALK_HOTKEY_ID), api.named("UnregisterHotKey"))
 
 
+class KeyStatusTests(NoRealCase):
+    """What the agent could register reaches Settings as a status file in the data folder: statuses only."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.folder = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(self.folder, ignore_errors=True))
+
+    def run_with(self, api: FakeWin32, **kwargs: object) -> list[dict]:
+        seen: list[dict] = []
+        with mock.patch.object(hotkey, "_api", return_value=api), self.assertLogs(LOGGER, level="INFO"):
+            run_agent("ctrl+alt+j", lambda: None, mutex_name="Local\\briefing-reader-fake", on_status=seen.append,
+                      **kwargs)
+        return seen
+
+    def test_a_taken_talk_key_is_said_with_its_error_number_and_the_others_listen(self) -> None:
+        api = FakeWin32(messages=(hotkey.HOTKEY_ID,), refuse=(hotkey.TALK_HOTKEY_ID,))
+        seen = self.run_with(api, hud_combo="ctrl+alt+h", on_hud_press=lambda: None,
+                             talk_combo="Alt+Ctrl+T", on_talk_press=lambda: None)
+        self.assertEqual(len(seen), 1)
+        statuses = seen[0]
+        self.assertEqual(statuses["window"], {"key": "ctrl+alt+j", "status": hotkey.KEY_LISTENING})
+        self.assertEqual(statuses["hud"], {"key": "ctrl+alt+h", "status": hotkey.KEY_LISTENING})
+        self.assertEqual(statuses["talk"]["key"], "ctrl+alt+t")              # its canonical spelling
+        self.assertEqual(statuses["talk"]["status"], hotkey.KEY_TAKEN)
+        self.assertIsInstance(statuses["talk"]["error"], int)
+        self.assertTrue(hotkey.write_key_status(self.folder, statuses))
+        self.assertEqual(hotkey.read_key_status(self.folder), statuses)
+        self.assertEqual(hotkey.key_taken(self.folder, "talk", "ctrl+alt+t"), statuses["talk"]["error"])
+        self.assertIsNone(hotkey.key_taken(self.folder, "hud", "ctrl+alt+h"))     # listening: not taken
+        text = (self.folder / hotkey.KEY_STATUS_FILE).read_text(encoding="utf-8")
+        self.assertNotIn("\r", text)
+        self.assertEqual(sorted(json.loads(text)), ["keys", "version"])
+
+    def test_a_window_key_that_is_taken_is_said_too(self) -> None:
+        api = FakeWin32(refuse=(hotkey.HOTKEY_ID,))
+        seen = self.run_with(api)
+        self.assertEqual(seen[0]["window"]["status"], hotkey.KEY_TAKEN)
+
+    def test_a_status_for_another_key_or_a_bad_file_says_nothing(self) -> None:
+        hotkey.write_key_status(self.folder, {"talk": {"key": "ctrl+alt+space", "status": hotkey.KEY_TAKEN,
+                                                       "error": 1409}})
+        self.assertEqual(hotkey.key_taken(self.folder, "talk", "ctrl+alt+space"), 1409)
+        self.assertIsNone(hotkey.key_taken(self.folder, "talk", "ctrl+alt+t"))    # the config changed since
+        self.assertIsNone(hotkey.key_taken(self.folder, "talk", ""))
+        self.assertIsNone(hotkey.key_taken(None, "talk", "ctrl+alt+space"))
+        for bad in ("not json", "[]", '{"keys": []}', '{"keys": {"talk": {"status": "taken"}}}',
+                    '{"keys": {"talk": {"key": "ctrl+alt+space", "status": "said hello"}}}'):
+            with self.subTest(bad=bad):
+                (self.folder / hotkey.KEY_STATUS_FILE).write_text(bad, encoding="utf-8")
+                self.assertIsNone(hotkey.key_taken(self.folder, "talk", "ctrl+alt+space"))
+        self.assertFalse(hotkey.write_key_status(None, {}))
+
+    def test_only_statuses_are_kept(self) -> None:
+        hotkey.write_key_status(self.folder, {"talk": {"key": "ctrl+alt+t", "status": hotkey.KEY_LISTENING,
+                                                       "words": "what the owner said", "error": 5},
+                                              "other": {"key": "x", "status": hotkey.KEY_TAKEN}})
+        self.assertEqual(hotkey.read_key_status(self.folder), {"talk": {"key": "ctrl+alt+t",
+                                                                        "status": hotkey.KEY_LISTENING}})
+        self.assertNotIn("owner said", (self.folder / hotkey.KEY_STATUS_FILE).read_text(encoding="utf-8"))
+
+    def test_the_agent_keeps_its_status_in_the_data_folder(self) -> None:
+        config = SimpleNamespace(hotkey=SimpleNamespace(enabled=True, combo="ctrl+alt+j"),
+                                 desktop=SimpleNamespace(enabled=False, hud_key="ctrl+alt+h"),
+                                 talk=SimpleNamespace(enabled=True, key="ctrl+alt+t"), data_dir=self.folder)
+        with mock.patch.object(hotkey, "run_agent", return_value=0) as agent:
+            entry._run_hotkey_agent(config, SLOTS)
+        agent.call_args.kwargs["on_status"]({"talk": {"key": "ctrl+alt+t", "status": hotkey.KEY_TAKEN, "error": 1409}})
+        self.assertEqual(hotkey.key_taken(self.folder, "talk", "ctrl+alt+t"), 1409)
+
+
 class TalkKeyMainTests(unittest.TestCase):
     def config(self, enabled: object = True, key: str = "ctrl+alt+space", desktop: bool = False) -> SimpleNamespace:
         return SimpleNamespace(hotkey=SimpleNamespace(enabled=True, combo="ctrl+alt+j"),
@@ -80,7 +155,7 @@ class TalkKeyMainTests(unittest.TestCase):
         for config in (self.config(enabled=False), self.config(enabled="yes"), self.config(key="")):
             with self.subTest(config=config), mock.patch.object(hotkey, "run_agent", return_value=0) as agent:
                 entry._run_hotkey_agent(config, SLOTS)
-            self.assertEqual(agent.call_args.kwargs, {})
+            self.assertEqual(sorted(agent.call_args.kwargs), ["on_status"])
 
     def test_with_talk_on_each_tap_sends_the_talk_message(self) -> None:
         with mock.patch.object(hotkey, "run_agent", return_value=0) as agent, \
@@ -88,7 +163,7 @@ class TalkKeyMainTests(unittest.TestCase):
             entry._run_hotkey_agent(self.config(desktop=True), SLOTS)
         self.assertIn("the talk key is listened for too", "\n".join(logs.output))
         kwargs = agent.call_args.kwargs
-        self.assertEqual(sorted(kwargs), ["hud_combo", "on_hud_press", "on_talk_press", "talk_combo"])
+        self.assertEqual(sorted(kwargs), ["hud_combo", "on_hud_press", "on_status", "on_talk_press", "talk_combo"])
         self.assertEqual(kwargs["talk_combo"], "ctrl+alt+space")
         talk = kwargs["on_talk_press"]
         self.assertIsInstance(talk, hotkey.PressDispatcher)
