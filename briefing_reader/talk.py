@@ -246,6 +246,18 @@ class TalkError(RuntimeError):
         self.code = code
 
 
+# Microphones that are software, not hardware: they give silence unless their own app sends sound through them (Steam
+# Remote Play, Oculus/Meta Link, virtual cables, Voicemeeter, phone-as-webcam apps). Case aside, a part of the name.
+VIRTUAL_MICROPHONES = ("steam streaming", "oculus virtual", "meta virtual", "virtual audio", "vb-audio", "cable output",
+                       "voicemeeter", "virtual cable", "virtual mic", "stereo mix", "droidcam", "iriun", "obs virtual")
+
+
+def virtual_microphone(name: str) -> bool:
+    """``name`` is a known virtual microphone (silent unless its app runs)."""
+    folded = " ".join(str(name or "").casefold().split())
+    return any(part in folded for part in VIRTUAL_MICROPHONES)
+
+
 class TalkSession:
     """One talk's microphone (no Qt). :meth:`start` opens it: the microphone picked in Settings > Meetings while it
     is there, else the Windows default. :meth:`poll` reads what arrived (the device's own rate and channels, made
@@ -254,8 +266,11 @@ class TalkSession:
     nothing should be (nothing said, a cancel, a stopped or muted microphone). The stream's ``read_available`` gives
     16 kHz mono int16 (meeting_audio's AudioStream contract)."""
 
-    def __init__(self, stream: Any, *, quiet_ms: int = QUIET_MS, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(self, stream: Any, *, quiet_ms: int = QUIET_MS, clock: Callable[[], float] = time.monotonic,
+                 device_name: str = "", follows_default: bool = False) -> None:
         self._stream = stream
+        self.device_name = device_name          # the microphone opened (the owner's; shown, never logged)
+        self.follows_default = follows_default  # it is the Windows default (none picked in Settings > Meetings)
         self.endpointer = Endpointer(quiet_ms=quiet_ms)
         self._audio = bytearray()
         self._clock = clock
@@ -269,7 +284,7 @@ class TalkSession:
         if backend is None:
             raise TalkError(ERR_NO_AUDIO_ADDON)
         try:
-            device, _follows = pick_device(backend.inputs(), backend.default_input(), picked)
+            device, follows = pick_device(backend.inputs(), backend.default_input(), picked)
         except Exception as exc:  # noqa: BLE001 - a device library that cannot list is no microphone
             raise TalkError(ERR_NO_MICROPHONE) from exc
         if device is None:
@@ -278,7 +293,8 @@ class TalkSession:
             stream = backend.open_mic(device)
         except Exception as exc:  # noqa: BLE001 - in use, unplugged, refused by Windows' privacy setting
             raise TalkError(ERR_MIC_BUSY) from exc
-        return cls(stream, quiet_ms=quiet_ms, clock=clock)
+        return cls(stream, quiet_ms=quiet_ms, clock=clock, device_name=str(getattr(device, "name", "") or ""),
+                   follows_default=bool(follows))
 
     @property
     def ended(self) -> str:

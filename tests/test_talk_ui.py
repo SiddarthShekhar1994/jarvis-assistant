@@ -191,7 +191,8 @@ class TalkControllerTests(unittest.TestCase):
                 self.assertEqual((self.backend.opened, self.calls.before, self.calls.forward), ([], 0, 1))
 
     def test_nothing_said_a_muted_microphone_and_a_stopped_one(self) -> None:
-        cases = ((noise(9000, ROOM), {}, talk_ui.NOT_CAUGHT), (bytes(16_000 * 2 * 9), {}, talk_ui.MUTED),
+        cases = ((noise(9000, ROOM), {}, talk_ui.NOT_CAUGHT),
+                 (bytes(16_000 * 2 * 9), {}, talk_ui.muted_text("Desk mic", True)),
                  (noise(300, ROOM) + tone(3000, VOICE), {"fail_after": 3}, talk_ui.DEVICE_STOPPED))
         for audio, kwargs, words in cases:
             with self.subTest(words=words):
@@ -292,6 +293,34 @@ class TalkControllerTests(unittest.TestCase):
         self.assertEqual(rows["Talk key"], "Ctrl+Alt+Space")
         self.assertEqual(rows["Speech model"], "small.en (about 480 MB): not downloaded yet")
         self.assertEqual(rows["Add-ons"], "missing: PyAudioWPatch")
+
+    def test_silence_names_the_microphone_and_flags_a_virtual_one(self) -> None:
+        from briefing_reader.meeting_audio import DeviceInfo
+
+        devices = [DeviceInfo("1", "Microphone (Steam Streaming Microphone)", True),
+                   DeviceInfo("2", "Microphone (FIFINE K678 Microphone)")]
+        controller = self.make(audio=bytes(16_000 * 2 * 9), devices=devices)
+        with self.assertLogs("briefing_reader.talk_ui", logging.INFO) as logs:
+            controller.toggle()
+            self.talk_through(controller)
+        said = self.calls.statuses[-1][0]
+        self.assertIn("Steam Streaming Microphone", said)
+        self.assertIn("virtual microphone", said)
+        self.assertIn("the Windows default", said)
+        self.assertIn("Settings > Meetings > Microphone", said)
+        self.assertNotIn("Steam", "\n".join(logs.output))             # a device's name is never logged
+        self.assertIn("(a virtual microphone)", "\n".join(logs.output))
+        row = dict(controller.settings_rows())["Microphone"]
+        self.assertTrue(row.startswith("Microphone (Steam Streaming Microphone) (the Windows default) - a virtual"))
+        self.assertEqual(talk_ui.muted_text("Microphone (FIFINE K678 Microphone)", False),
+                         "I heard nothing at all from \u201cMicrophone (FIFINE K678 Microphone)\u201d (picked in "
+                         "Settings > Meetings): is it muted?")
+        self.assertEqual(talk_ui.muted_text(""), talk_ui.MUTED)
+        for name, virtual in (("Headset Microphone (Oculus Virtual Audio Device)", True), ("CABLE Output (VB-Audio)", True),
+                              ("Stereo Mix (Realtek Audio)", True), ("Microphone (FIFINE K678 Microphone)", False),
+                              ("Desktop Microphone (3- Microsoft LifeCam HD-5000)", False)):
+            with self.subTest(name=name):
+                self.assertEqual(talk.virtual_microphone(name), virtual)
 
     def test_the_key_row_says_when_another_program_has_the_talk_key(self) -> None:
         from briefing_reader import hotkey
