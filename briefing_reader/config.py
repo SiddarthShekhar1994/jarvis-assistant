@@ -94,7 +94,7 @@ UNDO_SECONDS_RANGE = (3, 30)
 _MISSING = object()
 _KNOWN_TABLES = ("voice", "prompt", "polling", "sections", "notion", "calendar", "actions",
                  "accounts", "schedule", "hotkey", "agenda", "display", "ask", "research", "assistant", "live",
-                 "productivity", "ui", "meetings", "desktop", "agent", "talk")
+                 "productivity", "ui", "meetings", "desktop", "agent", "talk", "instant")
 # Library loggers kept at WARNING, also under --debug. The Google sign-in libraries log the
 # authorization code, the access token and the refresh token at DEBUG (requests_oauthlib),
 # before Jarvis could register them for redaction, so they never get DEBUG here.
@@ -469,6 +469,25 @@ TALK_HINTS_MAX = 20                  # names the speech model should expect ("Ja
 TALK_HINT_CHARS = 40
 
 
+INSTANT_TEMPERATURES = ("auto", "celsius", "fahrenheit")
+INSTANT_TOWN_RE = re.compile(r"[^\x00-\x1f\x7f]{1,60}")
+
+
+@dataclass(frozen=True)
+class InstantConfig:
+    """``[instant]``: everyday questions Jarvis answers himself, typed or spoken, in well under a second and without
+    the Claude plan (owner decision 2026-11-10; on by default; JARVIS_INSTANT_ENABLED overrides ``enabled``). The
+    time, dates, sums, conversions and timers never leave this PC; ``weather`` sends only a town's name to Open-Meteo
+    and ``currency`` only two currency codes to Frankfurter. ``town`` ("" = none): the weather's town when a request
+    names none (never logged). ``temperature``: "auto" follows the Windows region (the US: Fahrenheit)."""
+
+    enabled: bool = True
+    weather: bool = True
+    currency: bool = True
+    town: str = field(default="", repr=False)
+    temperature: str = "auto"       # one of INSTANT_TEMPERATURES
+
+
 @dataclass(frozen=True)
 class TalkConfig:
     """``[talk]``: talking to Jarvis (off by default; JARVIS_TALK_ENABLED overrides ``enabled``). The talk key
@@ -519,6 +538,7 @@ class Config:
     desktop: DesktopConfig = field(default_factory=DesktopConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     talk: TalkConfig = field(default_factory=TalkConfig)
+    instant: InstantConfig = field(default_factory=InstantConfig)
 
     @property
     def notion_url(self) -> str:
@@ -649,6 +669,7 @@ def load_config(project_root: Path | None = None, *,
         desktop=desktop,
         agent=_parse_agent(doc, environ),
         talk=_parse_talk(doc, environ, hotkey.combo, desktop.hud_key),
+        instant=_parse_instant(doc, environ),
     )
 
 
@@ -1359,6 +1380,25 @@ def _parse_talk(doc: Mapping[str, Any], environ: Mapping[str, str] | None = None
                                                   *TALK_RANGES["keep_warm_minutes"]),
                       quiet_ms=r.integer("quiet_ms", d.quiet_ms, *TALK_RANGES["quiet_ms"]),
                       hints=tuple(hints))
+
+
+INSTANT_ENABLED_ENV = "JARVIS_INSTANT_ENABLED"
+
+
+def _parse_instant(doc: Mapping[str, Any], environ: Mapping[str, str] | None = None) -> InstantConfig:
+    """``[instant]`` from config.toml; ``JARVIS_INSTANT_ENABLED`` (e.g. in the gitignored ``.env``) overrides
+    ``enabled`` both ways, like JARVIS_TALK_ENABLED. A town that is not a short line of text is left out with a warning
+    that never quotes it."""
+    d = InstantConfig()
+    r = _TableReader(doc, "instant", _field_names(InstantConfig))
+    enabled = _enabled_override(r.boolean("enabled", d.enabled), environ, INSTANT_ENABLED_ENV, "instant.enabled")
+    town = doc.get("instant", {}).get("town", "") if isinstance(doc.get("instant"), Mapping) else ""
+    if not isinstance(town, str) or (town.strip() and not INSTANT_TOWN_RE.fullmatch(town.strip())):
+        logger.warning("config.toml: instant.town is not a short town name; none is used")
+        town = ""
+    return InstantConfig(enabled=enabled, weather=r.boolean("weather", d.weather),
+                         currency=r.boolean("currency", d.currency), town=" ".join(town.split()),
+                         temperature=r.choice("temperature", d.temperature, INSTANT_TEMPERATURES))
 
 
 def _parse_assistant(doc: Mapping[str, Any]) -> AssistantConfig:

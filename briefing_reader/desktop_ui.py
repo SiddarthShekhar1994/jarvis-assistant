@@ -553,7 +553,8 @@ class DesktopController(QObject):
                  address: str = "sir", flight_clock: Callable[[], float] | None = None,
                  live: Any = None, backend_factory: Callable[[], Any] | None = None,
                  consent_store: Callable[[], Any] | None = None, window_api: Any = None,
-                 click_guard: Callable[[str], bool] | None = None, parent: QObject | None = None) -> None:
+                 click_guard: Callable[[str], bool] | None = None, timers: Any = None,
+                 parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.config = config
         self.window = window
@@ -678,7 +679,11 @@ class DesktopController(QObject):
         # Win32RecycleBin, which refuses to be made while the tests run - then nothing is binned, said plainly).
         self.recycle_factory: Callable[[], Any] | None = None
         self.timer_clock: Callable[[], datetime] | None = None
-        self.timers = pcctl.TimerBook(self._timers_folder(), now=self._timer_now)
+        # Instant answers on ([instant]): the app's one timer book (instant_ui.TimerController), which loads them, ends
+        # them and says so - here they only show on the HUD's chip and answer the HUD's own timer words. Else this
+        # controller's own book, as before.
+        self._shared_timers = timers is not None
+        self.timers = timers if timers is not None else pcctl.TimerBook(self._timers_folder(), now=self._timer_now)
         self._timer_check = QTimer(self)
         self._timer_check.setSingleShot(True)
         self._timer_check.setTimerType(Qt.TimerType.PreciseTimer)     # a coarse one may fire up to 5 % early
@@ -891,7 +896,7 @@ class DesktopController(QObject):
         self._task_held = []
         self._set_tidy(None)                                 # its card goes; a batch on its way stops at the next row
         self.pending, self.found = (), ()
-        dropped = self.timers.clear()                        # P2.4: Jarvis's timers go (nothing ends after it)
+        dropped = 0 if self._shared_timers else self.timers.clear()   # P2.4: its timers go (instant answers' stay)
         if dropped:
             logger.info("Desktop: %d timer(s) dropped (turned off)", dropped)
         self._end_focus("turned off")                        # P2.5: the app lets go of what focus held
@@ -2157,7 +2162,7 @@ class DesktopController(QObject):
         dropped quietly when that was long ago)."""
         if self._shut:
             return
-        count = self.timers.load()
+        count = 0 if self._shared_timers else self.timers.load()   # a shared book is loaded by the app
         if count:
             logger.info("Desktop: %d timer(s) restored", count)
         session = self.focus.load()                          # P2.5: focus mode set before a restart stays on
@@ -2165,6 +2170,10 @@ class DesktopController(QObject):
             self._instant.append(pcctl.PcChange(desktop_validate.FOCUS_MODE, pcctl.SET, "", True, True, None,
                                                 pcctl.FocusDone(session), group=session.focus_id))
             logger.info("Desktop: focus mode restored (%d min left)", int((self.focus.seconds_left() or 0) // 60))
+        self._arm_timers()
+
+    def timers_changed(self) -> None:
+        """Instant answers set, cancelled or ended a timer in the shared book: the HUD's chip follows."""
         self._arm_timers()
 
     def _arm_timers(self) -> None:
@@ -2189,13 +2198,13 @@ class DesktopController(QObject):
         if self._shut:
             return
         if not self.consent_given():
-            dropped = self.timers.clear()
+            dropped = 0 if self._shared_timers else self.timers.clear()
             if dropped:
                 logger.info("Desktop: %d timer(s) dropped (not turned on)", dropped)
             self._end_focus("not turned on")
             self._arm_timers()
             return
-        ended, dropped = self.timers.take_due()
+        ended, dropped = ([], 0) if self._shared_timers else self.timers.take_due()   # shared: the app ends them
         if dropped:
             logger.info("Desktop: %d timer(s) ended long ago while Jarvis was closed; dropped", dropped)
         for timer, late in ended:

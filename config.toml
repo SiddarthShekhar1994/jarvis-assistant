@@ -397,3 +397,16 @@ model = "small.en"            # "small.en" (about 480 MB), "base.en" (145 MB, qu
 keep_warm_minutes = 10        # the speech model stays loaded this long after a talk, so the next starts at once (1..120)
 quiet_ms = 500                # this much quiet after you speak ends a talk, in milliseconds (300..2000)
 hints = []                    # names he should expect to hear, e.g. ["Spotify", "Notion"] ("Jarvis" always is)
+
+[instant]
+# Instant answers: everyday questions Jarvis answers himself, typed or spoken, in well under a second and without
+# your Claude plan - the time and date (also in another city), dates ("days until Christmas"), sums and percentages,
+# unit conversions and timers. Those never leave this PC. Anything he can't answer for sure goes to Claude exactly
+# as before. The weather sends only a town's name to Open-Meteo, and currencies only the two currency codes to
+# Frankfurter (the European Central Bank's daily rates); if either can't be reached, the question goes to Claude.
+# Set enabled = false to send everything to Claude (JARVIS_INSTANT_ENABLED in .env overrides it).
+enabled = true
+weather = true                # "what's the weather in Paris", "will it rain tomorrow"
+currency = true               # "100 dollars in euros"
+town = ""                     # the weather's town when you name none, e.g. "Oslo" (kept on this PC; sent only to Open-Meteo)
+temperature = "auto"          # "auto" (the Windows region: the US gets Fahrenheit), "celsius" or "fahrenheit"
