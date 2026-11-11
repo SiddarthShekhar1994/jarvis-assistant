@@ -281,8 +281,11 @@ def _tokens(text: str) -> list[object]:
             tokens.append("of")
         else:
             operator = match.group("op")
-            if operator == "x" and not (tokens and (isinstance(tokens[-1], Fraction) or tokens[-1] in (")", "%"))):
-                raise MathRefused("an x that is no times")
+            spaced = text[match.start("op") - 1:match.start("op")].isspace() and \
+                text[match.end("op"):match.end("op") + 1].isspace()
+            if operator == "x" and not (spaced and tokens and (isinstance(tokens[-1], Fraction)
+                                                              or tokens[-1] in (")", "%"))):
+                raise MathRefused("an x that is no times")    # "5x5", "0x10": a size or a code, not a sum
             tokens.append(_SYMBOLS.get(operator, operator))
         position = match.end()
         if len(tokens) > MAX_TOKENS:
@@ -397,6 +400,8 @@ def _checked(value: Number) -> Number:
 
 
 def _power(base: Number, exponent: Number) -> Number:
+    if exponent == Fraction(1, 2) and isinstance(base, Fraction) and base >= 0:
+        return _root(base)
     if isinstance(exponent, Fraction) and exponent.denominator == 1 and isinstance(base, Fraction):
         whole = exponent.numerator
         if abs(whole) > MAX_POWER:
@@ -430,11 +435,14 @@ def _root(value: Number) -> Number:
 _SHOW = {"*": "×", "/": "÷", "-": "−"}
 _LEAD = re.compile(r"^(?:(?:what(?:'s| is)|whats|how much is|calculate|compute|work out|solve)\s+)?(?:the\s+)?")
 _TAIL = re.compile(r"\s*(?:=|equals?|is what|is)\s*$")
+_BARE_PAIR = re.compile(NUMBER + r"\s*[-/]\s*" + NUMBER)     # "24/7", "3-4": a ratio, a score or a range as often
 
 
 def calculate(text: str) -> Calc | None:
     """The sum ``text`` asks for ("what's 12 x 7", "15% of 80", "(3+4)^2", "square root of 144"), worked out; None
     when it is not a sum read for sure (a bare number is no sum)."""
+    if _BARE_PAIR.fullmatch(text.strip()):
+        return None
     words = _TAIL.sub("", _LEAD.sub("", text.strip()))
     try:
         tokens = _tokens(words)
@@ -555,16 +563,16 @@ _UNIT_LIST = (
     _unit("l", "volume", "1", "l", "litre", "litres", ("l", "liter", "liters", "litre", "litres", "ltr")),
     _unit("m3", "volume", "1000", "m³", "cubic metre", "cubic metres", ("m3", "m³", "cubic meter", "cubic meters",
                                                                         "cubic metre", "cubic metres")),
-    _unit("tsp", "volume", "0.00492892159375", "teaspoons", "teaspoon", "teaspoons", ("tsp", "teaspoon",
+    _unit("tsp", "volume", "0.00492892159375", "US teaspoons", "US teaspoon", "US teaspoons", ("tsp", "teaspoon",
                                                                                        "teaspoons")),
-    _unit("tbsp", "volume", "0.01478676478125", "tablespoons", "tablespoon", "tablespoons", ("tbsp", "tablespoon",
+    _unit("tbsp", "volume", "0.01478676478125", "US tablespoons", "US tablespoon", "US tablespoons", ("tbsp", "tablespoon",
                                                                                               "tablespoons")),
-    _unit("floz", "volume", "0.0295735295625", "fl oz", "fluid ounce", "fluid ounces", ("fl oz", "fluid ounce",
+    _unit("floz", "volume", "0.0295735295625", "US fl oz", "US fluid ounce", "US fluid ounces", ("fl oz", "fluid ounce",
                                                                                          "fluid ounces")),
-    _unit("cup", "volume", "0.2365882365", "cups", "cup", "cups", ("cup", "cups")),
-    _unit("pt", "volume", "0.473176473", "pints", "pint", "pints", ("pt", "pint", "pints", "us pint", "us pints")),
-    _unit("qt", "volume", "0.946352946", "quarts", "quart", "quarts", ("qt", "quart", "quarts")),
-    _unit("gal", "volume", "3.785411784", "gallons", "gallon", "gallons", ("gal", "gallon", "gallons", "us gallon",
+    _unit("cup", "volume", "0.2365882365", "US cups", "US cup", "US cups", ("cup", "cups")),
+    _unit("pt", "volume", "0.473176473", "US pints", "US pint", "US pints", ("pt", "pint", "pints", "us pint", "us pints")),
+    _unit("qt", "volume", "0.946352946", "US quarts", "US quart", "US quarts", ("qt", "quart", "quarts")),
+    _unit("gal", "volume", "3.785411784", "US gallons", "US gallon", "US gallons", ("gal", "gallon", "gallons", "us gallon",
                                                                            "us gallons")),
     _unit("impgal", "volume", "4.54609", "imperial gallons", "imperial gallon", "imperial gallons",
           ("imperial gallon", "imperial gallons")),

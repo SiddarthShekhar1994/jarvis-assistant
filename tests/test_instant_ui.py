@@ -117,6 +117,23 @@ class TimerControllerTests(unittest.TestCase):
         self.assertIn("ended at", self.ended[0][0])
         self.assertIn("while Jarvis was away", self.ended[0][0])
 
+    def test_restored_timers_show_and_a_timer_set_elsewhere_is_checked(self) -> None:
+        first = self.make()
+        first.handle(instant.TimerAsk(instant.TIMER_SET, seconds=300))
+        first.shutdown()
+        second = instant_ui.TimerController(self.folder, now=self.clock.now, chime=lambda: None)
+        self.addCleanup(second.shutdown)
+        changes: list[int] = []
+        second.changed.connect(lambda: changes.append(1))
+        second.start()
+        self.assertEqual(changes, [1])                       # Home's chip shows the restored timer
+        second.book.cancel_all()
+        second._check.stop()
+        second.book.add(2)                                   # the desktop's HUD set one in the shared book
+        second.poke()
+        self.assertTrue(second._check.isActive())
+        self.assertEqual(changes, [1, 1])
+
     def test_an_older_file_with_whole_minutes_still_loads(self) -> None:
         self.folder.mkdir(exist_ok=True)
         ends = START + timedelta(minutes=10)

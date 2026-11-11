@@ -683,6 +683,7 @@ class DesktopController(QObject):
         # them and says so - here they only show on the HUD's chip and answer the HUD's own timer words. Else this
         # controller's own book, as before.
         self._shared_timers = timers is not None
+        self.shared_timers_changed: Callable[[], Any] | None = None   # the app's TimerController.poke (shared book)
         self.timers = timers if timers is not None else pcctl.TimerBook(self._timers_folder(), now=self._timer_now)
         self._timer_check = QTimer(self)
         self._timer_check.setSingleShot(True)
@@ -2174,15 +2175,16 @@ class DesktopController(QObject):
 
     def timers_changed(self) -> None:
         """Instant answers set, cancelled or ended a timer in the shared book: the HUD's chip follows."""
-        self._arm_timers()
+        self._arm_timers(notify=False)
 
-    def _arm_timers(self) -> None:
+    def _arm_timers(self, notify: bool = True) -> None:
         """The next check: at the first timer's end - or focus mode's (P2.5) - and within pcctl.TIMER_CHECK_S at most
         (the wall clock is read again then, so a timer whose end came while the PC slept ends at the first check after
         the resume); none without a timer or focus. The HUD chips follow."""
         if self._shut:
             return
-        lefts = [left for left in (self.timers.seconds_left(), self.focus.seconds_left()) if left is not None]
+        own = None if self._shared_timers else self.timers.seconds_left()   # shared: the app checks the timers
+        lefts = [left for left in (own, self.focus.seconds_left()) if left is not None]
         if not lefts:
             self._timer_check.stop()
         else:
@@ -2190,6 +2192,8 @@ class DesktopController(QObject):
         if self._hud and shiboken6.isValid(self.overlay.hud):
             self.overlay.hud.set_timer(pcctl.chip_text(self.timers.running(), self._hour24))
             self._sync_instant()
+        if notify and self._shared_timers and self.shared_timers_changed is not None:
+            self.shared_timers_changed()                     # a timer set or cancelled here: the app's check and chips
 
     def _on_timer_check(self) -> None:
         """The timers against the wall clock: each one that has ended says so once - the toast's line

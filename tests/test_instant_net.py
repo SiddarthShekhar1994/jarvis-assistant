@@ -12,9 +12,9 @@ from briefing_reader import instant_net
 from briefing_reader.instant import KIND_CURRENCY, KIND_WEATHER, NetAsk
 
 PARIS = {"results": [{"name": "Paris", "latitude": 48.85, "longitude": 2.35, "country": "France", "country_code": "FR",
-                      "admin1": "Île-de-France"},
+                      "admin1": "Île-de-France", "population": 2138551},
                      {"name": "Paris", "latitude": 33.66, "longitude": -95.55, "country": "United States",
-                      "country_code": "US", "admin1": "Texas"}]}
+                      "country_code": "US", "admin1": "Texas", "population": 24171}]}
 FORECAST = {"current": {"temperature_2m": 12.4, "apparent_temperature": 8.6, "weather_code": 61, "wind_speed_10m": 9},
             "daily": {"time": ["2026-11-10", "2026-11-11"], "weather_code": [63, 71],
                       "temperature_2m_max": [14.2, 6.0], "temperature_2m_min": [8.1, -1.4],
@@ -61,7 +61,7 @@ class WeatherTests(unittest.TestCase):
         reply = self.answer(weather())
         self.assertEqual(reply.text, "In Paris, France: 12°C and light rain, feels like 9°; today 8° to 14°, 70% "
                                      "chance of rain.")
-        self.assertEqual(reply.speech, "In Paris it's 12 degrees and light rain, sir; up to 14 today.")
+        self.assertEqual(reply.speech, "In Paris, France it's 12 degrees and light rain, sir; up to 14 today.")
         self.assertEqual(reply.source, instant_net.WEATHER_CREDIT)
         (geocode, sent), (forecast, asked) = self.get.calls
         self.assertEqual(geocode, instant_net.GEOCODE_URL)
@@ -77,6 +77,20 @@ class WeatherTests(unittest.TestCase):
                                                fahrenheit=True).text)
         self.assertIn("Paris, Texas", instant_net.answer(weather("paris, texas"), get=self.get,
                                                          cache=instant_net.NetCache()).text)
+
+    def test_two_places_of_one_name_and_raining_now(self) -> None:
+        two = {"results": [{"name": "Springfield", "latitude": 39.8, "longitude": -89.6, "country": "United States",
+                            "country_code": "US", "admin1": "Illinois", "population": 114394},
+                           {"name": "Springfield", "latitude": 37.2, "longitude": -93.3, "country": "United States",
+                            "country_code": "US", "admin1": "Missouri", "population": 169176}]}
+        get = FakeGet({instant_net.GEOCODE_URL: two, instant_net.FORECAST_URL: FORECAST})
+        self.assertIsNone(instant_net.answer(weather("springfield"), get=get, cache=instant_net.NetCache()))
+        named = instant_net.answer(weather("springfield, illinois"), get=get, cache=instant_net.NetCache())
+        self.assertIn("Springfield, Illinois", named.text)
+        self.assertIn("Springfield, Illinois", named.speech)
+        now = self.answer(weather(rain="now_rain"))
+        self.assertEqual(now.text, "Yes, it's raining in Paris, France right now (light rain).")
+        self.assertIn("No, it isn't snowing", self.answer(weather(rain="now_snow")).text)
 
     def test_the_cache_keeps_places_and_the_weather_ten_minutes(self) -> None:
         self.answer(weather())

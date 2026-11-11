@@ -199,6 +199,14 @@ class TimerController(QObject):
         if count:
             logger.info("Instant: %d timer(s) restored", count)
         self.check()
+        if count:
+            self.changed.emit()                          # the chips show what was restored
+
+    def poke(self) -> None:
+        """The shared book changed elsewhere (the desktop's HUD set or cancelled a timer): check again and say so."""
+        if not self._shut:
+            self._arm()
+            self.changed.emit()
 
     def running(self) -> tuple[pcctl.Timer, ...]:
         return self.book.running()

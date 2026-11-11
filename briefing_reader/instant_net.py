@@ -52,6 +52,8 @@ WEATHER_WORDS = {0: "clear sky", 1: "mainly clear", 2: "partly cloudy", 3: "over
                  80: "light showers", 81: "showers", 82: "heavy showers", 85: "light snow showers",
                  86: "snow showers", 95: "thunderstorms", 96: "thunderstorms with hail", 99: "thunderstorms with hail"}
 SNOW_CODES = frozenset({71, 73, 75, 77, 85, 86})
+RAIN_NOW_CODES = frozenset({51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82, 95, 96, 99})
+AMBIGUOUS_RATIO = 10      # two places of one name: the bigger must have this many times the people, else no answer
 
 
 class NetRefusedInTests(RuntimeError):
@@ -122,6 +124,11 @@ def _number(value: Any) -> float:
     return float(value)
 
 
+def _population(result: Mapping[str, Any]) -> int:
+    value = result.get("population")
+    return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0 else 0
+
+
 def _place(town: str, get, cache: NetCache) -> tuple[float, float, str] | None:
     key = town.casefold()
     with cache.lock:
@@ -132,7 +139,7 @@ def _place(town: str, get, cache: NetCache) -> tuple[float, float, str] | None:
     results = data.get("results") if isinstance(data, Mapping) else None
     if not isinstance(results, list):
         return None
-    picked = None
+    matches: list[Mapping[str, Any]] = []
     for result in results:
         if not isinstance(result, Mapping) or str(result.get("name", "")).casefold() != name.casefold():
             continue
@@ -141,10 +148,13 @@ def _place(town: str, get, cache: NetCache) -> tuple[float, float, str] | None:
                                                                            "admin2")]
             if not any(part and (part == region.casefold() or part.startswith(region.casefold())) for part in regions):
                 continue
-        picked = result
-        break
-    if picked is None:
+        matches.append(result)
+    if not matches:
         return None                                      # no place of that very name: Claude, as before
+    matches.sort(key=_population, reverse=True)
+    picked = matches[0]
+    if len(matches) > 1 and _population(picked) < AMBIGUOUS_RATIO * max(1, _population(matches[1])):
+        return None                                      # two places of that name and neither stands out
     latitude, longitude = _number(picked.get("latitude")), _number(picked.get("longitude"))
     place = str(picked.get("name", name))
     where = str(picked.get("admin1") or "") if str(picked.get("country_code", "")).upper() == "US" else \
@@ -185,6 +195,17 @@ def _weather(ask: NetAsk, get, cache: NetCache, fahrenheit: bool, address: str, 
     chance = None if chance_raw is None else round(_number(chance_raw))
     degree = "°F" if fahrenheit else "°C"
     when = "tomorrow" if day else "today"
+    if ask.rain in ("now_rain", "now_snow"):
+        now_code = int(_number(current["weather_code"]))
+        wanted, what = (SNOW_CODES, "snowing") if ask.rain == "now_snow" else (RAIN_NOW_CODES, "raining")
+        words_now = WEATHER_WORDS.get(now_code, "unknown")
+        if now_code in wanted:
+            text, said = (f"Yes, it's {what} in {shown} right now ({words_now}).",
+                          f"Yes, {{sir}}: {words_now} in {shown} right now.")
+        else:
+            text, said = (f"No, it isn't {what} in {shown} right now: {words_now}.",
+                          f"No, {{sir}}: {words_now} in {shown} right now.")
+        return InstantReply(KIND_WEATHER, text, with_address(said, address), WEATHER_CREDIT)
     if ask.rain:
         if ask.rain == "snow":
             yes = code in SNOW_CODES
@@ -205,14 +226,14 @@ def _weather(ask: NetAsk, get, cache: NetCache, fahrenheit: bool, address: str, 
     rain_line = f", {chance}% chance of rain" if chance is not None and chance >= 20 else ""
     if day:
         text = f"Tomorrow in {shown}: {words}, {low}° to {high}{degree}{rain_line}."
-        said = f"Tomorrow in {shown.partition(',')[0]}: {words}, {low} to {high} degrees, {{sir}}."
+        said = f"Tomorrow in {shown}: {words}, {low} to {high} degrees, {{sir}}."
         return InstantReply(KIND_WEATHER, text, with_address(said, address), WEATHER_CREDIT)
     temperature = round(_number(current["temperature_2m"]))
     feels = round(_number(current["apparent_temperature"]))
     now_words = WEATHER_WORDS.get(int(_number(current["weather_code"])), words)
     feels_line = f", feels like {feels}°" if abs(feels - temperature) >= 3 else ""
     text = (f"In {shown}: {temperature}{degree} and {now_words}{feels_line}; today {low}° to {high}°{rain_line}.")
-    said = f"In {shown.partition(',')[0]} it's {temperature} degrees and {now_words}, {{sir}}; up to {high} today."
+    said = f"In {shown} it's {temperature} degrees and {now_words}, {{sir}}; up to {high} today."
     return InstantReply(KIND_WEATHER, text, with_address(said, address), WEATHER_CREDIT)
 
 

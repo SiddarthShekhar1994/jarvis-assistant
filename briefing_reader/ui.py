@@ -9251,6 +9251,9 @@ class AppController(QObject):
         controller.consentChanged.connect(lambda _on: self._sync_desktop_settings())
         controller.timerEnded.connect(lambda line: self._post_toast(line, TOAST_TIMER_TEXT, TOAST_TIMER))
         controller.focusChanged.connect(self._on_focus_changed)
+        instant = getattr(self, "instant", None)
+        if instant is not None and instant.timers is not None:
+            controller.shared_timers_changed = instant.timers.poke   # a timer set on the HUD: the app checks it
         meetings = getattr(self, "meetings", None)
         if meetings is not None:
             meetings.pillCreated.connect(controller.set_rec_pill)
@@ -11349,8 +11352,12 @@ class AppController(QObject):
 
     def _on_instant_fallback(self, words: str, spoken: bool) -> None:
         """The weather or the rate could not be had for sure: the words go to Claude exactly as before."""
-        if self.ask is not None and self.state != STATE_QUITTING:
-            self.ask.submit_claude(words, spoken)
+        if self.ask is None or self.state == STATE_QUITTING:
+            return
+        if self.ask.busy:
+            logger.info("Instant: no answer, and another request is running; nothing was sent on")
+            return
+        self.ask.submit_claude(words, spoken)
 
     def _on_instant_timer_ended(self, text: str, speech: str) -> None:
         """A timer ended (its chime has played): Jarvis's toast, a JARVIS entry (never given to Ask) and his voice."""

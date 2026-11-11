@@ -62,7 +62,7 @@ class ReplyTests(unittest.TestCase):
         ("how many days since 1 january", KIND_DATE_MATHS, "313 days since 1 January", "313 days"),
         ("how many days since christmas", KIND_DATE_MATHS, "320 days since Christmas (Thursday 25 December 2025)",
          "320"),
-        ("days between 1 march and 1 june", KIND_DATE_MATHS, "92 days between 1 March and 1 June.", "92 days"),
+        ("days between 1 march and 1 june", KIND_DATE_MATHS, "92 days between 1 March 2027 and 1 June 2027.", "92 days"),
         ("how many days from 1 january 2026 to 1 january 2027", KIND_DATE_MATHS, "365 days", "365"),
         ("what's the date in 3 weeks", KIND_DATE_MATHS, "In 3 weeks it will be Tuesday 1 December 2026.", "December"),
         ("10 days from now", KIND_DATE_MATHS, "In 10 days it will be Friday 20 November 2026.", "Friday"),
@@ -98,7 +98,7 @@ class ReplyTests(unittest.TestCase):
         ("how many ounces in a pound", KIND_UNITS, "1 pound = 16 ounces.", "1 pound is 16 ounces, sir."),
         ("how many feet are in a meter", KIND_UNITS, "1 m = about 3.281 feet.", "1 metre is about 3.281 feet"),
         ("5 pounds to kg", KIND_UNITS, "5 pounds = about 2.268 kg.", "kilograms"),
-        ("2 cups in ml", KIND_UNITS, "2 cups = about 473.18 ml.", "millilitres"),
+        ("2 cups in ml", KIND_UNITS, "2 US cups = about 473.18 ml.", "millilitres"),
         ("60 mph in km/h", KIND_UNITS, "60 mph = about 96.56 km/h.", "kilometres per hour"),
         ("1 gb in mb", KIND_UNITS, "1 GB = 1,000 MB.", "1,000 megabytes"),
         ("1 acre in square feet", KIND_UNITS, "1 acre = 43,560 square feet.", "43,560"),
@@ -146,6 +146,20 @@ class ReplyTests(unittest.TestCase):
         self.assertIsNone(ask("what day is 29 february 2027"))
         # April has no 31st: the next 31st is May's, and the answer names it.
         self.assertIn("31 May is a Sunday", ask("what day is the 31st", now=datetime(2026, 4, 30, 9, tzinfo=PACIFIC)).text)
+
+    def test_the_review_cases(self) -> None:
+        self.assertEqual(ask("what day was christmas").text, "Christmas was a Thursday.")
+        self.assertEqual(ask("what day was the 25th").text, "25 October was a Sunday.")
+        self.assertIn("No, 4 July was a Saturday", ask("was the 4th of july a friday").text)
+        january = datetime(2026, 1, 10, 9, tzinfo=PACIFIC)
+        self.assertIn("14 days between 1 January 2027 and 15 January 2027",
+                      ask("days between 1 january and 15 january", now=january).text)
+        self.assertIn("275 days between 1 March 2027 and 1 December 2027", ask("days between 1 march and 1 december").text)
+        self.assertIn("90 days between 1 December and 1 March 2027", ask("days between 1 december and 1 march").text)
+        self.assertEqual(ask("days between today and christmas").text[:7], "45 days")
+        self.assertEqual(ask("what's 4^0.5").text, "4 ^ 0.5 = 2")
+        self.assertEqual(ask("is it raining in paris").rain, "now_rain")
+        self.assertEqual(ask("will it be raining in paris tomorrow").rain, "rain")
 
     def test_a_naive_clock_is_read_as_local(self) -> None:
         self.assertIsInstance(understand("what time is it", now=datetime(2026, 11, 10, 15, 42)), InstantReply)
@@ -253,6 +267,9 @@ class ClaudeStillAnswersTests(unittest.TestCase):
         "stop the music", "what's the weather on mars", "plan my day", "prep me for my 2 PM", "any follow-ups?",
         "what's the time difference between london and tokyo", "is it raining", "time to go", "dinner time",
         "what's the date of the meeting", "x", "", "   ", "?", "a" * 400,
+        "when is christmas next year", "what's 5² + 1", "what is ½ of 10", "0x10", "24/7", "3-4", "5x5",
+        "time in est", "time in pst", "what time is it in perth", "what time is it in lima", "reset the timer",
+        "weather in london tomorrow morning", "weather in may", "weather in paris tonight",
     )
 
     def test_each_goes_to_claude(self) -> None:

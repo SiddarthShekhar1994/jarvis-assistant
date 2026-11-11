@@ -126,6 +126,8 @@ _TAIL_OFF = re.compile(r"(?:[\s,]+(?:please|jarvis|sir|thanks|thank\s+you))*[\s.
 def clean(text: str) -> str:
     """The request as the patterns read it: NFKC, curly quotes straight, lower case, one space, the lead-in and a
     final "please" / "." / "?" put aside, number words as digits."""
+    if any(unicodedata.category(char) == "No" for char in str(text or "")):
+        return ""                                  # "5²", "½": NFKC would turn them into other numbers
     words = unicodedata.normalize("NFKC", str(text or "")).translate(_QUOTES)
     words = "".join(" " if unicodedata.category(char) == "Cc" else char for char in words
                     if unicodedata.category(char) != "Cf")
@@ -197,8 +199,7 @@ def _clock(words: str, now: datetime, _flags: InstantFlags, address: str, hour24
 # ("Texas", "Australia", "Portland") is not here: it goes to Claude.
 _ZONES = {
     "America/New_York": "new york|new york city|nyc|manhattan|brooklyn|boston|philadelphia|washington dc|dc|"
-                        "atlanta|miami|orlando|detroit|pittsburgh|baltimore|charlotte|eastern time|eastern|est|edt|"
-                        "et",
+                        "atlanta|miami|orlando|detroit|pittsburgh|baltimore|charlotte|eastern time|eastern",
     "America/Toronto": "toronto|montreal|ottawa|quebec city",
     "America/Chicago": "chicago|dallas|houston|austin|san antonio|new orleans|minneapolis|nashville|st louis|"
                        "saint louis|memphis|milwaukee|central time",
@@ -208,7 +209,7 @@ _ZONES = {
     "America/Edmonton": "calgary|edmonton",
     "America/Phoenix": "phoenix|arizona|tucson",
     "America/Los_Angeles": "los angeles|la|san francisco|sf|san jose|san diego|sacramento|oakland|fresno|seattle|"
-                           "las vegas|california|pacific time|pst|pdt|pt|silicon valley|palo alto|mountain view|"
+                           "las vegas|california|pacific time|silicon valley|palo alto|mountain view|"
                            "santa clara|cupertino|berkeley|long beach",
     "America/Vancouver": "vancouver",
     "America/Anchorage": "anchorage|alaska",
@@ -217,7 +218,7 @@ _ZONES = {
     "America/Sao_Paulo": "sao paulo|são paulo|rio de janeiro|rio|brasilia",
     "America/Argentina/Buenos_Aires": "buenos aires|argentina",
     "America/Bogota": "bogota|bogotá|colombia",
-    "America/Lima": "lima|peru",
+    "America/Lima": "peru",
     "America/Santiago": "santiago de chile",
     "America/Caracas": "caracas|venezuela",
     "Europe/London": "london|uk|united kingdom|england|britain|great britain|scotland|wales|edinburgh|manchester|"
@@ -271,7 +272,7 @@ _ZONES = {
     "Australia/Sydney": "sydney|canberra",
     "Australia/Melbourne": "melbourne",
     "Australia/Brisbane": "brisbane",
-    "Australia/Perth": "perth",
+    "Australia/Perth": "western australia",
     "Australia/Adelaide": "adelaide",
     "Pacific/Auckland": "auckland|wellington|new zealand",
     "Africa/Lagos": "lagos|abuja|nigeria",
@@ -391,7 +392,7 @@ _DATE_FORMS = (
     ("weekday", re.compile(r"(?:what\s+is|what's)\s+the\s+day\s+(?:of\s+the\s+week\s+)?(?:on|for)\s+" + _A)),
     ("is_weekday", re.compile(r"(?:is|was|will)\s+" + _A + r"\s+(?:be\s+)?(?:on\s+)?a\s+(?P<wd>" + "|".join(_WEEKDAYS)
                               + r")")),
-    ("when", re.compile(r"when\s+is\s+(?P<a_hol>" + _HOLIDAY + r")(?:\s+(?:this|next)\s+year)?")),
+    ("when", re.compile(r"when\s+is\s+(?P<a_hol>" + _HOLIDAY + r")")),
     ("until", re.compile(r"(?:how\s+many\s+)?" + _SPAN + r"\s+(?:are\s+)?(?:there\s+)?(?:left\s+)?(?:until|till|til|"
                          r"to|before)\s+" + _A)),
     ("until", re.compile(r"how\s+long\s+(?:is\s+it\s+|is\s+left\s+)?(?:until|till|til|to|before)\s+" + _A)),
@@ -539,6 +540,28 @@ def _dates(words: str, now: datetime, _flags: InstantFlags, address: str, _hour2
     return None
 
 
+def _next_on_or_after(day: date, ref: date) -> date | None:
+    for year in (ref.year, ref.year + 1):
+        try:
+            found = date(year, day.month, day.day)
+        except ValueError:
+            continue
+        if found >= ref:
+            return found
+    return None
+
+
+def _last_on_or_before(day: date, ref: date) -> date | None:
+    for year in (ref.year, ref.year - 1):
+        try:
+            found = date(year, day.month, day.day)
+        except ValueError:
+            continue
+        if found <= ref:
+            return found
+    return None
+
+
 def _date_answer(kind: str, match: re.Match, today: date, address: str) -> InstantReply | None:
     groups = match.groupdict()
     unit = (groups.get("unit") or "days").replace("sleeps", "days")
@@ -548,11 +571,21 @@ def _date_answer(kind: str, match: re.Match, today: date, address: str) -> Insta
         first, second = _date_of(match, "a_", today, 1), _date_of(match, "b_", today, 1)
         if first is None or second is None:
             return None
-        gap = abs((second[0] - first[0]).days)
-        text = f"{_span_words(gap, unit)} between {_called(first[0], match, 'a_')} and {_called(second[0], match, 'b_')}."
+        (start, start_year), (end, end_year) = first, second
+        if not end_year:                       # a date with no year: the first such day on or after the other one
+            end = _next_on_or_after(end, start)
+        elif not start_year:                   # ... or the last such day on or before it
+            start = _last_on_or_before(start, end)
+        if start is None or end is None:
+            return None
+        gap = abs((end - start).days)
+        shown = [_called(day, match, prefix) + (f" {day.year}" if day.year != today.year else "")
+                 for day, prefix in ((start, "a_"), (end, "b_"))]
+        text = f"{_span_words(gap, unit)} between {shown[0]} and {shown[1]}."
         return InstantReply(KIND_DATE_MATHS, text[:1].upper() + text[1:],
                             with_address(f"{_span_words(gap, unit)}, {{sir}}.", address))
-    direction = -1 if kind == "since" else 1
+    past = kind in ("weekday", "is_weekday") and re.search(r"\b(?:was|did)\b", match.group(0)) is not None
+    direction = -1 if kind == "since" or past else 1   # "what day was Christmas": the last one
     found = _date_of(match, "a_", today, direction)
     if found is None:
         return None
@@ -635,7 +668,7 @@ _TIMER_SET_FORMS = (
     re.compile(r"let\s+me\s+know\s+in\s+(?P<dur>" + _DURATION + r")"),
 )
 _TIMER_WORD = r"(?:timers?|countdowns?)"
-_TIMER_CANCEL_RE = re.compile(r"(?:cancel|stop|end|clear|delete|remove|kill|turn\s+off|reset|dismiss)\s+"
+_TIMER_CANCEL_RE = re.compile(r"(?:cancel|stop|end|clear|delete|remove|kill|turn\s+off|dismiss)\s+"
                               r"(?:(?P<every>all)\s+(?:of\s+)?)?(?:the\s+|my\s+|that\s+|this\s+|those\s+|these\s+)?"
                               r"(?:(?P<dur>" + _DURATION + r")\s+)?" + _TIMER_WORD)
 _TIMER_LEFT_RE = re.compile(
@@ -746,6 +779,10 @@ _WEATHER_FORMS = (
 _NOT_TOWNS = {"here", "my area", "my town", "my city", "outside", "today", "tomorrow", "tonight", "now", "right now",
               "the morning", "the afternoon", "the evening", "the weekend", "this weekend", "the week", "this week",
               "next week", "my location", "home", "work", "the office", "the moment"}
+# A word of time in what would be the town ("london tomorrow morning", "may", "spring"): not a town for sure.
+_TIME_WORDS = re.compile(r"\b(?:today|tonight|tomorrow|now|morning|afternoon|evening|night|weekend|week|month|year|"
+                         r"spring|summer|autumn|fall|winter|"
+                         + "|".join(sorted({name for name in _MONTHS if len(name) > 3} | {"may"})) + r")\b")
 
 
 def _weather(words: str, flags: InstantFlags) -> NetAsk | None:
@@ -771,8 +808,14 @@ def _weather(words: str, flags: InstantFlags) -> NetAsk | None:
             given = False
             if not town:
                 return None                               # no town: Claude, as before
-        rain = {"raining": "rain", "snowing": "snow", "umbrella": "rain"}.get(groups.get("rain") or "",
-                                                                              groups.get("rain") or "")
+        elif _TIME_WORDS.search(town):
+            return None
+        if when not in ("now", "right now", "today", "tomorrow"):
+            return None                                   # tonight, this morning ...: not what the answer gives
+        rain = {"raining": "now_rain", "snowing": "now_snow", "umbrella": "rain"}.get(groups.get("rain") or "",
+                                                                                      groups.get("rain") or "")
+        if rain.startswith("now_") and when == "tomorrow":
+            rain = rain[4:]                               # "will it be raining tomorrow": the day's chance
         return NetAsk(KIND_WEATHER, town=town, when="tomorrow" if when == "tomorrow" else "now", rain=rain,
                       town_given=given)
     return None
