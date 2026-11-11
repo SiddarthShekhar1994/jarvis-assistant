@@ -189,6 +189,127 @@ class InstantControllerTests(unittest.TestCase):
         self.assertFalse(off.take("weather in paris"))
 
 
+class Ticks:
+    def __init__(self) -> None:
+        self.at = 1000.0
+
+    def __call__(self) -> float:
+        return self.at
+
+
+def calendar_events(now: datetime) -> dict:
+    """Two accounts' events around ``now``: the personal one's next at +40 minutes, the work one's at +2 hours."""
+    from briefing_reader.gcal import CalendarEvent
+
+    soon, later = now + timedelta(minutes=40), now + timedelta(hours=2)
+    return {"personal": [CalendarEvent("Physio", soon, soon + timedelta(minutes=30), location="Room 9")],
+            "work": [CalendarEvent("Design review", later, later + timedelta(hours=1))]}
+
+
+class CalendarControllerTests(unittest.TestCase):
+    """Round 2: the calendar questions - a read, the 2-minute copy, a read too slow, an account not read."""
+
+    NOW = datetime(2026, 11, 10, 13, 20).astimezone()
+
+    def setUp(self) -> None:
+        self.answers: list[tuple] = []
+        self.waits: list[str] = []
+        self.fallbacks: list[tuple] = []
+        self.reads = 0
+        self.ticks = Ticks()
+
+    def read(self) -> bool:
+        self.reads += 1
+        return True
+
+    def make(self, reader=None, **instant_values: object) -> instant_ui.InstantController:
+        controller = instant_ui.InstantController(a_config(**instant_values), timers=None, now=lambda: self.NOW,
+                                                  get=lambda *_args: {}, fahrenheit=False, threaded=False,
+                                                  calendar_read=reader or self.read, monotonic=self.ticks)
+        controller.answered.connect(lambda *args: self.answers.append(args))
+        controller.waiting.connect(self.waits.append)
+        controller.fallback.connect(lambda *args: self.fallbacks.append(args))
+        self.addCleanup(controller.shutdown)
+        return controller
+
+    def a_read(self, problems=None):
+        from briefing_reader import instant_calendar
+
+        start, end = instant_calendar.read_range(self.NOW)
+        return instant_calendar.CalendarRead(events=calendar_events(self.NOW), problems=dict(problems or {}),
+                                             start=start, end=end)
+
+    def test_a_read_then_two_minutes_of_instant_follow_ups(self) -> None:
+        controller = self.make()
+        self.assertTrue(controller.take("what's my next meeting", spoken=True))
+        self.assertTrue(controller.take("am I free at 3 pm"))            # waits for the same read
+        self.assertEqual((self.reads, self.waits), (1, ["Checking your calendar...", "Checking your calendar..."]))
+        self.assertEqual(self.answers, [])
+        controller.calendar_done(self.a_read())
+        self.assertEqual([args[1] for args in self.answers], ["what's my next meeting", "am I free at 3 pm"])
+        reply = self.answers[0][0]
+        self.assertEqual(reply.speech, "Your next meeting is at 2 PM, sir, in 40 minutes.")
+        self.assertIn("Physio", reply.text)
+        self.assertNotIn("Physio", reply.speech)
+        self.ticks.at += 119
+        self.assertTrue(controller.take("how many meetings do I have today"))
+        self.assertEqual((self.reads, len(self.answers), len(self.waits)), (1, 3, 2))   # from the copy: at once
+        self.ticks.at += 2
+        self.assertTrue(controller.take("what's my next meeting"))
+        self.assertEqual(self.reads, 2)                                   # 2 minutes old: read again
+        controller.forget_calendar()
+
+    def test_off_or_not_set_up_goes_to_claude(self) -> None:
+        self.assertFalse(self.make(reader=lambda: False).take("what's my next meeting"))
+        self.assertFalse(self.make(calendar=False).take("what's my next meeting"))
+        no_reader = instant_ui.InstantController(a_config(), timers=None, threaded=False)
+        self.addCleanup(no_reader.shutdown)
+        self.assertFalse(no_reader.flags().calendar)
+        self.assertFalse(no_reader.take("what's my next meeting"))
+
+    def test_a_read_too_slow_or_not_covering_goes_to_claude(self) -> None:
+        controller = self.make()
+        controller.take("what's my next meeting")
+        self.assertTrue(controller._calendar_timer.isActive())
+        controller._calendar_late()
+        self.assertEqual(self.fallbacks, [("what's my next meeting", False)])
+        controller.calendar_done(self.a_read())                          # it came later: kept for the next question
+        self.assertEqual(len(self.answers), 0)
+        self.assertTrue(controller.take("am I free at 3 pm"))
+        self.assertEqual((self.reads, len(self.answers)), (1, 1))
+        stale = self.make()
+        stale.take("what's my next meeting")
+        from briefing_reader import instant_calendar
+
+        stale.calendar_done(instant_calendar.CalendarRead(events={"personal": []}))   # no range: not for sure
+        self.assertEqual(self.fallbacks[-1], ("what's my next meeting", False))
+
+    def test_an_account_not_read_is_said_and_not_kept_when_none_was(self) -> None:
+        controller = self.make()
+        controller.take("am I free at 2:30 pm")
+        controller.calendar_done(self.a_read(problems={"work": "signedout"}))
+        said = self.answers[0][0].speech
+        self.assertIn("on your personal calendar", said)
+        self.assertIn("your work calendar couldn't be read", said)
+        self.ticks.at += instant_ui.CALENDAR_KEEP_S + 1
+        controller.take("what's my next meeting")
+        controller.calendar_done(self.a_read(problems={"work": "signedout", "personal": "signedout"}))
+        self.assertIn("I couldn't read your personal and work calendars", self.answers[-1][0].speech)
+        self.ticks.at += 1
+        self.assertTrue(controller.take("what's my next meeting"))
+        self.assertEqual(self.reads, 3)            # a read that read nothing is not kept: the next question reads again
+
+    def test_the_logs_hold_no_titles(self) -> None:
+        controller = self.make()
+        with self.assertLogs("briefing_reader.instant_ui", level="INFO") as logs:
+            controller.take("what's my next meeting")
+            controller.calendar_done(self.a_read())
+        text = "\n".join(logs.output)
+        self.assertIn("a calendar answer", text)
+        for secret in ("Physio", "Room 9", "Design review"):
+            self.assertNotIn(secret, text)
+
+
 class AppWiringTests(unittest.TestCase):
     def submit(self, app: AppHarness, text: str) -> None:
         bar = app.c.window.reading.command_bar
@@ -251,6 +372,52 @@ class AppWiringTests(unittest.TestCase):
         self.assertIn("a maths answer", text)
         self.assertNotIn("4321", text)
         self.assertNotIn("8,642", text)
+
+    def test_a_calendar_question_reads_both_accounts_on_the_worker(self) -> None:
+        from briefing_reader.gcal import CalendarNotSignedIn
+
+        app = AppHarness(self)
+        app.reading()
+        c = app.c
+        events = calendar_events(app.clock.now())
+        app.calendars["personal"].list_events = lambda start, end, ids=("primary",): (
+            app.calendars["personal"]._note("list") or list(events["personal"]))
+
+        def signed_out(start, end, ids=("primary",)):
+            app.calendars["work"]._note("list")
+            raise CalendarNotSignedIn("Not signed in to Google Calendar (work account)")
+
+        app.calendars["work"].list_events = signed_out
+        self.assertTrue(c.instant.flags().calendar)
+        with self.assertLogs(level=logging.INFO) as logs:
+            self.submit(app, "what's my next meeting")
+            self.assertTrue(wait_for(lambda: any("Physio" in entry[2] for entry in
+                                                 c.window.reading.conversation.entries())))
+        self.assertFalse(app.factory.runner.started)                    # no Claude run
+        self.assertIn("calendar", app.calendars["personal"].threads)     # read on the calendar worker
+        self.assertIn("calendar", app.calendars["work"].threads)
+        entries = c.window.reading.conversation.entries()
+        self.assertEqual(entries[-2][2], "what's my next meeting")
+        self.assertIn("Physio", entries[-1][2])
+        self.assertIn("Your work calendar couldn't be read", entries[-1][2])
+        self.assertTrue(entries[-1][3].startswith("From Google Calendar"))
+        self.assertIn("Next: Physio", c.window.reading.command_bar.status())
+        said = " ".join(text for _kind, text, _key in app.voice.said)
+        self.assertIn("Your next meeting on your personal calendar is at", said)
+        self.assertNotIn("Physio", said)
+        self.assertNotIn("Room 9", said)
+        log_text = "\n".join(logs.output)
+        self.assertIn("1 calendar(s) read, 1 not", log_text)
+        self.assertNotIn("Physio", log_text)
+        reads = len(app.calendars["personal"].calls)
+        self.submit(app, "am I free at 3 pm")                            # within 2 minutes: from the copy
+        self.assertEqual(len(app.calendars["personal"].calls), reads)
+        self.assertFalse(app.factory.runner.started)
+
+    def test_calendar_answers_are_off_without_the_calendar(self) -> None:
+        app = AppHarness(self, config_extra="\n[instant]\ncalendar = false\n")
+        app.reading()
+        self.assertFalse(app.c.instant.flags().calendar)
 
 
 if __name__ == "__main__":

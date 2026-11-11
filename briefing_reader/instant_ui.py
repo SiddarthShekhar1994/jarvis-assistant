@@ -9,6 +9,14 @@ with ``waiting`` saying so on the bar meanwhile, and comes back as ``answered``,
 service gave no answer for sure: the app then sends the words to Claude exactly as before. Nothing here logs a
 request, a town, an amount or an answer: kinds, statuses and durations only.
 
+Round 2 (owner decisions 2026-11-11), the calendar: a calendar question (instant.CalendarAsk) is answered from the
+app's last read of every account's main calendar for today and tomorrow (instant_calendar), kept CALENDAR_KEEP_S (2
+minutes) so a follow-up is instant. Older than that, ``calendar_read()`` (the app's: a job on its calendar worker,
+which never signs in) reads again while ``waiting`` says "Checking your calendar..."; the app hands the result back
+with ``calendar_done(read)``. No result within CALENDAR_WAIT_S (the worker may be busy with a sign-in): the
+question goes to Claude (``fallback``). ``calendar_read`` None, or False when asked (the calendar is off or not set
+up): Claude's, as before. ``forget_calendar()`` drops the copy (a card changed the calendar).
+
 ``TimerController``: the app's timers (desktop.pcctl.TimerBook in the data folder's "desktop" folder, so a restart
 restores them; the desktop's HUD shares the same book while [desktop] is on). Set, asked about and cancelled through
 ``handle(TimerAsk)``; at each end ``ended(text, speech)`` - the app posts its toast, plays the chime and says it - and
@@ -30,16 +38,19 @@ from typing import Any
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 
-from . import instant, instant_net
+from . import instant, instant_calendar, instant_net
 from .desktop import pcctl
-from .instant import InstantFlags, InstantReply, NetAsk, TimerAsk
+from .instant import CalendarAsk, InstantFlags, InstantReply, NetAsk, TimerAsk
 from .persona import with_address
 from .text_prep import format_time
 
 logger = logging.getLogger(__name__)
 
-WAITING_TEXT = {instant.KIND_WEATHER: "Checking the weather...", instant.KIND_CURRENCY: "Checking the exchange rate..."}
+WAITING_TEXT = {instant.KIND_WEATHER: "Checking the weather...", instant.KIND_CURRENCY: "Checking the exchange rate...",
+                instant.KIND_CALENDAR: "Checking your calendar..."}
 ON_THIS_PC = "on this PC"
+CALENDAR_KEEP_S = 120.0          # a read of the calendars answers follow-ups this long (owner decision 2026-11-11)
+CALENDAR_WAIT_S = 12.0           # a read that takes longer: the question goes to Claude
 
 
 class _Bridge(QObject):
@@ -54,7 +65,8 @@ class InstantController(QObject):
     def __init__(self, config: Any, *, timers: TimerController | None = None,
                  now: Callable[[], datetime] | None = None,
                  get: Callable[[str, Any, float], Any] | None = None, fahrenheit: bool | None = None,
-                 threaded: bool = True, parent: QObject | None = None) -> None:
+                 threaded: bool = True, calendar_read: Callable[[], bool] | None = None,
+                 monotonic: Callable[[], float] = time.monotonic, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._config = config
         self.timers = timers
@@ -68,14 +80,25 @@ class InstantController(QObject):
         self._shut = False
         self._bridge = _Bridge(self)
         self._bridge.done.connect(self._on_done, Qt.ConnectionType.QueuedConnection)
+        # Round 2: the calendars (the app's read; the last one kept CALENDAR_KEEP_S) and the questions waiting for one.
+        self._calendar_read = calendar_read if getattr(config.instant, "calendar", True) else None
+        self._monotonic = monotonic
+        self._calendar_copy: tuple[float, instant_calendar.CalendarRead] | None = None
+        self._calendar_waiting: list[tuple[CalendarAsk, str, bool, float]] = []
+        self._calendar_timer = QTimer(self)
+        self._calendar_timer.setSingleShot(True)
+        self._calendar_timer.timeout.connect(self._calendar_late)
 
     def flags(self) -> InstantFlags:
         cfg = self._config.instant
         return InstantFlags(weather=bool(cfg.weather), currency=bool(cfg.currency), timers=self.timers is not None,
-                            town=str(cfg.town or ""))
+                            town=str(cfg.town or ""), calendar=self._calendar_read is not None)
 
     def _address(self) -> str:
         return str(getattr(getattr(self._config, "assistant", None), "address", "sir"))
+
+    def _hour24(self) -> bool:
+        return bool(getattr(getattr(self._config, "display", None), "hour24", False))
 
     def take(self, words: str, spoken: bool = False) -> bool:
         """True when Jarvis answers ``words`` himself (see the module docs); False: Claude's, as before."""
@@ -84,12 +107,14 @@ class InstantController(QObject):
         started = time.perf_counter()
         try:
             found = instant.understand(words, now=self._now(), flags=self.flags(), address=self._address(),
-                                       hour24=bool(getattr(getattr(self._config, "display", None), "hour24", False)))
+                                       hour24=self._hour24())
         except Exception as exc:  # noqa: BLE001 - a request that can't be read is Claude's, as before
             logger.warning("Instant: a request could not be read (%s)", type(exc).__name__)
             return False
         if found is None:
             return False
+        if isinstance(found, CalendarAsk):
+            return self._ask_calendar(found, words, spoken, started)
         if isinstance(found, TimerAsk):
             if self.timers is None:
                 return False
@@ -132,8 +157,71 @@ class InstantController(QObject):
             return
         self._answer(reply, words, spoken, started)
 
+    # ---- round 2: the calendars ---------------------------------------------------------------------------------
+
+    def _calendar_reply(self, ask: CalendarAsk, read: instant_calendar.CalendarRead) -> InstantReply | None:
+        try:
+            return instant_calendar.reply(ask, read, now=self._now(), address=self._address(), hour24=self._hour24())
+        except Exception as exc:  # noqa: BLE001 - an answer that can't be made is Claude's, as before
+            logger.warning("Instant: a calendar answer could not be made (%s)", type(exc).__name__)
+            return None
+
+    def _ask_calendar(self, ask: CalendarAsk, words: str, spoken: bool, started: float) -> bool:
+        """At once from a read under CALENDAR_KEEP_S old, else after a new read (``waiting`` meanwhile)."""
+        copy = self._calendar_copy
+        if copy is not None and self._monotonic() - copy[0] < CALENDAR_KEEP_S:
+            reply = self._calendar_reply(ask, copy[1])
+            if reply is not None:
+                self._answer(reply, words, spoken, started)
+                return True
+        if self._calendar_read is None:
+            return False
+        if not self._calendar_waiting:
+            try:
+                asked = bool(self._calendar_read())
+            except Exception as exc:  # noqa: BLE001 - no read: Claude's, as before
+                logger.warning("Instant: the calendars could not be asked for (%s)", type(exc).__name__)
+                asked = False
+            if not asked:
+                return False                                     # off or not set up: Claude's, as before
+            self._calendar_timer.start(int(CALENDAR_WAIT_S * 1000))
+        self._calendar_waiting.append((ask, words, spoken, started))
+        self.waiting.emit(WAITING_TEXT[instant.KIND_CALENDAR])
+        return True
+
+    def calendar_done(self, read: instant_calendar.CalendarRead) -> None:
+        """The app's read of the calendars came back (GUI thread): kept while at least one account was read, and every
+        question waiting for it answered."""
+        if self._shut:
+            return
+        self._calendar_timer.stop()
+        if any(alias not in read.problems for alias in read.events):
+            self._calendar_copy = (self._monotonic(), read)
+        waiting, self._calendar_waiting = self._calendar_waiting, []
+        for ask, words, spoken, started in waiting:
+            reply = self._calendar_reply(ask, read)
+            if reply is None:
+                logger.info("Instant: the calendar read did not cover the question; it goes to Claude")
+                self.fallback.emit(words, spoken)
+            else:
+                self._answer(reply, words, spoken, started)
+
+    def _calendar_late(self) -> None:
+        waiting, self._calendar_waiting = self._calendar_waiting, []
+        if waiting and not self._shut:
+            logger.info("Instant: the calendars did not answer within %d s; %d question(s) go to Claude",
+                        int(CALENDAR_WAIT_S), len(waiting))
+            for _ask, words, spoken, _started in waiting:
+                self.fallback.emit(words, spoken)
+
+    def forget_calendar(self) -> None:
+        """The calendar changed (a card's event): the next question reads it again."""
+        self._calendar_copy = None
+
     def shutdown(self) -> None:
         self._shut = True
+        self._calendar_timer.stop()
+        self._calendar_waiting = []
         if self.timers is not None:
             self.timers.shutdown()
 

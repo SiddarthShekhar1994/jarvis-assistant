@@ -481,13 +481,16 @@ class InstantConfig:
     the Claude plan (owner decision 2026-11-10; on by default; JARVIS_INSTANT_ENABLED overrides ``enabled``). The
     time, dates, sums, conversions and timers never leave this PC; ``weather`` sends only a town's name to Open-Meteo
     and ``currency`` only two currency codes to Frankfurter. ``town`` ("" = none): the weather's town when a request
-    names none (never logged). ``temperature``: "auto" follows the Windows region (the US: Fahrenheit)."""
+    names none (never logged; a town set by voice or typing wins). ``temperature``: "auto" follows the Windows region
+    (the US: Fahrenheit). Round 2 (2026-11-11): ``calendar`` answers "what's my next meeting" and "am I free at 3" from
+    every account's main calendar ([calendar] on), saying times and counts but never titles."""
 
     enabled: bool = True
     weather: bool = True
     currency: bool = True
     town: str = field(default="", repr=False)
     temperature: str = "auto"       # one of INSTANT_TEMPERATURES
+    calendar: bool = True
 
 
 @dataclass(frozen=True)
@@ -1402,7 +1405,8 @@ def _parse_instant(doc: Mapping[str, Any], environ: Mapping[str, str] | None = N
         town = ""
     return InstantConfig(enabled=enabled, weather=r.boolean("weather", d.weather),
                          currency=r.boolean("currency", d.currency), town=" ".join(town.split()),
-                         temperature=r.choice("temperature", d.temperature, INSTANT_TEMPERATURES))
+                         temperature=r.choice("temperature", d.temperature, INSTANT_TEMPERATURES),
+                         calendar=r.boolean("calendar", d.calendar))
 
 
 def _parse_assistant(doc: Mapping[str, Any]) -> AssistantConfig:

@@ -412,3 +412,4 @@ weather = true                # "what's the weather in Paris", "will it rain tom
 currency = true               # "100 dollars in euros"
 town = ""                     # the weather's town when you name none, e.g. "Oslo" (kept on this PC; sent only to Open-Meteo)
 temperature = "auto"          # "auto" (the Windows region: the US gets Fahrenheit), "celsius" or "fahrenheit"
+calendar = true               # "what's my next meeting", "am I free at 3": from your calendars; titles shown, never said

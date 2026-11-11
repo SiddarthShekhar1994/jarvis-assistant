@@ -249,6 +249,127 @@ class HandedOverTests(unittest.TestCase):
         self.assertIsNone(ask("100 dollars in euros", flags=InstantFlags()))
 
 
+ROUND2 = InstantFlags(weather=True, currency=True, town="", calendar=True)
+
+
+def at_local(text: str, now: datetime = NOW) -> str:
+    """The moment a parse found, as "Tue 15:00" on the Pacific clock."""
+    found = ask(text, now=now, flags=ROUND2)
+    return found.at.astimezone(PACIFIC).strftime("%a %H:%M")
+
+
+class RoundTwoParseTests(unittest.TestCase):
+    """Round 2 (owner decisions 2026-11-11): the calendar, clock-time reminders and the weather's town."""
+
+    def test_calendar_questions(self) -> None:
+        cases = (("what's my next meeting", instant.CAL_NEXT, 0, "meeting"),
+                 ("what's my next appointment?", instant.CAL_NEXT, 0, "appointment"),
+                 ("when is my next call", instant.CAL_NEXT, 0, "call"),
+                 ("what's next on my calendar", instant.CAL_NEXT, 0, "event"),
+                 ("do I have any more meetings today", instant.CAL_MORE, 0, "meeting"),
+                 ("what's on my calendar today", instant.CAL_DAY, 0, "event"),
+                 ("what's on my calendar tomorrow", instant.CAL_DAY, 1, "event"),
+                 ("what do I have tomorrow", instant.CAL_DAY, 1, "event"),
+                 ("what does my day look like", instant.CAL_DAY, 0, "event"),
+                 ("what does tomorrow look like", instant.CAL_DAY, 1, "event"),
+                 ("how many meetings do I have today", instant.CAL_COUNT, 0, "meeting"),
+                 ("how many calls tomorrow", instant.CAL_COUNT, 1, "call"))
+        for text, action, day, noun in cases:
+            with self.subTest(text=text):
+                found = ask(text, flags=ROUND2)
+                self.assertIsInstance(found, instant.CalendarAsk)
+                self.assertEqual((found.action, found.day, found.noun), (action, day, noun))
+        self.assertIsNone(ask("what's my next meeting"))              # the calendar can't be read: Claude's
+        self.assertEqual(repr(ask("what's my next meeting", flags=ROUND2)), "CalendarAsk(next)")
+
+    def test_free_at_a_time(self) -> None:
+        # 3:42 PM on a Tuesday: a bare hour is the next one within 12 hours, and the answer says which.
+        self.assertEqual(at_local("am I free at 4"), "Tue 16:00")
+        self.assertEqual(at_local("am I free at 3"), "Wed 03:00")
+        self.assertEqual(at_local("am I free at 3 pm"), "Wed 15:00")
+        self.assertEqual(at_local("am I busy at 5:30"), "Tue 17:30")
+        self.assertEqual(at_local("am I free at 3 p.m.?"), "Wed 15:00")
+        self.assertEqual(at_local("am i free at half past 4"), "Tue 16:30")
+        self.assertEqual(at_local("am i free at noon"), "Wed 12:00")
+        self.assertEqual(at_local("am i free at 17:30"), "Tue 17:30")
+        self.assertEqual(at_local("do I have anything at 4 tomorrow"), "Wed 16:00")   # only 4 PM is a waking hour
+        self.assertEqual(at_local("do I have anything at 9 tomorrow morning"), "Wed 09:00")
+        self.assertEqual(at_local("am i free at 3:42"), "Tue 15:42")                   # this very minute counts
+        self.assertTrue(ask("am I busy at 4", flags=ROUND2).busy)
+        self.assertFalse(ask("am I free at 4", flags=ROUND2).busy)
+        for text in ("am I free tomorrow at 7", "am i free tomorrow at 10", "am I free at 13 pm", "am I free at 5:75",
+                     "am i free at 3 today", "am i free at 9 am tonight", "am i free on friday at 3"):
+            with self.subTest(text=text):
+                self.assertIsNone(ask(text, flags=ROUND2))                             # not for sure: Claude's
+
+    def test_reminders(self) -> None:
+        cases = (("remind me at 5 pm to call mum", "Tue 17:00", "call mum"),
+                 ("remind me to call mum at 5", "Tue 17:00", "call mum"),
+                 ("set a reminder for 9:30 am", "Wed 09:30", ""),
+                 ("remind me tomorrow at 9 am to stretch", "Wed 09:00", "stretch"),
+                 ("remind me at noon", "Wed 12:00", ""),
+                 ("remind me tonight at 9 to call dad", "Tue 21:00", "call dad"),
+                 ("remind me at 3 tomorrow", "Wed 15:00", ""),
+                 ("set a reminder for the dentist at 5 pm", "Tue 17:00", "the dentist"),
+                 ("Remind me at 5 to call Ana.", "Tue 17:00", "call Ana"),
+                 ("remind me at 3:42 pm", "Wed 15:42", ""))                  # a reminder needs a later time
+        for text, when, label in cases:
+            with self.subTest(text=text):
+                found = ask(text, flags=ROUND2)
+                self.assertIsInstance(found, instant.ReminderAsk)
+                self.assertEqual((found.action, at_local(text), found.label), (instant.REMINDER_SET, when, label))
+        self.assertEqual(ask("what reminders do I have"), instant.ReminderAsk(instant.REMINDER_LIST))
+        self.assertEqual(ask("cancel my reminder"), instant.ReminderAsk(instant.REMINDER_CANCEL))
+        self.assertEqual(ask("cancel all reminders"), instant.ReminderAsk(instant.REMINDER_CANCEL, every=True))
+        self.assertEqual(ask("cancel the 5 pm reminder").clocks, ((17, 0),))
+        self.assertEqual(ask("cancel the 5 reminder").clocks, ((5, 0), (17, 0)))
+        self.assertEqual(ask("cancel the reminder at 9:30 tomorrow").day, 1)
+        past = ask("remind me at 9 am today")
+        self.assertIsInstance(past, InstantReply)
+        self.assertIn("already past 9:00 AM", past.text)
+        self.assertNotIn("mum", repr(ask("remind me at 5 pm to call mum")))
+        self.assertIsNone(ask("remind me at 5 pm", flags=InstantFlags(timers=False)))
+        for text in ("remind me to call mum on friday at 5", "remind me every day at 9 to stretch",
+                     "remind me at 9 to stretch every day", "remind me at 7 tomorrow", "remind me next week at 5",
+                     "remind me on the 15th at 5", "remind me at 5 to call mum tomorrow", "remind me at 5 at 6",
+                     "remind me tomorrow", "remind me in the morning to stretch", "set an alarm for 7 am"):
+            with self.subTest(text=text):
+                self.assertIsNone(ask(text))
+        # Round 1's timers keep their words.
+        self.assertIsInstance(ask("remind me in 20 minutes to stretch"), TimerAsk)
+
+    def test_the_clocks_change(self) -> None:
+        # The night before the clocks go back (1 November 2026): tomorrow's 9 AM is on standard time.
+        found = ask("remind me tomorrow at 9 am", now=datetime(2026, 10, 31, 22, 0, tzinfo=PACIFIC), flags=ROUND2)
+        self.assertEqual(found.at.utcoffset().total_seconds(), -8 * 3600)
+        self.assertEqual(found.at.hour, 9)
+
+    def test_the_town(self) -> None:
+        cases = (("my town is San Jose, California", "San Jose, California"), ("I live in Oslo", "Oslo"),
+                 ("set my weather town to Paris", "Paris"), ("use Paris for the weather", "Paris"),
+                 ("my city is now Lyon", "Lyon"), ("change my town to St. Louis", "St. Louis"))
+        for text, town in cases:
+            with self.subTest(text=text):
+                found = ask(text)
+                self.assertEqual((found.action, found.town), (instant.TOWN_SET, town))
+        self.assertEqual(ask("what's my town"), instant.TownAsk(instant.TOWN_SAY))
+        self.assertEqual(ask("where do I live"), instant.TownAsk(instant.TOWN_SAY))
+        self.assertEqual(ask("forget my town"), instant.TownAsk(instant.TOWN_FORGET))
+        self.assertNotIn("Oslo", repr(ask("I live in Oslo")))
+        for text in ("i live in a house", "i live in the moment", "my town is tomorrow", "i live in my car"):
+            with self.subTest(text=text):
+                self.assertIsNone(ask(text))
+        self.assertIsNone(ask("I live in Oslo", flags=InstantFlags()))       # no weather: Claude's, as before
+
+    def test_round_two_is_quick(self) -> None:
+        requests = ("remind me to call mum on friday at 5", "what's my next meeting", "am i free at 3 pm",
+                    "my town is san jose, california", "draft an email to Ana about Friday's plan")
+        started = time.perf_counter()
+        for number in range(1000):
+            ask(requests[number % len(requests)], flags=ROUND2)
+        self.assertLess(time.perf_counter() - started, 1.0)
+
+
 class ClaudeStillAnswersTests(unittest.TestCase):
     """Anything that is not read for sure goes to Claude exactly as before."""
 
@@ -277,6 +398,15 @@ class ClaudeStillAnswersTests(unittest.TestCase):
         for text in self.TO_CLAUDE:
             with self.subTest(text=text[:60]):
                 self.assertIsNone(ask(text))
+
+    def test_round_two_leaves_these_to_claude(self) -> None:
+        for text in ("what time is my meeting", "cancel my meeting", "what day is my dentist appointment",
+                     "move my next meeting to 4", "who is my next meeting with", "what's my next meeting about",
+                     "am i free on friday", "do i have anything next week", "what's on my calendar on friday",
+                     "set an alarm for 7 am", "wake me up at 6", "remind me", "my town", "what's the weather on mars",
+                     "remind me at 5 on friday", "what reminders did i miss"):
+            with self.subTest(text=text):
+                self.assertIsNone(ask(text, flags=ROUND2))
 
     def test_no_zone_data_sends_a_place_to_claude(self) -> None:
         from unittest import mock

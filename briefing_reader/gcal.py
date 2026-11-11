@@ -210,6 +210,9 @@ class CalendarEvent:
     plus an inclusive ``all_day_end`` instead (Google's end date is exclusive).
     ``link`` is the event's page on Google Calendar (htmlLink); ``location``
     is the event's location as written, which may be a meeting URL.
+    ``declined``: your own guest entry says No; ``free``: it is marked "show
+    as free" (transparency "transparent") - instant answers never count it as
+    busy (round 2).
     """
 
     title: str
@@ -220,6 +223,8 @@ class CalendarEvent:
     location: str = ""
     link: str = ""
     calendar_id: str = "primary"
+    declined: bool = False
+    free: bool = False
 
     @property
     def all_day(self) -> bool:
@@ -1512,11 +1517,15 @@ def _event_from(item: dict, calendar_id: str) -> CalendarEvent | None:
         return None
     start = item.get("start") if isinstance(item.get("start"), dict) else {}
     end = item.get("end") if isinstance(item.get("end"), dict) else {}
+    own = next((entry for entry in item.get("attendees") or ()
+                if isinstance(entry, dict) and entry.get("self") is True), None)
     fields: dict[str, Any] = {
         "title": " ".join(str(item.get("summary") or "").split()) or NO_TITLE,
         "location": " ".join(str(item.get("location") or "").split()),
         "link": str(item.get("htmlLink") or ""),
         "calendar_id": calendar_id,
+        "declined": own is not None and own.get("responseStatus") == "declined",
+        "free": item.get("transparency") == "transparent",
     }
     if start.get("dateTime"):
         begin = _parse_instant(start.get("dateTime"))

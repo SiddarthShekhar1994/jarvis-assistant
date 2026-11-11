@@ -1,7 +1,9 @@
 """Instant answers: everyday questions Jarvis answers himself, typed or spoken, in well under a second and without
-the owner's Claude plan (owner decision 2026-11-10). Pure: no Qt, no network, nothing logged.
+the owner's Claude plan (owner decisions 2026-11-10 and, round 2, 2026-11-11). Pure: no Qt, no network, nothing
+logged.
 
-    understand(text, now=, flags=, address=, hour24=) -> InstantReply | NetAsk | TimerAsk | None
+    understand(text, now=, flags=, address=, hour24=)
+        -> InstantReply | NetAsk | TimerAsk | ReminderAsk | CalendarAsk | TownAsk | None
 
 ``None`` means "not one of these, read for sure": the request goes to Claude exactly as before. Every pattern is a
 FULL match of the request after the usual lead-in ("jarvis,", "hey jarvis", "please", "can you tell me") and a final
@@ -24,17 +26,34 @@ Asked of the app (the app answers them):
   TIMER_MIN_S to TIMER_MAX_S: outside that the answer says so;
 * ``NetAsk``: the weather (Open-Meteo) or a currency conversion (Frankfurter, the European Central Bank's reference
   rates) - only while ``InstantFlags.weather`` / ``currency`` are on; instant_net carries them out. The weather
-  without a town uses ``InstantFlags.town`` ([instant] town), and with neither the request goes to Claude. A
-  currency name is read only where it names one currency ("dollars" are US dollars; "pesos" or "kroner" alone are
-  not read).
+  without a town uses ``InstantFlags.town`` (the town set by voice or typing, else [instant] town), and with neither
+  the request goes to Claude. A currency name is read only where it names one currency ("dollars" are US dollars;
+  "pesos" or "kroner" alone are not read).
+* Round 2. ``ReminderAsk`` (with the timers): a reminder at a clock time today or tomorrow ("remind me at 5 pm to
+  call mum", "remind me to call mum at 5", "set a reminder for 9:30 am", "remind me tomorrow at 9 am to stretch"),
+  what reminders there are, cancel one ("cancel the 5 pm reminder") or all. Further ahead, repeating, or a label
+  that names another day goes to Claude.
+* ``CalendarAsk`` (only while ``InstantFlags.calendar`` is on; instant_calendar answers it from the calendars the app
+  reads): the next meeting ("what's my next meeting", "do I have any more meetings today"), a day ("what's on my
+  calendar tomorrow", "how many meetings do I have today"), free or busy at a time ("am I free at 3", "do I have
+  anything at 4 pm tomorrow").
+* ``TownAsk`` (with the weather): the weather's town by voice or typing ("my town is San Jose, California", "I live
+  in Oslo", "use Paris for the weather"), "what's my town", "forget my town".
+
+Clock times (reminders, "am I free at"): "5 pm", "5:30 p.m.", "17:30", "noon", "half past 3", "quarter to 6". A bare
+hour ("at 3") is the next one within 12 hours, and the answer says which; with "tomorrow" a bare hour is read only
+when one of its two readings falls between 7 AM and 10:59 PM ("4 tomorrow" is 4 PM; "7 tomorrow" goes to Claude).
+"this morning", "this afternoon", "tonight" and "tomorrow evening" pick the half of the day.
 
 Replies: ``InstantReply.text`` is shown (the conversation, the bar), ``speech`` is said, short, with the owner's form
 of address (persona.with_address). Neither is ever logged: a reply's repr names its kind only.
 
 Public API
 ==========
-``understand``; ``InstantReply``, ``NetAsk``, ``TimerAsk``, ``InstantFlags``; ``clean(text)``; ``duration_words(seconds)``;
-``KIND_*``; ``PLACES``; ``HOLIDAYS``; ``CURRENCIES``; ``TIMER_MIN_S``, ``TIMER_MAX_S``.
+``understand``; ``InstantReply``, ``NetAsk``, ``TimerAsk``, ``ReminderAsk``, ``CalendarAsk``, ``TownAsk``,
+``InstantFlags``; ``clean(text)``; ``duration_words(seconds)``; ``spoken_clock(moment)``; ``local_at(day, hour,
+minute, now)``; ``KIND_*``, ``CAL_*``, ``REMINDER_*``, ``TOWN_*``; ``PLACES``; ``HOLIDAYS``; ``CURRENCIES``;
+``TIMER_MIN_S``, ``TIMER_MAX_S``, ``REMINDER_MAX_S``.
 """
 
 from __future__ import annotations
@@ -42,7 +61,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from fractions import Fraction
 from typing import Union
 
@@ -52,18 +71,24 @@ from .text_prep import format_time
 
 KIND_TIME, KIND_DATE, KIND_PLACE_TIME, KIND_DATE_MATHS = "time", "date", "place_time", "date_maths"
 KIND_MATHS, KIND_UNITS, KIND_TIMER, KIND_WEATHER, KIND_CURRENCY = "maths", "units", "timer", "weather", "currency"
+KIND_CALENDAR, KIND_REMINDER, KIND_TOWN = "calendar", "reminder", "town"
 TIMER_MIN_S = 10
 TIMER_MAX_S = 4 * 3600
+REMINDER_MAX_S = 48 * 3600
 TIMER_SET, TIMER_CANCEL, TIMER_LEFT = "set", "cancel", "left"
+REMINDER_SET, REMINDER_LIST, REMINDER_CANCEL = "set", "list", "cancel"
+CAL_NEXT, CAL_MORE, CAL_DAY, CAL_COUNT, CAL_FREE = "next", "more", "day", "count", "free"
+TOWN_SET, TOWN_SAY, TOWN_FORGET = "set", "say", "forget"
 LABEL_MAX = 40
 
 
 @dataclass(frozen=True)
 class InstantReply:
     kind: str
-    text: str = field(repr=False)            # shown: the conversation and the bar
+    text: str = field(repr=False)            # shown: the conversation (and the bar, without ``brief``)
     speech: str = field(repr=False)          # said
     source: str = ""                         # the credit line under a network answer ("Weather data by Open-Meteo.com")
+    brief: str = field(default="", repr=False)   # the bar's one line when ``text`` is long (a calendar's day); shown
 
     def __repr__(self) -> str:
         return f"InstantReply({self.kind})"
@@ -103,14 +128,62 @@ class TimerAsk:
 
 
 @dataclass(frozen=True)
+class ReminderAsk:
+    """A reminder request: REMINDER_SET ``at`` (aware, local; today or tomorrow, at most REMINDER_MAX_S ahead) with
+    ``label`` (the owner's words, never logged or said), REMINDER_LIST, or REMINDER_CANCEL (``every``: all of them;
+    ``clocks``: the one at one of these (hour 0-23, minute) wall-clock times - two for a bare hour - on ``day`` (0
+    today, 1 tomorrow, -1 either); none of those: the only one)."""
+
+    action: str
+    at: datetime | None = None
+    label: str = field(default="", repr=False)
+    every: bool = False
+    clocks: tuple[tuple[int, int], ...] = ()
+    day: int = -1
+
+    def __repr__(self) -> str:
+        return f"ReminderAsk({self.action})"
+
+
+@dataclass(frozen=True)
+class CalendarAsk:
+    """A calendar question the app answers from the calendars it reads (instant_calendar): CAL_NEXT (the next
+    meeting), CAL_MORE (any more today), CAL_DAY and CAL_COUNT (``day``: 0 today, 1 tomorrow), CAL_FREE (free or
+    busy ``at``: aware, local; ``busy``: the question asked "busy" or "anything", so "yes" means busy). ``noun``: the
+    word asked about ("meeting", "event", "appointment", "call")."""
+
+    action: str
+    day: int = 0
+    at: datetime | None = None
+    busy: bool = False
+    noun: str = "meeting"
+
+    def __repr__(self) -> str:
+        return f"CalendarAsk({self.action})"
+
+
+@dataclass(frozen=True)
+class TownAsk:
+    """The weather's town: TOWN_SET ``town`` (as typed; the app looks it up and confirms the place it found),
+    TOWN_SAY or TOWN_FORGET. ``town`` is never logged."""
+
+    action: str
+    town: str = field(default="", repr=False)
+
+    def __repr__(self) -> str:
+        return f"TownAsk({self.action})"
+
+
+@dataclass(frozen=True)
 class InstantFlags:
     weather: bool = False
     currency: bool = False
-    timers: bool = True
+    timers: bool = True              # timers and reminders (the app's timer book)
     town: str = field(default="", repr=False)
+    calendar: bool = False           # the app can read the calendars (CalendarAsk)
 
 
-Answer = Union[InstantReply, NetAsk, TimerAsk, None]
+Answer = Union[InstantReply, NetAsk, TimerAsk, ReminderAsk, CalendarAsk, TownAsk, None]
 
 # --------------------------------------------------------------------------
 # Reading the request
@@ -154,14 +227,16 @@ def understand(text: str, *, now: datetime, flags: InstantFlags = InstantFlags()
         return None
     if now.utcoffset() is None:
         now = now.astimezone()
-    for reader in (_timer, _clock, _place_time, _dates):
+    for reader in (_timer, _reminder, _clock, _place_time, _dates, _calendar):
         found = reader(words, now, flags, address, hour24)
         if found is not None:
-            if isinstance(found, TimerAsk) and found.label:
+            if isinstance(found, (TimerAsk, ReminderAsk)) and found.label:
                 found = replace(found, label=_as_typed(found.label, text))
             return found
     if flags.weather:
-        found = _weather(words, flags)
+        found = _town(words) or _weather(words, flags)
+        if isinstance(found, TownAsk) and found.town:
+            found = replace(found, town=_as_typed(found.town, text))
         if found is not None:
             return found
     if flags.currency:
@@ -761,6 +836,352 @@ def _timer(words: str, _now: datetime, flags: InstantFlags, address: str, _hour2
                                 with_address("Timers run from 10 seconds to 4 hours, {sir}.", address))
         label = " ".join((match.groupdict().get("label") or "").split())[:LABEL_MAX].strip(" .,!?")
         return TimerAsk(TIMER_SET, seconds=seconds, label=label)
+    return None
+
+
+# --------------------------------------------------------------------------
+# Clock times (round 2): reminders and "am I free at"
+# --------------------------------------------------------------------------
+
+_AP = r"a\.?\s?m\.?|p\.?\s?m\.?"
+_CLOCK = (r"(?:(?P<noon>noon|midday|12\s+noon)"
+          r"|(?P<half>half\s+past|(?:a\s+)?quarter\s+past|(?:a\s+)?quarter\s+to)\s+(?P<hh>\d{1,2})(?:\s*(?P<ap2>" + _AP
+          + r"))?"
+          r"|(?P<h>\d{1,2})(?:(?::|\.|\s+)(?P<m>\d{2}))?(?:\s*(?P<ap>" + _AP + r"))?(?:\s+o'?\s?clock)?)")
+_PARTS = r"morning|afternoon|evening|night"
+_PART_OF = {"tonight": "evening"}
+# A bare hour after "tomorrow" is read only when one of its two readings falls in these hours (7 AM to 10:59 PM).
+_WAKING = range(7, 23)
+
+
+@dataclass(frozen=True)
+class _Clock:
+    """A clock time as said: ``hour`` 0-23 with ``explicit`` (am/pm, noon, a 24-hour time), else ``hour`` 1-12
+    and ``minute`` with no half of the day."""
+
+    hour: int
+    minute: int
+    explicit: bool
+
+    def readings(self) -> tuple[tuple[int, int], ...]:
+        """The (hour 0-23, minute) it can mean: one, or a bare hour's two (AM first)."""
+        if self.explicit:
+            return ((self.hour, self.minute),)
+        return ((self.hour % 12, self.minute), (self.hour % 12 + 12, self.minute))
+
+
+def _clock_of(match: re.Match, prefix: str = "") -> _Clock | None:
+    """The _CLOCK match (its groups under ``prefix``) as a _Clock; None when it is no real time ("13 pm", "5:75")."""
+    groups = match.groupdict()
+    get = lambda name: groups.get(prefix + name)  # noqa: E731
+    if get("noon"):
+        return _Clock(12, 0, True)
+    minute = 0
+    if get("half"):
+        hour, said = int(get("hh")), " ".join(get("half").split())
+        minute = 30 if said.startswith("half") else 15 if said.endswith("past") else 45
+        if said.endswith(" to"):
+            hour = hour - 1 if hour > 1 else 12
+        meridiem = get("ap2")
+        digits = get("hh")
+    else:
+        digits = get("h") or ""
+        if not digits:
+            return None
+        hour = int(digits)
+        minute = int(get("m")) if get("m") else 0
+        meridiem = get("ap")
+    if not 0 <= minute <= 59:
+        return None
+    if meridiem:
+        if not 1 <= hour <= 12:
+            return None
+        return _Clock(hour % 12 + (12 if meridiem.startswith("p") else 0), minute, True)
+    if 13 <= hour <= 23 or (get("m") and (hour == 0 or digits.startswith("0"))):
+        return _Clock(hour, minute, True)            # "17:30", "09:00": the 24-hour clock
+    if 1 <= hour <= 12:
+        return _Clock(hour, minute, False)
+    return None
+
+
+def _uses_system_zone(now: datetime) -> bool:
+    """``now`` came from datetime.now().astimezone(): a fixed offset that is this PC's own at that moment."""
+    tz = now.tzinfo
+    if not isinstance(tz, timezone):
+        return False
+    try:
+        return now.replace(tzinfo=None).astimezone().utcoffset() == now.utcoffset()
+    except (OverflowError, OSError, ValueError):
+        return False
+
+
+def local_at(day: date, hour: int, minute: int, now: datetime) -> datetime:
+    """``day`` at hour:minute on the wall clock of ``now``'s zone (aware). With this PC's own zone the system's
+    rules give the offset, so "tomorrow at 9" is right across a change of the clocks; any other zone as it is."""
+    naive = datetime(day.year, day.month, day.day, hour, minute)
+    if now.tzinfo is not None and not isinstance(now.tzinfo, timezone):
+        return naive.replace(tzinfo=now.tzinfo)                  # a real zone (ZoneInfo): its own rules
+    if _uses_system_zone(now):
+        try:
+            return naive.astimezone()
+        except (OverflowError, OSError, ValueError):
+            pass
+    return naive.replace(tzinfo=now.tzinfo or timezone.utc)
+
+
+def wall(moment: datetime, now: datetime) -> datetime:
+    """``moment`` on the wall clock ``now`` is on (see local_at)."""
+    if now.tzinfo is not None and not isinstance(now.tzinfo, timezone):
+        return moment.astimezone(now.tzinfo)
+    if _uses_system_zone(now):
+        try:
+            return moment.astimezone()
+        except (OverflowError, OSError, ValueError):
+            pass
+    return moment.astimezone(now.tzinfo) if now.tzinfo is not None else moment
+
+
+def _with_part(clock: _Clock, part: str) -> _Clock | None:
+    """The clock in ``part`` of the day ("morning": AM, "afternoon": 12-6 PM, "evening": 5-11 PM, "night": 7-11 PM);
+    None when they don't fit ("9 am tonight", "12 at night")."""
+    spans = {"morning": (0, 12), "afternoon": (12, 19), "evening": (17, 24), "night": (19, 24)}
+    first, last = spans[part]
+    for hour, minute in clock.readings():
+        if first <= hour < last and not (part == "morning" and hour == 0):
+            return _Clock(hour, minute, True)
+    return None
+
+
+def _resolve(clock: _Clock, day_word: str, part: str, now: datetime, *, inclusive: bool) -> datetime | None:
+    """When the owner means (aware, local): see the module docs. ``day_word``: "", "today", "tomorrow" or "tonight";
+    ``inclusive``: a time in the minute it is now counts as still to come (a question; a reminder needs a later one).
+    None when it can't be read for sure."""
+    part = part or _PART_OF.get(day_word, "")
+    if part:
+        clock = _with_part(clock, part)
+        if clock is None:
+            return None
+    floor = now.replace(second=0, microsecond=0)
+    ahead = (lambda moment: moment >= floor) if inclusive else (lambda moment: moment > now)  # noqa: E731
+    today = now.date()
+    tomorrow = today + timedelta(days=1)
+    if day_word == "tomorrow":
+        readings = clock.readings()
+        if not clock.explicit:
+            readings = tuple(reading for reading in readings if reading[0] in _WAKING)
+            if len(readings) != 1:
+                return None                              # "tomorrow at 7": 7 AM or 7 PM, not for sure
+        return local_at(tomorrow, *readings[0], now)
+    days = (today,) if day_word in ("today", "tonight") else (today, tomorrow)
+    for day in days:
+        for hour, minute in clock.readings():
+            moment = local_at(day, hour, minute, now)
+            if ahead(moment):
+                return moment
+    return None
+
+
+def spoken_clock(moment: datetime) -> str:
+    """"5 PM", "5:30 PM", "12 PM" - a time as said (the 12-hour clock, no ":00")."""
+    hour = moment.hour % 12 or 12
+    meridiem = "AM" if moment.hour < 12 else "PM"
+    return f"{hour} {meridiem}" if moment.minute == 0 else f"{hour}:{moment.minute:02d} {meridiem}"
+
+
+# --------------------------------------------------------------------------
+# Reminders (round 2)
+# --------------------------------------------------------------------------
+
+_WHEN_AT = ("(?:(?P<d1>today|tomorrow|tonight)\\s+)?(?:(?:this\\s+|in\\s+the\\s+)?(?P<p1>morning|afternoon|evening)\\s+)?"
+            "(?:at|for|by|around)\\s+" + _CLOCK + "(?:\\s+(?P<d2>today|tomorrow|tonight))?"
+            "(?:\\s+(?:this\\s+|in\\s+the\\s+|at\\s+)?(?P<p2>" + _PARTS + "))?")
+_R_LABEL = r"(?P<label>[a-zà-ÿ'\"].{0,60}?)"
+_REMINDER_SET_FORMS = (
+    re.compile(r"remind\s+me\s+" + _WHEN_AT + r"(?:\s+(?:to|about|that)\s+" + _R_LABEL + r")?"),
+    re.compile(r"remind\s+me\s+(?:(?P<d0>today|tomorrow|tonight)\s+)?(?:to|about|that)\s+" + _R_LABEL + r"\s+"
+               + _WHEN_AT),
+    re.compile(r"(?:(?:set|create|add|make|schedule|put\s+in)\s+(?:me\s+)?)?(?:a\s+|an\s+)?reminder\s+" + _WHEN_AT
+               + r"(?:\s+(?:to|about|that|for)\s+" + _R_LABEL + r")?"),
+    re.compile(r"(?:(?:set|create|add|make|schedule|put\s+in)\s+(?:me\s+)?)?(?:a\s+|an\s+)?reminder\s+(?:to|about|for)\s+"
+               + _R_LABEL + r"\s+" + _WHEN_AT),
+)
+# A label that names another day, a repeat or another time ("call mum on friday", "stretch every day"): Claude's.
+_FAR_LABEL = re.compile(
+    r"\b(?:(?:mon|tues|wednes|thurs|fri|satur|sun)days?|weekends?|weeks?|months?|years?|every|each|daily|weekly|"
+    r"monthly|yearly|annually|next|tomorrow|tonight|today|morning|afternoon|evening|night|noon|midnight|o'?clock|"
+    r"january|february|march|april|june|july|august|september|october|november|december)\b"
+    r"|\b\d{1,2}(?:st|nd|rd|th)\b|\b(?:a\.?m|p\.?m)\b|\b(?:at|on|by|in|until|till|from)\s+\d|\bmay\s+\d|\d\s+may\b")
+_REMINDER_WORD = r"reminders?"
+_REMINDER_LIST_RE = re.compile(
+    r"(?:what|which)\s+reminders\s+(?:do\s+i\s+have|have\s+i\s+got|are\s+(?:there|set|on))(?:\s+(?:set|today|left))?"
+    r"|(?:do\s+i\s+have|have\s+i\s+got|are\s+there|is\s+there)\s+(?:any\s+|a\s+)?reminders?(?:\s+(?:set|today|left|on))?"
+    r"|(?:(?:what\s+are|show(?:\s+me)?|list|check|read(?:\s+me)?)\s+)?(?:all\s+)?(?:my|the)\s+reminders"
+    r"|(?:what(?:'s|\s+is)|when(?:'s|\s+is)|whats|whens)\s+my\s+(?:next\s+)?reminder|(?:my\s+)?reminders")
+_REMINDER_CANCEL_RE = re.compile(
+    r"(?:cancel|delete|remove|clear|drop|forget|turn\s+off|dismiss)\s+(?:(?P<every>all)\s+(?:of\s+)?)?"
+    r"(?:the\s+|my\s+|that\s+|this\s+|those\s+|these\s+)?(?:(?P<pre>" + _named(_CLOCK, "a_") + r")\s+)?" + _REMINDER_WORD
+    + r"(?:\s+(?:at|for)\s+(?P<post>" + _named(_CLOCK, "b_") + r"))?(?:\s+(?P<day>today|tomorrow))?")
+
+
+def _reminder(words: str, now: datetime, flags: InstantFlags, address: str, hour24: bool) -> Answer:
+    if not flags.timers or "remind" not in words:
+        return None
+    match = _REMINDER_CANCEL_RE.fullmatch(words)
+    if match:
+        prefix = "a_" if match.group("pre") else "b_" if match.group("post") else ""
+        clock = _clock_of(match, prefix) if prefix else None
+        if prefix and clock is None:
+            return None
+        day = {"today": 0, "tomorrow": 1}.get(match.group("day") or "", -1)
+        return ReminderAsk(REMINDER_CANCEL, every=bool(match.group("every")),
+                           clocks=clock.readings() if clock is not None else (), day=day)
+    if _REMINDER_LIST_RE.fullmatch(words):
+        return ReminderAsk(REMINDER_LIST)
+    for pattern in _REMINDER_SET_FORMS:
+        match = pattern.fullmatch(words)
+        if not match:
+            continue
+        groups = match.groupdict()
+        clock = _clock_of(match)
+        days = {groups.get(name) for name in ("d0", "d1", "d2")} - {None}
+        parts = {groups.get(name) for name in ("p1", "p2")} - {None}
+        if clock is None or len(days) > 1 or len(parts) > 1:
+            return None                                  # "today at 5 tomorrow": not for sure
+        label = " ".join((groups.get("label") or "").split()).strip(" .,!?\"'")
+        if label and _FAR_LABEL.search(label):
+            return None                                  # another day, a repeat or another time: Claude's
+        day_word = next(iter(days), "")
+        part = next(iter(parts), "")
+        if day_word == "tonight" and part in ("morning", "afternoon"):
+            return None
+        at = _resolve(clock, day_word, part, now, inclusive=False)
+        if at is None:
+            if day_word in ("today", "tonight") and clock.explicit:
+                said = local_at(now.date(), clock.hour, clock.minute, now)
+                return InstantReply(KIND_REMINDER, f"It's already past {format_time(said, hour24=hour24)} today; "
+                                    f"nothing was set.", with_address(f"That time has passed today, {{sir}}.",
+                                                                     address))
+            return None
+        if (at - now).total_seconds() > REMINDER_MAX_S:
+            return None
+        return ReminderAsk(REMINDER_SET, at=at, label=label[:LABEL_MAX].strip())
+    return None
+
+
+# --------------------------------------------------------------------------
+# The calendar (round 2)
+# --------------------------------------------------------------------------
+
+_CAL_NOUN = r"(?P<noun>meetings?|events?|appointments?|calls?)"
+_CAL_SPOT = r"(?:calendar|schedule|agenda|diary)"
+_CAL_DAY = r"(?P<day>today|tomorrow)"
+_WHAT = r"(?:what(?:'s|\s+is)|whats)"
+_CAL_FORMS = (
+    (CAL_NEXT, re.compile(r"(?:" + _WHAT + r"|when(?:'s|\s+is)|whens|what\s+time\s+is)\s+my\s+next\s+" + _CAL_NOUN
+                          + r"(?:\s+today)?")),
+    (CAL_NEXT, re.compile(_WHAT + r"\s+next\s+(?:on|in)\s+my\s+" + _CAL_SPOT + r"(?:\s+today)?")),
+    (CAL_NEXT, re.compile(r"when\s+(?:do\s+i\s+have|is)\s+my\s+next\s+" + _CAL_NOUN)),
+    (CAL_NEXT, re.compile(r"(?:my\s+)?next\s+" + _CAL_NOUN)),
+    (CAL_MORE, re.compile(r"(?:do\s+i\s+have|have\s+i\s+got|are\s+there|is\s+there)\s+(?:any\s+)?(?:more|other)\s+"
+                          + _CAL_NOUN + r"(?:\s+left)?(?:\s+today)?")),
+    (CAL_MORE, re.compile(r"any\s+more\s+" + _CAL_NOUN + r"(?:\s+left)?(?:\s+today)?")),
+    (CAL_DAY, re.compile(_WHAT + r"\s+on\s+my\s+" + _CAL_SPOT + r"(?:\s+(?:for\s+)?" + _CAL_DAY + r")?")),
+    (CAL_DAY, re.compile(_WHAT + r"\s+on\s+" + _CAL_DAY + r"'?s\s+" + _CAL_SPOT)),
+    (CAL_DAY, re.compile(_WHAT + r"\s+(?:in\s+)?my\s+" + _CAL_SPOT + r"\s+(?:look\s+like\s+)?(?:for\s+)?" + _CAL_DAY)),
+    (CAL_DAY, re.compile(r"what\s+(?:do\s+i\s+have|have\s+i\s+got)\s+(?:on\s+)?(?:(?:for\s+)?" + _CAL_DAY + r"|on\s+my\s+"
+                         + _CAL_SPOT + r"(?:\s+(?:for\s+)?(?P<day2>today|tomorrow))?)")),
+    (CAL_DAY, re.compile(r"what\s+does\s+my\s+(?:day|" + _CAL_SPOT + r")\s+look\s+like(?:\s+" + _CAL_DAY + r")?")),
+    (CAL_DAY, re.compile(r"what\s+does\s+" + _CAL_DAY + r"\s+look\s+like")),
+    (CAL_DAY, re.compile(r"how\s+does\s+my\s+(?:day|" + _CAL_SPOT + r")\s+look(?:\s+" + _CAL_DAY + r")?")),
+    (CAL_DAY, re.compile(r"what\s+" + _CAL_NOUN + r"\s+(?:do\s+i\s+have|have\s+i\s+got|are\s+on\s+my\s+" + _CAL_SPOT
+                         + r")(?:\s+" + _CAL_DAY + r")?")),
+    (CAL_DAY, re.compile(r"(?:do\s+i\s+have|have\s+i\s+got)\s+(?:anything|any\s+" + _CAL_NOUN + r")\s+(?:on\s+)?"
+                         + _CAL_DAY)),
+    (CAL_DAY, re.compile(r"(?:show|read|tell)\s+(?:me\s+)?my\s+" + _CAL_SPOT + r"(?:\s+(?:for\s+)?" + _CAL_DAY + r")?")),
+    (CAL_DAY, re.compile(r"(?:my\s+)?" + _CAL_SPOT + r"\s+(?:for\s+)?" + _CAL_DAY)),
+    (CAL_COUNT, re.compile(r"how\s+many\s+" + _CAL_NOUN + r"\s+(?:do\s+i\s+have|have\s+i\s+got|are\s+there|are\s+on\s+my\s+"
+                           + _CAL_SPOT + r")(?:\s+(?:on\s+)?" + _CAL_DAY + r")?")),
+    (CAL_COUNT, re.compile(r"how\s+many\s+" + _CAL_NOUN + r"\s+(?:on\s+)?" + _CAL_DAY)),
+    (CAL_COUNT, re.compile(r"how\s+busy\s+(?:am\s+i|is\s+my\s+(?:day|" + _CAL_SPOT + r"))(?:\s+" + _CAL_DAY + r")?")),
+)
+_CAL_ONE = r"(?:meeting|event|appointment|call)"
+_CAL_FREE_RE = re.compile(
+    r"(?:(?P<free>am\s+i\s+(?:free|available)|is\s+my\s+" + _CAL_SPOT + r"\s+(?:free|clear|open))"
+    r"|(?P<busy>am\s+i\s+(?:busy|booked)|(?:do\s+i\s+have|have\s+i\s+got|is\s+there)\s+(?:anything|something|an?\s+"
+    + _CAL_ONE + r"|any\s+" + _CAL_NOUN + r")(?:\s+on)?(?:\s+my\s+" + _CAL_SPOT + r")?))"
+    r"\s+(?:(?P<d1>today|tomorrow|tonight)\s+)?(?:(?:this\s+|in\s+the\s+)?(?P<p1>morning|afternoon|evening)\s+)?"
+    r"(?:at|around|for)\s+" + _CLOCK + r"(?:\s+(?P<d2>today|tomorrow|tonight))?"
+    r"(?:\s+(?:this\s+|in\s+the\s+|at\s+)?(?P<p2>" + _PARTS + r"))?")
+
+
+def _noun(found: str | None) -> str:
+    return (found or "meeting").rstrip("s") or "meeting"
+
+
+def _calendar(words: str, now: datetime, flags: InstantFlags, _address: str, _hour24: bool) -> CalendarAsk | None:
+    if not flags.calendar:
+        return None
+    match = _CAL_FREE_RE.fullmatch(words)
+    if match:
+        groups = match.groupdict()
+        clock = _clock_of(match)
+        days = {groups.get(name) for name in ("d1", "d2")} - {None}
+        parts = {groups.get(name) for name in ("p1", "p2")} - {None}
+        if clock is None or len(days) > 1 or len(parts) > 1:
+            return None
+        day_word, part = next(iter(days), ""), next(iter(parts), "")
+        if day_word == "tonight" and part in ("morning", "afternoon"):
+            return None
+        at = _resolve(clock, day_word, part, now, inclusive=True)
+        if at is None:
+            return None
+        return CalendarAsk(CAL_FREE, day=(at.date() - now.date()).days, at=at, busy=bool(groups.get("busy")),
+                           noun=_noun(groups.get("noun")))
+    for action, pattern in _CAL_FORMS:
+        match = pattern.fullmatch(words)
+        if match:
+            groups = match.groupdict()
+            day = 1 if "tomorrow" in (groups.get("day"), groups.get("day2")) else 0
+            noun = _noun(groups.get("noun")) if action != CAL_DAY else "event"
+            if action == CAL_NEXT and "next on" in words:
+                noun = "event"
+            return CalendarAsk(action, day=day, noun=noun)
+    return None
+
+
+# --------------------------------------------------------------------------
+# The weather's town (round 2)
+# --------------------------------------------------------------------------
+
+_TOWN_NAME = r"(?P<town>[a-zà-ÿ][a-zà-ÿ .'\-]{0,38}[a-zà-ÿ.](?:,\s*[a-zà-ÿ][a-zà-ÿ .'\-]{0,30}[a-zà-ÿ.])?)"
+_TOWN_WORD = r"(?:weather\s+)?(?:town|city|location|home\s+town|hometown)"
+_TOWN_SET_FORMS = (
+    re.compile(r"my\s+(?:home\s+)?" + _TOWN_WORD + r"\s+is\s+(?:now\s+)?" + _TOWN_NAME),
+    re.compile(r"i\s+(?:live|am\s+based|'m\s+based)\s+in\s+" + _TOWN_NAME),
+    re.compile(r"i(?:\s+have|'ve)?\s+moved\s+to\s+" + _TOWN_NAME),
+    re.compile(r"(?:set|change|make|update|switch)\s+my\s+" + _TOWN_WORD + r"\s+to\s+" + _TOWN_NAME),
+    re.compile(r"(?:use|make)\s+" + _TOWN_NAME + r"\s+(?:for\s+(?:the\s+|my\s+)?weather|my\s+" + _TOWN_WORD + r")"),
+)
+_TOWN_SAY_RE = re.compile(
+    _WHAT + r"\s+my\s+" + _TOWN_WORD + r"|where\s+do\s+i\s+live|(?:what|which)\s+(?:town|city)\s+(?:do\s+you\s+(?:have|use)"
+    r"(?:\s+for\s+(?:me|the\s+weather))?|is\s+(?:the|my)\s+weather\s+for|am\s+i\s+in\s+for\s+the\s+weather)")
+_TOWN_FORGET_RE = re.compile(r"(?:forget|clear|remove|delete|reset|unset|drop)\s+my\s+" + _TOWN_WORD)
+_NOT_A_TOWN = re.compile(r"(?:a|an|my|your|his|her|our|their|this|that|here|there|it)\b")
+
+
+def _town(words: str) -> TownAsk | None:
+    if _TOWN_FORGET_RE.fullmatch(words):
+        return TownAsk(TOWN_FORGET)
+    if _TOWN_SAY_RE.fullmatch(words):
+        return TownAsk(TOWN_SAY)
+    for pattern in _TOWN_SET_FORMS:
+        match = pattern.fullmatch(words)
+        if not match:
+            continue
+        town = " ".join(match.group("town").split()).strip(" .")
+        if not town or town in _NOT_TOWNS or _TIME_WORDS.search(town) or _NOT_A_TOWN.match(town):
+            return None
+        return TownAsk(TOWN_SET, town=town)
     return None
 
 
