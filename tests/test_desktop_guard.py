@@ -37,7 +37,7 @@ _HELPER_CONSTANTS = {"VK_TAB", "VK_RETURN", "VK_ESCAPE", "VK_DELETE", "VK_V", "M
                      "URL_SCHEME", "URL_ADDRESS", "MOVEFILE_REPLACE_EXISTING", "MOVEFILE_COPY_ALLOWED",
                      "MOVEFILE_DELAY_UNTIL_REBOOT", "FOF_NOCONFIRMATION", "FOF_ALLOWUNDO", "FOF_WANTNUKEWARNING",
                      "FOFX_RECYCLEONDELETE", "COPY_FILE_FAIL_IF_EXISTS", "SECURITY_MANDATORY_MEDIUM_RID",
-                     "NEVER_CONSTANTS"}
+                     "NEVER_CONSTANTS", "SECRET_MARK"}
 
 
 class NeverListTests(unittest.TestCase):
@@ -567,6 +567,7 @@ _REAL_CALLS = {
     "exists": (("C:\\Users\\Owner\\Downloads\\a.pdf",), {}),
     "drive_type": (("C:\\",), {}),
     "file_id": (("C:\\Users\\Owner\\Downloads\\a.pdf",), {}),
+    "read_head": (("C:\\Users\\Owner\\Downloads\\a.txt",), {"max_bytes": 10}),
     "list_folder": (("C:\\Users\\Owner\\Downloads",), {}),
     "search_index": (("SELECT TOP 1 System.ItemPathDisplay FROM SystemIndex",), {"timeout_s": 1.0, "max_rows": 1}),
     "recent_items": ((), {"limit": 5}),
@@ -664,6 +665,9 @@ class RealBackendMethodTests(unittest.TestCase):
 
     def test_file_id_raises_under_the_guard(self) -> None:
         self.call_refused("file_id")
+
+    def test_read_head_raises_under_the_guard(self) -> None:
+        self.call_refused("read_head")
 
     def test_list_folder_raises_under_the_guard(self) -> None:
         self.call_refused("list_folder")

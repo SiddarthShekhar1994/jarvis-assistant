@@ -29,13 +29,16 @@
                              validated plan stays the source of truth
     run_planner(...)         run_cli with the planner's checks and read_result (web research uses
                              run_cli with its own: ask.research.run_research); ``on_words`` feeds a SayWatch
+    task_failure(text, status=)   a task's run's own reading of a failure (agent.runner): the plan's own words, a
+                             model's own cap or a limit with its reset named are its limit, and a server limiting
+                             requests is server_busy, but never over another limit's words; Ask's is classify_text
 
 Failure kinds (AskFailure.kind): not_signed_in, limit, max_turns, schema_retries, timeout,
-cancelled, guard, garbled, cli_unsupported, error, research_cap. Their messages are Jarvis's own words (the only
-model or CLI text in one is a sanitized usage-limit reset time) and are safe to show and log; the
-stream itself (the plan, the result text, stderr) is never logged (RunResult.reply, kept only with
-``capture`` for the LIVE view, never is either). ``total_cost_usd`` is a
-client-side estimate, not a charge on a subscription: it is never read.
+cancelled, guard, garbled, cli_unsupported, error, research_cap (and server_busy, from task_failure alone). Their
+messages are Jarvis's own words (the only model or CLI text in one is a sanitized usage-limit reset time) and are safe
+to show and log; the stream itself (the plan, the result text, stderr) is never logged (RunResult.reply, kept only with
+``capture`` for the LIVE view, never is either). ``total_cost_usd`` is a client-side estimate, not a charge on a
+subscription: it is never read.
 """
 
 from __future__ import annotations
@@ -79,6 +82,7 @@ LINE_CAP = 12000
 QUERY_CAP = 200
 WHY_CAP = 200
 WEB_QUESTION_CAP = 200
+AGENT_GOAL_CAP = 200
 REMEMBER_CAP = 160                 # one suggested note (cli.REMEMBER_PROPERTY)
 REMEMBER_ITEMS = 1
 ACCOUNT_CAP = 24
@@ -123,6 +127,44 @@ _UNKNOWN_OPTION_RE = re.compile(r"unknown option|unknown command|error: option .
 _RESET_RE = re.compile(r"resets?\s+(?:at\s+)?([0-9]{1,2}(?::[0-9]{2})?\s*(?:[ap]\.?m\.?)?"
                        r"(?:\s*\([A-Za-z_/+\-]{1,40}\))?)", re.IGNORECASE)
 _RESET_EPOCH_RE = re.compile(r"\|\s*(\d{10})\b")
+# A day or a date anywhere in a limit's words: "resets 5am Mon" is not the next 5am, and a pause must never be shorter than
+# the real one. So too a day counted ("in 3 days"), a next or a week, and a zone not in brackets ("00:00 UTC"), which the
+# time is not read in. Every branch opens with a \b, the zone's too (before its lookbehind), so a long text is scanned
+# at the pace of the others.
+_RESET_DAY_RE = re.compile(r"\b(?:mon|tue|tues|wed|weds|thu|thur|thurs|fri|sat|sun"
+                           r"|(?:mon|tues|wednes|thurs|fri|satur|sun)day"
+                           r"|today|tonight|tomorrow|jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february"
+                           r"|march|april|june|july|august|september|october|november|december)\b"
+                           r"|\b\d{1,2}(?:st|nd|rd|th)\b|\b\d{4}-\d{1,2}|\b\d{1,2}[/.]\d{1,2}\b"
+                           r"|\bin\s+\d+\s+(?:days?|weeks?)\b|\bnext\b|\bweeks?\b|\b(?<![(/])(?:utc|gmt)\b",
+                           re.IGNORECASE)
+# A model's name with its version ("Opus 4.5 limit reached"): no date, so it is set aside before a day is looked for.
+_MODEL_VERSION_RE = re.compile(r"\b(?:opus|sonnet|haiku|fable)[\s-]{1,3}\d{1,2}(?:\.\d{1,2}){0,2}\b", re.IGNORECASE)
+# What may follow a reset time (and its bracketed zone) for a clock to read it: the end of its clause, nothing else.
+_RESET_END_RE = re.compile(r"\s*(?:$|[.;,:!?|)\]\u00b7\u2022\u2013\u2014\r\n]|-(?:\s|$))")
+# A task's own reading of a failed result (task_failure; Ask's classify_text stays as it is). The plan's limit: its own
+# words (a usage, session, weekly or 5-hour limit, "hit your limit", "out of usage"), a model's own cap, which is the
+# plan's too, for a task runs on one model ("You've hit your Opus limit", "Opus limit reached": any one word in "hit
+# your ... limit" but the names of Claude Code's other limits), or any other limit with its reset named ("Daily limit
+# reached, resets 6pm", "resets in 8m"); never "not your usage limit". A model's name takes a version of three numbers
+# at most ("Opus 4.5"), so a long run of them is read in a few steps. The server's own words ("limiting requests", a
+# rate limit, the acceleration limit) are not a limit of the plan's, and they are taken out before a text is asked
+# whether it names another.
+_PLAN_LIMIT_RE = re.compile(r"\b(?:usage|session|weekly|5-hour)(?:\s+usage)?\s+limits?\b"
+                            r"|\b(?:hit|reached) your (?:(?!(?:context|budget|spend|spending|rate|subagent|nesting"
+                            r"|export|trigger|watch|device|size|recursion|credit)\b)[\w.-]{1,30} )?limits?\b"
+                            r"|\b(?:opus|sonnet|haiku|fable)(?:[\s-]{1,3}\d{1,2}(?:\.\d{1,2}){0,2})?\s{1,3}limits?\b"
+                            r"|\bout of (?:extra )?usage\b", re.IGNORECASE)
+_NOT_THE_PLAN_RE = re.compile(r"\bnot (?:your|the) (?:usage )?limits?\b", re.IGNORECASE)
+# The server's own words: "limiting requests", a rate limit (rate_limit_error; not a "separate limit": its "rate" opens
+# a word, read past the "r" so that a long text is scanned as fast as before), the API's acceleration limit.
+_SERVER_LIMIT_RE = re.compile(r"limiting requests|r(?<!\wr)ate.?limits?|acceleration limits?", re.IGNORECASE)
+_A_LIMIT_RE = re.compile(r"\blimits?\b", re.IGNORECASE)          # a limit named, once the server's own words are out
+_RESETS_RE = re.compile(r"\bresets\b|\breset (?:at|in|on)\b", re.IGNORECASE)
+SERVER_BUSY = "server_busy"   # task_failure's kind: Claude's server is limiting requests, and it is not the plan's limit
+SERVER_BUSY_MESSAGE = "Claude's server is limiting requests; it is not your plan's usage limit"
+_RESET_PARTS_RE = re.compile(r"([0-9]{1,2})(?::([0-9]{2}))?\s*(?:([ap])\.?m\.?)?(?:\s*\(([A-Za-z_/+\-]{1,40})\))?",
+                             re.IGNORECASE)
 _FENCE_RE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
 
 
@@ -162,6 +204,15 @@ class WebRequest:
 
 
 @dataclass(frozen=True)
+class AgentRequest:
+    """The first run's request to work through a task (planner text: shown to the owner, never logged; Jarvis starts the
+    task with the owner's own words, never these)."""
+
+    goal: str
+    why: str
+
+
+@dataclass(frozen=True)
 class Plan:
     say: str
     question: str
@@ -170,6 +221,7 @@ class Plan:
     via_fallback: bool = False   # read from the result text (StructuredOutput was not available)
     web: WebRequest | None = None   # web_research (only when the run was allowed to ask for it)
     remember: tuple[str, ...] = ()  # a suggested note (only when the run was allowed to suggest one)
+    agent: AgentRequest | None = None   # agent_task (only when the run was allowed to ask for it)
 
 
 @dataclass(frozen=True)
@@ -388,6 +440,21 @@ def _web_request(wanted: Any) -> WebRequest | None:
     return WebRequest(question, _one_line(why)) if question else None
 
 
+NOT_A_TASK = AgentRequest("", "")   # agent_task that does not fit the schema: the answer is garbled
+
+
+def agent_request(wanted: Any) -> AgentRequest | None:
+    """An agent_task value as the schema allows it; None for an empty goal (no task asked: the rest of the answer
+    stands, as with an empty web_research); NOT_A_TASK when it does not fit (the whole answer is then garbled)."""
+    if not isinstance(wanted, dict):
+        return NOT_A_TASK
+    goal, why = wanted.get("goal"), wanted.get("why", "")
+    if not isinstance(goal, str) or not isinstance(why, str) or len(goal) > AGENT_GOAL_CAP or len(why) > WHY_CAP:
+        return NOT_A_TASK
+    goal = _one_line(goal)
+    return AgentRequest(goal, _one_line(why)) if goal else None
+
+
 def _remember(wanted: Any) -> tuple[str, ...] | None:
     """A ``remember`` value as the schema allows it (a list of at most one string of at most 160
     characters; empty ones dropped); None when it does not fit (the whole answer is then garbled)."""
@@ -399,9 +466,9 @@ def _remember(wanted: Any) -> tuple[str, ...] | None:
 
 
 def _plan_from(data: Any, *, allow_search: bool, allow_web: bool = False, fallback: bool = False,
-               allow_remember: bool = False) -> Plan | None:
-    """structured_output (or the fallback's JSON) shape-checked locally; None when it does not fit.
-    ``gmail_search`` / ``web_research`` / ``remember`` are read only when allowed (ignored otherwise)."""
+               allow_remember: bool = False, allow_agent: bool = False) -> Plan | None:
+    """structured_output (or the fallback's JSON) shape-checked locally; None when it does not fit. ``gmail_search`` /
+    ``web_research`` / ``remember`` / ``agent_task`` are read only when allowed (ignored otherwise)."""
     if not isinstance(data, dict):
         return None
     say, question, lines = data.get("say", ""), data.get("question", ""), data.get("lines")
@@ -434,12 +501,17 @@ def _plan_from(data: Any, *, allow_search: bool, allow_web: bool = False, fallba
         if found is None:
             return None
         remember = found
+    agent = None
+    if allow_agent and data.get("agent_task") is not None:
+        agent = agent_request(data.get("agent_task"))
+        if agent is NOT_A_TASK:
+            return None
     kept = tuple(line.strip() for line in lines if line.strip())
-    return Plan(say, question, kept, search, fallback, web, remember)
+    return Plan(say, question, kept, search, fallback, web, remember, agent)
 
 
 def _fallback_plan(text: str, *, allow_search: bool, allow_web: bool = False,
-                   allow_remember: bool = False) -> Plan | None:
+                   allow_remember: bool = False, allow_agent: bool = False) -> Plan | None:
     """Only when init showed no StructuredOutput: the result text as JSON (code fences dropped),
     else its lines that start with a known kind."""
     text = text or ""
@@ -449,13 +521,18 @@ def _fallback_plan(text: str, *, allow_search: bool, allow_web: bool = False,
     except ValueError:
         data = None
     plan = _plan_from(data, allow_search=allow_search, allow_web=allow_web, fallback=True,
-                      allow_remember=allow_remember) if data is not None else None
+                      allow_remember=allow_remember, allow_agent=allow_agent) if data is not None else None
     if plan is not None:
         return plan
     found = [line.strip() for line in text.splitlines() if line.strip().startswith(KIND_PREFIXES)]
     if not found:
         return None
     return Plan("", "", tuple(found[:LINES_CAP]), None, True)
+
+
+def limit_reset_words(text: str, *, now: Callable[[], datetime] = lambda: datetime.now().astimezone()) -> str:
+    """"3pm (Europe/London)" from a usage-limit text, sanitized ("" when it names no time)."""
+    return _reset_words(text, now)
 
 
 def _reset_words(text: str, now: Callable[[], datetime]) -> str:
@@ -475,6 +552,57 @@ def _reset_words(text: str, now: Callable[[], datetime]) -> str:
     return ""
 
 
+def limit_reset_time(text: str, *, now: Callable[[], datetime] = lambda: datetime.now().astimezone()) -> datetime | None:
+    """When a usage-limit text says the limit resets, as a moment: "resets 3pm (Europe/London)" the next 3pm there (in
+    this PC's own zone when Python has no such zone: no tzdata here), "resets 15:30" the next 15:30, "...|1762300000"
+    that moment. None when it names no time a clock can read: "resets 3" says neither morning nor afternoon, and with a
+    day or a date beside the time ("resets 5am Mon", "in 3 days", "next week"; a model's version, "Opus 4.5", is none),
+    a zone outside brackets ("00:00 UTC") or anything else after it in its clause, the next such time may be far too
+    soon: a pause must never be shorter than the real one, so the task waits as with no time given. Only a task's run
+    reads this (agent.runner)."""
+    match = _RESET_RE.search(text or "")
+    if match is None:
+        epoch = _RESET_EPOCH_RE.search(text or "")
+        return _epoch_time(int(epoch.group(1)), now) if epoch else None
+    parts = _RESET_PARTS_RE.fullmatch(" ".join(match.group(1).split()))
+    if parts is None or _names_a_day(text) or not _RESET_END_RE.match(text, match.end()):
+        return None
+    hour, minute = int(parts.group(1)), int(parts.group(2) or 0)
+    meridiem = (parts.group(3) or "").casefold()
+    if meridiem:
+        if not 1 <= hour <= 12:
+            return None
+        hour = hour % 12 + (12 if meridiem == "p" else 0)
+    elif parts.group(2) is None or hour > 23:
+        return None
+    if minute > 59:
+        return None
+    current = now()
+    zone = _named_zone(parts.group(4))
+    local = current.astimezone(zone) if zone is not None else current
+    moment = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    return moment if moment > local else moment + timedelta(days=1)
+
+
+def _names_a_day(text: str) -> bool:
+    """A limit's ``text`` names a day or a date (_RESET_DAY_RE), a model's version aside ("Opus 4.5" is no date)."""
+    if _RESET_DAY_RE.search(text) is None:
+        return False
+    return _MODEL_VERSION_RE.search(text) is None or _RESET_DAY_RE.search(_MODEL_VERSION_RE.sub(" ", text)) is not None
+
+
+def _named_zone(name: str | None) -> Any:
+    """The zone a limit text names, or None: not named, not known, or no time zone database here."""
+    if not name:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+
+        return ZoneInfo(name)
+    except (ImportError, KeyError, OSError, ValueError):       # ZoneInfoNotFoundError is a KeyError
+        return None
+
+
 def classify_text(text: str, *, now: Callable[[], datetime] = lambda: datetime.now().astimezone(),
                   status: Any = None) -> AskFailure | None:
     """A usage limit or a sign-in problem in a result / stderr text (or an api_error_status)."""
@@ -485,6 +613,31 @@ def classify_text(text: str, *, now: Callable[[], datetime] = lambda: datetime.n
         message = (f"Your Claude plan's usage limit is reached (it resets {reset}); {NOTHING}" if reset
                    else MESSAGES[LIMIT])
         return failure(LIMIT, "limit", message)
+    return None
+
+
+def task_failure(text: str, *, now: Callable[[], datetime] = lambda: datetime.now().astimezone(),
+                 status: Any = None) -> AskFailure | None:
+    """classify_text as a task's run reads a failed result or the stderr of a process that ended (agent.runner; Ask's
+    own reading stays as it is). A sign-in problem as there. The plan's limit (LIMIT): the plan's own words, a model's
+    own cap ("You've hit your Opus limit", "Opus limit reached") or any other limit with its reset named ("Daily limit
+    reached, resets 6pm", "resets in 8m"), never "not your usage limit" (see _PLAN_LIMIT_RE). SERVER_BUSY: the
+    server's own words ("limiting requests", a rate limit, the acceleration limit) or a 429, and only when the text
+    names no other limit, so "it isn't your plan's limit" is never said over a limit's words. Another limit with no
+    reset named (a context's, a budget's, a spend cap's), or a bare "limit reached", is neither: None, as for anything
+    else."""
+    if status in (401, 403) or (text and _AUTH_RE.search(text)):
+        return failure(NOT_SIGNED_IN, "auth")
+    plain = _NOT_THE_PLAN_RE.sub(" ", text or "")
+    other = _SERVER_LIMIT_RE.sub(" ", plain)            # what is left once the server's own words are out
+    named = _A_LIMIT_RE.search(other) is not None
+    if _PLAN_LIMIT_RE.search(other) or (named and _RESETS_RE.search(other)):
+        reset = _reset_words(text or "", now)
+        message = (f"Your Claude plan's usage limit is reached (it resets {reset}); {NOTHING}" if reset
+                   else MESSAGES[LIMIT])
+        return failure(LIMIT, "limit", message)
+    if not named and (status == 429 or _SERVER_LIMIT_RE.search(plain)):
+        return failure(SERVER_BUSY, SERVER_BUSY, SERVER_BUSY_MESSAGE)
     return None
 
 
@@ -508,9 +661,10 @@ def result_failure(event: Mapping[str, Any], init: InitSummary | None, *,
 
 def read_result(event: Mapping[str, Any], init: InitSummary | None, *, allow_search: bool, allow_web: bool = False,
                 now: Callable[[], datetime] = lambda: datetime.now().astimezone(),
-                allow_remember: bool = False) -> Plan | AskFailure:
+                allow_remember: bool = False, allow_agent: bool = False) -> Plan | AskFailure:
     """The result event -> Plan or AskFailure. A plan needs a checked init first. ``remember`` is
-    read only with ``allow_remember`` (a run that was offered it in its schema)."""
+    read only with ``allow_remember``, ``agent_task`` only with ``allow_agent`` (a run that was offered it in its
+    schema)."""
     found = result_failure(event, init, now=now)
     if found is not None:
         return found
@@ -518,11 +672,13 @@ def read_result(event: Mapping[str, Any], init: InitSummary | None, *, allow_sea
     text = event.get("result") if isinstance(event.get("result"), str) else ""
     data = event.get("structured_output")
     if data is not None:
-        plan = _plan_from(data, allow_search=allow_search, allow_web=allow_web, allow_remember=allow_remember)
+        plan = _plan_from(data, allow_search=allow_search, allow_web=allow_web, allow_remember=allow_remember,
+                          allow_agent=allow_agent)
         return plan if plan is not None else failure(GARBLED, "shape")
     if init.structured_tool:
         return failure(GARBLED, "no_structured_output")
-    plan = _fallback_plan(text, allow_search=allow_search, allow_web=allow_web, allow_remember=allow_remember)
+    plan = _fallback_plan(text, allow_search=allow_search, allow_web=allow_web, allow_remember=allow_remember,
+                          allow_agent=allow_agent)
     return plan if plan is not None else failure(GARBLED, "fallback")
 
 
@@ -817,16 +973,18 @@ def run_planner(runner: Runner, argv: Sequence[str], prompt: str, *, env: Mappin
                 now: Callable[[], datetime] = lambda: datetime.now().astimezone(),
                 progress: Progress | None = None, capture: bool = False, allow_web: bool = False,
                 allow_remember: bool = False, on_words: Callable[[str, bool], None] | None = None,
-                process: Process | None = None, after_start: Callable[[], None] | None = None) -> RunResult:
+                process: Process | None = None, after_start: Callable[[], None] | None = None,
+                allow_agent: bool = False) -> RunResult:
     """One planner run (run_cli with check_init, check_event and read_result). ``allow_search`` /
-    ``allow_web`` / ``allow_remember``: the run may ask to read mail / for web research / suggest a
-    note to remember. ``on_words``: the say's words as they are written (SayWatch; the result's first_words_s
-    and say_complete_s say when, from the send). ``process`` / ``after_start``: run_cli's."""
+    ``allow_web`` / ``allow_remember`` / ``allow_agent``: the run may ask to read mail / for web research / suggest a
+    note to remember / work through a task. ``on_words``: the say's words as they are written (SayWatch; the result's
+    first_words_s and say_complete_s say when, from the send). ``process`` / ``after_start``: run_cli's."""
     watch = SayWatch(on_words, clock=clock) if on_words is not None else None
     sent = clock()
     result = run_cli(runner, argv, prompt, env=env, cwd=cwd, timeout_s=timeout_s,
                      read=lambda event, init: read_result(event, init, allow_search=allow_search, allow_web=allow_web,
-                                                          now=now, allow_remember=allow_remember),
+                                                          now=now, allow_remember=allow_remember,
+                                                          allow_agent=allow_agent),
                      cancel=cancel, clock=clock, init_timeout_s=init_timeout_s, poll_s=poll_s, now=now,
                      progress=progress, capture=capture, watch=watch.feed if watch is not None else None,
                      process=process, after_start=after_start)
@@ -834,6 +992,15 @@ def run_planner(runner: Runner, argv: Sequence[str], prompt: str, *, env: Mappin
         return result
     return replace(result, first_words_s=watch.first_at - sent,
                    say_complete_s=watch.complete_at - sent if watch.complete_at is not None else None)
+
+
+def exit_failure(tail: str, exit_code: int | None, *,
+                 now: Callable[[], datetime] = lambda: datetime.now().astimezone()) -> AskFailure:
+    """Why a process that ended with no result ended, from its stderr's tail and exit code (stderr itself never
+    leaves here: AskFailure holds Jarvis's own words)."""
+    if _UNKNOWN_OPTION_RE.search(tail):
+        return failure(CLI_UNSUPPORTED, "unknown_option")
+    return classify_text(tail, now=now) or failure(ERROR, f"exit {exit_code}" if exit_code is not None else "no_result")
 
 
 def run_cli(runner: Runner, argv: Sequence[str], prompt: str, *, env: Mapping[str, str], cwd: Path,
@@ -966,11 +1133,7 @@ def run_cli(runner: Runner, argv: Sequence[str], prompt: str, *, env: Mapping[st
         if ahead and not output:   # started ahead, it ended before any output: the engine runs cold
             return RunResult(failure=failure(ERROR, PRESTART_DIED), init=init,
                              stats=RunStats(duration_ms=measured, exit_code=exit_code))
-        if _UNKNOWN_OPTION_RE.search(tail):
-            found = failure(CLI_UNSUPPORTED, "unknown_option")
-        else:
-            found = classify_text(tail, now=now) or failure(ERROR, f"exit {exit_code}" if exit_code is not None
-                                                            else "no_result")
+        found = exit_failure(tail, exit_code, now=now)
         return RunResult(failure=found, init=init, stats=RunStats(duration_ms=measured, exit_code=exit_code))
     stats = stats_of(result_event, measured_ms=measured, exit_code=exit_code)
     outcome = read(result_event, init)

@@ -2218,6 +2218,20 @@ your OK on the updated card first, sir." and the card shows (on the HUD it says
 back). Until then Settings > Desktop says "Turned on for opening things - the
 updated card waits for your OK". Turn off takes back both.
 
+**With [tasks](#tasks-jarvis-works-it-through) on**, the card has one more row: "Give me a
+task and I work out the steps myself. I search and read public pages in a window you can
+watch, and the words of a search go to DuckDuckGo, or to Bing and Google if it gives nothing. When
+a task needs them, I read your calendar, mail, contacts, notes and allowed folders; what a task
+reads goes to your Claude plan, as an Ask's does, and is never kept in logs. What I say aloud goes
+to Microsoft's online voice, as an Ask's answers do, and a line that may hold something private
+stays on screen. Anything that changes things or gets sent still waits for your click." (it names
+`[agent] search_engine`'s engine first and the others after it). Everything
+you allowed before stays allowed, but a task needs your OK on this card: the first time you
+ask for one, nothing starts, the bar says "Tasks need your OK on the updated card first, sir."
+and the card shows with that row marked NEW, your words back in the bar. Until then Settings
+> Desktop says "Turned on - tasks wait for your OK on the updated card". With tasks off the
+card is as it was.
+
 **The switch.** Three ways onto the desktop, each only from you:
 
 - click **Desktop** in the Dock (or Ctrl+8, or "Desktop" in the Find list);
@@ -2417,6 +2431,311 @@ long stopping took). On the HUD LIVE never opens by itself.
 **Logs** carry run ids, kinds, counts, statuses and refusal codes only - never a
 file name, a path, a window title, an app's name or what you typed.
 
+### Tasks: Jarvis works it through
+
+Give Jarvis a task that takes more than one answer or one card - looking things
+up, comparing, building or organising - and he works out the steps himself: he
+shows a plan, works through it, checks what he did, changes approach when something
+fails, and reports what he produced and what he could not do. Your own Claude
+Code does the thinking, on your plan, over tools only Jarvis serves on this PC. A
+plain question still gets a plain answer through Ask.
+
+**Turning it on.** It is off in the public `config.toml` (`[agent] enabled =
+false`). Turn it on for this PC with the line `JARVIS_AGENT_ENABLED=true` in `.env`,
+then restart Jarvis. It also needs [Jarvis on your desktop](#jarvis-on-your-desktop-the-hud)
+(turned on, on the card that lists tasks) and [Ask](#ask-jarvis-optional). Off, nothing of
+it runs and not a word of it reaches Claude.
+
+**What you see.** A task moves onto the HUD, as a desktop request does. Under the bar on the
+left a panel shows `WORKING - 3 OF 6 - 2:14` with **Stop**, the plan's steps (dim to come, cyan
+at work, a green tick done, coral failed; amber only while a card waits for you) and one line
+Jarvis writes himself from what he is doing ("Searching the web", "Reading www.example.org",
+"Writing a file", "Waiting for you"): sites' names only, on screen only, never logged or said.
+The panel lets clicks through, but for its buttons, and never takes the focus. If you bring the
+window back the task carries on: the panel and the watch window hide, Home shows
+"Working - 3 of 6" (click it for Live; while a card waits, "Waiting for you", and a click takes you
+to it) with a **Stop**, and the HUD key brings them back.
+
+**Stopping it.** The panel's **Stop**, Home's, typing or dictating "stop" or "cancel" in the bar
+(as people say it: "Stop, please.", "Okay, stop.", "cancel this task"; "stop at the second shop"
+is a message to the task), **Turn off** or quitting: the process is killed at once, anything late
+is dropped, a card that waits is withdrawn, what he was saying goes (the line and those behind it;
+a briefing reads on; a Turn off silences him after the task has ended too, and what focus mode held
+of it never comes back) and the plan is stamped. In the seconds after his report is in, a Stop keeps
+the report. **Esc** stops it too, but only while the HUD's bar
+has the keyboard. Jarvis does not hold Esc across the system for a task, as it does for the
+seconds a batch of file moves takes: a task can run for 20 minutes while you work in other apps,
+and Esc stays theirs.
+
+**Cards.** A question he asks waits on a card with its choices as buttons, and what you type or
+dictate in the bar answers it too (one of its own choices is that answer, even a "Cancel"; but a
+"stop" or "cancel" only once a task: the next one stops the task, whatever the card offers). "Keep
+going?", the card for a step that needs your OK (a web step, or a change to your PC your words don't
+plainly ask for) and a card of file steps take a **click only**: words in the bar reach the task as
+your message and answer none of them, and the bar says so, with how to reach the card when you are
+back in the window ("that card needs a click: Show me in Approvals, or Ctrl+Alt+H"). A card counts in "N need your
+OK", and one that times out goes, with words saying so; if you typed at it, its words say that only a
+click counts. While a card of file steps waits, or its batch works, the watch window is off the screen,
+to leave the card the room (the panel's **Show** brings it back at once, and your own Hide still holds
+after); from your click on, only the batch's own end says how it went. A card that comes up with the
+HUD takes no click for its first 0.6 s. A question never asks for a password, a code or a card
+number (he refuses to put one on a card, and tells you so in LIVE), and every question's card says
+"Jarvis never needs a password or a code."
+
+**The result card.** `DONE - 6 STEPS - 4:12` (or PARTLY DONE; coral for failed and stopped), the
+whole report, scrolling, and the files he made, each with **Show** (in the same sealed window,
+where your wheel scrolls it) and **Folder** (its folder in Explorer with the file selected), then
+**Done**. Only the report's first sentence or two are said aloud. A page he wrote (`.html`, `.htm`,
+`.svg`) is never handed to your real browser or a default app from here: it could carry private
+data out there, with nothing sealed. So its **Folder** opens the folder with nothing selected, and
+its row says "A page Jarvis wrote: open it with Show, not from the folder." If you open one from
+Explorer all the same, it and any `.xml`, `.csv` or `.tsv` he wrote carry the Mark of the Web, as a download
+does, so your browser and Office treat them as from the internet (on a drive that can't hold the
+mark they simply have none). The window stays while the card stays. His report and his questions
+are never kept on this PC: they stay on screen until Jarvis closes.
+
+**What he says aloud.** A task's spoken lines go to Microsoft's online voice as an Ask's answers do,
+and a line that may hold something private stays on screen. Once a task has read anything of yours,
+a line he wrote (what he has just found, a question, the opening of his report) is said only when
+none of what he read is in it, it holds no key, email address or long number of its own (yours too:
+a card number in your request, a number you typed when he asked) and, in a strict task (below), no
+word outside your own and the most common ones. Otherwise it stays on the caption, unsaid; a question is said as "I've a question for
+you, sir. It's on the card.", a report as "That's done, sir. It's on the card." (or partly done, or
+failed). Jarvis's own fixed lines are said as ever, and the firewall's card never is.
+`[agent] speak_private = true` skips this. And a line in his voice may not repeat other people's
+words: six words in a row of what a page, a mail or a file gave him (common phrases aside) and it is
+not said. His report may quote.
+
+**What this version does not do.** This version does not sign in to anything, type into pages or
+run code. A task that needs one of those does what it can of the rest and says so in its report.
+
+**The window you can watch.** At his first search or page a window opens, on a second
+screen if you have one, else on the right of the main screen, clear of the HUD: the real
+page, under a thin strip with "Jarvis is reading", the site and the last few sites. What he
+reads is what it shows, with one limit. A page can hide words from you and not from him, in
+transparent or tiny type, off the page or white on white (only `display:none` and
+`visibility:hidden` are left out of what he reads). When a good part of a page's text is hidden so,
+LIVE flags that page and he is told, and a hidden or off-screen link gets no number. What he reads
+is data to him either way. The window never takes the focus and ignores your mouse and keyboard: it
+is his to drive. On one screen it covers part of your desktop, so the strip has a small **Hide**
+and the panel then a **Show**; the task carries on behind it. When the task ends the page goes
+at once and the window with the result card; after a Stop or a Turn off it goes at once.
+
+**What goes where.** A search opens the real results page of `[agent] search_engine`
+(DuckDuckGo unless you change it; if it gives nothing, or shows a captcha, a consent page or
+a block, he tries Bing and Google, and he never answers one or clicks through), so the words
+of each search go from this PC to that engine, with no sign-in and no cookies kept. Pages
+open in the same private web engine as the [page pictures](#pictures-in-live):
+a new private profile for every page, public https addresses only, no sign-in, typing, form,
+download, pop-up or permission, and every connection through the same network gate (public
+IPv4 addresses, port 443). What a page says is only ever data to him; LIVE flags a page only
+for a strong sign of orders (override phrases, role and prompt markers, templates, Jarvis's own
+markers and tools' names, hidden or look-alike tricks), not for the order verbs ordinary pages are
+full of ("Find a store").
+
+**A site that refuses.** Many sites keep automated browsers out (HTTP 401, 403 or 429). Jarvis
+never disguises his window or tries to get past a refusal: its user agent and headers stay the
+web engine's own, nothing is tried again under another identity, no captcha is answered. The
+window says "www.example.com keeps automated browsers out", and he is told plainly to try another
+source, or `fetch_text`: Claude Code's own declared fetcher, the one web research uses, in a
+separate short run with that as its only tool (on `[research] model`, at most 15 for a task). That
+run sees only the address and his question, and it is allowed that one address's host: Claude Code
+itself refuses any other before anything leaves this PC. It goes through the same checks as opening a
+page, and a host that leads to this PC or your network is refused before it starts, as the window's
+network gate would; what comes back is data like any page's text, and the window's strip says it is
+being read another way, not shown there. A task's and such a read's Claude Code sends no telemetry
+or error reports, because the model holds private text in those runs.
+
+**A page he wrote.** He can open a page, a picture or a text from the task's own folder in
+the window, to look over what he made. It may show the folder's other files and run its own
+inline script, and it can reach nothing else: while such a page is open the network gate
+refuses everything, so a page picture in LIVE that falls in those moments fails, and says so.
+
+**Your things.** When a task needs them he can read your calendar (as Ask reads it), the people
+in it and in your briefing, your notes, the last few turns of what you said to him, your mail
+and your files in the folders you allow. `[agent] private` narrows that, and nothing is offered
+that is not connected. Each read is checked again at the moment it happens, and Turn off stops
+them at once. He may search your mail only with your own words from this task, exactly as Ask
+refuses other searches, and read at most 10 threads a task. He reaches files only by refs given
+in this task, re-checked before each read: only text-like files (.txt .md .csv .tsv .json .log
+.html .xml .yaml and the like; other types can't be read yet), at most 12,000 characters a call and
+30 reads a task, and never a file named for secrets (a name or a folder that says passwords, tokens,
+accounts, sign-ins or a password manager's export), Jarvis's own folders, a code folder, a link or an
+online-only file. All of it is data to him, whatever it says.
+
+**Keys and passwords in what he reads.** What plainly is a key or a password never reaches him, in a
+mail's subject or text, a part of a file, a note, an earlier turn or an event's title: the value goes
+and the rest stays, so a gas bill still reads with its account number gone. He sees
+`[left out: looks like a key or a password]` in its place and is told it was left out, and LIVE warns
+with how many ("1 value left out: what looks like a key or a password") and no word of it. That means
+a private key's block, a well-known key's prefix, a password in an address (the rest of the address
+stays), or a label's value such as `Account number: ...`, `Passcode: ...`, `API_KEY=...` or
+`Authorization: Bearer ...`, anywhere along a line, on the next line after a line that ends in the
+label and its mark ("Your temporary password is:"), or, with no mark, in a table's next cell or on the
+next line. Under a PIN's, a CVV's, an OTP's or a passcode's label a value of 3 characters with a digit
+goes too (a PIN's four digits), and so does the value of a sentence saying what a password, a PIN or a
+code is ("Your OTP is ...", "Your OTP code is ...", "Your PIN number is ...", "Your one-time password
+(OTP) is ...", "the password is ...", on its line, or on the next after an "is:"; "Your password is
+changed" and "Your password is Case-Sensitive" stay). "Pass"
+or "PW" names a password on its own, as `DB_PASS` or after a sign-in word ("WiFi pass:"), so
+"Parking pass: P1234567" reads whole. In a link's query only `password=`, `passwd=`, `secret=`,
+`client_secret=` and `api_key=` count: a bare `token=`, `auth=` or `pwd=` is how marketing mail and a
+meeting's link are written, so those links reach him whole. An http or https address, an amount (the
+whole value: "$120.00", "US$120.00", "CA$120.00", "Rs 500/-", "120.00 USD" or "120.00EUR", "$20-30",
+"$25/person"; a whole number before a code or a word is none, so "PIN: 4821 dollars" goes), a postal
+code ("PIN code: 560001", "ZIP: 94103": the label's own name, so a "Zip
+password" or a "Card PIN code" is a secret) and, under a
+card's or an account's label, a masked number are no secret whatever their label:
+"One-time setup fee: $120.00", "Password policy: https://..." and "Card number: ************4242"
+read whole. That is a rule about plain keys, labels and those sentences: a bare "code" names no
+secret ("Your code: 482913"), and a password written into a longer sentence ("the password for the
+wifi is ...") can't be told from any other sentence, so those reach him.
+
+**Your private data and the web.** A task starts clean, knowing only your words. Even then, an
+address he was not given that carries a number of 4 digits or more from your own words (not a year:
+a code, a PIN, a phone, a date; as itself, reversed or with zeros before it) after its site's name
+waits for your click on a card that names the number. That is numbers only: a word of your request
+("Priya", "leukaemia") in an address he wrote goes with no card while the task holds nothing of
+yours, because words would add clicks to every public task and numbers none. Once a
+private tool has answered, whatever it gave, and for the rest of the task, a search that carries
+those words (names, titles, subjects, the names of files, apps and saved sites, of 4 or more letters,
+addresses, numbers of 4 digits or more but for years), an address he was not given or a search that
+looks encoded waits for your click on a card with the exact words, and so does a search with a word
+opening with "!" or a backslash, which tells the search engine to go to another site ("!archive
+...") rather than search: "Allow" lets that one call go and clears the words the card showed, as
+they stand on it, for the task. A word the card did not show you (one read backwards, encoded, or
+hidden across two words) lets that one call go and stays private. "Don't", or no answer, and it
+never goes and he carries on without it, whatever is cleared later: the same search with other
+spaces or capitals, and the same page by any address that is the same page, opened, read another
+way or opened in your browser. Nothing you type or say counts as that click, at any moment: once a task holds anything of
+yours, a later message that names such a word or an address clears nothing and makes nothing seen,
+whatever it says ("no, don't search for that", "yes, search for that"). Your words still reach him
+and still count for what you ask of him, but that search takes a click, and that click clears the word
+for the task; another address takes a click of its own. The words of your request, and a word that
+was not private when you said it, stay yours and are never held up. An ordinary follow-up changes
+nothing. But words you type once he has asked you something turn these checks on for the rest of the
+task, so an address not seen yet takes a click, one you typed among them: a page may have told him
+what to ask, in a question or in a line he says. So do words that plainly hold a password, a code, an
+email address, a date of birth ("DOB") or a long number, in your request (from the start, though its
+own addresses still open) or in a later message. A link you wrote yourself can still go on one of his cards, where the click on
+that card is what sends it. And he never says a line, or shows a step of his plan, that asks you for
+a password or a code, as he never asks one. Words are matched as they would read: look-alike
+letters, accents, invisible characters, cuts and glue aside, reversed, in ROT13 or with digits for
+letters, numbers in any form of digit, reversed or with zeros before them, and short words in base64.
+A short name counts across a gap only as whole pieces ("No ra"), so "the rice" is no Eric, a number
+that starts with a zero only when written with one (a room 0100 is not "under 100 dollars"), and no
+name counts inside a word of yours ("flight" in your "flights").
+How a word is written counts too, in such a task, so nothing can ride on a word that reads as yours:
+one with anything outside the plain alphabet that you did not spell so (an accent, a name like Soren
+with a stroked o, another script) takes one click, because no table of look-alikes can be whole, and
+so do two or more marks glued to a word or standing alone that you did not write, but for the
+ordinary "...", "?!", "!?", "!!", "??", "--" and ".-". One you did spell so goes with no card, and
+so does a token you wrote whole, or one a search you allowed showed (a tracking number,
+"samsung-galaxy-s24-ultra"): it never reads as encoded. Once
+he has read a mail's text, a file's contents or the earlier conversation the task is strict, because
+matching words can't cover all of those: every search or `fetch_text` question with any word outside
+your own words and the most common ones, or any symbol that is not ordinary punctuation, goes to that
+card. The honest limit: in a clean task a word of your request goes in an address he wrote; in a task
+that has read only your calendar, contacts, notes or names, a
+paraphrase, a word with a letter dropped, an amount or a time go out with no card; a strict task still
+passes anything spelled in common words, in any mix of capitals, with a mark at a time or the
+ordinary runs above; and any task could choose among links a page offers. The
+address rule and his having no way to type into a page are the strong parts.
+
+**What he changes.** Nothing by himself. Moves, copies, renames, zips, new folders and the Recycle
+Bin go on the desktop's own NEEDS YOUR OK card (`propose_files`), checked against your own words in
+this task, never his, a file's name or a page's, with ticks, Undo and the "undo" route as ever; the
+task waits for your click, and the panel says WAITING. Should no row of its batch end for 30 minutes
+(a share gone away, a download that hangs) the task goes on without it and says so: the batch is
+still at work, and its card has the truth and its Stop. Events, emails, replies and the like go on
+Ask's cards in Approvals (`propose_action`); those don't hold the task up, and his report says what
+is waiting. He opens something at once (a site goes to your own browser, signed in) only when you
+plainly ask for it: a part of your message that starts with open, show, find, go to and the like and
+names it ("open the Bramblemoor letter", "open https://... and https://...", "open this link:
+https://...", "find the report, then open https://..."). A paste, a
+how-to, a question or someone else's words naming it ("Summarise this mail for me: ... Please open
+...", "how do I open ...?", "she told me to open ...") put it on a card for your click, and so does
+anything else. A site whose web card you have just allowed has had that click, and opens then: one
+site, one click. He changes the volume, music, timers, screenshots or focus mode at once, with their
+chips and Undo, only when your message is plainly that request, as the desktop's own commands and a
+few plainer wordings read it ("turn the sound down", "pause the music"): from its start ("mute and
+pause"), straight after a then, an after that or a next ("find the report, then mute"), or a whole
+request with its verb first after an and, an also, a comma or a new sentence ("find the report and set
+the volume to 30"); and for just what you asked, once for each time you asked: the same direction,
+level, minutes and window, a step no bigger than the usual one, a timer's label only from your own
+words for it. For either, nothing acts at once in a message over 300 characters; after a ':', a line
+break (Enter sends what you type in the bar, so a line break is a paste's, and a paste that starts
+with one is all pasted), a greeting to someone else ("Hi Sam,", "Dear Will,", "Dear team", or one
+after your own words: "Summarise this - Hi Sam, ...") or a request to read, summarise, translate,
+reply to, check, proofread or explain "this email", "the following" and the like (what comes after
+them is pasted; "this week's mail" is your own); in a
+sentence with an if, a when or a '?' (a "can you ...?" is a request); after a how, what, why,
+should, explain, said, wrote, told, guide, can't and the like; or in words you typed to answer his
+question, on its card or in a line he said or showed in his plan ("Choose one: mute or pause."), or
+that only repeat what his lines said since you last typed ("Answer like this: mute", then "mute").
+Anything else that
+names it ("the trading volume", "the next train", "compare the play, pause and next buttons", "find
+the report and mute", a repeat of what you asked once) puts it on a card for your click first, and
+the card says a volume step other than the usual one ("turn the volume up by 30"). A later message
+takes back what an earlier one allowed: "don't delete anything", "leave the volume alone", "never
+mind", "scratch that", "cancel the screenshot" (only what stands in its own part: "forget the music
+and mute" takes back the music, and "cancel the timer and set a new 10 minute timer" the old timer
+only); and a whole message of "no", "no wait", "don't", "not
+that", "actually no", "hold on", "not yet" or "I changed my mind" takes back what the last one asked,
+an open too; the same message can ("mute. no, actually don't", "mute. no, pause"). The reading is
+kept that simple on purpose, so it has limits: "Skip the video and just summarise the transcript"
+still skips a track, and a short paste on one line with none of those before its words reads as
+your own ("Please open https://... and sign in. Thanks, Mallory"), as does the first line of a paste
+of several when nothing comes before it. Stop or Turn off withdraws what is still undecided.
+
+**One task at a time.** The first planner run decides that a request is a task; it
+starts from your own words, whatever the planner wrote, and with nothing else.
+While it runs, what you type goes to it as your message, and "stop" or "cancel" ends it
+at once: the process is killed and anything it was still doing is dropped, and he says nothing
+more: what he was saying goes too, and a Turn off leaves nothing of the task in the conversation
+either, nor his report in LIVE. (A briefing being read aloud reads on.) The bar says
+"Passing that on, sir." when your words went in; in the first seconds of a task they go in right
+after your request.
+
+**Its budget.** After `[agent] max_turns` turns or `max_minutes` minutes of work he asks
+"Keep going?" (the clock rests while he waits for you and while the PC sleeps). Reached while a card is up or a batch is at
+work, his calls are held and he asks when that has ended. No, or no answer, and he reports
+where things stand and stops. If your plan's limit is reached (in Claude Code's words, a usage,
+session, weekly or 5-hour limit, the task's model's own, as in "You've hit your Opus limit" or "Opus
+4.5 limit reached", or any other limit it says resets) the task pauses, says when it resets and asks
+you then; with no
+time named, a day, a date, a "next" or a week beside it, or anything after the time but its zone in
+brackets ("5am Mon", "5am in 3 days", "00:00 UTC"), it waits for you to say carry on, 6 hours at
+most, and then stops there. A card that was up
+then and ends on your click or answer, or with words you typed at it, counts as that word too: the
+task tries again. Meanwhile the state word says WAITING. What
+you say or answer meanwhile goes in with the resume, in the order
+you said it. Claude Code's other limits, when it names no reset (its context's, a budget's), end
+the task as any failure does, and if Claude's server is limiting requests (in its own words: a rate
+limit, its acceleration limit; or an error 429 that names no limit) the task stops and says that it
+isn't your plan's limit. A run
+that would use extra usage is killed at once. `tasks_per_day` limits how many
+start in 24 hours: the next one is told so, and your words wait in the bar.
+
+**After a task.** Its report stays on its result card and in the Transcript, and is never kept or
+given to a later Ask. A later Ask is told only that it ended and how, in one line of Jarvis's own
+that is not shown ("That task has ended (done). Its report is on the owner's screen and not here: say
+so if asked about it."), so it says where the answer is rather than guess.
+
+**Safe by design.** Claude Code runs with no tool of its own: its only tools are served
+by Jarvis on `127.0.0.1`, behind a token that exists for that run alone and never goes
+on a command line. Every start of a run is checked (only these tools, no skills, the
+one server connected) and anything else kills it. He may write only in the task's own
+folder, `Jarvis\Workspace\<date>-<slug>` in your user folder (`[agent] workspace`, never
+under OneDrive): text-like files only (.md .txt .csv .tsv .json .html .htm .css .svg .xml
+.yaml .yml .log), never a program or a script, 5 MB a file and 50 MB and 200 files a task.
+A restart ends a task; its files stay.
+
+**LIVE** shows each task with one step per tool call, a web step with a picture of the
+window on it (on screen and in memory only; it never opens LIVE by itself). **Logs** carry
+ids, kinds, counts, states, reason codes and durations only - never your words, a search, an
+address, a page's words, a file name, a tool's arguments or a token.
+
 ## TODAY and DEADLINES
 
 The **Day view** (click the header clock; Esc closes it) shows your day.
@@ -2478,6 +2797,49 @@ per kind, then "+N more". Its corner says "3 waiting . 1 owed", "scanning...",
 reads only mail headers, never while hidden or minimized; see
 [Follow-ups and nudges](#follow-ups-and-nudges).
 
+### Talk to Jarvis (the talk key)
+
+Off until you turn it on (below). Tap **Ctrl+Alt+Space**, say what you want, and
+Jarvis takes it after about half a second of quiet: "what's on my calendar
+today", "plan my day", "remember my exam is on the 14th". Tap the key again to
+end sooner, or press Esc to cancel (while he listens, Esc works wherever you
+are, as it does while he tidies files). What he heard goes in exactly as if you
+had typed it in the bar, under the same rules: mail, calendar changes and file
+changes still wait on their cards for your click, because voice never approves
+or undoes anything; a note you ask him to remember or forget changes at once,
+with Undo, as when you type it. Words said while a task works go to the task,
+as typed words do, and "stop" stops it.
+
+- **He hears you only from the tap to the end.** The microphone opens on the
+  tap and closes when the talk ends; while it is open the orbs say LISTENING
+  (Home's moves with your voice) and the bar says so, and his own voice waits.
+  Hiding or minimizing the window cancels the talk. Nothing listens in between:
+  there is no wake word.
+- **On this PC.** Your speech is turned into text here, by a speech model
+  (faster-whisper `small.en`, about 480 MB) downloaded only when you click
+  Download in Settings > Talk; the sound is kept in memory for the moment it
+  takes, never saved, and no log holds what you said (only how long and how
+  many characters). The model stays loaded for 10 minutes after a talk
+  (`[talk] keep_warm_minutes`), so the next one starts at once; the first after
+  a while takes a few seconds while it loads.
+- **The microphone** is the one picked in Settings > Meetings, else the Windows
+  default. When you tap, Jarvis stops talking and the briefing pauses (playing
+  or about to play on), so neither is heard; neither resumes by itself.
+- **Turning it on.** Install the two add-ons yourself (Jarvis never runs pip;
+  Settings > Talk shows the command), click Download in Settings > Talk, add
+  `JARVIS_TALK_ENABLED=true` to `.env` and restart the "Briefing hotkey" task.
+  The key (`[talk] key`), the model and the quiet that ends a talk (`[talk]
+  quiet_ms`) are in `config.toml`. It needs Ask Jarvis on.
+
+  ```powershell
+  C:/Users/<you>/AppData/Local/Programs/Python/Python313/python.exe -m pip install faster-whisper==1.2.1 PyAudioWPatch==0.2.12.9
+  ```
+
+If something is missing when you tap (an add-on, the model, a microphone), the
+bar says what and how to fix it, and the microphone does not open. Tapping the
+key while Jarvis is not running opens him, as the hotkey does; tap again to
+talk. Names Jarvis should expect ("Spotify", "Notion") go in `[talk] hints`.
+
 ## Catch-up and the hotkey
 
 **Catch-up.** The app keeps track of each scheduled briefing (a "slot", such as
@@ -2521,8 +2883,8 @@ then keeps its old behaviour (it reads the briefing at once). The "Briefing hotk
 (`--hotkey-agent`) from logon until you log off; it waits inside Windows and
 uses no CPU until the key is pressed, and it never loads the window code.
 Change the combination with `[hotkey] combo` in `config.toml` (ctrl, alt, shift,
-win plus one letter, digit or F1 to F24; a letter or digit needs ctrl, alt or
-win), or turn it off with `[hotkey] enabled = false`; then rerun
+win plus one letter, digit, space or F1 to F24; a letter, digit or space needs
+ctrl, alt or win), or turn it off with `[hotkey] enabled = false`; then rerun
 `install-schedule.ps1`, which restarts the agent (or removes it). If another
 program already uses the combination, the agent logs a warning and exits (see
 [Troubleshooting](#troubleshooting)).
@@ -3750,8 +4112,9 @@ research](#web-research) and the productivity bundle ([Memory](#memory-the-memor
 on or off for this PC, whatever `[ask] enabled`, `[research] enabled` and
 `[productivity] enabled` say; `JARVIS_DESKTOP_ENABLED` does the same for
 [Jarvis on your desktop](#jarvis-on-your-desktop-the-hud) (`[desktop] enabled`),
-which then still waits for your **Turn on** on its first-run card. Variables
-already set in the environment win over `.env`.
+which then still waits for your **Turn on** on its first-run card, and
+`JARVIS_AGENT_ENABLED` for [tasks](#tasks-jarvis-works-it-through) (`[agent]
+enabled`). Variables already set in the environment win over `.env`.
 
 **`google_client_secret.json`** (next to this README, optional): the Google OAuth
 client for calendar actions (setup step 8).
@@ -3791,7 +4154,7 @@ log. Changes apply the next time the app starts.
 | `[schedule] am` | `"10:12"` | Time of the AM task (24-hour `HH:MM`); the default is only an example, set it a few minutes after your own briefing task runs. `install-schedule.ps1` uses it unless you pass `-AmTime`; the app uses it to tell which briefing an answer belongs to when it was started without `--slots`. Rerun the script after a change. |
 | `[schedule] pm` | `"23:42"` | Time of the PM task, the same way (`-PmTime`). |
 | `[hotkey] enabled` | `true` | The global hotkey that opens Jarvis. `false`: `install-schedule.ps1` does not install the hotkey task (and removes an existing one); an agent that is started anyway exits at once. |
-| `[hotkey] combo` | `"ctrl+alt+j"` | The global hotkey: `ctrl`, `alt`, `shift`, `win` plus one letter, digit or `F1`-`F24`, e.g. `"ctrl+shift+F9"`. A letter or digit needs ctrl, alt or win. Rerun `install-schedule.ps1` (or log off and on) after a change. |
+| `[hotkey] combo` | `"ctrl+alt+j"` | The global hotkey: `ctrl`, `alt`, `shift`, `win` plus one letter, digit, `space` or `F1`-`F24`, e.g. `"ctrl+shift+F9"`. A letter, digit or space needs ctrl, alt or win. Rerun `install-schedule.ps1` (or log off and on) after a change. |
 | `[agenda] evening_from_hour` | `18` | From this hour on, the TODAY panel shows tomorrow (0-24; 24 = always today). |
 | `[agenda] deadline_days` | `14` | How many days ahead DEADLINES looks (1-60). |
 | `[agenda] calendars` | `["primary"]` | The Google calendars listed in TODAY: `"primary"` or calendar ids (see `[calendar] calendar_id`). |
@@ -3810,7 +4173,7 @@ log. Changes apply the next time the app starts.
 | `[ask] read_mail` | `true` | `false`: Ask never reads mail, whatever the accounts' features say (a meeting brief is then Jarvis's own, without your threads and without a Claude run). |
 | `[research] enabled` | `true` | [Web research](#web-research) (part of Ask: it needs `[ask] enabled = true`): `web:` requests and the planner handing a request over. `false`: `web:` says web research is off and the planner never hands anything over. `JARVIS_RESEARCH_ENABLED` in `.env` overrides it both ways. |
 | `[research] planner_may_ask` | `true` | The Ask planner may hand a request to web research; `false`: only `web:` starts it. |
-| `[research] model` | `"sonnet"` | The model the research runs with; `"haiku"` uses less of your plan. A name that starts with `-` or has spaces is refused. |
+| `[research] model` | `"sonnet"` | The model the research runs with, and a task's `fetch_text`; `"haiku"` uses less of your plan. A name that starts with `-` or has spaces is refused. |
 | `[research] timeout_seconds` | `120` | One research run may take this long (30-300); then it is stopped and nothing is proposed. |
 | `[research] max_searches` | `4` | Web searches one research run may make (1-8); Jarvis stops a run that wants more. |
 | `[research] max_fetches` | `4` | Pages one research run may read (0-8; `0`: search only, WebFetch is not offered); Jarvis stops a run that wants more. |
@@ -3866,6 +4229,20 @@ log. Changes apply the next time the app starts.
 | `[desktop] screenshots_dir` | `""` | Where screenshots go: `""` = `Jarvis\Screenshots` in your user folder, else a full folder path. |
 | `[desktop] undo_days` | `7` | How long Undo is offered for a change to your files (1-30 days); "undo" looks this far back. |
 | `[desktop] apps` | `false` | Work inside apps you allow (a later version); nothing uses it yet. |
+| `[agent] enabled` | `false` | [Tasks](#tasks-jarvis-works-it-through): Jarvis works a task through step by step. Turn it on for this PC with `JARVIS_AGENT_ENABLED=true` in `.env` (it overrides this key both ways); it also needs `[desktop]` and `[ask]` on, and your **Turn on** on the card that lists tasks. |
+| `[agent] model`, `effort` | `"opus"`, `""` | The tasks' model and effort (`"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`; `""` = Claude Code's default). Quick replies stay on `[ask] model`. |
+| `[agent] max_turns`, `max_minutes` | `60`, `20` | A task's budget (5-1000 turns, 1-240 minutes of work); reaching one asks "Keep going?". |
+| `[agent] tasks_per_day` | `20` | How many tasks may start in 24 hours (1-200). |
+| `[agent] search_engine` | `"duckduckgo"` | Where his searches go first: `"duckduckgo"`, `"bing"` or `"google"`, then the others if a page gives nothing or shows a wall. The words of each search go there, and the Turn on card names it. |
+| `[agent] workspace` | `""` | The tasks' folder: `""` = `Jarvis\Workspace` in your user folder, else a full folder path. Never under OneDrive: a task refuses to start there. |
+| `[agent] private` | `["calendar", "contacts", "memory", "mail", "files"]` | What a task may read of your things, when it needs them and only while it is connected. A shorter list narrows it (`"memory"` covers your notes and what you said before the task); an entry that is none of these grants nothing, and so does something that is not a list. |
+| `[agent] speak_private` | `false` | `true` also says aloud a task's line that may hold something private; such lines go to Microsoft's online voice. Off, they stay on screen. |
+| `[talk] enabled` | `false` | [Talk to Jarvis](#talk-to-jarvis-the-talk-key): the talk key opens the microphone for one request. Turn it on for this PC with `JARVIS_TALK_ENABLED=true` in `.env` (it overrides this both ways), then restart the "Briefing hotkey" task. Needs Ask Jarvis, the add-ons faster-whisper and PyAudioWPatch, and the speech model (Settings > Talk). |
+| `[talk] key` | `"ctrl+alt+space"` | The talk key; never the `[hotkey] combo` or the `[desktop] hud_key` (refused with a warning). |
+| `[talk] model` | `"small.en"` | The speech model on this PC: `"small.en"` (about 480 MB), `"base.en"` (about 145 MB, quicker, less sure) or `"medium.en"` (about 1.5 GB, the meetings' model). Downloaded only when you click Download in Settings > Talk. |
+| `[talk] keep_warm_minutes` | `10` | How long the speech model stays loaded after a talk, so the next starts at once (1..120). |
+| `[talk] quiet_ms` | `500` | How much quiet after you speak ends a talk, in milliseconds (300..2000). |
+| `[talk] hints` | `[]` | Names Jarvis should expect to hear, e.g. `["Spotify", "Notion"]` ("Jarvis" always is); at most 20 short names. |
 
 The offline voice uses the same `rate` and `volume`: the rate scales Windows'
 default 200 words per minute, and a volume above `+0%` cannot get louder than
@@ -4102,6 +4479,8 @@ Other files in `%LOCALAPPDATA%\briefing-reader`:
 | `accounts.json` | Which Google account each account name is (its address and Google's account id), written by the first sign-in that says so, and whether you confirmed it ("confirmed", after "Signed in as ... - is that right?"; nothing is sent or changed for a name until then). **No, use another account** removes the entry; or delete an entry, or the file, to bind a name to another Google account (setup step 8, "Disconnecting"). A name with a saved sign-in but no entry Jarvis can read (deleted, or the file is not valid JSON) sends and changes nothing until it signs in again. |
 | `recipients.json` | The addresses Jarvis sent replies and emails to, as one-way hashes (never the addresses), with the time; at most 5000. An address in it needs no NEW RECIPIENT confirmation. Delete it to confirm every address again. |
 | `ask_usage.json` | Ask Jarvis's planner runs of the last two days, for the hourly and daily caps (shared by every Jarvis process): a random id per run, when it started, how long it took, its turns and token counts and the outcome (web research runs carry `"kind": "research"` and count against both the Ask caps and the research caps; day plans carry `"kind": "plan_day"`, meeting briefs `"prep"` and drafts `"nudge"`, and count against both the Ask caps and `[productivity] max_runs_per_day`); and, after Claude Code reported extra usage, until when Ask is paused (`hold_until`). Never a request or anything the planner wrote. Delete it to reset the counts and the pause (`ask_usage.json.lock` next to it only takes turns between processes). |
+| `agent_tasks.json` | When [tasks](#tasks-jarvis-works-it-through) started in the last 24 hours, for `[agent] tasks_per_day`: times only, never a word of a task. |
+| `agent\`, `agent-fetch\`, `agent-runs\` | The empty folders Claude Code runs in for a task and its `fetch_text` (they refuse to run while anything is in them), and each running task's own folder, with the MCP config that holds its one-run token, deleted when the task ends. |
 | `ask\` | The empty folder Claude Code runs in for Ask. Ask refuses to run while anything is in it (a `CLAUDE.md` or `.mcp.json` there would add instructions or tools). |
 | `research\` | The empty folder Claude Code runs in for web research; research refuses to run while anything is in it. |
 | `runstate.json` | Per scheduled briefing: when it was first shown, when it was announced (`announced_at`) and first viewed (`viewed_at`), when and how a classic prompt was answered (read, dismissed, done), and (the productivity bundle) when the plan offer was posted for it (`plan_offered_at`) and when its day was planned (`planned_at`; an evening "plan tomorrow" marks tomorrow's AM slot), kept for 14 days. The catch-up task uses it, and it keeps a briefing from being announced twice; see [Catch-up and the hotkey](#catch-up-and-the-hotkey). Safe to delete (a briefing may then be announced once more). |
@@ -4119,14 +4498,23 @@ deletes the folder; leftovers older than 12 hours are removed at the next start.
 
 ## Privacy and cost
 
+Talking to Jarvis ([the talk key](#talk-to-jarvis-the-talk-key)) sends nothing
+anywhere to be understood: the microphone is open only from the tap to the end,
+your speech becomes text on this PC, the sound is never saved and no log holds
+what you said. What he heard then goes where typed words go.
+
 The app talks to these services, all free:
 
 - the Notion API: it only reads the one page, with a read-only integration;
 - Microsoft's Edge read-aloud service, which receives the briefing text to turn
   it into speech, and the same way Jarvis's own sentences ([Jarvis
   talks](#jarvis-talks)): greetings, "Your AM briefing is ready to view", Ask's
-  answers, your next event's title in a greeting, and the event titles and email
-  subjects in his confirmations (never an email's text or an address; an
+  answers, a task's spoken lines (what he found, his questions, the opening of his
+  report: once a task has read anything of yours, only a line none of it is in, as
+  far as matching words can tell, and the rest stays on screen: [what he says
+  aloud](#tasks-jarvis-works-it-through)), your next event's title in a greeting,
+  and the event titles and email subjects in his confirmations (never an email's text
+  or an address, unless you set `[agent] speak_private`; an
   approved plan block's result, and what he says about a day plan, carry only
   times and counts, never a title; what he says about a meeting brief, and an
   approved prep reply's result, carry only the meeting's time, never a title,
@@ -4834,6 +5222,8 @@ briefing_reader/tts.py        edge-tts synthesis, Windows SAPI fallback, highlig
 briefing_reader/player.py     QtMultimedia player that plays sections in order with pauses
 briefing_reader/hud.py        Jarvis HUD widget kit: colours, fonts, chamfered panels, orb, buttons, cards, agenda, command bar, tabs, conversation, the LIVE log, its pictures and the picture viewer
 briefing_reader/ui.py         assistant screen (JARVIS / BRIEFING / LIVE / MEMORY tabs), the LIVE pop-out window, classic prompt, tray icon, approvals, TODAY / DEADLINES, app controller (launch kinds, NEW, greeting, announcement)
+briefing_reader/agent/        Tasks (no Qt): the tool registry (tools), the task's own folder (workspace), the local MCP endpoint (endpoint), budgets and what is offered (policy), one run (runner), its prompt and settings (assets)
+briefing_reader/agent_ui.py   Tasks in the app: the controller of the one task that may run, its LIVE task, its words on the caption and in the voice
 briefing_reader/ask_ui.py     Ask Jarvis in the app: the command bar's controller and its "ask" thread (web: requests too)
 fonts/                        Chakra Petch, Sora and JetBrains Mono fonts with their OFL licences
 tests/                        unit tests and saved fake Notion pages (tests/fixtures)

@@ -322,6 +322,13 @@ class ResultCards(QObject):
         self._apply_decor()
         self.changed.emit()
 
+    def place_again(self) -> None:
+        """Every card's place anew: a task's panel or card moved, and hud_overlay.show_card keeps them clear of it."""
+        for entry in self._entries:
+            self._place(entry)
+        if self._entries:
+            self._apply_decor()
+
     def drop_tidy(self) -> None:
         entry = self.tidy()
         if entry is not None:

@@ -214,6 +214,9 @@ class FakeRunner:
             started.raw, started.stdin = text, message_text(text)
 
         process.on_send = sent_later
+        attach = getattr(process, "attach", None)    # tests.agent_fakes.FakeEngine: it reads what it was started with
+        if callable(attach):
+            attach(argv, stdin_text, env, cwd)
         return process
 
     def run(self, argv: Sequence[str], *, env: Mapping[str, str], cwd: Path | None, timeout: float) -> cli.Completed:

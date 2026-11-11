@@ -7,11 +7,11 @@ Nothing here turns anything on, stores anything or goes onto the desktop: every 
 
 ``ConsentCard(parent)``
     The first-run card, over the window's screen (the Find list's way: a ``void`` scrim and a panel in the middle):
-    the kicker "DESKTOP <middle dot> NEEDS YOUR OK", the title "Jarvis on your desktop", what Jarvis will and won't do in this
-    phase (``CONSENT_ROWS``: SPEC 10.3's rows that are live in Phase 2), where it can be turned off again, and "Not now"
-    (ghost, left) / "Turn on" (amber, right; DesktopB's order). ``open_card(entry, updated=)`` shows it for an entry
-    (the Dock's Desktop, the HUD key, a --hud start, a typed request or a Phase 2 skill asked for under Phase 1's OK -
-    desktop_ui.ENTRIES); ``updated``: the owner turned Phase 1's card on, so Phase 2's rows (``CONSENT_NEW``) are
+    the kicker "DESKTOP <middle dot> NEEDS YOUR OK", the title "Jarvis on your desktop", what Jarvis will and won't do
+    in this phase (``CONSENT_ROWS``: SPEC 10.3's rows that are live in Phase 2), where it can be turned off again, and
+    "Not now" (ghost, left) / "Turn on" (amber, right; DesktopB's order). ``open_card(entry, updated=)`` shows it for an
+    entry (the Dock's Desktop, the HUD key, a --hud start, a typed request or a Phase 2 skill asked for under Phase 1's
+    OK - desktop_ui.ENTRIES); ``updated``: the owner turned Phase 1's card on, so Phase 2's rows (``CONSENT_NEW``) are
     marked "NEW" (``new_rows()``). ``close_card()``, ``is_open()``,
     ``entry()``, ``set_problem(text)`` (a line in coral: the OK could not be saved). The keyboard: the focus starts on
     Not now - Enter or Space there turns nothing on -, Tab and Shift+Tab stay between the two buttons, Esc and a click
@@ -53,6 +53,13 @@ CONSENT_ROWS = ("I open files, apps, folders and sites you name.",
                 "I only work in the folders and apps you allow.",
                 "To plan, file, folder and app names go to your Claude plan. They're never kept in logs.")
 CONSENT_NEW = (1, 2)                   # the rows of CONSENT_ROWS new since Phase 1's card
+# The agent's row (version 3 of the card): only while [agent] is on; off, the card is as it was.
+CONSENT_TASK_ROW = ("Give me a task and I work out the steps myself. I search and read public pages in a window you "
+                    "can watch, and the words of a search go to {engine}, or to {others} if it gives nothing. When a "
+                    "task needs them, I read your calendar, mail, contacts, notes and allowed folders; what a task "
+                    "reads goes to your Claude plan, as an Ask's does, and is never kept in logs. What I say aloud "
+                    "goes to Microsoft's online voice, as an Ask's answers do, and a line that may hold something "
+                    "private stays on screen. Anything that changes things or gets sent still waits for your click.")
 NEW_TAG_TEXT = "NEW"
 CONSENT_FOOT = "You can turn it off again in Settings \u203a Desktop."
 NOT_NOW_TEXT = "Not now"
@@ -215,6 +222,7 @@ class ConsentCard(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._entry = ""
         self._opener: QWidget | None = None
+        self._task_row: _Bullet | None = None
         self.panel = _Panel(self)
         self.kicker = _Kicker(CONSENT_KICKER)
         self.title = body_label(CONSENT_TITLE, "screen_title", holo.AMBER_TX, wrap=False, name="desktopConsentTitle")
@@ -262,21 +270,36 @@ class ConsentCard(QWidget):
         """What the owner asked for when it opened (desktop_ui.ENTRIES)."""
         return self._entry
 
-    def open_card(self, entry: str, *, updated: bool = False) -> None:
+    def open_card(self, entry: str, *, updated: bool = False, task_row: str = "", task_new: bool = False) -> None:
         """Show the card for ``entry`` over the window's screen, the focus on Not now (the one before kept);
-        ``updated``: Phase 1's card was turned on, so its new rows are marked "NEW"."""
+        ``updated``: Phase 1's card was turned on, so its new rows are marked "NEW". ``task_row``: the agent's row,
+        while [agent] is on ("": none, and the card is as it was), marked "NEW" with ``task_new``."""
         if not self.isVisible():
             focus = self.window().focusWidget()
             self._opener = focus if focus is not None and not self.isAncestorOf(focus) else None
         self._entry = str(entry or "")
         for index, row in enumerate(self.rows):
             row.set_new(updated and index in CONSENT_NEW)
+        self._set_task_row(task_row, task_new)
         self.set_problem("")
         self.setGeometry(self.parentWidget().rect())
         self._place_panel()
         self.show()
         self.raise_()
         self.not_now.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _set_task_row(self, text: str, new: bool) -> None:
+        """The agent's row after the others: made when it first shows."""
+        if self._task_row is None and text:
+            self._task_row = _Bullet(text)
+            column = self.panel.layout()
+            at = column.indexOf(self.rows[-1]) + 1
+            column.insertSpacing(at, ROW_GAP)
+            column.insertWidget(at + 1, self._task_row)
+        if self._task_row is not None:
+            self._task_row.label.setText(text)
+            self._task_row.setVisible(bool(text))
+            self._task_row.set_new(bool(text) and new)
 
     def close_card(self, restore_focus: bool = True) -> None:
         if not self.isVisible():
@@ -294,11 +317,16 @@ class ConsentCard(QWidget):
 
     def new_rows(self) -> list[str]:
         """The rows marked "NEW" (tests and the harness)."""
-        return [row.label.text() for row in self.rows if row.is_new()]
+        return [row.label.text() for row in self._all_rows() if row.is_new()]
+
+    def _all_rows(self) -> list[_Bullet]:
+        shown = self._task_row is not None and not self._task_row.isHidden()
+        return [*self.rows, *([self._task_row] if shown else [])]
 
     def texts(self) -> list[str]:
         """Every text the card shows (tests and the harness)."""
-        return [self.kicker.text(), self.title.text(), *(row.label.text() for row in self.rows), self.foot.text(),
+        return [self.kicker.text(), self.title.text(), *(row.label.text() for row in self._all_rows()),
+                self.foot.text(),
                 *([self.problem.text()] if self.problem.isVisible() else []), self.not_now.text(),
                 self.turn_on.text()]
 
@@ -307,6 +335,8 @@ class ConsentCard(QWidget):
         self.panel.setFixedWidth(width)
         self.panel.adjustSize()
         height = self.panel.sizeHint().height()
+        if self._task_row is not None and not self._task_row.isHidden():    # a long row: its wrapped lines all show
+            height = max(height, self.panel.layout().totalHeightForWidth(width))
         self.panel.setGeometry(int((self.width() - width) / 2), int(max(16, (self.height() - height) / 2)),
                                int(width), int(height))
 
@@ -373,7 +403,7 @@ class WaitingRow(QWidget):
         super().__init__(parent)
         self.setObjectName("DesktopWaitingRow")
         self._count = 0
-        self.label = body_label(WAITING_TEXT, "body_sm", holo.AMBER_TX)
+        self.label = body_label(WAITING_TEXT, "body_sm", holo.AMBER_TX, wrap=False)
         self.dot = body_label("\u00b7", "body_sm", holo.AMBER_TX2)
         self.show_me = holo.HoloButton(SHOW_ME_TEXT, holo.LINK, size=holo.SIZE_SM)
         self.show_me.setAccessibleName(SHOW_ME_TEXT + ": " + WAITING_TEXT)

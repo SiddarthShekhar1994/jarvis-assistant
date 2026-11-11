@@ -596,6 +596,7 @@ class AppHarness:
     in the prefs already, as an earlier run would have left it (the default while [desktop] is on: the
     desktop tests test what comes after it - today's card, desktop_ui.CONSENT_VERSION; 1: Phase 1's card;
     the consent tests pass False). close() shuts the desktop controller down (its thread ends).
+    ``agent_factory``: what makes the agent's controller while [agent] is on (a test's short waits; None: the app's).
     ``launch`` (models.LAUNCH_*; None: derived as the app derives it) and ``desktop_launch`` (--hud)
     reach the controller for a test that calls its start()."""
 
@@ -606,7 +607,8 @@ class AppHarness:
                  clock: HarnessClock | None = None, productivity: bool = False, prod_extra: str = "",
                  prod_inline: bool = True, desktop_factory: Any = None, launch: str | None = None,
                  desktop_launch: bool = False, prepare: Any = None, desktop_backend: Any = None,
-                 desktop_window_api: Any = None, desktop_consent: bool | int = True) -> None:
+                 desktop_window_api: Any = None, desktop_consent: bool | int = True,
+                 agent_factory: Any = None) -> None:
         tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         test.addCleanup(tmp.cleanup)
         self.root = root = Path(tmp.name)
@@ -648,7 +650,8 @@ class AppHarness:
                                       run_state=run_state, voice_factory=lambda _controller: self.voice,
                                       snapshot_factory=snapshot_factory or (lambda _controller: self.snapshots),
                                       desktop_factory=desktop_factory, launch=launch, desktop_launch=desktop_launch,
-                                      desktop_backend=desktop_backend, desktop_window_api=desktop_window_api)
+                                      desktop_backend=desktop_backend, desktop_window_api=desktop_window_api,
+                                      agent_factory=agent_factory)
         self.c._start_fetch = lambda *args, **kwargs: None   # never Notion: the page is handed over below
         test.addCleanup(self.close)
 
@@ -670,6 +673,8 @@ class AppHarness:
         c = self.c
         c.live.set_listener(None)   # the LIVE feed hears nothing more
         c._live_feed.stop()
+        if getattr(c, "agent", None) is not None:
+            c.agent.shutdown()          # a task on its way is killed
         if c.ask is not None:
             c.ask.shutdown()
             c.ask.join(5)

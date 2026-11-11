@@ -287,6 +287,14 @@ def gate_counts() -> dict[str, int]:
         return {}
 
 
+def seal_gate(sealed: bool) -> None:
+    """The network gate refuses every new connection while sealed (snapshot_gate.ConnectGate.seal): agent.browser, while
+    a page the agent wrote is open. Before the gate started, and on a test platform, there is nothing to seal."""
+    gate = _ENGINE.gate
+    if gate is not None:
+        gate.seal(sealed)
+
+
 def _judged_environ() -> Mapping[str, str]:
     """The environment the inherited-settings checks judge (snapshots.sandbox_problem /
     engine_flags_problem): os.environ, but with QTWEBENGINE_CHROMIUM_FLAGS as Jarvis inherited it
@@ -335,6 +343,31 @@ def _start_engine() -> str:
         return snapshots.R_ENGINE_FAILED
     _ENGINE.imported = True
     return ""
+
+
+def warm_up(*, test_platform: bool = False) -> float:
+    """Chromium started now, on the GUI thread (GUI thread only): the first profile is what takes the time, about a
+    second or more, and a task does this as it starts, before the switch and the panel move, so its first web step does
+    not freeze them. No page, no renderer and no window come of it. Its seconds; 0.0 when it did nothing: started
+    already, the settings or the engine say no (a page's shot will say why), or a test platform (unless
+    ``test_platform``)."""
+    if _ENGINE.started or (_test_platform() and not test_platform) or QCoreApplication.instance() is None:
+        return 0.0
+    began = time.monotonic()
+    try:
+        environ = _judged_environ()
+        if snapshots.sandbox_problem(environ) or snapshots.engine_flags_problem(environ) or _start_engine():
+            return 0.0
+        profile = _classes().QWebEngineProfile()
+        if profile.isOffTheRecord():
+            _ENGINE.started = True
+        profile.deleteLater()
+    except Exception as exc:  # noqa: BLE001 - the first page will try again and say why
+        logger.debug("Page snapshots: the web engine was not started ahead (%s)", type(exc).__name__)
+        return 0.0
+    seconds = time.monotonic() - began
+    logger.info("Page snapshots: web engine started ahead in %.1f s", seconds)
+    return seconds
 
 
 def _quietly(step: Callable[[], Any]) -> None:
@@ -574,13 +607,7 @@ class PageCamera(QObject):
             shot.target = target
         view = self._view
         if view is None:
-            view = classes.QWebEngineView()
-            view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
-            view.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            view.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-            view.setAccessibleName("")
-            view.resize(*snapshots.VIEWPORT)
-            self._view = view
+            view = self._view = self._new_view(classes)
         page = classes.Page(profile, view)
         shot.page = page
         self._connect(page, shot)
@@ -597,6 +624,17 @@ class PageCamera(QObject):
         self._timeout.start(self._timeout_ms)
         seed.load(QUrl("about:blank"))
         return ""
+
+    def _new_view(self, classes: Any) -> Any:
+        """The view the pages show on: here a hidden one, never on screen (agent.browser's is in the window Jarvis
+        reads in)."""
+        view = classes.QWebEngineView()
+        view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+        view.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        view.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        view.setAccessibleName("")
+        view.resize(*snapshots.VIEWPORT)
+        return view
 
     # ---- the sandboxed window (GUI thread) ---------------------------------------------------
 

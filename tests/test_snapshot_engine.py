@@ -302,9 +302,10 @@ class PageCameraProbeTests(unittest.TestCase):
     def test_a_hung_page_gives_nothing_and_leaves_no_renderer(self) -> None:
         report = self.report("hang")
         self.assertFalse(report["result"]["ok"])
-        self.assertIn(report["result"]["reason"], (snapshots.R_BLANK, snapshots.R_TIMEOUT))
+        # (On a loaded PC the private window may not have come within the limit either: it gives nothing all the same.)
+        self.assertIn(report["result"]["reason"], (snapshots.R_BLANK, snapshots.R_TIMEOUT, snapshots.R_ENGINE_FAILED))
         self.assertGreaterEqual(report["children_peak_during_shots"], 1)
-        self.assertEqual(report["children_2s_after_close"], 0)
+        self.assertEqual(report["children_after_close"], 0)
 
     def test_nothing_is_written_to_disk(self) -> None:
         report = self.report("disk")

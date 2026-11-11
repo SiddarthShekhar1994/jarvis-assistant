@@ -7765,6 +7765,7 @@ class CommandBar(QWidget):
         self._holo = False           # the hologram pill (set_holo): no meta line, only what needs the owner
         self._hud = False            # the desktop HUD's row (set_hud): no status line either
         self._typing = False
+        self._escape_hook: Any = None   # asked at Esc in the empty field (a task's Stop on the HUD's bar)
         self._last_request = ""      # the last request accepted from here, as typed (Up brings it back)
         self.input = _CommandInput()
         self.field = _CommandField(self.input)
@@ -7991,6 +7992,11 @@ class CommandBar(QWidget):
         """The field's text with its whitespace collapsed (what Enter submits)."""
         return " ".join(self.input.text().split())
 
+    def raw_text(self) -> str:
+        """The field's text as it stands, a paste's line breaks and all. Only a task reads it (ask_ui: a line break is
+        a sign of a paste, agent.owner); what Enter submits is text()."""
+        return self.input.text()
+
     def set_text(self, text: str) -> None:
         self.input.setText(text[:COMMAND_MAX_LENGTH])
 
@@ -8038,6 +8044,11 @@ class CommandBar(QWidget):
             return
         self.submitted.emit(text)
 
+    def set_escape_hook(self, hook: Any) -> None:
+        """``hook()`` is called at Esc in the empty field, before the last answer is put away (agent_feed: Esc stops a
+        task while the HUD's bar has the keyboard). None: nothing is called."""
+        self._escape_hook = hook
+
     def _on_escape(self) -> None:
         if self._running:
             if self.button.isEnabled():
@@ -8045,6 +8056,8 @@ class CommandBar(QWidget):
         elif self.input.text():
             self.input.clear()
         else:
+            if self._escape_hook is not None:
+                self._escape_hook()
             self.statusDismissed.emit()
 
     def _on_button(self) -> None:
@@ -9116,6 +9129,7 @@ LIVE_TAG_COLORS = {
     live_events.TASK_PLAN: LAVENDER, live_events.TASK_PREP: PEACH, live_events.TASK_OWN_READS: TEXT_DIM,
     live_events.TASK_NUDGE: AMBER_HOVER, live_events.TASK_MEETING: PEACH,
     live_events.TASK_DESKTOP: ACCENT,           # cyan: Jarvis pointing at something on the desktop - never amber
+    live_events.TASK_AGENT: ACCENT,             # cyan: Jarvis at work on a task
 }
 LIVE_TEXT_MAX_PX = 320          # an open text block grows to this height, then scrolls
 LIVE_FIELD_LABEL_PX = 104       # the field labels' column ...

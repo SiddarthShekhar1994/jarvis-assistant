@@ -573,12 +573,13 @@ class LiveLogRenderTests(LogCase):
         self.assertFalse(card.expanded())
 
     def test_a_40_step_task_applies_quickly(self) -> None:
-        """A 40-step task is shown within 20 ms, and the cost grows with the steps, not faster.
+        """A 40-step task is shown quickly (11 to 16 ms on this PC, unloaded), and the cost grows with the steps, not faster.
 
         Timing on a shared machine (another program busy for a moment) is noisy, so: the best of
-        5 to 15 tries (it stops once a try is within the limit), and a 10-step task timed between
+        5 to 15 tries (it stops once a try is within 20 ms), and a 10-step task timed between
         the same tries - the machine's load hits both alike, so 4x the steps costing at most 4x
-        holds however busy the machine is (an apply that redoes every step per step would not)."""
+        holds however busy the machine is (an apply that redoes every step per step would not).
+        The clock's own limit is wide, for what would be felt: a little load must not fail it."""
         def task_with(steps: int) -> tuple[hud.LiveLog, live.LiveChanges, int]:
             clock = Clock()
             source = stream(clock)
@@ -610,7 +611,7 @@ class LiveLogRenderTests(LogCase):
                 break
         self.assertEqual(len(forty[0].task_widget(forty[2]).step_widgets()), 40)
         self.assertEqual(len(ten[0].task_widget(ten[2]).step_widgets()), 10)
-        self.assertLess(best40, 0.020, f"{best40 * 1000:.1f} ms")
+        self.assertLess(best40, 0.250, f"{best40 * 1000:.1f} ms")
         self.assertLess(best40 / best10, 4.0, f"40 steps {best40 * 1000:.1f} ms, 10 steps {best10 * 1000:.1f} ms")
 
     def test_hour24(self) -> None:

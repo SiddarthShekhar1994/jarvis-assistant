@@ -66,6 +66,7 @@ from types import ModuleType
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
+from .format_chars import invisible_char
 from .models import DIVIDER, HEADING, PARAGRAPH, FlatLine
 
 logger = logging.getLogger(__name__)
@@ -1261,9 +1262,11 @@ def web_link_problem(url: Any) -> str:
     """Why a web research card may not open ``url`` ("" when it may): everything an Open link must
     be (https, at most 2,048 characters, no whitespace / control / format character or backslash,
     no user name or password, port none or 443, no dot segments), none of | < > " ` (a source
-    becomes a key=value line and is shown as text), and a public host (public_host_problem) on any
-    site. Checked when the research's answer is read and again on the card's click."""
-    if not isinstance(url, str) or any(char in _WEB_LINK_BANNED for char in url):
+    becomes a key=value line and is shown as text), nothing no one can see (format_chars.invisible_char:
+    a variation selector or a filler holds a byte a card could not show), and a public host
+    (public_host_problem) on any site. Checked when the research's answer is read and again on the
+    card's click."""
+    if not isinstance(url, str) or any(char in _WEB_LINK_BANNED or invisible_char(char) for char in url):
         return _NOT_HTTPS
     problem, _parts, host = _https_parts(url)
     if problem:

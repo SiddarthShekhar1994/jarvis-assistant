@@ -94,7 +94,7 @@ UNDO_SECONDS_RANGE = (3, 30)
 _MISSING = object()
 _KNOWN_TABLES = ("voice", "prompt", "polling", "sections", "notion", "calendar", "actions",
                  "accounts", "schedule", "hotkey", "agenda", "display", "ask", "research", "assistant", "live",
-                 "productivity", "ui", "meetings", "desktop")
+                 "productivity", "ui", "meetings", "desktop", "agent", "talk")
 # Library loggers kept at WARNING, also under --debug. The Google sign-in libraries log the
 # authorization code, the access token and the refresh token at DEBUG (requests_oauthlib),
 # before Jarvis could register them for redaction, so they never get DEBUG here.
@@ -435,6 +435,57 @@ class DesktopConfig:
                 object.__setattr__(self, name, tuple(value))
 
 
+# Jarvis, a true agent ([agent]): a task worked out step by step by the owner's Claude Code over Jarvis's own tools.
+AGENT_RANGES = {"max_turns": (5, 1000), "max_minutes": (1, 240), "tasks_per_day": (1, 200)}
+AGENT_EFFORTS = ("", "low", "medium", "high", "xhigh", "max")      # "" = Claude Code's default
+AGENT_SEARCH_ENGINES = ("duckduckgo", "bing", "google")
+# What a task may read of the owner's things ([agent] private): an entry that is none of these grants nothing.
+AGENT_PRIVATE = ("calendar", "contacts", "memory", "mail", "files")
+
+
+@dataclass(frozen=True)
+class AgentConfig:
+    """``[agent]``: Jarvis working through a task (off by default; JARVIS_AGENT_ENABLED overrides ``enabled``; it also
+    needs [desktop] and [ask] on: agent.policy.agent_on). Off means no endpoint, nothing started and no new word in any
+    prompt or schema. Bad values become the default with a warning, but for ``private``: one that is not a list grants
+    nothing. The workspace's warnings never name its value."""
+
+    enabled: bool = False
+    model: str = "opus"            # judgement matters more than speed in a task; quick replies stay on [ask] model
+    effort: str = ""               # one of AGENT_EFFORTS
+    max_turns: int = 60            # a task's budget: reaching it asks "Keep going?" (5..1000)
+    max_minutes: int = 20          # ... and so does this, in minutes of work (1..240)
+    tasks_per_day: int = 20        # tasks started in the last 24 hours (1..200)
+    search_engine: str = "duckduckgo"              # where web_search goes first; then the others (agent.web)
+    workspace: str = field(default="", repr=False)   # "" = Jarvis\Workspace in your user folder; never under OneDrive
+    private: tuple[str, ...] = AGENT_PRIVATE         # what a task may read of the owner's things (AGENT_PRIVATE)
+    speak_private: bool = False    # true: a line that may hold something private is said too (agent_ui.spoken: off)
+
+
+DEFAULT_TALK_KEY = "ctrl+alt+space"   # owner decision 2026-11-09: tap it, speak, and a short quiet ends the talk
+TALK_MODELS = ("small.en", "base.en", "medium.en")   # faster-whisper models on this PC (owner decision: small.en)
+TALK_RANGES = {"keep_warm_minutes": (1, 120), "quiet_ms": (300, 2000)}
+TALK_HINTS_MAX = 20                  # names the speech model should expect ("Jarvis" is always one)
+TALK_HINT_CHARS = 40
+
+
+@dataclass(frozen=True)
+class TalkConfig:
+    """``[talk]``: talking to Jarvis (off by default; JARVIS_TALK_ENABLED overrides ``enabled``). The talk key
+    opens the microphone for one request: it closes after ``quiet_ms`` of quiet, a second tap or Esc, and what
+    was heard goes in as if typed (cards still need a click: voice never approves or undoes). Speech is turned
+    into text on this PC (``model``, downloaded only on the owner's click); audio is never written to disk and no
+    log holds what was said. ``key`` is never the window key ([hotkey] combo) nor the HUD key ([desktop] hud_key):
+    such a key is refused at load with a warning."""
+
+    enabled: bool = False
+    key: str = DEFAULT_TALK_KEY     # canonical spelling; "" = no talk key
+    model: str = "small.en"         # one of TALK_MODELS
+    keep_warm_minutes: int = 10     # the speech model stays loaded this long after the last talk (1..120)
+    quiet_ms: int = 500             # this much quiet after speech ends a talk (300..2000 ms)
+    hints: tuple[str, ...] = ()     # names the speech model should expect, besides "Jarvis" (at most 20)
+
+
 @dataclass(frozen=True)
 class Config:
     notion_token: str = field(repr=False)   # "" when missing; NEVER logged
@@ -466,6 +517,8 @@ class Config:
     ui: UiConfig = field(default_factory=UiConfig)
     meetings: MeetingsConfig = field(default_factory=MeetingsConfig)
     desktop: DesktopConfig = field(default_factory=DesktopConfig)
+    agent: AgentConfig = field(default_factory=AgentConfig)
+    talk: TalkConfig = field(default_factory=TalkConfig)
 
     @property
     def notion_url(self) -> str:
@@ -565,6 +618,7 @@ def load_config(project_root: Path | None = None, *,
 
     data_dir = _data_dir_from(environ)
     hotkey = _parse_hotkey(doc)
+    desktop = _parse_desktop(doc, environ, hotkey.combo)
     return Config(
         notion_token=token,
         page_id=_page_id_from_env(environ.get("BRIEFING_PAGE_ID"), root / ENV_FILE_NAME),
@@ -592,7 +646,9 @@ def load_config(project_root: Path | None = None, *,
         productivity=_parse_productivity(doc, environ),
         ui=_parse_ui(doc),
         meetings=_parse_meetings(doc, environ),
-        desktop=_parse_desktop(doc, environ, hotkey.combo),
+        desktop=desktop,
+        agent=_parse_agent(doc, environ),
+        talk=_parse_talk(doc, environ, hotkey.combo, desktop.hud_key),
     )
 
 
@@ -1221,6 +1277,88 @@ def _parse_desktop(doc: Mapping[str, Any], environ: Mapping[str, str] | None = N
                          hide_from_capture=r.boolean("hide_from_capture", d.hide_from_capture),
                          screenshots_dir=screenshots, undo_days=r.integer("undo_days", d.undo_days, *UNDO_DAYS_RANGE),
                          hud_key=hud_key, apps=r.boolean("apps", d.apps))
+
+
+AGENT_ENABLED_ENV = "JARVIS_AGENT_ENABLED"
+
+
+def _parse_agent(doc: Mapping[str, Any], environ: Mapping[str, str] | None = None) -> AgentConfig:
+    """``[agent]`` from config.toml; ``JARVIS_AGENT_ENABLED`` (e.g. in the gitignored ``.env``) overrides ``enabled``
+    both ways, like JARVIS_DESKTOP_ENABLED. Bad values fall back to the defaults, but a ``private`` that is no list
+    grants nothing: whoever writes one means to narrow it. A workspace that is not a full local
+    folder is refused here; whether it lies under OneDrive is checked when a task starts (agent.workspace). The
+    warnings about the workspace (and a [agent] that is not a table) name the setting only: it may be a folder path."""
+    d = AgentConfig()
+    r = _TableReader(doc, "agent", _field_names(AgentConfig), echo=False)
+    enabled = _enabled_override(r.boolean("enabled", d.enabled), environ, AGENT_ENABLED_ENV, "agent.enabled")
+    raw = r._get("workspace")
+    workspace = d.workspace
+    if isinstance(raw, str) and (not raw.strip() or _absolute_folder(raw.strip())):
+        workspace = raw.strip()
+    elif raw is not _MISSING:
+        logger.warning("config.toml: agent.workspace is not a full folder path; using the default (Jarvis\\Workspace "
+                       "in your user folder)")
+    private = d.private
+    listed = r._get("private")
+    if isinstance(listed, list):
+        names = [item.strip().casefold() for item in listed if isinstance(item, str)]
+        private = tuple(name for name in AGENT_PRIVATE if name in names)
+        if len(names) != len(listed) or any(name not in AGENT_PRIVATE for name in names):
+            logger.warning("config.toml: agent.private has an entry that is none of %s; it grants nothing",
+                           ", ".join(AGENT_PRIVATE))
+    elif listed is not _MISSING:
+        private = ()              # the owner meant to narrow it: nothing rather than everything
+        logger.warning("config.toml: agent.private is not a list; it grants nothing (a list of %s does)",
+                       ", ".join(AGENT_PRIVATE))
+    return AgentConfig(enabled=enabled, model=r.string("model", d.model, pattern=_MODEL_RE),
+                       effort=r.choice("effort", d.effort, AGENT_EFFORTS),
+                       max_turns=r.integer("max_turns", d.max_turns, *AGENT_RANGES["max_turns"]),
+                       max_minutes=r.integer("max_minutes", d.max_minutes, *AGENT_RANGES["max_minutes"]),
+                       tasks_per_day=r.integer("tasks_per_day", d.tasks_per_day, *AGENT_RANGES["tasks_per_day"]),
+                       search_engine=r.choice("search_engine", d.search_engine, AGENT_SEARCH_ENGINES),
+                       workspace=workspace, private=private,
+                       speak_private=r.boolean("speak_private", d.speak_private))
+
+
+TALK_ENABLED_ENV = "JARVIS_TALK_ENABLED"
+
+
+def _parse_talk(doc: Mapping[str, Any], environ: Mapping[str, str] | None = None,
+                window_combo: str = DEFAULT_COMBO, hud_combo: str = DEFAULT_HUD_KEY) -> TalkConfig:
+    """``[talk]`` from config.toml; ``JARVIS_TALK_ENABLED`` (e.g. in the gitignored ``.env``) overrides ``enabled``
+    both ways, like JARVIS_AGENT_ENABLED. A talk key that is the window key or the HUD key is refused with a
+    warning (the default, unless that is the clash too: then no talk key). ``hints`` keeps up to TALK_HINTS_MAX
+    short texts; its warnings name an entry's number, never its text."""
+    d = TalkConfig()
+    r = _TableReader(doc, "talk", _field_names(TalkConfig))
+    enabled = _enabled_override(r.boolean("enabled", d.enabled), environ, TALK_ENABLED_ENV, "talk.enabled")
+    key = r.combo("key", d.key)
+    taken = {combo for combo in (window_combo, hud_combo) if combo}
+    if key in taken:
+        fallback = d.key if d.key not in taken else ""
+        logger.warning("config.toml: talk.key %s is already %s; %s", key,
+                       "the window key ([hotkey] combo)" if key == window_combo else "the HUD key ([desktop] hud_key)",
+                       f"using {fallback}" if fallback else "no talk key")
+        key = fallback
+    hints: list[str] = []
+    listed = r._get("hints")
+    if isinstance(listed, list):
+        for number, item in enumerate(listed, 1):
+            text = " ".join(item.split()) if isinstance(item, str) else ""
+            if not text or len(text) > TALK_HINT_CHARS or any(ord(char) < 0x20 for char in text):
+                logger.warning("config.toml: talk.hints entry %d is not a short name; left out", number)
+            elif len(hints) < TALK_HINTS_MAX and text.casefold() not in {hint.casefold() for hint in hints}:
+                hints.append(text)
+        if len(listed) > TALK_HINTS_MAX:
+            logger.warning("config.toml: talk.hints has more than %d names; the first %d are used",
+                           TALK_HINTS_MAX, TALK_HINTS_MAX)
+    elif listed is not _MISSING:
+        logger.warning("config.toml: talk.hints is not a list of names; none are used")
+    return TalkConfig(enabled=enabled, key=key, model=r.choice("model", d.model, TALK_MODELS),
+                      keep_warm_minutes=r.integer("keep_warm_minutes", d.keep_warm_minutes,
+                                                  *TALK_RANGES["keep_warm_minutes"]),
+                      quiet_ms=r.integer("quiet_ms", d.quiet_ms, *TALK_RANGES["quiet_ms"]),
+                      hints=tuple(hints))
 
 
 def _parse_assistant(doc: Mapping[str, Any]) -> AssistantConfig:

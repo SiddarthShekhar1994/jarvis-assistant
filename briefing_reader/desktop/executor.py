@@ -341,6 +341,14 @@ class Executor:
             return not self._check_item(item, folder=False)[0]
         return False
 
+    def check_file(self, item: Any) -> tuple[str, paths.PathVerdict | None]:
+        """A listed file re-checked right before something is read of it (``_check_item``): (its code, None), or ("", the
+        verdict)."""
+        return self._check_item(item, folder=False)
+
+    def check_place(self, item: Any) -> tuple[str, paths.PathVerdict | None]:
+        return self._check_item(item, folder=True)
+
     def _check_link(self, via: Any, target: Any) -> str:
         """A shortcut's card: the shortcut is still the one shown (re-checked) and still names ``target``'s path."""
         code, _verdict = self._check_item(via, folder=False)
@@ -588,6 +596,7 @@ _CARD_NOUNS = {dv.MOVE_FILES: "moving the files", dv.COPY_FILES: "copying the fi
 WAITING_NOUNS = ((dv.FLAG_SCRIPT, "a file that can run macros or scripts"), (dv.FLAG_SHORTCUT, "a shortcut"),
                  (dv.FLAG_HIDDEN_CHARS, "a file with hidden characters in its name"),
                  (dv.FLAG_NOT_NAMED, "an app you didn't name exactly"),
+                 (dv.FLAG_TASK_ASKED, "something your words didn't plainly ask to open"),
                  (dv.FLAG_SUGGESTED, "a web page you didn't type"),
                  (dv.FLAG_BARE_HOST, "a web page"))
 

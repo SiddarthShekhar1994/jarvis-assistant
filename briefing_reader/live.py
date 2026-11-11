@@ -99,11 +99,13 @@ TASK_OWN_READS = "own_reads"      # Jarvis's own reads and offers (the day read 
 TASK_DESKTOP = "desktop"          # a desktop request (Jarvis on your desktop): its route, what the planner was
                                   # given, the planner run and each step's check (reason codes, never a name or a
                                   # path). Never amber; never opens LIVE by itself (the HUD shows; SPEC 10.1)
+TASK_AGENT = "agent"              # a task Jarvis works through (agent_ui): one step per tool call. Never opens LIVE by
+                                  # itself; memory only, as every task here (SPEC D11)
 TASK_KINDS = (TASK_ASK, TASK_ACTION, TASK_BRIEFING, TASK_BACKGROUND, TASK_WEB, TASK_MEMORY, TASK_PLAN, TASK_PREP,
-              TASK_OWN_READS, TASK_NUDGE, TASK_MEETING, TASK_DESKTOP)
+              TASK_OWN_READS, TASK_NUDGE, TASK_MEETING, TASK_DESKTOP, TASK_AGENT)
 TASK_TAGS = {TASK_ASK: "ASK", TASK_ACTION: "ACTION", TASK_BRIEFING: "BRIEFING", TASK_BACKGROUND: "BACKGROUND",
              TASK_WEB: "WEB", TASK_MEMORY: "MEMORY", TASK_PLAN: "PLAN", TASK_PREP: "PREP", TASK_OWN_READS: "READS",
-             TASK_NUDGE: "NUDGE", TASK_MEETING: "MEETING", TASK_DESKTOP: "DESKTOP"}
+             TASK_NUDGE: "NUDGE", TASK_MEETING: "MEETING", TASK_DESKTOP: "DESKTOP", TASK_AGENT: "TASK"}
 # Tasks that open the LIVE view by themselves ([live] auto_open) and set the tab's dot.
 ATTENTION_KINDS = frozenset({TASK_ASK, TASK_ACTION, TASK_WEB, TASK_PLAN, TASK_PREP, TASK_NUDGE})
 COMPACT_KINDS = frozenset({TASK_BRIEFING, TASK_BACKGROUND, TASK_MEMORY, TASK_OWN_READS})
@@ -163,12 +165,16 @@ DESKTOP_CONTROL = "desktop.control"       # an in-control re-check (Phase 3)
 DESKTOP_STOP = "desktop.stop"             # a stop: its reason and latency (Phase 3)
 DESKTOP_STEP_KINDS = (DESKTOP_REQUEST, DESKTOP_FIND, DESKTOP_PLAN, DESKTOP_VALIDATE, DESKTOP_STEP, DESKTOP_UNDO,
                       DESKTOP_CONTROL, DESKTOP_STOP)
+AGENT_REQUEST = "agent.request"           # what the owner asked and how the task is set up
+AGENT_TOOL = "agent.tool"                 # one tool call of a task
+AGENT_END = "agent.end"                   # how the task ended
+AGENT_STEP_KINDS = (AGENT_REQUEST, AGENT_TOOL, AGENT_END)
 STEP_KINDS = (ASK_REQUEST, ASK_CHECKS, CALENDAR_READ, MAIL_THREAD, MAIL_SEARCH, PLANNER_RUN, ASK_VALIDATE,
               ASK_CARDS, ACTION_APPROVED, ACTION_PAYLOAD, ACTION_HOLD, ACTION_SIGNIN, ACTION_CHECKS,
               ACTION_CALL, BRIEFING_FETCH, AGENDA_READ, EVENT_CHECK, ACCOUNT_SIGNIN, CLAUDE_CHECK, WEB_SEARCH,
               WEB_FETCH, WEB_SOURCE, RESEARCH_INPUT, RESEARCH_RUN, RESEARCH_VALIDATE, MEMORY_SAVE, MODE_REQUEST,
               PLAN_FREE, PLAN_VALIDATE, PREP_MEETING, PREP_PEOPLE, PREP_VALIDATE, CALENDAR_DAY, OFFER_MADE,
-              MAIL_SCAN, MEETING_INPUT, MEETING_VALIDATE, *DESKTOP_STEP_KINDS)
+              MAIL_SCAN, MEETING_INPUT, MEETING_VALIDATE, *DESKTOP_STEP_KINDS, *AGENT_STEP_KINDS)
 
 # Internal link ids a Field may carry besides a Jarvis-made Google result link: "tab:jarvis" (a tab),
 # "live:3" (a task), "picture:12" (step 12's picture shown larger; the step itself while it has none).
@@ -211,6 +217,7 @@ class LiveLimits:
     max_tasks: int = 30
     max_briefing_tasks: int = 3
     max_steps: int = 40
+    max_agent_steps: int = 300     # a task (TASK_AGENT) has one step per tool call; its characters count as any others
     max_items: int = 200
     max_notes: int = 30
     max_fields: int = 30
@@ -1017,7 +1024,8 @@ class LiveStream:
             if not self._alive(task):
                 return None
             existing = next((step for step in task.steps if key and step.key == key), None)
-            if existing is None and len(task.steps) >= self.limits.max_steps:
+            most = self.limits.max_agent_steps if task.kind == TASK_AGENT else self.limits.max_steps
+            if existing is None and len(task.steps) >= most:
                 task.steps_more += 1
                 self._touch(task)
                 record = None

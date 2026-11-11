@@ -106,6 +106,7 @@ R_NO_PICTURES = "no page pictures for a research that reads no pages ([research]
 R_SAME_PAGE = "the same page as an earlier picture"
 R_TIMEOUT = "the page did not load within 15 s"
 R_LOAD_FAILED = "the page did not load on this PC"
+R_SITE_REFUSED = "the site refuses automated browsers"    # HTTP 401, 403 or 429 (ShotResult.http_status)
 R_TOO_LARGE = "the picture was too large to keep in memory"
 R_BLANK = "the page showed nothing to picture"
 R_CRASHED = "the page stopped working on this PC"
@@ -119,7 +120,8 @@ R_TEXT_OFF = "not kept ([live] text = false)"
 R_SHUTDOWN = "Jarvis closed"
 
 _REASON_KINDS = {
-    R_TIMEOUT: "timeout", R_LOAD_FAILED: "load_failed", R_TOO_LARGE: "too_large", R_BLANK: "blank",
+    R_TIMEOUT: "timeout", R_LOAD_FAILED: "load_failed", R_SITE_REFUSED: "site_refused", R_TOO_LARGE: "too_large",
+    R_BLANK: "blank",
     R_CRASHED: "crashed", R_NO_ENGINE: "no_engine", R_ENGINE_FAILED: "engine_failed", R_SANDBOX_OFF: "sandbox",
     R_UNSAFE_FLAGS: "unsafe_flags", R_CANCELLED: "cancelled", R_TEST_RUN: "test_run", R_SHUTDOWN: "shutdown",
 }
@@ -627,6 +629,7 @@ class ShotResult:
     took_ms: int = 0
     still_loading: bool = False
     blocked: int = 0
+    http_status: int = 0   # R_SITE_REFUSED: the status it answered with
 
     def __repr__(self) -> str:   # never the URL or the image
         if not self.ok:

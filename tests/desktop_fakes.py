@@ -36,6 +36,7 @@ P2.4: ``save_png`` writes a screenshot's new file with fileops' own raw call (CR
 from __future__ import annotations
 
 import _winapi
+import errno
 import ntpath
 import os
 import stat
@@ -235,6 +236,16 @@ class FakeDesktopBackend:
         info = os.lstat(self.real(path))
         return dbk.FileIdentity(self._volume(path, int(info.st_dev)), int(info.st_ino), int(info.st_size),
                                 int(info.st_mtime_ns), stat.S_ISDIR(info.st_mode))
+
+    def read_head(self, path: str, *, max_bytes: int, identity: dbk.FileIdentity | None = None) -> bytes:
+        self._record("read_head", path)
+        if identity is not None and not identity.same_item(self.identity(path)):
+            raise OSError(errno.ESTALE, "it is not the item that was listed")
+        if self.attributes.get(ntpath.normcase(self._unalias(path)), 0) & (dbk.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+                                                                           | dbk.FILE_ATTRIBUTE_RECALL_ON_OPEN):
+            raise OSError(errno.EACCES, "its content is in the cloud")
+        with open(self.real(path), "rb") as handle:
+            return handle.read(max(0, int(max_bytes)))
 
     def list_folder(self, path: str, *, limit: int = dbk.MAX_LISTED) -> list[dbk.DirEntry]:
         self._record("list_folder", path)

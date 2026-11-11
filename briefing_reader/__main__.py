@@ -60,6 +60,9 @@ ERROR_ALREADY_EXISTS = 183
 OPEN_ACTIVATION = {"cmd": "activate", "run": None, "now": False, "open": True}
 # ... and the HUD key's ([desktop] hud_key; SPEC 9): "desktop": true (an app before the HUD key reads it as OPEN).
 DESKTOP_ACTIVATION = {**OPEN_ACTIVATION, "desktop": True}
+# ... and the talk key's ([talk] key): "talk": true - start listening, or end the talk under way (an app before the
+# talk key reads it as OPEN).
+TALK_ACTIVATION = {**OPEN_ACTIVATION, "talk": True}
 # Launch kinds (as models.LAUNCH_*; spelled out here so this module never imports more than it must).
 LAUNCH_OPEN = "open"
 LAUNCH_READ = "read"
@@ -493,17 +496,28 @@ def _run_hotkey_agent(config: Any, slots: Mapping[str, str]) -> int:
         activate=lambda: hotkey.send_activation(name, OPEN_ACTIVATION),
         start_app=lambda: _start_detached(start_arguments, executable=_windowless_python()),
     )
+    keys: dict[str, Any] = {}
     hud_combo = _agent_hud_key(config)
-    if not hud_combo:
-        return hotkey.run_agent(config.hotkey.combo, dispatcher)
-    hud_dispatcher = hotkey.PressDispatcher(
-        is_app_running=lambda: hotkey.mutex_exists(f"Local\\{name}"),
-        activate=lambda: hotkey.send_activation(name, DESKTOP_ACTIVATION),
-        start_app=lambda: _start_detached([*start_arguments, "--hud"], executable=_windowless_python()),
-        label="HUD key", purpose="go onto your desktop",
-    )
-    logger.info("Hotkey agent: [desktop] is on; the HUD key is listened for too")
-    return hotkey.run_agent(config.hotkey.combo, dispatcher, hud_combo=hud_combo, on_hud_press=hud_dispatcher)
+    if hud_combo:
+        keys.update(hud_combo=hud_combo, on_hud_press=hotkey.PressDispatcher(
+            is_app_running=lambda: hotkey.mutex_exists(f"Local\\{name}"),
+            activate=lambda: hotkey.send_activation(name, DESKTOP_ACTIVATION),
+            start_app=lambda: _start_detached([*start_arguments, "--hud"], executable=_windowless_python()),
+            label="HUD key", purpose="go onto your desktop",
+        ))
+        logger.info("Hotkey agent: [desktop] is on; the HUD key is listened for too")
+    talk_combo = _agent_talk_key(config)
+    if talk_combo:
+        # Each tap counts (the second ends the talk): no 2-second debounce. With no app running, it opens Jarvis as
+        # the window key does; the next tap listens.
+        keys.update(talk_combo=talk_combo, on_talk_press=hotkey.PressDispatcher(
+            is_app_running=lambda: hotkey.mutex_exists(f"Local\\{name}"),
+            activate=lambda: hotkey.send_activation(name, TALK_ACTIVATION),
+            start_app=lambda: _start_detached(start_arguments, executable=_windowless_python()),
+            debounce_s=hotkey.TALK_DEBOUNCE_S, label="Talk key", purpose="listen",
+        ))
+        logger.info("Hotkey agent: [talk] is on; the talk key is listened for too")
+    return hotkey.run_agent(config.hotkey.combo, dispatcher, **keys)
 
 
 def _agent_hud_key(config: Any) -> str:
@@ -512,6 +526,14 @@ def _agent_hud_key(config: Any) -> str:
     if getattr(desktop, "enabled", False) is not True:
         return ""
     return str(getattr(desktop, "hud_key", "") or "")
+
+
+def _agent_talk_key(config: Any) -> str:
+    """The talk key the agent registers: [talk] key while [talk] enabled is true, else "" (none)."""
+    talk = getattr(config, "talk", None)
+    if getattr(talk, "enabled", False) is not True:
+        return ""
+    return str(getattr(talk, "key", "") or "")
 
 
 # --------------------------------------------------------------------------
@@ -561,6 +583,21 @@ def _build_client(args: argparse.Namespace, config: Any) -> tuple[Any, Any, str 
     return NotionClient("", session=session, notion_version=config.notion_version), config, None
 
 
+def _prepare_agent_window(config: Any) -> None:
+    """While tasks are on: Jarvis's address scheme for a task's files, which the web engine must know before the
+    QApplication exists. Off: nothing of it is imported. Never stops the app."""
+    if getattr(getattr(config, "agent", None), "enabled", False) is not True:
+        return
+    try:
+        from .agent.browser import register_scheme
+        from .agent.policy import agent_on
+
+        if agent_on(config):
+            register_scheme()
+    except Exception as exc:  # noqa: BLE001 - Jarvis works without it
+        logger.info("Tasks: the window's scheme was not set up (%s)", type(exc).__name__)
+
+
 def _run_app(args: argparse.Namespace, config: Any, name: str, run: str | None,
              slots: Mapping[str, str] | None = None) -> int:
     from PySide6.QtCore import qInstallMessageHandler
@@ -573,6 +610,7 @@ def _run_app(args: argparse.Namespace, config: Any, name: str, run: str | None,
     _set_app_user_model_id()
     # Qt's attributes for the page snapshots' web engine: only before the QApplication exists.
     prepare_application()
+    _prepare_agent_window(config)
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(__version__)

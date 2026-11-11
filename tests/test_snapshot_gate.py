@@ -237,6 +237,33 @@ class GateTests(unittest.TestCase):
             socket.create_connection(("127.0.0.1", port), timeout=1).close()
         self.assertEqual(gate.start(), 0)   # a closed gate does not start again
 
+    def test_sealed_every_new_connection_is_refused_before_its_name_is_looked_up(self) -> None:
+        gate = self.gate()
+        gate.seal(True)
+        for head in (b"CONNECT www.example.org:443 HTTP/1.1\r\n\r\n", b"CONNECT 93.184.215.14:443 HTTP/1.1\r\n\r\n",
+                     b"CONNECT secret-words.example.org:443 HTTP/1.1\r\n\r\n"):
+            _sock, reply = self.ask(gate, head)
+            self.assertTrue(reply.startswith(b"HTTP/1.1 403"), reply)
+        self.assertEqual(self.resolved, [])          # no name went to any resolver
+        self.assertEqual(self.connected, [])
+        self.assertEqual(self.echo.connections, 0)
+        self.assertEqual(gate.counts(), {"tunnels": 0, "refused": 3, "failed": 0})
+        _sock, reply = self.ask(gate, b"GET / HTTP/1.1\r\n\r\n")
+        self.assertTrue(reply.startswith(b"HTTP/1.1 405"), reply)     # what it never did, it still does not
+        gate.seal(False)                             # open again, and its rules are as they were
+        _sock, reply = self.ask(gate, b"CONNECT www.example.org:443 HTTP/1.1\r\n\r\n")
+        self.assertTrue(reply.startswith(b"HTTP/1.1 200"), reply)
+        _sock, reply = self.ask(gate, b"CONNECT rebind.example.org:443 HTTP/1.1\r\n\r\n")
+        self.assertTrue(reply.startswith(b"HTTP/1.1 403"), reply)
+
+    def test_sealing_leaves_a_tunnel_already_open(self) -> None:
+        gate = self.gate()
+        sock, reply = self.ask(gate, b"CONNECT www.example.org:443 HTTP/1.1\r\n\r\n")
+        self.assertTrue(reply.startswith(b"HTTP/1.1 200"), reply)
+        gate.seal(True)
+        sock.sendall(b"still here")
+        self.assertEqual(sock.recv(1024), b"STILL HERE")
+
     def test_the_log_never_gets_a_host_or_an_address(self) -> None:
         with self.assertLogs("briefing_reader.snapshot_gate", logging.DEBUG) as logs:
             logging.getLogger("briefing_reader.snapshot_gate").debug("marker")

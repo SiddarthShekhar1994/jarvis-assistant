@@ -97,6 +97,13 @@ no notes and no conversation (owner decision D6: names only). Its checked plan i
 thread before the run ends (AskOutcome.desktop_run), and its answer on the bar is Jarvis's own words for what came
 of it (AskOutcome.message), never Claude's say or question; a Cancel after something opened still says what did.
 
+A task (Jarvis, a true agent; only while the agent is on): ``set_agent_gate(gate)`` makes ``submit`` ask ``gate(words)``
+first. While a task runs the gate takes whatever is typed (agent_ui.AgentController.take_request: it goes to the task as
+the owner's message, or stops it) and it leaves the bar; no Ask starts (D4). Off: no gate, nothing here changes. A
+planner that hands a request to a task says so in AskOutcome.agent_task; the app starts it (ui). The gate and that task
+have the words with the line breaks a paste left in the bar's field (``_lines_of``): only a task's reading of what they
+ask for at once sees them (agent.owner); the planner, the bar, Live and the conversation have them as one line.
+
 Web research: a request that starts with "web:" (or "research:") is a WEB task (live.TASK_WEB;
 ``running_kind``) whose "Your request" says nothing is read from the accounts; the command still
 goes to planner.plan() as typed, which runs only the research (ask.research). A request the
@@ -128,7 +135,7 @@ from .actions import is_web_open, link_host
 from .ask import desktop_mode
 from .ask import planner as ask_planner
 from .ask import prestart as ask_prestart
-from .ask.context import COMMAND_CAP, MEMORY_PROMPT_CAP, conversation_exchanges
+from .ask.context import COMMAND_CAP, MEMORY_PROMPT_CAP, conversation_exchanges, kept_lines
 from .ask.modes import (MODE_DESKTOP, MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_TASKS, MODE_TITLES,
                         ORIGIN_AUTO, ORIGIN_CHOICE, ORIGIN_TYPED, ModeInputs, ModeRequest)
 from .ask.research import forced_question
@@ -216,6 +223,8 @@ MAIL_LINK_TIP = ("{message}. Opens Google's sign-in for the {alias} account in y
 HUD_IN_APPROVALS = "That's in Approvals, {sir}."     # it proposed something: the cards wait there (the chip counts them)
 HUD_IN_WINDOW = "That's in the window, {sir}."       # an answer or a question back: in the window's conversation
 DEFAULT_META = f"uses your Claude plan {DOT} nothing happens without your OK"
+AGENT_META = "a task: Live has its steps"                # the meta line when a request was handed to a task
+AGENT_HANDED_TEXT = "handed to a task"                   # its LIVE task's end
 _TICK_MS = 1000
 READ_AHEAD_EVERY_S = 30.0      # the calendars are read ahead at most this often as the owner starts typing
 # The header chip's colour for each planner.CHIP_* state.
@@ -290,6 +299,9 @@ class _Running:
     words: str = dataclasses.field(default="", repr=False)
     # What may be shown of its say so far (memory only, never logged): the HUD's caption line while it runs.
     said: str = dataclasses.field(default="", repr=False)
+    # The same words with a paste's line breaks (only while the agent is on; memory only, never logged): what a task
+    # they are handed to starts with (_on_planned), "" when they had none.
+    lines: str = dataclasses.field(default="", repr=False)
 
 
 class _AskBridge(QObject):
@@ -438,6 +450,8 @@ class AskController(QObject):
         # A typed desktop request (ROUTE_DESKTOP; [desktop] on): the app takes it onto the HUD and answers a local
         # route there (None), or hands back the planner's job (ask.desktop_mode.DesktopJob). None: no desktop.
         self._desktop_request = desktop_request
+        self._agent_gate: Callable[[str], bool] | None = None   # a task running takes what is typed (None: agent off)
+        self._typed_lines = ("", "")          # the last words submitted and their line breaks (agent on: _lines_of)
         self.last_task_id = 0                  # the LIVE view task of the last finished Ask (0: none)
         # While outcomeReady is handled: the LIVE task of that answer (still open; NO_TASK otherwise).
         self.finishing_task: LiveTask = NO_TASK
@@ -476,6 +490,22 @@ class AskController(QObject):
         self._bind(bar)
         bar.set_status(CHECKING_TEXT, hud.TONE_IDLE)
         bar.set_meta(self._meta_text)
+
+    def set_agent_gate(self, gate: Callable[[str], bool] | None) -> None:
+        """While the agent is on: ``gate(words)`` is asked first for what is typed; True: it was taken (see the module
+        docs). It has them with a paste's line breaks (_lines_of)."""
+        self._agent_gate = gate
+
+    def _lines_of(self, text: str) -> str:
+        """While the agent is on: ``text`` (submitted, whitespace collapsed) with the line breaks the bar's field holds
+        (a paste keeps them: hud.CommandBar.raw_text), when the field holds those words; else ``text``. A task's reading
+        of what they ask for at once is all that sees them (agent.owner): what follows a break is pasted. Off: ``text``,
+        and nothing is read."""
+        if self._agent_gate is None:
+            return text
+        raw = getattr(self.bar, "raw_text", None)
+        lines = kept_lines(raw()) if callable(raw) else ""
+        return lines if lines != text and lines.lstrip("\n").replace("\n", " ") == text else text
 
     # ---- the bar (the window's, or the desktop HUD's while it shows) -------------------------------
 
@@ -642,6 +672,12 @@ class AskController(QObject):
         text = " ".join((text or "").split())
         if self._stop.is_set():
             return
+        lines = self._lines_of(text)
+        self._typed_lines = (text, lines) if lines != text else ("", "")
+        if text and self._agent_gate is not None and self._agent_gate(lines):
+            logger.info("Ask: typed words went to the running task")
+            self.bar.take_request(text)        # taken: the words leave the bar (Up brings them back)
+            return
         found = NO_ROUTE
         if text and forced_question(text) is None:   # "web:" always wins over a shortcut
             found = self._route(text)
@@ -690,9 +726,10 @@ class AskController(QObject):
         task = _request_task(self.live, text, briefing, kind=kind,
                              memory=self._memory_given(text[:COMMAND_CAP]) if kind == TASK_ASK else None,
                              conversation=len(conversation_exchanges(earlier))
-                             if kind == TASK_ASK and self._conversation is not None else None)
+                             if kind == TASK_ASK and self._conversation is not None else None,
+                             spoken=getattr(self, "_spoken_now", False))
         running = _Running(self._seq, threading.Event(), self._monotonic(), task=task, kind=kind, words=text,
-                           bar=self.bar)
+                           bar=self.bar, lines=lines if lines != text else "")
         self._running = running
         logger.info("Ask %d started", running.seq)
         self._worker.put(_PlanJob(running.seq, text, briefing, tuple(page_ids), running.cancel,
@@ -706,6 +743,22 @@ class AskController(QObject):
         self._tick.start()
         # busyChanged(True) waits for the first stage: an Ask the planner refuses (Claude Code
         # missing or signed out, a limit) never pauses the briefing.
+
+    def submit_spoken(self, text: str) -> None:
+        """What the owner said with the talk key (talk_ui), exactly as typed words: the same routes and gates (a
+        running task's gate, the shortcuts, the planner), so a card still needs a click - voice never approves or
+        undoes. Only the LIVE view's "Your request" says "You said". Logged by its length, never its words."""
+        logger.info("Ask: spoken words (%d characters)", len(text or ""))
+        self._spoken_now = True
+        try:
+            self.submit(text)
+        finally:
+            self._spoken_now = False
+
+    def talk_status(self, text: str, tone: str, *, hud_text: str | None = None) -> None:
+        """A talk's state on the status line (talk_ui: listening, understanding, what is missing first); on the
+        desktop HUD's bar ``hud_text`` when given."""
+        self._put_status(text, tone, hud_text=hud_text)
 
     def submit_mode(self, request: ModeRequest, words: str) -> bool:
         """A planner mode run (the productivity bundle: a typed "plan my day", or a click on an offer):
@@ -744,9 +797,10 @@ class AskController(QObject):
         # plan gets none.
         task = _mode_task(self.live, request, words, kind=kind,
                           memory=None if request.mode in (MODE_MEETING, MODE_DESKTOP) else self._memory_given(""))
+        last, lines = self._typed_lines          # a desktop request typed here: its line breaks, for a task (agent on)
         running = _Running(self._seq, threading.Event(), self._monotonic(), task=task, kind=kind,
                            typed=request.typed_route, mode=request.mode, words=words if request.typed_route else "",
-                           bar=self.bar)
+                           bar=self.bar, lines=lines if request.typed_route and last and last == words else "")
         self._running = running
         logger.info("Ask %d started (mode %s, %s)", running.seq, request.mode, request.origin)
         self._worker.put(_ModeJob(running.seq, request, inputs, briefing, tuple(page_ids), running.cancel,
@@ -818,6 +872,10 @@ class AskController(QObject):
             return
         self._status(text, tone, hud_text=hud_text)
 
+    def forget_task_meta(self) -> None:
+        """The task the last request was handed to did not start (agent_ui): its meta line says nothing of one."""
+        self._show_meta()
+
     def cancel(self) -> None:
         running = self._running
         if running is None or running.cancel_requested:
@@ -873,6 +931,8 @@ class AskController(QObject):
         if running is None or seq != running.seq:
             return   # cancelled and replaced, or the app is closing
         self._running = None
+        if running.lines and getattr(outcome, "agent_task", ""):
+            outcome = _with_lines(outcome, running.lines)
         self._tick.stop()
         self._notice_until = 0.0
         self.bar.set_running(False)
@@ -896,7 +956,9 @@ class AskController(QObject):
             soft = (outcome.question and not outcome.cards) or (bool(getattr(outcome, "note_kind", ""))
                                                                 and getattr(outcome, "brief", None) is None)
             tone = hud.TONE_WARN if soft else hud.TONE_DONE
-            if getattr(outcome, "mode", "") == MODE_DESKTOP:
+            if getattr(outcome, "mode", "") == MODE_DESKTOP and getattr(outcome, "agent_task", ""):
+                tone = hud.TONE_DONE           # handed to a task: Jarvis's own words say so
+            elif getattr(outcome, "mode", "") == MODE_DESKTOP:
                 # A desktop plan: Jarvis's own words for it and what came of it - amber only while a step needs the
                 # owner's OK on a card, coral when it was not done (no step passed, a step refused, failed or
                 # stopped: hard rule 17).
@@ -988,6 +1050,8 @@ class AskController(QObject):
         if getattr(outcome, "note_kind", "") or mode == MODE_DESKTOP or (mode in (MODE_PREP, MODE_MEETING)
                                                                          and getattr(outcome, "brief", None) is not None):
             return self._answer(outcome)
+        if getattr(outcome, "agent_task", ""):
+            return self._answer(outcome)      # the task's spoken start: its work goes on from here
         address = getattr(getattr(self.config, "assistant", None), "address", "sir")
         proposed = any(not card.error for card in outcome.cards)
         if written and not proposed and not getattr(outcome, "question", ""):
@@ -1046,7 +1110,9 @@ class AskController(QObject):
         research runs left, which the research caps can make fewer."""
         parts: list[str] = []
         report = getattr(outcome, "research", None) if outcome is not None and outcome.ok else None
-        if report is not None:
+        if outcome is not None and getattr(outcome, "agent_task", ""):
+            parts.append(AGENT_META)
+        elif report is not None:
             # "2 source cards + 1 proposal under ASK": the sources' Open cards, then the suggestions.
             proposals = research_proposals(outcome)
             words = cards_words(len(report.sources), proposals)
@@ -1192,20 +1258,23 @@ def conversation_words(exchanges: int) -> str:
 
 @quiet(NO_TASK)
 def _request_task(live: LiveStream | None, text: str, briefing: Any, *, kind: str = TASK_ASK,
-                  memory: tuple[Sequence[str], int] | None = None, conversation: int | None = None) -> LiveTask:
+                  memory: tuple[Sequence[str], int] | None = None, conversation: int | None = None,
+                  spoken: bool = False) -> LiveTask:
     """A new Ask's LIVE view task and its "Your request" step (NO_TASK without the LIVE view).
     ``kind`` TASK_WEB: a "web:" request (web research only: nothing is read from the accounts).
     ``memory``: (the notes the planner gets, how many left out) while memory is on. ``conversation``:
-    how many earlier exchanges the planner gets (None: no conversation is kept)."""
+    how many earlier exchanges the planner gets (None: no conversation is kept). ``spoken``: said with the
+    talk key ("You said" instead of "You typed")."""
     if live is None:
         return NO_TASK
     task = live.task(kind, text)
     if task is NO_TASK:
         return NO_TASK
+    words = ("You said" if spoken else "You typed", text)
     if kind == TASK_WEB:
-        fields = [("You typed", text), ("Mode", WEB_MODE_TEXT), ("Briefing given", WEB_BRIEFING_TEXT)]
+        fields = [words, ("Mode", WEB_MODE_TEXT), ("Briefing given", WEB_BRIEFING_TEXT)]
     else:
-        fields = [("You typed", text), ("Briefing given", _briefing_words(briefing))]
+        fields = [words, ("Briefing given", _briefing_words(briefing))]
         if memory is not None:
             fields.append(("Memory given", memory_words(*memory)))
         if conversation is not None:
@@ -1263,11 +1332,22 @@ def _card_words(card: Any, hour24: bool = False) -> str:
     return " - ".join([f"ASK {kind}", *ask_planner.card_details(card, hour24)])
 
 
+def _with_lines(outcome: Any, lines: str) -> Any:
+    """An outcome that hands the owner's words to a task (``agent_task``, only while the agent is on), with the line
+    breaks they were typed with: the same words, character for character, as far as the planner kept them. The task
+    alone reads the breaks (agent.owner), one before the first word too; anything else it holds is as it was."""
+    task = outcome.agent_task
+    body = lines.lstrip("\n")
+    if not dataclasses.is_dataclass(outcome) or body.replace("\n", " ")[:len(task)] != task:
+        return outcome
+    return dataclasses.replace(outcome, agent_task=lines[:len(lines) - len(body) + len(task)])
+
+
 @quiet()
 def _cards_step(task: LiveTask, outcome: Any, hour24: bool = False) -> None:
     """Right before the answer is handed over: what Jarvis says and the cards, as returned (a web
     research: its answer, how many sources it showed and left out, and the sources' cards)."""
-    if task is NO_TASK or getattr(outcome, "mode", "") == MODE_DESKTOP:
+    if task is NO_TASK or getattr(outcome, "mode", "") == MODE_DESKTOP or getattr(outcome, "agent_task", ""):
         return   # a desktop plan has no cards: its steps are in "Checking the plan" and "What Jarvis does with it"
     step = task.step(ASK_CARDS, "Answer and cards")
     for label, value in (("Jarvis says", outcome.say), ("Question", outcome.question), ("Note", outcome.message)):
@@ -1335,6 +1415,8 @@ def _finish_words(outcome: Any, *, cancelled: bool) -> tuple[str, str]:
     has a recipient you didn't type - the header says so without opening a step."""
     if cancelled or outcome.kind == CANCELLED:
         return STATUS_CANCELLED, "Cancelled; nothing was proposed"
+    if outcome.ok and getattr(outcome, "agent_task", ""):
+        return STATUS_OK, AGENT_HANDED_TEXT
     report = getattr(outcome, "research", None)
     if outcome.ok and report is not None:
         # A web research: "2 source cards + 1 proposal"; CHECK when a source or a suggestion was left out.

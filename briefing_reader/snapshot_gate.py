@@ -1,7 +1,7 @@
 """Page pictures' network gate (Qt-free): the one way the hidden private window reaches the network.
 
     ConnectGate(resolve=, connect=)   start() -> the port on 127.0.0.1 (0: it could not start);
-                                      port(); counts() (tunnels / refused / failed); close()
+                                      port(); counts() (tunnels / refused / failed); seal(bool); close()
 
 snapshot_engine starts Chromium with --proxy-server=127.0.0.1:<port> and --proxy-bypass-list=<-loopback>
 (snapshots.GATE_FLAGS), so every connection of a pictured page comes here first: its own requests,
@@ -106,6 +106,7 @@ class ConnectGate:
         self._listener: socket.socket | None = None
         self._port = 0
         self._stopped = threading.Event()
+        self._sealed = threading.Event()
         self._open: set[socket.socket] = set()
         self._counts = {"tunnels": 0, "refused": 0, "failed": 0}
 
@@ -147,6 +148,16 @@ class ConnectGate:
         """tunnels (opened) / refused / failed (the server could not be reached): counts only."""
         with self._lock:
             return dict(self._counts)
+
+    def seal(self, sealed: bool) -> None:
+        """While sealed every new CONNECT is refused before its name is looked up (a tunnel already open goes on):
+        nothing a page does can reach a resolver or a server, not even what the request interceptor never sees (a
+        pre-connection, WebRTC's TURN over TCP). The agent's window seals it while a page the agent wrote is open
+        (agent.browser): such a page may hold private data and may load nothing from the network. Never raises."""
+        if sealed:
+            self._sealed.set()
+        else:
+            self._sealed.clear()
 
     def close(self) -> None:
         """Stop accepting and end every open tunnel. Never raises."""
@@ -247,6 +258,10 @@ class ConnectGate:
             if len(parts) != 3 or parts[0] != "CONNECT" or not parts[2].startswith("HTTP/1."):
                 self._add("refused")
                 client.sendall(_REPLIES[405])
+                return
+            if self._sealed.is_set():
+                self._add("refused")
+                client.sendall(_REPLIES[403])
                 return
             host, problem = snapshots.tunnel_target(parts[1])
             addresses: list[str] = []

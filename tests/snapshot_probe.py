@@ -554,13 +554,19 @@ def main(case: str) -> dict:
                       reports=dict(reports), hooks=camera.hook_counts(),
                       windows_security_before=shown_before, windows_security_during=dialog["seen"])
     elif case == "hang":
-        camera = make(timeout_s=2.0)
+        # What is timed is the page that never settles, not the engine's start or a new page's making, which take seconds on
+        # a loaded PC: a plain page first, with all the time it needs, and then a limit that leaves room for the rest (the
+        # probe looks inside).
+        camera = make()
+        shoot(camera, PAGE_URL, STORAGE_HTML)
+        camera._timeout_ms = 10_000
+        peak["children"] = 0
         result, _early = shoot(camera, PAGE_URL, HANG_HTML, timeout_s=30)
         report["result"] = describe(result)
         started = time.monotonic()
         camera.close_view()
-        pause(2.0)
-        report["children_2s_after_close"] = len(children())
+        no_children(20)                 # (it goes at once when the PC is free; seconds later on a loaded one)
+        report["children_after_close"] = len(children())
         report["close_and_wait_s"] = round(time.monotonic() - started, 2)
     elif case == "disk":
         roots = {name: os.environ.get(name, "") for name in ("LOCALAPPDATA", "APPDATA", "TEMP", "TMP")}

@@ -21,8 +21,8 @@ Public API
 Kinds: ``FILE`` "f", ``PLACE`` "d", ``APP`` "a", ``SITE`` "s", ``WINDOW`` "w", ``FIELD`` "e", ``CELL`` "c", ``NEW``
 "n" (``KINDS``, ``CAPS``); ``REF_RE``.
 ``Ref(id, kind, target, label, suspect, flags)``.
-``RefIndex(run_id)``: ``issue(kind, target, label, suspect=None, flags=())``, ``resolve(ref_id, kind=None)``,
-``knows(ref_id)``, ``ids(kind)``, ``refs(kind)``, ``suspects()``, ``counts()``.
+``RefIndex(run_id)``: ``issue(kind, target, label, suspect=None, flags=())``, ``snapshot()``,
+``resolve(ref_id, kind=None)``, ``knows(ref_id)``, ``ids(kind)``, ``refs(kind)``, ``suspects()``, ``counts()``.
 ``parse_ref(text)`` -> (kind, number) or None.
 """
 
@@ -131,6 +131,14 @@ class RefIndex:
         if suspects:
             counts["suspect"] = suspects
         return counts
+
+    def snapshot(self) -> RefIndex:
+        """A copy as it stands now, for a thread to read while this one goes on issuing (a task's tools)."""
+        copied = RefIndex(self.run_id)
+        copied._refs = dict(self._refs)                 # noqa: SLF001
+        copied._by_target = dict(self._by_target)       # noqa: SLF001
+        copied._next = dict(self._next)                 # noqa: SLF001
+        return copied
 
     def __len__(self) -> int:
         return len(self._refs)

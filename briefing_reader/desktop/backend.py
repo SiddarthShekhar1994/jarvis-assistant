@@ -68,6 +68,7 @@ AppsFolder's parsing prefix an app id is launched under); ``INDEX_COLUMNS`` (wha
 
 from __future__ import annotations
 
+import errno
 import functools
 import logging
 import ntpath
@@ -316,6 +317,12 @@ class DesktopBackend(Protocol):
         """The identity of ``path`` itself (not followed; SPEC 5.3). OSError when it is missing."""
         ...
 
+    def read_head(self, path: str, *, max_bytes: int, identity: FileIdentity | None = None) -> bytes:
+        """At most ``max_bytes`` bytes from the start of the file at ``path``, read only. ``identity``: the handle it
+        opens must be that item, unchanged, and its content here on this PC (never fetched from the cloud), or OSError:
+        nothing is read."""
+        ...
+
     def list_folder(self, path: str, *, limit: int = MAX_LISTED) -> list[DirEntry]:
         """The entries of the folder ``path`` (at most ``limit``), from its listing: no entry is opened or followed.
         OSError when it cannot be listed."""
@@ -473,6 +480,20 @@ class Win32Backend:
         info = os.lstat(path)
         return FileIdentity(int(info.st_dev), int(info.st_ino), int(info.st_size), int(info.st_mtime_ns),
                             stat.S_ISDIR(info.st_mode))
+
+    @_real
+    def read_head(self, path: str, *, max_bytes: int, identity: FileIdentity | None = None) -> bytes:
+        handle = os.open(path, os.O_RDONLY | os.O_BINARY | os.O_NOINHERIT)
+        with os.fdopen(handle, "rb") as opened:
+            info = os.fstat(opened.fileno())
+            attributes = int(getattr(info, "st_file_attributes", 0))
+            if attributes & (FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS | FILE_ATTRIBUTE_RECALL_ON_OPEN):
+                raise OSError(errno.EACCES, "its content is in the cloud")
+            if identity is not None and not identity.same_item(FileIdentity(
+                    int(info.st_dev), int(info.st_ino), int(info.st_size), int(info.st_mtime_ns),
+                    stat.S_ISDIR(info.st_mode))):
+                raise OSError(errno.ESTALE, "it is not the item that was listed")
+            return opened.read(max(0, int(max_bytes)))
 
     # ---- looking ----------------------------------------------------------------------------------------
 

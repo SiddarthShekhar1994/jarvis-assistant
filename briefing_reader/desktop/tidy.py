@@ -309,6 +309,10 @@ def make_card(plan: cp.CardPlan | None, scope: paths.Scope, *, at: datetime | No
 # What came of a click (the desktop thread's answers)
 # --------------------------------------------------------------------------
 
+# How a card ended, as DesktopController.tidyEnded says (a task waiting on it hears: agent.owner.card_message).
+ENDED_CARRIED, ENDED_NOT_NOW, ENDED_EXPIRED, ENDED_DROPPED = "carried", "not_now", "expired", "dropped"
+
+
 @dataclass(frozen=True)
 class RowEnd:
     """How one row ended: ``state`` (journal: done, failed, skipped; undone, undo_refused), its reason code and

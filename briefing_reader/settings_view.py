@@ -86,6 +86,7 @@ DESKTOP_HOW = ("Jarvis on your desktop is switched on or off with [desktop] in c
 NOT_TURNED_ON = "Not turned on yet"
 TURNED_ON = "Turned on"
 TURNED_ON_PHASE_1 = "Turned on for opening things - the updated card waits for your OK"   # p2r-6: Phase 1's card
+TURNED_ON_NO_TASKS = "Turned on - tasks wait for your OK on the updated card"              # the agent's row
 NO_HUD_KEY_SHORTCUT_OFF = "No key while the keyboard shortcut is off - the Dock's Desktop switches"
 _DESKTOP_FOLDERS = {"desktop": "Desktop", "documents": "Documents", "downloads": "Downloads", "pictures": "Pictures",
                     "music": "Music", "videos": "Videos"}
@@ -245,10 +246,11 @@ def effective_hud_key(config: Any) -> str:
     return str(getattr(getattr(config, "desktop", None), "hud_key", "") or "")
 
 
-def desktop_rows(config: Any, turned_on: bool = False, current: bool = True) -> list[tuple[str, str]]:
+def desktop_rows(config: Any, turned_on: bool = False, current: bool = True,
+                 tasks: bool = True) -> list[tuple[str, str]]:
     """Settings > Desktop: [desktop] as loaded, in plain words, and whether the owner turned it on (its first-run
-    card; ``current``: today's card - not yet, the OK of Phase 1's covers opening things only). Read only, like every
-    group."""
+    card; ``current``: today's card - not yet, the OK of Phase 1's covers opening things only; ``tasks`` False: tasks
+    are on, and that card did not list them). Read only, like every group."""
     desktop = getattr(config, "desktop", None)
     if desktop is None:
         return []
@@ -267,7 +269,9 @@ def desktop_rows(config: Any, turned_on: bool = False, current: bool = True) -> 
         key_words = "None - the Dock's Desktop switches"
     days = int(getattr(desktop, "undo_days", 7) or 7)
     shots = str(getattr(desktop, "screenshots_dir", "") or "")
-    ok = (TURNED_ON if current else TURNED_ON_PHASE_1) if turned_on else NOT_TURNED_ON
+    ok = NOT_TURNED_ON
+    if turned_on:
+        ok = (TURNED_ON if tasks else TURNED_ON_NO_TASKS) if current else TURNED_ON_PHASE_1
     return [("Your OK", ok),
             ("Folders Jarvis may look in", where),
             ("HUD key", key_words),

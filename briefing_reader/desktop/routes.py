@@ -46,7 +46,8 @@ Public API
 ==========
 ``LocalRoute(kind, tier, code, target, hits, words, folder)``; ``route(text, context=None, search=None)``;
 ``route_words(found, address="sir")``; ``desktop_request(text)``; ``pc_request(text)`` (the PC control the text
-asks for, or None: pure); ``undo_request(text)``; ``KNOWN_FOLDER_WORDS``; ``WEB_ENDINGS``; ``NOT_YET_KINDS``.
+asks for, or None: pure); ``pc_what(asked)``; ``undo_request(text)``; ``KNOWN_FOLDER_WORDS``; ``WEB_ENDINGS``;
+``NOT_YET_KINDS``.
 
 Pure: nothing is logged here; LocalRoute's repr names its kind only.
 """
@@ -333,6 +334,12 @@ def _pc_what(asked: pcctl.PcAsk) -> str:
         what = "set a timer" if asked.kind == dv.TIMER else "start focus mode"
         return f"{what} for {minutes} minute{'' if minutes == 1 else 's'}"
     return _PC_WHAT.get((asked.kind, asked.action), "that")
+
+
+def pc_what(asked: pcctl.PcAsk) -> str:
+    """A PC control in Jarvis's own words, to follow "I'll" or "Jarvis wants to": "set the volume to 40". Never a
+    label."""
+    return _pc_what(asked)
 
 
 def route_words(found: LocalRoute, address: str = "sir") -> str:
