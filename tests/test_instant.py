@@ -179,6 +179,7 @@ class HandedOverTests(unittest.TestCase):
                  ("set a timer for 10 minutes for the pasta", 600, "the pasta"),
                  ("remind me in 20 minutes to stretch", 1200, "stretch"),
                  ("remind me to call mum in 5 minutes", 300, "call mum"), ("let me know in 3 minutes", 180, ""),
+                 ("remind me in 5 minutes to call Ana", 300, "call Ana"),
                  ("set a timer for 4 hours", 14400, ""), ("set a timer for 10 seconds", 10, ""))
         for text, seconds, label in cases:
             with self.subTest(text=text):

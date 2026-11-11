@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from fractions import Fraction
 from typing import Union
@@ -136,6 +136,15 @@ def clean(text: str) -> str:
     return maths.spoken_numbers(words)
 
 
+def _as_typed(words: str, text: str) -> str:
+    """``words`` (as cleaned: lower case) as the owner typed them when they are there word for word, else as they are
+    ("remind me in 5 minutes to call Ana": "call Ana")."""
+    typed = " ".join(unicodedata.normalize("NFKC", str(text or "")).split())
+    folded = typed.casefold()
+    at = folded.find(words)
+    return typed[at:at + len(words)] if at >= 0 and len(folded) == len(typed) else words
+
+
 def understand(text: str, *, now: datetime, flags: InstantFlags = InstantFlags(), address: str = "sir",
                hour24: bool = False) -> Answer:
     """What Jarvis answers himself for ``text`` (see the module docs); None: it goes to Claude. ``now``: the local
@@ -148,6 +157,8 @@ def understand(text: str, *, now: datetime, flags: InstantFlags = InstantFlags()
     for reader in (_timer, _clock, _place_time, _dates):
         found = reader(words, now, flags, address, hour24)
         if found is not None:
+            if isinstance(found, TimerAsk) and found.label:
+                found = replace(found, label=_as_typed(found.label, text))
             return found
     if flags.weather:
         found = _weather(words, flags)
