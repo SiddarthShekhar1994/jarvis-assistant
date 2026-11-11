@@ -2894,6 +2894,34 @@ The logs hold only the kind of answer and how long it took. Turn instant
 answers off with `[instant] enabled = false` (or `JARVIS_INSTANT_ENABLED=false`
 in `.env`); they need Ask Jarvis on, because they answer in its bar.
 
+### Speech on an NVIDIA GPU
+
+With an NVIDIA graphics card, talking to Jarvis and writing meetings down can
+run on the card instead of the processor: much faster, so a bigger, more
+accurate talk model (`distil-large-v3`) still answers in a moment, and a meeting
+is written down in about a minute. It needs NVIDIA's two runtime libraries,
+which Jarvis never installs; Settings > Talk shows the command, the same as:
+
+```
+python -m pip install "nvidia-cublas-cu12==12.*" "nvidia-cudnn-cu12==9.*"
+```
+
+(about 1 GB, with the python.exe Jarvis runs on). Then:
+
+- `[talk] device` and `[meetings] device` are `"auto"`: the card when it works,
+  the processor otherwise. Speech runs in its own background process, which
+  tries the card first and, on any problem (an old driver, a missing library,
+  not enough memory on the card), loads the processor's model instead, so it
+  keeps working, only slower. `"cpu"` never uses the card.
+- Settings > Talk and Settings > Meetings say where speech runs ("Runs on: the
+  GPU (CUDA)") or why not, with the command when the libraries are missing.
+- For the most accurate talk, set `[talk] model = "distil-large-v3"` and click
+  Download in Settings > Talk (about 1.5 GB). Keep `small.en` without a card:
+  on a processor `distil-large-v3` takes several seconds per request.
+
+Nothing else changes: the sound never leaves this PC and is never saved, and
+the logs say only whether the card or the processor was used.
+
 ## Catch-up and the hotkey
 
 **Catch-up.** The app keeps track of each scheduled briefing (a "slot", such as
@@ -4293,7 +4321,9 @@ log. Changes apply the next time the app starts.
 | `[agent] speak_private` | `false` | `true` also says aloud a task's line that may hold something private; such lines go to Microsoft's online voice. Off, they stay on screen. |
 | `[talk] enabled` | `false` | [Talk to Jarvis](#talk-to-jarvis-the-talk-key): the talk key opens the microphone for one request. Turn it on for this PC with `JARVIS_TALK_ENABLED=true` in `.env` (it overrides this both ways), then restart the "Briefing hotkey" task. Needs Ask Jarvis, the add-ons faster-whisper and PyAudioWPatch, and the speech model (Settings > Talk). |
 | `[talk] key` | `"ctrl+alt+space"` | The talk key; never the `[hotkey] combo` or the `[desktop] hud_key` (refused with a warning). |
-| `[talk] model` | `"small.en"` | The speech model on this PC: `"small.en"` (about 480 MB), `"base.en"` (about 145 MB, quicker, less sure) or `"medium.en"` (about 1.5 GB, the meetings' model). Downloaded only when you click Download in Settings > Talk. |
+| `[talk] model` | `"small.en"` | The speech model on this PC: `"small.en"` (about 480 MB), `"base.en"` (about 145 MB, quicker, less sure), `"medium.en"` (about 1.5 GB, the meetings' model) or `"distil-large-v3"` (about 1.5 GB, the most accurate; for an NVIDIA card). Downloaded only when you click Download in Settings > Talk. |
+| `[talk] device` | `"auto"` | Where talk's speech runs: `"auto"` (an NVIDIA card when it works, see [Speech on an NVIDIA GPU](#speech-on-an-nvidia-gpu), else the processor) or `"cpu"`. |
+| `[meetings] device` | `"auto"` | Where a meeting is written down: `"auto"` (an NVIDIA card when it works, else the processor) or `"cpu"`. |
 | `[talk] keep_warm_minutes` | `10` | How long the speech model stays loaded after a talk, so the next starts at once (1..120). |
 | `[talk] quiet_ms` | `500` | How much quiet after you speak ends a talk, in milliseconds (300..2000). |
 | `[talk] hints` | `[]` | Names Jarvis should expect to hear, e.g. `["Spotify", "Notion"]` ("Jarvis" always is); at most 20 short names. |
