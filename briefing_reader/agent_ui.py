@@ -51,7 +51,8 @@ what was typed, searched for or read.
 
 The voice: every line the model wrote (the plan's "found", say, a question, the report's opening) comes to spoken()
 before it reaches the voice. While the voice is made on this PC ([voice] engine = "local", owner decision 2026-11-12)
-every such line is said: nothing he says leaves the PC. On the online voice, whose words go to Microsoft's service as
+every such line is said - nothing he says leaves the PC - except one that holds a key, an email address or a long
+number of its own (agent.firewall.holds_data: no use read out in a room). On the online voice, whose words go to Microsoft's service as
 an Ask's answers do, such a line goes on only while the run holds nothing private, or when it has no tainted word in
 it, no key, email address or long number of its own and, in a strict run, no foreign word (WebFirewall.speakable); else
 it stays on the caption and on its card, unsaid, with Jarvis's own fixed words in its place for a question or a
@@ -601,11 +602,14 @@ class AgentController(QObject):
         Stop or Turn off nothing more is said, whatever was on its way."""
         if self.stopped_by:
             return ""
-        if getattr(self.config.agent, "speak_private", False) is True or is_local(self.config):
-            return line                          # the owner's choice, or the voice is made on this PC
+        if getattr(self.config.agent, "speak_private", False) is True:
+            return line                          # the owner's choice
         wall = self.firewall
         try:
-            if wall is not None and wall.speakable(line):
+            if is_local(self.config):            # the voice is made on this PC: only a raw value stays on screen
+                if not agent_firewall.holds_data(line):
+                    return line
+            elif wall is not None and wall.speakable(line):
                 return line
         except Exception as exc:  # noqa: BLE001 - unknown: not said
             logger.warning("Agent: a line could not be checked (%s); not said", type(exc).__name__)

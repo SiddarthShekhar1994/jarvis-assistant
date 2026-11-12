@@ -216,9 +216,22 @@ class SentenceGroupsTests(unittest.TestCase):
                          ["Project sync at 9:30. Lunch with Ana. Done!"])
 
     def test_one_long_sentence_stays_whole_and_nothing_is_nothing(self) -> None:
-        long = "word " * 80 + "end."
+        long = "word " * 60 + "end."
         self.assertEqual(lv.sentence_groups(long, most=100), [" ".join(long.split())])
         self.assertEqual(lv.sentence_groups("  \n "), [])
+
+    def test_a_very_long_sentence_is_cut_at_its_clauses(self) -> None:
+        clause = "the figures for the north office were higher than the plan"
+        text = ", ".join([clause] * 30) + "."
+        groups = lv.sentence_groups(text)
+        self.assertGreater(len(groups), 3)
+        self.assertTrue(all(len(group) <= lv.LONG_CHARS for group in groups), [len(g) for g in groups])
+        self.assertTrue(all(group.endswith((",", ".")) for group in groups))
+        self.assertEqual(" ".join(" ".join(groups).split()), " ".join(text.split()))
+        spaceless = "x" * 1000                                # no space at all: cut at the limit
+        self.assertTrue(all(len(group) <= lv.LONG_CHARS + 1 for group in lv.sentence_groups(spaceless)))
+        self.assertLess(max(len(group) for group in lv.sentence_groups(" ".join(["word"] * 1500))),
+                        lv.MAX_TEXT_CHARS)
 
 
 class SpeedGainTests(unittest.TestCase):
@@ -538,7 +551,7 @@ class ServeTests(unittest.TestCase):
             return 0
 
         with mock.patch.dict(os.environ, {}, clear=False), mock.patch.object(lw, "serve", fake_serve), \
-                mock.patch.object(lw.sys, "stdout", lw.sys.stdout):
+                mock.patch.object(lw, "answer_stream", io.StringIO):
             code = lw.main(["--model", "m", "--g2p-gb", "g", "--g2p-us", "u", "--out-root", str(self.root),
                             "--voice", "bm_george"])
         self.assertEqual(code, 0)
@@ -686,14 +699,73 @@ class ClientTests(unittest.TestCase):
         result = client.synthesize("still said", self.audio / "a.wav")
         self.assertEqual((result.duration_ms, len(procs)), (200, 2))
 
-    def test_a_process_that_cannot_load_says_why_and_is_not_retried(self) -> None:
+    def test_a_process_that_cannot_load_says_why_and_is_not_started_again(self) -> None:
         def missing():
             raise ImportError("misaki")
 
         client, procs = self.client(load=missing)
         with self.assertRaises(lv.LocalVoiceError) as caught:
             client.synthesize("hello", self.audio / "a.wav")
-        self.assertEqual((caught.exception.code, len(procs)), (lv.ERR_ADDON, 1))
+        self.assertEqual((caught.exception.code, len(procs)), (f"{lv.ERR_LOAD}:{lv.ERR_ADDON}", 1))
+        self.assertEqual(client.reason(), f"{lv.ERR_LOAD}:{lv.ERR_ADDON}")
+        for _ in range(3):                                 # every later line: the Windows voice, no new process
+            with self.assertRaises(lv.LocalVoiceError):
+                client.synthesize("again", self.audio / "b.wav")
+        client.warm()
+        time.sleep(0.1)
+        self.assertEqual(len(procs), 1)
+        client.forget_failure()                            # a download ended: it may try again
+        with self.assertRaises(lv.LocalVoiceError):
+            client.synthesize("once more", self.audio / "c.wav")
+        self.assertEqual(len(procs), 2)
+
+    def test_a_process_that_dies_before_ready_twice_is_given_up(self) -> None:
+        def dies():
+            raise SystemExit                               # ends before its ready line
+
+        client, procs = self.client(load=dies)
+        for expected in (lv.ERR_ENDED, lv.ERR_ENDED):
+            with self.assertRaises(lv.LocalVoiceError) as caught:
+                client.synthesize("hello", self.audio / "a.wav")
+            self.assertEqual(caught.exception.code, expected)
+        self.assertEqual(client.reason(), f"{lv.ERR_LOAD}:{lv.ERR_ENDED}")
+        self.assertEqual(len(procs), 2)
+
+    def test_his_line_waits_at_most_a_while_for_a_loading_voice(self) -> None:
+        class SlowToLoad(FakeSpeaker):
+            def prepare(self, voice: str) -> None:
+                time.sleep(1.0)
+
+        client, _procs = self.client(load=SlowToLoad)
+        client.warm()
+        time.sleep(0.1)                                    # the warm-up holds the voice while it loads
+        began = time.monotonic()
+        with mock.patch.object(lv, "URGENT_WAIT_S", 0.2), self.assertRaises(lv.LocalVoiceError) as caught:
+            client.synthesize("good morning", self.audio / "a.wav", urgent=True)
+        self.assertEqual(caught.exception.code, lv.ERR_BUSY)
+        self.assertLess(time.monotonic() - began, 0.9)
+        self.assertIn(lv.ERR_BUSY, lv.LINE_ERRORS)          # the Windows voice says that line; no cooldown
+        self.assertEqual(client.synthesize("later", self.audio / "b.wav", urgent=True).duration_ms, 100)
+
+    def test_a_close_while_it_starts_leaves_no_process(self) -> None:
+        procs: list[FakeProc] = []
+        holder: list[lv.LocalVoiceClient] = []
+
+        def spawn(command, environ):
+            proc = FakeProc(FakeSpeaker, self.audio)
+            procs.append(proc)
+            holder[0].close()                              # the app closes just as the process starts
+            return proc
+
+        client = lv.LocalVoiceClient(self.models, self.audio, spawn=spawn, addons=lambda: [])
+        holder.append(client)
+        self.addCleanup(lambda: [proc.tidy() for proc in procs])
+        with self.assertRaises(lv.LocalVoiceError) as caught:
+            client.synthesize("hello", self.audio / "a.wav")
+        self.assertEqual(caught.exception.code, lv.ERR_CLOSED)
+        procs[0].wait(5)
+        self.assertFalse(procs[0].thread.is_alive())
+        self.assertFalse(client.running())
 
     def test_no_answer_in_time_is_a_timeout_and_the_process_goes(self) -> None:
         client, _procs = self.client(load=lambda: FakeSpeaker(delay=0.6), answer_timeout_s=0.1)

@@ -553,7 +553,12 @@ class SpeechSynthesizer:
                 offset += max(0, int(result.duration_ms))
             duration_ms, _lengths = _lv.join_wavs(parts, path)
         except _lv.LocalVoiceError as exc:
-            self._on_local_failure(exc.code)
+            if exc.code == _lv.ERR_CLOSED:          # the app is closing: no Windows voice either, nothing more is made
+                raise TtsError("Speech stopped: the app is closing") from None
+            if exc.code in _lv.LINE_ERRORS:         # this line only: the Windows voice says it, the next asks again
+                logger.info("The local voice could not say one segment (%s); the Windows voice says it", exc.code)
+            else:
+                self._on_local_failure(exc.code)
             return None
         except Exception as exc:  # noqa: BLE001 - any failure means "the Windows voice"; its kind only
             self._on_local_failure(type(exc).__name__)
@@ -644,7 +649,8 @@ class SpeechSynthesizer:
             if not path.is_file():
                 raise TtsError("Windows SAPI did not produce a file")
         except Exception as exc:  # noqa: BLE001 - reported as TtsError below
-            raise TtsError("Speech synthesis failed: edge-tts is unavailable and Windows SAPI failed "
+            usual = "the local voice" if self._local_mode else "edge-tts"
+            raise TtsError(f"Speech synthesis failed: {usual} is unavailable and Windows SAPI failed "
                            f"({_describe_error(exc)})") from exc
         clip = _Clip(path, max(0, int(duration_ms)), (), SAPI, envelope=voice_fx.wav_envelope(path))
         self._cache[key] = clip
@@ -785,18 +791,36 @@ class SpeechSynthesizer:
         if self._offline_voice:
             needle = self._offline_voice.casefold()
             voices = engine.getProperty("voices") or []
-            match = next((v for v in voices if needle in str(getattr(v, "name", "") or "").casefold()), None)
+            match = next((v for v in voices if needle in str(getattr(v, "name", "") or "").casefold()
+                          and not (self._local_mode and _online_voice(v))), None)
             if match is None:
                 logger.warning("No Windows voice name contains %r; using the default voice",
                                self._offline_voice)
             else:
                 engine.setProperty("voice", match.id)
                 logger.info("Windows SAPI voice: %s", match.name)
+        if self._local_mode:
+            self._keep_sapi_on_this_pc(engine)
         rate_wpm = _sapi_rate_wpm(self._rate)
         volume = _sapi_volume_level(self._volume)
         engine.setProperty("rate", rate_wpm)
         engine.setProperty("volume", volume)
         logger.info("Windows SAPI engine ready (%d wpm, volume %.2f)", rate_wpm, volume)
+
+    @staticmethod
+    def _keep_sapi_on_this_pc(engine: Any) -> None:
+        """With the local voice, the Windows voice must be on this PC too: a voice an add-on serves from the cloud
+        (its name says "Online", e.g. "... Online (Natural)") is never used - another one is, or none (TtsError)."""
+        voices = list(engine.getProperty("voices") or [])
+        current = engine.getProperty("voice")
+        chosen = next((voice for voice in voices if getattr(voice, "id", None) == current), None)
+        if chosen is None or not _online_voice(chosen):
+            return
+        local = next((voice for voice in voices if not _online_voice(voice)), None)
+        if local is None:
+            raise TtsError("Every Windows voice here is an online one; with the local voice none of them is used")
+        engine.setProperty("voice", local.id)
+        logger.info("Windows SAPI voice: %s (the default one is an online voice)", local.name)
 
     def _ensure_com(self) -> None:
         if self._com_initialized:
@@ -814,6 +838,11 @@ class SpeechSynthesizer:
         if engine is not None:
             del engine
             gc.collect()
+
+
+def _online_voice(voice: Any) -> bool:
+    """A SAPI voice served from the cloud by an add-on (its name says "Online")."""
+    return "online" in str(getattr(voice, "name", "") or "").casefold()
 
 
 def _pump_com_messages() -> None:

@@ -5771,17 +5771,22 @@ class AppController(QObject):
         from . import local_voice, local_voice_ui
 
         reading = self.window.reading
+        root = local_voice.models_root(self.config)
         panel = local_voice_ui.VoiceSettingsPanel()
-        download = local_voice_ui.VoiceDownload(local_voice.models_root(self.config),
-                                                voice=self.config.voice.local_voice,
-                                                on_ready=self._local_voice_downloaded, parent=self)
+        download = local_voice_ui.VoiceDownload(
+            root, voice=self.config.voice.local_voice, on_ready=self._local_voice_downloaded, parent=self,
+            reason=lambda: (self._local_client.reason() if self._local_client is not None
+                            else local_voice.missing_reason(root)))
         download.attach_panel(panel, refresh=reading.settings_page.refresh)
         reading.settings_page.attach_extra("voice", panel)
+        reading.settings_page.groupChanged.connect(lambda key: download.refresh() if key == "voice" else None)
         return download
 
     def _local_voice_downloaded(self) -> None:
-        """The local voice's download ended whole: it loads now, so his next line is in it."""
+        """The local voice's download ended whole: a failed load before it is forgotten, and it loads now, so his next
+        line is in it."""
         if self._local_client is not None:
+            self._local_client.forget_failure()
             self._local_client.warm()
 
     def _synth_factory(self, out_dir: Path, *, urgent: bool) -> Callable[[], SpeechSynthesizer]:

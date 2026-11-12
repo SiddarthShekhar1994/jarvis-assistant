@@ -56,6 +56,9 @@ class FakeLocal:
     def warm(self) -> None:
         self.warmed += 1
 
+    def forget_failure(self) -> None:
+        self.forgotten = getattr(self, "forgotten", 0) + 1
+
     def close(self) -> None:
         self.closed = True
 
@@ -120,8 +123,25 @@ class LocalSynthTests(unittest.TestCase):
         self.assertEqual(segment.duration_ms, 7200)
         self.assertEqual(wav_ms(segment.path), 7200)
 
+    def test_one_line_s_error_is_the_windows_voice_for_that_line_only(self) -> None:
+        for code in (lv.ERR_TOO_LONG, lv.ERR_FAILED, lv.ERR_BUSY):
+            with self.subTest(code=code):
+                local = FakeLocal(error=LocalVoiceError(code))
+                synth = self.make(local)
+                self.assertEqual(synth.synthesize_section(make_section(entry("One."))).engine, SAPI)
+                local.error = None
+                audio = synth.synthesize_section(make_section(entry("Two."), key="s2"))
+                self.assertEqual((audio.engine, len(local.calls), synth.edge_calls), (LOCAL, 2, []))   # no cooldown
+
+    def test_a_closing_app_makes_nothing_more(self) -> None:
+        local = FakeLocal(error=LocalVoiceError(lv.ERR_CLOSED))
+        synth = self.make(local)
+        with self.assertRaises(tts.TtsError):
+            synth.synthesize_section(make_section(entry("Late line.")))
+        self.assertEqual((synth.sapi_calls, synth.edge_calls), ([], []))
+
     def test_it_never_uses_the_online_voice_even_when_it_fails(self) -> None:
-        local = FakeLocal(error=LocalVoiceError(lv.ERR_FAILED))
+        local = FakeLocal(error=LocalVoiceError(lv.ERR_ENDED))
         synth = self.make(local)
         with self.assertLogs("briefing_reader.tts", level="WARNING") as captured:
             audio = synth.synthesize_section(make_section(entry(SECRET)))
@@ -164,6 +184,43 @@ class LocalSynthTests(unittest.TestCase):
         synth = StubSynth(self.out, self.clock, local=local)        # engine defaults to online
         audio = synth.synthesize_section(make_section(entry("Hello there.")))
         self.assertEqual((audio.engine, local.calls, len(synth.edge_calls)), (tts.EDGE, [], 1))
+
+
+class FakeSapiEngine:
+    def __init__(self, names: list[str], current: int = 0) -> None:
+        self.voices = [SimpleNamespace(id=f"id{index}", name=name) for index, name in enumerate(names)]
+        self.voice = self.voices[current].id if self.voices else None
+
+    def getProperty(self, name):  # noqa: N802 - pyttsx3's names
+        return self.voices if name == "voices" else self.voice
+
+    def setProperty(self, name, value):  # noqa: N802
+        if name == "voice":
+            self.voice = value
+
+
+class WindowsVoiceTests(unittest.TestCase):
+    def test_with_the_local_voice_an_online_windows_voice_is_never_used(self) -> None:
+        engine = FakeSapiEngine(["Microsoft Aria Online (Natural)", "Microsoft David Desktop"])
+        SpeechSynthesizer._keep_sapi_on_this_pc(engine)
+        self.assertEqual(engine.voice, "id1")
+        local_only = FakeSapiEngine(["Microsoft Zira Desktop"])
+        SpeechSynthesizer._keep_sapi_on_this_pc(local_only)
+        self.assertEqual(local_only.voice, "id0")
+        with self.assertRaises(tts.TtsError):
+            SpeechSynthesizer._keep_sapi_on_this_pc(FakeSapiEngine(["Microsoft Guy Online (Natural)"]))
+
+    def test_a_named_online_voice_is_passed_over_in_local_mode(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            synth = SpeechSynthesizer(voice="v", rate="+0%", volume="+0%", offline_voice="Aria", out_dir=Path(tmp),
+                                      engine=LOCAL)
+            engine = FakeSapiEngine(["Microsoft Aria Online (Natural)", "Microsoft David Desktop"])
+            synth._configure_sapi(engine)
+            self.assertEqual(engine.voice, "id1")
+            online = SpeechSynthesizer(voice="v", rate="+0%", volume="+0%", offline_voice="Aria", out_dir=Path(tmp))
+            engine = FakeSapiEngine(["Microsoft David Desktop", "Microsoft Aria Online (Natural)"])
+            online._configure_sapi(engine)
+            self.assertEqual(engine.voice, "id1")          # the online mode keeps the owner's pick, as before
 
 
 class SettingsRowsTests(unittest.TestCase):
@@ -242,6 +299,22 @@ class VoiceDownloadTests(unittest.TestCase):
         self.assertIn("The download stopped (network)", panel.status.text())
         self.assertFalse(download.downloading())
 
+    def test_the_panel_never_says_on_this_pc_while_it_cannot_run(self) -> None:
+        from briefing_reader import local_voice_ui
+
+        make_models(self.root)
+        for reason, words in ((lv.ERR_ADDON, "its add-ons are missing"),
+                              (f"{lv.ERR_LOAD}:{lv.ERR_FAILED}", "couldn't start (load_failed:failed)"),
+                              ("", "The local voice is on this PC: George (British)")):
+            with self.subTest(reason=reason):
+                download = local_voice_ui.VoiceDownload(self.root, threaded=False, addons=lambda: [],
+                                                        reason=lambda reason=reason: reason)
+                panel = local_voice_ui.VoiceSettingsPanel()
+                self.addCleanup(panel.deleteLater)
+                download.attach_panel(panel)
+                self.assertIn(words, panel.status.text())
+                self.assertEqual("on this PC: George" in panel.status.text(), reason == "")
+
     def test_missing_addons_show_the_owner_lines(self) -> None:
         _download, panel, _log, _ready = self.make(addons=lambda: ["spacy", "misaki"])
         self.assertFalse(panel.pip.isHidden())
@@ -302,7 +375,7 @@ class AppVoiceTests(unittest.TestCase):
         fake = FakeLocal()
         c._local_client = fake
         c._local_voice_downloaded()
-        self.assertEqual(fake.warmed, 1)
+        self.assertEqual((fake.warmed, fake.forgotten), (1, 1))     # a failed load before it is forgotten
 
     def test_start_warms_the_voice_and_shutdown_ends_it(self) -> None:
         harness = self.make()

@@ -336,6 +336,12 @@ def _holds_data(plain: str) -> bool:
             or any(len(_digits(found)) >= REQUEST_GROUPED_DIGITS for found in _PHONE_RE.findall(plain)))
 
 
+def holds_data(line: str) -> bool:
+    """``line`` holds a key, an email address or a long number (a card's, a phone's): with the voice made on this PC a
+    task's line is said unless it does - such a value is no use read out in a room (agent_ui.spoken)."""
+    return _holds_data(_ascii_digits(line or ""))
+
+
 def _digit_runs(text: str) -> set[str]:
     """The numbers ``text`` writes, as itself and with the little marks between their digits gone ("4 8 2 1")."""
     plain = _ascii_digits(text if text.isascii() else unicodedata.normalize("NFKD", text))

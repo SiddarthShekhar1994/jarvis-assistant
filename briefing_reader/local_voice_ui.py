@@ -60,14 +60,21 @@ class VoiceSettingsPanel(QWidget):
             layout.addWidget(widget)
 
     def show_state(self, *, ready: bool, downloading: bool, percent: int, error: str, voice: str,
-                   pip_lines: list[str]) -> None:
-        if ready:
+                   pip_lines: list[str], reason: str = "") -> None:
+        """``ready``: the models are whole; ``reason``: why the voice can't run (local_voice's codes; "" = it can)."""
+        if ready and not reason:
             text = (f"The local voice is on this PC: {lv.voice_label(voice)}, made on the CPU. Nothing he says "
                     "leaves this PC.")
         elif downloading:
             text = f"Downloading the local voice ({lv.SIZE_TEXT}) from Hugging Face: {percent}%."
         elif error:
             text = f"The download stopped ({error}). Click Download to try again; it carries on where it stopped."
+        elif ready and reason == lv.ERR_ADDON:
+            text = ("The local voice is downloaded, but its add-ons are missing (below). Install them, then restart "
+                    "Jarvis; until then the Windows voice speaks - never the online one.")
+        elif ready:
+            text = (f"The local voice is downloaded but couldn't start ({reason}). Check its add-ons, then restart "
+                    "Jarvis; until then the Windows voice speaks - never the online one.")
         else:
             text = (f"The local voice ({lv.SIZE_TEXT}, from Hugging Face) is downloaded only when you click Download. "
                     "Until it is here, the Windows voice speaks - never the online one.")
@@ -88,11 +95,15 @@ class VoiceDownload(QObject):
 
     def __init__(self, models_root: Path, *, voice: str = lv.DEFAULT_VOICE, on_ready: Callable[[], Any] | None = None,
                  downloader_factory: Callable[..., Any] | None = None, addons: Callable[[], list[str]] | None = None,
-                 threaded: bool = True, parent: QObject | None = None) -> None:
+                 reason: Callable[[], str] | None = None, threaded: bool = True,
+                 parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._root = Path(models_root)
         self._voice = voice
         self._on_ready = on_ready or (lambda: None)
+        # Why the voice can't run (the app's client says, a failed load included): the panel never says "on this PC"
+        # while the Windows voice speaks.
+        self._reason = reason or (lambda: lv.missing_reason(self._root, addons=self._addons))
         self._factory = downloader_factory or (
             lambda root, model, progress, cancel: ModelDownloader.for_model(root, model, progress=progress,
                                                                             cancel=cancel))
@@ -119,10 +130,19 @@ class VoiceDownload(QObject):
     def downloading(self) -> bool:
         return self._downloading
 
+    def refresh(self) -> None:
+        """Show the state again (Settings > Voice opened: the voice may have failed to load meanwhile)."""
+        self._show()
+
     def _show(self) -> None:
         if self._panel is not None:
+            try:
+                reason = self._reason()
+            except Exception as exc:  # noqa: BLE001 - unknown: say it can't run
+                reason = type(exc).__name__
             self._panel.show_state(ready=self.ready(), downloading=self._downloading, percent=self._percent,
-                                   error=self._error, voice=self._voice, pip_lines=lv.pip_lines(self._addons()))
+                                   error=self._error, voice=self._voice, pip_lines=lv.pip_lines(self._addons()),
+                                   reason=reason)
 
     def download(self) -> None:
         """The owner clicked Download: the models still missing come from Hugging Face, one after another."""

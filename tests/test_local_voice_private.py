@@ -124,6 +124,22 @@ class LabelsTests(unittest.TestCase):
         self.assertNotIn("example.com", self.ended[-1][1])
 
 
+class InstantWiringTests(unittest.TestCase):
+    def test_calendar_answers_follow_where_the_voice_is_made(self) -> None:
+        from tests.test_instant_ui import a_config
+
+        for engine, named in (("local", True), ("online", False), (None, False)):
+            with self.subTest(engine=engine):
+                config = a_config()
+                if engine is not None:
+                    config.voice = SimpleNamespace(engine=engine)
+                controller = instant_ui.InstantController(config, timers=None, now=lambda: NOW,
+                                                          get=lambda *a: None, fahrenheit=False, threaded=False)
+                self.addCleanup(controller.shutdown)
+                reply = controller._calendar_reply(CalendarAsk(CAL_NEXT), a_read())
+                self.assertEqual("Design review" in reply.speech, named, reply.speech)
+
+
 class ConsentRowTests(unittest.TestCase):
     def test_the_row_follows_where_the_voice_is_made(self) -> None:
         local = desktop_view.consent_task_row("DuckDuckGo", "Bing and Google", local=True)
@@ -152,6 +168,14 @@ class AgentGateTests(unittest.TestCase):
         self.assertEqual(self.controller("online").spoken("Ana's figures are 42.", "It's on the card."),
                          "It's on the card.")
         self.assertEqual(self.controller("online", speak_private=True).spoken("Ana's figures.", ""), "Ana's figures.")
+
+    def test_a_raw_value_stays_on_screen_even_locally(self) -> None:
+        local = self.controller("local")
+        for line in ("Card 4111 1111 1111 1111 was declined.", "Write to ana.lima@example.com today.",
+                     "Her number is 415 555 0199."):
+            with self.subTest(line=line):
+                self.assertEqual(local.spoken(line, "It's on the card."), "It's on the card.")
+        self.assertEqual(local.spoken("The figures are 42 and 7.", ""), "The figures are 42 and 7.")
 
     def test_after_a_stop_nothing_is_said_even_locally(self) -> None:
         controller = self.controller("local")

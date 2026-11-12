@@ -2963,7 +2963,7 @@ is written down in about a minute. It needs NVIDIA's two runtime libraries,
 which Jarvis never installs; Settings > Talk shows the command, the same as:
 
 ```
-python -m pip install "nvidia-cublas-cu12==12.*" "nvidia-cudnn-cu12==9.*"
+py -3.13 -m pip install "nvidia-cublas-cu12==12.*" "nvidia-cudnn-cu12==9.*"
 ```
 
 (about 1 GB, with the python.exe Jarvis runs on). Then:
@@ -4492,12 +4492,13 @@ brings back Microsoft's online Ryan voice, with those lines on screen again.
    (Settings > Voice shows the exact line for whatever is missing on your PC):
 
    ```
-   python -m pip install "spacy>=3.8,<3.9" "num2words>=0.5.14" "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
-   python -m pip install --ignore-requires-python "misaki==0.9.4"
+   py -3.13 -m pip install "spacy>=3.8,<3.9" "num2words>=0.5.14" "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
+   py -3.13 -m pip install --ignore-requires-python "misaki==0.9.4"
    ```
 
-   It also uses onnxruntime, numpy, torch and transformers (already there with
-   the talk add-ons on most PCs). misaki's release says "Python below 3.13" but
+   It also uses onnxruntime and numpy (they come with the talk add-ons) and
+   torch and transformers; Settings > Voice adds any of them that is missing to
+   its line. misaki's release says "Python below 3.13" but
    is plain Python and runs on 3.13, hence `--ignore-requires-python`.
 2. Restart Jarvis, open **Settings > Voice** and click **Download the local
    voice**: about 346 MB from Hugging Face, once (the model with its 28 English

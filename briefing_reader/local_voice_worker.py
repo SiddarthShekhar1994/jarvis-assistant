@@ -268,6 +268,9 @@ class KokoroSpeaker:
         import onnxruntime as ort
 
         vocab = json.loads(vocab_file.read_text(encoding="utf-8"))["model"]["vocab"]
+        disable = getattr(ort, "disable_telemetry_events", None)
+        if callable(disable):                    # onnxruntime's own usage events (Windows builds): off
+            disable()
         options = ort.SessionOptions()
         options.intra_op_num_threads = max(1, int(threads))
         options.inter_op_num_threads = 1
@@ -419,6 +422,23 @@ def serve(inp: IO[bytes], out: IO[str], load: Callable[[], Speaker], *, out_root
         _write(out, handle(request, speaker, out_root, clock))
 
 
+def answer_stream() -> IO[str]:
+    """The answers' pipe, kept for them alone: a copy of descriptor 1 (under pythonw sys.stdout may be None even with a
+    pipe attached), with descriptor 1 itself - and Python's sys.stdout - pointed at the null device, so nothing a
+    library prints, from Python or from native code, can land between two answers."""
+    answers = os.dup(1)
+    try:
+        null = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(null, 1)
+        finally:
+            os.close(null)
+    except OSError:
+        pass
+    sys.stdout = sys.stderr if sys.stderr is not None else open(os.devnull, "w")  # noqa: SIM115
+    return open(answers, "w", encoding="utf-8", newline="\n")  # noqa: SIM115
+
+
 def main(argv: list[str] | None = None) -> int:
     os.environ.update(OFFLINE_ENV)                        # before anything that could reach the network loads
     parser = argparse.ArgumentParser(prog="briefing_reader.local_voice_worker")
@@ -430,11 +450,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--idle-s", type=float, default=0.0)
     parser.add_argument("--voice", default="")
     args = parser.parse_args(argv)
-    # The answers go on the pipe by its number (under pythonw sys.stdout may be None even with a pipe attached), and
-    # whatever a library prints goes to stderr instead, never in between them.
-    out = open(1, "w", encoding="utf-8", newline="\n", closefd=False)  # noqa: SIM115
+    out = answer_stream()
     inp = open(0, "rb", closefd=False)  # noqa: SIM115
-    sys.stdout = sys.stderr if sys.stderr is not None else open(os.devnull, "w")  # noqa: SIM115
     dirs = {True: Path(args.g2p_gb), False: Path(args.g2p_us)}
     return serve(inp, out, lambda: KokoroSpeaker.load(Path(args.model), dirs, args.threads),
                  out_root=Path(args.out_root), idle_s=max(0.0, args.idle_s), warm_voice=args.voice)

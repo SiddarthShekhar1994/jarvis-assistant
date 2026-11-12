@@ -64,9 +64,12 @@ DEFAULT_VOICE = DEFAULT_LOCAL_VOICE
 SAMPLE_RATE = 24_000
 SAMPLE_WIDTH = 2                       # 16-bit
 GROUP_CHARS = 220                      # a request's text: about 2 s on this PC's CPU, so his lines never wait long
+LONG_CHARS = 400                       # a longer sentence is cut at a clause mark (else a space) into requests this long
 THREADS = 8
 READY_TIMEOUT_S = 180.0                # loading spaCy, misaki's dictionaries, torch and the model (a slow disk)
 ANSWER_TIMEOUT_S = 90.0                # one request (at most a few sentences)
+URGENT_WAIT_S = 10.0                   # his own line waits at most this long for the voice (it may still be loading)
+START_TRIES = 2                        # a process that ends or hangs before it is ready this many times in a row: given up
 CLOSE_WAIT_S = 3.0
 IDLE_MARGIN_S = 5.0                    # a process this close to its idle end is replaced rather than raced
 BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
@@ -85,7 +88,11 @@ ERR_TIMEOUT = "timeout"                # no answer in time
 ERR_START = "start_failed"             # the process could not be started
 ERR_REFUSED = "refused"                # under the test guard, with no fake process given
 ERR_CLOSED = "closed"                  # the app is closing
-MAX_TEXT_CHARS = 4000                  # one request (GROUP_CHARS is the usual; a long sentence is one request)
+ERR_BUSY = "busy"                      # his line waited URGENT_WAIT_S for the voice (loading): the Windows voice says it
+ERR_LOAD = "load_failed"               # the process could not load (remembered: not started again until reset)
+MAX_TEXT_CHARS = 4000                  # one request (GROUP_CHARS is the usual; sentence_groups keeps far below it)
+# Errors about one line, not the voice: the Windows voice says that line, and the next one asks the local voice again.
+LINE_ERRORS = frozenset({ERR_TOO_LONG, ERR_FAILED, ERR_VOICE, ERR_PATH, ERR_BUSY})
 
 # --------------------------------------------------------------------------
 # Voices and the engine setting
@@ -260,15 +267,37 @@ def _sentences(line: str) -> list[str]:
     return parts
 
 
+_CLAUSE_RE = re.compile(r"[,;:—–](?=\s)|\s-(?=\s)")
+
+
+def _split_long(sentence: str, most: int = LONG_CHARS) -> list[str]:
+    """A sentence longer than ``most`` in pieces of at most ``most`` characters, each cut after its last clause mark
+    (a comma, a semicolon, a colon, a dash) in reach, else at its last space."""
+    pieces: list[str] = []
+    rest = sentence.strip()
+    while len(rest) > most:
+        window = rest[:most]
+        cut = max((match.end() for match in _CLAUSE_RE.finditer(window)), default=-1)
+        if cut <= most // 3:
+            space = window.rfind(" ")
+            cut = space if space > most // 3 else most
+        pieces.append(rest[:cut].strip())
+        rest = rest[cut:].strip()
+    if rest:
+        pieces.append(rest)
+    return pieces
+
+
 def sentence_groups(text: str, most: int = GROUP_CHARS) -> list[str]:
-    """``text`` as requests for the worker: whole sentences, joined while they stay within ``most`` characters (one
-    longer sentence is a request of its own). Each line is a sentence of its own; a line with no closing mark gets a
-    full stop, so two lines never run into one."""
+    """``text`` as requests for the worker: whole sentences, joined while they stay within ``most`` characters; a
+    sentence longer than LONG_CHARS is cut at its clause marks (so no request holds the voice for long, and none comes
+    near MAX_TEXT_CHARS). Each line is a sentence of its own; a line with no closing mark gets a full stop, so two
+    lines never run into one."""
     limit = max(40, int(most))
     sentences: list[str] = []
     for line in str(text or "").splitlines():
         for sentence in _sentences(" ".join(line.split())):
-            sentences.append(sentence)
+            sentences.extend(_split_long(sentence) if len(sentence) > LONG_CHARS else [sentence])
         if sentences and sentences[-1] and sentences[-1][-1] not in _TERMINAL and line.strip():
             sentences[-1] = sentences[-1] + "."
     groups: list[str] = []
@@ -388,17 +417,24 @@ class LocalVoiceClient:
         self._lines: queue.Queue = queue.Queue()
         self._last_used = 0.0
         self._next_id = 0
+        self._broken = ""                     # why the process could not load (ERR_LOAD + its code); "" when it can
+        self._start_failures = 0              # starts in a row that ended or hung before the process was ready
         self.last_load_ms = 0                 # how long the last start took to be ready (Settings, the log)
 
     # ---- state --------------------------------------------------------------------------------------------------
 
     def ready(self) -> bool:
-        """Every add-on is installed and every model is whole (file reads only)."""
+        """Every add-on is installed, every model is whole and the process has not failed to load (file reads only)."""
         return not self.reason()
 
     def reason(self) -> str:
-        """ERR_ADDON, ERR_MODEL or "" (see missing_reason)."""
-        return missing_reason(self.models_root, addons=self._addons)
+        """Why the local voice can't run: ERR_ADDON, ERR_MODEL (see missing_reason), "load_failed:<code>" once the
+        process could not load (remembered until ``forget_failure``: a fresh add-on means a restart of Jarvis), or ""."""
+        return self._broken or missing_reason(self.models_root, addons=self._addons)
+
+    def forget_failure(self) -> None:
+        """A download ended (or the owner fixed something): the next line may start the process again."""
+        self._broken, self._start_failures = "", 0
 
     def running(self) -> bool:
         proc = self._proc
@@ -444,7 +480,23 @@ class LocalVoiceClient:
         lines.put(None)                           # the process's output ended
 
     def _start(self) -> tuple[str, int]:
-        """("" or an error code, load_ms). Called holding the turn."""
+        """("" or an error code, load_ms). Called holding the turn. A process that says it could not load - or ends or
+        hangs before it is ready START_TRIES times in a row - is not started again (``reason`` says why) until
+        ``forget_failure``: each try costs a full load of about a gigabyte."""
+        error, load_ms = self._start_once()
+        if error in (ERR_CLOSED, ERR_REFUSED, ""):
+            return error, load_ms
+        if error.startswith(ERR_LOAD):
+            self._broken = error
+        else:
+            self._start_failures += 1
+            if self._start_failures >= START_TRIES:
+                self._broken = f"{ERR_LOAD}:{error}"
+        logger.info("Local voice: could not start (%s)%s", error,
+                    "; not started again until the next download or restart" if self._broken else "")
+        return error, 0
+
+    def _start_once(self) -> tuple[str, int]:
         try:
             proc = self._spawn(self._command(), self._environ())
         except PermissionError:
@@ -454,6 +506,11 @@ class LocalVoiceClient:
         lines: queue.Queue = queue.Queue()
         threading.Thread(target=self._pump, args=(proc, lines), name="local-voice-out", daemon=True).start()
         self._proc, self._lines = proc, lines
+        with self._cond:
+            closed = self._closed
+        if closed:                                # close() came while it started: it goes at once
+            self._kill()
+            return ERR_CLOSED, 0
         deadline = self._clock() + self._ready_timeout_s
         while True:
             try:
@@ -463,15 +520,16 @@ class LocalVoiceClient:
                 return ERR_TIMEOUT, 0
             if ready is None:
                 self._kill()
-                return ERR_ENDED, 0
+                return (ERR_CLOSED if self._closed else ERR_ENDED), 0
             if "ready" not in ready:
                 continue
             if not ready.get("ready"):
                 self._kill()
                 error = ready.get("error")
-                return (error if error in (ERR_ADDON, ERR_MODEL, ERR_FAILED) else ERR_FAILED), 0
+                return f"{ERR_LOAD}:{error if error in (ERR_ADDON, ERR_MODEL, ERR_FAILED) else ERR_FAILED}", 0
             load_ms = int(ready.get("load_ms") or 0)
             self.last_load_ms = load_ms
+            self._start_failures = 0
             self._last_used = self._clock()
             logger.info("Local voice: ready in %.1f s", load_ms / 1000)
             return "", load_ms
@@ -508,17 +566,27 @@ class LocalVoiceClient:
 
     # ---- the turn (one request at a time; urgent ones first) ---------------------------------------------------------
 
-    def _acquire(self, urgent: bool) -> None:
+    def _acquire(self, urgent: bool, timeout: float | None = None) -> bool:
+        """The turn (True), or False when ``timeout`` seconds went by first."""
+        deadline = None if timeout is None else self._clock() + timeout
         with self._cond:
             if urgent:
                 self._urgent_waiting += 1
             try:
                 while self._busy or (not urgent and self._urgent_waiting > 0):
-                    self._cond.wait()
+                    if deadline is None:
+                        self._cond.wait()
+                        continue
+                    left = deadline - self._clock()
+                    if left <= 0:
+                        return False
+                    self._cond.wait(left)
             finally:
                 if urgent:
                     self._urgent_waiting -= 1
+                    self._cond.notify_all()       # a waiting briefing request looks again
             self._busy = True
+            return True
 
     def _release(self) -> None:
         with self._cond:
@@ -537,9 +605,7 @@ class LocalVoiceClient:
             self._acquire(False)
             try:
                 if not self._closed and not self.running():
-                    error, _load_ms = self._start()
-                    if error:
-                        logger.info("Local voice: could not start (%s)", error)
+                    self._start()                 # a failure is logged there, and remembered when it is the load
             finally:
                 self._release()
 
@@ -556,7 +622,8 @@ class LocalVoiceClient:
         reason = self.reason()
         if reason:
             raise LocalVoiceError(reason)
-        self._acquire(urgent)
+        if not self._acquire(urgent, URGENT_WAIT_S if urgent else None):
+            raise LocalVoiceError(ERR_BUSY)       # still loading, or a long request: the Windows voice says this one
         try:
             return self._synthesize(text, Path(out), voice or self.voice, float(speed), float(gain))
         finally:
@@ -594,8 +661,10 @@ class LocalVoiceClient:
 
     def close(self) -> None:
         """The app closes: the process is asked to end, and killed if it has not within a few seconds. Never waits for
-        a request on its way (that one gets ERR_CLOSED or ERR_ENDED)."""
-        self._closed = True
+        a request on its way (that one gets ERR_CLOSED); a start on its way kills its new process itself."""
+        with self._cond:
+            self._closed = True
+            self._cond.notify_all()
         proc = self._proc
         if proc is None:
             return
