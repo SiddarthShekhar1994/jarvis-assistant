@@ -67,7 +67,7 @@ class DeafWindowTests(unittest.TestCase):
 class PrerollTests(unittest.TestCase):
     def session(self, audio: bytes, **kwargs) -> TalkSession:
         kwargs.setdefault("preroll", WAKE_WORDS)
-        kwargs.setdefault("one_breath_ms", talk.ONE_BREATH_MS)
+        kwargs.setdefault("deaf_ms", talk.WAKE_START_DEAF_MS)
         kwargs.setdefault("no_speech_s", talk.WAKE_NO_SPEECH_S)
         return TalkSession(FakeStream(audio), **kwargs)
 
@@ -85,12 +85,26 @@ class PrerollTests(unittest.TestCase):
         clip = session.clip()
         self.assertTrue(clip.startswith(WAKE_WORDS + said))
 
-    def test_a_request_after_a_pause_leaves_them_out(self) -> None:
-        session = self.session(noise(1600, ROOM) + tone(1000, VOICE) + noise(1500, ROOM))
+    def test_a_request_after_a_pause_also_starts_at_the_pre_roll(self) -> None:
+        after = noise(1600, ROOM) + tone(1000, VOICE)
+        session = self.session(after + noise(1500, ROOM))
         self.assertEqual(self.through(session), talk.END_QUIET)
-        clip = session.clip()
-        self.assertNotIn(WAKE_WORDS[:3200], clip)
-        self.assertLess(len(clip), (600 + 1000 + 1000) * 32)
+        self.assertTrue(session.clip().startswith(WAKE_WORDS + after))   # the wake words come off the words
+
+    def test_the_end_of_jarvis_never_starts_the_request(self) -> None:
+        session = self.session(tone(150, VOICE) + noise(2000, ROOM) + tone(900, VOICE) + noise(1500, ROOM))
+        self.assertEqual(self.through(session), talk.END_QUIET)
+        self.assertGreaterEqual(session.endpointer.start_frame * FRAME_MS, 2000)
+
+    def test_speech_since_hears_the_owner_but_not_the_room(self) -> None:
+        session = self.session(noise(300, ROOM) + tone(200, VOICE) + noise(3000, ROOM))
+        for _ in range(4):
+            session.poll()
+        self.assertTrue(session.speech_since(250))
+        session = self.session(tone(200, VOICE) + noise(3000, ROOM))
+        for _ in range(4):
+            session.poll()
+        self.assertFalse(session.speech_since(talk.WAKE_START_DEAF_MS))
 
     def test_nothing_said_ends_after_five_seconds(self) -> None:
         session = self.session(noise(9000, ROOM))
@@ -190,7 +204,7 @@ class ListenFromWakeTests(unittest.TestCase):
         frames = controller._session.endpointer.frames
         controller._maybe_chime()
         self.assertEqual(self.calls.chimes, 1)
-        self.assertEqual(controller._session.endpointer._deaf_until, frames + talk.CHIME_DEAF_MS // FRAME_MS)
+        self.assertEqual(controller._session.endpointer._deaf_until, frames + round(talk.CHIME_DEAF_MS / FRAME_MS))
         controller.cancel()
 
         controller = self.make()
@@ -250,6 +264,14 @@ class ListenFromWakeTests(unittest.TestCase):
         controller.toggle()
         self.assertEqual(self.calls.submitted, ["what's the time"])
         self.assertEqual(self.calls.ended, [talk_ui.WAKE_REQUEST])
+
+    def test_nothing_understood_after_a_wake_ends_quietly(self) -> None:
+        controller = self.make(heard=Heard(True, "", ms=100))
+        controller.listen_from_wake(FakeStream(tone(900, VOICE) + noise(1500, ROOM)), preroll=WAKE_WORDS,
+                                    speaking=True)
+        self.through(controller)
+        self.assertEqual(self.calls.statuses[-1], (talk_ui.WAKE_NOTHING, hud.TONE_IDLE))
+        self.assertEqual(self.calls.ended, [talk_ui.WAKE_HEARD_NOTHING])
 
     def test_understanding_that_failed_is_said_and_counted_as_stopped(self) -> None:
         controller = self.make(heard=Heard(False, error="failed"))

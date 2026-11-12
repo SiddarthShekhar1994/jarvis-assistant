@@ -422,9 +422,64 @@ class ControllerTests(unittest.TestCase):
         self.client.on_line(None)
         controller._restart_timer.stop()
         controller._apply()
+        self.client.on_line({"ready": True, "load_ms": 1})
         self.clock[0] += wake_ui.RESTART_RESET_S + 1
         self.client.on_line(None)
         self.assertEqual(controller._restart_timer.interval(), int(wake_ui.RESTART_DELAYS_S[0] * 1000))
+
+    def test_a_listener_that_never_starts_is_stopped_after_its_tries(self) -> None:
+        controller = self.make()
+
+        def factory(folder, on_line, sensitivity):
+            client = FakeClient(folder, on_line, sensitivity)
+            client.refuse = True
+            self.clients.append(client)
+            return client
+
+        controller._client_factory = factory
+        controller.start()
+        for _ in range(len(wake_ui.RESTART_DELAYS_S)):
+            self.assertTrue(controller._restart_timer.isActive())
+            self.clock[0] += wake_ui.RESTART_RESET_S + 1                  # never ready: never counted afresh
+            controller._restart_timer.stop()
+            controller._apply()
+        self.assertFalse(controller._restart_timer.isActive())
+        self.assertIn("kept failing", controller.status()[0])
+
+    def test_lines_from_a_listener_that_was_replaced_count_for_nothing(self) -> None:
+        controller = self.started()
+        old = self.client
+        controller.set_on(False)
+        controller.set_on(True)
+        new = self.client
+        self.assertIsNot(old, new)
+        new.on_line({"ready": True, "load_ms": 1})
+        new.on_line({"state": "listening", "mic": MIC, "default": True})
+        old.on_line({"heard": True, "score": 0.9, "speaking": False, "preroll_bytes": 0})
+        old.on_line(None)                                                 # the old one's late end
+        self.assertEqual(self.talk.wakes, [])
+        self.assertFalse(controller._restart_timer.isActive())
+        self.assertFalse(new.closed)
+        self.assertIs(controller._client, new)
+        self.assertEqual(controller.status()[1], wake_ui.LOOK_LISTENING)
+
+    def test_an_older_hand_off_closing_never_ends_the_newer_one(self) -> None:
+        self.started()
+        self.heard()
+        first = self.talk.wakes[0]["stream"]
+        self.heard()
+        sent = len(self.client.sent)
+        first.close()
+        self.assertEqual(len(self.client.sent), sent)                     # no handoff_end for the newer one
+        self.talk.wakes[1]["stream"].close()
+        self.assertEqual(self.client.sent[-1], {"handoff_end": True})
+
+    def test_a_turn_off_that_cannot_be_saved_says_so(self) -> None:
+        controller = self.started()
+        with mock.patch("briefing_reader.prefs._write_atomic", return_value=False):
+            controller.set_on(False)
+        self.assertFalse(controller.on)
+        self.assertIn("could not be saved", controller.status()[0])
 
     def test_a_model_or_add_on_the_listener_could_not_load_waits_for_the_owner(self) -> None:
         controller = self.make()
@@ -548,6 +603,8 @@ class AppHookTests(unittest.TestCase):
         self.assertEqual(ui.AppController._wake_holds(stub(player=SimpleNamespace(state=ui.PLAYING))),
                          [wake_ui.HOLD_SPEAKING])                         # reading the briefing
         self.assertEqual(ui.AppController._wake_holds(stub(meetings=None, voice=None)), [])
+        self.assertEqual(ui.AppController._wake_holds(stub(_utterance="Good evening, sir.")),
+                         [wake_ui.HOLD_SPEAKING])                          # his words start before their sound plays
 
     def test_in_control_and_the_tray_mark(self) -> None:
         stub = SimpleNamespace(_hud_active=lambda: True, desktop=SimpleNamespace(in_control=lambda: True))
@@ -567,6 +624,23 @@ class AppHookTests(unittest.TestCase):
         self.assertNotEqual(plain, listening)
         self.assertNotEqual(listening, problem)
         self.assertEqual(plain, ui.app_icon("paused").pixmap(64, 64).toImage())
+
+    def test_the_frame_header_keeps_its_service_chips_beside_hey_jarvis(self) -> None:
+        from briefing_reader import hud
+
+        header = hud.HeaderBar()
+        header.resize(1200, 46)
+        header.set_service("notion", hud.STATUS_OK, "Notion: connected")
+        badge = wake_ui.WakeBadge()
+        header.add_rec_badge(badge, wins_room=False)
+        badge.set_state("Listening", wake_ui.LOOK_LISTENING)
+        header._sync_chips_box()
+        self.assertFalse(header._chips_box.isHidden())
+        rec = wake_ui.WakeBadge()                                         # a badge that wins the room, as REC does
+        header.add_rec_badge(rec)
+        rec.set_state("REC", wake_ui.LOOK_PROBLEM)
+        header._sync_chips_box()
+        self.assertTrue(header._chips_box.isHidden())
 
     def test_the_reading_view_s_marks_and_the_hud(self) -> None:
         badges = [mock.Mock(), mock.Mock()]

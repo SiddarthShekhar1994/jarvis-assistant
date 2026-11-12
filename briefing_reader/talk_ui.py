@@ -322,7 +322,7 @@ class TalkController(QObject):
         self._before_talk()
         session = talk.TalkSession(stream, quiet_ms=self._cfg.quiet_ms, clock=self._clock, device_name=device_name,
                                    follows_default=follows_default, preroll=preroll,
-                                   no_speech_s=talk.WAKE_NO_SPEECH_S, one_breath_ms=talk.ONE_BREATH_MS)
+                                   no_speech_s=talk.WAKE_NO_SPEECH_S, deaf_ms=talk.WAKE_START_DEAF_MS)
         self._wake_talk = True
         self._begin(session, None)
         if self._session is session and not speaking:
@@ -353,7 +353,7 @@ class TalkController(QObject):
         session = self._session
         if session is None or self._state != LISTENING or not self._wake_talk:
             return
-        if session.endpointer.loud_frames or session.endpointer.heard_speech:
+        if session.endpointer.heard_speech or session.speech_since(talk.WAKE_START_DEAF_MS):
             return                                  # already speaking: no chime over the request
         session.endpointer.deafen(talk.CHIME_DEAF_MS)
         try:
@@ -482,18 +482,16 @@ class TalkController(QObject):
             if wake_talk:
                 self.wakeTalkEnded.emit(WAKE_STOPPED)
             return
-        if wake_talk and text:
+        if wake_talk:
             from .wake import strip_wake_words
 
-            text = strip_wake_words(text)           # "Hey Jarvis, open Spotify." -> "Open Spotify."
+            text = strip_wake_words(text) if text else ""     # "Hey Jarvis, open Spotify." -> "Open Spotify."
             if not text:
-                self._show(WAKE_NOTHING, hud.TONE_IDLE)
+                self._show(WAKE_NOTHING, hud.TONE_IDLE)        # a false wake, often: said quietly
                 self.wakeTalkEnded.emit(WAKE_HEARD_NOTHING)
                 return
         if not text:
             self._show(NOT_CAUGHT, hud.TONE_WARN)
-            if wake_talk:
-                self.wakeTalkEnded.emit(WAKE_HEARD_NOTHING)
             return
         self._submit(text)
         if wake_talk:

@@ -44,11 +44,13 @@ MAX_TALK_S = 30.0              # a talk's cap
 BEFORE_SPEECH_MS = 1_000       # kept before the speech the endpointer found (a soft first word it missed)
 AFTER_SPEECH_MS = 200          # ... and after its last speech
 # A talk "Hey Jarvis" started (wake_ui, owner decisions 2026-11-12): it begins on the listener's audio from the wake on,
-# with the PREROLL before the wake kept aside.
+# with the audio from before the wake kept aside (the pre-roll: its clip always begins there, and the wake words come
+# off what is heard).
 WAKE_NO_SPEECH_S = 5.0         # this long to start the request (the key gives NO_SPEECH_S)
-ONE_BREATH_MS = 900            # speech this soon after the wake is one breath with "Hey Jarvis": the clip keeps it all
-CHIME_CHECK_MS = 250           # the chime plays only when nothing was said this long after the wake ...
-CHIME_DEAF_MS = 400            # ... and while it plays (and echoes) it never starts the request; the audio is kept
+WAKE_START_DEAF_MS = 250       # the end of "Jarvis" may still be heard as the talk starts: it never starts the request
+CHIME_CHECK_MS = 350           # the chime plays only when nothing was said this long after the wake ...
+CHIME_DEAF_MS = 800            # ... and while it plays and echoes - with the audio arriving up to ~0.4 s late - it never
+                               # starts the request; the audio is kept
 
 SILENCE_DB = -100.0            # an all-zero frame
 MUTED_DB = -85.0               # a talk whose loudest frame stayed below this: a muted microphone
@@ -283,21 +285,22 @@ class TalkSession:
     closes the stream at once. The audio stays in memory: :meth:`clip` is the part worth understanding, b"" when
     nothing should be (nothing said, a cancel, a stopped or muted microphone). The stream's ``read_available`` gives
     16 kHz mono int16 (meeting_audio's AudioStream contract). A talk "Hey Jarvis" started is made directly on the
-    listener's stream, with the audio from before the wake as ``preroll``: when its speech starts within
-    ``one_breath_ms``, the clip begins there (the request was said in one breath with the wake words)."""
+    listener's stream, with the audio from before the wake as ``preroll`` - its clip begins there, so a request said
+    in one breath with the wake words is whole - and ``deaf_ms`` (the end of "Jarvis" never starts the request)."""
 
     def __init__(self, stream: Any, *, quiet_ms: int = QUIET_MS, clock: Callable[[], float] = time.monotonic,
                  device_name: str = "", follows_default: bool = False, preroll: bytes = b"",
-                 no_speech_s: float = NO_SPEECH_S, one_breath_ms: int = 0) -> None:
+                 no_speech_s: float = NO_SPEECH_S, deaf_ms: int = 0) -> None:
         self._stream = stream
         self.device_name = device_name          # the microphone opened (the owner's; shown, never logged)
         self.follows_default = follows_default  # it is the Windows default (none picked in Settings > Meetings)
         self.endpointer = Endpointer(quiet_ms=quiet_ms, no_speech_s=no_speech_s)
+        if deaf_ms:
+            self.endpointer.deafen(deaf_ms)      # its first ``deaf_ms`` never start the request (kept all the same)
         self._audio = bytearray()
-        # A talk "Hey Jarvis" started: the audio from before the wake, kept for the clip of a request said in the same
-        # breath (speech within ``one_breath_ms`` of the start), never fed to the endpointer.
+        # A talk "Hey Jarvis" started: the audio from before the wake, where its clip begins (never fed to the
+        # endpointer).
         self._preroll = bytes(preroll)
-        self._one_breath_ms = int(one_breath_ms)
         self._clock = clock
         self._began = clock()
 
@@ -373,9 +376,18 @@ class TalkSession:
         if ep.ended not in SAID_ENDS or ep.muted or (ep.ended != END_OWNER and not ep.heard_speech):
             return b""
         first, last = ep.span(len(self._audio))
-        if self._preroll and ep.heard_speech and ep.start_frame * FRAME_MS < self._one_breath_ms:
-            return self._preroll + bytes(self._audio[:last])   # "Hey Jarvis, open Spotify": all of it
-        return bytes(self._audio[first:last])
+        if self._preroll:
+            return self._preroll + bytes(self._audio[:last])   # "Hey Jarvis, open Spotify": all of it, said at once
+        return bytes(self._audio[first:last])                  # or after a pause (the wake words come off the words)
+
+    def speech_since(self, ms: int) -> bool:
+        """Something as loud as speech in the audio from ``ms`` into the talk on (the chime is not played over it)."""
+        ep = self.endpointer
+        threshold = max(ep.floor_db + SPEECH_ABOVE_DB, SPEECH_MIN_DB)
+        start = ms * SAMPLE_RATE // 1000 * BYTES_PER_SAMPLE
+        audio = bytes(self._audio[start:])
+        return any(frame_db(audio[at:at + FRAME_BYTES]) >= threshold
+                   for at in range(0, len(audio) - FRAME_BYTES + 1, FRAME_BYTES))
 
     def forget(self) -> None:
         """Drops the audio (once it was understood, or not needed)."""

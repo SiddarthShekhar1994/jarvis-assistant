@@ -38,6 +38,7 @@ import time
 import wave as wave_mod
 from collections.abc import Callable
 from datetime import date
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +65,7 @@ HOLD_TEXTS = {HOLD_TALK: "while you talk to him", HOLD_SPEAKING: "while he speak
               HOLD_MEETING: "while a meeting records", HOLD_FOCUS: "in focus mode"}
 PROBLEM_STOPPED = "stopped"       # the listener kept failing: it is not started again until the owner turns it on
 PROBLEM_UNSAVED = "unsaved"       # Turn on could not be saved (fail-closed: it stays off)
+PROBLEM_UNSAVED_OFF = "unsaved_off"   # Turn off could not be saved: off for this run, on again at the next start
 
 SETTINGS_NOTE = (f"Say {PHRASE} and Jarvis listens as if you had tapped the talk key - in one breath (“Hey "
                  "Jarvis, open Spotify”) or after his soft chime. A small listener on this PC hears only for those "
@@ -426,7 +428,7 @@ class WakeController(QObject):
     in control on the desktop. ``threaded`` False (tests): the listener's lines and downloads run in the caller."""
 
     changed = Signal()                       # what shows it changed (the marks, the tray, Settings)
-    _event = Signal(object, object)          # (a listener's line, its hand-off stream), to the GUI thread
+    _event = Signal(object, object, object)  # (a listener's line, its hand-off stream, which listener), to the GUI
     _download_progress = Signal(int, int)
     _downloaded = Signal(str)
 
@@ -455,6 +457,8 @@ class WakeController(QObject):
         self._clock = clock
         self._lock = threading.Lock()
         self._client: Any = None
+        self._token: object | None = None               # the running listener's own mark: a replaced one's lines don't count
+        self._ready_at = 0.0                            # when the running listener said it was ready (0: not yet)
         self._stream: HandoffStream | None = None       # the hand-off being gathered or under way (reader thread)
         self._heard: dict | None = None
         self._started = False
@@ -465,7 +469,6 @@ class WakeController(QObject):
         self._holds: tuple[str, ...] = ()
         self._held = False
         self._failures = 0
-        self._ran_since = 0.0
         self._downloading = False
         self._download_percent = 0
         self._download_error = ""
@@ -502,7 +505,7 @@ class WakeController(QObject):
         if bool(on) == self._store.on:
             return
         saved = self._store.set_on(on)
-        self._problem = PROBLEM_UNSAVED if on and not saved else ""
+        self._problem = "" if saved else PROBLEM_UNSAVED if on else PROBLEM_UNSAVED_OFF
         self._failures = 0
         logger.info("Wake: turned %s by the owner%s", "on" if self._store.on else "off",
                     "" if saved else " (could not be saved)")
@@ -543,32 +546,39 @@ class WakeController(QObject):
         with self._lock:
             self._stream, self._heard = None, None
         self._listener_state, self._mic = "", ("", False)
-        client = self._client_factory(self._folder, self._on_line, self._store.sensitivity)
+        token = object()
+        self._token, self._ready_at = token, 0.0
+        client = self._client_factory(self._folder, partial(self._on_line, token), self._store.sensitivity)
         if not client.start():
             logger.info("Wake: the listener could not be started")
-            self._client = None
+            self._client, self._token = None, None
             self._retry()
             return
         self._client = client
-        self._ran_since = self._clock()
         logger.info("Wake: the listener started (%s)", self._store.sensitivity)
 
     def _stop_client(self) -> None:
         client, self._client = self._client, None
+        self._token = None                                # what it still says from now on is let go
         self._end_stream()
         self._listener_state, self._held, self._holds = "", False, ()
         self._tail_timer.stop()
         if client is None:
             return
         logger.info("Wake: the listener stopped")
+        self._reap(client)
+
+    def _reap(self, client: Any) -> None:
+        """Make sure a listener's process is gone (asked to quit, then ended)."""
         if self._threaded:
             threading.Thread(target=client.close, name="wake-listen-close", daemon=True).start()
         else:
             client.close()
 
     def _retry(self) -> None:
-        """The listener ended by itself (or would not start): started again after a while; after too many, stopped."""
-        if self._clock() - self._ran_since >= RESTART_RESET_S:
+        """The listener ended by itself (or would not start): started again after a while; after too many, stopped. A
+        listener that was ready for RESTART_RESET_S counts the failures afresh."""
+        if self._ready_at and self._clock() - self._ready_at >= RESTART_RESET_S:
             self._failures = 0
         if self._failures >= len(RESTART_DELAYS_S):
             self._problem = PROBLEM_STOPPED
@@ -582,11 +592,14 @@ class WakeController(QObject):
 
     # ---- the listener's lines --------------------------------------------------------------------------------------
 
-    def _on_line(self, message: dict | None) -> None:
-        """On the listener's reader thread: a wake's audio is gathered here, the rest goes to the GUI thread."""
+    def _on_line(self, token: object, message: dict | None) -> None:
+        """On a listener's reader thread: a wake's audio is gathered here, the rest goes to the GUI thread. Only the
+        running listener counts (``token``): one that was replaced or stopped may still be ending."""
+        if token is not self._token:
+            return
         if message is None:
             self._end_stream()
-            self._post(None, None)
+            self._post(None, None, token)
             return
         if "heard" in message:
             stream = HandoffStream(int(message.get("preroll_bytes") or 0), self._handoff_closed)
@@ -595,7 +608,7 @@ class WakeController(QObject):
             if old is not None:
                 old.end()
             if stream.preroll_complete():
-                self._post(message, stream)
+                self._post(message, stream, token)
             return
         if "audio" in message:
             with self._lock:
@@ -607,7 +620,7 @@ class WakeController(QObject):
             except (ValueError, TypeError):
                 return
             if stream.push(pcm):
-                self._post(heard, stream)                # the pre-roll is here: the talk can take over
+                self._post(heard, stream, token)         # the pre-roll is here: the talk can take over
             return
         if message.get("audio_end") is True:
             with self._lock:
@@ -615,18 +628,18 @@ class WakeController(QObject):
             if stream is not None:
                 stream.end()
                 if not stream.preroll_complete():
-                    self._post(heard, stream)            # it ended early: the GUI thread lets it go
+                    self._post(heard, stream, token)     # it ended early: the GUI thread lets it go
             return
-        self._post(message, None)
+        self._post(message, None, token)
 
-    def _post(self, message: dict | None, stream: HandoffStream | None) -> None:
+    def _post(self, message: dict | None, stream: HandoffStream | None, token: object) -> None:
         if self._threaded:
-            self._event.emit(message, stream)
+            self._event.emit(message, stream, token)
         else:
-            self._on_event(message, stream)
+            self._on_event(message, stream, token)
 
-    def _on_event(self, message: dict | None, stream: HandoffStream | None) -> None:
-        if self._closing:
+    def _on_event(self, message: dict | None, stream: HandoffStream | None, token: object) -> None:
+        if self._closing or token is not self._token:      # closing, or from a listener that was replaced meanwhile
             if stream is not None:
                 stream.close()
             return
@@ -649,12 +662,13 @@ class WakeController(QObject):
         if client is None:
             return
         if message.get("ready") is True:
+            self._ready_at = self._clock()
             logger.info("Wake: the listener is ready (%d ms)", int(message.get("load_ms") or 0))
+            self.refresh_holds()                       # held first: a listener started while he speaks never opens
+            if self._held:                             # the microphone to listen (refresh_holds sends a hold only as
+                client.send({"hold": True})            # it starts)
             client.send({"listen": {"mic": self._picked()}})
             client.send({"sensitivity": self._store.sensitivity})
-            if self._held:
-                client.send({"hold": True})
-            self.refresh_holds()
             return
         error = str(message.get("error") or wake.ERR_FAILED)
         logger.info("Wake: the listener could not load (%s)", error)
@@ -664,10 +678,12 @@ class WakeController(QObject):
             self._changed()
 
     def _on_exit(self) -> None:
-        """The listener's output ended: it exited (asked to, or by itself)."""
-        if self._client is None:
+        """The running listener's output ended: it exited (asked to, or by itself)."""
+        client = self._client
+        if client is None:
             return
-        self._client = None
+        self._client, self._token = None, None
+        self._reap(client)                              # its process is gone, or made to go
         self._listener_state, self._held, self._holds = "", False, ()
         if self._problem in (wake.ERR_MODEL, wake.ERR_ADDON) or not self._should_run():
             self._changed()
@@ -718,12 +734,14 @@ class WakeController(QObject):
         return ""
 
     def _handoff_closed(self, stream: HandoffStream) -> None:
-        """A hand-off stream was closed (the talk ended, or the wake was let go): the listener listens again."""
+        """A hand-off stream was closed (the talk ended, or the wake was let go): the listener listens again - only for
+        the hand-off under way (an older stream closing never ends a newer one)."""
         with self._lock:
-            if self._stream is stream:
+            current = self._stream is stream
+            if current:
                 self._stream, self._heard = None, None
         client = self._client
-        if client is not None:
+        if current and client is not None:
             client.send({"handoff_end": True})
 
     def _end_stream(self) -> None:
@@ -787,6 +805,9 @@ class WakeController(QObject):
     def status(self) -> tuple[str, str]:
         """(what it is doing, in words; LOOK_*) for the marks, the tray and Settings."""
         if not self._store.on:
+            if self._problem == PROBLEM_UNSAVED_OFF:
+                return (f"{PHRASE} is off for now, but that could not be saved: it listens again when Jarvis next "
+                        "starts.", LOOK_OFF)
             return (f"{PHRASE} is off" + (": turning it on could not be saved" if self._problem == PROBLEM_UNSAVED
                                           else ""), LOOK_OFF)
         missing = self.missing()

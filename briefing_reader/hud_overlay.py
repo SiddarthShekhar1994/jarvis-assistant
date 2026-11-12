@@ -1174,8 +1174,9 @@ class HudWindow(_OverlayWindow):
         glows = [Glow(self.bar_rect_local().translated(origin), BAR_RADIUS, GLOW_BAR)]
         for key, chip in self.chips.items():
             if not chip.isHidden():
+                amber = key == CHIP_APPROVALS or chip.look() == CHIP_WAKE_PROBLEM
                 glows.append(Glow(chip.geometry().translated(origin), CHIP_HEIGHT / 2, GLOW_CHIP,
-                                  TONE_AMBER if key == CHIP_APPROVALS else TONE_CYAN))
+                                  TONE_AMBER if amber else TONE_CYAN))
         for item in self._instant_shown():
             glows.append(Glow(item.geometry().translated(origin), CHIP_HEIGHT / 2, GLOW_CHIP, TONE_CYAN))
         return glows

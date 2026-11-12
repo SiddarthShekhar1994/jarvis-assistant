@@ -57,12 +57,13 @@ TEST_GUARD_ENV = "JARVIS_DESKTOP_TEST_GUARD"        # "1" while the tests run: t
 POLL_S = 0.05                     # the loop reads the microphone this often while it listens
 IDLE_WAIT_S = 1.0                 # ... and only waits for commands before the first "listen"
 CLOSE_AFTER_S = 3.0               # a hold this long closes the microphone and lets PortAudio go
-RETRY_S = 5.0                     # a microphone that would not open is tried again this often
+RETRY_S = 5.0                     # a microphone that would not open is tried again after this, then twice as long each
+RETRY_MAX_S = 60.0                # time up to this (PortAudio is not started every few seconds all day)
 REFRESH_S = 600.0                 # PortAudio is started again this often while listening (a new default, new devices)
 SILENT_S = 20.0                   # a microphone that gives only digital silence this long is "silent_mic"
 PREROLL_S = 1.6                   # handed over from before the wake (all of "Hey Jarvis", for a one-breath request)
 PREROLL_BYTES = int(PREROLL_S * wake.SAMPLE_RATE) * wake.BYTES_PER_SAMPLE
-AUDIO_LINE_MS = 100
+AUDIO_LINE_MS = 50                # a hand-off's audio, this much a line (the talk hears it this soon)
 AUDIO_LINE_BYTES = wake.SAMPLE_RATE * AUDIO_LINE_MS // 1000 * wake.BYTES_PER_SAMPLE
 HANDOFF_MAX_S = talk.MAX_TALK_S + 10.0              # a hand-off never runs longer than a talk can, and then some
 SPEAKING_FRAMES = 5               # the last 150 ms (30 ms frames) ...
@@ -118,6 +119,7 @@ class Listener:
         self._opened_pick = ""                          # the pick it was opened with
         self._opened_at = 0.0
         self._retry_at = 0.0
+        self._retries = 0                               # tries in a row that failed (the next waits longer)
         self._ring = bytearray()          # the last PREROLL_BYTES listened to
         self._pending = bytearray()       # read, not yet a whole chunk
         self._outgoing = bytearray()      # a hand-off's audio not yet sent
@@ -136,7 +138,7 @@ class Listener:
                 self._close_stream()      # the newly picked microphone, at the next tick
             self.mic_pick = pick
             self.wanted = True
-            self._retry_at = 0.0
+            self._retry_at, self._retries = 0.0, 0     # (a newly picked microphone is tried at once)
         if "sensitivity" in message:
             self.detector.set_sensitivity(str(message.get("sensitivity") or ""))
         if "hold" in message:
@@ -174,7 +176,7 @@ class Listener:
                 return
             self._open(now)
             if self._stream is None:
-                self._retry_at = now + RETRY_S
+                self._later(now)
                 return
         audio = self._read(now)
         if audio:
@@ -214,7 +216,7 @@ class Listener:
             self._release_backend()
             self._set_state(STATE_BUSY, mic=name, default=bool(follows))
             return
-        self._opened_at = now
+        self._opened_at, self._retries = now, 0
         self._mic, self._opened_pick = (name, bool(follows)), self.mic_pick
         self._fresh()
         self._set_state(STATE_LISTENING, mic=name, default=bool(follows))
@@ -226,13 +228,19 @@ class Listener:
         except Exception:  # noqa: BLE001 - the device went away, or delivers nothing
             name, follows = self._mic
             self._close_stream()
-            self._retry_at = now + RETRY_S
+            self._later(now)
             if self.handoff:
                 self._send({"audio_end": True})
                 self._end_handoff(state=False)
             if not self.held:                          # held, it is opened again when the hold ends
                 self._set_state(STATE_BUSY, mic=name, default=follows)
             return None
+
+    def _later(self, now: float) -> None:
+        """The microphone failed: tried again after RETRY_S, twice as long after each failure in a row, at most
+        RETRY_MAX_S."""
+        self._retry_at = now + min(RETRY_MAX_S, RETRY_S * 2 ** min(self._retries, 8))
+        self._retries += 1
 
     def _listen(self, audio: bytes, now: float) -> None:
         self._pending += audio
@@ -288,6 +296,7 @@ class Listener:
             self._close_stream()                       # another microphone was picked meanwhile: it, next
             self._retry_at = 0.0
         if self.held:
+            self._held_since = self._clock()           # the hold that came during the talk: its 3 s start now
             if state:
                 self._set_state(STATE_HELD)
         elif state and self._stream is not None:

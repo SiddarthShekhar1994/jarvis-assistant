@@ -203,11 +203,28 @@ class ListenerTests(unittest.TestCase):
         self.tick(wake_listen.RETRY_S)
         self.assertEqual(self.lines()[-1], {"state": "mic_busy", "mic": REAL, "default": True})
         self.loader.make = lambda: None
-        self.tick(wake_listen.RETRY_S)
+        self.tick(wake_listen.RETRY_MAX_S)
         self.assertEqual(self.states()[-1], "audio_missing")
         self.loader.make = FakeBackend
-        self.tick(wake_listen.RETRY_S)
+        self.tick(wake_listen.RETRY_MAX_S)
         self.assertEqual(self.states()[-1], "listening")
+
+    def test_a_microphone_that_keeps_failing_is_tried_less_and_less_often(self) -> None:
+        self.loader.make = lambda: FakeBackend(names=(), default=None)
+        self.listener.command({"listen": {"mic": ""}})
+        tries = []
+        for _ in range(int(400 / 0.5)):
+            before = len(self.loader.backends)
+            self.tick(0.5)
+            if len(self.loader.backends) > before:
+                tries.append(self.clock.now)
+        gaps = [round(later - earlier) for earlier, later in zip(tries, tries[1:])]
+        self.assertEqual(gaps[:5], [5, 10, 20, 40, 60])
+        self.assertTrue(all(gap == 60 for gap in gaps[4:]))
+        before = len(self.loader.backends)
+        self.listener.command({"listen": {"mic": REAL}})                 # a pick is tried at once
+        self.tick()
+        self.assertEqual(len(self.loader.backends), before + 1)
 
     def test_the_detector_hears_the_microphone_chunk_by_chunk(self) -> None:
         stream = self.listening()
@@ -287,6 +304,17 @@ class ListenerTests(unittest.TestCase):
         self.assertNotIn("held", self.states())
         self.listener.command({"handoff_end": True})
         self.assertEqual(self.states()[-1], "held")
+
+    def test_the_hold_that_came_during_a_long_talk_counts_its_3_s_from_the_talk_s_end(self) -> None:
+        stream = self.listening()
+        self.tick(0.05, wake_chunk())
+        self.listener.command({"hold": True})                       # the talk the wake started
+        self.tick(10.0)                                             # a long talk
+        self.listener.command({"handoff_end": True})
+        self.tick(1.0)
+        self.assertFalse(stream.closed)                             # not at once: a release may follow in a moment
+        self.tick(2.5)
+        self.assertTrue(stream.closed)
 
     def test_the_microphone_stopping_ends_the_hand_off(self) -> None:
         self.listening()

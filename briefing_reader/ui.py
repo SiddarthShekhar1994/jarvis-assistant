@@ -3365,7 +3365,7 @@ class BriefingWindow(hud.HudWindowFrame):
         from .wake_ui import WakeBadge
 
         self.frame_wake = WakeBadge()                    # HEY JARVIS over the prompt view too ("Hey Jarvis" on)
-        self.header.add_rec_badge(self.frame_wake)
+        self.header.add_rec_badge(self.frame_wake, wins_room=False)    # the service chips stay beside it
         self.reading.add_wake_badge(self.frame_wake)
         self.ground = holo.GroundCache()
         self.reading.hero.set_ground(orb_mod.ground_painter(self.ground))
@@ -13940,6 +13940,8 @@ class AppController(QObject):
 
     def _on_player_state(self, state: str) -> None:
         self._pump_voice()
+        self._wake_call("refresh_holds")         # "Hey Jarvis" pauses while the briefing plays (any player, as it is
+                                                 # replaced for each new briefing)
         if state != PLAYING and self.state == STATE_READING and not self._utterance:
             self.window.reading.end_caption()      # paused or finished: the last line holds, then rests
         if state == PLAYING and self.state == STATE_READING:
@@ -14211,7 +14213,6 @@ class AppController(QObject):
         controller.attach_panel(panel, refresh=settings.refresh)
         talk.extra_rows = controller.settings_rows
         controller.changed.connect(self._on_wake_changed)
-        self.player.stateChanged.connect(lambda _state: controller.refresh_holds())
         recording = getattr(getattr(self, "meetings", None), "recordingChanged", None)
         if recording is not None:
             recording.connect(lambda _on: controller.refresh_holds())
@@ -14241,7 +14242,9 @@ class AppController(QObject):
         if talk is not None and talk.state != talk_ui.IDLE:
             holds.append(wake_ui.HOLD_TALK)
         voice = getattr(self, "voice", None)
-        if bool(getattr(voice, "speaking", False)) or self.player.state in (PLAYING, WAITING):
+        # His words start (speakingChanged, _utterance) just before their sound plays (voice.speaking): either counts.
+        speaking = bool(getattr(self, "_utterance", "")) or bool(getattr(voice, "speaking", False))
+        if speaking or self.player.state in (PLAYING, WAITING):
             holds.append(wake_ui.HOLD_SPEAKING)
         meetings = getattr(self, "meetings", None)
         if meetings is not None and bool(meetings.is_recording()):
