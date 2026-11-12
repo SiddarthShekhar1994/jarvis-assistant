@@ -282,6 +282,7 @@ class ModelDownloader:
     def _fetch(self, name: str, size: int, sha: str, done_before: int, total: int) -> str:
         final = self.target / name
         part = self.target / f"{name}.part"
+        final.parent.mkdir(parents=True, exist_ok=True)          # a file in a subfolder ("onnx/model.onnx")
         if final.is_file() and final.stat().st_size == size:
             final.replace(part)                      # checked again below (its hash, when Hugging Face gave one)
         have = part.stat().st_size if part.exists() else 0

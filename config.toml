@@ -8,7 +8,20 @@
 # BRIEFING_PAGE_ID (both required) in the .env file next to this one.
 
 [voice]
-# Online voice used by edge-tts. To list every available voice, run:
+# Where Jarvis's voice is made. "local": on this PC (Kokoro-82M) - the briefing and everything he
+# says never leave it, so lines that may be private are said aloud too. It needs the add-ons and a
+# download (about 346 MB) on your click in Settings > Voice; until then, and whenever it can't run,
+# the Windows voice speaks instead, never the online one. "online": Microsoft's online voice
+# (edge-tts) as before; it hears every word he says, so private lines stay on screen.
+engine = "local"
+# The local voice: "bm_george", "bm_fable", "bm_lewis", "bm_daniel" (British men),
+# "bf_emma", "bf_isabella", "bf_alice", "bf_lily" (British women), or an American one
+# ("am_michael", "am_fenrir", "am_puck", "af_heart", "af_bella", ... - README lists all 28).
+local_voice = "bm_george"
+# Minutes the local voice stays loaded after he last spoke (it takes about a gigabyte of memory
+# and a few seconds to load again). 0 keeps it loaded while Jarvis runs (0 to 1440).
+keep_warm_minutes = 0
+# The online voice (engine = "online"). To list every available voice, run:
 #   py -3.13 -m edge_tts --list-voices
 voice = "en-GB-RyanNeural"
 # Speaking speed relative to normal, from "-50%" to "+100%".
@@ -16,8 +29,8 @@ voice = "en-GB-RyanNeural"
 rate = "+0%"
 # Loudness relative to normal, from "-100%" to "+100%" (e.g. "-20%" is quieter).
 volume = "+0%"
-# Offline fallback (Windows built-in voices), used when edge-tts cannot be
-# reached. Any part of the voice name, e.g. "Zira" or "David".
+# The Windows voice (built in, also on this PC), used when the voice above can't run.
+# Any part of the voice name, e.g. "Zira" or "David".
 # Leave empty for the Windows default voice.
 offline_voice = ""
 # Silence between sections, in milliseconds (0 to 10000).

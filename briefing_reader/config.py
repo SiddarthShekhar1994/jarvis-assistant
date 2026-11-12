@@ -69,6 +69,18 @@ REDACTED = "[REDACTED]"
 RATE_RANGE = (-50, 100)
 VOLUME_RANGE = (-100, 100)
 
+# Jarvis's voice (owner decision 2026-11-12): "local" = made on this PC (Kokoro-82M, local_voice.py), with the Windows
+# voice when it can't run - never Microsoft's online voice; "online" = edge-tts with the Windows voice as before.
+VOICE_ENGINE_LOCAL, VOICE_ENGINE_ONLINE = "local", "online"
+VOICE_ENGINES = (VOICE_ENGINE_LOCAL, VOICE_ENGINE_ONLINE)
+# The local voice's English voices (Kokoro-82M v1.0: a = American, b = British; f = female, m = male).
+LOCAL_VOICES = ("af_alloy", "af_aoede", "af_bella", "af_heart", "af_jessica", "af_kore", "af_nicole", "af_nova",
+                "af_river", "af_sarah", "af_sky", "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam",
+                "am_michael", "am_onyx", "am_puck", "am_santa", "bf_alice", "bf_emma", "bf_isabella", "bf_lily",
+                "bm_daniel", "bm_fable", "bm_george", "bm_lewis")
+DEFAULT_LOCAL_VOICE = "bm_george"     # owner's pick 2026-11-12: British male
+KEEP_WARM_RANGE = (0, 1440)           # minutes the local voice stays loaded after he last spoke; 0 = while Jarvis runs
+
 DEFAULT_CLIENT_SECRET = "google_client_secret.json"
 DEFAULT_ACTIONS_HEADING = "Proposed actions"
 DEFAULT_DEADLINE_KEYWORDS = ("due", "deadline", "exam", "midterm", "final", "quiz", "submit",
@@ -115,12 +127,15 @@ _MIN_SECRET_LEN = 8
 
 @dataclass(frozen=True)
 class VoiceConfig:
-    voice: str = "en-GB-RyanNeural"
+    voice: str = "en-GB-RyanNeural"   # the online voice (engine = "online")
     rate: str = "+0%"             # validated ^[+-]\d+%$, else default + warning
     volume: str = "+0%"           # same validation
     offline_voice: str = ""       # substring of a SAPI voice name (any case); "" = system default
     section_gap_ms: int = 600     # silence between sections
     divider_pause_ms: int = 900   # silence for a divider
+    engine: str = VOICE_ENGINE_LOCAL          # VOICE_ENGINES: "local" (this PC) or "online" (Microsoft's edge-tts)
+    local_voice: str = DEFAULT_LOCAL_VOICE    # one of LOCAL_VOICES
+    keep_warm_minutes: int = 0                # the local voice is let go after this many quiet minutes; 0 = never
 
 
 @dataclass(frozen=True)
@@ -943,6 +958,9 @@ def _parse_voice(doc: Mapping[str, Any]) -> VoiceConfig:
         offline_voice=r.string("offline_voice", d.offline_voice, allow_empty=True),
         section_gap_ms=r.integer("section_gap_ms", d.section_gap_ms, 0, 10_000),
         divider_pause_ms=r.integer("divider_pause_ms", d.divider_pause_ms, 0, 10_000),
+        engine=r.choice("engine", d.engine, VOICE_ENGINES),
+        local_voice=r.choice("local_voice", d.local_voice, LOCAL_VOICES),
+        keep_warm_minutes=r.integer("keep_warm_minutes", d.keep_warm_minutes, *KEEP_WARM_RANGE),
     )
 
 
