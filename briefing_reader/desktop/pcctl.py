@@ -22,7 +22,9 @@ attribute marks each), before anything else happens.
   the tests run), so it is restored when Jarvis starts again; the deadlines are wall-clock times, so a timer whose
   end came while the PC slept ends as soon as it is checked after the resume (desktop_ui checks at least every
   ``TIMER_CHECK_S``). The app says it ended with its toast and a short sound (``Win32Pc.chime``) and shows a HUD chip
-  while one runs (``chip_text``).
+  while one runs (``chip_text``). Instant answers' round 2 keeps reminders at a clock time in the same book and file
+  (``add_until``, ``Timer.kind`` REMINDER_KIND, up to REMINDER_MAX_S ahead, MAX_REMINDERS at once); an entry with no
+  kind is a timer, so every older file still loads, and the desktop's "cancel the timers" leaves reminders alone.
 * Screenshots (``capture``): the whole screen or the active window, saved as a PNG (``png_bytes``: written here, no
   image library) to the screenshots folder - [desktop] screenshots_dir, else Jarvis\\Screenshots in the user folder
   (D8); local only: a folder in OneDrive or not on a fixed drive is never used (the default then). Jarvis's own HUD
@@ -63,8 +65,9 @@ Public API
 ``Win32Pc()``;
 ``gsmtc()``; ``png_bytes(width, height, bgra)``. ``AudioState(level, muted)``, ``PcAsk(kind, action, level, step,
 minutes, label)``, ``Timer``, ``Shot``, ``PcChange``; ``NoDevice``, ``NoWindow``, ``HudShows``,
-``MediaUnavailable``, ``TimersFull``. ``TimerBook(folder, now=)`` (``load()``, ``running()``, ``add(minutes,
-label)``, ``cancel_all()``, ``restore(timers)``, ``next_end()``, ``seconds_left()``, ``take_due()``, ``clear()``);
+``MediaUnavailable``, ``TimersFull``, ``RemindersFull``. ``TimerBook(folder, now=)`` (``load()``, ``running(kind=)``,
+``add(minutes, label)``, ``add_seconds(seconds, label)``, ``add_until(ends_at, label)``, ``cancel_all(kind=)``,
+``restore(timers)``, ``next_end()``, ``seconds_left()``, ``take_due()``, ``clear()``);
 ``timers_folder(
 data_dir)``; ``clean_label(text)``. ``PcControl(backend_factory, disk=, timers=, screenshots_dir=, clock=, now=,
 recycler=)`` (``carry_out(ask, cancel=, hud=)``, ``volume``, ``media``, ``timer``, ``cancel_timers``,
@@ -119,6 +122,12 @@ TIMER_MINUTES = (1, 240)
 TIMER_SECONDS = (10, 240 * 60)       # instant answers' timers (add_seconds): 10 seconds to 4 hours
 LABEL_MAX = 40
 MAX_TIMERS = 5
+# Round 2 of instant answers: a reminder at a clock time (add_until) shares the book and its file, up to 48 hours
+# ahead and at most MAX_REMINDERS at once (its own count: timers keep their five).
+TIMER_KIND, REMINDER_KIND = "timer", "reminder"
+REMINDER_MAX_S = 48 * 3600
+REMINDER_LATE_S = 48 * 3600          # a reminder missed while Jarvis was closed is still said this long after its time
+MAX_REMINDERS = 10
 TIMER_CHECK_S = 30.0                 # the app checks the timers at least this often (a resume is caught by then)
 TIMER_LATE_S = 12 * 3600             # an end missed by more than this (Jarvis was closed) is dropped quietly
 LATE_WORDS_S = 120                   # an end noticed later than this says when it was ("ended at 10:32 AM")
@@ -194,6 +203,10 @@ class TimersFull(RuntimeError):
     """MAX_TIMERS timers run already."""
 
 
+class RemindersFull(TimersFull):
+    """MAX_REMINDERS reminders are set already."""
+
+
 # --------------------------------------------------------------------------
 # What the controls report
 # --------------------------------------------------------------------------
@@ -225,7 +238,8 @@ class PcAsk:
 
 @dataclass(frozen=True)
 class Timer:
-    """One of Jarvis's timers: its id, minutes, when it was set and when it ends (wall clock), its label."""
+    """One of Jarvis's timers: its id, minutes, when it was set and when it ends (wall clock), its label. ``kind``
+    REMINDER_KIND: a reminder at a clock time (round 2 of instant answers; ``ends_at`` is the time asked for)."""
 
     timer_id: str
     minutes: int
@@ -233,9 +247,16 @@ class Timer:
     ends_at: datetime
     label: str = field(default="", repr=False)
     seconds: int = 0           # instant answers' timers: the length in seconds (0: ``minutes`` whole minutes)
+    kind: str = TIMER_KIND
 
     def __repr__(self) -> str:
+        if self.kind == REMINDER_KIND:
+            return f"Timer({self.timer_id}, reminder)"
         return f"Timer({self.timer_id}, {self.minutes} min)"
+
+    @property
+    def reminder(self) -> bool:
+        return self.kind == REMINDER_KIND
 
     @property
     def length_s(self) -> int:
@@ -891,13 +912,16 @@ def timers_folder(data_dir: Any) -> Path | None:
 class TimerBook:
     """Jarvis's running timers (see the module docstring): in memory, and in ``folder``/timers.json so that they are
     restored when Jarvis starts again (``load``). Safe to use from the desktop thread and the GUI thread. ``saved``
-    is False after a save failed (the timers then live in memory only). ``now()``: the wall clock."""
+    is False after a save failed (the timers then live in memory only). ``now()``: the wall clock. Round 2 of instant
+    answers: reminders at a clock time (``add_until``; ``kind`` REMINDER_KIND) share the book and its file, with their
+    own count (``max_reminders``); ``running(kind)`` and ``cancel_all(kind)`` take one kind."""
 
     def __init__(self, folder: str | Path | None, *, now: Callable[[], datetime] | None = None,
-                 max_timers: int = MAX_TIMERS) -> None:
+                 max_timers: int = MAX_TIMERS, max_reminders: int = MAX_REMINDERS) -> None:
         self.folder = Path(folder) if folder else None
         self._now = now or _utc_now
         self._max = int(max_timers)
+        self._max_reminders = int(max_reminders)
         self._lock = threading.Lock()
         self._timers: list[Timer] = []
         self.saved = True
@@ -917,13 +941,24 @@ class TimerBook:
         except (OSError, ValueError, AttributeError, TypeError) as exc:
             logger.warning("Desktop pc: the saved timers could not be read (%s)", type(exc).__name__)
             loaded = []
+        timers = [timer for timer in loaded if timer.kind == TIMER_KIND][:self._max]
+        reminders = [timer for timer in loaded if timer.kind == REMINDER_KIND][:self._max_reminders]
         with self._lock:
-            self._timers = sorted(loaded[:self._max], key=lambda timer: timer.ends_at)
+            self._timers = sorted(timers + reminders, key=lambda timer: timer.ends_at)
             return len(self._timers)
 
-    def running(self) -> tuple[Timer, ...]:
+    def running(self, kind: str | None = None) -> tuple[Timer, ...]:
+        """The timers and reminders still to end, the soonest first (``kind``: only that kind)."""
         with self._lock:
-            return tuple(self._timers)
+            return tuple(timer for timer in self._timers if kind is None or timer.kind == kind)
+
+    def _room(self, kind: str) -> None:
+        """TimersFull / RemindersFull when ``kind`` has its most already. Called with the lock held."""
+        count = sum(1 for timer in self._timers if timer.kind == kind)
+        if kind == REMINDER_KIND and count >= self._max_reminders:
+            raise RemindersFull("too many reminders")
+        if kind == TIMER_KIND and count >= self._max:
+            raise TimersFull("too many timers")
 
     def add(self, minutes: int, label: str = "") -> Timer:
         """A new timer of ``minutes`` (TIMER_MINUTES: else ValueError), kept and saved (TimersFull at MAX_TIMERS)."""
@@ -933,8 +968,7 @@ class TimerBook:
         now = self._now()
         timer = Timer(uuid.uuid4().hex[:8], minutes, now, now + timedelta(minutes=minutes), clean_label(label))
         with self._lock:
-            if len(self._timers) >= self._max:
-                raise TimersFull("too many timers")
+            self._room(TIMER_KIND)
             self._timers = sorted([*self._timers, timer], key=lambda item: item.ends_at)
             self._save()
         return timer
@@ -949,8 +983,29 @@ class TimerBook:
         timer = Timer(uuid.uuid4().hex[:8], max(1, -(-seconds // 60)), now, now + timedelta(seconds=seconds),
                       clean_label(label), seconds)
         with self._lock:
-            if len(self._timers) >= self._max:
-                raise TimersFull("too many timers")
+            self._room(TIMER_KIND)
+            self._timers = sorted([*self._timers, timer], key=lambda item: item.ends_at)
+            self._save()
+        return timer
+
+    def add_until(self, ends_at: datetime, label: str = "") -> Timer:
+        """A reminder at ``ends_at`` (aware; later than now and at most REMINDER_MAX_S ahead: else ValueError), kept
+        and saved with the timers (RemindersFull at MAX_REMINDERS). Its ``minutes`` and ``seconds`` say how far
+        ahead it was set."""
+        if not isinstance(ends_at, datetime):
+            raise ValueError("a reminder needs a time")
+        now = self._now()
+        ends = _like(ends_at, now)
+        if ends.tzinfo is not None:
+            ends = ends.astimezone(timezone.utc)
+        ahead = (ends - _like(now, ends)).total_seconds()
+        if not 0 < ahead <= REMINDER_MAX_S:
+            raise ValueError("a reminder is at most 48 hours ahead")
+        seconds = max(1, int(-(-ahead // 1)))
+        timer = Timer(uuid.uuid4().hex[:8], max(1, -(-seconds // 60)), now, ends, clean_label(label), seconds,
+                      REMINDER_KIND)
+        with self._lock:
+            self._room(REMINDER_KIND)
             self._timers = sorted([*self._timers, timer], key=lambda item: item.ends_at)
             self._save()
         return timer
@@ -963,10 +1018,12 @@ class TimerBook:
                 self._save()
             return found
 
-    def cancel_all(self) -> tuple[Timer, ...]:
+    def cancel_all(self, kind: str | None = None) -> tuple[Timer, ...]:
+        """Every timer and reminder cancelled (``kind``: only that kind); the ones that went."""
         with self._lock:
-            gone, self._timers = tuple(self._timers), []
+            gone = tuple(timer for timer in self._timers if kind is None or timer.kind == kind)
             if gone:
+                self._timers = [timer for timer in self._timers if not (kind is None or timer.kind == kind)]
                 self._save()
             return gone
 
@@ -975,8 +1032,11 @@ class TimerBook:
         now = self._now()
         with self._lock:
             ids = {timer.timer_id for timer in self._timers}
-            back = [timer for timer in timers if timer.timer_id not in ids and _like(timer.ends_at, now) > now]
-            back = back[:max(0, self._max - len(self._timers))]
+            back: list[Timer] = []
+            for kind, most in ((TIMER_KIND, self._max), (REMINDER_KIND, self._max_reminders)):
+                room = most - sum(1 for timer in self._timers if timer.kind == kind)
+                back += [timer for timer in timers if timer.kind == kind and timer.timer_id not in ids
+                         and _like(timer.ends_at, now) > now][:max(0, room)]
             if back:
                 self._timers = sorted([*self._timers, *back], key=lambda item: item.ends_at)
                 self._save()
@@ -996,7 +1056,7 @@ class TimerBook:
 
     def take_due(self) -> tuple[list[tuple[Timer, float]], int]:
         """The timers whose end has come, taken out: (each with how many seconds late it is noticed, the number
-        dropped quietly - ended more than TIMER_LATE_S ago, while Jarvis was closed)."""
+        dropped quietly - ended more than TIMER_LATE_S ago, while Jarvis was closed; a reminder REMINDER_LATE_S)."""
         now = self._now()
         ended: list[tuple[Timer, float]] = []
         dropped = 0
@@ -1006,7 +1066,7 @@ class TimerBook:
                 late = (now - _like(timer.ends_at, now)).total_seconds()
                 if late < 0:
                     keep.append(timer)
-                elif late > TIMER_LATE_S:
+                elif late > (REMINDER_LATE_S if timer.reminder else TIMER_LATE_S):
                     dropped += 1
                 else:
                     ended.append((timer, late))
@@ -1024,7 +1084,8 @@ class TimerBook:
             return
         entries = [{"id": timer.timer_id, "minutes": timer.minutes, "label": timer.label,
                     "set_at": timer.set_at.isoformat(), "ends_at": timer.ends_at.isoformat(),
-                    **({"seconds": timer.seconds} if timer.seconds else {})}
+                    **({"seconds": timer.seconds} if timer.seconds else {}),
+                    **({"kind": timer.kind} if timer.kind != TIMER_KIND else {})}
                    for timer in self._timers]
         try:
             self.folder.mkdir(parents=True, exist_ok=True)
@@ -1039,20 +1100,27 @@ class TimerBook:
 
 
 def _timer_from(entry: Any) -> Timer | None:
+    """One entry of the file as a Timer; None when it is of no good shape. An entry with no "kind" is a timer (every
+    file before round 2 of instant answers)."""
     try:
+        kind = entry.get("kind", TIMER_KIND)
+        if kind not in (TIMER_KIND, REMINDER_KIND):
+            return None
+        reminder = kind == REMINDER_KIND
         minutes = entry["minutes"]
-        if isinstance(minutes, bool) or not isinstance(minutes, int) \
-                or not TIMER_MINUTES[0] <= minutes <= TIMER_MINUTES[1]:
+        most_minutes = -(-REMINDER_MAX_S // 60) if reminder else TIMER_MINUTES[1]
+        if isinstance(minutes, bool) or not isinstance(minutes, int) or not TIMER_MINUTES[0] <= minutes <= most_minutes:
             return None
         timer_id = str(entry["id"])
         if not re.fullmatch(r"[0-9a-f]{8}", timer_id):
             return None
         seconds = entry.get("seconds", 0)
-        if isinstance(seconds, bool) or not isinstance(seconds, int) \
-                or (seconds and not TIMER_SECONDS[0] <= seconds <= TIMER_SECONDS[1]):
+        low, high = (1, REMINDER_MAX_S) if reminder else TIMER_SECONDS
+        if isinstance(seconds, bool) or not isinstance(seconds, int) or (seconds and not low <= seconds <= high):
             return None
         return Timer(timer_id, minutes, datetime.fromisoformat(str(entry["set_at"])),
-                     datetime.fromisoformat(str(entry["ends_at"])), clean_label(entry.get("label", "")), seconds)
+                     datetime.fromisoformat(str(entry["ends_at"])), clean_label(entry.get("label", "")), seconds,
+                     kind)
     except (KeyError, TypeError, ValueError, AttributeError):
         return None
 
@@ -1383,14 +1451,15 @@ class PcControl:
         return self._keep(PcChange(dv.TIMER, SET, "", True, True, None, timer))
 
     def cancel_timers(self, *, cancel: Any = None) -> PcChange:
-        """Every running Jarvis timer cancelled (kept for Undo all: those still to end come back)."""
+        """Every running Jarvis timer cancelled (kept for Undo all: those still to end come back). Reminders (instant
+        answers' round 2) stay: they are cancelled by name."""
         if self.timers is None:
             return self._refused(PcChange(dv.CANCEL_TIMER, CANCEL, UNAVAILABLE))
-        if not self.timers.running():
+        if not self.timers.running(TIMER_KIND):
             return self._refused(PcChange(dv.CANCEL_TIMER, CANCEL, NO_TIMER))
         if _stopped(cancel):
             return PcChange(dv.CANCEL_TIMER, CANCEL, STOPPED)
-        gone = self.timers.cancel_all()
+        gone = self.timers.cancel_all(TIMER_KIND)
         logger.info("Desktop pc: %d timer(s) cancelled", len(gone))
         return self._keep(PcChange(dv.CANCEL_TIMER, CANCEL, "", True, True, gone, ()))
 
@@ -2114,7 +2183,11 @@ def undo_words(change: PcChange, address: str = "sir") -> str:
 
 def end_words(timer: Timer, late_s: float = 0.0, address: str = "sir", hour24: bool = False) -> str:
     """The toast at a timer's end: "Your 10-minute timer is up, sir." (its label after a dash), or, noticed late
-    (Jarvis was closed, or the PC asleep), when it ended."""
+    (Jarvis was closed, or the PC asleep), when it ended. A reminder: "Your 5:00 PM reminder, sir." (its label after a
+    dash)."""
+    if timer.reminder:
+        text = with_address(f"Your {clock_text(_local(timer.ends_at), hour24)} reminder, {{sir}}.", address)
+        return f"{text[:-1]} - {timer.label}." if timer.label else text
     span = f"{timer.minutes}-minute"
     if late_s > LATE_WORDS_S:
         text = f"Your {span} timer ended at {clock_text(_local(timer.ends_at), hour24)}, {{sir}}."
@@ -2126,14 +2199,19 @@ def end_words(timer: Timer, late_s: float = 0.0, address: str = "sir", hour24: b
 
 def chip_text(timers: Sequence[Timer], hour24: bool = False) -> str:
     """The HUD chip while a timer runs: "Timer \u00b7 ends 10:32 AM" ("2 timers \u00b7 next ends 10:32 AM"); "" for
-    none. Static: no seconds ticking (only the orb loops)."""
+    none. Static: no seconds ticking (only the orb loops). A reminder (instant answers' round 2) that comes first:
+    "Reminder \u00b7 5:00 PM", with how many more after it ("\u00b7 2 more")."""
     if not timers:
         return ""
     first = min(timers, key=lambda timer: timer.ends_at)
     ends = clock_text(_local(first.ends_at), hour24)
-    if len(timers) == 1:
-        return f"Timer \u00b7 ends {ends}"
-    return f"{len(timers)} timers \u00b7 next ends {ends}"
+    if first.reminder:
+        others = len(timers) - 1
+        return f"Reminder \u00b7 {ends}" + (f" \u00b7 {others} more" if others else "")
+    only_timers = [timer for timer in timers if not timer.reminder]
+    reminders = len(timers) - len(only_timers)
+    text = f"Timer \u00b7 ends {ends}" if len(only_timers) == 1 else f"{len(only_timers)} timers \u00b7 next ends {ends}"
+    return text + (f" \u00b7 {reminders} reminder{'s' if reminders != 1 else ''}" if reminders else "")
 
 
 def live_note(change: Any) -> str:

@@ -58,6 +58,20 @@ SETTINGS_HOW = ("Turn it on with JARVIS_TALK_ENABLED=true in .env, then restart 
 
 NOT_CAUGHT = "I didn't catch that."
 MUTED = "I heard nothing at all: is your microphone muted?"
+MUTED_HUD = "I heard nothing, {sir}: check the microphone."
+
+
+def muted_text(name: str = "", follows_default: bool = False) -> str:
+    """What the bar says when the microphone gave nothing at all: it names the microphone (the owner's own screen),
+    says when it is a virtual one, and where another is picked."""
+    if not name:
+        return MUTED
+    where = "the Windows default" if follows_default else "picked in Settings > Meetings"
+    if talk.virtual_microphone(name):
+        return (f"I heard nothing: \u201c{name}\u201d ({where}) is a virtual microphone, silent unless its app runs. "
+                "Pick your real one in Settings > Meetings > Microphone.")
+    return (f"I heard nothing at all from \u201c{name}\u201d ({where}): is it muted?"
+            + (" Another can be picked in Settings > Meetings > Microphone." if follows_default else ""))
 CANCELLED = "Cancelled."
 DEVICE_STOPPED = "The microphone stopped; try again."
 UNDERSTANDING_TEXT = "Understanding..."
@@ -167,6 +181,8 @@ class TalkController(QObject):
         self._threaded = threaded
         self._clock = clock
         self._key = describe_combo(self._cfg.key) if self._cfg.key else "the talk key"
+        self._last_mic: tuple[str, bool] | None = None        # the microphone the last talk opened (name, the default)
+        self._address = str(getattr(getattr(config, "assistant", None), "address", "sir"))
         self._state = IDLE
         self._session: talk.TalkSession | None = None
         self._backend: Any = None
@@ -313,10 +329,14 @@ class TalkController(QObject):
         backend, self._backend = self._backend, None
         self._close_backend(backend)
         clip, ended, muted = session.clip(), session.ended, session.muted
+        device, follows = str(getattr(session, "device_name", "") or ""), bool(getattr(session, "follows_default", False))
+        if device:
+            self._last_mic = (device, follows)
         speech_ms = session.endpointer.speech_frames * talk.FRAME_MS
         session.forget()
-        logger.info("Talk: ended (%s) after %d ms, %d ms of speech", ended,
-                    int((self._clock() - self._began) * 1000), speech_ms)
+        logger.info("Talk: ended (%s) after %d ms, %d ms of speech%s", ended,
+                    int((self._clock() - self._began) * 1000), speech_ms,
+                    " (a virtual microphone)" if device and talk.virtual_microphone(device) else "")
         if not clip:
             self._set_state(IDLE)
             if ended == talk.END_CANCEL:
@@ -324,7 +344,13 @@ class TalkController(QObject):
             elif ended == talk.END_DEVICE:
                 self._show(DEVICE_STOPPED, hud.TONE_WARN)
             else:
-                self._show(MUTED if muted else NOT_CAUGHT, hud.TONE_WARN)
+                if muted:
+                    from .persona import with_address
+
+                    self._show(muted_text(device, follows), hud.TONE_WARN,
+                               hud_text=with_address(MUTED_HUD, getattr(self, "_address", "sir")))
+                else:
+                    self._show(NOT_CAUGHT, hud.TONE_WARN)
             return
         self._set_state(UNDERSTANDING)
         self._show(UNDERSTANDING_TEXT, hud.TONE_WORKING, hud_text="One moment...")
@@ -333,7 +359,7 @@ class TalkController(QObject):
     def _new_client(self, folder: Path, hints: str, idle_s: float) -> Any:
         from .talk_speech import SpeechClient
 
-        return SpeechClient(folder, hints=hints, idle_s=idle_s)
+        return SpeechClient(folder, hints=hints, idle_s=idle_s, device=getattr(self._cfg, "device", "auto"))
 
     def _understand(self, clip: bytes) -> None:
         if self._client is None:
@@ -426,12 +452,28 @@ class TalkController(QObject):
         key = self._key if self._cfg.key else "None"
         if self._cfg.key and key_taken(self._data_dir, "talk", self._cfg.key) is not None:
             key = KEY_TAKEN_TEXT.format(key=self._key)
+        from . import gpu
+
+        reported = str(getattr(self._client, "device", "") or "") if self._client is not None else ""
+        runs_on = gpu.runs_on_text(gpu.status(getattr(self._cfg, "device", gpu.DEVICE_AUTO)), reported,
+                                   setting="[talk] device")
         return [("Talk key", key),
                 ("Speech model", model),
+                ("Runs on", runs_on),
                 ("Add-ons", "installed" if not missing else "missing: " + ", ".join(missing)),
-                ("Microphone", "the one picked in Settings > Meetings, else the Windows default"),
+                ("Microphone", self._microphone_row()),
                 ("Quiet that ends a talk", f"{self._cfg.quiet_ms} ms"),
                 ("Model kept loaded", f"{self._cfg.keep_warm_minutes} min after a talk")]
+
+    def _microphone_row(self) -> str:
+        """Settings > Talk's microphone row: the one the last talk used, flagged when virtual; before a talk, the rule."""
+        if self._last_mic is None:
+            return "the one picked in Settings > Meetings, else the Windows default"
+        name, follows = self._last_mic
+        where = "the Windows default" if follows else "picked in Settings > Meetings"
+        flag = " - a virtual microphone, silent unless its app runs: pick your real one in Settings > Meetings" \
+            if talk.virtual_microphone(name) else ""
+        return f"{name} ({where}){flag}"
 
     def _show_panel(self) -> None:
         if self._panel is not None:

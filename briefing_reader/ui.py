@@ -63,7 +63,7 @@ import threading
 import time
 import traceback
 from collections.abc import Callable, Mapping, Sequence
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -2410,16 +2410,19 @@ class ReadingView(QWidget):
         self.task_chip.setVisible(bool(text))
         self.task_stop.setVisible(bool(text) and can_stop)
 
-    def set_timer_chip(self, text: str) -> None:
-        """Home's chip of Jarvis's timers (instant answers): "Timer 4:59", "2 timers - 4:59"; "" none. Made when one
-        first runs: without a timer Home is as it was."""
+    def set_timer_chip(self, text: str, *, reminder: bool = False) -> None:
+        """Home's chip of Jarvis's timers (instant answers): "Timer 4:59", "2 timers - 4:59", or - round 2, when a
+        reminder comes first (``reminder``) - "Reminder 5:00 PM"; "" none. Made when one first runs: without a timer
+        Home is as it was."""
         if self.timer_chip is None:
             if not text:
                 return
             self.timer_chip = holo.ActionChip(text, holo.CHIP_CYAN)
-            self.timer_chip.setAccessibleName("Timer")
-            self.timer_chip.setToolTip('Say or type "how long is left" or "cancel the timer"')
             self._chip_row.layout().insertWidget(1, self.timer_chip)
+        if text:
+            self.timer_chip.setAccessibleName("Reminder" if reminder else "Timer")
+            self.timer_chip.setToolTip('Say or type "what reminders do I have" or "cancel my reminder"' if reminder
+                                       else 'Say or type "how long is left" or "cancel the timer"')
         if text and self.timer_chip.text() != text:
             self.timer_chip.setText(text)
             self.timer_chip.updateGeometry()
@@ -4137,6 +4140,15 @@ class _AgendaJob:
 
 
 @dataclasses.dataclass(frozen=True)
+class _InstantCalendarJob:
+    """Instant answers' read (round 2): every account's main calendar from ``start`` to ``end`` (never a sign-in)."""
+
+    request_id: int
+    start: datetime
+    end: datetime
+
+
+@dataclasses.dataclass(frozen=True)
 class _ExecJob:
     """Carry out one approved proposal (executor.run_action). ``writes_running``: the click (a
     calendar change) or the end of its hidden hold (a Reply, Email or Cancel); "running" is saved
@@ -4201,12 +4213,22 @@ class _Bridge(QObject):
     undoResult = Signal(str, object)                  # action id, executor.RunOutcome of its Undo
     eventPeek = Signal(int, object)                   # request id, {action id: (EventDetails | None, error | None)}
     agendaResult = Signal(int, object, str, str)      # request id, events | None, _PROBLEM_* or "", message
+    instantCalendar = Signal(int, object, object)     # request id, {alias: events}, {alias: _PROBLEM_*} (round 2)
     accountConnect = Signal(str, str, str, str)       # alias, _CONNECT_* stage, failure message, PROBLEM_*
     sayResult = Signal(int, object, object)           # utterance seq, SectionAudio | None, error | None ("tts-say")
 
 
 def _local_now() -> datetime:
     return datetime.now().astimezone()
+
+
+def _calendar_set_up(calendar: Any) -> bool:
+    """One account's calendar has its OAuth client secret file (files only, no network)."""
+    try:
+        return calendar is not None and bool(calendar.is_configured())
+    except Exception as exc:  # noqa: BLE001 - treated as not set up
+        logger.debug("Could not check the Google Calendar setup (%s)", type(exc).__name__)
+        return False
 
 
 def _emit_from_worker(bridge: _Bridge, signal_name: str, stop: threading.Event, *args: Any) -> None:
@@ -4291,6 +4313,10 @@ class _ActionWorker:
     def list_agenda(self, job: _AgendaJob) -> None:
         self._jobs.put(job)
 
+    def read_calendars(self, job: _InstantCalendarJob) -> None:
+        """Instant answers' read of every account's main calendar (round 2; never a sign-in)."""
+        self._jobs.put(job)
+
     def peek(self, job: _PeekJob) -> None:
         self._jobs.put(job)
 
@@ -4331,6 +4357,8 @@ class _ActionWorker:
     def _dispatch(self, job: Any) -> None:
         if isinstance(job, _AgendaJob):
             self._list(job)
+        elif isinstance(job, _InstantCalendarJob):
+            self._read_calendars(job)
         elif isinstance(job, _ExecJob):
             try:
                 self._exec(job)
@@ -4388,6 +4416,37 @@ class _ActionWorker:
             logger.debug("Where:\n%s", "".join(traceback.format_tb(exc.__traceback__)))
             problem, message = _PROBLEM_ERROR, f"unexpected error ({type(exc).__name__})"
         self._emit("agendaResult", job.request_id, events, problem, message)
+
+    def _read_calendars(self, job: _InstantCalendarJob) -> None:
+        """Instant answers' read (round 2): each account's main calendar (``calendar_id``: [calendar] calendar_id for
+        the personal one, "primary" for the others), one after another; an account that can't be read is reported
+        with its _PROBLEM_* and never signed in. Logs: counts and kinds only."""
+        events: dict[str, list[Any]] = {}
+        problems: dict[str, str] = {}
+        started = time.monotonic()
+        for alias, calendar in self._calendars.items():
+            if self._stop.is_set():
+                return
+            try:
+                if not _calendar_set_up(calendar):
+                    raise CalendarSetupError("Google Calendar is not set up")
+                events[alias] = list(calendar.list_events(job.start, job.end,
+                                                          (getattr(calendar, "calendar_id", "") or "primary",)))
+            except CalendarSetupError:
+                problems[alias] = _PROBLEM_SETUP
+            except CalendarAuthError:   # CalendarNotSignedIn included
+                problems[alias] = _PROBLEM_SIGNED_OUT
+            except CalendarError:       # gcal already logged it, with a safe message
+                problems[alias] = _PROBLEM_ERROR
+            except Exception as exc:  # noqa: BLE001 - a bug must not end the worker
+                logger.warning("Instant: reading a calendar failed unexpectedly (%s)", type(exc).__name__)
+                problems[alias] = _PROBLEM_ERROR
+            if alias in problems:
+                events.setdefault(alias, [])
+        logger.info("Instant: %d calendar(s) read, %d not (%d event(s), %d ms)", len(events) - len(problems),
+                    len(problems), sum(len(found) for found in events.values()),
+                    int((time.monotonic() - started) * 1000))
+        self._emit("instantCalendar", job.request_id, events, problems)
 
     def _peek(self, job: _PeekJob) -> None:
         """Google's own view of each card's event, for its check line (never signs in)."""
@@ -5444,6 +5503,7 @@ class AppController(QObject):
         bridge.undoResult.connect(self._on_undo_result, queued)
         bridge.eventPeek.connect(self._on_event_peek, queued)
         bridge.agendaResult.connect(self._on_agenda_result, queued)
+        bridge.instantCalendar.connect(self._on_instant_calendar, queued)
         bridge.accountConnect.connect(self._on_account_connect, queued)
         prompt, reading = self.window.prompt, self.window.reading
         prompt.readNow.connect(self.read_now)
@@ -7244,6 +7304,8 @@ class AppController(QObject):
         if self.state == STATE_QUITTING:
             return
         self._jobs.pop(action_id, None)
+        if getattr(self, "instant", None) is not None:
+            self.instant.forget_calendar()               # round 2: an Undo may have changed a calendar
         offer = self._undos.get(action_id)
         action = offer.action if offer is not None else self._shown(action_id)
         status = getattr(outcome, "status", "")
@@ -7718,6 +7780,8 @@ class AppController(QObject):
         running = self._running.pop(action_id, None)
         action = running[0] if running is not None else self._current(action_id)
         writes_running = running[1] if running is not None else bool(action is not None and action.carried)
+        if getattr(self, "instant", None) is not None and not getattr(action, "sends_mail", False):
+            self.instant.forget_calendar()               # round 2: a card changed a calendar: read it again next time
         if writes_running and action is not None and not _adds_event(action):
             self._carried_result(action, result, error, status)
         else:   # the worker saved the result itself (writes_running)
@@ -11312,20 +11376,72 @@ class AppController(QObject):
         except Exception as exc:  # noqa: BLE001 - the timers then last until Jarvis closes
             logger.warning("Instant: no folder for the timers (%s); they are kept in memory only", type(exc).__name__)
             folder = None
+        from .instant import wall
+
+        # The app's clock for the timers too (round 2: a reminder's time is read on it), on this PC's wall clock.
         timers = instant_ui.TimerController(folder, address=self.config.assistant.address,
-                                            hour24=self.config.display.hour24, parent=self)
-        controller = instant_ui.InstantController(self.config, timers=timers, parent=self)
+                                            hour24=self.config.display.hour24,
+                                            now=lambda: self._instant_now().astimezone(timezone.utc),
+                                            local=lambda moment: wall(moment, self._instant_now()), parent=self)
+        self._instant_calendar_job: Any = None          # round 2: the calendars' read on its way (one at a time)
+        self._instant_calendar_seq = 0
+        calendar_read = self._instant_calendar_read if self._any_calendar_configured() else None
+        store = instant_ui.TownStore(instant_ui.instant_file(self.config.data_dir))   # round 2: the weather's town
+        controller = instant_ui.InstantController(self.config, timers=timers, calendar_read=calendar_read,
+                                                  now=self._instant_now, store=store, parent=self)
         controller.answered.connect(self._on_instant)
         controller.waiting.connect(self._on_instant_waiting)
         controller.fallback.connect(self._on_instant_fallback)
+        settings = self.window.reading.settings_page                   # round 2: Settings > Instant answers
+        settings.add_group(instant_ui.SETTINGS_KEY, instant_ui.SETTINGS_TITLE, note=instant_ui.SETTINGS_NOTE,
+                           how=instant_ui.SETTINGS_HOW, rows=controller.settings_rows)
+        controller.townChanged.connect(settings.refresh)
         timers.ended.connect(self._on_instant_timer_ended)
         timers.changed.connect(self._on_instant_timers_changed)
         self._timer_chip_tick = self._make_timer(self._sync_timer_chip, single_shot=False, interval_ms=1000)
         self.ask.set_instant(controller.take)
         QTimer.singleShot(0, timers.start)
-        logger.info("Instant answers are on (weather %s, currency %s)", "on" if cfg.weather else "off",
-                    "on" if cfg.currency else "off")
+        logger.info("Instant answers are on (weather %s, currency %s, calendar %s)", "on" if cfg.weather else "off",
+                    "on" if cfg.currency else "off", "on" if controller.flags().calendar else "off")
         return controller
+
+    def _instant_now(self) -> datetime:
+        """The app's clock for instant answers (aware: a naive one is read as this PC's local time)."""
+        moment = self._now()
+        return moment if moment.utcoffset() is not None else moment.astimezone()
+
+    def _instant_calendar_read(self) -> bool:
+        """Round 2: read every account's main calendar for today and tomorrow on the calendar worker (one read at a
+        time; never a sign-in); the result reaches instant answers through ``_on_instant_calendar``. False when the
+        calendar is off or not set up (the question then goes to Claude, as before)."""
+        if self.state == STATE_QUITTING or not self.config.calendar.enabled or not self._any_calendar_configured():
+            return False
+        if self._instant_calendar_job is not None:
+            return True                                  # one is on its way: its answer serves this question too
+        worker = self._start_calendar()
+        if worker is None:
+            return False
+        from . import instant_calendar
+
+        start, end = instant_calendar.read_range(self._instant_now())
+        self._instant_calendar_seq += 1
+        self._instant_calendar_job = _InstantCalendarJob(self._instant_calendar_seq, start, end)
+        worker.read_calendars(self._instant_calendar_job)
+        return True
+
+    def _on_instant_calendar(self, request_id: int, events: Any, problems: Any) -> None:
+        job = getattr(self, "_instant_calendar_job", None)
+        if self.state == STATE_QUITTING or job is None or job.request_id != request_id:
+            return                                       # stale: not the read on its way
+        self._instant_calendar_job = None
+        instant = getattr(self, "instant", None)
+        if instant is None:
+            return
+        from . import instant_calendar
+
+        read = instant_calendar.CalendarRead(events=dict(events or {}), problems=dict(problems or {}),
+                                             start=job.start, end=job.end)
+        instant.calendar_done(read)
 
     def _shared_timer_book(self) -> Any:
         """The one timer book the desktop's HUD shares while instant answers are on (None: the desktop keeps its own)."""
@@ -11342,7 +11458,8 @@ class AppController(QObject):
         sub = f"{reply.source} {DOT} {ms / 1000:.1f} s" if reply.source else f"on this PC {DOT} {ms} ms"
         self._jarvis(reply.text, sub=sub)
         if self.ask is not None:
-            self.ask.show_note(reply.text, hud_text=reply.speech)
+            brief = getattr(reply, "brief", "")          # round 2: a calendar's day has a one-line form for the bar
+            self.ask.show_note(brief or reply.text, hud_text=brief or reply.speech)
         if self.config.assistant.speak_replies:
             self._say(KIND_RESULT, reply.speech)
 
@@ -11381,12 +11498,16 @@ class AppController(QObject):
             return
         text = instant.timers.chip_text()
         tick = self._timer_chip_tick
+        # Round 2: a reminder's chip changes only at midnight ("tomorrow") or when the timers change.
+        interval = 1000 if instant.timers.ticking() else 30_000
+        if text and tick.interval() != interval:
+            tick.setInterval(interval)
         if text and not tick.isActive():
             tick.start()
         elif not text and tick.isActive():
             tick.stop()
         if not text or self.window.isVisible() or not self.window.reading.timer_chip_text():
-            self.window.reading.set_timer_chip(text)
+            self.window.reading.set_timer_chip(text, reminder=bool(text) and not instant.timers.ticking())
 
     def _on_followups_route(self, text: str) -> None:
         """A typed "any follow-ups?" (R45): the YOU entry and one JARVIS entry from the list as it is

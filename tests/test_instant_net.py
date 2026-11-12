@@ -153,6 +153,61 @@ class RealNetworkTests(unittest.TestCase):
         self.assertFalse(instant_net.fahrenheit_region())
 
 
+SAN_JOSE = {"results": [{"name": "San Jose", "latitude": 37.34, "longitude": -121.89, "country": "United States",
+                         "country_code": "US", "admin1": "California", "population": 1013240},
+                        {"name": "San Jose", "latitude": 37.43, "longitude": -121.98, "country": "Philippines",
+                         "country_code": "PH", "admin1": "Central Luzon", "population": 40000}]}
+SPRINGFIELD = {"results": [{"name": "Springfield", "latitude": 39.8, "longitude": -89.64, "country": "United States",
+                            "country_code": "US", "admin1": "Illinois", "population": 114394},
+                           {"name": "Springfield", "latitude": 37.2, "longitude": -93.29, "country": "United States",
+                            "country_code": "US", "admin1": "Missouri", "population": 169176}]}
+
+
+class FindPlaceTests(unittest.TestCase):
+    """Round 2: the weather's town by voice - the same search and the same rule for places of one name."""
+
+    def find(self, town: str, reply: object):
+        get = FakeGet({instant_net.GEOCODE_URL: reply, instant_net.FORECAST_URL: FORECAST})
+        cache = instant_net.NetCache()
+        return instant_net.find_place(town, get=get, cache=cache), get, cache
+
+    def test_found_named_in_full_and_kept_for_its_weather(self) -> None:
+        (status, place), get, cache = self.find("San Jose", SAN_JOSE)
+        self.assertEqual(status, instant_net.PLACE_FOUND)
+        self.assertEqual((place.shown, place.full, place.query, place.region, place.country),
+                         ("San Jose, California", "San Jose, California, United States", "San Jose, California",
+                          "California", "United States"))
+        self.assertEqual(get.calls, [(instant_net.GEOCODE_URL, {"name": "San Jose", "count": 10, "language": "en",
+                                                                "format": "json"})])
+        self.assertEqual(repr(place), "Place(...)")
+        reply = instant_net.answer(weather(place.query), get=get, cache=cache, monotonic=Clock())
+        self.assertIn("In San Jose, California:", reply.text)
+        self.assertEqual([url for url, _params in get.calls], [instant_net.GEOCODE_URL, instant_net.FORECAST_URL])
+        (status, oslo), _get, _cache = self.find("Oslo", {"results": [{"name": "Oslo", "latitude": 59.9, "longitude": 10.7,
+                                                                       "country": "Norway", "country_code": "NO",
+                                                                       "admin1": "Oslo", "population": 580000}]})
+        self.assertEqual((oslo.shown, oslo.full), ("Oslo, Norway", "Oslo, Norway"))
+
+    def test_several_none_and_failed(self) -> None:
+        (status, names), _get, _cache = self.find("Springfield", SPRINGFIELD)
+        self.assertEqual(status, instant_net.PLACE_SEVERAL)
+        self.assertEqual(names, ["Springfield, Missouri", "Springfield, Illinois"])     # as they can be said back
+        twins = {"results": [{"name": "San Jose", "latitude": 9.9, "longitude": -84.1, "country": "Costa Rica",
+                              "country_code": "CR", "admin1": "San José", "population": 300000},
+                             {"name": "San Jose", "latitude": 10.9, "longitude": -85.1, "country": "Costa Rica",
+                              "country_code": "CR", "admin1": "Guanacaste", "population": 200000}]}
+        (status, names), _get, _cache = self.find("San Jose", twins)
+        self.assertEqual((status, names), (instant_net.PLACE_SEVERAL, ["San Jose, San José", "San Jose, Guanacaste"]))
+        (status, place), _get, _cache = self.find("Springfield, Illinois", SPRINGFIELD)
+        self.assertEqual((status, place.shown), (instant_net.PLACE_FOUND, "Springfield, Illinois"))
+        self.assertEqual(self.find("Xyzzy", {"generationtime_ms": 0.4})[0], (instant_net.PLACE_NONE, None))
+        with self.assertLogs("briefing_reader.instant_net", level="INFO") as logs:
+            self.assertEqual(self.find("Oslo", OSError("no network"))[0], (instant_net.PLACE_FAILED, None))
+            self.assertEqual(self.find("Oslo", {"results": [{"name": "Oslo", "latitude": "x"}]})[0],
+                             (instant_net.PLACE_FAILED, None))
+        self.assertNotIn("Oslo", "\n".join(logs.output))
+
+
 if __name__ == "__main__":
     logging.disable(logging.NOTSET)
     unittest.main()

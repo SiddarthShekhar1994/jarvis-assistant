@@ -2867,10 +2867,48 @@ with the talk key, in well under a second and without your Claude plan:
   in 20 minutes to stretch", "how long is left on my timer", "cancel the
   timer" (or "cancel all timers"). From 10 seconds to 4 hours, at most five
   at once. Home shows a chip counting down; at the end you hear a chime, see
-  Jarvis's toast and he says it. Timers live in Jarvis, not in his window, so
+  Jarvis's toast and he says it. A timer's label ("stretch") shows in the
+  toast but is never said aloud. Timers live in Jarvis, not in his window, so
   hiding the window changes nothing, and they come back after a restart. With
   [Jarvis on your desktop](#jarvis-on-your-desktop-the-hud) on, the HUD
   shows the same timers.
+- **Reminders at a time**, today or tomorrow: "remind me at 5 pm to call
+  mum", "remind me to call mum at 5", "set a reminder for 9:30 am", "remind
+  me tomorrow at 9 am to stretch", "remind me at noon"; then "what reminders
+  do I have", "cancel the 5 pm reminder" or "cancel all reminders". At the
+  time you hear the chime, the toast says "It's 5:00 PM: call mum", and
+  Jarvis says only "Sir, your 5 PM reminder" - your words never go to the
+  voice. Up to ten at once, kept with the timers (so they survive a restart
+  and the HUD shows them), and Home's chip shows whichever comes first
+  ("Reminder 5:00 PM" or a timer's countdown). A bare hour ("at 5") is the
+  next 5 o'clock within 12 hours, and the answer says which; with "tomorrow"
+  it must be clear ("4 tomorrow" is 4 PM, "7 tomorrow" could be either, so
+  that goes to Claude). Anything further ahead, repeating, or naming another
+  day goes to Claude as before.
+- **Your calendar** (`[instant] calendar`, with Google Calendar set up):
+  "what's my next meeting", "do I have any more meetings today", "what's on
+  my calendar tomorrow", "what does my day look like", "how many meetings do
+  I have today", "am I free at 3", "do I have anything at 4 pm tomorrow".
+  Jarvis reads the main calendar of every account with the calendar feature
+  (personal and work), for today and tomorrow, on the same worker as the
+  agenda and never signs in. A read is kept for 2 minutes, so follow-ups are
+  instant; otherwise "Checking your calendar..." shows for the second it
+  takes (if it takes more than 12 seconds, the question goes to Claude). The
+  screen shows each event's title, time, place and calendar; **his voice says
+  only times, counts and how soon** ("Your next meeting is at 2 PM, sir, in
+  40 minutes"), never a title. Events you declined are left out, and all-day
+  events or events shown as "free" are listed but never make you busy. If an
+  account can't be read, the answer says so plainly and never calls you free
+  from the other calendars alone. The logs hold only counts and how long the
+  read took.
+- **Your weather town**: say or type "my town is San Jose, California" (also
+  "I live in Oslo", "set my weather town to Paris", "use Paris for the
+  weather"). Jarvis looks it up with the same place search as the weather,
+  confirms what he found ("Got it: San Jose, California, United States") and
+  keeps it in `instant.json` in the data folder, on this PC only. It wins over
+  `[instant] town`; "what's my town" says it and "forget my town" clears it.
+  When several places share the name and none stands out, he names them so
+  you can pick one ("my town is Springfield, Illinois").
 - **The weather** (`[instant] weather`): "weather in Paris", "will it rain
   tomorrow", "what's the temperature". Only the town's name goes to
   Open-Meteo's place search, then that place's coordinates to its forecast;
@@ -2890,9 +2928,39 @@ be reached within a few seconds. A request that starts with `web:` is always
 web research, and a running task still takes what you type. The conversation
 shows each instant answer with "on this PC" (or the service's credit) where
 an Ask shows its time, and his voice says it when "Speaks his answers" is on.
-The logs hold only the kind of answer and how long it took. Turn instant
-answers off with `[instant] enabled = false` (or `JARVIS_INSTANT_ENABLED=false`
-in `.env`); they need Ask Jarvis on, because they answer in its bar.
+The logs hold only the kind of answer and how long it took. Settings >
+Instant answers shows what is on, your weather town and where it comes from,
+and the services the network answers use. Turn instant answers off with
+`[instant] enabled = false` (or `JARVIS_INSTANT_ENABLED=false` in `.env`); they
+need Ask Jarvis on, because they answer in its bar.
+
+### Speech on an NVIDIA GPU
+
+With an NVIDIA graphics card, talking to Jarvis and writing meetings down can
+run on the card instead of the processor: much faster, so a bigger, more
+accurate talk model (`distil-large-v3`) still answers in a moment, and a meeting
+is written down in about a minute. It needs NVIDIA's two runtime libraries,
+which Jarvis never installs; Settings > Talk shows the command, the same as:
+
+```
+python -m pip install "nvidia-cublas-cu12==12.*" "nvidia-cudnn-cu12==9.*"
+```
+
+(about 1 GB, with the python.exe Jarvis runs on). Then:
+
+- `[talk] device` and `[meetings] device` are `"auto"`: the card when it works,
+  the processor otherwise. Speech runs in its own background process, which
+  tries the card first and, on any problem (an old driver, a missing library,
+  not enough memory on the card), loads the processor's model instead, so it
+  keeps working, only slower. `"cpu"` never uses the card.
+- Settings > Talk and Settings > Meetings say where speech runs ("Runs on: the
+  GPU (CUDA)") or why not, with the command when the libraries are missing.
+- For the most accurate talk, set `[talk] model = "distil-large-v3"` and click
+  Download in Settings > Talk (about 1.5 GB). Keep `small.en` without a card:
+  on a processor `distil-large-v3` takes several seconds per request.
+
+Nothing else changes: the sound never leaves this PC and is never saved, and
+the logs say only whether the card or the processor was used.
 
 ## Catch-up and the hotkey
 
@@ -4293,14 +4361,17 @@ log. Changes apply the next time the app starts.
 | `[agent] speak_private` | `false` | `true` also says aloud a task's line that may hold something private; such lines go to Microsoft's online voice. Off, they stay on screen. |
 | `[talk] enabled` | `false` | [Talk to Jarvis](#talk-to-jarvis-the-talk-key): the talk key opens the microphone for one request. Turn it on for this PC with `JARVIS_TALK_ENABLED=true` in `.env` (it overrides this both ways), then restart the "Briefing hotkey" task. Needs Ask Jarvis, the add-ons faster-whisper and PyAudioWPatch, and the speech model (Settings > Talk). |
 | `[talk] key` | `"ctrl+alt+space"` | The talk key; never the `[hotkey] combo` or the `[desktop] hud_key` (refused with a warning). |
-| `[talk] model` | `"small.en"` | The speech model on this PC: `"small.en"` (about 480 MB), `"base.en"` (about 145 MB, quicker, less sure) or `"medium.en"` (about 1.5 GB, the meetings' model). Downloaded only when you click Download in Settings > Talk. |
+| `[talk] model` | `"small.en"` | The speech model on this PC: `"small.en"` (about 480 MB), `"base.en"` (about 145 MB, quicker, less sure), `"medium.en"` (about 1.5 GB, the meetings' model) or `"distil-large-v3"` (about 1.5 GB, the most accurate; for an NVIDIA card). Downloaded only when you click Download in Settings > Talk. |
+| `[talk] device` | `"auto"` | Where talk's speech runs: `"auto"` (an NVIDIA card when it works, see [Speech on an NVIDIA GPU](#speech-on-an-nvidia-gpu), else the processor) or `"cpu"`. |
+| `[meetings] device` | `"auto"` | Where a meeting is written down: `"auto"` (an NVIDIA card when it works, else the processor) or `"cpu"`. |
 | `[talk] keep_warm_minutes` | `10` | How long the speech model stays loaded after a talk, so the next starts at once (1..120). |
 | `[talk] quiet_ms` | `500` | How much quiet after you speak ends a talk, in milliseconds (300..2000). |
 | `[talk] hints` | `[]` | Names Jarvis should expect to hear, e.g. `["Spotify", "Notion"]` ("Jarvis" always is); at most 20 short names. |
-| `[instant] enabled` | `true` | [Instant answers](#instant-answers): the time, dates, sums, conversions and timers on this PC, the weather and currencies from free services. `JARVIS_INSTANT_ENABLED` in `.env` overrides it both ways. Needs Ask Jarvis. |
+| `[instant] enabled` | `true` | [Instant answers](#instant-answers): the time, dates, sums, conversions, timers and reminders on this PC, your calendar, the weather and currencies from free services. `JARVIS_INSTANT_ENABLED` in `.env` overrides it both ways. Needs Ask Jarvis. |
 | `[instant] weather` | `true` | Weather answers: only a town's name (then its coordinates) goes to Open-Meteo. |
 | `[instant] currency` | `true` | Currency answers: only two currency codes go to Frankfurter (European Central Bank rates). |
-| `[instant] town` | `""` | The weather's town when a request names none, e.g. `"Oslo"` or `"Springfield, Illinois"`; `""` = none (the question goes to Claude). Never logged. |
+| `[instant] town` | `""` | The weather's town when a request names none, e.g. `"Oslo"` or `"Springfield, Illinois"`; `""` = none (the question goes to Claude). A town you set by saying "my town is ..." wins over it. Never logged. |
+| `[instant] calendar` | `true` | Calendar answers ("what's my next meeting", "am I free at 3") from every account's main calendar, read when you ask; titles are shown, never said. Needs `[calendar]` on and set up. |
 | `[instant] temperature` | `"auto"` | `"auto"` follows the Windows region (US units: Fahrenheit), else `"celsius"` or `"fahrenheit"`. |
 
 The offline voice uses the same `rate` and `volume`: the rate scales Windows'
@@ -4544,7 +4615,8 @@ Other files in `%LOCALAPPDATA%\briefing-reader`:
 | `research\` | The empty folder Claude Code runs in for web research; research refuses to run while anything is in it. |
 | `runstate.json` | Per scheduled briefing: when it was first shown, when it was announced (`announced_at`) and first viewed (`viewed_at`), when and how a classic prompt was answered (read, dismissed, done), and (the productivity bundle) when the plan offer was posted for it (`plan_offered_at`) and when its day was planned (`planned_at`; an evening "plan tomorrow" marks tomorrow's AM slot), kept for 14 days. The catch-up task uses it, and it keeps a briefing from being announced twice; see [Catch-up and the hotkey](#catch-up-and-the-hotkey). Safe to delete (a briefing may then be announced once more). |
 | `assistant.json` | Whether Jarvis's voice is muted, the ids of the last 5 greetings (so the next one differs), whether the briefings an older version read through its prompt were taken as viewed (done once, at the first start after the update, so they are not announced again), and, once you used it, where the LIVE pop-out window was and whether it was open, and `prod_hint_shown` once the "minimize instead of Done" hint was shown, and `followups_off` while the follow-up list is turned off on this PC, and `desktop_turned_on` (with `desktop_consent_version`, the card's version) once you turned [Jarvis on your desktop](#jarvis-on-your-desktop-the-hud) on. Never any text. Safe to delete. |
-| `desktop\` | Jarvis on your desktop's own records, on this PC only: `journal\<run id>.jsonl`, for each NEEDS YOUR OK card you clicked, every file it moved, copied, renamed, zipped or put in the Recycle Bin with its old and new path (Undo needs them; never logged, never sent to Claude; kept 30 days); `timers.json`, your running timers and their labels (so a restart keeps them); `focus.json` while focus mode runs. Safe to delete (Undo of those changes goes with it). |
+| `desktop\` | Jarvis on your desktop's own records, on this PC only: `journal\<run id>.jsonl`, for each NEEDS YOUR OK card you clicked, every file it moved, copied, renamed, zipped or put in the Recycle Bin with its old and new path (Undo needs them; never logged, never sent to Claude; kept 30 days); `timers.json`, your running timers and reminders and their labels (so a restart keeps them); `focus.json` while focus mode runs. Safe to delete (Undo of those changes goes with it). |
+| `instant.json` | The weather town you set by saying or typing "my town is ..." ([Instant answers](#instant-answers)): the place Jarvis found, as shown, and its coordinates. Never logged. "Forget my town" clears it; safe to delete. |
 | `followups.json` | The follow-up rows you hid: per row a 32-character hash (of the account name, the thread and its newest deciding message, never in clear), when you hid it and until when ("" = until something new arrives); entries older than 30 days are dropped. No subject, name, address or id. Safe to delete (hidden rows come back). |
 | `prep_series.json` | The productivity bundle's repeating meetings whose prep offers ended unclicked: per series a 32-character hash (of the account name, the calendar and Google's series id, never in clear), how many times in a row (3 stops its offers) and the day of the last change; entries untouched for 60 days are dropped. No title, id or address. Safe to delete (the offers come back). |
 | `conversation.json` | The last 24 hours of the conversation (at most 100 entries: your requests, Jarvis's answers and results as the Transcript showed them, each with its time; never your memory lines), shown again at a start and given to Ask as `<conversation>` (a web research's question and answer are marked and never given; see [Ask remembers the conversation](#ask-remembers-the-conversation)). Written by the app a moment after the conversation changes and when it closes; older entries leave it at the start and within the hour after they turn a day old. **Clear conversation** in the Transcript deletes it; you can delete it yourself while Jarvis is closed. A broken file is ignored and replaced. Never logged. |
@@ -4562,11 +4634,15 @@ anywhere to be understood: the microphone is open only from the tap to the end,
 your speech becomes text on this PC, the sound is never saved and no log holds
 what you said. What he heard then goes where typed words go.
 
-[Instant answers](#instant-answers) about the time, dates, sums, conversions
-and timers never leave this PC. A weather question sends only the town's name
-to Open-Meteo (then that place's coordinates), and a currency question only
-the two currency codes to Frankfurter; nothing else goes with them, and the
-logs never hold the town, the amount or the answer.
+[Instant answers](#instant-answers) about the time, dates, sums, conversions,
+timers and reminders never leave this PC. A weather question sends only the
+town's name to Open-Meteo (then that place's coordinates), and a currency
+question only the two currency codes to Frankfurter; nothing else goes with
+them, and the logs never hold the town, the amount or the answer. A calendar
+question reads your own Google calendars the way the agenda does; what Jarvis
+says aloud (through Microsoft's read-aloud service) holds only times and
+counts, never an event's title or place, and neither do reminder or timer
+labels.
 
 The app talks to these services, all free:
 
@@ -5027,6 +5103,12 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
   only when it was not announced, viewed or answered and the app is not open. Its decision is in the
   log, in a line starting with "Catch-up:". Check that "Briefing catch-up" exists
   in Task Scheduler (rerun `install-schedule.ps1`).
+- **Talk hears nothing** ("I heard nothing"): the message names the microphone
+  Jarvis listened to. A virtual one (Steam Streaming Microphone, Oculus Virtual
+  Audio Device, a virtual cable) is silent unless its app runs, and Windows
+  sometimes makes one the default: pick your real microphone in Settings >
+  Meetings > Microphone (talk uses the same choice), or make it the default
+  input in Windows Settings > System > Sound.
 - **The talk key does nothing**: Settings > Talk's "Talk key" row says when
   another program has it ("another program has it; choose another [talk] key
   in config.toml"). Pick another `[talk] key`, then restart the "Briefing

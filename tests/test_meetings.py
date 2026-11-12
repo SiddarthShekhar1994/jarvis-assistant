@@ -984,7 +984,7 @@ class InPersonTranscriptTests(Base):
         self.assertEqual(code, 0)
         lines = [json.loads(line) for line in out.getvalue().splitlines()]
         self.assertEqual(lines[-1], {"done": True})
-        self.assertTrue(all(set(line) <= {"progress", "done"} for line in lines))
+        self.assertTrue(all(set(line) <= {"progress", "done", "device"} for line in lines))   # statuses only
         self.assertNotIn("Zq7", out.getvalue())
         self.assertEqual(fake.calls, ["mic.wav"])
         transcript = json.loads((folder / mt.TRANSCRIPT_FILE).read_text(encoding="utf-8"))

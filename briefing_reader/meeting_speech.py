@@ -35,6 +35,7 @@ and waits until it ended), ``running()``.
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import importlib
 import importlib.util
@@ -51,6 +52,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import gpu
 from . import meetings as mt
 
 logger = logging.getLogger(__name__)
@@ -105,10 +107,20 @@ class SpeechModel:
 
 
 MEETING_MODEL = SpeechModel(MODEL_NAME, MODEL_REPO, MODEL_FOLDER, MODEL_SIZE_TEXT)
+# The large-v3 family's models carry a preprocessor file and a JSON vocabulary (MIT, like the rest).
+LARGE_V3_FILES = ("config.json", "model.bin", "preprocessor_config.json", "tokenizer.json", "vocabulary.json")
 SPEECH_MODELS = {model.name: model for model in (
     SpeechModel("base.en", "Systran/faster-whisper-base.en", "faster-whisper-base.en", "about 145 MB"),
     SpeechModel("small.en", "Systran/faster-whisper-small.en", "faster-whisper-small.en", "about 480 MB"),
-    MEETING_MODEL)}
+    MEETING_MODEL,
+    SpeechModel("distil-large-v3", "Systran/faster-distil-whisper-large-v3", "faster-distil-whisper-large-v3",
+                "about 1.5 GB", LARGE_V3_FILES))}
+_last_device = {"device": ""}      # where the last writing down ran (the app's process: Settings > Meetings)
+
+
+def last_device() -> str:
+    """gpu.CUDA or gpu.CPU: where the last meeting was written down in this run of Jarvis ("" before one)."""
+    return _last_device["device"]
 
 
 # --------------------------------------------------------------------------
@@ -416,14 +428,18 @@ def read_wav(path: Path) -> Any:
 
 
 class FasterWhisperTranscriber:
-    """faster-whisper behind a small adapter: ``WhisperModel(model_dir, device="cpu", compute_type="int8")``;
+    """faster-whisper behind a small adapter: on an NVIDIA GPU in float16 when it can, else the CPU in int8
+    (gpu.load_model; ``device`` "auto" or "cpu", ``self.device`` says which);
     ``transcribe(path)`` yields Segments (``vad_filter`` skips the silence, English only). The recording is handed
     over as samples (``read_wav``); only a file that cannot be read that way goes to the add-on's own decoder."""
 
-    def __init__(self, folder: Path, *, threads: int = 0) -> None:
+    def __init__(self, folder: Path, *, threads: int = 0, device: str = gpu.DEVICE_AUTO) -> None:
         module = importlib.import_module(SPEECH_MODULE)
-        self._model = module.WhisperModel(str(folder), device="cpu", compute_type="int8",
-                                          cpu_threads=threads or max(1, (os.cpu_count() or 4) - 2))
+        if device != gpu.DEVICE_CPU:
+            gpu.prepare()                                # NVIDIA's libraries on this process's DLL search path
+        self._model, self.device = gpu.load_model(module.WhisperModel, Path(folder), device=device,
+                                                  threads=threads or max(1, (os.cpu_count() or 4) - 2),
+                                                  warm=gpu.warm_up)
 
     def transcribe(self, path: Path) -> Iterable[Segment]:
         try:
@@ -499,8 +515,12 @@ class TranscriptionProcess:
     its reader thread. ``python`` defaults to this interpreter."""
 
     def __init__(self, meeting_dir: Path, model: Path, *, on_progress: Callable[[int], Any],
-                 on_done: Callable[[str], Any], python: str | None = None) -> None:
+                 on_done: Callable[[str], Any], python: str | None = None, device: str = gpu.DEVICE_AUTO) -> None:
         self.meeting_dir, self.model = Path(meeting_dir), Path(model)
+        self.device_setting = device if device in gpu.DEVICES else gpu.DEVICE_AUTO
+        if _last_device.get("fell_back"):
+            self.device_setting = gpu.DEVICE_CPU    # the GPU took a worker down this run: the CPU from now on
+        self.device = ""                 # where the worker said it runs (gpu.CUDA or gpu.CPU)
         self._on_progress, self._on_done = on_progress, on_done
         self._python = python or sys.executable
         self._proc: subprocess.Popen | None = None
@@ -511,7 +531,7 @@ class TranscriptionProcess:
         root = str(Path(__file__).resolve().parent.parent)
         self._proc = subprocess.Popen(
             [self._python, "-B", "-m", "briefing_reader.meeting_speech", "--meeting", str(self.meeting_dir),
-             "--model", str(self.model)], cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+             "--model", str(self.model), "--device", self.device_setting], cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, creationflags=flags)
         threading.Thread(target=self._read, name="meeting-transcribe", daemon=True).start()
 
@@ -520,6 +540,7 @@ class TranscriptionProcess:
         assert proc is not None and proc.stdout is not None
         error = ERR_WORKER
         kind = ""
+        told = False                     # the worker said how it ended (done, or an error code)
         for raw in proc.stdout:
             try:
                 message = json.loads(raw.decode("ascii", "replace"))
@@ -527,16 +548,28 @@ class TranscriptionProcess:
                 continue
             if not isinstance(message, dict):
                 continue
+            if message.get("device") in (gpu.CUDA, gpu.CPU):
+                self.device = _last_device["device"] = message["device"]
+                logger.info("Meetings: writing down on the %s", "GPU" if self.device == gpu.CUDA else "CPU")
             if isinstance(message.get("progress"), int):
                 self._on_progress(max(0, min(100, message["progress"])))
             if message.get("done") is True:
-                error = ""
+                error, told = "", True
             elif isinstance(message.get("error"), str):
+                told = True
                 error = message["error"][:40]
                 found = message.get("kind")
                 kind = found[:40] if isinstance(found, str) and found.isidentifier() else ""
         proc.stdout.close()
         code = proc.wait()
+        if not told and not self._cancelled and self.device_setting == gpu.DEVICE_AUTO \
+                and self.device in (gpu.CUDA, ""):
+            # It ended without a word, maybe taken down by the GPU: once more on the CPU, which stays for this run.
+            logger.info("Meetings: the writing down ended on its own (exit code %s); again on the CPU", code)
+            _last_device["fell_back"] = True
+            self.device_setting, self.device = gpu.DEVICE_CPU, ""
+            self.start()
+            return
         if error and not self._cancelled:
             # The failure's kind only (an exception's type name) and the exit code: never a library message.
             logger.info("Meetings: the writing down failed (%s%s, exit code %s)", error,
@@ -575,6 +608,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="briefing_reader.meeting_speech")
     parser.add_argument("--meeting", required=True)
     parser.add_argument("--model", required=True)
+    parser.add_argument("--device", choices=gpu.DEVICES, default=gpu.DEVICE_AUTO)
     args = parser.parse_args(argv)
     if speech_missing():
         _emit({"error": ERR_ADDON})
@@ -583,8 +617,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         _emit({"error": ERR_MODEL})
         return 2
     try:
-        transcriber = FasterWhisperTranscriber(Path(args.model))
-        transcribe_meeting(Path(args.meeting), transcriber, lambda percent: _emit({"progress": percent}))
+        transcriber = FasterWhisperTranscriber(Path(args.model), device=args.device)
+        _emit({"device": getattr(transcriber, "device", gpu.CPU)})   # a status: where it runs
+        try:
+            transcribe_meeting(Path(args.meeting), transcriber, lambda percent: _emit({"progress": percent}))
+        except FileNotFoundError:
+            raise
+        except Exception:  # noqa: BLE001 - on the GPU: the whole meeting again on the CPU (else as before)
+            if getattr(transcriber, "device", gpu.CPU) != gpu.CUDA:
+                raise
+            transcriber = None
+            gc.collect()                                 # the GPU's model is let go first
+            transcriber = FasterWhisperTranscriber(Path(args.model), device=gpu.DEVICE_CPU)
+            _emit({"device": gpu.CPU})
+            transcribe_meeting(Path(args.meeting), transcriber, lambda percent: _emit({"progress": percent}))
     except FileNotFoundError:
         _emit({"error": ERR_AUDIO})
         return 1
