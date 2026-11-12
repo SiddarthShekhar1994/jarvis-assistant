@@ -231,19 +231,17 @@ class SettingsRowsTests(unittest.TestCase):
                                                                       speak_results=True, greet=True, address="sir"))
 
     def test_the_local_voice_rows(self) -> None:
-        rows = dict(settings_view.settings_rows(self.config("local"), "voice"))
-        self.assertEqual(rows["Made"], "On this PC - nothing he says leaves it")
-        self.assertEqual(rows["Voice"], "George (British)")
-        self.assertEqual(rows["Lines that may be private"], "Said aloud (the voice is on this PC)")
-        self.assertEqual(rows["When that voice can't run"], "Windows' default voice (also on this PC)")
-        self.assertEqual(rows["Speed"], "Normal")
+        rows = settings_view.settings_rows(self.config("local"), "voice")
+        self.assertEqual(rows[0], ("Voice", "George (British), made on this PC"))
+        self.assertEqual(dict(rows)["When that voice can't run"], "Windows' default voice")
+        self.assertEqual(dict(rows)["Speed"], "Normal")
+        self.assertEqual(len(rows), 9)                     # as many as before: Open config.toml stays in view
 
     def test_the_online_voice_rows(self) -> None:
-        rows = dict(settings_view.settings_rows(self.config("online"), "voice"))
-        self.assertIn("Microsoft", rows["Made"])
-        self.assertEqual(rows["Voice"], "en-GB-RyanNeural")
-        self.assertEqual(rows["Lines that may be private"], "Kept on screen (the online voice would hear them)")
-        self.assertIn("When that voice is out of reach", rows)
+        rows = settings_view.settings_rows(self.config("online"), "voice")
+        self.assertEqual(rows[0], ("Voice", "en-GB-RyanNeural, online (Microsoft)"))
+        self.assertIn("When that voice is out of reach", dict(rows))
+        self.assertEqual(len(rows), 9)
 
 
 class FakeDownloader:
@@ -367,7 +365,7 @@ class AppVoiceTests(unittest.TestCase):
         stage.select_group("voice")
         settle()
         rows = dict(stage.rows())
-        self.assertEqual(rows["Made"], "On this PC - nothing he says leaves it")
+        self.assertEqual(rows["Voice"], "George (British), made on this PC")
         panel = stage._extras["voice"]
         self.assertTrue(panel.isVisibleTo(stage))
         stage.select_group("times")

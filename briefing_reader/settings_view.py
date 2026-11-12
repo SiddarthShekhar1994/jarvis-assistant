@@ -20,8 +20,9 @@ Public API
     shows under its rows. The six built-in groups stay read only.
 
 ``SettingsStage.attach_extra(key, widget)``
-    A built-in group's own part under its rows (Voice: the local voice's Download and add-ons,
-    local_voice_ui.VoiceSettingsPanel), shown only while that group is open.
+    A built-in group's own part (Voice: the local voice's Download and add-ons,
+    local_voice_ui.VoiceSettingsPanel), shown only while that group is open, at the foot of the panel - under Open
+    the data folder - so the group shown first keeps Open config.toml in the window.
 
 ``settings_rows(config, group, connected)``
     The (label, value) pairs a group shows (used by the panel and the tests).
@@ -167,22 +168,16 @@ def settings_rows(config: Any, group: str, connected: Mapping[str, bool] | None 
         address = str(getattr(assistant, "address", "") or "")
         local = getattr(voice, "engine", "") == "local"
         windows = f"Windows voice: {offline}" if offline else "Windows' default voice"
-        if local:
+        if local:   # what that means for private lines is said under the rows (local_voice_ui.VoiceSettingsPanel)
             from .local_voice import voice_label
 
-            made = [("Made", "On this PC - nothing he says leaves it"),
-                    ("Voice", voice_label(str(getattr(voice, "local_voice", "") or "bm_george")))]
-            private = "Said aloud (the voice is on this PC)"
+            named = f"{voice_label(str(getattr(voice, 'local_voice', '') or 'bm_george'))}, made on this PC"
         else:
-            made = [("Made", "Online, by Microsoft's read-aloud service (edge-tts)"),
-                    ("Voice", str(getattr(voice, "voice", "") or "Default"))]
-            private = "Kept on screen (the online voice would hear them)"
-        return [*made,
+            named = f"{str(getattr(voice, 'voice', '') or 'Default')}, online (Microsoft)"
+        return [("Voice", named),
                 ("Speed", _percent(getattr(voice, "rate", ""), "faster", "slower")),
                 ("Volume", _percent(getattr(voice, "volume", ""), "louder", "quieter")),
-                ("When that voice can't run" if local else "When that voice is out of reach",
-                 f"{windows} (also on this PC)" if local else windows),
-                ("Lines that may be private", private),
+                ("When that voice can't run" if local else "When that voice is out of reach", windows),
                 ("Speaks on his own", "Yes" if getattr(assistant, "speak", True) else "No - text only"),
                 ("Speaks his answers", _yes(getattr(assistant, "speak_replies", True))),
                 ("Says what happened after an approval", _yes(getattr(assistant, "speak_results", True))),
@@ -458,6 +453,9 @@ class SettingsStage(QWidget):
         column.addWidget(self.data_path)
         column.addSpacing(6)
         column.addWidget(self.data_button, 0, Qt.AlignmentFlag.AlignLeft)
+        self._tail_box = QVBoxLayout()            # a built-in group's own part (attach_extra): under everything, so
+        self._tail_box.setContentsMargins(0, 18, 0, 0)   # the first group opened keeps Open config.toml in view
+        column.addLayout(self._tail_box)
         column.addStretch(1)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(holo.GUTTER_SIDE + 8, holo.GUTTER_TOP, holo.GUTTER_SIDE, 16)
@@ -492,7 +490,7 @@ class SettingsStage(QWidget):
         if key in self._extras or key not in dict(GROUPS):
             return
         self._extras[key] = widget
-        self._extra_box.addWidget(widget)
+        self._tail_box.addWidget(widget)
         widget.setVisible(self._group == key)
 
     def refresh(self) -> None:

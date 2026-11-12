@@ -64,7 +64,8 @@ class VoiceSettingsPanel(QWidget):
         """``ready``: the models are whole; ``reason``: why the voice can't run (local_voice's codes; "" = it can)."""
         if ready and not reason:
             text = (f"The local voice is on this PC: {lv.voice_label(voice)}, made on the CPU. Nothing he says "
-                    "leaves this PC.")
+                    "leaves this PC, so lines that may be private - an event's title, a reminder's words - are said "
+                    "aloud too.")
         elif downloading:
             text = f"Downloading the local voice ({lv.SIZE_TEXT}) from Hugging Face: {percent}%."
         elif error:
