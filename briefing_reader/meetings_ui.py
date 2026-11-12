@@ -96,6 +96,7 @@ class MeetingsController(QObject):
     summaryOpened = Signal(str)          # part 2: a meeting's summary opened (the app lends its cards)
     summaryChanged = Signal(str)         # part 2: a summary was kept or failed (the app may re-render it)
     meetingDeleted = Signal(str)         # part 2: the owner's Delete or retention (the app drops undecided drafts)
+    devicesPicked = Signal()             # Settings > Meetings: a device was picked ("Hey Jarvis" moves to the microphone)
     _stopped = Signal(str)
     _devices_changed = Signal()
     _progress = Signal(str, int)
@@ -482,6 +483,7 @@ class MeetingsController(QObject):
         """Settings > Meetings: a device picked ("" follows the Windows default). Used from the next start."""
         self.prefs.set(microphone=microphone, call_audio=call_audio)
         self.refresh_settings()
+        self.devicesPicked.emit()
 
     # ---- writing it down ------------------------------------------------------------------------------
 

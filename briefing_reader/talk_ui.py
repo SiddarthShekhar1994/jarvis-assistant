@@ -131,6 +131,10 @@ class TalkSettingsPanel(QWidget):
         for widget in (self.status, self.download, self.addons, self.pip):
             layout.addWidget(widget)
 
+    def add_part(self, widget: QWidget) -> None:
+        """Another part of Settings > Talk under this one ("Hey Jarvis": wake_ui.WakePanel)."""
+        self.layout().addWidget(widget)
+
     def show_state(self, *, ready: bool, downloading: bool, percent: int, error: str, size_text: str,
                    addons_missing: bool) -> None:
         if ready:
@@ -222,6 +226,7 @@ class TalkController(QObject):
         self._esc_armed = False
         self._global_esc.connect(self.cancel, Qt.ConnectionType.QueuedConnection)
         self._chime = chime or (lambda: None)       # "Hey Jarvis": the soft sound as he starts listening (wake_ui)
+        self.extra_rows: Callable[[], list[tuple[str, str]]] | None = None    # Settings > Talk's "Hey Jarvis" rows
         self._wake_talk = False                     # the talk under way (or being understood) "Hey Jarvis" started
         self._chime_timer = QTimer(self)
         self._chime_timer.setSingleShot(True)
@@ -543,13 +548,19 @@ class TalkController(QObject):
         reported = str(getattr(self._client, "device", "") or "") if self._client is not None else ""
         runs_on = gpu.runs_on_text(gpu.status(getattr(self._cfg, "device", gpu.DEVICE_AUTO)), reported,
                                    setting="[talk] device")
-        return [("Talk key", key),
+        rows = [("Talk key", key),
                 ("Speech model", model),
                 ("Runs on", runs_on),
                 ("Add-ons", "installed" if not missing else "missing: " + ", ".join(missing)),
                 ("Microphone", self._microphone_row()),
                 ("Quiet that ends a talk", f"{self._cfg.quiet_ms} ms"),
                 ("Model kept loaded", f"{self._cfg.keep_warm_minutes} min after a talk")]
+        if self.extra_rows is not None:
+            try:
+                rows += list(self.extra_rows())
+            except Exception as exc:  # noqa: BLE001 - Settings shows the talk's own rows whatever happens
+                logger.warning("Talk: the \"Hey Jarvis\" rows failed (%s)", type(exc).__name__)
+        return rows
 
     def _microphone_row(self) -> str:
         """Settings > Talk's microphone row: the one the last talk used, flagged when virtual; before a talk, the rule."""

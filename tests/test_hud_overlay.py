@@ -565,7 +565,8 @@ class ChipTests(_OverlayTest):
         win.set_pending(3)
         win.set_recording("1:02:09")
         win.set_timer("Timer \u00b7 ends 10:32 AM")                       # P2.4: a Jarvis timer runs
-        self.assertEqual(win.chip_texts()[-1], "Timer \u00b7 ends 10:32 AM")
+        win.set_wake("Listening for \u201cHey Jarvis\u201d", "listening")      # "Hey Jarvis" is on and listens
+        self.assertEqual(win.chip_texts()[-2:], ["Timer \u00b7 ends 10:32 AM", "Hey Jarvis"])
         bar = win.bar_rect_local()
         x = bar.left() + hud_overlay.ORB_PAD
         for chip in win.chips.values():

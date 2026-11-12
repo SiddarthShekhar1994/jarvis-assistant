@@ -2510,9 +2510,10 @@ class HeaderBar(QWidget):
     _REC_GAP = 10            # between a meeting's REC (when shown) and the clock
 
     def add_rec_badge(self, badge: QWidget) -> None:
-        """A meeting's REC (the dot, the time and Stop; meetings_view.RecBadge) left of the clock: it takes room
-        only while it shows (the bar compacts its other parts for it)."""
-        self._rec = badge
+        """A meeting's REC (the dot, the time and Stop; meetings_view.RecBadge) - or "Hey Jarvis"'s HEY JARVIS
+        (wake_ui.WakeBadge) - left of the clock: each takes room only while it shows (the bar compacts its other parts
+        for them)."""
+        self._badges = [*getattr(self, "_badges", []), badge]
         badge.setContentsMargins(0, 0, self._REC_GAP, 0)
         layout = self.layout()
         layout.insertWidget(layout.indexOf(self._clock), badge, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -2521,12 +2522,11 @@ class HeaderBar(QWidget):
         self._fit(force=True)
 
     def _rec_width(self) -> int:
-        rec = getattr(self, "_rec", None)
-        return rec.sizeHint().width() if rec is not None and not rec.isHidden() else 0
+        return sum(badge.sizeHint().width() for badge in getattr(self, "_badges", []) if not badge.isHidden())
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt override
-        if watched is getattr(self, "_rec", None) and event.type() in (QEvent.Type.Show, QEvent.Type.Hide,
-                                                                      QEvent.Type.LayoutRequest):
+        if watched in getattr(self, "_badges", ()) and event.type() in (QEvent.Type.Show, QEvent.Type.Hide,
+                                                                       QEvent.Type.LayoutRequest):
             self._sync_chips_box()
             self.updateGeometry()
             self._fit(force=True)

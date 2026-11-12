@@ -191,6 +191,10 @@ CHIP_REC = "rec"
 CHIP_KEYS = (CHIP_BRIEFING, CHIP_APPROVALS, CHIP_REC)
 CHIP_TIMER = "timer"                        # P2.4: while a Jarvis timer runs (after the others; P2.5's row follows)
 CHIP_DND = "dnd"                            # P2.5: "Do Not Disturb - Turn on" while focus mode runs (Windows' switch)
+CHIP_WAKE = "wake"                          # "Hey Jarvis" (wake_ui) while it is on: read only, after the timer's
+CHIP_WAKE_PAUSED, CHIP_WAKE_PROBLEM = "wake_paused", "wake_problem"     # ... its dim and amber looks
+WAKE_CHIP_TEXTS = {"listening": "Hey Jarvis", "paused": "Hey Jarvis · paused",
+                   "problem": "Hey Jarvis · can't hear you"}
 # P2.5: the instant row's chips, one per kind of change done at once, in this order (desktop.pcctl.INSTANT_KINDS).
 INSTANT_KEYS = ("focus", "music", "volume", "timers", "shots")
 UNDO_TEXT = "Undo"
@@ -640,6 +644,11 @@ _CHIP_LOOKS = {   # fill, border, hover border, text, dot, chevron
     CHIP_REC: (holo.RAISED, holo.alpha(holo.ALERT, 0.55), QColor(holo.ALERT), holo.INK_1, holo.ALERT, holo.INK_4),
     CHIP_TIMER: (holo.TILE, holo.alpha(holo.HOLO, 0.42), QColor(holo.HOLO), holo.INK_1, holo.HOLO, holo.INK_4),
     CHIP_DND: (holo.TILE, holo.alpha(holo.HOLO, 0.42), QColor(holo.HOLO), holo.INK_1, holo.HOLO, holo.INK_4),
+    CHIP_WAKE: (holo.TILE, holo.alpha(holo.HOLO, 0.42), QColor(holo.HOLO), holo.INK_1, holo.HOLO, holo.INK_4),
+    CHIP_WAKE_PAUSED: (holo.TILE, holo.alpha(holo.STEEL, 0.40), QColor(holo.STEEL), holo.INK_4, holo.STEEL,
+                       holo.INK_4),
+    CHIP_WAKE_PROBLEM: (holo.TILE_AMBER, holo.alpha(holo.AMBER, 0.60), QColor(holo.AMBER), holo.AMBER_TX, holo.AMBER,
+                        _AMBER_CHEVRON),
 }
 
 
@@ -655,6 +664,7 @@ class HudChip(QAbstractButton):
     def __init__(self, key: str, parent: QWidget | None = None, *, read_only: bool = False) -> None:
         super().__init__(parent)
         self._key = key if key in _CHIP_LOOKS else CHIP_BRIEFING
+        self._look = self._key                       # its colours (the wake chip's change with what it is doing)
         self._read_only = bool(read_only)
         self._hover = False
         self._font = hud.body_font(13, 500)
@@ -669,6 +679,16 @@ class HudChip(QAbstractButton):
 
     def key(self) -> str:
         return self._key
+
+    def look(self) -> str:
+        return self._look
+
+    def set_look(self, key: str) -> None:
+        """Another entry of the chip looks for its colours (the wake chip: listening, paused, a problem)."""
+        key = key if key in _CHIP_LOOKS else self._key
+        if key != self._look:
+            self._look = key
+            self.update()
 
     def read_only(self) -> bool:
         return self._read_only
@@ -718,7 +738,7 @@ class HudChip(QAbstractButton):
         return self._hover
 
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
-        fill, border, hover, ink, dot, chevron = _CHIP_LOOKS[self._key]
+        fill, border, hover, ink, dot, chevron = _CHIP_LOOKS[self._look]
         painter = QPainter(self)
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -1062,6 +1082,9 @@ class HudWindow(_OverlayWindow):
                 chip.clicked.connect(partial(self.chipClicked.emit, key))
             self.chips[key] = chip
         self.chips[CHIP_BRIEFING].setText(BRIEFING_READY_TEXT)
+        wake_chip = HudChip(CHIP_WAKE, self, read_only=True)     # "Hey Jarvis" while it is on (set_wake)
+        wake_chip.hide()
+        self.chips[CHIP_WAKE] = wake_chip
         # P2.5: the instant row under the chips - one chip per kind of change done at once (each with its Undo), Do
         # Not Disturb's opener while focus mode runs and Undo all; none of them shows until there is one.
         self.instant: dict[str, InstantChip] = {}
@@ -1353,6 +1376,17 @@ class HudWindow(_OverlayWindow):
         if text:
             self.chips[CHIP_TIMER].setText(text)
         self._show_chip(CHIP_TIMER, bool(text))
+
+    def set_wake(self, text: str = "", look: str = "off") -> None:
+        """"Hey Jarvis" (wake_ui; ``look`` one of its LOOK_*): its chip while it is on - cyan while it listens, dim
+        while paused, amber when it cannot hear; ``text`` (what it is doing, in words) is its tooltip. None while off."""
+        shown = look in WAKE_CHIP_TEXTS
+        chip = self.chips[CHIP_WAKE]
+        if shown:
+            chip.setText(WAKE_CHIP_TEXTS[look])
+            chip.set_look({"listening": CHIP_WAKE, "paused": CHIP_WAKE_PAUSED}.get(look, CHIP_WAKE_PROBLEM))
+            chip.setToolTip(str(text or ""))
+        self._show_chip(CHIP_WAKE, shown)
 
     def chip_texts(self) -> list[str]:
         """The chips shown, left to right."""
