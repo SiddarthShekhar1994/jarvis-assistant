@@ -399,6 +399,8 @@ device = "auto"               # "auto": an NVIDIA GPU when it works (README "Spe
 keep_warm_minutes = 10        # the speech model stays loaded this long after a talk, so the next starts at once (1..120)
 quiet_ms = 500                # this much quiet after you speak ends a talk, in milliseconds (300..2000)
 hints = []                    # names he should expect to hear, e.g. ["Spotify", "Notion"] ("Jarvis" always is)
+# "Hey Jarvis" (hands-free) is turned on in Settings > Talk or the tray menu, not here; its wake model is downloaded
+# only when you click (README "Hey Jarvis").
 
 [instant]
 # Instant answers: everyday questions Jarvis answers himself, typed or spoken, in well under a second and without
