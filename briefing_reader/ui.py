@@ -393,7 +393,8 @@ from .runstate import ANSWER_MAX_AGE, RunState, briefing_key, handled_slot_key, 
 from .speech import (KIND_ACK, KIND_ANNOUNCE, KIND_GREETING, KIND_NOTICE, KIND_REPLY, KIND_RESULT, SayWorker,
                      SilentVoice, Voice)
 from .text_prep import ACTIONS_KEY, build_script, describe_updated, format_time, updated_label
-from .tts import SAPI, SpeechSynthesizer, TtsWorker
+from .local_voice import voice_label
+from .tts import LOCAL, ONLINE, SAPI, SpeechSynthesizer, TtsWorker
 
 logger = logging.getLogger(__name__)
 
@@ -5205,6 +5206,7 @@ class AppController(QObject):
         self.task_feed: Any = None                     # the task's panel and cards (agent_feed), with the agent
         self.agent: Any = self._create_agent(agent_factory)   # [agent]: a task worked through, or None while it is off
         self.talk: Any = self._create_talk()            # [talk]: the talk key's listening, or None while it is off
+        self.voice_download: Any = self._create_voice_settings()   # [voice] engine "local": Settings > Voice's part
         self.window.reading.set_find_actions(self.productivity is not None)   # offers' links in the Find list
         # Jarvis's own voice: silent unless injected; start() builds the real one ([assistant] speak).
         self._voice_injected = voice_factory is not None
@@ -5453,6 +5455,7 @@ class AppController(QObject):
         self._background_run: str | None = None    # a run polled for while the assistant screen shows
         self._pending_briefing: Briefing | None = None   # a newer briefing waiting for the reading to end
         self._say_worker: SayWorker | None = None  # Jarvis's own speech worker ("tts-say"; start() only)
+        self._local_client: Any = None             # [voice] engine "local": the voice made on this PC (start() only)
         self._utterance = ""                       # what Jarvis is saying right now (orb SPEAKING, speech line)
         self._briefing_speech = ""                 # the briefing's line for the speech line
         self._briefing_caption = ""                # ... and what the voice says for it (Home's caption)
@@ -5681,6 +5684,8 @@ class AppController(QObject):
         self._adopt_older_answers()
         self._start_tts()
         self._start_voice()
+        if self._local_client is not None:
+            self._local_client.warm()   # the voice loads in the background now: his first line needs no wait
         self._create_tray()
         if self.meetings is not None:
             self.meetings.start()   # a recording a crash left is saved; retention; nothing records by itself
@@ -5741,21 +5746,70 @@ class AppController(QObject):
             self.voice = voice
         self._sync_speaker()
 
-    def _create_voice(self) -> Voice | None:
-        """The real voice: voice_ui.AssistantVoice with its own speech worker ("tts-say": the
-        module-level SpeechSynthesizer with the [voice] settings, so Ryan with the Windows voice as
-        fallback, writing into the session's "say" folder), its own player at the controller's
-        volume, and assistant.json's mute switch. None keeps the SilentVoice."""
-        from . import voice_ui
-
+    def _ensure_local_voice(self) -> Any:
+        """[voice] engine "local": the one local_voice.LocalVoiceClient both speech threads share (made here, on the
+        GUI thread, before either starts); None for the online voice."""
         settings = self.config.voice
-        out_dir = (self._audio_dir if self._audio_dir is not None else self.config.audio_root) / "say"
-        bridge, closing = self._bridge, self._closing
+        if getattr(settings, "engine", "") != LOCAL or self._closing.is_set():
+            return None
+        if self._local_client is None:
+            from . import local_voice
 
-        def factory() -> SpeechSynthesizer:   # runs on the worker thread (SAPI/COM is thread-bound)
+            self._local_client = local_voice.LocalVoiceClient(
+                local_voice.models_root(self.config), self.config.audio_root, voice=settings.local_voice,
+                keep_warm_s=float(settings.keep_warm_minutes) * 60.0)
+            reason = self._local_client.reason()
+            logger.info("Jarvis's voice: made on this PC (%s)%s", settings.local_voice,
+                        f"; not ready yet ({reason}): the Windows voice speaks meanwhile" if reason else "")
+        return self._local_client
+
+    def _create_voice_settings(self) -> Any:
+        """[voice] engine "local": Settings > Voice's own part under its rows (local_voice_ui: whether the voice can
+        run, Download - only on a click - and the add-ons' lines). None for the online voice."""
+        if getattr(self.config.voice, "engine", "") != LOCAL:
+            return None
+        from . import local_voice, local_voice_ui
+
+        reading = self.window.reading
+        panel = local_voice_ui.VoiceSettingsPanel()
+        download = local_voice_ui.VoiceDownload(local_voice.models_root(self.config),
+                                                voice=self.config.voice.local_voice,
+                                                on_ready=self._local_voice_downloaded, parent=self)
+        download.attach_panel(panel, refresh=reading.settings_page.refresh)
+        reading.settings_page.attach_extra("voice", panel)
+        return download
+
+    def _local_voice_downloaded(self) -> None:
+        """The local voice's download ended whole: it loads now, so his next line is in it."""
+        if self._local_client is not None:
+            self._local_client.warm()
+
+    def _synth_factory(self, out_dir: Path, *, urgent: bool) -> Callable[[], SpeechSynthesizer]:
+        """A SpeechSynthesizer maker with the [voice] settings, for a speech worker's own thread (SAPI/COM is
+        thread-bound): the local voice (shared; ``urgent`` for Jarvis's own lines) with the Windows voice as its
+        fallback, or the online voice."""
+        settings, client = self.config.voice, self._ensure_local_voice()
+
+        def factory() -> SpeechSynthesizer:
             return SpeechSynthesizer(voice=settings.voice, rate=settings.rate, volume=settings.volume,
                                      offline_voice=settings.offline_voice, out_dir=out_dir,
-                                     divider_pause_ms=settings.divider_pause_ms)
+                                     divider_pause_ms=settings.divider_pause_ms,
+                                     engine=getattr(settings, "engine", ONLINE), local=client,
+                                     local_voice=getattr(settings, "local_voice", "bm_george"), urgent=urgent)
+
+        return factory
+
+    def _create_voice(self) -> Voice | None:
+        """The real voice: voice_ui.AssistantVoice with its own speech worker ("tts-say": the
+        module-level SpeechSynthesizer with the [voice] settings - the local voice made on this PC, or
+        Ryan online, with the Windows voice as fallback - writing into the session's "say" folder), its
+        own player at the controller's volume, and assistant.json's mute switch. None keeps the
+        SilentVoice."""
+        from . import voice_ui
+
+        out_dir = (self._audio_dir if self._audio_dir is not None else self.config.audio_root) / "say"
+        bridge, closing = self._bridge, self._closing
+        factory = self._synth_factory(out_dir, urgent=True)   # runs on the worker thread
 
         def on_result(seq: int, audio: SectionAudio | None, error: str | None) -> None:
             _emit_from_worker(bridge, "sayResult", closing, seq, audio, error)
@@ -5795,13 +5849,9 @@ class AppController(QObject):
         return audio_dir
 
     def _start_tts(self) -> None:
-        voice, out_dir = self.config.voice, self._audio_dir
+        out_dir = self._audio_dir if self._audio_dir is not None else self.config.audio_root
         bridge, closing = self._bridge, self._closing
-
-        def factory() -> SpeechSynthesizer:   # runs on the worker thread (SAPI/COM is thread-bound)
-            return SpeechSynthesizer(voice=voice.voice, rate=voice.rate, volume=voice.volume,
-                                     offline_voice=voice.offline_voice, out_dir=out_dir,
-                                     divider_pause_ms=voice.divider_pause_ms)
+        factory = self._synth_factory(out_dir, urgent=False)   # runs on the worker thread
 
         def on_result(generation: int, index: int, audio: SectionAudio | None, error: str | None) -> None:
             _emit_from_worker(bridge, "ttsResult", closing, generation, index, audio, error)
@@ -5951,7 +6001,11 @@ class AppController(QObject):
 
     def _voice_chip(self) -> tuple[str, str]:
         if self._uses_offline_voice():
+            if getattr(self.config.voice, "engine", "") == LOCAL:
+                return hud.STATUS_WARN, "Voice: Windows voice - the local voice can't run now (Settings > Voice)"
             return hud.STATUS_WARN, "Voice: offline (Windows voice)"
+        if self._engine == LOCAL:
+            return hud.STATUS_OK, f"Voice: on this PC - {voice_label(self.config.voice.local_voice)}"
         if self._engine is not None:
             return hud.STATUS_OK, "Voice: online (edge-tts)"
         if self._failed and not self._audio:
@@ -13199,8 +13253,9 @@ class AppController(QObject):
     def _on_tts_audio(self, index: int, audio: SectionAudio) -> None:
         self._audio[index] = audio
         if audio.segments and audio.engine != self._engine:
-            logger.info("Speech engine: %s", "Windows offline voice (SAPI)" if audio.engine == SAPI
-                        else "edge-tts online voice")
+            logger.info("Speech engine: %s", {SAPI: "Windows offline voice (SAPI)",
+                                              LOCAL: "the local voice (made on this PC)"}.get(audio.engine,
+                                                                                            "edge-tts online voice"))
             self._engine = audio.engine
         if self._script is not None:
             self.player.set_audio(index, audio)
@@ -13225,7 +13280,8 @@ class AppController(QObject):
         self._audio_ready_logged = True
         if all(index in self._failed for index in needed):
             return
-        voice = "offline voice" if self._uses_offline_voice() else "edge voice"
+        voice = ("offline voice" if self._uses_offline_voice() else "local voice" if self._engine == LOCAL
+                 else "edge voice")
         self._activity(hud.TAG_DONE, "Audio ready", f"{voice} {DOT} {_plural(len(needed), 'section')}")
 
     def _uses_offline_voice(self) -> bool:
@@ -13810,7 +13866,7 @@ class AppController(QObject):
         if self._uses_offline_voice():
             reading.voice_bar.set_value("offline", 1.0, hud.AMBER)
         elif self._engine is not None:
-            reading.voice_bar.set_value("online", 1.0, hud.GREEN)
+            reading.voice_bar.set_value("local" if self._engine == LOCAL else "online", 1.0, hud.GREEN)
         else:
             reading.voice_bar.set_value("--", 0.0, hud.TEXT_DIM)
         briefing = self._briefing
@@ -14429,6 +14485,8 @@ class AppController(QObject):
             self.instant.shutdown()    # no network answer lands after this; the timers stay in their file
         if getattr(self, "talk", None) is not None:
             self.talk.shutdown()       # the microphone closes; the speech process ends
+        if getattr(self, "voice_download", None) is not None:
+            self.voice_download.shutdown()   # a download of the local voice stops (it carries on at the next click)
         if getattr(self, "meetings", None) is not None:
             self.meetings.shutdown()   # a recording stops and is saved; the pill goes
         if getattr(self, "task_feed", None) is not None:
@@ -14478,6 +14536,9 @@ class AppController(QObject):
         self._stop_fetch()
         if self._tts is not None:
             self._tts.stop()
+        client, self._local_client = self._local_client, None
+        if client is not None:   # the voice's process is asked to end (it also ends when this app's pipe closes)
+            threading.Thread(target=client.close, name="local-voice-close", daemon=True).start()
         if self._calendar_worker is not None:
             # A hold that ended just before (its call still queued behind another job) goes too: the
             # worker takes it even though it is stopping, like a flushed one.

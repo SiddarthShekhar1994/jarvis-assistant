@@ -1,13 +1,21 @@
-"""Text-to-speech: edge-tts synthesis with a Windows SAPI fallback.
+"""Text-to-speech: the local voice or edge-tts, with a Windows SAPI fallback.
 
 A :class:`Section` is split into audio segments at its pause items (dividers);
 each segment becomes one audio file plus "marks" that say when each item of
 the section starts, so the player can highlight roughly where the audio is.
 
-edge-tts (online, free) is tried first and produces mp3 with word timings.
-When it fails, Windows SAPI via pyttsx3 produces a WAV and the marks are
-estimated from character positions. After an edge failure the synthesizer
-stays on SAPI for a cooldown period before trying edge again.
+``engine="local"`` ([voice] engine, the default; owner decision 2026-11-12):
+the local voice (local_voice.LocalVoiceClient: Kokoro-82M made on this PC) is
+tried first, a sentence group at a time, and gives a WAV with word timings.
+When it can't run (add-ons or download missing) or fails, the Windows voice
+speaks - never edge-tts, so nothing he says leaves the PC; after a failure the
+synthesizer stays on SAPI for a cooldown before trying the local voice again.
+``urgent`` (Jarvis's own lines) goes before the briefing's at the shared voice.
+
+``engine="online"``: edge-tts (online, free) is tried first and produces mp3
+with word timings. When it fails, Windows SAPI via pyttsx3 produces a WAV and
+the marks are estimated from character positions. After an edge failure the
+synthesizer stays on SAPI for a cooldown period before trying edge again.
 
 Microsoft serves the online voice at two addresses: the library's own
 ("usual") and the newer api.msedgeservices.com one ("newer"); regions move
@@ -45,6 +53,7 @@ from edge_tts import communicate as edge_communicate
 from edge_tts import constants as edge_constants
 from edge_tts.exceptions import NoAudioReceived
 
+from . import local_voice as _lv
 from . import voice_fx
 from .models import ITEM_PAUSE, AudioSegment, Section, SectionAudio
 
@@ -52,6 +61,8 @@ logger = logging.getLogger(__name__)
 
 EDGE = "edge"
 SAPI = "sapi"
+LOCAL = _lv.ENGINE_LOCAL          # "local": the voice made on this PC (also [voice] engine's value)
+ONLINE = _lv.ENGINE_ONLINE
 
 USUAL = "usual"                 # edge-tts's own service address, as installed
 NEWER = "newer"                 # Microsoft's newer Read Aloud address
@@ -413,11 +424,16 @@ class _Clip:
 
 
 class SpeechSynthesizer:
-    """Blocking synthesis. Create and use it on ONE thread (SAPI/COM is thread-bound)."""
+    """Blocking synthesis. Create and use it on ONE thread (SAPI/COM is thread-bound).
+
+    ``engine`` LOCAL (with ``local``, the app's LocalVoiceClient, and ``local_voice``) or ONLINE (edge-tts); see the
+    module docstring. ``urgent``: Jarvis's own lines (the "tts-say" thread), served before the briefing's."""
 
     def __init__(self, *, voice: str, rate: str, volume: str, offline_voice: str, out_dir: Path,
                  divider_pause_ms: int = 900, edge_retry_after_s: float = 120.0,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic, engine: str = ONLINE, local: Any = None,
+                 local_voice: str = _lv.DEFAULT_VOICE, urgent: bool = False,
+                 local_retry_after_s: float = 60.0) -> None:
         self._voice = voice
         self._rate = _normalize_percent(rate)
         self._volume = _normalize_percent(volume)
@@ -428,7 +444,14 @@ class SpeechSynthesizer:
         self._clock = clock
         self._edge_failed_at: float | None = None
         self._cache: dict[tuple[str, str, str, str, str], _Clip] = {}
-        self._last_engine = EDGE
+        self._local_mode = engine == LOCAL
+        self._local = local
+        self._local_voice = local_voice
+        self._urgent = bool(urgent)
+        self._local_retry_after_s = float(local_retry_after_s)
+        self._local_failed_at: float | None = None
+        self._local_reason_said = ""                 # why it can't run, logged once until that changes
+        self._last_engine = LOCAL if self._local_mode else EDGE
         self._sapi_engine: Any = None
         self._com_initialized = False
 
@@ -447,7 +470,7 @@ class SpeechSynthesizer:
             segments.append(segment)
             engines.append(engine)
             self._last_engine = engine
-        engine = SAPI if SAPI in engines else (EDGE if engines else self._last_engine)
+        engine = SAPI if SAPI in engines else (engines[0] if engines else self._last_engine)
         total_ms = sum(segment.duration_ms for segment in segments)
         logger.info("Section %s: %d segment(s), %.1f s of audio, engine %s",
                     section.key, len(segments), total_ms / 1000, engine)
@@ -471,9 +494,14 @@ class SpeechSynthesizer:
 
     def _synthesize_segment(self, text: str, starts: list[tuple[int, int]],
                             pause_after_ms: int) -> tuple[AudioSegment, str]:
-        clip = self._cached(self._cache_key(EDGE, text))
-        if clip is None and self._edge_allowed():
-            clip = self._try_edge(text)
+        if self._local_mode:              # this PC's voice, else the Windows voice: never the online one
+            clip = self._cached(self._cache_key(LOCAL, text))
+            if clip is None and self._local_allowed():
+                clip = self._try_local(text)
+        else:
+            clip = self._cached(self._cache_key(EDGE, text))
+            if clip is None and self._edge_allowed():
+                clip = self._try_edge(text)
         if clip is None:
             clip = self._cached(self._cache_key(SAPI, text))
             if clip is not None:
@@ -481,6 +509,69 @@ class SpeechSynthesizer:
             else:
                 clip = self._run_sapi(text)
         return self._make_segment(clip, text, starts, pause_after_ms), clip.engine
+
+    def _local_allowed(self) -> bool:
+        """The local voice may be asked: it can run (add-ons and download there) and is not in its cooldown."""
+        if self._local is None:
+            return False
+        try:
+            reason = self._local.reason()
+        except Exception as exc:  # noqa: BLE001 - unknown: the Windows voice
+            reason = type(exc).__name__
+        if reason:
+            if reason != self._local_reason_said:
+                self._local_reason_said = reason
+                logger.info("The local voice can't run yet (%s); the Windows voice speaks", reason)
+            return False
+        self._local_reason_said = ""
+        if self._local_failed_at is None:
+            return True
+        remaining = self._local_retry_after_s - (self._clock() - self._local_failed_at)
+        if remaining <= 0:
+            logger.info("Trying the local voice again after the cooldown")
+            return True
+        return False
+
+    def _try_local(self, text: str) -> _Clip | None:
+        """``text`` in the local voice, a sentence group at a time, joined into one WAV with its word times; None (and
+        the cooldown) when it fails."""
+        key = self._cache_key(LOCAL, text)
+        path = self._path_for(key, ".wav")
+        groups = _lv.sentence_groups(text) or [text]
+        parts: list[Path] = []
+        words: list[tuple[int, str]] = []
+        speed = _lv.speed_for(parse_percent(self._rate))
+        gain = _lv.gain_for(parse_percent(self._volume))
+        try:
+            offset = 0
+            for index, group in enumerate(groups):
+                part = path.with_name(f"{path.stem}-{index}.wav")
+                parts.append(part)
+                result = self._local.synthesize(group, part, voice=self._local_voice, speed=speed, gain=gain,
+                                                urgent=self._urgent)
+                words.extend((offset + ms, word) for ms, word in result.words)
+                offset += max(0, int(result.duration_ms))
+            duration_ms, _lengths = _lv.join_wavs(parts, path)
+        except _lv.LocalVoiceError as exc:
+            self._on_local_failure(exc.code)
+            return None
+        except Exception as exc:  # noqa: BLE001 - any failure means "the Windows voice"; its kind only
+            self._on_local_failure(type(exc).__name__)
+            return None
+        finally:
+            for part in parts:
+                _unlink_quietly(part)
+        if self._local_failed_at is not None:
+            logger.info("The local voice is working again")
+            self._local_failed_at = None
+        clip = _Clip(path, max(0, int(duration_ms)), tuple(words), LOCAL, envelope=voice_fx.wav_envelope(path))
+        self._cache[key] = clip
+        return clip
+
+    def _on_local_failure(self, code: str) -> None:
+        self._local_failed_at = self._clock()
+        logger.warning("The local voice failed (%s); the Windows voice speaks, and the local voice is tried again in "
+                       "%.0f s", code, self._local_retry_after_s)
 
     def _edge_allowed(self) -> bool:
         if self._edge_failed_at is None:
@@ -561,7 +652,7 @@ class SpeechSynthesizer:
 
     def _make_segment(self, clip: _Clip, text: str, starts: list[tuple[int, int]],
                       pause_after_ms: int) -> AudioSegment:
-        if clip.engine == EDGE:
+        if clip.engine in (EDGE, LOCAL):
             marks = align_marks(text, starts, clip.words, clip.duration_ms)
         else:
             marks = proportional_marks(len(text), starts, clip.duration_ms)
@@ -573,7 +664,7 @@ class SpeechSynthesizer:
     # ---- cache ------------------------------------------------------------
 
     def _cache_key(self, engine: str, text: str) -> tuple[str, str, str, str, str]:
-        voice = self._voice if engine == EDGE else self._offline_voice
+        voice = {EDGE: self._voice, LOCAL: self._local_voice}.get(engine, self._offline_voice)
         return (engine, voice, self._rate, self._volume, text)
 
     def _cached(self, key: tuple[str, str, str, str, str]) -> _Clip | None:

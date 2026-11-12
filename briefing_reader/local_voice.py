@@ -172,7 +172,7 @@ SPACY_MODEL_URL = ("https://github.com/explosion/spacy-models/releases/download/
 # (module, what pip installs). misaki goes on its own line: its release says Python below 3.13.
 ADDONS = (("onnxruntime", "onnxruntime"), ("numpy", "numpy"), ("torch", "torch"), ("transformers", "transformers"),
           ("spacy", '"spacy>=3.8,<3.9"'), ("num2words", '"num2words>=0.5.14"'),
-          ("en_core_web_sm", f'"en_core_web_sm @ {SPACY_MODEL_URL}"'), ("misaki", '"misaki==0.9.4"'))
+          ("en_core_web_sm", f'"{SPACY_MODEL_URL}"'), ("misaki", '"misaki==0.9.4"'))
 _PIP_NAMES = {"spacy": "spacy", "num2words": "num2words", "en_core_web_sm": "en_core_web_sm", "misaki": "misaki"}
 
 
