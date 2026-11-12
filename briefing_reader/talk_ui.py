@@ -15,6 +15,12 @@ process (talk_speech.SpeechClient) on a worker thread, and the words go in throu
 (AskController.submit_spoken: the same routes and gates as typed words, so cards still need a click - voice never
 approves or undoes). Logs hold kinds, counts and times only: never what was said.
 
+"Hey Jarvis" (wake_ui, owner decisions 2026-11-12) starts the same talk through :meth:`TalkController.listen_from_wake`
+on the listener's audio instead of a microphone of its own: 5 s to start the request; a request said in the same
+breath ("Hey Jarvis, open Spotify") keeps the audio from before the wake in its clip and loses the wake words from what
+goes in; a soft chime when nothing was said CHIME_CHECK_MS after the wake (it never starts the request); a talk that
+heard nothing ends quietly ("I didn't hear a request."), and ``wakeTalkEnded`` says how each one ended (counts only).
+
 Settings > Talk (:class:`TalkSettingsPanel`, :meth:`TalkController.settings_rows`): the key, the model and whether
 it is downloaded (Download, only on the owner's click: meeting_speech.ModelDownloader into its own folder), the
 add-ons and the command that installs them (the owner runs it; Jarvis never runs pip). The key's row also says when
@@ -73,6 +79,10 @@ def muted_text(name: str = "", follows_default: bool = False) -> str:
     return (f"I heard nothing at all from \u201c{name}\u201d ({where}): is it muted?"
             + (" Another can be picked in Settings > Meetings > Microphone." if follows_default else ""))
 CANCELLED = "Cancelled."
+WAKE_NOTHING = "I didn't hear a request."      # a talk "Hey Jarvis" started that heard nothing (a false wake, often)
+# How a talk "Hey Jarvis" started ended (wakeTalkEnded): what was heard went in / nothing was heard / Esc or Stop /
+# the microphone or the understanding failed.
+WAKE_REQUEST, WAKE_HEARD_NOTHING, WAKE_CANCELLED, WAKE_STOPPED = "request", "nothing", "cancelled", "stopped"
 DEVICE_STOPPED = "The microphone stopped; try again."
 UNDERSTANDING_TEXT = "Understanding..."
 NOT_UNDERSTOOD = "I couldn't make that out; try again."
@@ -143,6 +153,7 @@ class TalkController(QObject):
     """See the module docstring. ``threaded`` False (tests): understanding and downloads run in the caller."""
 
     stateChanged = Signal(str)
+    wakeTalkEnded = Signal(str)     # a talk "Hey Jarvis" started ended: WAKE_REQUEST, WAKE_HEARD_NOTHING, ...
     _heard = Signal(object, int)
     _download_progress = Signal(int, int)
     _downloaded = Signal(str)
@@ -156,7 +167,8 @@ class TalkController(QObject):
                  client_factory: Callable[[Path, str, float], Any] | None = None,
                  audio_missing: Callable[[], str] | None = None, speech_missing: Callable[[], str] | None = None,
                  downloader_factory: Callable[..., Any] | None = None, threaded: bool = True,
-                 clock: Callable[[], float] = time.monotonic, stopkeys: Any = None) -> None:
+                 clock: Callable[[], float] = time.monotonic, stopkeys: Any = None,
+                 chime: Callable[[], Any] | None = None) -> None:
         super().__init__(parent)
         from . import meeting_audio, meeting_speech, meetings
 
@@ -209,6 +221,12 @@ class TalkController(QObject):
         self._stopkeys = stopkeys
         self._esc_armed = False
         self._global_esc.connect(self.cancel, Qt.ConnectionType.QueuedConnection)
+        self._chime = chime or (lambda: None)       # "Hey Jarvis": the soft sound as he starts listening (wake_ui)
+        self._wake_talk = False                     # the talk under way (or being understood) "Hey Jarvis" started
+        self._chime_timer = QTimer(self)
+        self._chime_timer.setSingleShot(True)
+        self._chime_timer.setInterval(talk.CHIME_CHECK_MS)
+        self._chime_timer.timeout.connect(self._maybe_chime)
 
     # ---- state ----------------------------------------------------------------------------------------------
 
@@ -279,6 +297,35 @@ class TalkController(QObject):
             logger.info("Talk: the microphone did not open (%s)", exc.code)
             self._show(MIC_TEXTS.get(exc.code, MIC_TEXTS[talk.ERR_MIC_BUSY]), hud.TONE_WARN)
             return
+        self._begin(session, backend)
+
+    def listen_from_wake(self, stream: Any, *, preroll: bytes = b"", device_name: str = "",
+                         follows_default: bool = False, speaking: bool = False) -> bool:
+        """"Hey Jarvis" was heard (wake_ui): a talk on the listener's audio. ``stream`` gives what came after the wake
+        (``read_available``; its ``close`` ends the hand-off) and ``preroll`` what came before it; ``speaking``: the owner
+        was still talking at the wake (no chime then). It goes as a tap of the talk key does (see the module docstring
+        for what differs). False when no talk started - one is under way, or something it needs is missing - and the
+        caller ends the hand-off; True once the talk owns ``stream``."""
+        if self._state != IDLE or self._closing:
+            return False
+        self._bring_forward()
+        missing = self.missing()
+        if missing:
+            logger.info("Talk: \"Hey Jarvis\", but not ready (%s)", ", ".join(missing))
+            self._show(self._missing_text(missing), hud.TONE_WARN)
+            return False
+        self._before_talk()
+        session = talk.TalkSession(stream, quiet_ms=self._cfg.quiet_ms, clock=self._clock, device_name=device_name,
+                                   follows_default=follows_default, preroll=preroll,
+                                   no_speech_s=talk.WAKE_NO_SPEECH_S, one_breath_ms=talk.ONE_BREATH_MS)
+        self._wake_talk = True
+        self._begin(session, None)
+        if self._session is session and not speaking:
+            self._chime_timer.start()
+        return True
+
+    def _begin(self, session: talk.TalkSession, backend: Any) -> None:
+        """A talk's microphone is open (``backend``: its device library, None for the listener's audio): listen."""
         self._backend, self._session = backend, session
         self._began = self._clock()
         try:
@@ -292,7 +339,22 @@ class TalkController(QObject):
             logger.warning("Talk: starting to listen failed (%s)", type(exc).__name__)
             self._finish(talk.END_DEVICE)
             return
-        logger.info("Talk: listening (global Esc %s)", "held" if self._esc_armed else "not held")
+        logger.info("Talk: listening%s (global Esc %s)", " after \"Hey Jarvis\"" if self._wake_talk else "",
+                    "held" if self._esc_armed else "not held")
+
+    def _maybe_chime(self) -> None:
+        """CHIME_CHECK_MS into a talk "Hey Jarvis" started: nothing said yet - the chime, which the talk never takes for
+        the request starting (the audio is kept all the same)."""
+        session = self._session
+        if session is None or self._state != LISTENING or not self._wake_talk:
+            return
+        if session.endpointer.loud_frames or session.endpointer.heard_speech:
+            return                                  # already speaking: no chime over the request
+        session.endpointer.deafen(talk.CHIME_DEAF_MS)
+        try:
+            self._chime()
+        except Exception as exc:  # noqa: BLE001 - the window still shows that he listens
+            logger.info("Talk: the chime did not play (%s)", type(exc).__name__)
 
     def _poll(self) -> None:
         session = self._session
@@ -311,6 +373,7 @@ class TalkController(QObject):
     def _finish(self, reason: str) -> None:
         session, self._session = self._session, None
         self._timer.stop()
+        self._chime_timer.stop()
         self._watch_escape(False)
         if self._esc_armed:
             self._esc_armed = False
@@ -334,23 +397,31 @@ class TalkController(QObject):
             self._last_mic = (device, follows)
         speech_ms = session.endpointer.speech_frames * talk.FRAME_MS
         session.forget()
-        logger.info("Talk: ended (%s) after %d ms, %d ms of speech%s", ended,
+        logger.info("Talk: ended (%s) after %d ms, %d ms of speech%s%s", ended,
                     int((self._clock() - self._began) * 1000), speech_ms,
-                    " (a virtual microphone)" if device and talk.virtual_microphone(device) else "")
+                    " (a virtual microphone)" if device and talk.virtual_microphone(device) else "",
+                    " (after \"Hey Jarvis\")" if self._wake_talk else "")
         if not clip:
             self._set_state(IDLE)
+            wake_talk, self._wake_talk = self._wake_talk, False
+            outcome = WAKE_HEARD_NOTHING
             if ended == talk.END_CANCEL:
+                outcome = WAKE_CANCELLED
                 self._show(CANCELLED, hud.TONE_IDLE)
             elif ended == talk.END_DEVICE:
+                outcome = WAKE_STOPPED
                 self._show(DEVICE_STOPPED, hud.TONE_WARN)
-            else:
-                if muted:
-                    from .persona import with_address
+            elif muted:
+                from .persona import with_address
 
-                    self._show(muted_text(device, follows), hud.TONE_WARN,
-                               hud_text=with_address(MUTED_HUD, getattr(self, "_address", "sir")))
-                else:
-                    self._show(NOT_CAUGHT, hud.TONE_WARN)
+                self._show(muted_text(device, follows), hud.TONE_WARN,
+                           hud_text=with_address(MUTED_HUD, getattr(self, "_address", "sir")))
+            elif wake_talk:
+                self._show(WAKE_NOTHING, hud.TONE_IDLE)      # a false wake, often: said quietly
+            else:
+                self._show(NOT_CAUGHT, hud.TONE_WARN)
+            if wake_talk:
+                self.wakeTalkEnded.emit(outcome)
             return
         self._set_state(UNDERSTANDING)
         self._show(UNDERSTANDING_TEXT, hud.TONE_WORKING, hud_text="One moment...")
@@ -391,6 +462,7 @@ class TalkController(QObject):
         if self._state != UNDERSTANDING:
             return                                  # shut down meanwhile
         self._set_state(IDLE)
+        wake_talk, self._wake_talk = self._wake_talk, False
         text = str(getattr(heard, "text", "") or "").strip()
         logger.info("Talk: understood in %d ms (model load %d ms): %s, %d characters", took_ms,
                     int(getattr(heard, "load_ms", 0) or 0), "ok" if heard.ok else heard.error, len(text))
@@ -402,11 +474,25 @@ class TalkController(QObject):
                            hud.TONE_WARN)
             else:
                 self._show(NOT_UNDERSTOOD, hud.TONE_WARN)
+            if wake_talk:
+                self.wakeTalkEnded.emit(WAKE_STOPPED)
             return
+        if wake_talk and text:
+            from .wake import strip_wake_words
+
+            text = strip_wake_words(text)           # "Hey Jarvis, open Spotify." -> "Open Spotify."
+            if not text:
+                self._show(WAKE_NOTHING, hud.TONE_IDLE)
+                self.wakeTalkEnded.emit(WAKE_HEARD_NOTHING)
+                return
         if not text:
             self._show(NOT_CAUGHT, hud.TONE_WARN)
+            if wake_talk:
+                self.wakeTalkEnded.emit(WAKE_HEARD_NOTHING)
             return
         self._submit(text)
+        if wake_talk:
+            self.wakeTalkEnded.emit(WAKE_REQUEST)
 
     def _close_backend(self, backend: Any) -> None:
         close = getattr(backend, "close", None)
@@ -529,9 +615,11 @@ class TalkController(QObject):
         """The microphone closes (a talk under way is cancelled), a download stops and the speech process ends."""
         self._closing = True
         self._download_cancel.set()
+        self._chime_timer.stop()
         if self._session is not None:
             self._finish(talk.END_CANCEL)
         self._state = IDLE
+        self._wake_talk = False
         client, self._client = self._client, None
         if client is not None:
             threading.Thread(target=client.close, name="talk-speech-close", daemon=True).start()
