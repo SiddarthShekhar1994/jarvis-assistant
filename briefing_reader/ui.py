@@ -393,7 +393,7 @@ from .runstate import ANSWER_MAX_AGE, RunState, briefing_key, handled_slot_key, 
 from .speech import (KIND_ACK, KIND_ANNOUNCE, KIND_GREETING, KIND_NOTICE, KIND_REPLY, KIND_RESULT, SayWorker,
                      SilentVoice, Voice)
 from .text_prep import ACTIONS_KEY, build_script, describe_updated, format_time, updated_label
-from .local_voice import voice_label
+from .local_voice import is_local, voice_label
 from .tts import LOCAL, ONLINE, SAPI, SpeechSynthesizer, TtsWorker
 
 logger = logging.getLogger(__name__)
@@ -9526,10 +9526,10 @@ class AppController(QObject):
         task_row = ""
         if desktop.tasks_on():
             from .agent.web import engine_order
-            from .desktop_view import CONSENT_TASK_ROW
+            from .desktop_view import consent_task_row
 
             first, *others = (engine.name for engine in engine_order(self.config.agent.search_engine))
-            task_row = CONSENT_TASK_ROW.format(engine=first, others=" and ".join(others))
+            task_row = consent_task_row(first, " and ".join(others), local=is_local(self.config))
         card.open_card(entry, updated=desktop.consent_given() and not desktop.consent_current(), task_row=task_row,
                        task_new=desktop.consent_given() and not desktop.consent_for_tasks())
         logger.info("Desktop: the first-run card shows (%s)", entry)
@@ -11436,7 +11436,8 @@ class AppController(QObject):
         timers = instant_ui.TimerController(folder, address=self.config.assistant.address,
                                             hour24=self.config.display.hour24,
                                             now=lambda: self._instant_now().astimezone(timezone.utc),
-                                            local=lambda moment: wall(moment, self._instant_now()), parent=self)
+                                            local=lambda moment: wall(moment, self._instant_now()),
+                                            say_labels=is_local(self.config), parent=self)
         self._instant_calendar_job: Any = None          # round 2: the calendars' read on its way (one at a time)
         self._instant_calendar_seq = 0
         calendar_read = self._instant_calendar_read if self._any_calendar_configured() else None

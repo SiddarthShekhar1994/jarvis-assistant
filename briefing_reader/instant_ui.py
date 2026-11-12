@@ -33,8 +33,10 @@ check. The timers live in the app, not in the window: hiding the window changes 
 
 Round 2: reminders at a clock time today or tomorrow (``handle_reminder(ReminderAsk)``: set, listed, cancelled) live
 in the same book and file (pcctl.REMINDER_KIND). At a reminder's time: the chime, the toast with its label ("It's 5:00
-PM: call mum") and his voice with no label ("Sir, your 5 PM reminder."). A timer's label is never said either (the
-owner's words never reach the online voice). Home's chip shows whichever comes first: "Reminder 5:00 PM", or the
+PM: call mum") and his voice with no label ("Sir, your 5 PM reminder."); a timer's label is not said either (the
+owner's words never reach the online voice). While the voice is made on this PC (``say_labels``, owner decision
+2026-11-12) both are said with their label ("Sir, your 5 PM reminder: call mum."). Home's chip shows whichever comes
+first: "Reminder 5:00 PM", or the
 timer's countdown (``ticking()``: a countdown shows).
 """
 
@@ -56,7 +58,8 @@ from . import instant, instant_calendar, instant_net
 from .desktop import pcctl
 from .instant import (CalendarAsk, InstantFlags, InstantReply, NetAsk, ReminderAsk, TimerAsk, TownAsk,
                       spoken_clock)
-from .persona import with_address
+from .local_voice import is_local
+from .persona import spoken_title, with_address
 from .text_prep import format_time
 
 logger = logging.getLogger(__name__)
@@ -286,7 +289,8 @@ class InstantController(QObject):
 
     def _calendar_reply(self, ask: CalendarAsk, read: instant_calendar.CalendarRead) -> InstantReply | None:
         try:
-            return instant_calendar.reply(ask, read, now=self._now(), address=self._address(), hour24=self._hour24())
+            return instant_calendar.reply(ask, read, now=self._now(), address=self._address(), hour24=self._hour24(),
+                                          say_titles=is_local(self._config))   # said only by the voice on this PC
         except Exception as exc:  # noqa: BLE001 - an answer that can't be made is Claude's, as before
             logger.warning("Instant: a calendar answer could not be made (%s)", type(exc).__name__)
             return None
@@ -510,11 +514,13 @@ class TimerController(QObject):
 
     def __init__(self, folder: str | Path | None, *, address: str = "sir", hour24: bool = False,
                  now: Callable[[], datetime] | None = None, chime: Callable[[], None] | None = None,
-                 local: Callable[[datetime], datetime] | None = None, parent: QObject | None = None) -> None:
+                 local: Callable[[datetime], datetime] | None = None, say_labels: bool = False,
+                 parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.book = pcctl.TimerBook(folder, now=now or (lambda: datetime.now(timezone.utc)))
         self._address = address
         self._hour24 = hour24
+        self._say_labels = bool(say_labels)      # the voice is made on this PC: a label may be said (2026-11-12)
         self.chime = chime or _chime
         self._local = local or (lambda moment: moment.astimezone())    # a moment on this PC's wall clock
         self._shut = False
@@ -745,11 +751,18 @@ class TimerController(QObject):
         timers, reminders = self.running(), self.reminders()
         return bool(timers) and not (reminders and reminders[0].ends_at < timers[0].ends_at)
 
+    def _said_label(self, label: str) -> str:
+        """A reminder's or timer's label as said: only while the voice is made on this PC (``say_labels``), with links,
+        addresses and ids out (persona.spoken_title); "" otherwise."""
+        return spoken_title(label) if self._say_labels and label else ""
+
     def _reminder_end(self, reminder: pcctl.Timer, late: float) -> tuple[str, str]:
-        """A reminder's time came: the toast's words (its label) and his (no label: "Sir, your 5 PM reminder.")."""
+        """A reminder's time came: the toast's words (its label) and his ("Sir, your 5 PM reminder." - with its label
+        only while the voice is made on this PC: "Sir, your 5 PM reminder: call mum.")."""
         logger.info("Instant: a reminder came (%d s late)", int(late))
         local = self._local(reminder.ends_at)
         shown, said = format_time(local, hour24=self._hour24), spoken_clock(local)
+        label = self._said_label(reminder.label)
         if late > 90:
             today = self._local(self.book.now()).date()
             day = "" if local.date() == today else "yesterday" if local.date() == today - timedelta(days=1) else \
@@ -758,9 +771,9 @@ class TimerController(QObject):
             text = (f"Your {shown} reminder{when}, while Jarvis was away: {reminder.label}." if reminder.label else
                     f"Your {shown} reminder{when} came while Jarvis was away.")
             return text, self._say(f"{{Sir}}, your {said} reminder{' from ' + day if day else ''} came while I was "
-                                   f"away.")
+                                   f"away{': ' + label if label else ''}.")
         text = f"It's {shown}: {reminder.label}." if reminder.label else f"It's {shown}: your reminder."
-        return text, self._say(f"{{Sir}}, your {said} reminder.")
+        return text, self._say(f"{{Sir}}, your {said} reminder{': ' + label if label else ''}.")
 
     def check(self) -> None:
         """The timers against the wall clock: each that has ended says so once (``ended``), then the next check."""
@@ -776,12 +789,14 @@ class TimerController(QObject):
                 logger.info("Instant: a %d-second timer ended (%d s late)", timer.length_s, int(late))
                 name = _length_name(timer.length_s)
                 label = f" for {timer.label}" if timer.label else ""
+                spoken = self._said_label(timer.label)                 # said only by the voice on this PC
+                said_label = f" for {spoken}" if spoken else ""
                 if late > 90:
                     text = f"Your {name} timer{label} ended at {self._ends_at(timer)}, while Jarvis was away."
-                    said = self._say(f"Your {name} timer ended a while ago, {{sir}}.")
+                    said = self._say(f"Your {name} timer{said_label} ended a while ago, {{sir}}.")
                 else:
                     text = f"Your {name} timer{label} is done."
-                    said = self._say(f"Your {name} timer is done, {{sir}}.")    # its label is shown, never said
+                    said = self._say(f"Your {name} timer{said_label} is done, {{sir}}.")
             try:
                 self.chime()
             except Exception as exc:  # noqa: BLE001 - the toast and his voice still say it

@@ -1363,6 +1363,11 @@ class VoiceGateTests(ThingsApp):
     CANARY_LINE = f"{BODY_WORD} says the figures are 42."
     READ = (("search", "mail_search", {"words": SUBJECT_WORD}), ("read", "mail_read", {"thread": THREAD_ID}))
 
+    VOICE = "online"     # the gate is the online voice's ([voice] engine; a voice made on this PC says every line)
+
+    def make_things(self, script: Any, *, agent: str = "", **harness: Any) -> FakeEngine:
+        return super().make_things(script, agent=agent + f'\n[voice]\nengine = "{self.VOICE}"\n', **harness)
+
     def play(self, *steps: Any, summary: str = DONE, outcome: str = "done", **harness: Any) -> None:
         """The steps, then a finish with ``summary``: the caption is recorded along the way."""
 
@@ -1529,6 +1534,12 @@ class VoiceGateTests(ThingsApp):
 
     def test_speak_private_true_skips_the_gate(self) -> None:
         self.play(*self.READ, ("line", "say", {"text": self.CANARY_LINE}), agent="speak_private = true\n")
+        self.ended()
+        self.assertIn(self.CANARY_LINE, self.said())
+
+    def test_the_voice_made_on_this_pc_says_every_line(self) -> None:
+        self.VOICE = "local"
+        self.play(*self.READ, ("line", "say", {"text": self.CANARY_LINE}))
         self.ended()
         self.assertIn(self.CANARY_LINE, self.said())
 

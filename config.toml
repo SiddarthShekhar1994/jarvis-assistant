@@ -395,7 +395,7 @@ tasks_per_day = 20            # how many tasks may start in 24 hours (1..200)
 search_engine = "duckduckgo"  # where his searches go: "duckduckgo", "bing" or "google" (the words of each search go there)
 workspace = ""                # his files; "" = the Jarvis\Workspace folder in your user folder; never under OneDrive
 private = ["calendar", "contacts", "memory", "mail", "files"]   # what a task may read of your things, when it needs them
-speak_private = false         # true: a line that may hold something private is said aloud too (spoken lines go to Microsoft's online voice)
+speak_private = false         # with [voice] engine = "online": true says a line that may hold something private too (it goes to Microsoft's online voice); the local voice says them anyway
 
 [talk]
 # Talk to Jarvis: tap the talk key, say what you want, and he takes it after about half a second of quiet (tap
@@ -425,4 +425,4 @@ weather = true                # "what's the weather in Paris", "will it rain tom
 currency = true               # "100 dollars in euros"
 town = ""                     # the weather's town when you name none, e.g. "Oslo" (kept on this PC; sent only to Open-Meteo)
 temperature = "auto"          # "auto" (the Windows region: the US gets Fahrenheit), "celsius" or "fahrenheit"
-calendar = true               # "what's my next meeting", "am I free at 3": from your calendars; titles shown, never said
+calendar = true               # "what's my next meeting", "am I free at 3": from your calendars; titles shown, and said only by the local voice

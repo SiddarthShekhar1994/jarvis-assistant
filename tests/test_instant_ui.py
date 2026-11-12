@@ -736,9 +736,9 @@ class AppWiringTests(unittest.TestCase):
         self.assertTrue(entries[-1][3].startswith("From Google Calendar"))
         self.assertIn("Next: Physio", c.window.reading.command_bar.status())
         said = " ".join(text for _kind, text, _key in app.voice.said)
-        self.assertIn("Your next meeting on your personal calendar is at", said)
-        self.assertNotIn("Physio", said)
-        self.assertNotIn("Room 9", said)
+        self.assertIn("Your next meeting on your personal calendar, Physio, is at", said)   # the voice is on this PC
+        self.assertNotIn("Room 9", said)                                  # a place is never said
+        self.assertNotIn("Physio", log_text := "\n".join(logs.output))   # nor ever logged
         log_text = "\n".join(logs.output)
         self.assertIn("1 calendar(s) read, 1 not", log_text)
         self.assertNotIn("Physio", log_text)
@@ -755,25 +755,28 @@ class AppWiringTests(unittest.TestCase):
         self.assertEqual(c._instant_calendar_seq, seq + 1)
 
     def test_a_reminder_on_home_and_at_its_time(self) -> None:
-        app = AppHarness(self)                                           # the app's clock: Sunday 1:52 PM
-        app.reading()
-        c = app.c
-        self.submit(app, "remind me at 3 pm to stretch")
-        self.assertFalse(app.factory.runner.started)
-        self.assertEqual(len(c.instant.timers.reminders()), 1)
-        reading = c.window.reading
-        self.assertEqual(reading.conversation.entries()[-1][2], "Reminder set for 3:00 PM: stretch.")
-        self.assertEqual(reading.timer_chip_text(), "Reminder 3:00 PM")
-        self.assertEqual(reading.timer_chip.accessibleName(), "Reminder")
-        self.assertEqual(c._timer_chip_tick.interval(), 30_000)          # no second-by-second ticking for it
-        app.clock.advance(minutes=68)
-        c.instant.timers.check()
-        settle()
-        self.assertEqual(reading.conversation.entries()[-1][2], "It's 3:00 PM: stretch.")
-        said = [text for _kind, text, _key in app.voice.said]
-        self.assertIn("Sir, your 3 PM reminder.", said)
-        self.assertFalse(any("stretch" in text for text in said))
-        self.assertEqual(reading.timer_chip_text(), "")
+        for engine, expected in (("local", "Sir, your 3 PM reminder: stretch."), ("online", "Sir, your 3 PM reminder.")):
+            with self.subTest(engine=engine):
+                app = AppHarness(self, config_extra=f'\n[voice]\nengine = "{engine}"\n')   # Sunday 1:52 PM
+                app.reading()
+                c = app.c
+                self.submit(app, "remind me at 3 pm to stretch")
+                self.assertFalse(app.factory.runner.started)
+                self.assertEqual(len(c.instant.timers.reminders()), 1)
+                reading = c.window.reading
+                self.assertEqual(reading.conversation.entries()[-1][2], "Reminder set for 3:00 PM: stretch.")
+                self.assertEqual(reading.timer_chip_text(), "Reminder 3:00 PM")
+                self.assertEqual(reading.timer_chip.accessibleName(), "Reminder")
+                self.assertEqual(c._timer_chip_tick.interval(), 30_000)      # no second-by-second ticking for it
+                app.clock.advance(minutes=68)
+                c.instant.timers.check()
+                settle()
+                self.assertEqual(reading.conversation.entries()[-1][2], "It's 3:00 PM: stretch.")
+                said = [text for _kind, text, _key in app.voice.said]
+                self.assertIn(expected, said)                                # its label only by the voice on this PC
+                self.assertEqual(any("stretch" in text for text in said), engine == "local")
+                self.assertEqual(reading.timer_chip_text(), "")
+                app.close()
 
     def test_settings_has_the_instant_answers_group(self) -> None:
         app = AppHarness(self)

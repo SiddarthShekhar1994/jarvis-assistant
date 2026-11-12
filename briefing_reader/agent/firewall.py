@@ -897,7 +897,8 @@ class WebFirewall:
             return tuple(self._heard)
 
     def speakable(self, line: str) -> bool:
-        """May a line the model wrote reach the voice, which goes to Microsoft's online service? Yes while the run holds
+        """May a line the model wrote reach the online voice, which goes to Microsoft's service (agent_ui.spoken asks only
+        then: a voice made on this PC says every line)? Yes while the run holds
         nothing private; after that only with no tainted word in it, no key, email address or long number of its own
         (whoever gave it: the request, a typed answer) and, in a strict run, no foreign word."""
         if not (self.private or self.strict):

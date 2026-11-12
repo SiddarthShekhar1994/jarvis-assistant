@@ -54,12 +54,22 @@ CONSENT_ROWS = ("I open files, apps, folders and sites you name.",
                 "To plan, file, folder and app names go to your Claude plan. They're never kept in logs.")
 CONSENT_NEW = (1, 2)                   # the rows of CONSENT_ROWS new since Phase 1's card
 # The agent's row (version 3 of the card): only while [agent] is on; off, the card is as it was.
+CONSENT_VOICE_ONLINE = ("What I say aloud goes to Microsoft's online voice, as an Ask's answers do, and a line that may "
+                        "hold something private stays on screen.")
+CONSENT_VOICE_LOCAL = ("What I say aloud is made on this PC, so a line that may hold something private is said too - "
+                       "never sent anywhere.")
 CONSENT_TASK_ROW = ("Give me a task and I work out the steps myself. I search and read public pages in a window you "
                     "can watch, and the words of a search go to {engine}, or to {others} if it gives nothing. When a "
                     "task needs them, I read your calendar, mail, contacts, notes and allowed folders; what a task "
-                    "reads goes to your Claude plan, as an Ask's does, and is never kept in logs. What I say aloud "
-                    "goes to Microsoft's online voice, as an Ask's answers do, and a line that may hold something "
-                    "private stays on screen. Anything that changes things or gets sent still waits for your click.")
+                    "reads goes to your Claude plan, as an Ask's does, and is never kept in logs. "
+                    + CONSENT_VOICE_ONLINE + " Anything that changes things or gets sent still waits for your click.")
+
+
+def consent_task_row(engine: str, others: str, *, local: bool) -> str:
+    """The agent's row as the card shows it: its sentence on what he says aloud follows where his voice is made
+    ([voice] engine; owner decision 2026-11-12): CONSENT_VOICE_LOCAL while it is made on this PC."""
+    row = CONSENT_TASK_ROW.format(engine=engine, others=others)
+    return row.replace(CONSENT_VOICE_ONLINE, CONSENT_VOICE_LOCAL) if local else row
 NEW_TAG_TEXT = "NEW"
 CONSENT_FOOT = "You can turn it off again in Settings \u203a Desktop."
 NOT_NOW_TEXT = "Not now"
