@@ -2828,8 +2828,9 @@ as typed words do, and "stop" stops it.
 - **He hears you only from the tap to the end.** The microphone opens on the
   tap and closes when the talk ends; while it is open the orbs say LISTENING
   (Home's moves with your voice) and the bar says so, and his own voice waits.
-  Hiding or minimizing the window cancels the talk. Nothing listens in between:
-  there is no wake word.
+  Hiding or minimizing the window cancels the talk. Nothing listens in between,
+  unless you turn on ["Hey Jarvis"](#hey-jarvis-the-wake-word), which listens
+  only for those words.
 - **On this PC.** Your speech is turned into text here, by a speech model
   (faster-whisper `small.en`, about 480 MB) downloaded only when you click
   Download in Settings > Talk; the sound is kept in memory for the moment it
@@ -2854,6 +2855,50 @@ If something is missing when you tap (an add-on, the model, a microphone), the
 bar says what and how to fix it, and the microphone does not open. Tapping the
 key while Jarvis is not running opens him, as the hotkey does; tap again to
 talk. Names Jarvis should expect ("Spotify", "Notion") go in `[talk] hints`.
+
+### "Hey Jarvis" (the wake word)
+
+Off until you turn it on. Say **"Hey Jarvis"** and he listens exactly as if
+you had tapped the talk key: say it in one breath ("Hey Jarvis, open
+Spotify") or pause, hear his soft chime, then say what you want. What he
+heard goes in as typed words do, under the same rules (cards still wait for
+your click). "Hey Jarvis" itself is taken off the front.
+
+- **Turning it on.** Settings > Talk > Turn on "Hey Jarvis", or the tray
+  menu's "Listen for "Hey Jarvis"". The first time it asks for the wake model:
+  click Download (about 3.7 MB from GitHub; see the licence below). It needs
+  talking set up first ([Talk to Jarvis](#talk-to-jarvis-the-talk-key)): it
+  uses the same add-ons, the same speech model and the same microphone (the
+  one picked in Settings > Meetings, else the Windows default). Nothing new to
+  install: its runtime, onnxruntime, comes with faster-whisper.
+- **While Jarvis runs.** It listens while his window is open, minimized or on
+  your desktop, and stops when you close him, so minimize him rather than
+  closing him. A small separate listener on this PC (below normal priority;
+  about 2% of one processor core and 95 MB) hears only for the wake words and
+  keeps no more than the last 1.6 seconds in memory, for a request said in one
+  breath. **Nothing is saved or sent while it waits**, and no log holds
+  audio, words or device names.
+- **It pauses** while he speaks or reads the briefing (so he never wakes
+  himself), while a talk listens, while a meeting records and in focus mode,
+  and listens again a moment after. Saying "Hey Jarvis" while he speaks does
+  nothing: tap the talk key to interrupt him. While he is in control on your
+  desktop it is ignored, as the talk key is.
+- **What shows it.** A small HEY JARVIS mark in his window's header and on the
+  desktop HUD (cyan while it listens, dim while paused, amber when it can't
+  hear you), a dot on his tray icon with the same words in its tooltip, and
+  Windows' own microphone icon in the taskbar. Settings > Talk says exactly
+  what it is doing and which microphone it listens to.
+- **Sensitivity** (Settings > Talk): *Fewer false wakes*, *Balanced* (the
+  default) or *Hears more*. Saying "Jarvis" alone, or words that sound like
+  "Hey Jarvis", can wake him too; a wake that hears no request ends quietly
+  ("I didn't hear a request."). Settings > Talk counts today's wakes and how
+  many of them heard nothing, so you can see whether to change it.
+
+The wake model is [openWakeWord](https://github.com/dscripka/openWakeWord)'s
+"hey jarvis" (release v0.5.1). Its files are licensed **CC BY-NC-SA 4.0: free
+for personal, non-commercial use**, so they are not part of this repository:
+Jarvis downloads them only when you click, into the models folder in the data
+folder, and checks each file's size and SHA-256 before using it.
 
 ### Instant answers
 
@@ -4708,6 +4753,7 @@ Other files in `%LOCALAPPDATA%\briefing-reader`:
 | `assistant.json` | Whether Jarvis's voice is muted, the ids of the last 5 greetings (so the next one differs), whether the briefings an older version read through its prompt were taken as viewed (done once, at the first start after the update, so they are not announced again), and, once you used it, where the LIVE pop-out window was and whether it was open, and `prod_hint_shown` once the "minimize instead of Done" hint was shown, and `followups_off` while the follow-up list is turned off on this PC, and `desktop_turned_on` (with `desktop_consent_version`, the card's version) once you turned [Jarvis on your desktop](#jarvis-on-your-desktop-the-hud) on. Never any text. Safe to delete. |
 | `desktop\` | Jarvis on your desktop's own records, on this PC only: `journal\<run id>.jsonl`, for each NEEDS YOUR OK card you clicked, every file it moved, copied, renamed, zipped or put in the Recycle Bin with its old and new path (Undo needs them; never logged, never sent to Claude; kept 30 days); `timers.json`, your running timers and reminders and their labels (so a restart keeps them); `focus.json` while focus mode runs. Safe to delete (Undo of those changes goes with it). |
 | `instant.json` | The weather town you set by saying or typing "my town is ..." ([Instant answers](#instant-answers)): the place Jarvis found, as shown, and its coordinates. Never logged. "Forget my town" clears it; safe to delete. |
+| `wake.json`, `wake_chime.wav` | ["Hey Jarvis"](#hey-jarvis-the-wake-word): whether you turned it on, its sensitivity and today's two counts (wakes, and wakes that heard nothing) - no audio, words or device names; and the chime, a tone Jarvis makes himself. Deleting `wake.json` turns "Hey Jarvis" off. The wake model's files are in `models\openwakeword-hey-jarvis-v0.1\`. |
 | `followups.json` | The follow-up rows you hid: per row a 32-character hash (of the account name, the thread and its newest deciding message, never in clear), when you hid it and until when ("" = until something new arrives); entries older than 30 days are dropped. No subject, name, address or id. Safe to delete (hidden rows come back). |
 | `prep_series.json` | The productivity bundle's repeating meetings whose prep offers ended unclicked: per series a 32-character hash (of the account name, the calendar and Google's series id, never in clear), how many times in a row (3 stops its offers) and the day of the last change; entries untouched for 60 days are dropped. No title, id or address. Safe to delete (the offers come back). |
 | `conversation.json` | The last 24 hours of the conversation (at most 100 entries: your requests, Jarvis's answers and results as the Transcript showed them, each with its time; never your memory lines), shown again at a start and given to Ask as `<conversation>` (a web research's question and answer are marked and never given; see [Ask remembers the conversation](#ask-remembers-the-conversation)). Written by the app a moment after the conversation changes and when it closes; older entries leave it at the start and within the hour after they turn a day old. **Clear conversation** in the Transcript deletes it; you can delete it yourself while Jarvis is closed. A broken file is ignored and replaced. Never logged. |
@@ -4724,6 +4770,10 @@ Talking to Jarvis ([the talk key](#talk-to-jarvis-the-talk-key)) sends nothing
 anywhere to be understood: the microphone is open only from the tap to the end,
 your speech becomes text on this PC, the sound is never saved and no log holds
 what you said. What he heard then goes where typed words go.
+["Hey Jarvis"](#hey-jarvis-the-wake-word), when you turn it on, listens on this
+PC for those words only: the audio stays in memory, nothing is saved or sent
+while it waits, and its one download (the wake model from GitHub) happens only
+when you click.
 
 [Instant answers](#instant-answers) about the time, dates, sums, conversions,
 timers and reminders never leave this PC. A weather question sends only the
@@ -5214,6 +5264,15 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
   sometimes makes one the default: pick your real microphone in Settings >
   Meetings > Microphone (talk uses the same choice), or make it the default
   input in Windows Settings > System > Sound.
+- **"Hey Jarvis" does nothing**: Settings > Talk's "Hey Jarvis" row says why
+  (and the HEY JARVIS mark turns amber). "a virtual microphone": pick your real
+  one in Settings > Meetings > Microphone, as for the talk key; "paused": he is
+  speaking, a meeting records, or focus mode is on; "needs the wake model":
+  click Download. It works only while Jarvis runs: minimize him rather than
+  closing him. If he still misses you, try Sensitivity > Hears more.
+- **He wakes when you didn't call him**: try Sensitivity > Fewer false wakes,
+  or turn "Hey Jarvis" off from the tray menu while a video or a call says
+  "Jarvis" a lot. Settings > Talk counts the wakes that heard nothing.
 - **The talk key does nothing**: Settings > Talk's "Talk key" row says when
   another program has it ("another program has it; choose another [talk] key
   in config.toml"). Pick another `[talk] key`, then restart the "Briefing
@@ -5504,3 +5563,9 @@ The bundled fonts in `fonts\` are not covered by that licence: Chakra Petch,
 Sora and JetBrains Mono are each licensed under the SIL Open Font License,
 Version 1.1, and their licence files are next to them (`fonts\OFL-ChakraPetch.txt`,
 `fonts\OFL-Sora.txt`, `fonts\OFL-JetBrainsMono.txt`; see [Fonts](#fonts)).
+
+"Hey Jarvis" (`briefing_reader\wake.py`) follows the streaming pipeline of
+[openWakeWord](https://github.com/dscripka/openWakeWord) (code under the Apache
+License 2.0, copyright 2022 David Scripka), re-done here. openWakeWord's model
+files are licensed CC BY-NC-SA 4.0 (non-commercial) and are not included: they
+are downloaded only on your click (see ["Hey Jarvis"](#hey-jarvis-the-wake-word)).

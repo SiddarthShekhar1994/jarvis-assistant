@@ -183,7 +183,10 @@ def missing_pieces(models_root: Path, *, audio_missing: Callable[[], str] | None
 class ModelDownloader:
     """See the module docstring. ``progress(done_bytes, total_bytes)`` is called on the downloading thread;
     ``cancel()`` (an Event-like ``is_set``) stops between chunks. ``session`` is a requests-like session
-    (``head(url, allow_redirects=, timeout=)`` and ``get(url, headers=, stream=, timeout=)``)."""
+    (``head(url, allow_redirects=, timeout=)`` and ``get(url, headers=, stream=, timeout=)``). ``LOG_NAME`` begins
+    its log lines (wake.WakeModelDownloader: "Wake model")."""
+
+    LOG_NAME = "Speech model"
 
     def __init__(self, target: Path, *, session: Any = None, progress: Callable[[int, int], Any] | None = None,
                  cancel: Any = None, repo: str = MODEL_REPO, revision: str = MODEL_REVISION,
@@ -240,10 +243,10 @@ class ModelDownloader:
         try:
             return self._run()
         except OSError as exc:
-            logger.info("Speech model: a file could not be written (%s)", type(exc).__name__)
+            logger.info("%s: a file could not be written (%s)", self.LOG_NAME, type(exc).__name__)
             return ERR_DISK
         except Exception as exc:  # noqa: BLE001 - a download never dies silently
-            logger.info("Speech model: the download stopped (%s)", type(exc).__name__)
+            logger.info("%s: the download stopped (%s)", self.LOG_NAME, type(exc).__name__)
             return ERR_NETWORK
 
     def _run(self) -> str:
@@ -253,7 +256,7 @@ class ModelDownloader:
         except OSError:
             return ERR_DISK
         except Exception as exc:  # noqa: BLE001 - network problems are a code, never a crash
-            logger.info("Speech model: the file list could not be read (%s)", type(exc).__name__)
+            logger.info("%s: the file list could not be read (%s)", self.LOG_NAME, type(exc).__name__)
             return ERR_NETWORK
         total = sum(size for size, _sha in expected.values())
         done_before = 0
@@ -265,7 +268,7 @@ class ModelDownloader:
                 continue
             code = self._fetch(name, size, sha, done_before, total)
             if code:
-                logger.info("Speech model: %s stopped (%s)", name, code)
+                logger.info("%s: %s stopped (%s)", self.LOG_NAME, name, code)
                 return code
             done_before += size
         manifest = {"repo": self.repo, "revision": self.revision,
@@ -276,7 +279,7 @@ class ModelDownloader:
             mt._write_json(self.target / MANIFEST, manifest)
         except OSError:
             return ERR_DISK
-        logger.info("Speech model: ready (%d files, %d MB)", len(self.files), total // (1 << 20))
+        logger.info("%s: ready (%d files, %d MB)", self.LOG_NAME, len(self.files), total // (1 << 20))
         return ""
 
     def _fetch(self, name: str, size: int, sha: str, done_before: int, total: int) -> str:
@@ -302,7 +305,7 @@ class ModelDownloader:
                     have = 0
                 fh = open(part, "ab" if have else "wb")
             except Exception as exc:  # noqa: BLE001 - network problems are a code; the .part file stays
-                logger.info("Speech model: the download could not start (%s)", type(exc).__name__)
+                logger.info("%s: the download could not start (%s)", self.LOG_NAME, type(exc).__name__)
                 return ERR_DISK if isinstance(exc, PermissionError) else ERR_NETWORK
             with fh:
                 chunks = iter(response.iter_content(CHUNK))
@@ -312,7 +315,7 @@ class ModelDownloader:
                     try:
                         chunk = next(chunks, None)
                     except Exception as exc:  # noqa: BLE001 - the connection dropped; the .part file stays
-                        logger.info("Speech model: download interrupted (%s)", type(exc).__name__)
+                        logger.info("%s: download interrupted (%s)", self.LOG_NAME, type(exc).__name__)
                         return ERR_NETWORK
                     if chunk is None:
                         break

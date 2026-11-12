@@ -414,8 +414,9 @@ def apply_dark_theme(app: QApplication) -> None:
     hud.apply_theme(app)
 
 
-def app_icon() -> QIcon:
-    """The window and tray icon: the HUD logo (a cyan diamond) on the dark ground."""
+def app_icon(mark: str = "") -> QIcon:
+    """The window and tray icon: the HUD logo (a cyan diamond) on the dark ground. ``mark`` (the tray's, "Hey Jarvis";
+    wake_ui.LOOK_*): a dot at the bottom right - "listening" cyan, "problem" amber; none otherwise."""
     pixmap = QPixmap(64, 64)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
@@ -424,11 +425,17 @@ def app_icon() -> QIcon:
         painter.fillPath(hud.chamfer_path(QRectF(2, 2, 60, 60), 12), QColor(hud.GROUND))
         painter.setPen(QPen(hud.rgba(hud.ACCENT, 0.45), 1.5))
         painter.drawPath(hud.chamfer_path(QRectF(2.75, 2.75, 58.5, 58.5), 11.5))
+        painter.save()
         painter.translate(32, 32)
         painter.rotate(45)
         painter.setPen(QPen(QColor(hud.ACCENT), 5))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(QRectF(-12, -12, 24, 24))
+        painter.restore()
+        if mark in ("listening", "problem"):
+            painter.setPen(QPen(QColor(hud.GROUND), 4))
+            painter.setBrush(QColor(holo.HOLO if mark == "listening" else holo.AMBER))
+            painter.drawEllipse(QPointF(50, 50), 11, 11)
     finally:
         painter.end()
     return QIcon(pixmap)
@@ -1424,6 +1431,13 @@ class ReadingView(QWidget):
         self.rec_badge = meetings_view.RecBadge()
         self.rec_badge.stopClicked.connect(self.stopRecording)
         self.header.add_rec_badge(self.rec_badge)
+        # "Hey Jarvis" (wake_ui): HEY JARVIS in the header (every screen) and the frame header's, hidden while it is off.
+        from .wake_ui import LOOK_OFF, WakeBadge
+
+        self._wake: tuple[str, str] = ("", LOOK_OFF)
+        self._wake_badges: list[Any] = []
+        self.wake_badge = WakeBadge()
+        self.header.add_rec_badge(self.wake_badge)      # (any badge goes left of the hold note, REC's place)
         self.home_rec = meetings_view.RecBadge(home=True)
         self.home_rec.stopClicked.connect(self.stopRecording)
         self._close_tip = self.header.close_button.toolTip()
@@ -2690,6 +2704,26 @@ class ReadingView(QWidget):
         """(elapsed, warning) while a meeting records ("12:04", "No call audio"); ("", "") while none."""
         return self._recording, self._recording_warning
 
+    def add_wake_badge(self, badge: Any) -> None:
+        """Another header's HEY JARVIS (the frame header over the prompt view), shown as this view's is."""
+        self._wake_badges.append(badge)
+        badge.set_state(*self._wake)
+
+    def set_wake(self, text: str, look: str) -> None:
+        """"Hey Jarvis" (wake_ui): what it is doing in words and its look (wake_ui.LOOK_*) for HEY JARVIS in the
+        headers and on the desktop HUD (hidden while it is off)."""
+        if (text, look) == self._wake:
+            return
+        self._wake = (text, look)
+        for badge in (self.wake_badge, *self._wake_badges):
+            badge.set_state(text, look)
+        self.header._fit_notes()
+        self.glanceChanged.emit()
+
+    def wake_state(self) -> tuple[str, str]:
+        """(words, wake_ui.LOOK_*) of "Hey Jarvis" for the desktop HUD's chip; LOOK_OFF while it is off."""
+        return self._wake
+
     def set_followups_available(self, available: bool) -> None:
         """FOLLOW-UPS is on (the bundle): the Dock's Follow-ups slot and its screen."""
         self._set_slot_available(dock_mod.FOLLOWUPS, SCREEN_FOLLOWUPS, available)
@@ -3329,6 +3363,11 @@ class BriefingWindow(hud.HudWindowFrame):
         self.frame_rec = meetings_view.RecBadge()
         self.header.add_rec_badge(self.frame_rec)
         self.reading.add_rec_badge(self.frame_rec)
+        from .wake_ui import WakeBadge
+
+        self.frame_wake = WakeBadge()                    # HEY JARVIS over the prompt view too ("Hey Jarvis" on)
+        self.header.add_rec_badge(self.frame_wake, wins_room=False)    # the service chips stay beside it
+        self.reading.add_wake_badge(self.frame_wake)
         self.ground = holo.GroundCache()
         self.reading.hero.set_ground(orb_mod.ground_painter(self.ground))
         self.reading.briefing_orb.set_ground(orb_mod.ground_painter(self.ground))
@@ -5173,6 +5212,8 @@ class AppController(QObject):
         self._tray_menu: QMenu | None = None
         self._tray_quit_action: Any = None
         self._tray_back_action: Any = None   # Bring Jarvis back ([desktop]; shown only on the desktop HUD)
+        self._tray_wake_action: Any = None   # Listen for "Hey Jarvis" (wake_ui; only with the talk)
+        self._tray_mark = ""                 # the tray icon's mark ("Hey Jarvis": listening / a problem)
         self._tts: TtsWorker | None = None
         self._audio_dir: Path | None = None
         if action_store is None:
@@ -5206,6 +5247,7 @@ class AppController(QObject):
         self.task_feed: Any = None                     # the task's panel and cards (agent_feed), with the agent
         self.agent: Any = self._create_agent(agent_factory)   # [agent]: a task worked through, or None while it is off
         self.talk: Any = self._create_talk()            # [talk]: the talk key's listening, or None while it is off
+        self.wake: Any = self._create_wake()            # "Hey Jarvis" (wake_ui) beside the talk, or None without it
         self.voice_download: Any = self._create_voice_settings()   # [voice] engine "local": Settings > Voice's part
         self.window.reading.set_find_actions(self.productivity is not None)   # offers' links in the Find list
         # Jarvis's own voice: silent unless injected; start() builds the real one ([assistant] speak).
@@ -5687,6 +5729,7 @@ class AppController(QObject):
         if self._local_client is not None:
             self._local_client.warm()   # the voice loads in the background now: his first line needs no wait
         self._create_tray()
+        self._wake_call("start")    # "Hey Jarvis": the listener runs from now while it is on (never before start)
         if self.meetings is not None:
             self.meetings.start()   # a recording a crash left is saved; retention; nothing records by itself
         else:
@@ -5914,6 +5957,13 @@ class AppController(QObject):
             self._tray_back_action.triggered.connect(self._on_tray_bring_back)
             self._tray_back_action.setVisible(self._hud_active())
         menu.addAction("Show briefing").triggered.connect(self._on_tray_show)
+        if getattr(self, "wake", None) is not None:
+            from .wake_ui import PHRASE
+
+            self._tray_wake_action = menu.addAction(f"Listen for {PHRASE}")
+            self._tray_wake_action.setCheckable(True)
+            self._tray_wake_action.setChecked(bool(self.wake.on))
+            self._tray_wake_action.triggered.connect(lambda checked: self.wake.set_on(bool(checked)))
         self._tray_quit_action = menu.addAction("Dismiss")
         self._tray_quit_action.triggered.connect(self._on_tray_quit)
         self._tray_menu = menu
@@ -5958,6 +6008,10 @@ class AppController(QObject):
         if self.tray is not None:
             recording = self._recording_tooltip()
             self.tray.setToolTip(recording or (tooltip if tooltip is not None else self._tray_tooltip()))
+            mark = self._wake_tray_mark()
+            if mark != self._tray_mark:
+                self._tray_mark = mark
+                self.tray.setIcon(app_icon(mark))
         if self._tray_quit_action is not None:
             quits = self.state in (STATE_READING, STATE_WAITING)
             self._tray_quit_action.setText("Quit" if quits else "Dismiss")
@@ -5978,7 +6032,8 @@ class AppController(QObject):
         if self._new_key() is not None:
             run = self._run_label()
             return f"Jarvis: {run + ' ' if run else ''}briefing ready to view"
-        return TRAY_TOOLTIP
+        wake = getattr(self, "wake", None)
+        return (wake.tray_text() if wake is not None else "") or TRAY_TOOLTIP
 
     # ---- activity log and header chips -------------------------------------------------
 
@@ -9447,6 +9502,7 @@ class AppController(QObject):
         are held - or ended (at its end, early by the owner's Undo, or turned off): what was held comes back - the
         offers at their next tick, the last few sentences, and the newest toast (after the one showing, if any)."""
         self._prod_call("sync")
+        self._wake_call("refresh_holds")         # "Hey Jarvis" pauses in focus mode
         if on:
             logger.info("Focus mode: Jarvis keeps quiet")
             return
@@ -12326,6 +12382,7 @@ class AppController(QObject):
         """Jarvis started saying ``text`` (the orb says SPEAKING and the speech line shows his words)
         or finished (""; the briefing's own state and line come back)."""
         self._utterance = text or ""
+        self._wake_call("refresh_holds")         # "Hey Jarvis" pauses while he speaks: he never wakes himself
         if text:
             self._prod_call("on_speaking", text)   # an offer's sentence counts as spoken from now (R26)
         if self.state != STATE_READING:
@@ -13945,6 +14002,8 @@ class AppController(QObject):
 
     def _on_player_state(self, state: str) -> None:
         self._pump_voice()
+        self._wake_call("refresh_holds")         # "Hey Jarvis" pauses while the briefing plays (any player, as it is
+                                                 # replaced for each new briefing)
         if state != PLAYING and self.state == STATE_READING and not self._utterance:
             self.window.reading.end_caption()      # paused or finished: the last line holds, then rests
         if state == PLAYING and self.state == STATE_READING:
@@ -14185,15 +14244,114 @@ class AppController(QObject):
         controller = talk_ui.TalkController(self.config, bring_forward=self._talk_bring_forward,
                                             before_talk=self._talk_before, show_status=self.ask.talk_status,
                                             submit=self.ask.submit_spoken, set_look=self._talk_look,
-                                            set_level=self._talk_level, parent=self)
+                                            set_level=self._talk_level, parent=self,
+                                            chime=getattr(self, "_wake_chime", None))
         panel = talk_ui.TalkSettingsPanel(talk_ui.pip_command())
         controller.attach_panel(panel, refresh=reading.settings_page.refresh)
+        self._talk_panel = panel                        # "Hey Jarvis" adds its part (_create_wake)
         visibility = getattr(self.window, "visibilityChanged", None)
         if visibility is not None:
             visibility.connect(self._talk_visibility)
         reading.settings_page.add_group(talk_ui.SETTINGS_KEY, talk_ui.SETTINGS_TITLE, note=talk_ui.SETTINGS_NOTE,
                                         how=talk_ui.SETTINGS_HOW, rows=controller.settings_rows, extra=panel)
         return controller
+
+    # ---- "Hey Jarvis" (wake_ui) -----------------------------------------------------------------------------------
+
+    def _create_wake(self) -> Any:
+        """"Hey Jarvis" beside the talk (wake_ui.WakeController): its part of Settings > Talk, its marks (the header's,
+        the frame header's and the HUD's HEY JARVIS; the tray's) and what pauses it. None without the talk. Nothing
+        listens before start(), and only while the owner turned it on."""
+        talk = getattr(self, "talk", None)
+        if talk is None:
+            return None
+        from . import wake_ui
+
+        controller = wake_ui.WakeController(self.config, talk, holds=self._wake_holds,
+                                            in_control=self._wake_in_control, parent=self)
+        panel = wake_ui.WakePanel()
+        self._talk_panel.add_part(panel)
+        settings = self.window.reading.settings_page
+        controller.attach_panel(panel, refresh=settings.refresh)
+        talk.extra_rows = controller.settings_rows
+        controller.changed.connect(self._on_wake_changed)
+        recording = getattr(getattr(self, "meetings", None), "recordingChanged", None)
+        if recording is not None:
+            recording.connect(lambda _on: controller.refresh_holds())
+        picked = getattr(getattr(self, "meetings", None), "devicesPicked", None)
+        if picked is not None:
+            picked.connect(controller.mic_picked)       # Settings > Meetings > Microphone: the listener moves to it
+        self._on_wake_changed()
+        return controller
+
+    def _wake_call(self, name: str, *args: Any) -> Any:
+        wake = getattr(self, "wake", None)
+        if wake is None:
+            return None
+        try:
+            return getattr(wake, name)(*args)
+        except Exception as exc:  # noqa: BLE001 - "Hey Jarvis" never stops the app
+            logger.warning("Wake: %s failed (%s)", name, type(exc).__name__)
+            return None
+
+    def _wake_holds(self) -> list[str]:
+        """What pauses "Hey Jarvis" now (wake_ui.HOLD_*): a talk under way, Jarvis speaking or reading the briefing, a
+        meeting recording, focus mode."""
+        from . import talk_ui, wake_ui
+
+        holds: list[str] = []
+        talk = getattr(self, "talk", None)
+        if talk is not None and talk.state != talk_ui.IDLE:
+            holds.append(wake_ui.HOLD_TALK)
+        voice = getattr(self, "voice", None)
+        # His words start (speakingChanged, _utterance) just before their sound plays (voice.speaking): either counts.
+        speaking = bool(getattr(self, "_utterance", "")) or bool(getattr(voice, "speaking", False))
+        if speaking or self.player.state in (PLAYING, WAITING):
+            holds.append(wake_ui.HOLD_SPEAKING)
+        meetings = getattr(self, "meetings", None)
+        if meetings is not None and bool(meetings.is_recording()):
+            holds.append(wake_ui.HOLD_MEETING)
+        if self._focus_quiet():
+            holds.append(wake_ui.HOLD_FOCUS)
+        return holds
+
+    def _wake_in_control(self) -> bool:
+        """Jarvis is in control on the desktop: a wake is ignored, as the talk key is (Esc or Stop first)."""
+        return bool(self._hud_active() and self.desktop.in_control())
+
+    def _wake_chime(self) -> None:
+        """The soft chime as a talk "Hey Jarvis" started listens (when nothing was said yet: talk_ui)."""
+        from .wake_ui import play_chime
+
+        play_chime(self.config.data_dir)
+
+    def _wake_tray_mark(self) -> str:
+        """The tray icon's mark: "listening" while "Hey Jarvis" listens, "problem" when it cannot, "" otherwise."""
+        wake = getattr(self, "wake", None)
+        if wake is None:
+            return ""
+        from . import wake_ui
+
+        look = wake.look()
+        return look if look in (wake_ui.LOOK_LISTENING, wake_ui.LOOK_PROBLEM) else ""
+
+    def _on_wake_changed(self) -> None:
+        """What "Hey Jarvis" is doing changed: the HEY JARVIS marks (header, frame header, HUD), the tray's tooltip,
+        mark and tick, and Settings > Talk while it is open."""
+        wake = getattr(self, "wake", None)
+        if wake is None:
+            return
+        text, look = wake.status()
+        self.window.reading.set_wake(text, look)
+        self._update_tray()
+        action = self._tray_wake_action
+        if action is not None and action.isChecked() != bool(wake.on):
+            action.blockSignals(True)
+            action.setChecked(bool(wake.on))
+            action.blockSignals(False)
+        settings = self.window.reading.settings_page
+        if settings.current_group() == "talk":
+            settings.refresh()
 
     def _talk_bring_forward(self) -> None:
         """A talk starts: Jarvis comes forward in the mode he is in (on the HUD its bar shows the talk; a hidden or
@@ -14489,6 +14647,8 @@ class AppController(QObject):
         self._live_feed.stop()
         if getattr(self, "instant", None) is not None:
             self.instant.shutdown()    # no network answer lands after this; the timers stay in their file
+        if getattr(self, "wake", None) is not None:
+            self.wake.shutdown()       # "Hey Jarvis": the listener ends (its microphone closes)
         if getattr(self, "talk", None) is not None:
             self.talk.shutdown()       # the microphone closes; the speech process ends
         if getattr(self, "voice_download", None) is not None:
