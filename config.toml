@@ -18,8 +18,8 @@ engine = "local"
 # "bf_emma", "bf_isabella", "bf_alice", "bf_lily" (British women), or an American one
 # ("am_michael", "am_fenrir", "am_puck", "af_heart", "af_bella", ... - README lists all 28).
 local_voice = "bm_george"
-# Minutes the local voice stays loaded after he last spoke (it takes about a gigabyte of memory
-# and a few seconds to load again). 0 keeps it loaded while Jarvis runs (0 to 1440).
+# Minutes the local voice stays loaded after he last spoke (it takes about 1.3 GB of memory and
+# about 5 seconds to load again). 0 keeps it loaded while Jarvis runs (0 to 1440).
 keep_warm_minutes = 0
 # The online voice (engine = "online"). To list every available voice, run:
 #   py -3.13 -m edge_tts --list-voices

@@ -202,30 +202,55 @@ def refuse_spacy_download() -> None:
 # The real voice
 # --------------------------------------------------------------------------
 
+FALLBACK_WAIT_S = 60.0                 # a word that needs the unknown-word model waits this long for it to load
+
+
 class WordFallback:
     """misaki's unknown-word step, from our own copy of PeterReid/graphemes_to_phonemes_en_* (Apache-2.0; a 3 MB BART):
-    the same model misaki's FallbackNetwork downloads, loaded here from ``folder`` only, on the CPU."""
+    the same model misaki's FallbackNetwork downloads, loaded here from ``folder`` only, on the CPU. It loads on a
+    thread of its own (importing transformers alone takes about 8 s here), so the voice is ready without it: only a word
+    misaki doesn't know waits for it, and when it can't load such a word is left unsaid."""
 
-    def __init__(self, folder: Path) -> None:
+    def __init__(self, folder: Path, *, loader: Callable[[Path], tuple[Any, Any, int]] | None = None) -> None:
+        self._folder = Path(folder)
+        self._loader = loader or self._load_bart
+        self._ready = threading.Event()
+        self._run: Callable[[list[int]], list[int]] | None = None
+        self._graphemes: dict[str, int] = {}
+        self._phonemes: dict[int, str] = {}
+        self._longest = 62
+        threading.Thread(target=self._load, name="word-fallback-load", daemon=True).start()
+
+    @staticmethod
+    def _load_bart(folder: Path) -> tuple[Any, Callable[[list[int]], list[int]], int]:
         import torch
         from transformers import BartForConditionalGeneration
 
-        self._torch = torch
-        self.model = BartForConditionalGeneration.from_pretrained(str(folder), local_files_only=True)
-        self.model.eval()
-        config = self.model.config
-        self._graphemes = {char: index for index, char in enumerate(config.grapheme_chars)}
-        self._phonemes = {index: char for index, char in enumerate(config.phoneme_chars)}
-        self._longest = max(1, int(getattr(config, "max_position_embeddings", 64)) - 2)
+        model = BartForConditionalGeneration.from_pretrained(str(folder), local_files_only=True)
+        model.eval()
+
+        def run(ids: list[int]) -> list[int]:
+            with torch.no_grad():
+                return model.generate(input_ids=torch.tensor([ids]))[0].tolist()
+
+        return model.config, run, max(1, int(getattr(model.config, "max_position_embeddings", 64)) - 2)
+
+    def _load(self) -> None:
+        try:
+            config, self._run, self._longest = self._loader(self._folder)
+            self._graphemes = {char: index for index, char in enumerate(config.grapheme_chars)}
+            self._phonemes = {index: char for index, char in enumerate(config.phoneme_chars)}
+        except Exception:  # noqa: BLE001 - no unknown-word model: such words are left unsaid
+            self._run = None
+        finally:
+            self._ready.set()
 
     def __call__(self, token: Any) -> tuple[str, int]:
-        text = str(getattr(token, "text", "") or "")[: self._longest]
-        if not text:
+        text = str(getattr(token, "text", "") or "")
+        if not text or not self._ready.wait(FALLBACK_WAIT_S) or self._run is None:
             return "", 1
-        ids = [1] + [self._graphemes.get(char, 3) for char in text] + [2]
-        with self._torch.no_grad():
-            made = self.model.generate(input_ids=self._torch.tensor([ids]))
-        return "".join(self._phonemes.get(index, "") for index in made[0].tolist() if index > 3), 1
+        ids = [1] + [self._graphemes.get(char, 3) for char in text[: self._longest]] + [2]
+        return "".join(self._phonemes.get(index, "") for index in self._run(ids) if index > 3), 1
 
 
 def make_g2p(is_british: bool, folder: Path) -> Any:

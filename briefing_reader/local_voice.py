@@ -482,7 +482,7 @@ class LocalVoiceClient:
     def _start(self) -> tuple[str, int]:
         """("" or an error code, load_ms). Called holding the turn. A process that says it could not load - or ends or
         hangs before it is ready START_TRIES times in a row - is not started again (``reason`` says why) until
-        ``forget_failure``: each try costs a full load of about a gigabyte."""
+        ``forget_failure``: each try costs a full load of about 1.3 GB."""
         error, load_ms = self._start_once()
         if error in (ERR_CLOSED, ERR_REFUSED, ""):
             return error, load_ms

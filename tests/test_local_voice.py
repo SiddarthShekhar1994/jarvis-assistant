@@ -559,6 +559,28 @@ class ServeTests(unittest.TestCase):
         self.assertEqual(captured["warm_voice"], "bm_george")
 
 
+class WordFallbackTests(unittest.TestCase):
+    CONFIG = SimpleNamespace(grapheme_chars="____ab", phoneme_chars="____xy")
+
+    def test_an_unknown_word_s_sounds_once_the_model_has_loaded(self) -> None:
+        seen = []
+
+        def loader(folder):
+            time.sleep(0.2)                                    # it loads on its own thread
+            return self.CONFIG, lambda ids: (seen.append(ids), [0, 4, 5, 2])[1], 62
+
+        fallback = lw.WordFallback(Path("g2p"), loader=loader)
+        self.assertEqual(fallback(token("ab", None)), ("xy", 1))     # this word waited for the load
+        self.assertEqual(seen, [[1, 4, 5, 2]])
+        self.assertEqual(fallback(token("", None)), ("", 1))
+
+    def test_when_it_cannot_load_such_a_word_is_left_unsaid(self) -> None:
+        def broken(folder):
+            raise OSError("no torch")
+
+        self.assertEqual(lw.WordFallback(Path("g2p"), loader=broken)(token("ab", None)), ("", 1))
+
+
 class SpacyRefusalTests(unittest.TestCase):
     def test_spacy_download_raises_instead_of_running_pip(self) -> None:
         cli = SimpleNamespace(download=lambda *a, **k: self.fail("pip ran"))

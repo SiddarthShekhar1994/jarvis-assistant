@@ -4315,7 +4315,7 @@ log. Changes apply the next time the app starts.
 |---|---|---|
 | `[voice] engine` | `"local"` | Where his voice is made: `"local"` = on this PC (Kokoro-82M; nothing he says leaves the PC, so lines that may be private are said too; the Windows voice speaks until it is downloaded or when it can't run - never the online one), `"online"` = Microsoft's online voice (edge-tts), with private lines kept on screen. See [Jarvis's voice, made on this PC](#jarviss-voice-made-on-this-pc). |
 | `[voice] local_voice` | `"bm_george"` | The local voice: `bm_george`, `bm_fable`, `bm_lewis`, `bm_daniel` (British men), `bf_emma`, `bf_isabella`, `bf_alice`, `bf_lily` (British women), or an American one (`am_adam`, `am_echo`, `am_eric`, `am_fenrir`, `am_liam`, `am_michael`, `am_onyx`, `am_puck`, `am_santa`, `af_alloy`, `af_aoede`, `af_bella`, `af_heart`, `af_jessica`, `af_kore`, `af_nicole`, `af_nova`, `af_river`, `af_sarah`, `af_sky`). All 28 come in the one download. |
-| `[voice] keep_warm_minutes` | `0` | Minutes the local voice stays loaded after he last spoke (0 to 1440). `0` keeps it loaded while Jarvis runs, so he never waits for it; it takes about a gigabyte of memory and a few seconds to load again. |
+| `[voice] keep_warm_minutes` | `0` | Minutes the local voice stays loaded after he last spoke (0 to 1440). `0` keeps it loaded while Jarvis runs, so he never waits for it; it takes about 1.3 GB of memory and about 5 seconds to load again. |
 | `[voice] voice` | `"en-GB-RyanNeural"` | Online edge-tts voice (`engine = "online"`). List them with `py -3.13 -m edge_tts --list-voices`. |
 | `[voice] rate` | `"+0%"` | Speed, a signed percentage from `"-50%"` to `"+100%"`, e.g. `"+15%"` faster, `"-10%"` slower. |
 | `[voice] volume` | `"+0%"` | Loudness, `"-100%"` to `"+100%"`, e.g. `"-20%"` quieter. |
@@ -4557,7 +4557,8 @@ brings back Microsoft's online Ryan voice, with those lines on screen again.
 American ones (see [Configuration](#configuration)). `rate` and `volume` work as before.
 
 **Speed.** It runs on the CPU in a process of its own, at below-normal
-priority, and stays loaded while Jarvis runs (`keep_warm_minutes`). On a Ryzen
+priority, and stays loaded while Jarvis runs (`keep_warm_minutes`): it loads in
+about 5 seconds when Jarvis starts and takes about 1.3 GB of memory. On a Ryzen
 7 7700X a one-sentence line is ready in about 0.6 s and a two- or
 three-sentence answer in about 1.7 s - about five times faster than he speaks
 (the online voice took about 2 s a line there). His own lines go before the
