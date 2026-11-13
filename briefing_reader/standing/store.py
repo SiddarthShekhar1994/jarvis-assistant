@@ -598,6 +598,12 @@ class Usage:
             entry = self._day(data, self._clock().date())
             return DayCounts(entry["runs"], dict(entry["jobs"]), dict(entry["checks"]), dict(entry["tidy"]))
 
+    def peek(self) -> DayCounts:
+        """Today's counts without the lock (a status to show: the file is always written whole)."""
+        data = self._read()
+        entry = self._day(data, self._clock().date())
+        return DayCounts(entry["runs"], dict(entry["jobs"]), dict(entry["checks"]), dict(entry["tidy"]))
+
     def try_run(self, job_id: str, *, total_cap: int, job_cap: int) -> bool:
         """Count one Claude run of ``job_id`` today when both caps allow it; False (nothing counted) when not."""
         with self._mutex, FileLock(self.files.usage_lock):

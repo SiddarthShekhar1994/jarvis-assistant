@@ -141,6 +141,14 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--followups-check", action="store_true",
                       help="the follow-ups of the productivity bundle: one real scan of your accounts' mail "
                            "headers (read only, the last 14 days, never the text); prints counts only")
+    mode.add_argument("--standing-run", action="store_true",
+                      help="standing agents and rules: one check of what is due, without a window ([standing] "
+                           "enabled; used by the Briefing agents task every 5 minutes)")
+    mode.add_argument("--standing-check", action="store_true",
+                      help="standing agents and rules: print what is set up and how the checks went (no Claude "
+                           "request, nothing read from Google)")
+    # Internal: who started a standing check (the task, or Jarvis while his window is open).
+    parser.add_argument("--origin", choices=("task", "app", "now"), default="task", help=argparse.SUPPRESS)
     parser.add_argument("--ask-dry-run", action="store_true",
                         help="with --ask-text: print the exact text Jarvis would send to Claude Code "
                              "(email text shown as counts) and stop; no Claude request")
@@ -154,6 +162,8 @@ def build_parser() -> argparse.ArgumentParser:
     view.add_argument("--now", action="store_true",
                       help="older name of --open, kept so existing shortcuts and hotkeys keep working; "
                            "it no longer starts reading (use --read)")
+    # Internal: a standing check found something that needs you while Jarvis was closed: open him without the focus.
+    view.add_argument("--standing-show", action="store_true", help=argparse.SUPPRESS)
     view.add_argument("--read", action="store_true",
                       help="open Jarvis and read the briefing aloud at once (what --now did before)")
     parser.add_argument("--from-file", metavar="PATH",
@@ -176,7 +186,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                            ("--ask-check", args.ask_check), ("--ask-text", args.ask_text is not None),
                            ("--plan-dry-run", args.plan_dry_run is not None),
                            ("--desktop-dry-run", args.desktop_dry_run is not None),
-                           ("--followups-check", args.followups_check)):
+                           ("--followups-check", args.followups_check),
+                           ("--standing-run", args.standing_run), ("--standing-check", args.standing_check)):
             if used:
                 parser.error(f"{view} cannot be combined with {flag}")
         if args.read and args.ask:
@@ -192,9 +203,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _view_flag(args: argparse.Namespace) -> str:
     """"--open", "--now" or "--read" when one was given, else ""."""
-    for flag in ("open", "now", "read"):
+    for flag in ("open", "now", "read", "standing_show"):
         if getattr(args, flag, False):
-            return f"--{flag}"
+            return f"--{flag.replace('_', '-')}"
     return ""
 
 
@@ -204,7 +215,7 @@ def launch_kind(args: argparse.Namespace) -> str:
     if getattr(args, "read", False):
         return LAUNCH_READ
     if (getattr(args, "open", False) or getattr(args, "now", False) or getattr(args, "ask", False)
-            or getattr(args, "hud", False)):
+            or getattr(args, "hud", False) or getattr(args, "standing_show", False)):
         return LAUNCH_OPEN
     if getattr(args, "run", None) or getattr(args, "catch_up", False):
         return LAUNCH_SCHEDULED
@@ -215,7 +226,7 @@ def _run(args: argparse.Namespace) -> int:
     from .config import load_config, setup_logging
 
     # The hotkey agent runs all day: it must not hold the log open (rotation).
-    log_file = setup_logging(debug=args.debug, keep_open=not args.hotkey_agent)
+    log_file = setup_logging(debug=args.debug, keep_open=not (args.hotkey_agent or args.standing_run))
     logger.info("%s %s starting (Python %s on %s)", APP_NAME, __version__,
                 platform.python_version(), platform.platform())
     logger.info("Arguments: run=%s open=%s now=%s read=%s catch_up=%s hotkey_agent=%s ask=%s hud=%s slots=%s "
@@ -239,6 +250,8 @@ def _run(args: argparse.Namespace) -> int:
                     getattr(args, "plan_dry_run", None) is not None, bool(getattr(args, "followups_check", False)),
                     getattr(args, "desktop_dry_run", None) is not None)
         return commands.run(args, config, sys.stdout)
+    if args.standing_run or args.standing_check:
+        return _run_standing(config, check_only=bool(args.standing_check), origin=args.origin)
     slots = _resolve_slots(args.slots, config.schedule.slots)
     if args.hotkey_agent:
         return _run_hotkey_agent(config, slots)
@@ -471,6 +484,41 @@ def _windowless_python() -> str:
         if candidate.is_file():
             return str(candidate)
     return sys.executable
+
+
+# --------------------------------------------------------------------------
+# Standing agents and rules
+# --------------------------------------------------------------------------
+
+def _run_standing(config: Any, *, check_only: bool, origin: str) -> int:
+    """``--standing-run``: one check without a window (no Qt, no app lock, its own mutex); ``--standing-check``:
+    print the status. Refused while the tests run (the test guard): a real check reads Google and runs Claude Code."""
+    from .standing import runner
+    from .standing.lock import RunnerLock
+
+    if check_only:
+        for line in runner.describe(config):
+            print(line)
+        return 0
+    from .desktop.backend import real_backend_blocked
+
+    if real_backend_blocked():
+        logger.info("Standing: no real check while the tests run")
+        return 0
+    if not getattr(getattr(config, "standing", None), "enabled", False):
+        logger.info("Standing: [standing] is off; nothing to check")
+        return 0
+    lock = RunnerLock()
+    if not lock.acquire():
+        logger.info("Standing: another check is running; this one ends")
+        return 0
+    try:
+        if lock.abandoned:
+            logger.info("Standing: the last check ended without letting go of its lock; carrying on")
+        runner.run_check(config, runner.real_deps(config, _instance_name()), origin=origin)
+    finally:
+        lock.release()
+    return 0
 
 
 # --------------------------------------------------------------------------
