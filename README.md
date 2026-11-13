@@ -53,7 +53,8 @@ your own scheduled routine (see
   a calendar change happens at once and its card offers **Undo** for 10
   minutes; a reply, email or cancellation shows **Sent** with **Undo** at once
   and goes out a few seconds later. A new recipient needs your tick first, and
-  he never sends or changes anything on his own. Share requests, Slack replies and links are
+  he never sends or changes anything on his own (but for a standing rule's
+  tidy-up, if you set one up: see below). Share requests, Slack replies and links are
   hand-offs (**Open**, **Copy**). See
   [Calendar actions](#calendar-actions),
   [Invitations, moves and cancellations](#invitations-moves-and-cancellations),
@@ -121,6 +122,19 @@ your own scheduled routine (see
   He may offer to remember a fact himself; it is kept only when you click
   **Remember this**. Part of the productivity bundle (`[productivity]`), off
   until you turn it on. See [Memory (the MEMORY tab)](#memory-the-memory-tab).
+- **Standing agents and rules.** Jobs that come back on their own, each set up
+  from one sentence in the bar: "agent: every weekday at 7:30, look at my
+  calendar and my lab's mail and tell me what needs me", "rule: when
+  billing@example.com sends a bill, add a to-do to pay it by its due date".
+  They wake at a time, every 30 minutes or more, on new mail that matches
+  their filter (looked for every 5 minutes, headers only) or on **Run now**,
+  read only their own sources, report on the **Agents** screen (**Ctrl+9**)
+  and line up cards that wait for your click. A rule may also star, label or
+  archive the one mail it matched, without a click and with an **Undo** for 7
+  days, if you set it up to. Your own Claude Code does the reading, on your
+  plan: at most 30 runs a day for all of them. Off until you turn it on, and
+  nothing runs before your yes on its consent card. See
+  [Standing agents and rules](#standing-agents-and-rules).
 - **Always at hand.** **Ctrl+Alt+J** opens Jarvis from anywhere, and so does a
   Start menu shortcut. Minimize him to his taskbar button; while a scheduled
   run waits for the briefing, only his tray icon shows. See
@@ -188,12 +202,25 @@ orb in the middle and a rail of screens at its left edge (see
   PC, kept in memory) and are shown in LIVE.
 - **Mail Jarvis reads on his own is headers only (sender, recipients, subject,
   date), from the last 14 days, on this PC; never the text, never saved, never
-  sent anywhere.** The follow-up list's scan asks Gmail for named headers with a
+  sent anywhere**, but for the standing agents and rules you set up (the next
+  point). The follow-up list's scan asks Gmail for named headers with a
   field mask that has no snippet and no body, only for accounts whose Google
   account you confirmed, and only while the reading screen is visible. A
   thread's text is read only after your click on **Draft a reply** / **Draft a
   nudge** (that one thread), and only then does it reach your Claude Code; a day
   plan gets two counts of the list, nothing else.
+- **Standing agents and rules read the mail they watch, on their own, once you
+  said yes.** They are off by default, and nothing runs before your yes on
+  their consent card. Then, when a job runs, the text of each mail its filter
+  matched goes to your Claude plan without a click at that moment: only that
+  one message, never its whole conversation, with keys and passwords taken out
+  first. The run has no tools and no web, like Ask's, so a mail can't change
+  what is read, and every filter may use only words and addresses of your own
+  sentence. Their cards still wait for your click, and a reply is checked again
+  at it. A rule's tidy-up (star, one of your labels, archive) is the one change
+  made without a click: only if you set it up, only on the mail it matched,
+  each with an **Undo** for 7 days. See
+  [Standing agents and rules](#standing-agents-and-rules).
 - **A mail search Jarvis builds himself uses only a guest's address from your
   calendar, and only after your click** (or your typed "prep me ..."): one
   read-only search per guest of that meeting, the last 14 days, at most one
@@ -229,12 +256,15 @@ orb in the middle and a rail of screens at its left edge (see
   access is the few permissions listed in setup step 8.
 - **Gray zones, stated.** Driving your own signed-in Claude Code from your own
   app, when you ask, is personal use; sharing such a feature in a public
-  project, and automated web searching and page reading on a consumer plan,
-  are less clear-cut. So Ask is off by default, every user installs and signs
+  project, runs that start on their own (standing agents and rules), and
+  automated web searching and page reading on a consumer plan, are less
+  clear-cut. So Ask is off by default, every user installs and signs
   in to Claude Code themselves, and web research is small, runs only when you
   ask and shows every step in LIVE (`[research] enabled = false` turns it
-  off). See [Privacy and cost](#privacy-and-cost) and
-  [Web research](#web-research).
+  off); standing agents and rules are off by default too, wait for your yes on
+  their consent card and make at most 30 runs a day. See
+  [Privacy and cost](#privacy-and-cost), [Web research](#web-research) and
+  [Standing agents and rules](#standing-agents-and-rules).
 
 ## How it fits together
 
@@ -253,9 +283,9 @@ orb in the middle and a rail of screens at its left edge (see
                         |  read-only Notion API
  YOUR WINDOWS PC        v
  +----------------------------------------------+     Task Scheduler: AM, PM
- | Jarvis desktop app (Python 3.13, PySide6)    | <-- and catch-up tasks; the
+ | Jarvis desktop app (Python 3.13, PySide6)    | <-- and catch-up tasks, the
  | JARVIS / BRIEFING / LIVE, NEEDS YOUR OK      |     Ctrl+Alt+J hotkey agent
- +----------------------------------------------+
+ +----------------------------------------------+     and the agents check
         |                  |                  |
         v                  v                  v
  Google APIs        Claude Code CLI      Voice
@@ -293,13 +323,18 @@ orb in the middle and a rail of screens at its left edge (see
   changes you approve and, for Ask, the events it plans from (by default
   yesterday to 14 days ahead, with guests' names and addresses; see "What
   Claude Code gets" under [Ask Jarvis](#ask-jarvis-optional)); Gmail to send
-  what you approved and, for Ask, to read the threads a request is about.
+  what you approved and, for Ask, to read the threads a request is about; for
+  [standing agents and rules](#standing-agents-and-rules), to look for new
+  mail that matches their filters (headers only) and read the one message each
+  matched, and, for a rule's tidy-up you set up, to star, label or archive it.
 - **Claude Code** runs on this PC (`claude -p`), signed in to your claude.ai
-  plan: once per Ask (twice when it reads mail), and as a separate, isolated
-  run for web research.
+  plan: once per Ask (twice when it reads mail), as a separate, isolated
+  run for web research, and once for each run of a standing agent or rule (at
+  most 30 a day).
 - **Windows Task Scheduler** starts the app for the AM and PM runs and at
-  logon and unlock (the catch-up), and keeps a small agent waiting for the
-  hotkey. What the app keeps (sign-ins, decisions, logs) is in
+  logon and unlock (the catch-up), keeps a small agent waiting for the
+  hotkey, and every 5 minutes starts a windowless check for standing agents
+  and rules. What the app keeps (sign-ins, decisions, logs) is in
   `%LOCALAPPDATA%\briefing-reader` on this PC.
 
 The modules are listed under [Project layout](#project-layout).
@@ -353,9 +388,9 @@ not of this list.
    powershell -NoProfile -ExecutionPolicy Bypass -File .\install-schedule.ps1
    ```
 
-   It registers the AM, PM, catch-up and hotkey tasks. Set `[schedule]` in
-   `config.toml` (or pass `-AmTime` and `-PmTime`) a few minutes after your
-   routine writes the page.
+   It registers the AM, PM, catch-up, hotkey and agents tasks. Set
+   `[schedule]` in `config.toml` (or pass `-AmTime` and `-PmTime`) a few
+   minutes after your routine writes the page.
 8. **Add a Start menu shortcut** that starts
    `pythonw.exe -m briefing_reader --open` in the project folder (see
    [Start menu shortcut](#start-menu-shortcut)), or just press **Ctrl+Alt+J**.
@@ -369,15 +404,37 @@ Built: **Visual snapshots in LIVE** - see [Pictures in LIVE](#pictures-in-live);
 **Plan and prep offers** - see [Offers](#offers-plan-my-day-and-prepare-brief);
 **Follow-up nudges** - see [Follow-ups and nudges](#follow-ups-and-nudges);
 **Meeting recording and summaries** (only with the consent of everyone in the
-meeting) - see [Meetings](#meetings-recording-and-summaries).
+meeting) - see [Meetings](#meetings-recording-and-summaries);
+**Standing agents and rules** - see
+[Standing agents and rules](#standing-agents-and-rules).
 
 Planned for later versions; none of these is built yet, and all of them will
-keep the same rules (proposals, your click, every step visible in LIVE):
+keep the same rules (they propose, your click approves, and what they did
+shows, in LIVE or, for standing jobs, on the Agents screen):
 
+- **A new look**: a board of typed frames beside the chat (mail, calendar,
+  to-dos, charts, timelines, tables, pictures), drawn from data only.
+- **Capture**: screenshots, PDFs, pasted text and calendar files (.ics,
+  webcal) become events and to-dos, each linked to where it came from and
+  each a card for your click; a whole repeating series comes in on one
+  Approve, and a calendar file skips what is already on your calendar.
+- **Mail extras**: a reply editor you revise in plain words ("shorter, and
+  warmer"), help with unsubscribing that reads a mail's List-Unsubscribe
+  header and asks you first, and approve-all for a batch of cards.
+- **Documents and datasheets** beside the chat: documents written with you,
+  and tables with typed columns that Jarvis fills (a standing agent's report
+  could land there too).
+- **Radar**: ready-made standing agents for internships, hackathons,
+  deadlines and subscriptions (renewals, trials that end) worth your
+  attention.
 - **A live browser Jarvis drives**: he opens and fills in pages in a browser
   you can watch, and every submit waits for your click.
-- **Radar**: internships, hackathons, deadlines and subscriptions (renewals,
-  trials that end) worth your attention.
+- **Smaller items**: changing settings in the app (the Settings screen is
+  read only today), his first words sooner, a fallback model that runs on
+  this PC, filling forms in the apps you allow (see
+  [Jarvis on your desktop](#jarvis-on-your-desktop-the-hud)), and for his
+  voice: knowing yours, staying quiet during calls and live captions while
+  you talk.
 
 ## About the name
 
@@ -392,8 +449,9 @@ changed; to keep existing setups working, the internals keep the old name:
   `py -3.13 -m briefing_reader ...` (also in shortcuts and scheduled tasks);
 - the data folder `%LOCALAPPDATA%\briefing-reader` (sign-ins, decisions and
   the log, `briefing-reader.log`) and the audio folder `%TEMP%\briefing-reader`;
-- the scheduled tasks "Briefing AM", "Briefing PM", "Briefing catch-up" and
-  "Briefing hotkey", and the names of the app's single-instance locks;
+- the scheduled tasks "Briefing AM", "Briefing PM", "Briefing catch-up",
+  "Briefing hotkey" and "Briefing agents", and the names of the app's
+  single-instance locks;
 - the `.env` keys (`NOTION_TOKEN`, `BRIEFING_PAGE_ID`, `JARVIS_...`).
 
 **Coming from briefing-reader?** Update the folder you have (`git pull`). An
@@ -567,7 +625,7 @@ cd "<project folder>"
 
    The script checks that Python 3.13 and the packages import, reads `[schedule]`
    and `[hotkey]` from `config.toml`, warns if `.env` has no `NOTION_TOKEN` or no
-   `BRIEFING_PAGE_ID` value (it never prints the values), and registers four
+   `BRIEFING_PAGE_ID` value (it never prints the values), and registers five
    tasks for your user:
 
    | Task | When | Runs (in the project folder) |
@@ -576,6 +634,7 @@ cd "<project folder>"
    | Briefing PM | daily 23:42 | `pythonw.exe -m briefing_reader --run pm --slots am=10:12,pm=23:42` |
    | Briefing catch-up | at logon and when you unlock the PC, 20 s later | `pythonw.exe -m briefing_reader --catch-up --slots am=10:12,pm=23:42` |
    | Briefing hotkey | at logon (and started right away) | `pythonw.exe -m briefing_reader --hotkey-agent --slots am=10:12,pm=23:42` |
+   | Briefing agents | at logon and every 5 minutes | `pythonw.exe -m briefing_reader --standing-run --origin task` |
 
    `pythonw.exe` is the full path of Python 3.13's windowless interpreter, which
    the script finds with `py -3.13` and prints. The tasks used to start the `pyw`
@@ -607,6 +666,17 @@ cd "<project folder>"
    without logging off. If `[hotkey] enabled = false` or `-NoHotkey` is given, the
    hotkey task is not installed and an existing one is stopped and removed. The
    hotkey task always runs windowless, also with `-Console`.
+
+   The agents task checks for the
+   [standing agents and rules](#standing-agents-and-rules) that are due: at
+   logon and every 5 minutes, never waking the PC, also on battery, one at a
+   time (a start missed while the PC slept runs as soon as it can) and stopped
+   after 30 minutes at most (a check starts no job after 15 minutes and
+   usually ends within seconds). It is always installed, also with
+   `-NoHotkey`, and always windowless, also with `-Console`; while standing
+   agents and rules are off it ends at once each time. An install from before
+   this version has no such task: run the script again once (the Agents
+   screen says "Background runs off" until you do).
 
    **Wake timers.** A task can wake a sleeping PC only when the power plan setting
    "Allow wake timers" is **Enable**, both plugged in and on battery. The script
@@ -779,12 +849,15 @@ cd "<project folder>"
    | `https://www.googleapis.com/auth/calendar.events` | Add the event you approved, and first look for the same event (same title and start) so it is not added twice; read your events of today (or tomorrow) and the next 14 days for TODAY and DEADLINES; read one event by its id for an invitation, move or cancel card. Only after your click on that card (a cancellation after its short hold): answer an invitation (only your own answer is sent), move an event you organize (or may change as a guest) or cancel an event you organize, always telling the guests as the card says ("guests notified" by default); and only on your click on that card's **Undo**, reverse exactly that change (delete the event Jarvis added, put your earlier answer back, move the event back), unless it was changed since. It never changes or deletes anything else. |
    | `https://www.googleapis.com/auth/calendar.settings.readonly` | Read your calendar's time zone, so that "15:00" means 15:00 where your calendar is. |
    | `https://www.googleapis.com/auth/gmail.send` | Only for an account with `"gmail_send"` in its features (step 8b). Only after your click on **Send** on that card and its short hold: send that one reply or email, exactly as the card shows it. It cannot read, search, change or delete any mail. |
-   | `https://www.googleapis.com/auth/gmail.readonly` | Asked for at every sign-in of an account with `"gmail_read"` in its features (the shipped `config.toml` has it on both accounts), **even while Ask Jarvis is off**; remove `"gmail_read"` if you do not use Ask (step 8c). Used only while Ask Jarvis is on: read the Gmail threads one request is about (at most 3, each read only when you ask Jarvis something); with the productivity bundle on, also a [meeting brief](#meeting-prep)'s reads, only after your typed "prep me ..." or your click: one lookup per guest of that meeting on the meeting's account, from the **last 14 days**, at most one thread per guest and 3 in all; also the [follow-up list](#follow-ups-and-nudges)'s header scan (while the reading screen is visible, every 30 minutes: sender, recipients, subject, date and labels of the **last 14 days**, never the text) and a draft's read (after your click on Draft a reply / Draft a nudge: that one thread). Read only: it cannot send, change or delete any mail; the text is used for that one request and never saved or logged. |
+   | `https://www.googleapis.com/auth/gmail.readonly` | Asked for at every sign-in of an account with `"gmail_read"` in its features (the shipped `config.toml` has it on both accounts), **even while Ask Jarvis is off**; remove `"gmail_read"` if you do not use Ask (step 8c). Used only while Ask Jarvis is on: read the Gmail threads one request is about (at most 3, each read only when you ask Jarvis something); with the productivity bundle on, also a [meeting brief](#meeting-prep)'s reads, only after your typed "prep me ..." or your click: one lookup per guest of that meeting on the meeting's account, from the **last 14 days**, at most one thread per guest and 3 in all; also the [follow-up list](#follow-ups-and-nudges)'s header scan (while the reading screen is visible, every 30 minutes: sender, recipients, subject, date and labels of the **last 14 days**, never the text) and a draft's read (after your click on Draft a reply / Draft a nudge: that one thread). With [standing agents and rules](#standing-agents-and-rules) on (after your yes on their consent card): every 5 minutes, the ids and named headers of new mail that matches a job's filter (never a snippet or a body); when that job runs, the one message its filter matched (a rule's dry run, on your click: up to 8 of the newest matches); the account's own labels, when a rule's tidy-up names one; and, at your click on a standing reply's Send, that conversation once more. Read only: it cannot send, change or delete any mail; the text is used for that one request (or that one run) and never saved or logged. |
+   | `https://www.googleapis.com/auth/gmail.modify` | Only for an account with `"gmail_tidy"` in its features (step 8d), and only in that account's own tidy-up sign-in (`google_token_<account>.tidy.json`), never in its main one. Only for a [standing rule's tidy-up](#standing-agents-and-rules) you set up: read the label ids of the one message the rule matched (and whether other messages of its conversation are in the inbox), then star it, add the rule's one label or take it out of the inbox, without a click; and, on your click on its **Undo**, take exactly that change off again. Google's permission is broad (everything but deleting mail for good); Jarvis never uses it to read a mail's text, send, trash, mark as spam, read or unread, or change any other label or a whole conversation. |
    | `openid`, `https://www.googleapis.com/auth/userinfo.email` | Learn which Google account a sign-in is (its address and account id), to bind the account name to it (see above). Nothing else. |
 
    No other access: Jarvis reads mail only through `gmail.readonly`, for Ask
-   Jarvis (step 8c), its meeting briefs and the follow-up list (headers only)
-   and its drafts, and has no access to Drive, contacts or anything else.
+   Jarvis (step 8c), its meeting briefs and the follow-up list (headers only),
+   its drafts and the standing agents and rules you set up; `gmail.modify`
+   (step 8d) only changes the labels of a mail a rule matched; and he has no
+   access to Drive, contacts or anything else.
 
    **Disconnecting.** Right after a name's first sign-in, **No, use another
    account** in the question above does it for you: that name's saved sign-in
@@ -792,7 +865,8 @@ cd "<project folder>"
    (Jarvis closed, or a binding you confirmed earlier): delete
    `%LOCALAPPDATA%\briefing-reader\google_token_personal.json`
    (or `google_token_work.json` for the work account; the next click on that
-   account's card signs in again), and remove the app's access at
+   account's card signs in again; a rule's tidy-up sign-in is
+   `google_token_<account>.tidy.json`), and remove the app's access at
    <https://myaccount.google.com/permissions> (pick your app, jarvis-assistant,
    and remove its access), in each Google account you signed in with. To use an
    account name with another Google account, also delete that name's entry in
@@ -809,7 +883,7 @@ cd "<project folder>"
    using calendar actions and email without disconnecting, set
    `[calendar] enabled = false` in `config.toml`; to stop acting for one
    account, remove its `[accounts.<name>]` table, or one of its features
-   (`"calendar"`, `"gmail_send"`, `"gmail_read"`).
+   (`"calendar"`, `"gmail_send"`, `"gmail_read"`, `"gmail_tidy"`).
 
    **8b. Sending replies and emails.** Only needed if **Send** on a Reply or
    Email card should send it for you; without it those cards stay hand-offs
@@ -885,17 +959,43 @@ cd "<project folder>"
    account's sign-in is then blocked (`admin_policy_enforced`), remove
    `"gmail_read"` from that account first; Calendar and sending keep working.
 
+   **8d. Letting a rule tidy the mail it matched (optional).** Only needed
+   for a [standing rule](#standing-agents-and-rules) that stars, labels or
+   archives the mail it matched. Without it such a rule still lines up its
+   cards, and its ACTIVITY rows say why nothing was tidied.
+
+   1. The Gmail API is enabled already if you did step 8b (otherwise do 8b.1).
+   2. **OAuth consent screen > Data access**: **Add or remove scopes**, tick
+      `.../auth/gmail.modify`, then **Update** and **Save**. Like
+      gmail.readonly it is a "restricted" scope: for an app only you use, no
+      verification or security assessment is needed.
+   3. In `config.toml`, add `"gmail_tidy"` to that account's `features` (no
+      account has it in the shipped file), and restart Jarvis. It never
+      joins the account's main sign-in, so nothing else signs in again.
+   4. On the Agents screen (once you said yes on its consent card, and while
+      a rule of yours tidies that account's mail), the card "Tidy-up needs its
+      own sign-in" says what the tidy-up may do; **Sign in for tidy-up** opens
+      Google's sign-in. Pick the same Google account as that account name's
+      own (another one is refused). It asks only for `gmail.modify` and who
+      the account is, and is kept apart, in
+      `%LOCALAPPDATA%\briefing-reader\google_token_<account>.tidy.json`.
+
+   Delete that file to sign the tidy-up out on this PC (the rule then makes
+   cards only), and remove `"gmail_tidy"` from the account to stop it for
+   good.
+
 9. **Uninstall**
 
    ```powershell
    powershell -NoProfile -ExecutionPolicy Bypass -File .\uninstall-schedule.ps1
    ```
 
-   It removes "Briefing AM", "Briefing PM", "Briefing catch-up" and "Briefing
-   hotkey" if they exist (the hotkey agent is stopped first, so the hotkey is
-   free at once) and reports what was removed or not found (`-WhatIf` shows what
-   it would do). Files, `.env`, logs, the Google sign-in and saved decisions are
-   left alone; see "Disconnecting" in step 8 and
+   It removes "Briefing AM", "Briefing PM", "Briefing catch-up", "Briefing
+   hotkey" and "Briefing agents" if they exist (the hotkey agent is stopped
+   first, so the hotkey is free at once) and reports what was removed or not
+   found (`-WhatIf` shows what it would do). Files, `.env`, logs, the Google
+   sign-ins, saved decisions and your standing agents and rules are left
+   alone; see "Disconnecting" in step 8 and
    [Logs and saved files](#logs-and-saved-files).
 
 ## The look (the hologram)
@@ -1045,6 +1145,9 @@ effects off, and so does turning off "Show animations in Windows".
   follow-ups are on (see [Memory (the MEMORY tab)](#memory-the-memory-tab) and
   [Follow-ups and nudges](#follow-ups-and-nudges)); with the bundle off they
   are not there at all.
+- **Agents** (**Ctrl+9**; a cyan dot while a run has something you have not
+  seen) shows only while [standing agents and rules](#standing-agents-and-rules)
+  are on (with Ask Jarvis): the jobs, what they did and their reports.
 - **Settings** (**Ctrl+,**) is read only: it shows the settings as Jarvis
   loaded them (Voice, Briefing times, Ask, Accounts, Quiet hours, LIVE and
   privacy), says which `config.toml` tables hold them and opens `config.toml`
@@ -1294,6 +1397,14 @@ voice when the online one cannot be reached), politely and to the point:
   guests (prep offers), while the briefing plays, while a card is being
   carried out (a Send's hold included) or while Jarvis plans or speaks: some of those wait for a quieter moment,
   others leave the offer as text only (the table under Offers says which).
+- **Standing agents and rules** (see
+  [Standing agents and rules](#standing-agents-and-rules)): one fixed line
+  when a run needs you, built from counts: "Sir, your agents left 2 cards for
+  your OK.", "Sir, your agents have 1 new item for you." With the voice made
+  on this PC it names the job ("Sir, Bills left 1 card for your OK."). Never a
+  report, a subject, a sender or a card's text. It waits while the PC is
+  locked, in `[standing]` quiet hours, while a meeting records, in focus mode
+  or while Windows says you are busy, and each run is told once.
 
 Everything he says is also written in the JARVIS tab. While he speaks the orb
 reads SPEAKING and the large line next to it shows his words. He never talks
@@ -2750,6 +2861,243 @@ A restart ends a task; its files stay.
 window on it (on screen and in memory only; it never opens LIVE by itself). **Logs** carry
 ids, kinds, counts, states, reason codes and durations only - never your words, a search, an
 address, a page's words, a file name, a tool's arguments or a token.
+
+### Standing agents and rules
+
+Some jobs come round again and again: "every weekday at 7:30, tell me what in
+my calendar and my lab's mail needs me", "when a bill comes in, line up a
+to-do to pay it". A **standing agent** is such a job, set up from one sentence
+of yours: it wakes at a time, every so often, on new mail that matches its
+filter or when you click **Run now**, reads only the sources it was given,
+writes a short report on the **Agents** screen (**Ctrl+9**) and lines up
+cards (to-dos, events, reply drafts) that wait for your click like any other.
+A **rule** is one sentence too, and narrower: a hard Gmail filter, one yes or
+no question about each new mail it matches, the values to find in it (an
+amount, a date, a name) and what a "yes" makes: a to-do, an event, a reply
+draft, or a line that just tells you. If you want it, a rule also tidies the
+one mail it matched (stars it, gives it one of your labels or archives it)
+without a click, with an **Undo** for 7 days. Your own Claude Code does the
+reading, on your plan, with no tools and no web: Jarvis gathers each job's
+sources himself and builds every card from what the run answers.
+
+**Turning it on.** It is off in the public `config.toml` (its `[standing]`
+table is there, commented out, with `enabled = false`). Turn it on for this PC
+with the line `JARVIS_STANDING_ENABLED=true` in `.env`, then restart Jarvis.
+It also needs [Ask](#ask-jarvis-optional) on, and an account with
+`"gmail_read"` for anything about mail. Then run `install-schedule.ps1` once
+more (setup step 6): it adds the "Briefing agents" task, which checks every 5
+minutes, also while Jarvis is closed. Until you do, Jarvis checks every 5
+minutes only while he is open, and the Agents screen says so ("Background runs
+need the scheduled task: run install-schedule.ps1 again."). Off, nothing of it
+runs, the Dock has no Agents screen and the task ends at once each time.
+
+**Setting one up.** Type `agent:` or `rule:` and your sentence in the bar
+("rule: when billing@example.com sends a bill, add a to-do to pay it by its
+due date and star it"), or just ask ("every Monday at 8, look at my week and
+tell me what to prepare"): Ask's first planner run may hand it to the setup,
+and only your own words go there, never the planner's. One setup run on your
+plan turns the sentence into a draft (it gets your sentence, your account
+names and what each can do, and the date; never mail) and shows it on the
+Agents screen's setup card in plain words: when it runs, what it reads (each
+filter as Jarvis will use it), what it asks and finds, what it may line up,
+its tidy-up and its caps, with the privacy line, and **Dry run** (a rule),
+**Turn on**, **Edit** (your sentence back in the bar, to reword it; the draft
+goes) and **Discard**. A sentence that is not something to do again and again
+is not set up ("Ask it as a normal request, or say when it should happen.").
+Every filter is checked against your own sentence, as Ask's mail searches
+are: it may use only words and addresses you typed, never OR, AND, brackets, a
+lone "-", a time or one single message, never a security or payment sender, a
+word about codes, passwords, banking or statements, a label, spam or trash,
+and it must narrow. A rule that tidies must name its sender (`from:`), and a
+label tidy-up's label must already be one of your Gmail labels ("make the
+label in Gmail first").
+
+**The dry run.** A rule goes on only after its dry run. Gmail's own count of
+its matches in the last 30 days comes first (headers only, no Claude run): a
+filter that matches more than 300 is refused right there ("it would read
+nearly everything. Name a sender or a subject to narrow it."). Then the newest
+matches (up to 8) are read and judged in one run, counted like any other, and
+the card says for each what a live rule would have done: the card it would
+line up, the line it would tell you, the tidy-up it would make, or why not.
+Nothing is proposed, starred, labelled or archived. A filter with more than 90
+matches in those 30 days never tidies: it makes cards only.
+
+**The consent card and Turn on.** Before anything runs, the Agents screen
+shows one card (your yes is asked once and kept on this PC): "Agents and
+rules read the mail they watch, on their own", with what that means (see
+**What goes where** below), **Yes, let them run** and **Not now**. Until you
+say yes nothing runs and Turn on waits. Turn on also needs each account the
+job reads mail from signed in, and records which Google account each one is:
+if that account name is later signed in as another Google account, the job's
+cards are not shown and its tidy-up stops.
+
+**When they run.** A timed agent at its times on its days (by the local date
+and clock, so a daylight-saving night neither skips nor repeats a run; a time
+missed while the PC was off or asleep runs once at the next check if it is at
+most 3 hours old, `catch_up_hours`, and is noted as missed otherwise); an
+interval agent every N minutes or hours (30 minutes at the shortest; after a
+long sleep one run, never a backlog); a mail job on new mail that matches its
+filter, looked for every 5 minutes (one probe per account, then each filter:
+Gmail's ids and headers only, no Claude run); and an agent when you click
+**Run now**, or type "run" and its name ("run Morning check"). A job sees only
+mail that came after it was turned on (its first check sets the start). A run
+happens only when there is something to read: a mail job with no new mail
+makes no Claude run and no file. When a run fails, its mail is checked again
+next time, and nothing is ever proposed twice.
+
+**The Agents screen** (the Dock, **Ctrl+9**; a cyan dot while a run has
+something you have not seen):
+
+- **The status line**, such as BACKGROUND RUNS ON · 4 OF 30 RUNS TODAY · NEXT
+  7:30 AM (CHECKS WHILE JARVIS IS OPEN, or BACKGROUND RUNS OFF, while the task
+  has not run for 15 minutes), and under it what to fix: rerun the installer,
+  an account that "can't be read in the background", "No Claude runs until
+  ..." while a limit holds, `standing.json` kept read only, and a Delete's
+  **Undo**.
+- **Pause all** / **Resume all** beside the title: nothing runs and nothing is
+  tidied until you resume.
+- **The cards Jarvis puts first**: the consent card, a tidy-up's sign-in card
+  and the setup card.
+- **AGENTS**: one row each with its name, when it runs and what it reads, its
+  next and last run and its runs today (your own words are its tooltip), and
+  **Run now**, **Pause** / **Resume** and **Delete** (with **Undo** for 10
+  minutes). Pausing or deleting a job withdraws its cards that still wait.
+- **RULES**: one row each with its sentence, its dry run ("Dry run: 3 of 8
+  yes"), the mails it checked today and its tidy-up, and **Dry run**, **Turn
+  on**, **Pause** / **Resume** and **Delete**.
+- **ACTIVITY**: a receipt for everything the jobs did, newest first: each card
+  (WAITING, with an **Undo** that withdraws it from Approvals; DECIDED;
+  WITHDRAWN), each match a rule told you of, with the values it found, each
+  tidy-up with its own **Undo** or why there was none, and a run that made
+  nothing ("Reached its runs for today; it waits until tomorrow.", "Missed a
+  run while the PC was off or asleep.", "Couldn't finish a run.").
+- **REPORTS**: what the agents wrote, each under "Written by Claude from your
+  mail", and **Clear**, which deletes the reports and receipts kept on this PC
+  at once (a card that still waits stays until you decide it).
+
+**Cards.** A standing card is an ordinary card on Approvals, under its own
+AGENTS header between Ask's and the briefing's ("RULE · TODO", "AGENT ·
+REPLY"), at most 40 at a time. Jarvis builds each one himself: a rule's value
+counts only when that mail itself holds it, a reply goes only to the sender of
+the mail it answers and never repeats another mail, and every recipient counts
+as new (a NEW RECIPIENT tick, unless Jarvis sent to that address before). A
+standing **Reply** is checked again at your click, before its hidden hold:
+Jarvis reads that conversation again, and the message must still be there,
+you must not have written in it since, and its recipients must be on that
+message; then Send goes on by itself ("Checking that conversation again
+before it goes..."). If not, nothing is sent and the card says why. A card is
+kept on this PC with its run for 7 days (`keep_days`); one still waiting then
+goes with it.
+
+**Telling you.** When a run needs you, Jarvis says one fixed line built from
+counts, never the model's words ("Sir, your agents left 2 cards for your
+OK."); with the voice made on this PC (`[voice] engine = "local"`) it names
+the job when the news is from one ("Sir, Bills left 1 card for your OK."),
+since nothing he says then leaves the PC. The JARVIS tab shows it at
+once with **View agents**, and so does a toast when you are in another app.
+The spoken line waits while the PC is locked, during `[standing]` quiet hours
+(22:00-08:00), while a meeting records, in focus mode, or while Windows says
+you are busy (presentation mode, a full-screen program or game, quiet time).
+Each run is told once, and one more than 12 hours old is only shown. With
+Jarvis closed, a check opens him quietly, without taking the focus (as a
+scheduled briefing does; `--standing-show`), but never in quiet hours or with
+`open_when_closed = false`: then the news waits for the first check after
+them, or for your next open.
+
+**The tidy-up.** Only a rule tidies, only the mail it matched and only when
+you set it up so: your choice, and the one thing Jarvis changes without a
+click (an agent never tidies). For each "yes" it may star that one message,
+add the one label of yours the rule names, or archive it (take it out of the
+inbox), nothing more. It never sends, deletes, trashes, marks as spam, read or
+unread, never touches any other label and never changes a whole
+conversation. It needs:
+
+1. `"gmail_tidy"` in that account's `features` in `config.toml` (no account
+   has it in the shipped file), and Gmail's `gmail.modify` permission on your
+   OAuth consent screen (setup step 8d);
+2. its own sign-in for that account: once you said yes on the consent card, a
+   rule with a tidy-up shows the card "Tidy-up needs its own sign-in", which
+   says what the tidy-up may do, and its **Sign in for tidy-up** opens
+   Google's sign-in, where you pick that account. It asks for nothing but
+   `gmail.modify` and who the account is, must be the same Google account
+   (another is refused) and is kept apart from the account's main sign-in, in
+   `google_token_<account>.tidy.json`. The main sign-in never asks for it.
+
+Every "yes" then passes these first, or nothing is changed and its ACTIVITY
+row says why ("Not archived: you have written to that sender"):
+
+- no mail of that run's batch reads like instructions to Jarvis, and the batch
+  did not say yes far more often than the dry run did (either one holds the
+  whole batch);
+- the mail passed Gmail's own sender check (DMARC), is not your own, not sent
+  mail or a draft and, to archive, not starred or important (its labels are read
+  again just before the change);
+- Pause all is still off and the rule is still on, both read again at that
+  moment, and your own addresses could be read;
+- the account has `gmail_tidy`, its tidy-up sign-in and your yes on its card
+  are there, that sign-in was not signed out or in again since the check
+  began, and it is the Google account Turn on recorded;
+- the rule's filter names a sender by address or domain, the mail's own address
+  is that sender (a display name never counts), and its dry run counted at most
+  90 matches in 30 days;
+- to archive: you have never written to that sender, neither through Jarvis
+  (`recipients.json`, only read) nor from that account (one look at its Sent
+  mail); if that can't be checked, nothing is archived;
+- the rule's tidy-ups for today are not used up (`tidy_per_day`, 40).
+
+Each change is written to a journal before Gmail is called (then "done" or
+"failed"; a call that got no answer stays "not known"), so a check that stops
+midway shows "Not known: Jarvis may have
+starred one message (the check stopped midway). Look at it in Gmail." An
+archived mail whose conversation has other messages in the inbox leaves that
+conversation in the inbox for them, and its row says so. Each tidy-up's row
+has its own **Undo** for 7 days: it takes off exactly Jarvis's change, through
+the tidy-up sign-in, and only while the message's labels are still exactly as
+he left them ("Not undone: the mail's labels changed since Jarvis's change;
+nothing was changed."). The row lives with its run's receipts, so **Clear**,
+or a `keep_days` under 7, takes that Undo away too.
+
+**Caps.** At most 30 Claude runs a day for everything together
+(`max_runs_per_day`, by your local date; setup runs, at most 20 a day, and dry
+runs count too), and 6 for each agent. A rule judges at most 8 mails in one
+run and 40 a day, and tidies at most 40 a day. Rules run on Haiku (one yes or
+no and a few values per mail), agents and setups on Sonnet (`[standing]
+rule_model`, `model`). A job that reaches its cap waits until tomorrow and
+says so once. When your plan's limit is reached, every standing run waits
+until it resets (6 hours when Claude Code names no time); when Claude Code
+says you are near your limit, until that reset (2 hours when none is named),
+so the rest of your plan stays yours; and a run that would be billed to extra
+usage is stopped and pauses Ask too. Standing runs are counted apart from
+Ask's (`standing_usage.json`), and they wait while Ask is paused for extra
+usage.
+
+**Background runs.** The "Briefing agents" task runs `pythonw.exe -m
+briefing_reader --standing-run --origin task` at logon and every 5 minutes
+(setup step 6), windowless. One check runs at a time (a second ends at once),
+and it starts no job after 15 minutes. It reads Google with sign-ins it holds
+in memory only: it never saves, deletes or moves a sign-in and never signs
+in, so an account whose sign-in needs you waits for you ("The work account
+can't be read in the background: sign it in again in Jarvis."). Standing
+runs, the setup and dry runs too, do not show in LIVE: the Agents screen's
+ACTIVITY and REPORTS are their record, and the log keeps ids, kinds, counts,
+durations and statuses only. `--standing-check` prints how things stand (see
+[Command line](#command-line)).
+
+**What goes where.** When a job runs, the text of each mail its filter matched
+goes to your Claude plan without a click at that moment: only that one
+message, never its whole conversation, with its quoted history and what
+plainly is a key or a password taken out first (the same rule as a task's:
+[Keys and passwords in what he reads](#tasks-jarvis-works-it-through)), cut
+to 4,000 characters (`mail_chars`), each in a block of its own marked as
+data, with its sender, subject and date. A rule's run gets its question and
+the values to find, and never a Gmail id; an agent's run gets your own words
+for the job, your own addresses (never as a recipient) and, if you set it to,
+some days of your calendar (titles, times and places, no guests) and your
+notes. The run has no tools and no web, so a mail can't change what is read
+or make anything happen. Cards still wait for your click. The reports,
+receipts (a matched mail's sender and subject, the values found) and cards
+stay on this PC for 7 days (`keep_days`), and **Clear** deletes them. See
+also [Privacy and cost](#privacy-and-cost).
 
 ## TODAY and DEADLINES
 
@@ -4246,7 +4594,8 @@ proposals that the user decides one by one.)
 
 ```
 py -3.13 -m briefing_reader [--run {am,pm} | --catch-up | --hotkey-agent | --ask | --ask-check | --ask-text TEXT
-                             | --plan-dry-run [REQUEST] | --followups-check] [--ask-dry-run] [--slots am=HH:MM,pm=HH:MM] [--open | --now | --read]
+                             | --plan-dry-run [REQUEST] | --followups-check | --standing-run | --standing-check]
+                            [--ask-dry-run] [--slots am=HH:MM,pm=HH:MM] [--open | --now | --read]
                             [--from-file PATH] [--debug] [--version]
 ```
 
@@ -4260,6 +4609,8 @@ py -3.13 -m briefing_reader [--run {am,pm} | --catch-up | --hotkey-agent | --ask
 | `--ask-text TEXT` | Ask Jarvis once from the command line, without a window: prints what the planner said, the proposals and how Claude Code started. One request on your Claude plan (two when it reads mail or hands the request to web research). Starting the text with `web:` runs web research only (one run; nothing is read from your accounts). With `--from-file`, the briefing comes from that fixture. With the productivity bundle's memory on, the planner gets your notes as in the app, read from `memory.json` without ever changing it; `remember that ...`, `forget that ...` and `what do you remember?` are the app's (MEMORY tab): the command line says so, saves nothing and exits with code 2. Like an Ask in the app, the planner also gets the conversation the app kept in the last day (`conversation.json`, read without changing it; `web:` never gets it), and `--ask-dry-run` shows each of its entries as its size. |
 | `--plan-dry-run [REQUEST]` | The productivity bundle's [day plan](#plan-my-day) without a run: reads that day of your calendar now (read only) and prints the exact text its run would get, with event titles, to-dos, briefing lines and notes as their sizes, the free stretches and the command line (only the prompt file and the answer format differ from an Ask's), or why there would be no run ("No planner run: ..."). REQUEST as typed in the app (`"plan tomorrow"`, `"plan my afternoon, gym"`; default `plan my day`); anything else exits with code 2. With `--from-file`, the to-dos, deadlines and briefing come from that fixture. No Claude request, nothing counted. |
 | `--followups-check` | The productivity bundle's [follow-up list](#follow-ups-and-nudges) scan once, for real, on every account with `"gmail_read"`: headers only (read only, the last 14 days, never the text). Prints counts per account only ("work: listed 42, read 42 header set(s); 3 waiting on you, 1 owed to you; skipped: automated 30, ...") - never a subject, a name, an address or an id. No Claude request; nothing saved. |
+| `--standing-run` | One check of the [standing agents and rules](#standing-agents-and-rules), without a window: what the "Briefing agents" task runs every 5 minutes (Jarvis also starts one for **Run now**, and every 5 minutes while he is open and no scheduled check came for 15 minutes). It does nothing while `[standing]` or Ask is off, before your yes on their consent card or under Pause all; one check runs at a time (a second ends at once), and it starts no job after 15 minutes. Google is read with sign-ins held in memory only: nothing is saved, deleted or moved, and it never signs in. |
+| `--standing-check` | Print what is set up and how the checks went: on or off, the consent and Pause all, the jobs (their ids, kinds, triggers, next run and runs today), the last check and who started it, a hold and until when, today's runs out of `[standing] max_runs_per_day`, and an account the check could not read. Counts, times and statuses only; no Claude request, nothing read from Google. |
 | `--ask-dry-run` | With `--ask-text`: print the exact text Jarvis would send to Claude Code (email text and memory notes as character counts) and the command line, and stop. With `web:`: the exact text the web research would get and its command line. No Claude request, nothing counted. |
 | `--slots am=10:12,pm=23:42` | The scheduled times (24-hour), which tell the app which briefing an answer belongs to. The tasks pass them; without it (or for a run it leaves out) `[schedule]` in `config.toml` applies. A value that cannot be read is logged and ignored. |
 | `--open` | Open Jarvis: the assistant screen in front, on its JARVIS tab, with a greeting (and "Your AM briefing is ready to view." when one is waiting); the briefing waits in its BRIEFING tab and nothing is read until you press Play. The same as starting without options. A running app comes forward. What the Start menu shortcut and the hotkey use. |
@@ -4270,7 +4621,10 @@ py -3.13 -m briefing_reader [--run {am,pm} | --catch-up | --hotkey-agent | --ask
 | `--version` | Print the name and version (such as `Jarvis Assistant 1.2.0`) and exit. |
 
 `--open`, `--now` and `--read` exclude each other, and none of them goes with
-`--catch-up`, `--hotkey-agent`, `--ask-check`, `--ask-text`, `--plan-dry-run` or `--followups-check`. Without `--run`,
+`--catch-up`, `--hotkey-agent`, `--ask-check`, `--ask-text`, `--plan-dry-run`, `--followups-check`, `--standing-run` or
+`--standing-check`. `--standing-show` (a check found something for you while
+Jarvis was closed: he opens without taking the focus and tells it) and
+`--origin` (who started a check) are only for Jarvis's own use. Without `--run`,
 the app fetches the page once (retrying if Notion cannot be reached) and does
 not wait for a fresh one; a briefing that is not from today still gets the
 spoken stale note when it is read.
@@ -4299,9 +4653,12 @@ research](#web-research) and the productivity bundle ([Memory](#memory-the-memor
 on or off for this PC, whatever `[ask] enabled`, `[research] enabled` and
 `[productivity] enabled` say; `JARVIS_DESKTOP_ENABLED` does the same for
 [Jarvis on your desktop](#jarvis-on-your-desktop-the-hud) (`[desktop] enabled`),
-which then still waits for your **Turn on** on its first-run card, and
+which then still waits for your **Turn on** on its first-run card,
 `JARVIS_AGENT_ENABLED` for [tasks](#tasks-jarvis-works-it-through) (`[agent]
-enabled`). Variables already set in the environment win over `.env`.
+enabled`), and `JARVIS_STANDING_ENABLED` for
+[standing agents and rules](#standing-agents-and-rules) (`[standing]
+enabled`), which then still wait for your yes on their consent card.
+Variables already set in the environment win over `.env`.
 
 **`google_client_secret.json`** (next to this README, optional): the Google OAuth
 client for calendar actions (setup step 8).
@@ -4340,7 +4697,7 @@ log. Changes apply the next time the app starts.
 | `[actions] trusted_domains` | `[]` | Email recipient domains that do not get the red NEW RECIPIENT badge, such as `["example.edu"]` (its subdomains count too; a leading `@` is dropped). An Ask recipient you did not type yourself is the exception: it is new even in these domains. Any other address must be one Jarvis sent to before, or ticked on its card before Send; the sending account's own address is never sent to (see [Replies and emails](#replies-and-emails)). |
 | `[accounts.<name>]` | `personal` and `work` | The Google accounts Jarvis may act for, one table each; the name is what the briefing writes as `acct=` (lowercase letters, digits, `-`, `_`). Without any `[accounts]` table only `personal` exists. Which Google account a name is never goes here: you pick it in Google's sign-in, and its first sign-in binds the name to it in `accounts.json` (setup step 8). Calendar proposals, to-do blocks and TODAY always use `personal`. |
 | `[accounts.<name>] backend` | `"google"` | Who carries out the account's actions. Only `"google"` (your own OAuth client) works in this version; `"composio"` is accepted but its cards say "Composio is not built into this version". |
-| `[accounts.<name>] features` | `["calendar"]` (the shipped `config.toml`: `["calendar", "gmail_send", "gmail_read"]`) | What Jarvis may do for the account: `"calendar"` answers invitations and moves or cancels events; `"gmail_send"` sends the replies and emails you approve (send only; setup step 8b); `"gmail_read"` lets Ask Jarvis read the threads a request is about, and a [meeting brief](#meeting-prep) your latest thread with each guest of the last 14 days (read only, never used to send; step 8c). Adding a feature means one new Google sign-in for that account. `[]` makes the account's cards hand-off only (Open, Copy, Done, Deny). |
+| `[accounts.<name>] features` | `["calendar"]` (the shipped `config.toml`: `["calendar", "gmail_send", "gmail_read"]`) | What Jarvis may do for the account: `"calendar"` answers invitations and moves or cancels events; `"gmail_send"` sends the replies and emails you approve (send only; setup step 8b); `"gmail_read"` lets Ask Jarvis read the threads a request is about, and a [meeting brief](#meeting-prep) your latest thread with each guest of the last 14 days (read only, never used to send; step 8c), and is what a [standing agent or rule](#standing-agents-and-rules) reads mail with; `"gmail_tidy"` lets a standing rule star, label or archive the one mail it matched, without a click and with an Undo, through a sign-in of its own (step 8d; no account has it in the shipped file). Adding a feature means one new Google sign-in for that account (`"gmail_tidy"`: its own sign-in, from the Agents screen). `[]` makes the account's cards hand-off only (Open, Copy, Done, Deny). |
 | `[schedule] am` | `"10:12"` | Time of the AM task (24-hour `HH:MM`); the default is only an example, set it a few minutes after your own briefing task runs. `install-schedule.ps1` uses it unless you pass `-AmTime`; the app uses it to tell which briefing an answer belongs to when it was started without `--slots`. Rerun the script after a change. |
 | `[schedule] pm` | `"23:42"` | Time of the PM task, the same way (`-PmTime`). |
 | `[hotkey] enabled` | `true` | The global hotkey that opens Jarvis. `false`: `install-schedule.ps1` does not install the hotkey task (and removes an existing one); an agent that is started anyway exits at once. |
@@ -4441,6 +4798,23 @@ log. Changes apply the next time the app starts.
 | `[instant] town` | `""` | The weather's town when a request names none, e.g. `"Oslo"` or `"Springfield, Illinois"`; `""` = none (the question goes to Claude). A town you set by saying "my town is ..." wins over it. Never logged. |
 | `[instant] calendar` | `true` | Calendar answers ("what's my next meeting", "am I free at 3") from every account's main calendar, read when you ask; titles are shown, and said only by the voice made on this PC (never a place). Needs `[calendar]` on and set up. |
 | `[instant] temperature` | `"auto"` | `"auto"` follows the Windows region (US units: Fahrenheit), else `"celsius"` or `"fahrenheit"`. |
+| `[standing] enabled` | `false` | [Standing agents and rules](#standing-agents-and-rules): jobs set up from the chat that run on their own and only propose (a rule's tidy-up aside). The shipped `config.toml` has the `[standing]` table commented out, so these defaults apply; to change a key, uncomment the table's header and that line. Turn it on for this PC with `JARVIS_STANDING_ENABLED=true` in `.env` (it overrides this key both ways), then rerun `install-schedule.ps1`. Needs `[ask] enabled = true`; nothing runs until your yes on the Agents screen's consent card. |
+| `[standing] model` | `"sonnet"` | The model of an agent's runs and of a setup run; `"haiku"` uses less of your plan. A name that starts with `-` or has spaces is refused. |
+| `[standing] rule_model` | `"haiku"` | The model of a rule's checks and its dry run (one yes or no and a few values per mail). |
+| `[standing] max_runs_per_day` | `30` | Claude runs a day for every agent and rule together, setup runs and dry runs included, by your local date (1-200). A job that finds it used up waits until tomorrow. |
+| `[standing] agent_runs_per_day` | `6` | The runs a day a new agent gets as its own cap (1-48). |
+| `[standing] rule_batch` | `8` | Mails a rule judges in one run, and the newest matches its dry run reads (1-8). |
+| `[standing] rule_checks_per_day` | `40` | The mails a day a new rule may judge (1-200). |
+| `[standing] tidy_per_day` | `40` | Tidy-ups each rule may make a day (0-200; `0`: none). |
+| `[standing] poll_minutes` | `5` | How often each mail job's filter is checked for new mail, headers only (5-60 minutes; the scheduled check comes every 5). |
+| `[standing] min_every_minutes` | `30` | The shortest interval an agent may run at (30-1440 minutes). |
+| `[standing] max_mail_per_run` | `20` | Mails one agent run reads (1-50). |
+| `[standing] mail_chars` | `4000` | Each matched mail's text is cut to this many characters before a run gets it (500-12000). |
+| `[standing] keep_days` | `7` | Reports, receipts and waiting cards are kept this many days on this PC (1-30); a tidy-up's Undo lasts while its receipt does, 7 days at most. |
+| `[standing] catch_up_hours` | `3` | A timed run missed by up to this many hours (the PC was off or asleep) runs once at the next check; an older one is noted as missed (0-12). |
+| `[standing] quiet_from`, `quiet_until` | `"22:00"`, `"08:00"` | Quiet hours: the spoken line waits, and a check never opens a closed Jarvis (what it found is told after them). The same time twice: never quiet. |
+| `[standing] open_when_closed` | `true` | `false`: a check never opens a closed Jarvis; what it found waits for your next open. |
+| `[standing] timeout_seconds` | `120` | One standing run may take this long (30-600); then it is stopped. |
 
 The offline voice uses the same `rate` and `volume`: the rate scales Windows'
 default 200 words per minute, and a volume above `+0%` cannot get louder than
@@ -4741,6 +5115,16 @@ unreadable, draft_waiting), "Nudge: a denied draft was replaced" and "Nudge: a
 draft held back (note)". Never a subject, a name, an address, a thread id, a
 hash, a draft or your words.
 
+[Standing agents and rules](#standing-agents-and-rules) log one line per check
+and per run, with ids, kinds, counts, durations and statuses only: "Standing:
+check (task) done: 3 job(s) live, 1 run(s), 1 told", "Standing: rule
+r-0123456789ab checked 3 mail(s): 1 yes, 1 card(s)", "Standing: a rule run ok
+in 4.1 s (1 turn(s), 2210 in / 140 out tokens, exit 0)", "Standing: the line
+for 1 run(s) waits (quiet hours)", "Standing: no scheduled check lately; Jarvis
+started one". Never a job's name, your sentence, a filter, a report, a
+subject, a sender, an address or a label. The background check writes to the
+same log file, one line at a time, so the app can still rotate it.
+
 Other files in `%LOCALAPPDATA%\briefing-reader`:
 
 | File | What it is |
@@ -4763,6 +5147,16 @@ Other files in `%LOCALAPPDATA%\briefing-reader`:
 | `prep_series.json` | The productivity bundle's repeating meetings whose prep offers ended unclicked: per series a 32-character hash (of the account name, the calendar and Google's series id, never in clear), how many times in a row (3 stops its offers) and the day of the last change; entries untouched for 60 days are dropped. No title, id or address. Safe to delete (the offers come back). |
 | `conversation.json` | The last 24 hours of the conversation (at most 100 entries: your requests, Jarvis's answers and results as the Transcript showed them, each with its time; never your memory lines), shown again at a start and given to Ask as `<conversation>` (a web research's question and answer are marked and never given; see [Ask remembers the conversation](#ask-remembers-the-conversation)). Written by the app a moment after the conversation changes and when it closes; older entries leave it at the start and within the hour after they turn a day old. **Clear conversation** in the Transcript deletes it; you can delete it yourself while Jarvis is closed. A broken file is ignored and replaced. Never logged. |
 | `memory.json` | The productivity bundle's memory ([Memory](#memory-the-memory-tab)): **the only file with your own text** - your notes, typed or suggestions you kept, each with an id, TOLD or SUGGESTED and when it was made or changed; and, for suggestions you dismissed, a short hash of each word (not the sentence; a common word or a name could be guessed from its hash). Written only by the app (the command line reads it without changing it). Delete it (also while Jarvis runs: the next Ask, MEMORY and any change take the file as it is), or delete the notes in MEMORY, to forget everything. If it can't be read, Jarvis never overwrites it (MEMORY says so). |
+| `standing.json` | The [standing agents and rules](#standing-agents-and-rules) as you set them up: each one's name, your own words or sentence, its filters, when it runs, what it may line up, its tidy-up (and its label's id and name), its status and cap, its dry run's counts and the Google account ids Turn on recorded. Written only by the app, on your clicks. A damaged file, or one a newer version wrote, is kept read only: nothing runs and nothing is saved over it (the Agents screen says so). Delete it to remove every agent and rule. |
+| `standing_app.json` | The app's side of them: your yes on their consent card (and on each account's tidy-up card), Pause all, the cards you withdrew, the receipts you undid, when you last cleared and which runs were told. Ids and times only. |
+| `standing_state.json` | The background check's own state: per job its last run and its last time slot, per job and account the Gmail ids it saw and how far it has read, what it proposed (stable keys, so nothing is proposed twice), a hold after a plan limit, the last check (and the last one the scheduled task started), the runs not told yet and an account it could not read. Written only by the check; no subject, sender or text. |
+| `standing_runs\` | One file per run (`<date>-<time>-<id>.json`), written once: an agent's report, the run's cards (with a draft and its recipients) and its receipts (each matched mail's sender, subject and Gmail ids, the values a rule found, each tidy-up with the labels before and after). Private: they hold what was written from your mail. Kept `[standing] keep_days` (7) days, then deleted by the check; **Clear** on the Agents screen deletes them at once (a run with a card still waiting keeps its file until you decide that card). |
+| `standing_requests\` | A **Run now** request (`<job id>.json`), taken and deleted by the next check. |
+| `standing_usage.json` | Claude runs, rule checks and tidy-ups by local date and job id, for the caps (the last 8 days; counts only), shared by the app's setup and dry runs and the background check (`standing_usage.json.lock` next to it only takes turns between processes). |
+| `standing_tidy.jsonl` | The check's tidy-up journal: one line per step ("doing" written before Gmail is called, then "done" with the labels after, or "failed"), with the rule's id, the account name and Gmail's message, thread and label ids only. An entry left at "doing" shows on the Agents screen as "Not known". |
+| `standing_tidy_undo.jsonl` | The same journal for the app's **Undo** of a tidy-up. |
+| `google_token_<account>.tidy.json` | An account's tidy-up sign-in (`"gmail_tidy"`, setup step 8d): `gmail.modify` and who the account is, nothing else. Private: never share it. Delete it to sign the tidy-up out on this PC (the rule then makes cards only). |
+| `standing-run\`, `standing-app\` | The empty folders Claude Code runs in for the background check and for the app's setup and dry runs; a run refuses to start while anything is in them. |
 
 Generated audio goes to `%TEMP%\briefing-reader\session-<process id>` (Jarvis's own
 sentences to its `say` folder) and is deleted when the app closes. If a section is still being generated at that
@@ -4840,7 +5234,14 @@ The app talks to these services, all free:
   on and `"gmail_read"` (step 8c), Jarvis also searches and reads the threads one
   request is about (at most 3), read only, and only when you ask something; for
   a meeting brief, after your request, one search per guest of that meeting (the
-  last 14 days, the meeting's account) and at most 3 threads read. Each
+  last 14 days, the meeting's account) and at most 3 threads read. With
+  [standing agents and rules](#standing-agents-and-rules) on, Jarvis also
+  looks for new mail that matches each job's filter every 5 minutes (Gmail's
+  ids and named headers, never a snippet or a body), reads the one message a
+  filter matched when its job runs, and reads a standing reply's conversation
+  again at your click on Send; with `"gmail_tidy"` (step 8d), a rule's
+  tidy-up reads that one message's label ids and stars it, adds its one label
+  or archives it, through a sign-in of its own, without a click. Each
   sign-in also tells Jarvis which Google account it is (`openid`,
   `userinfo.email`): the address is kept in `accounts.json` on this PC and shown
   on the cards, never logged;
@@ -4856,6 +5257,14 @@ The app talks to these services, all free:
   guests), who Jarvis looked up and what he found, at most 3 threads with its
   guests from the last 14 days (read by Jarvis's own search of each guest's
   address, only after your request), and your notes; never your typed words.
+  A standing agent's or rule's run (only after your yes on their consent
+  card) sends, without a click at that moment, the text of each mail its
+  filter matched (that message only, never its conversation; keys and
+  passwords taken out; at most 4,000 characters each), the rule's question
+  and values or the agent's own words, and, for an agent that reads them,
+  some days of your calendar (titles, times, places) and your notes; a setup
+  run sends your sentence, your account names and what each can do, and a
+  rule's dry run, on your click, up to 8 of its newest matches.
   This
   is the same kind of data your briefing routine already sends Claude. It runs
   on your plan's usage, never on an API key (Claude Code gets only the Windows
@@ -4897,10 +5306,26 @@ false` in `config.toml` (this also turns off Approve) or sign out by deleting
 the briefing names, for accounts that are signed in, and are shown, not saved
 (also the address Google answered as, at the end of the line).
 
+**Standing agents and rules.** They are the one part of Jarvis that reads the
+text of your mail and gives it to your Claude Code without a click at that
+moment, and a rule's tidy-up is the one change he makes without a click. Both
+are your choice: off by default (`[standing] enabled`), nothing runs before
+your yes on their consent card, each job reads only what its own filter
+matches (checked against your own sentence, and never a security or payment
+sender), and a tidy-up needs its own feature, its own sign-in and a filter
+that names its sender. The runs have no tools and no web, are capped (at most
+30 a day for all of them) and stop at your plan's limit; every card they make
+still waits for your click, and every tidy-up keeps an **Undo** for 7 days.
+What they wrote (reports, receipts with a matched mail's sender and subject,
+cards with their drafts) stays on this PC for 7 days (`standing_runs\`), and
+**Clear** on the Agents screen deletes it. **Pause all** stops everything at
+once. See [Standing agents and rules](#standing-agents-and-rules).
+
 **Other proposals.** Share requests, Slack replies, to-dos without a block and
 links are only shown: the app has no access to Drive or Slack, and Gmail only
 to send what you approved on a card (and, for Ask Jarvis with `"gmail_read"`,
-to read the threads a request is about). **Open** hands a link to your browser only
+to read the threads a request is about; for standing agents and rules, see
+above). **Open** hands a link to your browser only
 when you click it.
 **Copy** puts the drafted text on the Windows clipboard, where any program can
 read it and, if Windows clipboard history (Win+V) is turned on, Windows keeps a
@@ -4908,13 +5333,16 @@ copy until you clear it (Win+V > Clear all).
 
 There are no paid API calls of any kind. Ask Jarvis uses your Claude plan (keep
 its extra usage off, see Ask's setup step 3), never an API key; a day plan, and a
-meeting brief with a run, is one Ask run on that plan. The offline voice runs
-entirely on this PC.
+meeting brief with a run, is one Ask run on that plan. A standing agent's or
+rule's run is one run on that plan too, counted apart from Ask's (at most 30 a
+day). The offline voice runs entirely on this PC.
 
 Driving your own signed-in Claude Code from your own app is ordinary personal
 use of it; sharing such a feature in a public project is less clear-cut, which
 is why Ask is off by default and every user installs and signs in to Claude Code
-themselves.
+themselves. Runs that start on their own, as standing agents' and rules' do,
+are less clear-cut still, so they are off by default too, wait for your yes on
+their consent card and make at most 30 runs a day.
 
 The LIVE tab shows on your screen what Jarvis read and sent - email text, the
 exact input he gave the planner, the message he will send and, for web
@@ -5049,6 +5477,26 @@ tests) use fake Gmail readers that answer header and thread reads, and check
 that no list item reaches a log, an ACTIVITY row or anything spoken, and that a
 scan never asks for a snippet or a body.
 
+The standing agents' and rules' tests (`test_standing_model.py` for the
+definitions and the `[standing]` table; `test_standing_store.py` for their
+files, one writer each, a damaged `standing.json` kept read only and the daily
+caps held across two processes; `test_standing_schedule.py` for when a job is
+due: daylight-saving nights, missed slots, a long sleep, quiet hours;
+`test_standing_google.py` for the background sign-ins, the filters and how new
+mail is found; `test_standing_modes.py` for the locked-down runs and what
+Jarvis builds of their answers, the tidy-up holds and the dry run;
+`test_standing_runner.py` for one check end to end, its holds, caps and lock;
+`test_standing_cards.py` for their cards on Approvals;
+`test_standing_app.py` for the Agents screen, the spoken line and a Reply
+checked again at the click; `test_standing_setup.py` for setting jobs up from
+the chat; `test_standing_tidy.py` for the tidy-up's gates, its journal and its
+exact Undo; and `standing_fakes.py`, their invented jobs, run files and Gmail)
+use invented mail only and fakes for Gmail, the Google sign-ins and Claude
+Code, keep every file in a temporary folder, and check that no subject,
+address, report or sentence of yours reaches a log. The lock and cap tests
+start a second Python process of their own; `--standing-run` does nothing
+while the tests run.
+
 The hotkey tests register Ctrl+Alt+Shift+F24 (a key no keyboard has) for a
 moment with a private agent lock, simulate a press without pressing anything,
 and release it within seconds; they never start the app. The catch-up tests run
@@ -5179,6 +5627,74 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
 - **Web research: "Jarvis stopped the web research: it wanted a fifth web
   search ..."**: the question needed more searches or page reads than
   `[research] max_searches` / `max_fetches` allow; ask a narrower question.
+- **"agent: ..." or "rule: ..." started an ordinary Ask** (or there is no
+  Agents screen): standing agents and rules are off, or Ask is. Check
+  `JARVIS_STANDING_ENABLED` in `.env` (or `[standing] enabled`) and `[ask]
+  enabled`, then restart Jarvis.
+- **Agents: "Background runs off"** (or "Checks while Jarvis is open", and
+  "Background runs need the scheduled task: run install-schedule.ps1
+  again."): no check from the "Briefing agents" task came in the last 15
+  minutes, so it is not installed (an install from before standing agents)
+  or did not run. Run `install-schedule.ps1` again (setup step 6) and look
+  for "Briefing agents" in Task Scheduler (`taskschd.msc`) with its last run
+  result. Until then Jarvis checks every 5 minutes only while he is open.
+  `--standing-check` shows the last check and who started it (`task` or
+  `app`).
+- **Agents: "The work account can't be read in the background: sign it in
+  again in Jarvis."**: the background check found no sign-in it could read
+  that account's mail with: it is not signed in on this PC, or its sign-in
+  lacks the permission to read mail (it needs one more sign-in, or "Read your
+  email" was unticked; step 8c). The check never signs in itself. Open Jarvis
+  and sign that account in (**Allow work mail** under the bar, or a card's
+  **Sign in**), and answer the question about which Google account it is if
+  Jarvis asks.
+- **Agents: "No Claude runs until 3:00 PM (your Claude plan's limit)"** (or
+  "(Claude Code said you are near your limit)", "(extra usage would pay for
+  it)"): a run hit your plan's limit, or Claude Code warned that you are near
+  it, so every standing run waits until that time (6 hours, or 2 after a
+  warning, when no time was named) and the rest of your plan stays yours.
+  They go on by themselves. For extra usage, turn usage credits off (Ask's
+  setup step 3); Ask is paused too until then.
+- **A rule did not tidy** ("Not starred: ...", "Not labelled: ..." or "Not
+  archived: ..." on its ACTIVITY row): the row says which gate held it. "its
+  filter must name a sender and match few mails": delete the rule and set it
+  up again with the sender in your sentence ("rule: when billing@example.com
+  sends ..."), then Dry run (at most 90 matches in 30 days). "the account has
+  no gmail_tidy feature in config.toml": add `"gmail_tidy"` to that account's
+  `features` and restart Jarvis (setup step 8d). "the tidy-up's own sign-in
+  is not done yet": **Sign in for tidy-up** on the Agents screen's card. "the
+  account's tidy-up sign-in changed since Turn on": the tidy-up sign-in is
+  missing, was signed in again during that check, or is not the Google
+  account the rule recorded; sign in for the tidy-up with that account (or
+  set the rule up again). "you have written to that sender": a rule never
+  archives mail from an address Jarvis has sent your mail to. "the rule's
+  tidy-ups for today are used up": `[standing] tidy_per_day`. "everything was
+  paused": Pause all was on. "Gmail refused it": nothing changed. The others
+  are safety holds and stay so by design: a mail of that batch read like
+  instructions to Jarvis, the batch said yes far more often than its dry run,
+  the mail did not pass Gmail's sender check, it is your own, sent mail or a
+  draft, or (to archive) it is starred or important; the rule's card, if any,
+  still came.
+- **Agents: "Not known: Jarvis may have archived one message (the check
+  stopped midway)."**: a check ended (the PC slept or shut down) between
+  writing "doing" in the tidy-up journal and hearing back from Gmail. Look at
+  that mail in Gmail; nothing more happens to it by itself.
+- **Agents: "standing.json can't be read as it is"**: the file was changed by
+  hand or by another program, is damaged, or a newer version of Jarvis wrote
+  it. Jarvis keeps it exactly as it is: nothing runs and nothing is saved over
+  it, so no agent or rule is lost (a change on the Agents screen says "Jarvis
+  couldn't save the agents and rules"). Put back a good copy (or use the newer
+  version again) and Jarvis reads it within 30 seconds; deleting it removes
+  every agent and rule.
+- **Turn on does nothing** (or is greyed out on the setup card): Jarvis says
+  why, in the button's tooltip or a short note: your yes on the consent card
+  first ("First say yes on the card above"), a rule's **Dry run** first, or
+  one of the job's accounts is not signed in yet (Turn on records which
+  Google account it is).
+- **How things stand, without the app**: `py -3.13 -m briefing_reader
+  --standing-check` prints whether they are on, the consent and Pause all,
+  each job's id, trigger, next run and runs today, the last check, a hold and
+  today's runs; no Claude request, nothing read from Google.
 - **LIVE: "Picture unavailable: this PC's PySide6 has no web engine
   (QtWebEngine)"**: page pictures need PySide6 6.8 or newer with its web engine
   (in PySide6-Addons): `py -3.13 -m pip install --upgrade PySide6`. The
@@ -5485,7 +6001,8 @@ they are quoted here in normal case, and the log has the same text)
 - Open <https://myaccount.google.com/permissions> in each Google account,
   pick your app (jarvis-assistant), remove its access, and delete
   `%LOCALAPPDATA%\briefing-reader\google_token_personal.json` (and
-  `google_token_work.json`).
+  `google_token_work.json`, and a tidy-up sign-in's
+  `google_token_<account>.tidy.json`).
   If you only revoke on Google's side, the next use of that account fails once
   with the "expired or was revoked" message and the app deletes the file itself.
 
@@ -5548,12 +6065,21 @@ briefing_reader/ui.py         assistant screen (JARVIS / BRIEFING / LIVE / MEMOR
 briefing_reader/agent/        Tasks (no Qt): the tool registry (tools), the task's own folder (workspace), the local MCP endpoint (endpoint), budgets and what is offered (policy), one run (runner), its prompt and settings (assets)
 briefing_reader/agent_ui.py   Tasks in the app: the controller of the one task that may run, its LIVE task, its words on the caption and in the voice
 briefing_reader/ask_ui.py     Ask Jarvis in the app: the command bar's controller and its "ask" thread (web: requests too)
+briefing_reader/standing/     Standing agents and rules (no Qt): definitions checked on every read (model), their files and
+                              daily counts (store), when a job is due (schedule), Google filters (filters) and new mail
+                              (mailwatch), the locked-down runs (engine), a rule's check (rules) and its values
+                              (values), an agent's run (agents), their cards (cards), setup from a sentence (setup), the
+                              dry run (dryrun), the tidy-up and its journal (tidy), one check (runner) and its lock
+                              (lock); standing/assets: the runs' prompts and answer formats
+briefing_reader/standing_setup.py  setting a job up in the app: the setup run, a rule's dry run, Turn on's checks, the cards' words
+briefing_reader/standing_ui.py  standing agents and rules in the app: their cards, the Agents screen's controller, the spoken line, a Reply checked again at the click, the tidy-up's Undo and sign-in
+briefing_reader/standing_view.py  the Agents screen (Ctrl+9): status line, AGENTS, RULES, ACTIVITY, REPORTS
 fonts/                        Chakra Petch, Sora and JetBrains Mono fonts with their OFL licences
 tests/                        unit tests and saved fake Notion pages (tests/fixtures)
 config.toml                   voice, prompt, polling, section, calendar, actions, schedule, hotkey, agenda, display, Ask, web research, assistant, LIVE and productivity settings
 .env.example                  template for .env (NOTION_TOKEN, BRIEFING_PAGE_ID; the optional JARVIS_ keys)
 requirements.txt              Python dependencies
-install-schedule.ps1          registers the Briefing AM / PM / catch-up / hotkey scheduled tasks
+install-schedule.ps1          registers the Briefing AM / PM / catch-up / hotkey / agents scheduled tasks
 uninstall-schedule.ps1        removes them
 LICENSE                       MIT licence of the code (the fonts keep their own OFL licences)
 .env                          your Notion token and page id (step 4; not in git, keep private)
