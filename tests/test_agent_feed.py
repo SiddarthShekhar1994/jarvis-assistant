@@ -996,7 +996,9 @@ class BarTests(FeedApp):
 
 
 class ConsentTests(FeedApp):
-    ROW = desktop_view.CONSENT_TASK_ROW.format(engine="DuckDuckGo", others="Bing and Google")
+    # The card's row as the default voice (made on this PC: [voice] engine = "local") shows it; ONLINE_ROW on Ryan's.
+    ROW = desktop_view.consent_task_row("DuckDuckGo", "Bing and Google", local=True)
+    ONLINE_ROW = desktop_view.CONSENT_TASK_ROW.format(engine="DuckDuckGo", others="Bing and Google")
 
     def test_every_line_of_the_row_shows_and_it_says_what_a_task_may_read(self) -> None:
         for words in ("calendar", "mail", "contacts", "notes", "allowed folders", "waits for your click"):
@@ -1098,8 +1100,10 @@ class ConsentTests(FeedApp):
         self.make_agent(desktop_consent=False, agent='search_engine = "bing"\n')
         self.c._show_desktop_consent(desktop_ui.ENTRY_DOCK)
         settle()
-        self.assertIn(desktop_view.CONSENT_TASK_ROW.format(engine="Bing", others="DuckDuckGo and Google"),
-                      self.card().texts())
+        row = desktop_view.consent_task_row("Bing", "DuckDuckGo and Google", local=True)   # the default voice
+        self.assertIn(row, self.card().texts())
+        self.assertIn(desktop_view.CONSENT_VOICE_LOCAL, row)
+        self.assertNotIn("Microsoft", row)
 
     def test_settings_says_so(self) -> None:
         self.make_agent(desktop_consent=2)
@@ -1110,11 +1114,17 @@ class ConsentTests(FeedApp):
     def test_the_row_is_plain_about_what_goes_where(self) -> None:
         for words in ("work out the steps", "window you can watch", "the words of a search go to DuckDuckGo, or to Bing and "
                       "Google if it gives nothing", "what a task reads goes to your Claude plan, as an Ask's does, and is "
-                      "never kept in logs", "What I say aloud goes to Microsoft's online voice, as an Ask's answers do",
-                      "a line that may hold something private stays on screen", "waits for your click"):
+                      "never kept in logs", "waits for your click"):
             self.assertIn(words, self.ROW)
-        self.assertNotIn("straight to", self.ROW)
-        self.assertNotRegex(self.ROW, r"\b(?:he|him|his)\b")
+            self.assertIn(words, self.ONLINE_ROW)
+        for words in ("What I say aloud goes to Microsoft's online voice, as an Ask's answers do",
+                      "a line that may hold something private stays on screen"):
+            self.assertIn(words, self.ONLINE_ROW)
+        self.assertIn("What I say aloud is made on this PC, so a line that may hold something private is said too",
+                      self.ROW)
+        for row in (self.ROW, self.ONLINE_ROW):
+            self.assertNotIn("straight to", row)
+            self.assertNotRegex(row, r"\b(?:he|him|his)\b")
 
 
 class FeatureOffConsentTests(AgentApp):

@@ -336,6 +336,12 @@ def _holds_data(plain: str) -> bool:
             or any(len(_digits(found)) >= REQUEST_GROUPED_DIGITS for found in _PHONE_RE.findall(plain)))
 
 
+def holds_data(line: str) -> bool:
+    """``line`` holds a key, an email address or a long number (a card's, a phone's): with the voice made on this PC a
+    task's line is said unless it does - such a value is no use read out in a room (agent_ui.spoken)."""
+    return _holds_data(_ascii_digits(line or ""))
+
+
 def _digit_runs(text: str) -> set[str]:
     """The numbers ``text`` writes, as itself and with the little marks between their digits gone ("4 8 2 1")."""
     plain = _ascii_digits(text if text.isascii() else unicodedata.normalize("NFKD", text))
@@ -897,7 +903,8 @@ class WebFirewall:
             return tuple(self._heard)
 
     def speakable(self, line: str) -> bool:
-        """May a line the model wrote reach the voice, which goes to Microsoft's online service? Yes while the run holds
+        """May a line the model wrote reach the online voice, which goes to Microsoft's service (agent_ui.spoken asks only
+        then: a voice made on this PC says every line)? Yes while the run holds
         nothing private; after that only with no tainted word in it, no key, email address or long number of its own
         (whoever gave it: the request, a typed answer) and, in a strict run, no foreign word."""
         if not (self.private or self.strict):

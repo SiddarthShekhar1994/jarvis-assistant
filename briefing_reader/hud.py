@@ -2410,7 +2410,7 @@ class HeaderBar(QWidget):
     def _sync_chips_box(self) -> None:
         """No chips shown (the LIVE pop-out's header), or a meeting's REC shows (it wins the room over the service
         chips): their row and its margins take no room, as _required_width counts them."""
-        shown = bool(self._shown_chips()) and not self._rec_width()
+        shown = bool(self._shown_chips()) and not self._room_width()
         if self._chips_box.isHidden() == shown:
             self._chips_box.setVisible(shown)
 
@@ -2501,7 +2501,7 @@ class HeaderBar(QWidget):
 
     def _required_width(self, level: int) -> int:
         tight = level >= 3
-        chips = [chip.width_for(tight) for chip in self._shown_chips()] if not self._rec_width() else []
+        chips = [chip.width_for(tight) for chip in self._shown_chips()] if not self._room_width() else []
         chips_width = sum(chips) + 4 * max(0, len(chips) - 1) + (sum(self._chip_margins(level)) if chips else 0)
         return (self._brand.width_for(level == 0) + chips_width + self._clock.width_for(level <= 1)
                 + self._CLOSE_GAPS[level] + self._speaker_width() + self._buttons_width() + self._RIGHT_MARGIN
@@ -2509,10 +2509,13 @@ class HeaderBar(QWidget):
 
     _REC_GAP = 10            # between a meeting's REC (when shown) and the clock
 
-    def add_rec_badge(self, badge: QWidget) -> None:
-        """A meeting's REC (the dot, the time and Stop; meetings_view.RecBadge) left of the clock: it takes room
-        only while it shows (the bar compacts its other parts for it)."""
-        self._rec = badge
+    def add_rec_badge(self, badge: QWidget, *, wins_room: bool = True) -> None:
+        """A meeting's REC (the dot, the time and Stop; meetings_view.RecBadge) - or "Hey Jarvis"'s HEY JARVIS
+        (wake_ui.WakeBadge, ``wins_room`` False) - left of the clock: each takes room only while it shows (the bar
+        compacts its other parts for them); while one that ``wins_room`` shows (REC), the service chips give way."""
+        self._badges = [*getattr(self, "_badges", []), badge]
+        if wins_room:
+            self._room_badges = [*getattr(self, "_room_badges", []), badge]
         badge.setContentsMargins(0, 0, self._REC_GAP, 0)
         layout = self.layout()
         layout.insertWidget(layout.indexOf(self._clock), badge, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -2521,12 +2524,15 @@ class HeaderBar(QWidget):
         self._fit(force=True)
 
     def _rec_width(self) -> int:
-        rec = getattr(self, "_rec", None)
-        return rec.sizeHint().width() if rec is not None and not rec.isHidden() else 0
+        return sum(badge.sizeHint().width() for badge in getattr(self, "_badges", []) if not badge.isHidden())
+
+    def _room_width(self) -> int:
+        """The shown badges that win the room over the service chips (a meeting's REC)."""
+        return sum(badge.sizeHint().width() for badge in getattr(self, "_room_badges", []) if not badge.isHidden())
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt override
-        if watched is getattr(self, "_rec", None) and event.type() in (QEvent.Type.Show, QEvent.Type.Hide,
-                                                                      QEvent.Type.LayoutRequest):
+        if watched in getattr(self, "_badges", ()) and event.type() in (QEvent.Type.Show, QEvent.Type.Hide,
+                                                                       QEvent.Type.LayoutRequest):
             self._sync_chips_box()
             self.updateGeometry()
             self._fit(force=True)

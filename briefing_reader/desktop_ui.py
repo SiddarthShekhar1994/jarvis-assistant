@@ -2489,6 +2489,9 @@ class DesktopController(QObject):
         elapsed, warning = reading.recording_state()
         win.set_recording(elapsed, warning)
         win.set_timer(pcctl.chip_text(self.timers.running(), self._hour24))     # P2.4: while a timer runs
+        wake_state = getattr(reading, "wake_state", None)
+        if callable(wake_state):
+            win.set_wake(*wake_state())                      # "Hey Jarvis" while it is on (wake_ui)
         self._sync_instant()                                 # P2.5: the instant row as it is now
         win.orb.set_recording(bool(elapsed))
         base, muted, offline = reading.look()

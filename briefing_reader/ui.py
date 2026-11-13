@@ -393,7 +393,8 @@ from .runstate import ANSWER_MAX_AGE, RunState, briefing_key, handled_slot_key, 
 from .speech import (KIND_ACK, KIND_ANNOUNCE, KIND_GREETING, KIND_NOTICE, KIND_REPLY, KIND_RESULT, SayWorker,
                      SilentVoice, Voice)
 from .text_prep import ACTIONS_KEY, build_script, describe_updated, format_time, updated_label
-from .tts import SAPI, SpeechSynthesizer, TtsWorker
+from .local_voice import is_local, voice_label
+from .tts import LOCAL, ONLINE, SAPI, SpeechSynthesizer, TtsWorker
 
 logger = logging.getLogger(__name__)
 
@@ -413,8 +414,9 @@ def apply_dark_theme(app: QApplication) -> None:
     hud.apply_theme(app)
 
 
-def app_icon() -> QIcon:
-    """The window and tray icon: the HUD logo (a cyan diamond) on the dark ground."""
+def app_icon(mark: str = "") -> QIcon:
+    """The window and tray icon: the HUD logo (a cyan diamond) on the dark ground. ``mark`` (the tray's, "Hey Jarvis";
+    wake_ui.LOOK_*): a dot at the bottom right - "listening" cyan, "problem" amber; none otherwise."""
     pixmap = QPixmap(64, 64)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
@@ -423,11 +425,17 @@ def app_icon() -> QIcon:
         painter.fillPath(hud.chamfer_path(QRectF(2, 2, 60, 60), 12), QColor(hud.GROUND))
         painter.setPen(QPen(hud.rgba(hud.ACCENT, 0.45), 1.5))
         painter.drawPath(hud.chamfer_path(QRectF(2.75, 2.75, 58.5, 58.5), 11.5))
+        painter.save()
         painter.translate(32, 32)
         painter.rotate(45)
         painter.setPen(QPen(QColor(hud.ACCENT), 5))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(QRectF(-12, -12, 24, 24))
+        painter.restore()
+        if mark in ("listening", "problem"):
+            painter.setPen(QPen(QColor(hud.GROUND), 4))
+            painter.setBrush(QColor(holo.HOLO if mark == "listening" else holo.AMBER))
+            painter.drawEllipse(QPointF(50, 50), 11, 11)
     finally:
         painter.end()
     return QIcon(pixmap)
@@ -1423,6 +1431,13 @@ class ReadingView(QWidget):
         self.rec_badge = meetings_view.RecBadge()
         self.rec_badge.stopClicked.connect(self.stopRecording)
         self.header.add_rec_badge(self.rec_badge)
+        # "Hey Jarvis" (wake_ui): HEY JARVIS in the header (every screen) and the frame header's, hidden while it is off.
+        from .wake_ui import LOOK_OFF, WakeBadge
+
+        self._wake: tuple[str, str] = ("", LOOK_OFF)
+        self._wake_badges: list[Any] = []
+        self.wake_badge = WakeBadge()
+        self.header.add_rec_badge(self.wake_badge)      # (any badge goes left of the hold note, REC's place)
         self.home_rec = meetings_view.RecBadge(home=True)
         self.home_rec.stopClicked.connect(self.stopRecording)
         self._close_tip = self.header.close_button.toolTip()
@@ -2689,6 +2704,26 @@ class ReadingView(QWidget):
         """(elapsed, warning) while a meeting records ("12:04", "No call audio"); ("", "") while none."""
         return self._recording, self._recording_warning
 
+    def add_wake_badge(self, badge: Any) -> None:
+        """Another header's HEY JARVIS (the frame header over the prompt view), shown as this view's is."""
+        self._wake_badges.append(badge)
+        badge.set_state(*self._wake)
+
+    def set_wake(self, text: str, look: str) -> None:
+        """"Hey Jarvis" (wake_ui): what it is doing in words and its look (wake_ui.LOOK_*) for HEY JARVIS in the
+        headers and on the desktop HUD (hidden while it is off)."""
+        if (text, look) == self._wake:
+            return
+        self._wake = (text, look)
+        for badge in (self.wake_badge, *self._wake_badges):
+            badge.set_state(text, look)
+        self.header._fit_notes()
+        self.glanceChanged.emit()
+
+    def wake_state(self) -> tuple[str, str]:
+        """(words, wake_ui.LOOK_*) of "Hey Jarvis" for the desktop HUD's chip; LOOK_OFF while it is off."""
+        return self._wake
+
     def set_followups_available(self, available: bool) -> None:
         """FOLLOW-UPS is on (the bundle): the Dock's Follow-ups slot and its screen."""
         self._set_slot_available(dock_mod.FOLLOWUPS, SCREEN_FOLLOWUPS, available)
@@ -3328,6 +3363,11 @@ class BriefingWindow(hud.HudWindowFrame):
         self.frame_rec = meetings_view.RecBadge()
         self.header.add_rec_badge(self.frame_rec)
         self.reading.add_rec_badge(self.frame_rec)
+        from .wake_ui import WakeBadge
+
+        self.frame_wake = WakeBadge()                    # HEY JARVIS over the prompt view too ("Hey Jarvis" on)
+        self.header.add_rec_badge(self.frame_wake, wins_room=False)    # the service chips stay beside it
+        self.reading.add_wake_badge(self.frame_wake)
         self.ground = holo.GroundCache()
         self.reading.hero.set_ground(orb_mod.ground_painter(self.ground))
         self.reading.briefing_orb.set_ground(orb_mod.ground_painter(self.ground))
@@ -4908,6 +4948,22 @@ def _remove_audio_dir_after(workers: threading.Thread | Sequence[threading.Threa
     threading.Thread(target=run, name="audio-cleanup", daemon=False).start()
 
 
+def _with_picked_voice(config: Any) -> Any:
+    """``config`` with Settings > Voice's pick (the data folder's voice.json) as [voice] local_voice, while the voice is
+    made on this PC; ``config`` itself when nothing was picked or the pick can't apply."""
+    try:
+        if getattr(getattr(config, "voice", None), "engine", "") != LOCAL:
+            return config
+        from . import local_voice
+
+        picked = local_voice.VoicePick(Path(config.data_dir) / local_voice.PICK_FILE).get()
+        if not picked or picked == config.voice.local_voice:
+            return config
+        return dataclasses.replace(config, voice=dataclasses.replace(config.voice, local_voice=picked))
+    except Exception:  # noqa: BLE001 - the voice in config.toml, as before
+        return config
+
+
 def _remove_old_sessions(root: Path, keep: Path) -> None:
     """Best-effort removal of audio folders left behind by earlier runs (older than 12 h)."""
     try:
@@ -5123,7 +5179,7 @@ class AppController(QObject):
                  desktop_window_api: Any = None,
                  agent_factory: Callable[..., Any] | None = None) -> None:
         super().__init__()
-        self.config = config
+        self.config = _with_picked_voice(config)   # Settings > Voice's pick (voice.json) wins over [voice] local_voice
         self.client = client
         self._on_shutdown = on_shutdown   # e.g. an exit watchdog (the app passes one; tests do not)
         self._desktop_launch = bool(desktop_launch)   # --hud (the HUD key started Jarvis): onto the HUD once ready
@@ -5172,6 +5228,8 @@ class AppController(QObject):
         self._tray_menu: QMenu | None = None
         self._tray_quit_action: Any = None
         self._tray_back_action: Any = None   # Bring Jarvis back ([desktop]; shown only on the desktop HUD)
+        self._tray_wake_action: Any = None   # Listen for "Hey Jarvis" (wake_ui; only with the talk)
+        self._tray_mark = ""                 # the tray icon's mark ("Hey Jarvis": listening / a problem)
         self._tts: TtsWorker | None = None
         self._audio_dir: Path | None = None
         if action_store is None:
@@ -5205,6 +5263,8 @@ class AppController(QObject):
         self.task_feed: Any = None                     # the task's panel and cards (agent_feed), with the agent
         self.agent: Any = self._create_agent(agent_factory)   # [agent]: a task worked through, or None while it is off
         self.talk: Any = self._create_talk()            # [talk]: the talk key's listening, or None while it is off
+        self.wake: Any = self._create_wake()            # "Hey Jarvis" (wake_ui) beside the talk, or None without it
+        self.voice_download: Any = self._create_voice_settings()   # [voice] engine "local": Settings > Voice's part
         self.window.reading.set_find_actions(self.productivity is not None)   # offers' links in the Find list
         # Jarvis's own voice: silent unless injected; start() builds the real one ([assistant] speak).
         self._voice_injected = voice_factory is not None
@@ -5453,6 +5513,7 @@ class AppController(QObject):
         self._background_run: str | None = None    # a run polled for while the assistant screen shows
         self._pending_briefing: Briefing | None = None   # a newer briefing waiting for the reading to end
         self._say_worker: SayWorker | None = None  # Jarvis's own speech worker ("tts-say"; start() only)
+        self._local_client: Any = None             # [voice] engine "local": the voice made on this PC (start() only)
         self._utterance = ""                       # what Jarvis is saying right now (orb SPEAKING, speech line)
         self._briefing_speech = ""                 # the briefing's line for the speech line
         self._briefing_caption = ""                # ... and what the voice says for it (Home's caption)
@@ -5681,7 +5742,10 @@ class AppController(QObject):
         self._adopt_older_answers()
         self._start_tts()
         self._start_voice()
+        if self._local_client is not None:
+            self._local_client.warm()   # the voice loads in the background now: his first line needs no wait
         self._create_tray()
+        self._wake_call("start")    # "Hey Jarvis": the listener runs from now while it is on (never before start)
         if self.meetings is not None:
             self.meetings.start()   # a recording a crash left is saved; retention; nothing records by itself
         else:
@@ -5741,21 +5805,100 @@ class AppController(QObject):
             self.voice = voice
         self._sync_speaker()
 
-    def _create_voice(self) -> Voice | None:
-        """The real voice: voice_ui.AssistantVoice with its own speech worker ("tts-say": the
-        module-level SpeechSynthesizer with the [voice] settings, so Ryan with the Windows voice as
-        fallback, writing into the session's "say" folder), its own player at the controller's
-        volume, and assistant.json's mute switch. None keeps the SilentVoice."""
-        from . import voice_ui
-
+    def _ensure_local_voice(self) -> Any:
+        """[voice] engine "local": the one local_voice.LocalVoiceClient both speech threads share (made here, on the
+        GUI thread, before either starts); None for the online voice."""
         settings = self.config.voice
-        out_dir = (self._audio_dir if self._audio_dir is not None else self.config.audio_root) / "say"
-        bridge, closing = self._bridge, self._closing
+        if getattr(settings, "engine", "") != LOCAL or self._closing.is_set():
+            return None
+        if self._local_client is None:
+            from . import local_voice
 
-        def factory() -> SpeechSynthesizer:   # runs on the worker thread (SAPI/COM is thread-bound)
+            self._local_client = local_voice.LocalVoiceClient(
+                local_voice.models_root(self.config), self.config.audio_root, voice=settings.local_voice,
+                keep_warm_s=float(settings.keep_warm_minutes) * 60.0)
+            reason = self._local_client.reason()
+            logger.info("Jarvis's voice: made on this PC (%s)%s", settings.local_voice,
+                        f"; not ready yet ({reason}): the Windows voice speaks meanwhile" if reason else "")
+        return self._local_client
+
+    def _create_voice_settings(self) -> Any:
+        """[voice] engine "local": Settings > Voice's own part under its rows (local_voice_ui: whether the voice can
+        run, Download - only on a click - and the add-ons' lines). None for the online voice."""
+        if getattr(self.config.voice, "engine", "") != LOCAL:
+            return None
+        from . import local_voice, local_voice_ui
+
+        reading = self.window.reading
+        root = local_voice.models_root(self.config)
+        panel = local_voice_ui.VoiceSettingsPanel()
+        download = local_voice_ui.VoiceDownload(
+            root, voice=self.config.voice.local_voice, on_ready=self._local_voice_downloaded, parent=self,
+            reason=lambda: (self._local_client.reason() if self._local_client is not None
+                            else local_voice.missing_reason(root)),
+            current=lambda: self.config.voice.local_voice)
+        download.attach_panel(panel, refresh=reading.settings_page.refresh)
+        panel.picker.picked.connect(self._pick_voice)
+        reading.settings_page.attach_extra("voice", panel)
+        reading.settings_page.groupChanged.connect(lambda key: download.refresh() if key == "voice" else None)
+        return download
+
+    def _pick_voice(self, name: str) -> None:
+        """Settings > Voice: the owner clicked a voice (owner decision 2026-11-12). It is his voice from the next line on -
+        kept in voice.json, so it stays after a restart - and he says the preview line in it at once."""
+        from . import local_voice
+
+        if name not in local_voice.VOICE_NAMES or getattr(self.config.voice, "engine", "") != LOCAL:
+            return
+        if name != self.config.voice.local_voice:
+            self.config = dataclasses.replace(self.config, voice=dataclasses.replace(self.config.voice, local_voice=name))
+            if not local_voice.VoicePick(Path(self.config.data_dir) / local_voice.PICK_FILE).set(name):
+                logger.warning("Voice: the pick could not be saved; it holds until Jarvis closes")
+            if self._local_client is not None:
+                self._local_client.voice = name
+            self.window.reading.settings_page.set_config(self.config)
+            self._update_service_chips()
+            logger.info("Voice: the owner picked %s", name)
+        if self.voice_download is not None:
+            self.voice_download.refresh()
+        self.voice.stop_key(local_voice.PREVIEW_KEY)                # a quick second click: only the newest is said
+        self._say(KIND_NOTICE, with_address(local_voice.PREVIEW_LINE, self.config.assistant.address),
+                  key=local_voice.PREVIEW_KEY)
+
+    def _local_voice_downloaded(self) -> None:
+        """The local voice's download ended whole: a failed load before it is forgotten, and it loads now, so his next
+        line is in it."""
+        if self._local_client is not None:
+            self._local_client.forget_failure()
+            self._local_client.warm()
+
+    def _synth_factory(self, out_dir: Path, *, urgent: bool) -> Callable[[], SpeechSynthesizer]:
+        """A SpeechSynthesizer maker with the [voice] settings, for a speech worker's own thread (SAPI/COM is
+        thread-bound): the local voice (shared; ``urgent`` for Jarvis's own lines) with the Windows voice as its
+        fallback, or the online voice."""
+        settings, client = self.config.voice, self._ensure_local_voice()
+
+        def factory() -> SpeechSynthesizer:
             return SpeechSynthesizer(voice=settings.voice, rate=settings.rate, volume=settings.volume,
                                      offline_voice=settings.offline_voice, out_dir=out_dir,
-                                     divider_pause_ms=settings.divider_pause_ms)
+                                     divider_pause_ms=settings.divider_pause_ms,
+                                     engine=getattr(settings, "engine", ONLINE), local=client,
+                                     local_voice=lambda: getattr(self.config.voice, "local_voice", "bm_george"),
+                                     urgent=urgent)   # read at each line: Settings > Voice's pick holds at once
+
+        return factory
+
+    def _create_voice(self) -> Voice | None:
+        """The real voice: voice_ui.AssistantVoice with its own speech worker ("tts-say": the
+        module-level SpeechSynthesizer with the [voice] settings - the local voice made on this PC, or
+        Ryan online, with the Windows voice as fallback - writing into the session's "say" folder), its
+        own player at the controller's volume, and assistant.json's mute switch. None keeps the
+        SilentVoice."""
+        from . import voice_ui
+
+        out_dir = (self._audio_dir if self._audio_dir is not None else self.config.audio_root) / "say"
+        bridge, closing = self._bridge, self._closing
+        factory = self._synth_factory(out_dir, urgent=True)   # runs on the worker thread
 
         def on_result(seq: int, audio: SectionAudio | None, error: str | None) -> None:
             _emit_from_worker(bridge, "sayResult", closing, seq, audio, error)
@@ -5795,13 +5938,9 @@ class AppController(QObject):
         return audio_dir
 
     def _start_tts(self) -> None:
-        voice, out_dir = self.config.voice, self._audio_dir
+        out_dir = self._audio_dir if self._audio_dir is not None else self.config.audio_root
         bridge, closing = self._bridge, self._closing
-
-        def factory() -> SpeechSynthesizer:   # runs on the worker thread (SAPI/COM is thread-bound)
-            return SpeechSynthesizer(voice=voice.voice, rate=voice.rate, volume=voice.volume,
-                                     offline_voice=voice.offline_voice, out_dir=out_dir,
-                                     divider_pause_ms=voice.divider_pause_ms)
+        factory = self._synth_factory(out_dir, urgent=False)   # runs on the worker thread
 
         def on_result(generation: int, index: int, audio: SectionAudio | None, error: str | None) -> None:
             _emit_from_worker(bridge, "ttsResult", closing, generation, index, audio, error)
@@ -5859,6 +5998,13 @@ class AppController(QObject):
             self._tray_back_action.triggered.connect(self._on_tray_bring_back)
             self._tray_back_action.setVisible(self._hud_active())
         menu.addAction("Show briefing").triggered.connect(self._on_tray_show)
+        if getattr(self, "wake", None) is not None:
+            from .wake_ui import PHRASE
+
+            self._tray_wake_action = menu.addAction(f"Listen for {PHRASE}")
+            self._tray_wake_action.setCheckable(True)
+            self._tray_wake_action.setChecked(bool(self.wake.on))
+            self._tray_wake_action.triggered.connect(lambda checked: self.wake.set_on(bool(checked)))
         self._tray_quit_action = menu.addAction("Dismiss")
         self._tray_quit_action.triggered.connect(self._on_tray_quit)
         self._tray_menu = menu
@@ -5903,6 +6049,10 @@ class AppController(QObject):
         if self.tray is not None:
             recording = self._recording_tooltip()
             self.tray.setToolTip(recording or (tooltip if tooltip is not None else self._tray_tooltip()))
+            mark = self._wake_tray_mark()
+            if mark != self._tray_mark:
+                self._tray_mark = mark
+                self.tray.setIcon(app_icon(mark))
         if self._tray_quit_action is not None:
             quits = self.state in (STATE_READING, STATE_WAITING)
             self._tray_quit_action.setText("Quit" if quits else "Dismiss")
@@ -5923,7 +6073,8 @@ class AppController(QObject):
         if self._new_key() is not None:
             run = self._run_label()
             return f"Jarvis: {run + ' ' if run else ''}briefing ready to view"
-        return TRAY_TOOLTIP
+        wake = getattr(self, "wake", None)
+        return (wake.tray_text() if wake is not None else "") or TRAY_TOOLTIP
 
     # ---- activity log and header chips -------------------------------------------------
 
@@ -5951,7 +6102,11 @@ class AppController(QObject):
 
     def _voice_chip(self) -> tuple[str, str]:
         if self._uses_offline_voice():
+            if getattr(self.config.voice, "engine", "") == LOCAL:
+                return hud.STATUS_WARN, "Voice: Windows voice - the local voice can't run now (Settings > Voice)"
             return hud.STATUS_WARN, "Voice: offline (Windows voice)"
+        if self._engine == LOCAL:
+            return hud.STATUS_OK, f"Voice: on this PC - {voice_label(self.config.voice.local_voice)}"
         if self._engine is not None:
             return hud.STATUS_OK, "Voice: online (edge-tts)"
         if self._failed and not self._audio:
@@ -9388,6 +9543,7 @@ class AppController(QObject):
         are held - or ended (at its end, early by the owner's Undo, or turned off): what was held comes back - the
         offers at their next tick, the last few sentences, and the newest toast (after the one showing, if any)."""
         self._prod_call("sync")
+        self._wake_call("refresh_holds")         # "Hey Jarvis" pauses in focus mode
         if on:
             logger.info("Focus mode: Jarvis keeps quiet")
             return
@@ -9472,10 +9628,10 @@ class AppController(QObject):
         task_row = ""
         if desktop.tasks_on():
             from .agent.web import engine_order
-            from .desktop_view import CONSENT_TASK_ROW
+            from .desktop_view import consent_task_row
 
             first, *others = (engine.name for engine in engine_order(self.config.agent.search_engine))
-            task_row = CONSENT_TASK_ROW.format(engine=first, others=" and ".join(others))
+            task_row = consent_task_row(first, " and ".join(others), local=is_local(self.config))
         card.open_card(entry, updated=desktop.consent_given() and not desktop.consent_current(), task_row=task_row,
                        task_new=desktop.consent_given() and not desktop.consent_for_tasks())
         logger.info("Desktop: the first-run card shows (%s)", entry)
@@ -11382,7 +11538,8 @@ class AppController(QObject):
         timers = instant_ui.TimerController(folder, address=self.config.assistant.address,
                                             hour24=self.config.display.hour24,
                                             now=lambda: self._instant_now().astimezone(timezone.utc),
-                                            local=lambda moment: wall(moment, self._instant_now()), parent=self)
+                                            local=lambda moment: wall(moment, self._instant_now()),
+                                            say_labels=is_local(self.config), parent=self)
         self._instant_calendar_job: Any = None          # round 2: the calendars' read on its way (one at a time)
         self._instant_calendar_seq = 0
         calendar_read = self._instant_calendar_read if self._any_calendar_configured() else None
@@ -12266,6 +12423,7 @@ class AppController(QObject):
         """Jarvis started saying ``text`` (the orb says SPEAKING and the speech line shows his words)
         or finished (""; the briefing's own state and line come back)."""
         self._utterance = text or ""
+        self._wake_call("refresh_holds")         # "Hey Jarvis" pauses while he speaks: he never wakes himself
         if text:
             self._prod_call("on_speaking", text)   # an offer's sentence counts as spoken from now (R26)
         if self.state != STATE_READING:
@@ -13199,8 +13357,9 @@ class AppController(QObject):
     def _on_tts_audio(self, index: int, audio: SectionAudio) -> None:
         self._audio[index] = audio
         if audio.segments and audio.engine != self._engine:
-            logger.info("Speech engine: %s", "Windows offline voice (SAPI)" if audio.engine == SAPI
-                        else "edge-tts online voice")
+            logger.info("Speech engine: %s", {SAPI: "Windows offline voice (SAPI)",
+                                              LOCAL: "the local voice (made on this PC)"}.get(audio.engine,
+                                                                                            "edge-tts online voice"))
             self._engine = audio.engine
         if self._script is not None:
             self.player.set_audio(index, audio)
@@ -13225,7 +13384,8 @@ class AppController(QObject):
         self._audio_ready_logged = True
         if all(index in self._failed for index in needed):
             return
-        voice = "offline voice" if self._uses_offline_voice() else "edge voice"
+        voice = ("offline voice" if self._uses_offline_voice() else "local voice" if self._engine == LOCAL
+                 else "edge voice")
         self._activity(hud.TAG_DONE, "Audio ready", f"{voice} {DOT} {_plural(len(needed), 'section')}")
 
     def _uses_offline_voice(self) -> bool:
@@ -13810,7 +13970,7 @@ class AppController(QObject):
         if self._uses_offline_voice():
             reading.voice_bar.set_value("offline", 1.0, hud.AMBER)
         elif self._engine is not None:
-            reading.voice_bar.set_value("online", 1.0, hud.GREEN)
+            reading.voice_bar.set_value("local" if self._engine == LOCAL else "online", 1.0, hud.GREEN)
         else:
             reading.voice_bar.set_value("--", 0.0, hud.TEXT_DIM)
         briefing = self._briefing
@@ -13883,6 +14043,8 @@ class AppController(QObject):
 
     def _on_player_state(self, state: str) -> None:
         self._pump_voice()
+        self._wake_call("refresh_holds")         # "Hey Jarvis" pauses while the briefing plays (any player, as it is
+                                                 # replaced for each new briefing)
         if state != PLAYING and self.state == STATE_READING and not self._utterance:
             self.window.reading.end_caption()      # paused or finished: the last line holds, then rests
         if state == PLAYING and self.state == STATE_READING:
@@ -14123,15 +14285,114 @@ class AppController(QObject):
         controller = talk_ui.TalkController(self.config, bring_forward=self._talk_bring_forward,
                                             before_talk=self._talk_before, show_status=self.ask.talk_status,
                                             submit=self.ask.submit_spoken, set_look=self._talk_look,
-                                            set_level=self._talk_level, parent=self)
+                                            set_level=self._talk_level, parent=self,
+                                            chime=getattr(self, "_wake_chime", None))
         panel = talk_ui.TalkSettingsPanel(talk_ui.pip_command())
         controller.attach_panel(panel, refresh=reading.settings_page.refresh)
+        self._talk_panel = panel                        # "Hey Jarvis" adds its part (_create_wake)
         visibility = getattr(self.window, "visibilityChanged", None)
         if visibility is not None:
             visibility.connect(self._talk_visibility)
         reading.settings_page.add_group(talk_ui.SETTINGS_KEY, talk_ui.SETTINGS_TITLE, note=talk_ui.SETTINGS_NOTE,
                                         how=talk_ui.SETTINGS_HOW, rows=controller.settings_rows, extra=panel)
         return controller
+
+    # ---- "Hey Jarvis" (wake_ui) -----------------------------------------------------------------------------------
+
+    def _create_wake(self) -> Any:
+        """"Hey Jarvis" beside the talk (wake_ui.WakeController): its part of Settings > Talk, its marks (the header's,
+        the frame header's and the HUD's HEY JARVIS; the tray's) and what pauses it. None without the talk. Nothing
+        listens before start(), and only while the owner turned it on."""
+        talk = getattr(self, "talk", None)
+        if talk is None:
+            return None
+        from . import wake_ui
+
+        controller = wake_ui.WakeController(self.config, talk, holds=self._wake_holds,
+                                            in_control=self._wake_in_control, parent=self)
+        panel = wake_ui.WakePanel()
+        self._talk_panel.add_part(panel)
+        settings = self.window.reading.settings_page
+        controller.attach_panel(panel, refresh=settings.refresh)
+        talk.extra_rows = controller.settings_rows
+        controller.changed.connect(self._on_wake_changed)
+        recording = getattr(getattr(self, "meetings", None), "recordingChanged", None)
+        if recording is not None:
+            recording.connect(lambda _on: controller.refresh_holds())
+        picked = getattr(getattr(self, "meetings", None), "devicesPicked", None)
+        if picked is not None:
+            picked.connect(controller.mic_picked)       # Settings > Meetings > Microphone: the listener moves to it
+        self._on_wake_changed()
+        return controller
+
+    def _wake_call(self, name: str, *args: Any) -> Any:
+        wake = getattr(self, "wake", None)
+        if wake is None:
+            return None
+        try:
+            return getattr(wake, name)(*args)
+        except Exception as exc:  # noqa: BLE001 - "Hey Jarvis" never stops the app
+            logger.warning("Wake: %s failed (%s)", name, type(exc).__name__)
+            return None
+
+    def _wake_holds(self) -> list[str]:
+        """What pauses "Hey Jarvis" now (wake_ui.HOLD_*): a talk under way, Jarvis speaking or reading the briefing, a
+        meeting recording, focus mode."""
+        from . import talk_ui, wake_ui
+
+        holds: list[str] = []
+        talk = getattr(self, "talk", None)
+        if talk is not None and talk.state != talk_ui.IDLE:
+            holds.append(wake_ui.HOLD_TALK)
+        voice = getattr(self, "voice", None)
+        # His words start (speakingChanged, _utterance) just before their sound plays (voice.speaking): either counts.
+        speaking = bool(getattr(self, "_utterance", "")) or bool(getattr(voice, "speaking", False))
+        if speaking or self.player.state in (PLAYING, WAITING):
+            holds.append(wake_ui.HOLD_SPEAKING)
+        meetings = getattr(self, "meetings", None)
+        if meetings is not None and bool(meetings.is_recording()):
+            holds.append(wake_ui.HOLD_MEETING)
+        if self._focus_quiet():
+            holds.append(wake_ui.HOLD_FOCUS)
+        return holds
+
+    def _wake_in_control(self) -> bool:
+        """Jarvis is in control on the desktop: a wake is ignored, as the talk key is (Esc or Stop first)."""
+        return bool(self._hud_active() and self.desktop.in_control())
+
+    def _wake_chime(self) -> None:
+        """The soft chime as a talk "Hey Jarvis" started listens (when nothing was said yet: talk_ui)."""
+        from .wake_ui import play_chime
+
+        play_chime(self.config.data_dir)
+
+    def _wake_tray_mark(self) -> str:
+        """The tray icon's mark: "listening" while "Hey Jarvis" listens, "problem" when it cannot, "" otherwise."""
+        wake = getattr(self, "wake", None)
+        if wake is None:
+            return ""
+        from . import wake_ui
+
+        look = wake.look()
+        return look if look in (wake_ui.LOOK_LISTENING, wake_ui.LOOK_PROBLEM) else ""
+
+    def _on_wake_changed(self) -> None:
+        """What "Hey Jarvis" is doing changed: the HEY JARVIS marks (header, frame header, HUD), the tray's tooltip,
+        mark and tick, and Settings > Talk while it is open."""
+        wake = getattr(self, "wake", None)
+        if wake is None:
+            return
+        text, look = wake.status()
+        self.window.reading.set_wake(text, look)
+        self._update_tray()
+        action = self._tray_wake_action
+        if action is not None and action.isChecked() != bool(wake.on):
+            action.blockSignals(True)
+            action.setChecked(bool(wake.on))
+            action.blockSignals(False)
+        settings = self.window.reading.settings_page
+        if settings.current_group() == "talk":
+            settings.refresh()
 
     def _talk_bring_forward(self) -> None:
         """A talk starts: Jarvis comes forward in the mode he is in (on the HUD its bar shows the talk; a hidden or
@@ -14427,8 +14688,12 @@ class AppController(QObject):
         self._live_feed.stop()
         if getattr(self, "instant", None) is not None:
             self.instant.shutdown()    # no network answer lands after this; the timers stay in their file
+        if getattr(self, "wake", None) is not None:
+            self.wake.shutdown()       # "Hey Jarvis": the listener ends (its microphone closes)
         if getattr(self, "talk", None) is not None:
             self.talk.shutdown()       # the microphone closes; the speech process ends
+        if getattr(self, "voice_download", None) is not None:
+            self.voice_download.shutdown()   # a download of the local voice stops (it carries on at the next click)
         if getattr(self, "meetings", None) is not None:
             self.meetings.shutdown()   # a recording stops and is saved; the pill goes
         if getattr(self, "task_feed", None) is not None:
@@ -14478,6 +14743,9 @@ class AppController(QObject):
         self._stop_fetch()
         if self._tts is not None:
             self._tts.stop()
+        client, self._local_client = self._local_client, None
+        if client is not None:   # the voice's process is asked to end (it also ends when this app's pipe closes)
+            threading.Thread(target=client.close, name="local-voice-close", daemon=True).start()
         if self._calendar_worker is not None:
             # A hold that ended just before (its call still queued behind another job) goes too: the
             # worker takes it even though it is stopping, like a flushed one.

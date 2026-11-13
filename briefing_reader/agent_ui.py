@@ -50,11 +50,13 @@ the page in the window on it, and it never opens LIVE by itself. Logs: run ids, 
 what was typed, searched for or read.
 
 The voice: every line the model wrote (the plan's "found", say, a question, the report's opening) comes to spoken()
-before it reaches the voice, whose words go to Microsoft's online service as an Ask's answers do. Such a line goes on
-only while the run holds nothing private, or when it has no tainted word in it, no key, email address or long number of
-its own and, in a strict run, no foreign word (WebFirewall.speakable); else it stays on the caption and on its card,
-unsaid, with Jarvis's own fixed words in its
-place for a question or a report. [agent] speak_private = true skips the gate. Jarvis's own fixed lines never come here.
+before it reaches the voice. While the voice is made on this PC ([voice] engine = "local", owner decision 2026-11-12)
+every such line is said - nothing he says leaves the PC - except one that holds a key, an email address or a long
+number of its own (agent.firewall.holds_data: no use read out in a room). On the online voice, whose words go to Microsoft's service as
+an Ask's answers do, such a line goes on only while the run holds nothing private, or when it has no tainted word in
+it, no key, email address or long number of its own and, in a strict run, no foreign word (WebFirewall.speakable); else
+it stays on the caption and on its card, unsaid, with Jarvis's own fixed words in its place for a question or a
+report. [agent] speak_private = true skips the gate on the online voice too. Jarvis's own fixed lines never come here.
 
 The owner's things (part A4): ``things`` (AppThings, made by the app) is what a run's agent.owner.OwnerAccess reads and
 shows through, on the right threads: Google's objects on the tool's own, files on the "desktop" thread, whatever shows
@@ -103,6 +105,7 @@ from .agent.web import WebSession
 from .agent.workspace import TaskFolder, WorkspaceRefused, check_name, workspace_root
 from .ask.context import kept_lines
 from .ask.stream import GUARD, LIMIT
+from .local_voice import is_local
 from .persona import with_address
 
 logger = logging.getLogger(__name__)
@@ -600,10 +603,13 @@ class AgentController(QObject):
         if self.stopped_by:
             return ""
         if getattr(self.config.agent, "speak_private", False) is True:
-            return line
+            return line                          # the owner's choice
         wall = self.firewall
         try:
-            if wall is not None and wall.speakable(line):
+            if is_local(self.config):            # the voice is made on this PC: only a raw value stays on screen
+                if not agent_firewall.holds_data(line):
+                    return line
+            elif wall is not None and wall.speakable(line):
                 return line
         except Exception as exc:  # noqa: BLE001 - unknown: not said
             logger.warning("Agent: a line could not be checked (%s); not said", type(exc).__name__)

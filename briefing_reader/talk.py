@@ -43,6 +43,14 @@ NO_SPEECH_S = 8.0              # nothing said this long after the key: "I didn't
 MAX_TALK_S = 30.0              # a talk's cap
 BEFORE_SPEECH_MS = 1_000       # kept before the speech the endpointer found (a soft first word it missed)
 AFTER_SPEECH_MS = 200          # ... and after its last speech
+# A talk "Hey Jarvis" started (wake_ui, owner decisions 2026-11-12): it begins on the listener's audio from the wake on,
+# with the audio from before the wake kept aside (the pre-roll: its clip always begins there, and the wake words come
+# off what is heard).
+WAKE_NO_SPEECH_S = 5.0         # this long to start the request (the key gives NO_SPEECH_S)
+WAKE_START_DEAF_MS = 250       # the end of "Jarvis" may still be heard as the talk starts: it never starts the request
+CHIME_CHECK_MS = 350           # the chime plays only when nothing was said this long after the wake ...
+CHIME_DEAF_MS = 800            # ... and while it plays and echoes - with the audio arriving up to ~0.4 s late - it never
+                               # starts the request; the audio is kept
 
 SILENCE_DB = -100.0            # an all-zero frame
 MUTED_DB = -85.0               # a talk whose loudest frame stayed below this: a muted microphone
@@ -95,7 +103,8 @@ class Endpointer:
     """When a talk ends (see the module docstring). ``feed(pcm)`` takes 16 kHz mono 16-bit audio in any size of
     piece and returns "" while the talk goes on, else its end reason (END_*, the same from then on); ``end(reason)``
     ends it from outside (END_OWNER, END_CANCEL, END_DEVICE). ``level`` (0..1, the last frame), ``muted``,
-    ``heard_speech`` and ``span()`` read it."""
+    ``heard_speech``, ``loud_frames`` and ``span()`` read it. ``deafen(ms)``: the next ``ms`` never count as speech
+    nor as the room (Jarvis's own chime after "Hey Jarvis"); the audio is still kept."""
 
     def __init__(self, *, quiet_ms: int = QUIET_MS, no_speech_s: float = NO_SPEECH_S,
                  max_s: float = MAX_TALK_S) -> None:
@@ -112,6 +121,8 @@ class Endpointer:
         self.speech_frames = 0          # frames of speech since the start
         self._run = 0                   # loud frames in a row, before the start
         self._quiet_run = 0             # quiet frames in a row, after the start
+        self.loud_frames = 0            # frames that counted as speech, start or not
+        self._deaf_until = 0            # frames before this one never count as speech (deafen)
         self.ended = ""
 
     @property
@@ -138,6 +149,10 @@ class Endpointer:
             self.ended = reason
         return self.ended
 
+    def deafen(self, ms: int) -> None:
+        """From the next frame on, ``ms`` of audio never count as speech nor as the room."""
+        self._deaf_until = max(self._deaf_until, self.frames + max(0, round(ms / FRAME_MS)))
+
     def _quiet_needed_ms(self) -> int:
         short = self.speech_frames * FRAME_MS < SHORT_SPEECH_MS
         return self.quiet_ms + (SHORT_QUIET_EXTRA_MS if short else 0)
@@ -149,11 +164,16 @@ class Endpointer:
         self.level = level_of(db)
         if index == 0:
             self.floor_db = min(FLOOR_START_MAX_DB, max(FLOOR_MIN_DB, db))
-        loud = db >= max(self.floor_db + SPEECH_ABOVE_DB, SPEECH_MIN_DB)
-        if db < self.floor_db:
+        deaf = index < self._deaf_until
+        loud = not deaf and db >= max(self.floor_db + SPEECH_ABOVE_DB, SPEECH_MIN_DB)
+        if deaf:
+            pass                                           # Jarvis's own chime: neither speech nor the room
+        elif db < self.floor_db:
             self.floor_db = max(FLOOR_MIN_DB, db)          # the room is at least this quiet
         elif not loud:
             self.floor_db = min(FLOOR_MAX_DB, self.floor_db + FLOOR_RISE_DB)
+        if loud:
+            self.loud_frames += 1
         if self.start_frame < 0:
             self._run = self._run + 1 if loud else 0
             if self._run * FRAME_MS >= SPEECH_START_MS:
@@ -264,15 +284,23 @@ class TalkSession:
     16 kHz mono) and returns the end reason or ""; :meth:`end` ends it from outside (a second tap, Esc). Every end
     closes the stream at once. The audio stays in memory: :meth:`clip` is the part worth understanding, b"" when
     nothing should be (nothing said, a cancel, a stopped or muted microphone). The stream's ``read_available`` gives
-    16 kHz mono int16 (meeting_audio's AudioStream contract)."""
+    16 kHz mono int16 (meeting_audio's AudioStream contract). A talk "Hey Jarvis" started is made directly on the
+    listener's stream, with the audio from before the wake as ``preroll`` - its clip begins there, so a request said
+    in one breath with the wake words is whole - and ``deaf_ms`` (the end of "Jarvis" never starts the request)."""
 
     def __init__(self, stream: Any, *, quiet_ms: int = QUIET_MS, clock: Callable[[], float] = time.monotonic,
-                 device_name: str = "", follows_default: bool = False) -> None:
+                 device_name: str = "", follows_default: bool = False, preroll: bytes = b"",
+                 no_speech_s: float = NO_SPEECH_S, deaf_ms: int = 0) -> None:
         self._stream = stream
         self.device_name = device_name          # the microphone opened (the owner's; shown, never logged)
         self.follows_default = follows_default  # it is the Windows default (none picked in Settings > Meetings)
-        self.endpointer = Endpointer(quiet_ms=quiet_ms)
+        self.endpointer = Endpointer(quiet_ms=quiet_ms, no_speech_s=no_speech_s)
+        if deaf_ms:
+            self.endpointer.deafen(deaf_ms)      # its first ``deaf_ms`` never start the request (kept all the same)
         self._audio = bytearray()
+        # A talk "Hey Jarvis" started: the audio from before the wake, where its clip begins (never fed to the
+        # endpointer).
+        self._preroll = bytes(preroll)
         self._clock = clock
         self._began = clock()
 
@@ -348,8 +376,20 @@ class TalkSession:
         if ep.ended not in SAID_ENDS or ep.muted or (ep.ended != END_OWNER and not ep.heard_speech):
             return b""
         first, last = ep.span(len(self._audio))
-        return bytes(self._audio[first:last])
+        if self._preroll:
+            return self._preroll + bytes(self._audio[:last])   # "Hey Jarvis, open Spotify": all of it, said at once
+        return bytes(self._audio[first:last])                  # or after a pause (the wake words come off the words)
+
+    def speech_since(self, ms: int) -> bool:
+        """Something as loud as speech in the audio from ``ms`` into the talk on (the chime is not played over it)."""
+        ep = self.endpointer
+        threshold = max(ep.floor_db + SPEECH_ABOVE_DB, SPEECH_MIN_DB)
+        start = ms * SAMPLE_RATE // 1000 * BYTES_PER_SAMPLE
+        audio = bytes(self._audio[start:])
+        return any(frame_db(audio[at:at + FRAME_BYTES]) >= threshold
+                   for at in range(0, len(audio) - FRAME_BYTES + 1, FRAME_BYTES))
 
     def forget(self) -> None:
         """Drops the audio (once it was understood, or not needed)."""
         self._audio = bytearray()
+        self._preroll = b""

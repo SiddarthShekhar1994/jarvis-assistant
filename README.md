@@ -62,9 +62,12 @@ your own scheduled routine (see
 - **Voice and persona.** Each time you open him, Jarvis greets you with a
   short, random line for the time of day ("Good morning, sir."). He says Ask's
   answer and, once Google has answered, what happened after you approved a
-  card ("Done, sir - I've moved 'Project sync' to Friday at 2 PM."). He speaks
-  with Microsoft's online en-GB Ryan voice (edge-tts), or a Windows voice when
-  that cannot be reached. The speaker button in the header or **Ctrl+M** mutes
+  card ("Done, sir - I've moved 'Project sync' to Friday at 2 PM."). His voice
+  is made on this PC (George, a British voice of Kokoro-82M), so nothing he
+  says leaves it; until it is downloaded, or if it can't run, a Windows voice
+  speaks instead. `[voice] engine = "online"` brings back Microsoft's online
+  en-GB Ryan voice (edge-tts). See
+  [Jarvis's voice, made on this PC](#jarviss-voice-made-on-this-pc). The speaker button in the header or **Ctrl+M** mutes
   him, and everything he says is also written in the **JARVIS** tab. See
   [Jarvis talks](#jarvis-talks).
 - **LIVE view.** The **LIVE** tab shows every step he takes, as it happens:
@@ -256,9 +259,9 @@ orb in the middle and a rail of screens at its left edge (see
         |                  |                  |
         v                  v                  v
  Google APIs        Claude Code CLI      Voice
- (your own OAuth    (your claude.ai      edge-tts online,
-  client)            plan)               Windows voices
- Calendar: TODAY,   Ask planner: no      offline
+ (your own OAuth    (your claude.ai      Kokoro on this PC
+  client)            plan)               (or edge-tts online),
+ Calendar: TODAY,   Ask planner: no      Windows voices
  add, answer,       tools, proposes
  move, cancel       only
  after your OK;     Web research: web
@@ -277,8 +280,9 @@ orb in the middle and a rail of screens at its left edge (see
   [Instructions for the Claude briefing task](#instructions-for-the-claude-briefing-task)).
   Its instructions tell it never to send or change anything itself.
 - **The desktop app** (this repository) reads that page through a read-only
-  Notion integration, speaks with edge-tts (or the Windows voices) played by
-  QtMultimedia, and draws the HUD with PySide6 (Qt). For LIVE's page pictures
+  Notion integration, speaks with the voice made on this PC (Kokoro-82M; or
+  edge-tts online, or the Windows voices) played by QtMultimedia, and draws the
+  HUD with PySide6 (Qt). For LIVE's page pictures
   it also opens, itself, in a hidden private window (Qt's web engine), the
   public pages a web research read (once more) and the sources a search
   listed that it cites without reading them (a visit made only for the
@@ -429,8 +433,12 @@ and the [license](#license).
 - A Notion page that a scheduled task rewrites with your briefing (format:
   [Instructions for the Claude briefing task](#instructions-for-the-claude-briefing-task)),
   and a Notion integration that may read it (setup steps 2 and 3).
-- Internet access for Notion and for the online voice (edge-tts). If the online
-  voice cannot be reached, the app falls back to the Windows built-in voices.
+- Internet access for Notion. Jarvis's voice is made on this PC once you have
+  its add-ons and its one download (about 346 MB; see
+  [Jarvis's voice, made on this PC](#jarviss-voice-made-on-this-pc)); until
+  then, and whenever it can't run, the Windows built-in voices speak. With
+  `[voice] engine = "online"` he uses the online voice (edge-tts) instead,
+  which needs internet.
 - For calendar actions, sending replies and the TODAY panel only: a Google
   account (or two: a personal and a work or school one) and a free Google Cloud
   project with your own OAuth client (setup step 8, and 8b for email). Without
@@ -1176,7 +1184,8 @@ itself, and none adds a new moment when he speaks or shows something):
   posted nowhere else. **View** opens the Briefing screen; **Prepare brief**
   opens Home with the offer's tile, which still needs its own click: the toast
   never reads, prepares or sends anything.
-- **Offline voice.** When the online voice cannot be reached and the Windows
+- **Offline voice.** When his usual voice can't speak - the local voice is not
+  downloaded or can't run, or the online one cannot be reached - and the Windows
   voice speaks instead (see [Offline fallback](#offline-fallback)), the header
   says OFFLINE VOICE (steel), the orb's core goes flat with a broken outer
   track, Home says "My usual voice is out of reach, sir. I'll keep trying." and
@@ -2224,10 +2233,12 @@ updated card waits for your OK". Turn off takes back both.
 task and I work out the steps myself. I search and read public pages in a window you can
 watch, and the words of a search go to DuckDuckGo, or to Bing and Google if it gives nothing. When
 a task needs them, I read your calendar, mail, contacts, notes and allowed folders; what a task
-reads goes to your Claude plan, as an Ask's does, and is never kept in logs. What I say aloud goes
-to Microsoft's online voice, as an Ask's answers do, and a line that may hold something private
-stays on screen. Anything that changes things or gets sent still waits for your click." (it names
-`[agent] search_engine`'s engine first and the others after it). Everything
+reads goes to your Claude plan, as an Ask's does, and is never kept in logs. What I say aloud is
+made on this PC, so a line that may hold something private is said too - never sent anywhere.
+Anything that changes things or gets sent still waits for your click." (it names
+`[agent] search_engine`'s engine first and the others after it; with `[voice] engine = "online"`
+its voice sentence says instead that what he says aloud goes to Microsoft's online voice, as an
+Ask's answers do, and that a line that may hold something private stays on screen). Everything
 you allowed before stays allowed, but a task needs your OK on this card: the first time you
 ask for one, nothing starts, the bar says "Tasks need your OK on the updated card first, sir."
 and the card shows with that row marked NEW, your words back in the bar. Until then Settings
@@ -2496,8 +2507,10 @@ does, so your browser and Office treat them as from the internet (on a drive tha
 mark they simply have none). The window stays while the card stays. His report and his questions
 are never kept on this PC: they stay on screen until Jarvis closes.
 
-**What he says aloud.** A task's spoken lines go to Microsoft's online voice as an Ask's answers do,
-and a line that may hold something private stays on screen. Once a task has read anything of yours,
+**What he says aloud.** With his voice made on this PC (the default), every line of a task is said:
+nothing he says leaves the PC. With `[voice] engine = "online"`, a task's spoken lines go to
+Microsoft's online voice as an Ask's answers do, and a line that may hold something private stays on
+screen. On the online voice, once a task has read anything of yours,
 a line he wrote (what he has just found, a question, the opening of his report) is said only when
 none of what he read is in it, it holds no key, email address or long number of its own (yours too:
 a card number in your request, a number you typed when he asked) and, in a strict task (below), no
@@ -2815,8 +2828,9 @@ as typed words do, and "stop" stops it.
 - **He hears you only from the tap to the end.** The microphone opens on the
   tap and closes when the talk ends; while it is open the orbs say LISTENING
   (Home's moves with your voice) and the bar says so, and his own voice waits.
-  Hiding or minimizing the window cancels the talk. Nothing listens in between:
-  there is no wake word.
+  Hiding or minimizing the window cancels the talk. Nothing listens in between,
+  unless you turn on ["Hey Jarvis"](#hey-jarvis-the-wake-word), which listens
+  only for those words.
 - **On this PC.** Your speech is turned into text here, by a speech model
   (faster-whisper `small.en`, about 480 MB) downloaded only when you click
   Download in Settings > Talk; the sound is kept in memory for the moment it
@@ -2841,6 +2855,50 @@ If something is missing when you tap (an add-on, the model, a microphone), the
 bar says what and how to fix it, and the microphone does not open. Tapping the
 key while Jarvis is not running opens him, as the hotkey does; tap again to
 talk. Names Jarvis should expect ("Spotify", "Notion") go in `[talk] hints`.
+
+### "Hey Jarvis" (the wake word)
+
+Off until you turn it on. Say **"Hey Jarvis"** and he listens exactly as if
+you had tapped the talk key: say it in one breath ("Hey Jarvis, open
+Spotify") or pause, hear his soft chime, then say what you want. What he
+heard goes in as typed words do, under the same rules (cards still wait for
+your click). "Hey Jarvis" itself is taken off the front.
+
+- **Turning it on.** Settings > Talk > Turn on "Hey Jarvis", or the tray
+  menu's "Listen for "Hey Jarvis"". The first time it asks for the wake model:
+  click Download (about 3.7 MB from GitHub; see the licence below). It needs
+  talking set up first ([Talk to Jarvis](#talk-to-jarvis-the-talk-key)): it
+  uses the same add-ons, the same speech model and the same microphone (the
+  one picked in Settings > Meetings, else the Windows default). Nothing new to
+  install: its runtime, onnxruntime, comes with faster-whisper.
+- **While Jarvis runs.** It listens while his window is open, minimized or on
+  your desktop, and stops when you close him, so minimize him rather than
+  closing him. A small separate listener on this PC (below normal priority;
+  about 2% of one processor core and 95 MB) hears only for the wake words and
+  keeps no more than the last 1.6 seconds in memory, for a request said in one
+  breath. **Nothing is saved or sent while it waits**, and no log holds
+  audio, words or device names.
+- **It pauses** while he speaks or reads the briefing (so he never wakes
+  himself), while a talk listens, while a meeting records and in focus mode,
+  and listens again a moment after. Saying "Hey Jarvis" while he speaks does
+  nothing: tap the talk key to interrupt him. While he is in control on your
+  desktop it is ignored, as the talk key is.
+- **What shows it.** A small HEY JARVIS mark in his window's header and on the
+  desktop HUD (cyan while it listens, dim while paused, amber when it can't
+  hear you), a dot on his tray icon with the same words in its tooltip, and
+  Windows' own microphone icon in the taskbar. Settings > Talk says exactly
+  what it is doing and which microphone it listens to.
+- **Sensitivity** (Settings > Talk): *Fewer false wakes*, *Balanced* (the
+  default) or *Hears more*. Saying "Jarvis" alone, or words that sound like
+  "Hey Jarvis", can wake him too; a wake that hears no request ends quietly
+  ("I didn't hear a request."). Settings > Talk counts today's wakes and how
+  many of them heard nothing, so you can see whether to change it.
+
+The wake model is [openWakeWord](https://github.com/dscripka/openWakeWord)'s
+"hey jarvis" (release v0.5.1). Its files are licensed **CC BY-NC-SA 4.0: free
+for personal, non-commercial use**, so they are not part of this repository:
+Jarvis downloads them only when you click, into the models folder in the data
+folder, and checks each file's size and SHA-256 before using it.
 
 ### Instant answers
 
@@ -2868,7 +2926,9 @@ with the talk key, in well under a second and without your Claude plan:
   timer" (or "cancel all timers"). From 10 seconds to 4 hours, at most five
   at once. Home shows a chip counting down; at the end you hear a chime, see
   Jarvis's toast and he says it. A timer's label ("stretch") shows in the
-  toast but is never said aloud. Timers live in Jarvis, not in his window, so
+  toast and is said aloud only by the voice made on this PC ("Your 20
+  minutes timer for stretch is done, sir."); with `[voice] engine = "online"`
+  it is never said. Timers live in Jarvis, not in his window, so
   hiding the window changes nothing, and they come back after a restart. With
   [Jarvis on your desktop](#jarvis-on-your-desktop-the-hud) on, the HUD
   shows the same timers.
@@ -2877,8 +2937,10 @@ with the talk key, in well under a second and without your Claude plan:
   me tomorrow at 9 am to stretch", "remind me at noon"; then "what reminders
   do I have", "cancel the 5 pm reminder" or "cancel all reminders". At the
   time you hear the chime, the toast says "It's 5:00 PM: call mum", and
-  Jarvis says only "Sir, your 5 PM reminder" - your words never go to the
-  voice. Up to ten at once, kept with the timers (so they survive a restart
+  Jarvis says "Sir, your 5 PM reminder: call mum" - his voice is made on this
+  PC, so your words never leave it (with `[voice] engine = "online"` he says
+  only "Sir, your 5 PM reminder": your words never go to the online voice).
+  Up to ten at once, kept with the timers (so they survive a restart
   and the HUD shows them), and Home's chip shows whichever comes first
   ("Reminder 5:00 PM" or a timer's countdown). A bare hour ("at 5") is the
   next 5 o'clock within 12 hours, and the answer says which; with "tomorrow"
@@ -2894,9 +2956,12 @@ with the talk key, in well under a second and without your Claude plan:
   agenda and never signs in. A read is kept for 2 minutes, so follow-ups are
   instant; otherwise "Checking your calendar..." shows for the second it
   takes (if it takes more than 12 seconds, the question goes to Claude). The
-  screen shows each event's title, time, place and calendar; **his voice says
-  only times, counts and how soon** ("Your next meeting is at 2 PM, sir, in
-  40 minutes"), never a title. Events you declined are left out, and all-day
+  screen shows each event's title, time, place and calendar; **his voice
+  names the event the answer is about** ("Your next meeting, Design review,
+  is at 2 PM, sir, in 40 minutes"), never a place - his voice is made on this
+  PC. With `[voice] engine = "online"` it says only times, counts and how
+  soon ("Your next meeting is at 2 PM, sir, in 40 minutes"), never a title.
+  Events you declined are left out, and all-day
   events or events shown as "free" are listed but never make you busy. If an
   account can't be read, the answer says so plainly and never calls you free
   from the other calendars alone. The logs hold only counts and how long the
@@ -2943,7 +3008,7 @@ is written down in about a minute. It needs NVIDIA's two runtime libraries,
 which Jarvis never installs; Settings > Talk shows the command, the same as:
 
 ```
-python -m pip install "nvidia-cublas-cu12==12.*" "nvidia-cudnn-cu12==9.*"
+py -3.13 -m pip install "nvidia-cublas-cu12==12.*" "nvidia-cudnn-cu12==9.*"
 ```
 
 (about 1 GB, with the python.exe Jarvis runs on). Then:
@@ -4248,7 +4313,10 @@ log. Changes apply the next time the app starts.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `[voice] voice` | `"en-GB-RyanNeural"` | Online edge-tts voice. List them with `py -3.13 -m edge_tts --list-voices`. |
+| `[voice] engine` | `"local"` | Where his voice is made: `"local"` = on this PC (Kokoro-82M; nothing he says leaves the PC, so lines that may be private are said too; the Windows voice speaks until it is downloaded or when it can't run - never the online one), `"online"` = Microsoft's online voice (edge-tts), with private lines kept on screen. See [Jarvis's voice, made on this PC](#jarviss-voice-made-on-this-pc). |
+| `[voice] local_voice` | `"bm_george"` | The local voice: `bm_george`, `bm_fable`, `bm_lewis`, `bm_daniel` (British men), `bf_emma`, `bf_isabella`, `bf_alice`, `bf_lily` (British women), or an American one (`am_adam`, `am_echo`, `am_eric`, `am_fenrir`, `am_liam`, `am_michael`, `am_onyx`, `am_puck`, `am_santa`, `af_alloy`, `af_aoede`, `af_bella`, `af_heart`, `af_jessica`, `af_kore`, `af_nicole`, `af_nova`, `af_river`, `af_sarah`, `af_sky`). All 28 come in the one download. |
+| `[voice] keep_warm_minutes` | `0` | Minutes the local voice stays loaded after he last spoke (0 to 1440). `0` keeps it loaded while Jarvis runs, so he never waits for it; it takes about 1.3 GB of memory and about 5 seconds to load again. |
+| `[voice] voice` | `"en-GB-RyanNeural"` | Online edge-tts voice (`engine = "online"`). List them with `py -3.13 -m edge_tts --list-voices`. |
 | `[voice] rate` | `"+0%"` | Speed, a signed percentage from `"-50%"` to `"+100%"`, e.g. `"+15%"` faster, `"-10%"` slower. |
 | `[voice] volume` | `"+0%"` | Loudness, `"-100%"` to `"+100%"`, e.g. `"-20%"` quieter. |
 | `[voice] offline_voice` | `""` | Part of a Windows voice name for the offline fallback, e.g. `"Zira"` or `"David"`; empty = Windows default. List them with `py -3.13 -c "import pyttsx3; [print(v.name) for v in pyttsx3.init().getProperty('voices')]"`. |
@@ -4358,7 +4426,7 @@ log. Changes apply the next time the app starts.
 | `[agent] search_engine` | `"duckduckgo"` | Where his searches go first: `"duckduckgo"`, `"bing"` or `"google"`, then the others if a page gives nothing or shows a wall. The words of each search go there, and the Turn on card names it. |
 | `[agent] workspace` | `""` | The tasks' folder: `""` = `Jarvis\Workspace` in your user folder, else a full folder path. Never under OneDrive: a task refuses to start there. |
 | `[agent] private` | `["calendar", "contacts", "memory", "mail", "files"]` | What a task may read of your things, when it needs them and only while it is connected. A shorter list narrows it (`"memory"` covers your notes and what you said before the task); an entry that is none of these grants nothing, and so does something that is not a list. |
-| `[agent] speak_private` | `false` | `true` also says aloud a task's line that may hold something private; such lines go to Microsoft's online voice. Off, they stay on screen. |
+| `[agent] speak_private` | `false` | With `[voice] engine = "online"`: `true` also says aloud a task's line that may hold something private; such lines go to Microsoft's online voice. Off, they stay on screen. The voice made on this PC says them anyway. |
 | `[talk] enabled` | `false` | [Talk to Jarvis](#talk-to-jarvis-the-talk-key): the talk key opens the microphone for one request. Turn it on for this PC with `JARVIS_TALK_ENABLED=true` in `.env` (it overrides this both ways), then restart the "Briefing hotkey" task. Needs Ask Jarvis, the add-ons faster-whisper and PyAudioWPatch, and the speech model (Settings > Talk). |
 | `[talk] key` | `"ctrl+alt+space"` | The talk key; never the `[hotkey] combo` or the `[desktop] hud_key` (refused with a warning). |
 | `[talk] model` | `"small.en"` | The speech model on this PC: `"small.en"` (about 480 MB), `"base.en"` (about 145 MB, quicker, less sure), `"medium.en"` (about 1.5 GB, the meetings' model) or `"distil-large-v3"` (about 1.5 GB, the most accurate; for an NVIDIA card). Downloaded only when you click Download in Settings > Talk. |
@@ -4371,7 +4439,7 @@ log. Changes apply the next time the app starts.
 | `[instant] weather` | `true` | Weather answers: only a town's name (then its coordinates) goes to Open-Meteo. |
 | `[instant] currency` | `true` | Currency answers: only two currency codes go to Frankfurter (European Central Bank rates). |
 | `[instant] town` | `""` | The weather's town when a request names none, e.g. `"Oslo"` or `"Springfield, Illinois"`; `""` = none (the question goes to Claude). A town you set by saying "my town is ..." wins over it. Never logged. |
-| `[instant] calendar` | `true` | Calendar answers ("what's my next meeting", "am I free at 3") from every account's main calendar, read when you ask; titles are shown, never said. Needs `[calendar]` on and set up. |
+| `[instant] calendar` | `true` | Calendar answers ("what's my next meeting", "am I free at 3") from every account's main calendar, read when you ask; titles are shown, and said only by the voice made on this PC (never a place). Needs `[calendar]` on and set up. |
 | `[instant] temperature` | `"auto"` | `"auto"` follows the Windows region (US units: Fahrenheit), else `"celsius"` or `"fahrenheit"`. |
 
 The offline voice uses the same `rate` and `volume`: the rate scales Windows'
@@ -4453,8 +4521,81 @@ or position reporting and is no longer maintained; `pygame` adds SDL and its own
 event handling, which would have to be polled next to Qt's loop; `python-vlc`
 needs VLC installed separately.
 
+## Jarvis's voice, made on this PC
+
+Jarvis's voice is made on this PC by Kokoro-82M, a small open speech model, so
+nothing he says - the briefing, Ask's answers, his greetings, a task's lines -
+ever leaves it. That is why he also says the lines he used to keep on screen:
+the event an instant calendar answer is about (by its title; never a place), a
+reminder's or a timer's label, and a task's lines that may hold something
+private. This is the default (`[voice] engine = "local"`); `engine = "online"`
+brings back Microsoft's online Ryan voice, with those lines on screen again.
+
+**Setting it up (once).**
+
+1. The add-ons. You install them; Jarvis never runs pip. In PowerShell
+   (Settings > Voice shows the exact line for whatever is missing on your PC):
+
+   ```
+   py -3.13 -m pip install "spacy>=3.8,<3.9" "num2words>=0.5.14" "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
+   py -3.13 -m pip install --ignore-requires-python "misaki==0.9.4"
+   ```
+
+   It also uses onnxruntime and numpy (they come with the talk add-ons) and
+   torch and transformers; Settings > Voice adds any of them that is missing to
+   its line. misaki's release says "Python below 3.13" but
+   is plain Python and runs on 3.13, hence `--ignore-requires-python`.
+2. Restart Jarvis, open **Settings > Voice** and click **Download the local
+   voice**: about 346 MB from Hugging Face, once (the model with its 28 English
+   voices, and two 3 MB word models), pinned to exact revisions, checked, and
+   it carries on where it stopped. Until it is here the Windows voice speaks -
+   never the online one.
+
+**The voices.** George (`bm_george`, British male) is the default. To pick
+another, open **Settings > Voice**: every voice is a button (British men and
+women, American men and women). A click makes it his voice from his next line
+and he says "Hey, sir. Let's get to work." in it at once; the one in use is
+lit. The pick is kept in the data folder's `voice.json`, so it stays after a
+restart, and it wins over `[voice] local_voice` (which you can still set:
+`bm_fable`, `bm_lewis`, `bm_daniel`, `bf_emma`, ... - see
+[Configuration](#configuration)). `rate` and `volume` work as before.
+
+**Speed.** It runs on the CPU in a process of its own, at below-normal
+priority, and stays loaded while Jarvis runs (`keep_warm_minutes`): it loads in
+about 5 seconds when Jarvis starts and takes about 1.3 GB of memory. On a Ryzen
+7 7700X a one-sentence line is ready in about 0.6 s and a two- or
+three-sentence answer in about 1.7 s - about five times faster than he speaks
+(the online voice took about 2 s a line there). His own lines go before the
+briefing's, which is prepared in the background. Word timings come from the
+model, so the captions and the orb follow his words as before.
+
+**What runs, and the licences.** Kokoro-82M and its voices
+(onnx-community's ONNX export; Apache-2.0), run by onnxruntime (MIT); words
+turned into sounds by misaki (Apache-2.0) with spaCy and its English model
+(MIT) and num2words (LGPL-2.1, used as it is); words misaki doesn't know by a
+3 MB model (PeterReid/graphemes_to_phonemes_en_gb and _us; Apache-2.0) run by
+torch and transformers. No espeak-ng or phonemizer (GPL-3.0) is used: the
+`kokoro` and `kokoro-onnx` packages and misaki's `[en]` extra, which bring them
+in, are not needed.
+
+**Privacy.** The text goes from Jarvis to his voice process over a pipe on
+this PC and nowhere else. The process works offline (Hugging Face and
+transformers set to offline, spaCy's own download refused) and writes only
+the audio files into Jarvis's temporary audio folder. The logs hold counts and
+times, never his words.
+
+**If he doesn't speak in his voice**, the voice chip says "Voice: Windows
+voice - the local voice can't run now (Settings > Voice)" and Settings > Voice
+says what is missing: an add-on (with the line to install it) or the
+download. The log says `The local voice can't run yet (addon_missing)` (or
+`model_missing`), or `The local voice failed (...); the Windows voice
+speaks, and the local voice is tried again in 60 s`.
+
 ## Offline fallback
 
+With the local voice (the default), the Windows voice speaks while the local
+one can't run, and after a failure Jarvis tries the local voice again a
+minute later. With `[voice] engine = "online"`:
 edge-tts uses Microsoft's online read-aloud service: it needs internet but no
 account, key or payment. If it fails (for example offline), the section is
 spoken with a Windows built-in voice through pyttsx3 (SAPI). The prompt then
@@ -4617,6 +4758,7 @@ Other files in `%LOCALAPPDATA%\briefing-reader`:
 | `assistant.json` | Whether Jarvis's voice is muted, the ids of the last 5 greetings (so the next one differs), whether the briefings an older version read through its prompt were taken as viewed (done once, at the first start after the update, so they are not announced again), and, once you used it, where the LIVE pop-out window was and whether it was open, and `prod_hint_shown` once the "minimize instead of Done" hint was shown, and `followups_off` while the follow-up list is turned off on this PC, and `desktop_turned_on` (with `desktop_consent_version`, the card's version) once you turned [Jarvis on your desktop](#jarvis-on-your-desktop-the-hud) on. Never any text. Safe to delete. |
 | `desktop\` | Jarvis on your desktop's own records, on this PC only: `journal\<run id>.jsonl`, for each NEEDS YOUR OK card you clicked, every file it moved, copied, renamed, zipped or put in the Recycle Bin with its old and new path (Undo needs them; never logged, never sent to Claude; kept 30 days); `timers.json`, your running timers and reminders and their labels (so a restart keeps them); `focus.json` while focus mode runs. Safe to delete (Undo of those changes goes with it). |
 | `instant.json` | The weather town you set by saying or typing "my town is ..." ([Instant answers](#instant-answers)): the place Jarvis found, as shown, and its coordinates. Never logged. "Forget my town" clears it; safe to delete. |
+| `wake.json`, `wake_chime.wav` | ["Hey Jarvis"](#hey-jarvis-the-wake-word): whether you turned it on, its sensitivity and today's two counts (wakes, and wakes that heard nothing) - no audio, words or device names; and the chime, a tone Jarvis makes himself. Deleting `wake.json` turns "Hey Jarvis" off. The wake model's files are in `models\openwakeword-hey-jarvis-v0.1\`. |
 | `followups.json` | The follow-up rows you hid: per row a 32-character hash (of the account name, the thread and its newest deciding message, never in clear), when you hid it and until when ("" = until something new arrives); entries older than 30 days are dropped. No subject, name, address or id. Safe to delete (hidden rows come back). |
 | `prep_series.json` | The productivity bundle's repeating meetings whose prep offers ended unclicked: per series a 32-character hash (of the account name, the calendar and Google's series id, never in clear), how many times in a row (3 stops its offers) and the day of the last change; entries untouched for 60 days are dropped. No title, id or address. Safe to delete (the offers come back). |
 | `conversation.json` | The last 24 hours of the conversation (at most 100 entries: your requests, Jarvis's answers and results as the Transcript showed them, each with its time; never your memory lines), shown again at a start and given to Ask as `<conversation>` (a web research's question and answer are marked and never given; see [Ask remembers the conversation](#ask-remembers-the-conversation)). Written by the app a moment after the conversation changes and when it closes; older entries leave it at the start and within the hour after they turn a day old. **Clear conversation** in the Transcript deletes it; you can delete it yourself while Jarvis is closed. A broken file is ignored and replaced. Never logged. |
@@ -4633,21 +4775,32 @@ Talking to Jarvis ([the talk key](#talk-to-jarvis-the-talk-key)) sends nothing
 anywhere to be understood: the microphone is open only from the tap to the end,
 your speech becomes text on this PC, the sound is never saved and no log holds
 what you said. What he heard then goes where typed words go.
+["Hey Jarvis"](#hey-jarvis-the-wake-word), when you turn it on, listens on this
+PC for those words only: the audio stays in memory, nothing is saved or sent
+while it waits, and its one download (the wake model from GitHub) happens only
+when you click.
 
 [Instant answers](#instant-answers) about the time, dates, sums, conversions,
 timers and reminders never leave this PC. A weather question sends only the
 town's name to Open-Meteo (then that place's coordinates), and a currency
 question only the two currency codes to Frankfurter; nothing else goes with
 them, and the logs never hold the town, the amount or the answer. A calendar
-question reads your own Google calendars the way the agenda does; what Jarvis
-says aloud (through Microsoft's read-aloud service) holds only times and
-counts, never an event's title or place, and neither do reminder or timer
-labels.
+question reads your own Google calendars the way the agenda does. What Jarvis
+says aloud is made on this PC: it names the event an answer is about (never
+its place), and reminder and timer labels are said too. With
+`[voice] engine = "online"` (Microsoft's read-aloud service) it holds only
+times and counts, never an event's title or place, and neither do reminder or
+timer labels.
 
 The app talks to these services, all free:
 
 - the Notion API: it only reads the one page, with a read-only integration;
-- Microsoft's Edge read-aloud service, which receives the briefing text to turn
+- Hugging Face, once, when you click **Download the local voice** in Settings >
+  Voice: the voice's files (about 346 MB, pinned revisions); nothing of yours is
+  sent, and the voice then runs offline on this PC - the briefing and
+  everything he says never leave it ([Jarvis's voice, made on this
+  PC](#jarviss-voice-made-on-this-pc));
+- only with `[voice] engine = "online"`: Microsoft's Edge read-aloud service, which receives the briefing text to turn
   it into speech, and the same way Jarvis's own sentences ([Jarvis
   talks](#jarvis-talks)): greetings, "Your AM briefing is ready to view", Ask's
   answers, a task's spoken lines (what he found, his questions, the opening of his
@@ -5062,7 +5215,14 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
 - **No sound**: check the Windows default output device and its volume; the app
   plays on the default device and follows it when it changes. Look in the log for
   playback or speech errors.
-- **The Windows voice speaks although you are online** (amber voice chip, "Audio
+- **The Windows voice speaks instead of George** (the voice chip: "Voice: Windows
+  voice - the local voice can't run now"): open Settings > Voice. It says what
+  is missing - an add-on, with the line to install it (then restart Jarvis),
+  or the download (click Download). After a failure the log says `The local
+  voice failed (...)` and Jarvis tries his own voice again a minute later; a
+  failure every time is worth a look at the add-ons' versions.
+- **The Windows voice speaks although you are online** (`[voice] engine =
+  "online"`; amber voice chip, "Audio
   ready (offline voice)"): Microsoft sometimes moves or refuses the online
   voice's address. Jarvis then tries his newer address by himself (log:
   `edge-tts refused at the usual address (...); trying the newer address`, then
@@ -5109,6 +5269,15 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
   sometimes makes one the default: pick your real microphone in Settings >
   Meetings > Microphone (talk uses the same choice), or make it the default
   input in Windows Settings > System > Sound.
+- **"Hey Jarvis" does nothing**: Settings > Talk's "Hey Jarvis" row says why
+  (and the HEY JARVIS mark turns amber). "a virtual microphone": pick your real
+  one in Settings > Meetings > Microphone, as for the talk key; "paused": he is
+  speaking, a meeting records, or focus mode is on; "needs the wake model":
+  click Download. It works only while Jarvis runs: minimize him rather than
+  closing him. If he still misses you, try Sensitivity > Hears more.
+- **He wakes when you didn't call him**: try Sensitivity > Fewer false wakes,
+  or turn "Hey Jarvis" off from the tray menu while a video or a call says
+  "Jarvis" a lot. Settings > Talk counts the wakes that heard nothing.
 - **The talk key does nothing**: Settings > Talk's "Talk key" row says when
   another program has it ("another program has it; choose another [talk] key
   in config.toml"). Pick another `[talk] key`, then restart the "Briefing
@@ -5369,7 +5538,10 @@ briefing_reader/pictures.py   LIVE's pictures as data (no Qt): an email, what a 
 briefing_reader/snapshots.py  page pictures' rules (no Qt): which pages may be opened, what the hidden window may load, the per-research cap
 briefing_reader/snapshot_engine.py  page pictures on this PC: the hidden private window (QtWebEngine, loaded on first use) and LIVE's side of it
 briefing_reader/snapshot_gate.py  the hidden window's network gate (no Qt): every connection it makes, to public IPv4 addresses on port 443 only
-briefing_reader/tts.py        edge-tts synthesis, Windows SAPI fallback, highlight timing, background worker
+briefing_reader/tts.py        speech synthesis: the local voice or edge-tts, Windows SAPI fallback, highlight timing, background worker
+briefing_reader/local_voice.py  the voice made on this PC, the app's side (no Qt): its pinned download, add-ons, text into requests, the shared client
+briefing_reader/local_voice_worker.py  the local voice's own process: misaki's word-to-sound, Kokoro-82M in onnxruntime, WAVs with word times
+briefing_reader/local_voice_ui.py  Settings > Voice's own part: whether the local voice can run, its Download, the add-ons' lines
 briefing_reader/player.py     QtMultimedia player that plays sections in order with pauses
 briefing_reader/hud.py        Jarvis HUD widget kit: colours, fonts, chamfered panels, orb, buttons, cards, agenda, command bar, tabs, conversation, the LIVE log, its pictures and the picture viewer
 briefing_reader/ui.py         assistant screen (JARVIS / BRIEFING / LIVE / MEMORY tabs), the LIVE pop-out window, classic prompt, tray icon, approvals, TODAY / DEADLINES, app controller (launch kinds, NEW, greeting, announcement)
@@ -5396,3 +5568,9 @@ The bundled fonts in `fonts\` are not covered by that licence: Chakra Petch,
 Sora and JetBrains Mono are each licensed under the SIL Open Font License,
 Version 1.1, and their licence files are next to them (`fonts\OFL-ChakraPetch.txt`,
 `fonts\OFL-Sora.txt`, `fonts\OFL-JetBrainsMono.txt`; see [Fonts](#fonts)).
+
+"Hey Jarvis" (`briefing_reader\wake.py`) follows the streaming pipeline of
+[openWakeWord](https://github.com/dscripka/openWakeWord) (code under the Apache
+License 2.0, copyright 2022 David Scripka), re-done here. openWakeWord's model
+files are licensed CC BY-NC-SA 4.0 (non-commercial) and are not included: they
+are downloaded only on your click (see ["Hey Jarvis"](#hey-jarvis-the-wake-word)).

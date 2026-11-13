@@ -9,7 +9,9 @@ and the range read; ``covers(now)`` says whether it holds today and tomorrow as 
 
 What is shown (``text``: the conversation; ``brief``: the bar's one line) names each event: its title, its time, its
 place and - with two or more accounts - which calendar. What is said (``speech``) holds times, counts and how soon
-only, never a title or a place: the owner's voice is Microsoft's online voice (owner decision 2026-11-11). Events he
+only, never a title or a place, while the owner's voice is Microsoft's online voice (owner decision 2026-11-11);
+``say_titles`` (the voice is made on this PC: owner decision 2026-11-12) names the event the answer is about by its
+title too (persona.spoken_title: links, addresses and ids out, cut at a word) - places stay on screen. Events he
 declined are left out; all-day events and events shown as "free" are listed but never make him busy. An account that
 couldn't be read is said plainly, and no answer says "free" or "nothing" without saying which calendars it covers.
 ``reply`` is None only when the read does not cover what was asked (the app reads again).
@@ -25,7 +27,7 @@ from urllib.parse import urlsplit
 
 from .instant import (CAL_COUNT, CAL_DAY, CAL_FREE, CAL_MORE, CAL_NEXT, KIND_CALENDAR, CalendarAsk, InstantReply,
                       local_at, spoken_clock, wall)
-from .persona import with_address
+from .persona import spoken_title, with_address
 from .text_prep import clock_parts, format_time
 
 PROBLEM_SIGNED_OUT, PROBLEM_SETUP, PROBLEM_ERROR = "signedout", "setup", "error"
@@ -263,8 +265,13 @@ def _join(*parts: str) -> str:
     return "\n".join(part for part in parts if part)
 
 
+def _name(item: _Item, titles: bool) -> str:
+    """The event's title as said when titles may be said ("" otherwise, or when nothing sayable is left)."""
+    return spoken_title(item.title) if titles else ""
+
+
 def reply(ask: CalendarAsk, read: CalendarRead, *, now: datetime, address: str = "sir",
-          hour24: bool = False) -> InstantReply | None:
+          hour24: bool = False, say_titles: bool = False) -> InstantReply | None:
     """The answer to ``ask`` from ``read`` (see the module docs); None when the read does not cover it."""
     if now.utcoffset() is None:
         now = now.astimezone()
@@ -277,7 +284,7 @@ def reply(ask: CalendarAsk, read: CalendarRead, *, now: datetime, address: str =
     answer = {CAL_NEXT: _next, CAL_MORE: _more, CAL_DAY: _day, CAL_COUNT: _day, CAL_FREE: _free}.get(ask.action)
     if answer is None:
         return None
-    text, speech, brief = answer(ask, items, now, scope, hour24)
+    text, speech, brief = answer(ask, items, now, scope, hour24, titles=say_titles)
     if scope.failed:
         text = _join(text, scope.shown())
         brief += scope.brief()
@@ -297,7 +304,8 @@ def _none_read(scope: _Scope, address: str) -> InstantReply:
     return InstantReply(KIND_CALENDAR, scope.shown(), with_address(said, address), SOURCE, brief=brief)
 
 
-def _next(ask: CalendarAsk, items: list[_Item], now: datetime, scope: _Scope, hour24: bool) -> tuple[str, str, str]:
+def _next(ask: CalendarAsk, items: list[_Item], now: datetime, scope: _Scope, hour24: bool, *,
+          titles: bool = False) -> tuple[str, str, str]:
     noun = ask.noun
     timed = [item for item in items if item.timed]
     on_now = [item for item in timed if item.start <= now < item.until()]
@@ -311,8 +319,9 @@ def _next(ask: CalendarAsk, items: list[_Item], now: datetime, scope: _Scope, ho
     if not upcoming:
         text = _join(now_line, f"Nothing more on {scope.your()} today or tomorrow.")
         if on_now:
-            said = (f"Your {noun} now ends at {spoken_clock(on_now[-1].until())}, {{sir}}, and there's nothing after "
-                    f"it{scope.on()} today or tomorrow.")
+            name = _name(on_now[-1], titles)
+            said = (f"Your {noun} now{', ' + name + ',' if name else ''} ends at {spoken_clock(on_now[-1].until())}, "
+                    f"{{sir}}, and there's nothing after it{scope.on()} today or tomorrow.")
         else:
             said = f"Nothing on {scope.your()} for the rest of today or tomorrow, {{sir}}."
         if scope.partial:
@@ -335,10 +344,13 @@ def _next(ask: CalendarAsk, items: list[_Item], now: datetime, scope: _Scope, ho
     else:
         rest = ""
     text = _join(now_line, head, *lines, rest)
+    names = [name for name in (_name(item, titles) for item in together[:3]) if name]
     if len(together) == 1:
-        said = f"Your next {noun}{scope.on()} is {said_when}, {{sir}}{soon}."
+        said = (f"Your next {noun}{scope.on()}{', ' + names[0] + ',' if names else ''} is {said_when}, "
+                f"{{sir}}{soon}.")
     else:
-        said = f"You have {len(together)} {noun}s next{scope.on()}, {said_when}, {{sir}}{soon}."
+        said = (f"You have {len(together)} {noun}s next{scope.on()}, {said_when}, {{sir}}{soon}"
+                + (f": {_names(names)}." if names else "."))
     if scope.partial:
         said = said[:-1] + f"; {scope.said()}."
     brief = f"Next: {first.title} {'tomorrow ' if tomorrow else ''}at {when}" + (
@@ -347,7 +359,8 @@ def _next(ask: CalendarAsk, items: list[_Item], now: datetime, scope: _Scope, ho
     return text, said, brief
 
 
-def _more(ask: CalendarAsk, items: list[_Item], now: datetime, scope: _Scope, hour24: bool) -> tuple[str, str, str]:
+def _more(ask: CalendarAsk, items: list[_Item], now: datetime, scope: _Scope, hour24: bool, *,
+          titles: bool = False) -> tuple[str, str, str]:
     noun = ask.noun
     today = now.date()
     timed = [item for item in items if item.timed]
@@ -357,11 +370,14 @@ def _more(ask: CalendarAsk, items: list[_Item], now: datetime, scope: _Scope, ho
         first = left[0]
         head = f"{len(left)} more today{scope.on()}:"
         text = _join(head, *(_line(item, scope.accounts, hour24) for item in left))
+        name = _name(first, titles)
+        named = f"{name}, " if name else ""
         if len(left) == 1:
-            said = f"Yes, {{sir}}: one more today{scope.on()}, at {spoken_clock(first.start)}, {_soon(first.start, now)}."
-        else:
-            said = (f"Yes, {{sir}}: {len(left)} more today{scope.on()}; the next is at {spoken_clock(first.start)}, "
+            said = (f"Yes, {{sir}}: one more today{scope.on()}, {named}at {spoken_clock(first.start)}, "
                     f"{_soon(first.start, now)}.")
+        else:
+            said = (f"Yes, {{sir}}: {len(left)} more today{scope.on()}; the next is {named}at "
+                    f"{spoken_clock(first.start)}, {_soon(first.start, now)}.")
         brief = f"{len(left)} more today · next: {first.title} at {format_time(first.start, hour24=hour24)}"
     else:
         tomorrow = [item for item in timed if item.start.date() == today + timedelta(days=1)]
@@ -372,15 +388,17 @@ def _more(ask: CalendarAsk, items: list[_Item], now: datetime, scope: _Scope, ho
         if tomorrow:
             lines.append(f"Tomorrow's first: {tomorrow[0].title} at {format_time(tomorrow[0].start, hour24=hour24)}.")
         text = _join(*lines)
-        said = (f"Just the one on now, {{sir}}, until {spoken_clock(on_now[-1].until())}." if on_now else
-                f"No more {noun}s today{scope.on()}, {{sir}}.")
+        name = _name(on_now[-1], titles) if on_now else ""
+        said = (f"Just the one on now, {{sir}}{': ' + name + ',' if name else ','} until "
+                f"{spoken_clock(on_now[-1].until())}." if on_now else f"No more {noun}s today{scope.on()}, {{sir}}.")
         brief = f"No more {noun}s today"
     if scope.partial:
         said = said[:-1] + f"; {scope.said()}."
     return text, said, brief
 
 
-def _day(ask: CalendarAsk, items: list[_Item], now: datetime, scope: _Scope, hour24: bool) -> tuple[str, str, str]:
+def _day(ask: CalendarAsk, items: list[_Item], now: datetime, scope: _Scope, hour24: bool, *,
+         titles: bool = False) -> tuple[str, str, str]:
     today = now.date()
     day = today + timedelta(days=ask.day)
     word = "today" if ask.day == 0 else "tomorrow"
@@ -408,18 +426,21 @@ def _day(ask: CalendarAsk, items: list[_Item], now: datetime, scope: _Scope, hou
         said = f"You have {_count(len(all_day), 'all-day event')} {word}{scope.on()}, {{sir}}."
         brief = f"{word.capitalize()}: {_count(len(all_day), 'all-day event')}"
     elif ask.day == 1:
-        said = (f"You have {_count(len(counted), noun)} tomorrow{scope.on()}, {{sir}}; the first is at "
-                f"{spoken_clock(timed[0].start)}.")
+        name = _name(timed[0], titles)
+        said = (f"You have {_count(len(counted), noun)} tomorrow{scope.on()}, {{sir}}; the first is "
+                f"{name + ', ' if name else ''}at {spoken_clock(timed[0].start)}.")
         brief = (f"Tomorrow: {_count(len(counted), noun)} · first: {timed[0].title} at "
                  f"{format_time(timed[0].start, hour24=hour24)}")
     elif upcoming:
-        said = (f"You have {_count(len(counted), noun)} today{scope.on()}, {{sir}}; the next is at "
-                f"{spoken_clock(upcoming[0].start)}.")
+        name = _name(upcoming[0], titles)
+        said = (f"You have {_count(len(counted), noun)} today{scope.on()}, {{sir}}; the next is "
+                f"{name + ', ' if name else ''}at {spoken_clock(upcoming[0].start)}.")
         brief = (f"Today: {_count(len(counted), noun)} · next: {upcoming[0].title} at "
                  f"{format_time(upcoming[0].start, hour24=hour24)}")
     elif on_now:
-        said = (f"You have {_count(len(counted), noun)} today{scope.on()}, {{sir}}; the last one is on now, until "
-                f"{spoken_clock(on_now[-1].until())}.")
+        name = _name(on_now[-1], titles)
+        said = (f"You have {_count(len(counted), noun)} today{scope.on()}, {{sir}}; the last one"
+                f"{', ' + name + ',' if name else ''} is on now, until {spoken_clock(on_now[-1].until())}.")
         brief = f"Today: {_count(len(counted), noun)} · the last is on now"
     else:
         said = f"You had {_count(len(counted), noun)} today{scope.on()}, {{sir}}; none are left."
@@ -429,7 +450,8 @@ def _day(ask: CalendarAsk, items: list[_Item], now: datetime, scope: _Scope, hou
     return text, said, brief
 
 
-def _free(ask: CalendarAsk, items: list[_Item], now: datetime, scope: _Scope, hour24: bool) -> tuple[str, str, str]:
+def _free(ask: CalendarAsk, items: list[_Item], now: datetime, scope: _Scope, hour24: bool, *,
+          titles: bool = False) -> tuple[str, str, str]:
     at = ask.at if ask.at is not None else now
     at = wall(at, now)
     day = at.date()
@@ -445,8 +467,10 @@ def _free(ask: CalendarAsk, items: list[_Item], now: datetime, scope: _Scope, ho
         lines = [_line(item, scope.accounts, hour24) for item in busy]
         text = _join(f"You're busy at {shown_when}{scope.on()}:", *lines)
         first = busy[0]
-        what = (f"you have {_a(noun)} {_said_span(first)}" if len(busy) == 1 else
-                f"you have {len(busy)} {noun}s then, the first {_said_span(first)}")
+        name = _name(first, titles)
+        what = ((f"you have {name}, {_said_span(first)}" if name else f"you have {_a(noun)} {_said_span(first)}")
+                if len(busy) == 1 else
+                f"you have {len(busy)} {noun}s then, the first {name + ', ' if name else ''}{_said_span(first)}")
         said = f"{'Yes' if ask.busy else 'No'}, {{sir}}: {what}."
         if scope.partial:
             said = said[:-1] + f". Your {scope.said().removeprefix('your ')}."
