@@ -17,6 +17,7 @@ engine = "local"
 # The local voice: "bm_george", "bm_fable", "bm_lewis", "bm_daniel" (British men),
 # "bf_emma", "bf_isabella", "bf_alice", "bf_lily" (British women), or an American one
 # ("am_michael", "am_fenrir", "am_puck", "af_heart", "af_bella", ... - README lists all 28).
+# A voice clicked in Settings > Voice wins over this line (it is kept in the data folder).
 local_voice = "bm_george"
 # Minutes the local voice stays loaded after he last spoke (it takes about 1.3 GB of memory and
 # about 5 seconds to load again). 0 keeps it loaded while Jarvis runs (0 to 1440).

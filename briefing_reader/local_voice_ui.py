@@ -19,9 +19,9 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtWidgets import QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QGridLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
-from . import hud
+from . import holo, hud
 from . import local_voice as lv
 from .meeting_speech import ModelDownloader
 
@@ -29,6 +29,53 @@ logger = logging.getLogger(__name__)
 
 DOWNLOAD_TEXT = "Download the local voice"
 ADDONS_TEXT = "The add-ons (you install them; Jarvis never does), then restart Jarvis:"
+PICK_TEXT = "His voice: click one to hear it - it is his from then on."
+PICK_LATER_TEXT = "His voices (you can pick one once the local voice is ready):"
+PICK_COLUMNS = 4
+
+
+class VoicePicker(QWidget):
+    """Every voice of the local voice as a button, in local_voice.voice_groups' order; a click: ``picked(name)``. The
+    voice in use has the GO look; while the local voice can't run the buttons are off."""
+
+    picked = Signal(str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 10, 0, 0)
+        layout.setSpacing(6)
+        self.title = QLabel(PICK_TEXT)
+        self.title.setWordWrap(True)
+        self.title.setFont(hud.body_font(13))
+        hud.set_label_color(self.title, hud.TEXT_SOFT)
+        layout.addWidget(self.title)
+        self.buttons: dict[str, holo.HoloButton] = {}
+        for heading, names in lv.voice_groups():
+            label = QLabel(heading)
+            label.setFont(hud.body_font(11))
+            hud.set_label_color(label, hud.TEXT_DIM)
+            layout.addWidget(label)
+            grid = QGridLayout()
+            grid.setContentsMargins(0, 0, 0, 0)
+            grid.setHorizontalSpacing(4)
+            grid.setVerticalSpacing(2)
+            kind = heading.replace("men", "man")                # "British men" -> "British man"
+            for index, name in enumerate(names):
+                button = holo.HoloButton(lv.first_name(name), holo.GHOST, size=holo.SIZE_SM)
+                button.setToolTip(f"{lv.first_name(name)} - a {kind}'s voice ({name})")
+                button.setAccessibleName(f"{lv.first_name(name)}, {kind}")
+                button.clicked.connect(lambda _checked=False, which=name: self.picked.emit(which))
+                grid.addWidget(button, index // PICK_COLUMNS, index % PICK_COLUMNS, Qt.AlignmentFlag.AlignLeft)
+                self.buttons[name] = button
+            grid.setColumnStretch(PICK_COLUMNS, 1)
+            layout.addLayout(grid)
+
+    def show_state(self, current: str, enabled: bool) -> None:
+        for name, button in self.buttons.items():
+            button.set_variant(holo.GO if name == current else holo.GHOST)
+            button.setEnabled(enabled)
+        self.title.setText(PICK_TEXT if enabled else PICK_LATER_TEXT)
 
 
 class VoiceSettingsPanel(QWidget):
@@ -56,7 +103,8 @@ class VoiceSettingsPanel(QWidget):
         self.pip.setWordWrap(True)
         self.pip.setFont(hud.mono_font(11))
         self.pip.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        for widget in (self.status, self.download, self.addons, self.pip):
+        self.picker = VoicePicker()
+        for widget in (self.status, self.download, self.addons, self.pip, self.picker):
             layout.addWidget(widget)
 
     def show_state(self, *, ready: bool, downloading: bool, percent: int, error: str, voice: str,
@@ -86,6 +134,7 @@ class VoiceSettingsPanel(QWidget):
         self.addons.setVisible(bool(pip_lines))
         self.pip.setText("\n".join(pip_lines))
         self.pip.setVisible(bool(pip_lines))
+        self.picker.show_state(voice, ready and not reason)
 
 
 class VoiceDownload(QObject):
@@ -96,11 +145,11 @@ class VoiceDownload(QObject):
 
     def __init__(self, models_root: Path, *, voice: str = lv.DEFAULT_VOICE, on_ready: Callable[[], Any] | None = None,
                  downloader_factory: Callable[..., Any] | None = None, addons: Callable[[], list[str]] | None = None,
-                 reason: Callable[[], str] | None = None, threaded: bool = True,
-                 parent: QObject | None = None) -> None:
+                 reason: Callable[[], str] | None = None, current: Callable[[], str] | None = None,
+                 threaded: bool = True, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._root = Path(models_root)
-        self._voice = voice
+        self._current = current or (lambda: voice)     # the voice in use (Settings > Voice's pick may change it)
         self._on_ready = on_ready or (lambda: None)
         # Why the voice can't run (the app's client says, a failed load included): the panel never says "on this PC"
         # while the Windows voice speaks.
@@ -142,7 +191,7 @@ class VoiceDownload(QObject):
             except Exception as exc:  # noqa: BLE001 - unknown: say it can't run
                 reason = type(exc).__name__
             self._panel.show_state(ready=self.ready(), downloading=self._downloading, percent=self._percent,
-                                   error=self._error, voice=self._voice, pip_lines=lv.pip_lines(self._addons()),
+                                   error=self._error, voice=self._current(), pip_lines=lv.pip_lines(self._addons()),
                                    reason=reason)
 
     def download(self) -> None:

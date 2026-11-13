@@ -446,7 +446,7 @@ class SpeechSynthesizer:
         self._cache: dict[tuple[str, str, str, str, str], _Clip] = {}
         self._local_mode = engine == LOCAL
         self._local = local
-        self._local_voice = local_voice
+        self._local_voice = local_voice   # a name, or a callable giving it (Settings > Voice's pick: read each line)
         self._urgent = bool(urgent)
         self._local_retry_after_s = float(local_retry_after_s)
         self._local_failed_at: float | None = None
@@ -510,6 +510,14 @@ class SpeechSynthesizer:
                 clip = self._run_sapi(text)
         return self._make_segment(clip, text, starts, pause_after_ms), clip.engine
 
+    def _voice_name(self) -> str:
+        """The local voice to speak in now (the pick may change between two lines); an unknown one is the default."""
+        try:
+            name = self._local_voice() if callable(self._local_voice) else self._local_voice
+        except Exception:  # noqa: BLE001 - the default voice
+            name = ""
+        return name if name in _lv.VOICE_NAMES else _lv.DEFAULT_VOICE
+
     def _local_allowed(self) -> bool:
         """The local voice may be asked: it can run (add-ons and download there) and is not in its cooldown."""
         if self._local is None:
@@ -547,7 +555,7 @@ class SpeechSynthesizer:
             for index, group in enumerate(groups):
                 part = path.with_name(f"{path.stem}-{index}.wav")
                 parts.append(part)
-                result = self._local.synthesize(group, part, voice=self._local_voice, speed=speed, gain=gain,
+                result = self._local.synthesize(group, part, voice=self._voice_name(), speed=speed, gain=gain,
                                                 urgent=self._urgent)
                 words.extend((offset + ms, word) for ms, word in result.words)
                 offset += max(0, int(result.duration_ms))
@@ -670,7 +678,7 @@ class SpeechSynthesizer:
     # ---- cache ------------------------------------------------------------
 
     def _cache_key(self, engine: str, text: str) -> tuple[str, str, str, str, str]:
-        voice = {EDGE: self._voice, LOCAL: self._local_voice}.get(engine, self._offline_voice)
+        voice = {EDGE: self._voice, LOCAL: self._voice_name()}.get(engine, self._offline_voice)
         return (engine, voice, self._rate, self._volume, text)
 
     def _cached(self, key: tuple[str, str, str, str, str]) -> _Clip | None:

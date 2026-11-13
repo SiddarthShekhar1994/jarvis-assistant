@@ -4551,10 +4551,14 @@ brings back Microsoft's online Ryan voice, with those lines on screen again.
    it carries on where it stopped. Until it is here the Windows voice speaks -
    never the online one.
 
-**The voices.** George (`bm_george`, British male) is the default. Set
-`[voice] local_voice` and restart Jarvis for another: `bm_fable`, `bm_lewis`,
-`bm_daniel`, `bf_emma`, `bf_isabella`, `bf_alice`, `bf_lily` or one of the
-American ones (see [Configuration](#configuration)). `rate` and `volume` work as before.
+**The voices.** George (`bm_george`, British male) is the default. To pick
+another, open **Settings > Voice**: every voice is a button (British men and
+women, American men and women). A click makes it his voice from his next line
+and he says "Hey, sir. Let's get to work." in it at once; the one in use is
+lit. The pick is kept in the data folder's `voice.json`, so it stays after a
+restart, and it wins over `[voice] local_voice` (which you can still set:
+`bm_fable`, `bm_lewis`, `bm_daniel`, `bf_emma`, ... - see
+[Configuration](#configuration)). `rate` and `volume` work as before.
 
 **Speed.** It runs on the CPU in a process of its own, at below-normal
 priority, and stays loaded while Jarvis runs (`keep_warm_minutes`): it loads in

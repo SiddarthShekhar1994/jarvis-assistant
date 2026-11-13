@@ -4948,6 +4948,22 @@ def _remove_audio_dir_after(workers: threading.Thread | Sequence[threading.Threa
     threading.Thread(target=run, name="audio-cleanup", daemon=False).start()
 
 
+def _with_picked_voice(config: Any) -> Any:
+    """``config`` with Settings > Voice's pick (the data folder's voice.json) as [voice] local_voice, while the voice is
+    made on this PC; ``config`` itself when nothing was picked or the pick can't apply."""
+    try:
+        if getattr(getattr(config, "voice", None), "engine", "") != LOCAL:
+            return config
+        from . import local_voice
+
+        picked = local_voice.VoicePick(Path(config.data_dir) / local_voice.PICK_FILE).get()
+        if not picked or picked == config.voice.local_voice:
+            return config
+        return dataclasses.replace(config, voice=dataclasses.replace(config.voice, local_voice=picked))
+    except Exception:  # noqa: BLE001 - the voice in config.toml, as before
+        return config
+
+
 def _remove_old_sessions(root: Path, keep: Path) -> None:
     """Best-effort removal of audio folders left behind by earlier runs (older than 12 h)."""
     try:
@@ -5163,7 +5179,7 @@ class AppController(QObject):
                  desktop_window_api: Any = None,
                  agent_factory: Callable[..., Any] | None = None) -> None:
         super().__init__()
-        self.config = config
+        self.config = _with_picked_voice(config)   # Settings > Voice's pick (voice.json) wins over [voice] local_voice
         self.client = client
         self._on_shutdown = on_shutdown   # e.g. an exit watchdog (the app passes one; tests do not)
         self._desktop_launch = bool(desktop_launch)   # --hud (the HUD key started Jarvis): onto the HUD once ready
@@ -5819,11 +5835,35 @@ class AppController(QObject):
         download = local_voice_ui.VoiceDownload(
             root, voice=self.config.voice.local_voice, on_ready=self._local_voice_downloaded, parent=self,
             reason=lambda: (self._local_client.reason() if self._local_client is not None
-                            else local_voice.missing_reason(root)))
+                            else local_voice.missing_reason(root)),
+            current=lambda: self.config.voice.local_voice)
         download.attach_panel(panel, refresh=reading.settings_page.refresh)
+        panel.picker.picked.connect(self._pick_voice)
         reading.settings_page.attach_extra("voice", panel)
         reading.settings_page.groupChanged.connect(lambda key: download.refresh() if key == "voice" else None)
         return download
+
+    def _pick_voice(self, name: str) -> None:
+        """Settings > Voice: the owner clicked a voice (owner decision 2026-11-12). It is his voice from the next line on -
+        kept in voice.json, so it stays after a restart - and he says the preview line in it at once."""
+        from . import local_voice
+
+        if name not in local_voice.VOICE_NAMES or getattr(self.config.voice, "engine", "") != LOCAL:
+            return
+        if name != self.config.voice.local_voice:
+            self.config = dataclasses.replace(self.config, voice=dataclasses.replace(self.config.voice, local_voice=name))
+            if not local_voice.VoicePick(Path(self.config.data_dir) / local_voice.PICK_FILE).set(name):
+                logger.warning("Voice: the pick could not be saved; it holds until Jarvis closes")
+            if self._local_client is not None:
+                self._local_client.voice = name
+            self.window.reading.settings_page.set_config(self.config)
+            self._update_service_chips()
+            logger.info("Voice: the owner picked %s", name)
+        if self.voice_download is not None:
+            self.voice_download.refresh()
+        self.voice.stop_key(local_voice.PREVIEW_KEY)                # a quick second click: only the newest is said
+        self._say(KIND_NOTICE, with_address(local_voice.PREVIEW_LINE, self.config.assistant.address),
+                  key=local_voice.PREVIEW_KEY)
 
     def _local_voice_downloaded(self) -> None:
         """The local voice's download ended whole: a failed load before it is forgotten, and it loads now, so his next
@@ -5843,7 +5883,8 @@ class AppController(QObject):
                                      offline_voice=settings.offline_voice, out_dir=out_dir,
                                      divider_pause_ms=settings.divider_pause_ms,
                                      engine=getattr(settings, "engine", ONLINE), local=client,
-                                     local_voice=getattr(settings, "local_voice", "bm_george"), urgent=urgent)
+                                     local_voice=lambda: getattr(self.config.voice, "local_voice", "bm_george"),
+                                     urgent=urgent)   # read at each line: Settings > Voice's pick holds at once
 
         return factory
 

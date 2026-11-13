@@ -179,6 +179,16 @@ class LocalSynthTests(unittest.TestCase):
         synth.synthesize_section(make_section(entry("Hello.")))
         self.assertEqual(local.calls, [("Hello.", "bf_emma", 1.2, 0.5, True)])
 
+    def test_the_voice_is_read_at_each_line(self) -> None:
+        local, current = FakeLocal(), ["bm_george"]
+        synth = self.make(local, local_voice=lambda: current[0])
+        synth.synthesize_section(make_section(entry("One.")))
+        current[0] = "bf_emma"                                   # the owner picked another voice in between
+        synth.synthesize_section(make_section(entry("Two."), key="s2"))
+        current[0] = "zz_unknown"
+        synth.synthesize_section(make_section(entry("Three."), key="s3"))
+        self.assertEqual([call[1] for call in local.calls], ["bm_george", "bf_emma", "bm_george"])
+
     def test_the_online_mode_is_unchanged(self) -> None:
         local = FakeLocal()
         synth = StubSynth(self.out, self.clock, local=local)        # engine defaults to online
@@ -322,7 +332,66 @@ class VoiceDownloadTests(unittest.TestCase):
         self.assertTrue(panel.pip.isHidden())
 
 
+class VoicePickTests(unittest.TestCase):
+    def test_the_pick_is_kept_and_read_back(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            pick = lv.VoicePick(Path(tmp) / lv.PICK_FILE)
+            self.assertEqual(pick.get(), "")
+            self.assertTrue(pick.set("bf_emma"))
+            self.assertEqual(pick.get(), "bf_emma")
+            self.assertFalse(pick.set("xx_nobody"))
+            (Path(tmp) / lv.PICK_FILE).write_text("{not json", encoding="utf-8")
+            self.assertEqual(pick.get(), "")
+
+    def test_every_voice_once_in_the_picker_s_groups(self) -> None:
+        groups = lv.voice_groups()
+        self.assertEqual([heading for heading, _names in groups],
+                         ["British men", "British women", "American men", "American women"])
+        self.assertEqual(sorted(name for _heading, names in groups for name in names), sorted(lv.VOICE_NAMES))
+        self.assertEqual(lv.first_name("bm_george"), "George")
+
+    def test_the_picker_marks_the_voice_in_use_and_says_which_was_clicked(self) -> None:
+        from briefing_reader import holo, local_voice_ui
+
+        picker = local_voice_ui.VoicePicker()
+        self.addCleanup(picker.deleteLater)
+        self.assertEqual(len(picker.buttons), 28)
+        picker.show_state("bf_emma", True)
+        variant = lambda name: picker.buttons[name].variant()              # noqa: E731
+        self.assertEqual((variant("bf_emma"), variant("bm_george")), (holo.GO, holo.GHOST))
+        clicked = []
+        picker.picked.connect(clicked.append)
+        picker.buttons["am_michael"].click()
+        self.assertEqual(clicked, ["am_michael"])
+        picker.show_state("bf_emma", False)
+        self.assertFalse(any(button.isEnabled() for button in picker.buttons.values()))
+        self.assertEqual(picker.title.text(), local_voice_ui.PICK_LATER_TEXT)
+
+
 class AppVoiceTests(unittest.TestCase):
+    def test_a_click_makes_it_his_voice_and_he_greets_in_it(self) -> None:
+        harness = AppHarness(self)
+        c = harness.c
+        fake = FakeLocal()
+        c._local_client = fake
+        c._pick_voice("bf_emma")
+        self.assertEqual(c.config.voice.local_voice, "bf_emma")
+        self.assertEqual(lv.VoicePick(Path(c.config.data_dir) / lv.PICK_FILE).get(), "bf_emma")
+        self.assertEqual(fake.voice, "bf_emma")
+        said = [(kind, text, key) for kind, text, key in harness.voice.said]
+        self.assertIn(("notice", "Hey, sir. Let's get to work.", lv.PREVIEW_KEY), said)
+        self.assertEqual(c._synth_factory(harness.root, urgent=False)()._voice_name(), "bf_emma")
+        self.assertEqual(dict(c.window.reading.settings_page.rows())["Voice"], "Emma (British), made on this PC")
+        c._pick_voice("xx_nobody")                                  # not a voice: nothing changes
+        self.assertEqual(c.config.voice.local_voice, "bf_emma")
+
+    def test_a_saved_pick_holds_after_a_restart(self) -> None:
+        harness = AppHarness(self, prepare=lambda config: lv.VoicePick(Path(config.data_dir) / lv.PICK_FILE)
+                             .set("am_michael"))
+        self.assertEqual(harness.c.config.voice.local_voice, "am_michael")
+        online = AppHarness(self, config_extra='\n[voice]\nengine = "online"\n',
+                            prepare=lambda config: lv.VoicePick(Path(config.data_dir) / lv.PICK_FILE).set("am_michael"))
+        self.assertEqual(online.c.config.voice.local_voice, "bm_george")     # the pick is the local voice's only
     def make(self, extra: str = "") -> AppHarness:
         harness = AppHarness(self, config_extra=extra)
         return harness

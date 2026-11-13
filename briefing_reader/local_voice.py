@@ -123,6 +123,48 @@ def voice_label(name: str) -> str:
     return f"{first} ({accent})" if accent else first
 
 
+# Settings > Voice's picker (owner decision 2026-11-12): every voice a button; a click makes it his voice from the next
+# line on (kept in the data folder's voice.json, which wins over [voice] local_voice) and he says PREVIEW_LINE in it.
+PICK_FILE = "voice.json"
+PREVIEW_LINE = "Hey, {sir}. Let's get to work."
+PREVIEW_KEY = "voice-preview"
+VOICE_GROUPS = (("British men", "bm_"), ("British women", "bf_"), ("American men", "am_"), ("American women", "af_"))
+
+
+def voice_groups() -> list[tuple[str, list[str]]]:
+    """[(heading, [voice names])] in the picker's order: British first, men first."""
+    return [(heading, [name for name in VOICE_NAMES if name.startswith(prefix)]) for heading, prefix in VOICE_GROUPS]
+
+
+def first_name(name: str) -> str:
+    """"bm_george" -> "George"."""
+    return str(name).split("_", 1)[-1].capitalize()
+
+
+class VoicePick:
+    """The voice picked in Settings > Voice, kept in ``path`` (``<data dir>\\voice.json``: {"local_voice": name}).
+    ``get()`` is "" when none was picked or the file holds no known voice; ``set(name)`` writes it (False when it could
+    not be written - the pick still holds for this run)."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+
+    def get(self) -> str:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeError):
+            return ""
+        name = data.get("local_voice") if isinstance(data, dict) else None
+        return name if name in VOICE_NAMES else ""
+
+    def set(self, name: str) -> bool:
+        if name not in VOICE_NAMES:
+            return False
+        from .prefs import _write_atomic
+
+        return _write_atomic(self.path, json.dumps({"local_voice": name}, indent=2) + "\n")
+
+
 # --------------------------------------------------------------------------
 # The models (downloaded only on the owner's click)
 # --------------------------------------------------------------------------
