@@ -26,7 +26,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import secrets
+import tempfile
 import threading
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -48,6 +50,36 @@ DOING, DONE, FAILED, UNKNOWN = "doing", "done", "failed", "unknown"
 HELD_BROAD, HELD_NOT_SET_UP, HELD_NOT_SIGNED_IN, HELD_ACCOUNT, HELD_WRITTEN, HELD_CAP, HELD_PAUSED, HELD_FAILED, \
     HELD_ALREADY, HELD_UNKNOWN = ("broad", "not_set_up", "not_signed_in", "account", "written", "cap", "paused",
                                   "failed", "already", "unknown")
+
+
+class TidyRefused(Exception):
+    """Gmail answered and refused the change (a 4xx): nothing changed. Any other failure may have changed it."""
+
+
+_ADDRESS_RE = re.compile(r"[A-Za-z0-9._%+'-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def plain_address(address: str) -> bool:
+    return bool(_ADDRESS_RE.fullmatch(str(address or "")))
+
+
+def sender_named(address: str, senders: Iterable[str]) -> bool:
+    """The mail's own address is one a rule's from: names: the same address, or in the domain named ("acme.com",
+    "@acme.com"). A bare word (Gmail would match it in a display name too) never is."""
+    address = str(address or "").casefold()
+    if not plain_address(address):
+        return False
+    domain = address.rpartition("@")[2]
+    for value in senders:
+        value = str(value or "").casefold().strip()
+        if "@" in value and not value.startswith("@"):
+            if value == address:
+                return True
+            continue
+        value = value.lstrip("@")
+        if "." in value and (domain == value or domain.endswith("." + value)):
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -120,7 +152,14 @@ class GmailTidy:
         return self._service
 
     def _execute(self, request: Any) -> Any:
-        return request.execute(num_retries=0)
+        try:
+            return request.execute(num_retries=0)
+        except Exception as exc:  # noqa: BLE001 - a 4xx is Gmail's refusal; anything else may or may not have changed
+            from ..gmail import _status_of
+
+            if 400 <= _status_of(exc) < 500:
+                raise TidyRefused(f"Gmail refused it ({_status_of(exc)})") from None
+            raise
 
     @staticmethod
     def _check_id(value: str) -> str:
@@ -213,6 +252,9 @@ class TidyJournal:
         """Every entry by id, as its last line left it ("doing" with nothing after it reads UNKNOWN)."""
         try:
             with open(self.path, "rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                size = fh.tell()
+                fh.seek(max(0, size - MAX_JOURNAL_BYTES))     # the newest part: pruned at every check anyway
                 raw = fh.read(MAX_JOURNAL_BYTES)
         except OSError:
             return {}
@@ -242,14 +284,54 @@ class TidyJournal:
         return result
 
 
+    def prune(self, before: datetime) -> int:
+        """Drop the entries begun before ``before`` (rewritten atomically by its one writer); how many went."""
+        entries = self.entries()
+        keep = [entry for entry in entries.values()
+                if (_parse(entry.at) or before) >= before]
+        if len(keep) == len(entries):
+            return 0
+        lines = []
+        for entry in keep:
+            record = {"id": entry.id, "state": DOING if entry.state == UNKNOWN else entry.state, "at": entry.at,
+                      "rule": entry.rule, "account": entry.account, "message": entry.message,
+                      "thread": entry.thread, "kind": entry.kind, "add": list(entry.add),
+                      "remove": list(entry.remove), "before": list(entry.before), "after": list(entry.after)}
+            lines.append(json.dumps(record, ensure_ascii=True, sort_keys=True))
+        try:
+            fd, part = tempfile.mkstemp(prefix=f"{self.path.name}.", suffix=".tmp", dir=self.path.parent)
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write("".join(line + "\n" for line in lines))
+                fh.flush()
+                os.fsync(fh.fileno())
+            from .. import atomic
+
+            atomic.replace(part, self.path)
+        except OSError:
+            return 0
+        return len(entries) - len(keep)
+
+
+def _parse(text: str) -> datetime | None:
+    try:
+        moment = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    return moment if moment.tzinfo is not None else moment.astimezone()
+
+
 def undo_problem(tidy: Mapping[str, Any], labels_now: Iterable[str], now: datetime, done_at: datetime | None) -> str:
-    """Why a receipt's tidy-up can't be undone now ("" when it can): it was not done, it is older than UNDO_DAYS, or
-    the message's labels are no longer exactly what Jarvis left (the owner or another program changed them)."""
+    """Why a tidy-up can't be undone now ("" when it can): it was not done, it is older than UNDO_DAYS, or the labels
+    Jarvis changed are no longer as he left them (the owner or another program changed them; other labels, such as
+    UNREAD, do not count)."""
     if not tidy.get("done"):
         return "not_done"
     if done_at is None or now - done_at > timedelta(days=UNDO_DAYS):
         return "too_old"
-    after = tidy.get("after")
-    if not isinstance(after, list) or set(str(item) for item in after) != set(labels_now):
+    add, remove = tidy.get("add"), tidy.get("remove")
+    if not isinstance(add, list) or not isinstance(remove, list):
+        return "changed"
+    labels_now = set(labels_now)
+    if not set(str(item) for item in add) <= labels_now or set(str(item) for item in remove) & labels_now:
         return "changed"
     return ""

@@ -230,6 +230,37 @@ class ScreenTests(_Base):
         self.assertEqual([rule.id for rule in Definitions(files_of(self.app.config)).load()[1]], [RULE_ID])
         self.assertEqual([card.id for card in standing_cards(self.c)], [todo["id"]])
 
+    def test_resume_brings_back_the_cards_pause_withdrew(self) -> None:
+        todo = todo_record()
+        write_run(self.app.config, run_cards=[todo])
+        self.s.reload()
+        self.s.toggle_pause(RULE_ID)
+        self.assertEqual(standing_cards(self.c), [])
+        self.s.toggle_pause(RULE_ID)
+        self.assertEqual([card.id for card in standing_cards(self.c)], [todo["id"]])
+
+    def test_two_deletes_each_keep_their_undo(self) -> None:
+        self.s.delete_job(RULE_ID)
+        self.s.delete_job(AGENT_ID)
+        notes = self.c.window.reading.agents_stage.notes()
+        self.assertIn(f"Deleted {RULE_NAME}.", notes)
+        self.assertIn(f"Deleted {AGENT_NAME}.", notes)
+        self.s._on_link(f"{standing_ui.UNDO_DELETE_LINK}:{RULE_ID}")
+        agents, rules = Definitions(files_of(self.app.config)).load()
+        self.assertEqual(([a.id for a in agents], [r.id for r in rules]), ([], [RULE_ID]))
+        self.s._on_link(f"{standing_ui.UNDO_DELETE_LINK}:{AGENT_ID}")
+        self.assertEqual([a.id for a in Definitions(files_of(self.app.config)).load()[0]], [AGENT_ID])
+
+    def test_clear_keeps_a_card_in_its_hidden_hold(self) -> None:
+        todo = todo_record()
+        write_run(self.app.config, run_cards=[todo])
+        self.s.reload()
+        self.c._jobs[todo["id"]] = "held"                              # on its way (a hidden hold or queued)
+        self.app.store.set(todo["id"], STATUS_DENIED, kind="todo", account="work")
+        self.s.clear_reports()
+        self.assertEqual(len(run_paths(self.app.config)), 1)
+        del self.c._jobs[todo["id"]]
+
     def test_pause_all_is_kept_for_the_runner(self) -> None:
         stage = self.c.window.reading.agents_stage
         stage.pause_all_button.click()
@@ -279,7 +310,7 @@ class ScreenTests(_Base):
         settle()
         self.assertEqual(len(run_paths(self.app.config)), 1)           # the run whose card still waits stays
         self.assertEqual(stage.report_rows(), [])
-        self.assertEqual(stage.activity_rows(), [])
+        self.assertEqual([row.info().state_text for row in stage.activity_rows()], ["Waiting"])   # it still waits
         self.assertEqual([card.id for card in standing_cards(self.c)], [todo["id"]])
         self.app.store.set(todo["id"], STATUS_DENIED, kind="todo", account="work")
         self.s.reload()

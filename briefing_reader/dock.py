@@ -961,7 +961,7 @@ class Dock(QWidget):
     # ---- Qt ------------------------------------------------------------------------------------
 
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
-        rows = 10 if self.is_slot_visible(DESKTOP) else 9      # 9 slots with Desktop (its hairline and hint)
+        rows = sum(1 for key in SLOTS if self.is_slot_visible(key)) + 1   # the visible slots and the hairlines
         return QSize(self._width(), 2 * PAD_Y + rows * BUTTON)
 
     def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override

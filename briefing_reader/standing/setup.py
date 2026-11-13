@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
@@ -31,6 +32,11 @@ from .model import (KIND_AGENT, KIND_RULE, MAX_WORDS, STATUS_DRAFT, TIDY_LABEL, 
 
 class SetupRefused(ValueError):
     """Why a sentence made no standing job (names no word of the sentence)."""
+
+
+_NEVER = re.compile(r"(?!)")
+_ASKED = {"star": re.compile(r"\bstar", re.IGNORECASE), "label": re.compile(r"\blabel", re.IGNORECASE),
+          "archive": re.compile(r"\barchiv|\bout of (?:my |the )?inbox|\bskip (?:the |my )?inbox", re.IGNORECASE)}
 
 
 def check_words(words: Any) -> str:
@@ -95,6 +101,8 @@ def _rule(spec: Mapping[str, Any], words: str, name: str, created: str, aliases:
         raise SetupRefused(f'The {account} account can\'t read mail yet (config.toml features "gmail_read")')
     tidy = dict(spec.get("tidy") or {})
     tidy_kind = tidy.get("kind") or TIDY_NONE
+    if tidy_kind != TIDY_NONE and not _ASKED.get(tidy_kind, _NEVER).search(words):
+        tidy_kind = TIDY_NONE                     # the owner's own words never asked for it: no tidy-up
     query = check_filter(spec.get("query"), words, needs_sender=tidy_kind != TIDY_NONE)
     tidy_data: dict[str, Any] = {"kind": tidy_kind}
     if tidy_kind == TIDY_LABEL:

@@ -282,7 +282,8 @@ class AgentRunTests(unittest.TestCase):
                 self.assertIsInstance(read(bad), stream.AskFailure)
 
 
-SENTENCE = "when an invoice from billing@acme.example arrives with invoice in the subject, make a to-do and star it"
+SENTENCE = ("when an invoice from billing@acme.example arrives with invoice in the subject, make a to-do and star it "
+            "or label it invoices")
 
 
 class SetupTests(unittest.TestCase):

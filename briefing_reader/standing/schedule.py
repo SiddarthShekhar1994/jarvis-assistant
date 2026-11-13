@@ -124,6 +124,26 @@ def next_every(trigger: Trigger, last_run: datetime | None, now: datetime) -> da
     return max(now, last_run + timedelta(minutes=trigger.every_minutes))
 
 
+def windows_busy() -> bool:
+    """Windows says the owner is busy (SHQueryUserNotificationState): presentation mode, a full-screen program or
+    game, quiet time, or nobody present. False off Windows, while the tests run, or when it can't be asked."""
+    import os
+    import sys
+
+    if sys.platform != "win32" or os.environ.get("JARVIS_DESKTOP_TEST_GUARD") == "1":
+        return False
+    try:
+        import ctypes
+
+        state = ctypes.c_int(0)
+        result = ctypes.windll.shell32.SHQueryUserNotificationState(ctypes.byref(state))
+    except Exception:  # noqa: BLE001 - unknown: not busy
+        return False
+    # 1 not present, 2 busy, 3 full-screen Direct3D, 4 presentation mode, 5 accepts notifications, 6 quiet time,
+    # 7 a full-screen app.
+    return result == 0 and state.value in (1, 2, 3, 4, 6, 7)
+
+
 def in_quiet(now: datetime, quiet_from: str, quiet_until: str) -> bool:
     try:
         start, end = _hhmm(quiet_from), _hhmm(quiet_until)

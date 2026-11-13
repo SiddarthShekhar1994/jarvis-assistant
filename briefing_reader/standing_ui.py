@@ -233,7 +233,9 @@ def when_text(moment: datetime | None, now: datetime, hour24: bool = False) -> s
         return clock
     if days == 1:
         return f"Yesterday {clock}"
-    if 1 < days < 7:
+    if days == -1:
+        return f"Tomorrow {clock}"
+    if 1 < days < 7 or -7 < days < -1:
         return f"{local.strftime('%a')} {clock}"
     return f"{local.strftime('%b')} {local.day} {clock}"
 
@@ -318,22 +320,8 @@ def reply_problem(thread: Any, gmid: str, recipients: Iterable[str], own: Iterab
 
 
 def windows_busy() -> bool:
-    """Windows says the owner is busy (SHQueryUserNotificationState): presentation mode, a full-screen program or
-    game, quiet time, or nobody present. False off Windows, while the tests run, or when it can't be asked."""
-    if sys.platform != "win32" or os.environ.get(TEST_GUARD_ENV) == "1":
-        return False
-    try:
-        import ctypes
-
-        state = ctypes.c_int(0)
-        result = ctypes.windll.shell32.SHQueryUserNotificationState(ctypes.byref(state))
-    except Exception:  # noqa: BLE001 - unknown: not busy
-        return False
-    if result != 0:
-        return False
-    # 1 not present, 2 busy, 3 full-screen Direct3D, 4 presentation mode, 5 accepts notifications, 6 quiet time,
-    # 7 a full-screen app.
-    return state.value in (1, 2, 3, 4, 6, 7)
+    """Windows says the owner is busy (standing.schedule.windows_busy; the background check asks it too)."""
+    return schedule.windows_busy()
 
 
 def _start_runner(origin: str = "now") -> bool:
@@ -383,7 +371,7 @@ class StandingController(QObject):
         self._held_timer: QTimer | None = None
         self._held: list[str] = []                          # run ids whose line waits (shown already)
         self._shown_runs: set[str] = set()                  # run ids whose entry is in the conversation
-        self._deleted: tuple[Agent | Rule, tuple[str, ...], datetime] | None = None
+        self._deleted: dict[str, tuple[Agent | Rule, tuple[str, ...], datetime]] = {}   # job id -> its Undo
         self._reply_ok: dict[str, float] = {}               # card id -> monotonic time its check passed
         self._reply_checking: dict[str, tuple[int, float]] = {}   # card id -> (sequence, monotonic click time)
         self._reply_seq = 0
@@ -596,6 +584,30 @@ class StandingController(QObject):
             logger.info("Standing: %d kept card(s) left out (unreadable, changed or another account)", dropped)
         return cards
 
+    def _pending_ids(self) -> set[str]:
+        """The standing cards a run file must stay for: still waiting, on their way (a hidden hold, queued,
+        running) or still offering their Undo."""
+        host = self.host
+        pending = set(self._waiting_ids()) | set(getattr(host, "_jobs", {}) or {}) | set(getattr(host, "_undos", {}) or {})
+        hold = getattr(host, "_send_hold", None)
+        if hold is not None and getattr(hold, "action", None) is not None:
+            pending.add(hold.action.id)
+        return pending
+
+    def _keeps(self, run: RunView, pending: set[str]) -> bool:
+        """A run whose file must stay: a card of it still pending, or a tidy-up of it that can still be undone."""
+        if any(str(record.get("id") or "") in pending for record in run.cards):
+            return True
+        now = self._now()
+        for receipt in run.receipts:
+            made = receipt.get("tidy")
+            if isinstance(made, Mapping) and made.get("done") and not self.app_state.is_undone(
+                    f"{run.id}:{receipt.get('id')}:tidy"):
+                at = parse_stamp(made.get("at")) or run.ended
+                if at is not None and now - at <= timedelta(days=tidy_mod.UNDO_DAYS):
+                    return True
+        return False
+
     def _waiting_ids(self) -> set[str]:
         """The standing cards still waiting for the owner (shown, undecided)."""
         store = self.host._store
@@ -607,13 +619,12 @@ class StandingController(QObject):
         cleared = self.app_state.cleared_before()
         if cleared is None:
             return
-        store = self.host._store
+        pending = self._pending_ids()
         for run in list(self.runs):
-            if run.started is None or run.started >= cleared:
+            ended = run.ended or run.started
+            if ended is None or ended >= cleared:
                 continue
-            waiting = any((record.get("id") not in ("", None) and not store.is_decided(str(record.get("id")))
-                           and not self.app_state.is_withdrawn(str(record.get("id")))) for record in run.cards)
-            if waiting:
+            if self._keeps(run, pending):
                 continue
             try:
                 (self.files.runs / run.name).unlink()
@@ -625,8 +636,18 @@ class StandingController(QObject):
     # ---- what the screen shows ------------------------------------------------------------------------------------
 
     def _visible_runs(self) -> list[RunView]:
+        """The runs shown: those that ended after the last Clear, and the older ones kept for what still waits."""
         cleared = self.app_state.cleared_before()
-        return [run for run in self.runs if cleared is None or (run.started is not None and run.started >= cleared)]
+        if cleared is None:
+            return list(self.runs)
+        pending = self._pending_ids()
+        return [run for run in self.runs if ((run.ended or run.started) is not None
+                                             and (run.ended or run.started) >= cleared) or self._keeps(run, pending)]
+
+    def _cleared(self, run: RunView) -> bool:
+        cleared = self.app_state.cleared_before()
+        ended = run.ended or run.started
+        return cleared is not None and (ended is None or ended < cleared)
 
     def _show(self) -> None:
         try:
@@ -692,12 +713,11 @@ class StandingController(QObject):
         if self.definitions.problem:
             notes.append(("standing.json can't be read as it is: the agents and rules are kept as they are, "
                           "read only.", "", ""))
-        if self._deleted is not None:
-            job, _cards, at_ = self._deleted
+        for job_id, (job, _cards, at_) in list(self._deleted.items()):
             if now - at_ <= DELETE_UNDO:
-                notes.append((f"Deleted {job.name}.", "Undo", UNDO_DELETE_LINK))
+                notes.append((f"Deleted {job.name}.", "Undo", f"{UNDO_DELETE_LINK}:{job_id}"))
             else:
-                self._deleted = None
+                del self._deleted[job_id]
         if not consented and (self.agents or self.rules):
             notes.append(("Nothing runs until you say yes on the card that explains what agents read.", "", ""))
         return dot.join(parts), notes
@@ -757,14 +777,15 @@ class StandingController(QObject):
         if rule.tidy.kind:
             meta.append({"star": "Stars", "label": f"Labels {rule.tidy.label_name or ''}".rstrip(),
                          "archive": "Archives"}.get(rule.tidy.kind, "") + " what it matches")
-        live_or_paused = rule.status in (STATUS_LIVE, STATUS_PAUSED)
+        live_or_paused = rule.status in (STATUS_LIVE, STATUS_PAUSED) and self._busy != f"dry:{rule.id}"
         if rule.status == STATUS_DRAFT:
             meta.append("Try it with Dry run before it can go on")
         return JobRow(rule.id, KIND_RULE, rule.name, detail=rule.sentence,
                       meta=f" {DOT} ".join(part for part in meta if part),
                       status=rule.status, status_text=STATUS_WORDS.get(rule.status, ""), can_pause=live_or_paused,
                       paused=rule.status == STATUS_PAUSED, can_dry_run=not self._busy,
-                      can_turn_on=rule.status == STATUS_TRIED, tooltip=rule.sentence)
+                      can_turn_on=rule.status == STATUS_TRIED and self._busy != f"dry:{rule.id}",
+                      tooltip=rule.sentence)
 
     def _activity(self, now: datetime, hour24: bool) -> tuple[list[ActivityRow], list[ReportRow]]:
         rows: list[ActivityRow] = []
@@ -776,7 +797,7 @@ class StandingController(QObject):
             job = jobs.get(run.job_id)
             name = job.name if job is not None else (run.job_name or "A deleted job")
             when = when_text(run.ended or run.started, now, hour24)
-            if run.report:
+            if run.report and not self._cleared(run):
                 reports.append(ReportRow(run.id, when, name, run.report, run.summary))
             if not run.receipts and run.status in RUN_LINES:
                 rows.append(ActivityRow(f"{run.id}:run", when, name, RUN_LINES[run.status],
@@ -820,7 +841,7 @@ class StandingController(QObject):
             done_at = parse_stamp(made.get("at")) or run.ended
             fresh = done_at is not None and now - done_at <= timedelta(days=tidy_mod.UNDO_DAYS)
             busy = key in self._tidy_busy
-            return ActivityRow(key, when, name, f"{what}: {subject}", detail, what, holo.TONE_CYAN,
+            return ActivityRow(key, when, name, f"{what} the matched mail", detail, what, holo.TONE_CYAN,
                                can_undo=fresh and not busy, undo_text="Undo",
                                undo_tip="Take off exactly Jarvis's change, if the mail is still as he left it")
         held = str(made.get("held") or "")
@@ -835,14 +856,27 @@ class StandingController(QObject):
         """Tidy-ups a crash left between "doing" and "done": Jarvis may or may not have changed that message."""
         rows: list[ActivityRow] = []
         oldest = now - timedelta(days=max(1, int(self.settings.keep_days)))
+        held = {str((receipt.get("tidy") or {}).get("tidy") or "") for run in self.runs for receipt in run.receipts
+                if isinstance(receipt.get("tidy"), Mapping)}
         for entry in tidy_mod.TidyJournal(self.files.tidy_journal).entries().values():
             at = parse_stamp(entry.at)
-            if entry.state != tidy_mod.UNKNOWN or at is None or at < oldest:
+            if at is None or at < oldest or entry.id in held:
                 continue
-            what = TIDY_DONE_WORDS.get(entry.kind, "Tidied").lower()
-            rows.append(ActivityRow(f"journal:{entry.id}", when_text(at, now, hour24), entry.account,
-                                    f"Not known: Jarvis may have {what} one message (the check stopped midway). "
-                                    "Look at it in Gmail.", state_text="Not known", tone=holo.TONE_AMBER))
+            what = TIDY_DONE_WORDS.get(entry.kind, "Tidied")
+            key = f"journal:{entry.id}"
+            if entry.state == tidy_mod.UNKNOWN:
+                rows.append(ActivityRow(key, when_text(at, now, hour24), entry.account,
+                                        f"Not known: Jarvis may have {what.lower()} one message (the check stopped "
+                                        "midway). Look at it in Gmail.", state_text="Not known",
+                                        tone=holo.TONE_AMBER))
+            elif entry.state == tidy_mod.DONE and now - at > timedelta(minutes=20):
+                undone = self.app_state.is_undone(key)
+                rows.append(ActivityRow(key, when_text(at, now, hour24), entry.account,
+                                        f"{what} one message; its receipt was lost (the check stopped midway).",
+                                        state_text="Undone" if undone else what,
+                                        tone=holo.TONE_STEEL if undone else holo.TONE_CYAN,
+                                        can_undo=not undone and now - at <= timedelta(days=tidy_mod.UNDO_DAYS),
+                                        undo_text="Undo"))
         return rows
 
     def _receipt_row(self, run: RunView, receipt: Mapping[str, Any], name: str, when: str, waiting: set[str],
@@ -933,6 +967,12 @@ class StandingController(QObject):
                 if not self._save(agents, rules):
                     return
                 withdrawn = self._withdraw(self._cards_of(job_id)) if pausing else ()
+                if pausing and withdrawn:
+                    self.app_state.keep_paused_cards(job_id, withdrawn)
+                elif not pausing:
+                    back = self.app_state.take_paused_cards(job_id)
+                    if back:
+                        self.app_state.unmark("withdrawn", back)
                 logger.info("Standing: %s %s %s (%d card(s) withdrawn)", job.kind, job_id,
                             "paused" if pausing else "resumed", len(withdrawn))
                 self.reload(announce=False)
@@ -948,15 +988,17 @@ class StandingController(QObject):
         if not self._save(agents, rules):
             return
         withdrawn = self._withdraw(self._cards_of(job_id))
-        self._deleted = (job, withdrawn, self._now())
+        self._deleted[job_id] = (job, withdrawn, self._now())
         logger.info("Standing: %s %s deleted (%d card(s) withdrawn)", job.kind, job_id, len(withdrawn))
         self.reload(announce=False)
 
-    def undo_delete(self) -> None:
-        if self._deleted is None:
+    def undo_delete(self, job_id: str = "") -> None:
+        if not self._deleted:
             return
-        job, withdrawn, _at = self._deleted
-        self._deleted = None
+        job_id = job_id or next(reversed(self._deleted))
+        if job_id not in self._deleted:
+            return
+        job, withdrawn, _at = self._deleted.pop(job_id)
         agents, rules = list(self.agents), list(self.rules)
         if job.id not in self._jobs():
             (agents if isinstance(job, Agent) else rules).append(job)
@@ -981,6 +1023,13 @@ class StandingController(QObject):
         if key.endswith(":tidy"):
             self.undo_tidy(key)
             return
+        if key.startswith("journal:"):
+            entry = tidy_mod.TidyJournal(self.files.tidy_journal).entries().get(key.partition(":")[2])
+            if entry is not None and entry.state == tidy_mod.DONE and not self.app_state.is_undone(key):
+                self._undo_change(key, entry.account, entry.message, entry.thread,
+                                  {"done": True, "kind": entry.kind, "add": list(entry.add),
+                                   "remove": list(entry.remove)}, parse_stamp(entry.at), entry.rule)
+            return
         run_id, _, receipt_id = key.partition(":")
         run = next((item for item in self.runs if item.id == run_id), None)
         receipt = next((item for item in (run.receipts if run is not None else ())
@@ -1002,25 +1051,26 @@ class StandingController(QObject):
         if not self.app_state.clear_runs(now):
             self.host._flash_note("Jarvis couldn't clear them (standing_app.json); nothing changed.")
             return
-        waiting = self._waiting_ids()
-        runs_with_waiting = {self._card_runs.get(card_id) for card_id in waiting}
+        pending = self._pending_ids()
+        kept = 0
         gone = 0
         for run in list(self.runs):
-            if run.id in runs_with_waiting:
+            if self._keeps(run, pending):
+                kept += 1
                 continue
             try:
                 (self.files.runs / run.name).unlink()
                 gone += 1
             except OSError:
                 continue
-        logger.info("Standing: cleared %d run file(s); %d kept for waiting cards", gone, len(runs_with_waiting))
+        logger.info("Standing: cleared %d run file(s); %d kept for what still waits", gone, kept)
         self.reload(announce=False)
 
     def _on_link(self, link_id: str) -> None:
-        if link_id == UNDO_DELETE_LINK:
-            self.undo_delete()
+        if link_id == UNDO_DELETE_LINK or link_id.startswith(UNDO_DELETE_LINK + ":"):
+            self.undo_delete(link_id.partition(":undo-delete:")[2] if ":undo-delete:" in link_id else "")
         elif link_id == INSTALLER_LINK:
-            self.host._flash_note("Background runs: run install-schedule.ps1 again (README, step 9). It adds the "
+            self.host._flash_note("Background runs: run install-schedule.ps1 again (README, step 6). It adds the "
                                   "\"Briefing agents\" task, which checks every 5 minutes.")
 
     # ---- tidy-up: its Undo and its own sign-in --------------------------------------------------------------------
@@ -1052,8 +1102,19 @@ class StandingController(QObject):
         if (receipt is None or not isinstance(made, Mapping) or self.app_state.is_undone(key)
                 or key in self._tidy_busy):
             return
-        alias = str(receipt.get("account") or "")
-        message = str(receipt.get("message") or "")
+        self._undo_change(key, str(receipt.get("account") or ""), str(receipt.get("message") or ""),
+                          str(receipt.get("thread") or ""), made,
+                          parse_stamp(made.get("at")) or (run.ended if run is not None else None),
+                          run.job_id if run is not None else "")
+
+    def _undo_change(self, key: str, alias: str, message: str, thread: str, made: Mapping[str, Any],
+                     done_at: datetime | None, rule_id: str) -> None:
+        try:
+            change = tidy_mod.Change(tuple(str(item) for item in list(made.get("add") or ())),
+                                     tuple(str(item) for item in list(made.get("remove") or ()))).reverse()
+        except TypeError:
+            self.host._flash_note(UNDO_PROBLEMS["changed"])
+            return
         client = self.tidy_for(alias)
         if client is None:
             self.host._flash_note(UNDO_PROBLEMS["signed_out"])
@@ -1061,11 +1122,7 @@ class StandingController(QObject):
         self._tidy_busy.add(key)
         self._show()
         now = self._now()
-        done_at = parse_stamp(made.get("at")) or (run.ended if run is not None else None)
-        change = tidy_mod.Change(tuple(str(item) for item in made.get("add") or ()),
-                                 tuple(str(item) for item in made.get("remove") or ())).reverse()
         journal = tidy_mod.TidyJournal(self.files.data_dir / UNDO_FILE)
-        rule_id = run.job_id if run is not None else ""
         logger.info("Standing: undoing a tidy-up of rule %s", rule_id)
 
         def work() -> None:
@@ -1075,7 +1132,7 @@ class StandingController(QObject):
                 problem = tidy_mod.undo_problem(made, labels_now, now, done_at)
                 if not problem:
                     entry = journal.begin(rule=rule_id, account=alias, message=message,
-                                          thread=str(receipt.get("thread") or ""), kind=f"undo-{made.get('kind')}",
+                                          thread=thread, kind=f"undo-{made.get('kind')}",
                                           change=change, before=labels_now, now=now)
                     try:
                         after = client.modify(message, add=change.add, remove=change.remove)
@@ -1128,6 +1185,14 @@ class StandingController(QObject):
         account = self.tidy_accounts().get(alias)
         if account is None or alias in self._tidy_busy:
             return
+        try:
+            bound = account.binding() is not None
+        except Exception:  # noqa: BLE001 - unknown: not bound
+            bound = False
+        if not bound:
+            self.host._flash_note(f"Sign the {alias} account in first (a card's Sign in, or Connect in the Day view); "
+                                  "the tidy-up's sign-in must be the same Google account.")
+            return
         if not self.app_state.set_tidy_consent(alias, True, self._now()):
             self.host._flash_note("Jarvis couldn't save that (standing_app.json); nothing changed.")
             return
@@ -1140,8 +1205,11 @@ class StandingController(QObject):
             try:
                 if not account.is_signed_in(tidy_mod.TIDY_FEATURE):
                     account.sign_in()
+                if account.change_problem()[0] == "identity":
+                    account.disconnect()                  # another Google account: its sign-in is not kept
+                    problem = "identity"
             except Exception as exc:  # noqa: BLE001 - cancelled, denied or not set up: the card says so
-                problem = type(exc).__name__
+                problem = problem or type(exc).__name__
             self._tidySigned.emit(alias, problem)
 
         self.thread_runner(work)
@@ -1150,7 +1218,10 @@ class StandingController(QObject):
         self._tidy_busy.discard(alias)
         if self._closed:
             return
-        if problem:
+        if problem == "identity":
+            self.host._flash_note(f"That was another Google account than the {alias} account's: sign in for tidy-up "
+                                  "with the same one. Nothing was kept.")
+        elif problem:
             self.host._flash_note("The tidy-up sign-in did not finish; nothing was changed. Try again from the card.")
         self.reload(announce=False)
 
@@ -1311,11 +1382,17 @@ class StandingController(QObject):
             return
         self._busy = ""
         draft = self._setup
-        if outcome.rule is not None:
-            rules = [outcome.rule if item.id == rule_id else item for item in self.rules]
-            if any(item.id == rule_id for item in self.rules) and self._save(self.agents, rules):
+        self.agents, self.rules = self.definitions.load()          # as it is now: a click may have come meanwhile
+        current = next((item for item in self.rules if item.id == rule_id), None)
+        if outcome.rule is not None and current is not None and outcome.rule.dry_run is not None:
+            merged = replace(current, dry_run=outcome.rule.dry_run)      # only the dry run is the run's
+            if merged.status == STATUS_DRAFT:
+                merged = with_status(merged, STATUS_TRIED)
+            rules = [merged if item.id == rule_id else item for item in self.rules]
+            if self._save(self.agents, rules):
                 self.rules = rules
-        job = outcome.rule or next((item for item in self.rules if item.id == rule_id), None)
+                current = merged
+        job = current
         if draft is not None and draft.job is not None and draft.job.id == rule_id:
             self._setup = replace(draft, job=job, busy="", dry=outcome, note=outcome.refusal)
         self.reload(announce=False)
@@ -1407,7 +1484,7 @@ class StandingController(QObject):
         consented = self.app_state.consented()
         if not consented and not self._consent_later and (self.agents or self.rules or self._setup is not None):
             cards.append(NoticeCard(CONSENT_CARD, standing_setup.CONSENT_KICKER, standing_setup.CONSENT_TITLE,
-                                    standing_setup.CONSENT_LINES,
+                                    standing_setup.consent_lines(self.settings),
                                     (CardButton("yes", standing_setup.CONSENT_YES, LOOK_AMBER),
                                      CardButton("later", standing_setup.CONSENT_LATER, LOOK_GHOST))))
         if consented:

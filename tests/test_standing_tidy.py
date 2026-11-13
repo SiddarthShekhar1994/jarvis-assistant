@@ -24,7 +24,8 @@ from PySide6.QtWidgets import QApplication
 from briefing_reader import standing_ui
 from briefing_reader.config import AskConfig, StandingConfig
 from briefing_reader.standing import model, runner, tidy
-from briefing_reader.standing.store import AppState, Definitions, RunFiles, StandingFiles, Usage, stamp
+from briefing_reader.standing.store import (AppState, Definitions, RunFiles, RunnerState, StandingFiles, Usage,
+                                            stamp)
 from tests.standing_fakes import GMID, STANDING_ON, consent, files_of, rule_data, save_jobs, write_run
 from tests.test_standing_google import message
 from tests.test_standing_model import RULE
@@ -50,12 +51,21 @@ class FakeGoogle:
         self.saved = True
         self.signed_in = True
         self.sign_ins = 0
+        self.held = False                                   # credentials() loaded the saved sign-in
+        self.disconnects = 0
+
+    def credentials(self, *, interactive: bool, need: str | None = None) -> object:
+        self.held = True
+        return object()
+
+    def disconnect(self) -> None:
+        self.disconnects += 1
 
     def change_problem(self) -> tuple[str, str]:
         return self.problem
 
     def still_saved(self) -> bool:
-        return self.saved
+        return self.saved and self.held                     # as GoogleAccount.still_saved: nothing held, False
 
     def binding(self) -> Any:
         return SimpleNamespace(sub=self.sub, email="owner@example.com")
@@ -82,13 +92,25 @@ class FakeTidy:
     def modify(self, message_id: str, *, add=(), remove=()) -> frozenset[str]:
         self.calls.append((message_id, tuple(add), tuple(remove)))
         if self.fail:
-            raise RuntimeError("Gmail refused it")
+            raise tidy.TidyRefused("Gmail refused it")
         now = (set(self.labels_of(message_id)) | set(add)) - set(remove)
         self.labels[message_id] = now
         return frozenset(now)
 
     def thread_in_inbox(self, thread_id: str, *, but: str) -> bool:
         return self.in_inbox
+
+
+class SentReader(Reader):
+    """The runner's fake reader, which also answers "in:sent to:<address>" (the owner's own Sent mail)."""
+
+    sent_to: set[str] = set()
+
+    def list_messages(self, query: str, *, max_results: int):
+        if query.startswith("in:sent to:"):
+            address = query.rpartition("to:")[2]
+            return ([("s0000001", "t0000099")], 1) if address in self.sent_to else ([], 0)
+        return super().list_messages(query, max_results=max_results)
 
 
 class TidyRunnerTests(unittest.TestCase):
@@ -102,7 +124,7 @@ class TidyRunnerTests(unittest.TestCase):
         self.config = SimpleNamespace(data_dir=self.data_dir, standing=StandingConfig(enabled=True),
                                       ask=AskConfig(enabled=True),
                                       accounts={"personal": SimpleNamespace(features=TIDY_FEATURES)})
-        self.reader = Reader([])
+        self.reader = SentReader([])
         self.engine = Engine()
         self.tidy = FakeTidy()
         self.written: set[str] = set()
@@ -212,6 +234,66 @@ class TidyRunnerTests(unittest.TestCase):
         entries = tidy.TidyJournal(self.files.tidy_journal).entries()
         self.assertEqual([entry.state for entry in entries.values()], [tidy.FAILED])
         self.assertEqual(Usage(self.files, clock=lambda: self.now).today().tidy_of(RULE["id"]), 0)
+
+    def test_a_display_name_alone_never_earns_a_tidy_up(self) -> None:
+        self.save_rule(query="from:acme subject:invoice")              # a bare word: Gmail matches display names
+        self.assertEqual(self.tidy_of(self.run_with(self.invoice()))["held"], tidy.HELD_BROAD)
+        self.setUp()
+        lookalike = self.invoice(sender="Acme Billing <billing@acme.example.evil.test>")
+        self.assertEqual(self.tidy_of(self.run_with(lookalike))["held"], tidy.HELD_BROAD)
+        self.assertEqual(self.tidy.calls, [])
+        self.assertTrue(tidy.sender_named("billing@acme.example", ["acme.example"]))
+        self.assertTrue(tidy.sender_named("billing@mail.acme.example", ["@acme.example"]))
+        self.assertFalse(tidy.sender_named("x@evil.test", ["billing@acme.example", "acme"]))
+
+    def test_archive_holds_for_someone_in_the_owners_sent_mail(self) -> None:
+        self.save_rule(tidy={"kind": "archive"})
+        SentReader.sent_to = {"billing@acme.example"}
+        self.addCleanup(setattr, SentReader, "sent_to", set())
+        self.assertEqual(self.tidy_of(self.run_with(self.invoice()))["held"], tidy.HELD_WRITTEN)
+        self.assertEqual(self.tidy.calls, [])
+
+    def test_a_paused_rule_or_unreadable_own_addresses_hold_it(self) -> None:
+        files, rule = self.files, model.rule_from(dict(RULE, bindings=[["personal", "sub-1"]]))
+
+        class PausingRule(Engine):
+            def run(self, *args: Any, **kwargs: Any) -> Any:
+                Definitions(files).save([], [model.with_status(rule, "paused")])   # paused during its run
+                return super().run(*args, **kwargs)
+
+        self.engine = PausingRule()
+        self.assertEqual(self.tidy_of(self.run_with(self.invoice()))["held"], tidy.HELD_PAUSED)
+        self.setUp()
+
+        def broken() -> list[str]:
+            raise OSError("no addresses")
+
+        self.assertEqual(self.tidy_of(self.run_with(self.invoice(), own=broken))["held"], "own")
+        self.assertEqual(self.tidy.calls, [])
+
+    def test_a_change_without_an_answer_stays_unknown(self) -> None:
+        def no_answer(*_args: Any, **_kwargs: Any) -> Any:
+            raise TimeoutError("no answer")
+
+        self.tidy.modify = no_answer
+        made = self.tidy_of(self.run_with(self.invoice()))
+        self.assertEqual(made["held"], tidy.HELD_UNKNOWN)
+        entries = tidy.TidyJournal(self.files.tidy_journal).entries()
+        self.assertEqual([entry.state for entry in entries.values()], [tidy.UNKNOWN])
+
+    def test_a_job_whose_account_changed_is_not_read(self) -> None:
+        self.check(binding=lambda alias: "sub-another")
+        self.now += timedelta(minutes=6)
+        self.reader.messages["m0000001"] = self.invoice()
+        self.check(binding=lambda alias: "sub-another")
+        self.assertEqual(self.engine.prompts, [])                      # nothing of it went to Claude
+        state = RunnerState(self.files)
+        self.assertEqual(state.data.get("problems"), {"personal": "binding"})
+
+    def test_paused_or_without_consent_the_task_still_beats(self) -> None:
+        AppState(self.files).set_paused_all(True)
+        self.assertEqual(self.check().status, runner.PAUSED)
+        self.assertIsNotNone(RunnerState(self.files).data.get("task_check"))
 
     def test_already_starred_is_left_alone(self) -> None:
         self.tidy.labels["m0000001"] = {"INBOX", "STARRED"}
@@ -333,13 +415,29 @@ class AppUndoTests(unittest.TestCase):
     def test_labels_changed_since_leave_it_alone(self) -> None:
         write_run(self.app.config, receipts=[self.receipt()])
         self.s.reload()
-        self.client.labels[GMID] = {"STARRED"}                         # the owner archived it since
+        self.client.labels[GMID] = {"INBOX"}                           # the owner took the star off since
         self.tidy_row().undo_button.click()
         settle()
         self.assertEqual(self.client.calls, [])
         self.assertFalse(AppState(files_of(self.app.config)).is_undone(self.tidy_row().info().key))
         self.assertEqual(self.tidy_row().info().state_text, "Changed since")
         self.assertFalse(self.tidy_row().info().can_undo)
+
+    def test_reading_the_mail_since_does_not_block_the_undo(self) -> None:
+        write_run(self.app.config, receipts=[self.receipt()])
+        self.s.reload()
+        self.client.labels[GMID] = {"INBOX", "STARRED", "CATEGORY_UPDATES"}   # UNREAD went, a category came
+        self.tidy_row().undo_button.click()
+        settle()
+        self.assertEqual(self.client.calls, [(GMID, (), ("STARRED",))])
+
+    def test_clear_keeps_a_run_whose_tidy_up_can_still_be_undone(self) -> None:
+        write_run(self.app.config, receipts=[self.receipt()])
+        self.s.reload()
+        self.c.window.reading.agents_stage.clear_button.click()
+        settle()
+        self.assertEqual(len(RunFiles(StandingFiles(self.app.config.data_dir)).paths()), 1)
+        self.assertTrue(self.tidy_row().info().can_undo)
 
     def test_after_seven_days_there_is_no_undo(self) -> None:
         write_run(self.app.config, started=NOW - timedelta(days=6, hours=23), receipts=[

@@ -49,7 +49,8 @@ from .rules import Item
 from . import tidy as tidy_mod
 from .dryrun import NARROW_FOR_TIDY
 from .filters import senders as filter_senders
-from .model import TIDY_ARCHIVE, TIDY_NONE
+from .model import STATUS_LIVE, TIDY_ARCHIVE, TIDY_NONE
+from .rules import HELD_OWN, HELD_SENT, HELD_STARRED
 from .store import (AppState, Definitions, RunFiles, RunnerState, RunRequests, StandingFiles, Usage, new_run_id,
                     parse_stamp, stamp)
 
@@ -81,6 +82,9 @@ class Deps:
     hold_extra_usage: Callable[[datetime], None] = lambda until: None   # Ask's shared hold (ask_usage.json)
     tidy: Mapping[str, Any] = field(default_factory=dict)      # alias -> its tidy-up client (tidy.GmailTidy)
     written_to: Callable[[str], bool] = lambda address: True   # the owner has written to this address (read only)
+    # alias -> the Google account (sub) it is signed in to now ("" unknown or not the bound one); None: not checked
+    binding: Callable[[str], str] | None = None
+    busy: Callable[[], bool] = lambda: False                   # Windows says the owner is busy (presentation, ...)
     time_zone_name: str = ""
     deadline_s: float = DEADLINE_S
 
@@ -105,12 +109,14 @@ class _Check:
         self.files = StandingFiles(config.data_dir)
         self.now = deps.clock()
         self.state = RunnerState(self.files)
+        self.state.data["problems"] = {}       # found again by this check, or gone (never a stale one)
         self.usage = Usage(self.files, clock=deps.clock)
         self.run_files = RunFiles(self.files)
         self.result = CheckResult(DONE)
         self.cancel = threading.Event()
         self.started = time.monotonic()
         self._own: list[str] | None = None
+        self._own_failed = False
         self._probed: dict[str, bool] = {}
 
     # ---- helpers ------------------------------------------------------------------------------------------------
@@ -122,6 +128,7 @@ class _Check:
             except Exception as exc:  # noqa: BLE001 - a run without them refuses replies to the owner anyway
                 logger.info("Standing: the owner's addresses could not be read (%s)", type(exc).__name__)
                 self._own = []
+                self._own_failed = True                    # no tidy-up in this check: the owner's mail can't be told
         return self._own
 
     def late(self) -> bool:
@@ -165,6 +172,23 @@ class _Check:
             if parts.get("needs_owner"):
                 self.state.to_announce(run_id)
         return run_id
+
+    def bound(self, job: Agent | Rule, alias: str) -> bool:
+        """The alias is still signed in to the Google account Turn on recorded for this job (else nothing of it is
+        read: a problem shows on the Agents screen)."""
+        if self.deps.binding is None:
+            return True
+        recorded = dict(job.bindings).get(alias)
+        if not recorded:
+            return True
+        try:
+            current = self.deps.binding(alias)
+        except Exception:  # noqa: BLE001 - unknown: not read
+            current = ""
+        if current != recorded:
+            self.state.data.setdefault("problems", {})[alias] = "binding"
+            return False
+        return True
 
     def reader(self, alias: str) -> Any | None:
         reader = self.deps.readers.get(alias)
@@ -237,6 +261,8 @@ class _Check:
     def rule(self, rule: Rule, *, forced: bool = False) -> None:
         if not forced and not self.mail_due(rule.id, rule.account):
             return
+        if not self.bound(rule, rule.account):
+            return
         left = rule.checks_per_day - self.usage.today().checks_of(rule.id)
         if left <= 0:
             self.capped(rule, "checks")
@@ -298,6 +324,12 @@ class _Check:
             return outcome.tidy_held
         if AppState(self.files).paused_all:
             return tidy_mod.HELD_PAUSED
+        current = next((job for job in Definitions(self.files, min_every=self.cfg.min_every_minutes).load()[1]
+                        if job.id == rule.id), None)
+        if current is None or current.status != STATUS_LIVE:
+            return tidy_mod.HELD_PAUSED                   # paused or deleted since this check began
+        if self._own_failed:
+            return HELD_OWN
         account = (getattr(self.config, "accounts", None) or {}).get(rule.account)
         if tidy_mod.TIDY_FEATURE not in tuple(getattr(account, "features", ()) or ()):
             return tidy_mod.HELD_NOT_SET_UP
@@ -306,6 +338,7 @@ class _Check:
             return tidy_mod.HELD_NOT_SIGNED_IN
         google = client.account
         try:
+            google.credentials(interactive=False, need=tidy_mod.TIDY_FEATURE)   # held now: still_saved can compare
             problem, _message = google.change_problem()
             saved = google.still_saved()
             binding = google.binding()
@@ -314,19 +347,31 @@ class _Check:
         recorded = dict(rule.bindings).get(rule.account)
         if problem or not saved or binding is None or not recorded or getattr(binding, "sub", "") != recorded:
             return tidy_mod.HELD_ACCOUNT
-        if not filter_senders(rule.query) or rule.dry_run is None or rule.dry_run.matched > NARROW_FOR_TIDY:
-            return tidy_mod.HELD_BROAD
-        if rule.tidy.kind == TIDY_ARCHIVE:
-            sender = outcome.ref.sender.email if outcome.ref.sender is not None else ""
-            try:
-                written = bool(self.deps.written_to(sender))
-            except Exception:  # noqa: BLE001 - unknown: never archived
-                written = True
-            if not sender or written:
-                return tidy_mod.HELD_WRITTEN
+        sender = outcome.ref.sender.email if outcome.ref.sender is not None else ""
+        if (not tidy_mod.sender_named(sender, filter_senders(rule.query)) or rule.dry_run is None
+                or rule.dry_run.matched > NARROW_FOR_TIDY):
+            return tidy_mod.HELD_BROAD                    # the mail's own address must be the filter's sender
+        if rule.tidy.kind == TIDY_ARCHIVE and self.written_to(rule.account, sender):
+            return tidy_mod.HELD_WRITTEN
         if self.usage.today().tidy_of(rule.id) >= self.cfg.tidy_per_day:
             return tidy_mod.HELD_CAP
         return ""
+
+    def written_to(self, alias: str, sender: str) -> bool:
+        """The owner has written to ``sender``: Jarvis sent to it (recipients.json), or the account's Sent mail has a
+        message to it (one id, read only). Unknown counts as yes: nothing is archived."""
+        if not sender or not tidy_mod.plain_address(sender):
+            return True
+        try:
+            if self.deps.written_to(sender):
+                return True
+            reader = self.deps.readers.get(alias)
+            if reader is None:
+                return True
+            ids, estimate = reader.list_messages(f"in:sent to:{sender}", max_results=1)
+            return bool(ids) or bool(estimate)
+        except Exception:  # noqa: BLE001 - unknown: never archived
+            return True
 
     def _tidy(self, rule: Rule, outcome: Any) -> dict[str, Any]:
         """The rule's tidy-up of one matched message, every gate first; what its receipt keeps of it."""
@@ -351,6 +396,12 @@ class _Check:
         if change.done_in(before):
             made["held"] = tidy_mod.HELD_ALREADY
             return made
+        if before & {"SENT", "DRAFT"}:                   # the labels now, not as the check first read them
+            made["held"] = HELD_SENT
+            return made
+        if kind == TIDY_ARCHIVE and before & {"STARRED", "IMPORTANT"}:
+            made["held"] = HELD_STARRED
+            return made
         journal = tidy_mod.TidyJournal(self.files.tidy_journal)
         try:
             entry = journal.begin(rule=rule.id, account=rule.account, message=ref.message_id, thread=ref.thread_id,
@@ -360,13 +411,17 @@ class _Check:
             return made
         try:
             after = client.modify(ref.message_id, add=change.add, remove=change.remove)
-        except Exception as exc:  # noqa: BLE001 - Gmail refused it: the journal says failed
-            logger.info("Standing: rule %s: a tidy-up was refused (%s)", rule.id, type(exc).__name__)
+        except tidy_mod.TidyRefused:
+            logger.info("Standing: rule %s: Gmail refused a tidy-up", rule.id)
             try:
                 journal.failed(entry, self.deps.clock())
             except OSError:
                 pass
             made.update(held=tidy_mod.HELD_FAILED, tidy=entry)
+            return made
+        except Exception as exc:  # noqa: BLE001 - no answer: Gmail may have changed it; the journal stays "doing"
+            logger.info("Standing: rule %s: a tidy-up got no answer (%s)", rule.id, type(exc).__name__)
+            made.update(held=tidy_mod.HELD_UNKNOWN, tidy=entry)
             return made
         try:
             journal.done(entry, after, self.deps.clock())
@@ -415,6 +470,8 @@ class _Check:
         refs: list[Any] = []
         for source in agent.mail:
             if due_kind == TRIGGER_MAIL and not self.mail_due(agent.id, source.account):
+                continue
+            if not self.bound(agent, source.account):
                 continue
             batch = self.batch(agent.id, source.account, source.query, self.cfg.max_mail_per_run)
             if batch is None or batch.baseline:
@@ -504,7 +561,7 @@ class _Check:
                 self.result.told = waiting
                 return
         elif (not schedule.in_quiet(self.now, self.cfg.quiet_from, self.cfg.quiet_until)
-              and self.cfg.open_when_closed and self.deps.start_app()):
+              and self.cfg.open_when_closed and not _busy(self.deps) and self.deps.start_app()):
             self.result.told = waiting
             return
         for run_id in waiting:                     # kept for the first check after quiet hours (or a later start)
@@ -517,10 +574,12 @@ def run_check(config: Any, deps: Deps, *, origin: str = ORIGIN_TASK) -> CheckRes
     if standing is None or not standing.enabled or not getattr(getattr(config, "ask", None), "enabled", False):
         return CheckResult(OFF)
     app = AppState(files)
-    if not app.consented():
-        return CheckResult(NO_CONSENT)
-    if app.paused_all:
-        return CheckResult(PAUSED)
+    if not app.consented() or app.paused_all:
+        status = NO_CONSENT if not app.consented() else PAUSED
+        state = RunnerState(files)                        # the heartbeat: background runs are on, only waiting
+        state.checked(origin, status, deps.clock())
+        state.save()
+        return CheckResult(status)
     check = _Check(config, deps, origin)
     definitions = Definitions(files, min_every=standing.min_every_minutes)
     all_agents, all_rules = definitions.load()
@@ -535,6 +594,7 @@ def run_check(config: Any, deps: Deps, *, origin: str = ORIGIN_TASK) -> CheckRes
             if check.late():
                 check.result.status = RUN_LATE
                 break
+            app.reload()
             if app.paused_all:
                 break
             try:
@@ -546,6 +606,8 @@ def run_check(config: Any, deps: Deps, *, origin: str = ORIGIN_TASK) -> CheckRes
                 logger.warning("Standing: %s %s stopped by an unexpected error (%s)", job.kind, job.id,
                                type(exc).__name__)
         check.run_files.prune(standing.keep_days, check.now)
+        tidy_mod.TidyJournal(files.tidy_journal).prune(check.now - timedelta(days=max(standing.keep_days,
+                                                                                       tidy_mod.UNDO_DAYS) + 1))
         check.state.checked(origin, check.result.status, check.now)
         check.tell()
         check.state.save()
@@ -554,6 +616,13 @@ def run_check(config: Any, deps: Deps, *, origin: str = ORIGIN_TASK) -> CheckRes
     logger.info("Standing: check (%s) %s: %d job(s) live, %d run(s), %d told", origin, check.result.status,
                 len(jobs), len(check.result.runs), len(check.result.told))
     return check.result
+
+
+def _busy(deps: Deps) -> bool:
+    try:
+        return bool(deps.busy())
+    except Exception:  # noqa: BLE001 - unknown: not busy
+        return False
 
 
 def _source(ref: Any) -> dict[str, Any]:
@@ -581,8 +650,18 @@ def real_deps(config: Any, instance: str) -> Deps:
 
     accounts = executor.build_accounts(config, persist=False)
     readers = executor.build_readers(config, accounts)
-    tidy_clients = {alias: tidy_mod.GmailTidy(account)
-                    for alias, account in executor.build_tidy_accounts(config, persist=False).items()}
+    google_on = getattr(config.calendar, "enabled", True)
+    tidy_clients = {alias: tidy_mod.GmailTidy(account)            # Google off: no tidy-up the app couldn't undo
+                    for alias, account in (executor.build_tidy_accounts(config, persist=False).items()
+                                           if google_on else ())}
+
+    def binding(alias: str) -> str:
+        account = accounts.get(alias)
+        if account is None:
+            return ""
+        problem, _message = account.change_problem()
+        found = account.binding()
+        return "" if problem == "identity" or found is None else str(found.sub)
     calendars = executor.build_calendars(config, accounts) if getattr(config.calendar, "enabled", True) else {}
     usage_log = UsageLog(config.data_dir / USAGE_FILE)
 
@@ -618,6 +697,7 @@ def real_deps(config: Any, instance: str) -> Deps:
 
     return Deps(readers=readers, engine=StandingEngine(config.ask, StandingFiles(config.data_dir)),
                 calendars=calendars, notes=notes, own=own, tidy=tidy_clients, written_to=history.knows,
+                binding=binding, busy=schedule.windows_busy,
                 app_running=lambda: hotkey.mutex_exists("Local\\" + instance),
                 tell_app=lambda runs: hotkey.send_activation(instance, {"cmd": "standing", "runs": list(runs)[:50]}),
                 start_app=start_app, extra_usage_held=held, hold_extra_usage=usage_log.hold,

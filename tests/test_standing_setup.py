@@ -154,6 +154,21 @@ class SetupTests(_Base):
         self.assertEqual(Definitions(files_of(self.app.config)).load(), ([], []))
         self.assertIn("Couldn't set that up".upper(), self.card().kicker_label.text().upper())
 
+    def test_a_tidy_up_the_owner_never_asked_for_is_left_out(self) -> None:
+        answer = {**RULE_ANSWER, "rule": {**RULE_ANSWER["rule"], "tidy": {"kind": "archive"}}}
+        self.engine.answers.append(answer)
+        self.type("rule: " + WORDS)                                     # nothing about archiving in the words
+        rule = Definitions(files_of(self.app.config)).load()[1][0]
+        self.assertEqual(rule.tidy.kind, "")
+
+    def test_the_apps_engine_starts_nothing_while_the_tests_run(self) -> None:
+        from briefing_reader import standing_setup
+
+        result = standing_setup.app_engine(self.app.config).run("x", kind="setup", model="sonnet", timeout_s=1,
+                                                                read=lambda *_a: None)
+        self.assertIsNotNone(result.failure)
+        self.assertFalse(result.started)
+
     def test_edit_puts_the_words_back_and_discard_drops_the_draft(self) -> None:
         self.engine.answers.append(RULE_ANSWER)
         self.type("rule: " + WORDS)
@@ -206,6 +221,27 @@ class DryRunAndTurnOnTests(_Base):
         self.assertEqual([kind for kind, _m, _p in self.engine.runs], [KIND_SETUP])
         self.assertIn("about 450 emails", self.card().note_label.text())
         self.assertEqual(Definitions(files_of(self.app.config)).load()[1][0].status, STATUS_DRAFT)
+
+    def test_a_pause_during_the_dry_run_is_kept(self) -> None:
+        self.engine.answers += [RuleAnswer({1: Result(False), 2: Result(True, {"amount": "$40.00"})}),
+                                RuleAnswer({1: Result(True, {"amount": "$40.00"}), 2: Result(False)})]
+        self.card().button("dry").click()
+        settle()
+        self.c._google_accounts = {"work": Account("sub-work-1")}
+        self.s.reload()
+        self.card().button("on").click()
+        settle()
+        rule_id = Definitions(files_of(self.app.config)).load()[1][0].id
+        pending: list = []
+        self.s.thread_runner = pending.append
+        self.s.dry_run(rule_id)                                        # a second dry run starts
+        self.assertTrue(self.c.window.reading.agents_stage.job_row(rule_id).pause_button.isHidden())
+        self.s.toggle_pause(rule_id)                                   # paused while it runs
+        pending.pop()()
+        settle()
+        rule = Definitions(files_of(self.app.config)).load()[1][0]
+        self.assertEqual(rule.status, "paused")                        # the dry run never undoes the pause
+        self.assertEqual((rule.dry_run.judged, rule.bindings), (2, (("work", "sub-work-1"),)))
 
     def test_turn_on_records_the_google_account_and_goes_live(self) -> None:
         self.engine.answers.append(RuleAnswer({1: Result(False), 2: Result(True, {"amount": "$40.00"})}))

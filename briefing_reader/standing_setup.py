@@ -52,8 +52,15 @@ CONSENT_LINES = (
     "Jarvis reads the mail himself; the run has no tools and no web, so a mail can't change what is read.",
     "Cards (to-dos, events, reply drafts) wait for your click as always. A rule may star, label or archive the mail it "
     "matched only if you set it up to, each with an Undo.",
-    "At most 30 runs a day for everything. Reports and receipts stay on this PC for 7 days; Clear deletes them.",
+    "At most {runs} runs a day for everything. Reports and receipts stay on this PC for {days} days; Clear deletes "
+    "them.",
 )
+
+
+def consent_lines(settings: Any) -> tuple[str, ...]:
+    """The consent card's words with this PC's caps ([standing] max_runs_per_day, keep_days)."""
+    return tuple(line.format(runs=getattr(settings, "max_runs_per_day", 30), days=getattr(settings, "keep_days", 7))
+                 for line in CONSENT_LINES)
 CONSENT_YES = "Yes, let them run"
 CONSENT_LATER = "Not now"
 PRIVACY_LINE = ("When it runs, the text of the mail its filter matches goes to your Claude plan without a click; "
@@ -75,7 +82,21 @@ class DryOutcome:
     refusal: str = ""
 
 
-def app_engine(config: Any) -> StandingEngine:
+class _RefusingEngine:
+    """While the tests run (JARVIS_DESKTOP_TEST_GUARD=1) the app's engine starts nothing: every run is refused."""
+
+    def run(self, *_args: Any, **_kwargs: Any) -> Any:
+        from .ask.stream import failure
+        from .standing.engine import StandingResult
+
+        return StandingResult(failure=failure("missing", "the tests run"), started=False)
+
+
+def app_engine(config: Any) -> Any:
+    import os
+
+    if os.environ.get("JARVIS_DESKTOP_TEST_GUARD") == "1":
+        return _RefusingEngine()
     files = StandingFiles(config.data_dir)
     engine = StandingEngine(config.ask, files)
     engine.claude.work_folder = files.data_dir / APP_WORK_FOLDER
@@ -136,6 +157,9 @@ def run_setup(engine: Any, words: str, config: Any, usage: Any, *, now: datetime
         return SetupOutcome(say=say, refusal=str(refused))
     if job is None:
         return SetupOutcome(say=say, neither=True)
+    # A new job's own cap is this PC's ([standing] agent_runs_per_day / rule_checks_per_day), never the model's.
+    job = (replace(job, runs_per_day=settings.agent_runs_per_day) if isinstance(job, Agent)
+           else replace(job, checks_per_day=settings.rule_checks_per_day))
     logger.info("Standing: set up a draft %s %s", job.kind, job.id)
     return SetupOutcome(job=job, say=say)
 

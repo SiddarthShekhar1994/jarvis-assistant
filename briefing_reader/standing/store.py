@@ -205,6 +205,7 @@ class Definitions:
         self.read_only = False
         self.problem = ""
         self.skipped = 0
+        self._kept: dict[str, list[Any]] = {"agents": [], "rules": []}   # what did not check: written back as read
         self._lock = threading.Lock()
 
     def load(self) -> tuple[list[Agent], list[Rule]]:
@@ -220,16 +221,19 @@ class Definitions:
                 return [], []
             agents: list[Agent] = []
             rules: list[Rule] = []
+            self._kept = {"agents": [], "rules": []}
             for item in data.get("agents") or ():
                 try:
                     agents.append(agent_from(item, min_every=self.min_every))
                 except DefinitionError:
                     self.skipped += 1
+                    self._kept["agents"].append(item)      # e.g. min_every_minutes raised since: kept as it was
             for item in data.get("rules") or ():
                 try:
                     rules.append(rule_from(item))
                 except DefinitionError:
                     self.skipped += 1
+                    self._kept["rules"].append(item)
             if self.skipped:
                 logger.warning("Standing: %d definition(s) in standing.json did not check and are left out",
                                self.skipped)
@@ -241,8 +245,9 @@ class Definitions:
                 logger.warning("Standing: standing.json is %s; nothing was saved", self.problem or "read-only")
                 return False
             return write_json(self.files.definitions,
-                              {"agents": [to_data(agent) for agent in agents],
-                               "rules": [to_data(rule) for rule in rules]}, what="standing.json")
+                              {"agents": [to_data(agent) for agent in agents] + list(self._kept["agents"]),
+                               "rules": [to_data(rule) for rule in rules] + list(self._kept["rules"])},
+                              what="standing.json")
 
     def mtime(self) -> float:
         try:
@@ -338,6 +343,22 @@ class AppState:
             for item in ids:
                 self.data[key].pop(item, None)
             return self._save()
+
+    def keep_paused_cards(self, job_id: str, card_ids: Iterable[str]) -> bool:
+        """The cards Pause withdrew from ``job_id`` (Resume brings them back)."""
+        with self._lock:
+            kept = dict(self.data.get("paused_cards") or {}) if isinstance(self.data.get("paused_cards"), dict) else {}
+            kept[job_id] = sorted(set(kept.get(job_id) or ()) | set(card_ids))
+            self.data["paused_cards"] = kept
+            return self._save()
+
+    def take_paused_cards(self, job_id: str) -> list[str]:
+        with self._lock:
+            kept = dict(self.data.get("paused_cards") or {}) if isinstance(self.data.get("paused_cards"), dict) else {}
+            ids = [item for item in kept.pop(job_id, None) or () if isinstance(item, str)]
+            self.data["paused_cards"] = kept
+            self._save()
+            return ids
 
     def tidy_consented(self, alias: str) -> bool:
         """The owner said yes to a rule's tidy-up on ``alias`` (the card before its own sign-in)."""

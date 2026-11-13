@@ -166,14 +166,17 @@ def new_mail(reader: Any, query: str, mark: Mapping[str, Any], now: datetime, *,
                  seen=tuple(seen + [ref.message_id for ref in taken]), full=len(listed) >= LIST_MAX)
 
 
+COUNT_IDS = 100
+
+
 def recent(reader: Any, query: str, days: int, now: datetime, *, max_refs: int) -> tuple[list[MailRef], int]:
     """A dry run's matches: the newest ``max_refs`` messages of ``query`` in the last ``days``, and Gmail's estimate
     of how many match in that window."""
     after = int((now - timedelta(days=max(1, int(days)))).timestamp())
-    listed, estimate = reader.list_messages(watch_query(query, after), max_results=max(1, max_refs))
+    listed, estimate = reader.list_messages(watch_query(query, after), max_results=max(COUNT_IDS, max_refs))
     refs = [ref for ref in (ref_from(reader.message_metadata(message_id), reader.alias)
                             for message_id, _thread in listed[:max_refs]) if ref is not None]
-    return refs, max(estimate, len(refs))
+    return refs, max(estimate, len(listed))      # ids counted up to COUNT_IDS: a tidy-up's 90 never trusts a guess
 
 
 def read_message(reader: Any, ref: MailRef, *, chars: int) -> tuple[MailMessage | None, int]:

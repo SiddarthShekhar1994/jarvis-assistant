@@ -1669,12 +1669,26 @@ def build_accounts(config: Config, *, flow_factory: Callable[[Any, list[str]], A
     return accounts
 
 
+class _ReadOnlyBindings(AccountBindings):
+    """accounts.json as a tidy-up sign-in sees it: read only. Its sign-in never binds, rebinds, confirms or releases
+    an alias (the main sign-in does); another Google account than the bound one reads as an identity problem."""
+
+    def bind(self, *_args: Any, **_kwargs: Any) -> bool:
+        return False
+
+    def confirm(self, *_args: Any, **_kwargs: Any) -> bool:
+        return False
+
+    def unbind(self, *_args: Any, **_kwargs: Any) -> Any:
+        return None
+
+
 def build_tidy_accounts(config: Config, *, flow_factory: Callable[[Any, list[str]], Any] | None = None,
                         refresh: Callable[[Any], None] | None = None, persist: bool = True) -> dict[str, GoogleAccount]:
     """The tidy-up sign-ins: one GoogleAccount per alias with the gmail_tidy feature, asking only for gmail.modify (and
     who the account is), its token in google_token_<alias>.tidy.json, bound like the alias's main sign-in (the same
     accounts.json: a different Google account is refused). ``persist`` False: a background run's (memory only)."""
-    bindings = AccountBindings(config.data_dir / ACCOUNTS_FILE)
+    bindings = _ReadOnlyBindings(config.data_dir / ACCOUNTS_FILE)
     accounts: dict[str, GoogleAccount] = {}
     for alias in google_aliases(config):
         account = config.accounts.get(alias)
