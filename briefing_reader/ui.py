@@ -9067,6 +9067,10 @@ class AppController(QObject):
             self._activity(hud.TAG_ASK, "Handed to a task", f"{outcome.duration_ms / 1000:.1f} s")
             self._start_agent(outcome.agent_task)
             return
+        if outcome.ok and getattr(outcome, "standing_job", "") and getattr(self, "standing", None) is not None:
+            self._activity(hud.TAG_ASK, "Handed to the standing setup", f"{outcome.duration_ms / 1000:.1f} s")
+            self.standing.setup_from_words(outcome.standing_job, getattr(outcome, "standing_words", ""))
+            return
         if outcome.ok and getattr(outcome, "suggestion", ""):
             self._offer_memory_suggestion(outcome.suggestion)
         report = getattr(outcome, "research", None) if outcome.ok else None
@@ -11831,8 +11835,11 @@ class AppController(QObject):
         """The typed shortcuts on now: memory ("remember that ..."), the day plan ("plan my day"),
         the meeting brief ("prep me for my 2 PM"), the follow-up list ("any follow-ups?"), and desktop
         requests ("open my LING essay") only while [desktop] is enabled (the HUD exists)."""
+        standing = getattr(self, "standing", None)
         return RouteFlags(memory=self.memory_store is not None, plan=self._plan_on(), prep=self._prep_on(),
-                          followups=self._followups_section_on(), desktop=getattr(self, "desktop", None) is not None)
+                          followups=self._followups_section_on(), desktop=getattr(self, "desktop", None) is not None,
+                          standing=standing is not None,
+                          standing_names=standing.live_agent_names() if standing is not None else ())
 
     def _memory_prompt_notes(self) -> tuple[str, ...]:
         """Every note, newest first: the planner gives a run the ones that fit, an Ask's the closest to its
@@ -14362,6 +14369,12 @@ class AppController(QObject):
 
         controller = standing_ui.StandingController(self, parent=self)
         self.window.reading.tabChanged.connect(self._on_tab_for_standing)
+        # Setup from the chat: "agent:" / "rule:" and "run <name>" (ask.routes), and an Ask's first run may hand a
+        # standing job's request to the setup (the owner's own words go, never the planner's).
+        self.ask.standingRequested.connect(controller.on_route)
+        planner = getattr(self.ask, "planner", None)
+        if planner is not None:
+            planner.standing_allowed = controller.handoff_allowed
         return controller
 
     def _on_tab_for_standing(self, index: int) -> None:

@@ -901,8 +901,21 @@ AGENT_TASK_PROPERTY = {"type": "object", "additionalProperties": False, "require
                                       "tools. Give no lines or steps when you use it."}
 
 
+# Added in code too (no schema or prompt file changes) to an Ask's first planner run while [standing] is on: it may hand
+# the request to the standing setup. Jarvis sets the job up from the owner's own words, whatever "why" says.
+STANDING_JOB_PROPERTY = {"type": "object", "additionalProperties": False, "required": ["kind", "why"],
+                         "properties": {"kind": {"type": "string", "enum": ["agent", "rule"]},
+                                        "why": {"type": "string", "maxLength": 200}},
+                         "description": "Only when the owner asks for something to keep happening on its own, again "
+                                        "and again - at a time each day, every few hours, or each time a certain kind "
+                                        "of email comes in - and not for something to do once now: \"rule\" for "
+                                        "what to do with each matching email, \"agent\" for a job that wakes on a "
+                                        "schedule or on new mail and reports. Jarvis then sets it up from the owner's "
+                                        "own words for them to check and turn on. Give no lines when you use it."}
+
+
 def schema_text(*, allow_search: bool, allow_web: bool = False, allow_remember: bool = False,
-                path: Path = SCHEMA_FILE, allow_agent: bool = False) -> str:
+                path: Path = SCHEMA_FILE, allow_agent: bool = False, allow_standing: bool = False) -> str:
     """The --json-schema value: schema.json compact; without ``allow_search`` the gmail_search
     property is removed (the second planner run may not ask to read mail again), without
     ``allow_web`` the web_research property (only the first run may hand a request to web
@@ -922,6 +935,8 @@ def schema_text(*, allow_search: bool, allow_web: bool = False, allow_remember: 
         data.setdefault("properties", {})["remember"] = dict(REMEMBER_PROPERTY)
     if allow_agent:
         data.setdefault("properties", {})["agent_task"] = dict(AGENT_TASK_PROPERTY)
+    if allow_standing:
+        data.setdefault("properties", {})["standing_job"] = dict(STANDING_JOB_PROPERTY)
     return compact_json(data)
 
 

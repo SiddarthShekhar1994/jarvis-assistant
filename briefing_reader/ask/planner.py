@@ -398,12 +398,13 @@ class ClaudeEngine:
                          probe.agent_missing)
 
     def argv(self, ready: Readiness, *, allow_search: bool, allow_web: bool = False,
-             allow_remember: bool = False, allow_agent: bool = False) -> list[str]:
+             allow_remember: bool = False, allow_agent: bool = False, allow_standing: bool = False) -> list[str]:
         assert ready.exe is not None
         extra = {"prompt_file": cli.PROMPT_FILE_AGENT} if allow_agent else {}   # off: the prompt file as ever
         return cli.build_argv(ready.exe.path, model=self.ask.model, max_turns=self.ask.max_turns,
                               schema=cli.schema_text(allow_search=allow_search, allow_web=allow_web,
-                                                     allow_remember=allow_remember, allow_agent=allow_agent),
+                                                     allow_remember=allow_remember, allow_agent=allow_agent,
+                                                     allow_standing=allow_standing),
                               hardened=ready.hardened, streaming=ready.streaming, **extra)
 
     def preflight(self) -> tuple[Readiness, AskFailure | None]:
@@ -433,7 +434,7 @@ class ClaudeEngine:
             progress: Callable[[str, Any], None] | None = None, capture: bool = False,
             allow_web: bool = False, allow_remember: bool = False,
             on_words: Callable[[str, bool], None] | None = None, slot: str = "",
-            allow_agent: bool = False) -> RunResult:
+            allow_agent: bool = False, allow_standing: bool = False) -> RunResult:
         """One planner run with ``prompt`` on stdin, after preflight(). ``progress`` / ``capture``:
         stream.run_planner's (the LIVE view; neither changes the run). ``allow_web``: the run may
         hand the request to web research (planner run 1 only); ``allow_remember``: it may suggest
@@ -450,7 +451,7 @@ class ClaudeEngine:
             return RunResult(failure=failure(CANCELLED, "cancel"))
         env = cli.clean_env(self._env_source())
         argv = self.argv(ready, allow_search=allow_search, allow_web=allow_web, allow_remember=allow_remember,
-                         allow_agent=allow_agent)
+                         allow_agent=allow_agent, allow_standing=allow_standing)
 
         def go(process: Any, after: Callable[[], None] | None) -> RunResult:
             return run_planner(self.runner, argv, prompt, env=env, cwd=self.work_folder,
@@ -979,11 +980,17 @@ class AskOutcome:
     # A task to work through (Jarvis, a true agent): the owner's own words, whatever the planner wrote as the goal; the
     # app starts it (agent_ui). Never logged.
     agent_task: str = field(default="", repr=False)
+    # A standing job to set up ([standing]): its kind ("agent" | "rule") and the owner's own words, whatever the planner
+    # wrote; the app starts the setup (standing_ui). The words are never logged.
+    standing_job: str = ""
+    standing_words: str = field(default="", repr=False)
 
     def summary(self) -> str:
         """For the log: kinds and counts only."""
         if self.agent_task:
             return f"{self.kind}: handed to a task, {self.runs} run(s), {self.duration_ms / 1000:.1f} s"
+        if self.standing_job:
+            return f"{self.kind}: handed to the standing setup ({self.standing_job}), {self.runs} run(s)"
         kinds: dict[str, int] = {}
         for card in self.cards:
             name = "refused" if card.error else card.kind
@@ -1219,7 +1226,7 @@ class AskPlanner:
              number: int = 1, search_words: str = "", allow_web: bool = False, web_words: str = "",
              allow_remember: bool = False, mode: str = "",
              on_words: Callable[[str, bool], None] | None = None, slot: str = "",
-             allow_agent: bool = False) -> RunResult:
+             allow_agent: bool = False, allow_standing: bool = False) -> RunResult:
         """One planner run, counted when it starts (``mode``: a planner mode's run, ClaudeEngine.run_mode,
         counted as that mode's bundle kind): the send, never a process started ahead's start. ``on_words`` and
         ``slot``: ClaudeEngine.run's."""
@@ -1235,7 +1242,7 @@ class AskPlanner:
             step.done(STATUS_BLOCKED, status_text="SKIPPED", summary=f"Not started: {refused.message}")
             return RunResult(failure=refused, started=False)
         _run_ready(step, self.engine, ready, allow_search, allow_web, allow_remember, mode=mode,
-                   allow_agent=allow_agent)
+                   allow_agent=allow_agent, allow_standing=allow_standing)
         run = self.usage.start(kind=MODE_USAGE[mode]) if mode else self.usage.start()
         result: RunResult | None = None
         try:
@@ -1248,6 +1255,8 @@ class AskPlanner:
                 extra["allow_remember"] = True
             if allow_agent:           # the same
                 extra["allow_agent"] = True
+            if allow_standing:        # the same
+                extra["allow_standing"] = True
             if on_words is not None:  # the same
                 extra["on_words"] = on_words
             if slot and getattr(self.engine, "prestart", None) is not None:   # the same
@@ -1345,6 +1354,8 @@ class AskPlanner:
                 extra["allow_remember"] = True
             if self._agent_allowed():
                 extra["allow_agent"] = True
+            if self._standing_allowed():
+                extra["allow_standing"] = True
             argv = self.engine.argv(ready, allow_search=allow_search, **extra)
             pool.fill(prestart.SLOT_ASK, argv, cli.clean_env(self.engine._env_source()), self.engine.work_folder)
         except Exception as exc:  # noqa: BLE001 - only prepares the next request
@@ -1446,6 +1457,17 @@ class AskPlanner:
             return False, "no - the Ask limit leaves one run"
         return True, "yes"
 
+    def _standing_allowed(self) -> bool:
+        """May a first run hand the request to the standing setup? Only while [standing] is on and the app says so
+        (``standing_allowed``); never raises."""
+        check = getattr(self, "standing_allowed", None)
+        if check is None or not getattr(getattr(self.config, "standing", None), "enabled", False):
+            return False
+        try:
+            return check() is True
+        except Exception:  # noqa: BLE001 - unknown: no hand-off
+            return False
+
     def _agent_allowed(self) -> bool:
         """May a first run hand the request to a task? False unless the app says so; never raises."""
         check = self.agent_allowed
@@ -1513,9 +1535,12 @@ class AskPlanner:
         allow_agent = self._agent_allowed()
         if allow_agent:
             logger.info("Ask: run 1 may hand the request to a task")
+        allow_standing = self._standing_allowed()
+        standing_extra = {"allow_standing": True} if allow_standing else {}   # off: the call exactly as before
         first = self._run(prompt, allow_search=allow_search, cancel=cancel, live=live, number=1, search_words=why_not,
                           allow_web=allow_web, web_words=web_words, allow_remember=allow_remember,
-                          on_words=words(1, bool(ctx.mail)), slot=prestart.SLOT_ASK, allow_agent=allow_agent)
+                          on_words=words(1, bool(ctx.mail)), slot=prestart.SLOT_ASK, allow_agent=allow_agent,
+                          **standing_extra)
         del prompt
         if first.failure is not None or first.plan is None:
             failure = first.failure
@@ -1532,6 +1557,14 @@ class AskPlanner:
             logger.info("Agent: handed over by the planner (%d line(s) left out)", len(plan.lines))
             return AskOutcome(True, "ok", "", say=plan.say or with_address(AGENT_TASK_WORDS, self._owner()), runs=1,
                               init=first.init, stats=(first.stats,), mail=report(ctx.mail), agent_task=command)
+        if (allow_standing and plan.standing and not plan.question
+                and not (plan.search is not None and allow_search)):
+            # The owner's own words go to the setup, whatever the planner wrote; none of the context does.
+            logger.info("Standing: handed over by the planner (%s; %d line(s) left out)", plan.standing,
+                        len(plan.lines))
+            return AskOutcome(True, "ok", "", say=plan.say or with_address(STANDING_SETUP_WORDS, self._owner()),
+                              runs=1, init=first.init, stats=(first.stats,), mail=report(ctx.mail),
+                              standing_job=plan.standing, standing_words=command)
         if plan.web is not None and allow_web:
             if plan.search is not None and allow_search:   # mail first, as asked; the web another time
                 live.step(ASK_CHECKS, "Web research", status=STATUS_WARN, status_text="SKIPPED", summary=BOTH_MESSAGE)
@@ -2637,11 +2670,13 @@ class AskPlanner:
             searchable = any(account.read_mail == "yes" for account in ctx.accounts)
             allow_web = self._web_allowed()[0] if ready.ok else False   # as planner run 1 would
             allow_agent = self._agent_allowed() if ready.ok else False  # the same
+            allow_standing = self._standing_allowed() if ready.ok else False   # the same
             extra = {"prompt_file": cli.PROMPT_FILE_AGENT} if allow_agent else {}
             argv = tuple(cli.build_argv(ready.exe.path, model=self.config.ask.model,
                                         max_turns=self.config.ask.max_turns,
                                         schema=cli.schema_text(allow_search=searchable, allow_web=allow_web,
-                                                               allow_agent=allow_agent),
+                                                               allow_agent=allow_agent,
+                                                               allow_standing=allow_standing),
                                         hardened=ready.hardened, streaming=ready.streaming, **extra))
         return DryRun(prompt, argv, ready, index.counts(), report(ctx.mail))
 
@@ -2676,6 +2711,7 @@ HANDOVER_WORDS = "asked for web research"   # planner run 1's summary when it ha
 AGENT_HANDED_WORDS = "asked to work through it as a task"
 AGENT_MAY_WORDS = "yes - Jarvis then works through it with your own words only"
 AGENT_TASK_WORDS = "I'll work through that as a task, {sir}."   # Jarvis's own words as a request is handed over
+STANDING_SETUP_WORDS = "I'll set that up for you to check first, {sir}."   # ... and to the standing setup
 HANDOVER_WHY_CHARS = 80
 OVERAGE_WORDS = "Claude Code said this would use extra usage, so Ask stopped it"
 # The planner run's stdin block: named "sent" only once Claude Code has started with it.
@@ -2906,7 +2942,8 @@ def _run_step(live: LiveTask, model: str, prompt: str, number: int, search_words
 
 @_quiet()
 def _run_ready(step: LiveStep, engine: Any, ready: Readiness, allow_search: bool, allow_web: bool = False,
-               allow_remember: bool = False, mode: str = "", allow_agent: bool = False) -> None:
+               allow_remember: bool = False, mode: str = "", allow_agent: bool = False,
+               allow_standing: bool = False) -> None:
     if step is NO_STEP:
         return
     hardened = "hardened (--safe-mode --restricted)" if ready.hardened else "not hardened"
@@ -2919,6 +2956,8 @@ def _run_ready(step: LiveStep, engine: Any, ready: Readiness, allow_search: bool
         extra["allow_remember"] = True
     if allow_agent:
         extra["allow_agent"] = True
+    if allow_standing:
+        extra["allow_standing"] = True
     try:
         if mode:
             argv = engine.mode_argv(ready, mode, allow_remember=allow_remember,

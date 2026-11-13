@@ -222,6 +222,7 @@ class Plan:
     web: WebRequest | None = None   # web_research (only when the run was allowed to ask for it)
     remember: tuple[str, ...] = ()  # a suggested note (only when the run was allowed to suggest one)
     agent: AgentRequest | None = None   # agent_task (only when the run was allowed to ask for it)
+    standing: str = ""                  # standing_job's kind, "agent" | "rule" (acted on only when it was offered)
 
 
 @dataclass(frozen=True)
@@ -507,7 +508,9 @@ def _plan_from(data: Any, *, allow_search: bool, allow_web: bool = False, fallba
         if agent is NOT_A_TASK:
             return None
     kept = tuple(line.strip() for line in lines if line.strip())
-    return Plan(say, question, kept, search, fallback, web, remember, agent)
+    wanted = data.get("standing_job")
+    standing = wanted["kind"] if isinstance(wanted, dict) and wanted.get("kind") in ("agent", "rule") else ""
+    return Plan(say, question, kept, search, fallback, web, remember, agent, standing)
 
 
 def _fallback_plan(text: str, *, allow_search: bool, allow_web: bool = False,

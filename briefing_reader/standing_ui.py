@@ -45,14 +45,14 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from . import holo
+from . import holo, standing_setup
 from .actions import CALENDAR, REPLY, SOURCE_STANDING, STANDING_MODES, TODO, ProposedAction
 from .standing import cards as standing_cards
 from .standing import schedule
@@ -61,7 +61,9 @@ from .standing.model import (KIND_AGENT, KIND_RULE, STATUS_DRAFT, STATUS_LIVE, S
                              DefinitionError, Rule, with_status)
 from .standing.store import (AppState, Definitions, RunFiles, RunRequests, StandingFiles, Usage, parse_stamp,
                              read_runner_state)
-from .standing_view import (ActivityRow, AgentsInfo, JobRow, ReportRow)
+from .standing.setup import SetupRefused, check_words
+from .standing_view import (LOOK_AMBER, LOOK_DANGER, LOOK_GHOST, LOOK_GO, ActivityRow, AgentsInfo, CardButton,
+                            JobRow, NoticeCard, ReportRow)
 from .text_prep import format_time
 
 logger = logging.getLogger(__name__)
@@ -93,6 +95,11 @@ REPLY_PROBLEMS = {
     "no_reader": "Jarvis can't read that account's mail here, so this draft can't be checked: nothing was sent.",
 }
 UNDO_TIP = "Withdraw this card from Approvals (nothing was sent)"
+NEITHER_TEXT = ("That doesn't sound like something to do again and again. Ask it as a normal request, or say when it "
+                "should happen.")
+SETUP_BUSY_TEXT = "Jarvis is already setting one up; a moment."
+SETUP_FAILED_TEXT = "Jarvis couldn't set that up just now; try again."
+CONSENT_CARD, SETUP_CARD = "consent", "setup"
 STATUS_WORDS = {STATUS_LIVE: "LIVE", STATUS_PAUSED: "PAUSED", STATUS_DRAFT: "DRAFT", STATUS_TRIED: "TRIED"}
 RUN_LINES = {   # a run that made nothing to show as a receipt: its activity line
     "capped": "Reached its runs for today; it waits until tomorrow.",
@@ -305,6 +312,8 @@ class StandingController(QObject):
 
     changed = Signal()
     _replyChecked = Signal(str, str, int)      # action id, problem ("" passed), sequence (from the worker)
+    _setupDone = Signal(object, int)           # SetupOutcome, sequence (from the worker)
+    _dryDone = Signal(str, object, int)        # rule id, DryOutcome, sequence (from the worker)
 
     def __init__(self, host: Any, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -338,8 +347,19 @@ class StandingController(QObject):
         self.start_runner: Callable[[], bool] = _start_runner
         self.reader_for: Callable[[str], Any] = self._reader
         self.thread_runner: Callable[[Callable[[], None]], None] = self._in_thread
+        self.engine_factory: Callable[[], Any] = lambda: standing_setup.app_engine(self.config)
+        self._engine: Any = None
+        self._setup: standing_setup.SetupDraft | None = None   # the setup card (memory only)
+        self._busy = ""                                      # "setup" or "dry:<rule id>" while one runs
+        self._work_seq = 0
+        self._consent_later = False
         self._replyChecked.connect(self._on_reply_checked)
+        self._setupDone.connect(self._on_setup_done)
+        self._dryDone.connect(self._on_dry_done)
         stage = self.stage
+        stage.cardAction.connect(self._on_card)
+        stage.dryRunRequested.connect(self.dry_run)
+        stage.turnOnRequested.connect(self.turn_on)
         stage.runNowRequested.connect(self.run_now)
         stage.pauseRequested.connect(self.toggle_pause)
         stage.deleteRequested.connect(self.delete_job)
@@ -556,8 +576,8 @@ class StandingController(QObject):
             jobs_rows.append(self._agent_row(agent, now, state, today, paused_all, consented, hour24))
         rule_rows = [self._rule_row(rule, now, today, hour24) for rule in self.rules]
         activity, reports = self._activity(now, hour24)
-        return AgentsInfo(meta=meta, notes=tuple(notes), paused_all=paused_all, agents=tuple(jobs_rows),
-                          rules=tuple(rule_rows), activity=tuple(activity), reports=tuple(reports),
+        return AgentsInfo(meta=meta, notes=tuple(notes), paused_all=paused_all, cards=tuple(self._notice_cards()),
+                          agents=tuple(jobs_rows), rules=tuple(rule_rows), activity=tuple(activity), reports=tuple(reports),
                           empty_text=EMPTY_TEXT, can_clear=bool(reports or activity),
                           can_pause_all=bool(self.agents or self.rules or paused_all))
 
@@ -643,11 +663,13 @@ class StandingController(QObject):
         if agent.id in self.requests.pending():
             meta.append("Run now asked")
         live_or_paused = agent.status in (STATUS_LIVE, STATUS_PAUSED)
+        if agent.status == STATUS_DRAFT:
+            meta.append("Not on yet")
         return JobRow(agent.id, KIND_AGENT, agent.name, detail=agent_detail(agent, hour24),
                       meta=f" {DOT} ".join(meta), status=agent.status, status_text=STATUS_WORDS.get(agent.status, ""),
                       can_run=agent.status == STATUS_LIVE and consented and not paused_all,
                       can_pause=live_or_paused, paused=agent.status == STATUS_PAUSED,
-                      tooltip=agent.words)
+                      can_turn_on=agent.status == STATUS_DRAFT, tooltip=agent.words)
 
     def _rule_row(self, rule: Rule, now: datetime, today: Any, hour24: bool) -> JobRow:
         meta = []
@@ -661,10 +683,13 @@ class StandingController(QObject):
             meta.append({"star": "Stars", "label": f"Labels {rule.tidy.label_name or ''}".rstrip(),
                          "archive": "Archives"}.get(rule.tidy.kind, "") + " what it matches")
         live_or_paused = rule.status in (STATUS_LIVE, STATUS_PAUSED)
+        if rule.status == STATUS_DRAFT:
+            meta.append("Try it with Dry run before it can go on")
         return JobRow(rule.id, KIND_RULE, rule.name, detail=rule.sentence,
                       meta=f" {DOT} ".join(part for part in meta if part),
                       status=rule.status, status_text=STATUS_WORDS.get(rule.status, ""), can_pause=live_or_paused,
-                      paused=rule.status == STATUS_PAUSED, tooltip=rule.sentence)
+                      paused=rule.status == STATUS_PAUSED, can_dry_run=not self._busy,
+                      can_turn_on=rule.status == STATUS_TRIED, tooltip=rule.sentence)
 
     def _activity(self, now: datetime, hour24: bool) -> tuple[list[ActivityRow], list[ReportRow]]:
         rows: list[ActivityRow] = []
@@ -745,17 +770,23 @@ class StandingController(QObject):
         return [card_id for card_id, run_id in self._card_runs.items()
                 if card_id in waiting and runs.get(run_id) is not None and runs[run_id].job_id == job_id]
 
-    def run_now(self, job_id: str) -> None:
-        """Run now (an agent, live): asked through standing_requests, and a check started at once."""
+    def run_now(self, job_id: str) -> str:
+        """Run now (an agent, live): asked through standing_requests, and a check started at once. Why not, in Jarvis's
+        own words ("" when it was asked for)."""
         agent = next((item for item in self.agents if item.id == job_id), None)
-        if agent is None or agent.status != STATUS_LIVE or self.app_state.paused_all or not self.app_state.consented():
-            return
+        if agent is None or agent.status != STATUS_LIVE:
+            return "That agent isn't on."
+        if self.app_state.paused_all:
+            return "Every agent is paused: Resume all on the Agents screen first."
+        if not self.app_state.consented():
+            return "First say yes on the Agents screen's card that explains what agents read."
         if not self.requests.ask(job_id, self._now()):
             self.host._flash_note("Jarvis couldn't ask for that run; try again.")
-            return
+            return "Jarvis couldn't ask for that run; try again."
         started = self.start_runner()
         logger.info("Standing: Run now for %s (%s)", job_id, "a check started" if started else "the next check takes it")
         self._show()
+        return ""
 
     def toggle_pause(self, job_id: str) -> None:
         """Pause (its waiting cards are withdrawn) or Resume a live or paused job."""
@@ -857,6 +888,280 @@ class StandingController(QObject):
         elif link_id == INSTALLER_LINK:
             self.host._flash_note("Background runs: run install-schedule.ps1 again (README, step 9). It adds the "
                                   "\"Briefing agents\" task, which checks every 5 minutes.")
+
+    # ---- setting a job up ([standing]: "agent:" / "rule:", the planner's hand-off) --------------------------------
+
+    def live_agent_names(self) -> tuple[str, ...]:
+        """The live agents' names, for "run <name>" (ask.routes)."""
+        return tuple(agent.name for agent in self.agents if agent.status == STATUS_LIVE)
+
+    def handoff_allowed(self) -> bool:
+        """An Ask's first run may hand a standing job's request to the setup (AskPlanner.standing_allowed)."""
+        return not self._closed
+
+    def on_route(self, kind: str, payload: str) -> None:
+        """A typed shortcut (ask.routes ROUTE_STANDING): "run" with an agent's name, or "agent" / "rule" with the
+        owner's own sentence."""
+        if kind == "run":
+            self.run_by_name(payload)
+        else:
+            self.setup_from_words(kind, payload)
+
+    def run_by_name(self, name: str) -> None:
+        agent = next((item for item in self.agents if item.status == STATUS_LIVE
+                      and item.name.casefold() == " ".join(name.split()).casefold()), None)
+        if agent is None:
+            self.host._flash_note("No agent of that name is on.")
+            return
+        problem = self.run_now(agent.id)
+        if problem:
+            self.host._jarvis(problem, tone=_warn_tone(), context=False)
+            return
+        self.host._jarvis(f"Running {agent.name} now; what it finds comes to the Agents screen.",
+                          link=(VIEW_TEXT, VIEW_LINK), context=False)
+
+    def _engine_obj(self) -> Any:
+        if self._engine is None:
+            self._engine = self.engine_factory()
+        return self._engine
+
+    def _open_screen(self) -> None:
+        from .ui import SCREEN_AGENTS
+
+        self.host.window.reading.set_tab(SCREEN_AGENTS)
+
+    def setup_from_words(self, kind: str, words: str) -> None:
+        """Set a job up from the owner's own sentence: one setup run on a worker, then a draft on the setup card (a
+        rule needs its dry run before it can go on). Never words a planner wrote."""
+        if self._closed:
+            return
+        if self._busy:
+            self.host._flash_note(SETUP_BUSY_TEXT)
+            return
+        try:
+            words = check_words(words)
+        except SetupRefused as refused:
+            self._setup = standing_setup.SetupDraft(" ".join(str(words or "").split())[:200], kind, note=str(refused))
+            self._show()
+            self._open_screen()
+            return
+        self._work_seq += 1
+        seq = self._work_seq
+        self._busy = "setup"
+        self._setup = standing_setup.SetupDraft(words, kind if kind in (KIND_AGENT, KIND_RULE) else "", busy="setup")
+        self._show()
+        self._open_screen()
+        engine, now = self._engine_obj(), self._now()
+        logger.info("Standing: setting up a %s from the owner's sentence", kind or "job")
+
+        def work() -> None:
+            try:
+                outcome = standing_setup.run_setup(engine, words, self.config, self.usage, now=now,
+                                                   time_zone_name=now.tzname() or "", labels=self._labels)
+            except Exception as exc:  # noqa: BLE001 - the card says so; nothing was saved
+                logger.warning("Standing: a setup stopped (%s)", type(exc).__name__)
+                outcome = standing_setup.SetupOutcome(refusal=SETUP_FAILED_TEXT)
+            self._setupDone.emit(outcome, seq)
+
+        self.thread_runner(work)
+
+    def _labels(self, alias: str) -> list[tuple[str, str]]:
+        """The account's own Gmail labels (a label tidy-up's label must be one of them): read on the worker."""
+        reader = self.reader_for(alias)
+        try:
+            return list(reader.labels()) if reader is not None and callable(getattr(reader, "labels", None)) else []
+        except Exception:  # noqa: BLE001 - none found: the setup says to make the label first
+            return []
+
+    def _on_setup_done(self, outcome: Any, seq: int) -> None:
+        if seq != self._work_seq or self._closed:
+            return
+        self._busy = ""
+        draft = self._setup or standing_setup.SetupDraft("")
+        if outcome.job is None:
+            self._setup = replace(draft, busy="", say=outcome.say,
+                                  note=NEITHER_TEXT if outcome.neither else (outcome.refusal or SETUP_FAILED_TEXT))
+            self._show()
+            return
+        job = outcome.job
+        agents, rules = list(self.agents), list(self.rules)
+        (agents if isinstance(job, Agent) else rules).append(job)
+        if not self._save(agents, rules):
+            self._setup = replace(draft, busy="", note="Jarvis couldn't save it (standing.json); nothing was kept.")
+            self._show()
+            return
+        self._setup = replace(draft, busy="", job=job, say=outcome.say, note="")
+        self.host._jarvis(f"I set up {job.name} as a draft: check it on the Agents screen before it goes on.",
+                          link=(VIEW_TEXT, VIEW_LINK), context=False)
+        self.reload(announce=False)
+
+    def dry_run(self, rule_id: str) -> None:
+        """A rule's dry run over the last 30 days of its mail, on a worker: nothing is proposed or tidied."""
+        rule = next((item for item in self.rules if item.id == rule_id), None)
+        if rule is None or self._closed:
+            return
+        if self._busy:
+            self.host._flash_note(SETUP_BUSY_TEXT)
+            return
+        self._work_seq += 1
+        seq = self._work_seq
+        self._busy = f"dry:{rule_id}"
+        if self._setup is None or self._setup.job is None or self._setup.job.id != rule_id:
+            self._setup = standing_setup.SetupDraft(rule.sentence, KIND_RULE, job=rule)
+        self._setup = replace(self._setup, busy="dry", note="")
+        self._show()
+        self._open_screen()
+        engine, now = self._engine_obj(), self._now()
+        reader = self.reader_for(rule.account)
+        logger.info("Standing: a dry run of rule %s", rule_id)
+
+        def work() -> None:
+            try:
+                own = list(reader.own_addresses()) if reader is not None else []
+            except Exception:  # noqa: BLE001 - without them a mail of the owner's is judged like any other
+                own = []
+            try:
+                outcome = standing_setup.run_dry(engine, rule, reader, self.config, self.usage, now=now,
+                                                 time_zone_name=now.tzname() or "", own=own)
+            except Exception as exc:  # noqa: BLE001 - the card says so; nothing was kept
+                logger.warning("Standing: a dry run stopped (%s)", type(exc).__name__)
+                outcome = standing_setup.DryOutcome(refusal="Jarvis couldn't finish the dry run; try again.")
+            self._dryDone.emit(rule_id, outcome, seq)
+
+        self.thread_runner(work)
+
+    def _on_dry_done(self, rule_id: str, outcome: Any, seq: int) -> None:
+        if seq != self._work_seq or self._closed:
+            return
+        self._busy = ""
+        draft = self._setup
+        if outcome.rule is not None:
+            rules = [outcome.rule if item.id == rule_id else item for item in self.rules]
+            if any(item.id == rule_id for item in self.rules) and self._save(self.agents, rules):
+                self.rules = rules
+        job = outcome.rule or next((item for item in self.rules if item.id == rule_id), None)
+        if draft is not None and draft.job is not None and draft.job.id == rule_id:
+            self._setup = replace(draft, job=job, busy="", dry=outcome, note=outcome.refusal)
+        self.reload(announce=False)
+
+    def turn_on(self, job_id: str) -> None:
+        """Turn on a draft agent or a tried rule: consent given, a rule's dry run done, and each of its accounts'
+        Google account recorded (the background check refuses a changed one)."""
+        job = self._jobs().get(job_id)
+        if job is None or job.status not in (STATUS_DRAFT, STATUS_TRIED, STATUS_PAUSED):
+            return
+        accounts = getattr(self.host, "_google_accounts", None) or {}
+        problem = standing_setup.turn_on_problem(job, self.config, accounts, self.app_state.consented())
+        if problem:
+            if self._setup is not None and self._setup.job is not None and self._setup.job.id == job_id:
+                self._setup = replace(self._setup, note=problem)
+                self._show()
+            else:
+                self.host._flash_note(problem)
+            return
+        try:
+            on = with_status(replace(job, bindings=standing_setup.bindings_of(job, accounts)), STATUS_LIVE)
+        except DefinitionError:
+            return
+        agents = [on if item.id == job_id else item for item in self.agents]
+        rules = [on if item.id == job_id else item for item in self.rules]
+        if not self._save(agents, rules):
+            return
+        if self._setup is not None and self._setup.job is not None and self._setup.job.id == job_id:
+            self._setup = None
+        logger.info("Standing: %s %s turned on", job.kind, job_id)
+        self.host._jarvis(f"{job.name} is on.", link=(VIEW_TEXT, VIEW_LINK), context=False)
+        self.reload(announce=False)
+
+    def discard_setup(self) -> None:
+        draft, self._setup = self._setup, None
+        job = draft.job if draft is not None else None
+        if job is not None and job.status in (STATUS_DRAFT, STATUS_TRIED):
+            agents = [item for item in self.agents if item.id != job.id]
+            rules = [item for item in self.rules if item.id != job.id]
+            self._save(agents, rules)
+            logger.info("Standing: draft %s %s discarded", job.kind, job.id)
+        self.reload(announce=False)
+
+    def edit_setup(self) -> None:
+        """Edit: the owner's sentence back in the bar ("agent: ..." / "rule: ..."), to reword and set up again; the
+        draft goes."""
+        draft = self._setup
+        if draft is None:
+            return
+        kind = draft.kind or (draft.job.kind if draft.job is not None else KIND_AGENT)
+        self.discard_setup()
+        bar = self.host.window.reading.command_bar
+        bar.set_text(f"{kind}: {draft.words}")
+        bar.focus_input()
+
+    def _on_card(self, card_id: str, action: str) -> None:
+        if card_id == CONSENT_CARD:
+            if action == "yes":
+                if self.app_state.set_consent(True, self._now()):
+                    logger.info("Standing: the owner said yes to the consent card")
+                else:
+                    self.host._flash_note("Jarvis couldn't save that (standing_app.json); nothing changed.")
+            elif action == "later":
+                self._consent_later = True
+            self.reload(announce=False)
+            return
+        if card_id != SETUP_CARD or self._setup is None:
+            return
+        job = self._setup.job
+        if action == "dry" and job is not None:
+            self.dry_run(job.id)
+        elif action == "on" and job is not None:
+            self.turn_on(job.id)
+        elif action == "edit":
+            self.edit_setup()
+        elif action in ("discard", "dismiss"):
+            self.discard_setup()
+
+    def _notice_cards(self) -> list[NoticeCard]:
+        cards: list[NoticeCard] = []
+        consented = self.app_state.consented()
+        if not consented and not self._consent_later and (self.agents or self.rules or self._setup is not None):
+            cards.append(NoticeCard(CONSENT_CARD, standing_setup.CONSENT_KICKER, standing_setup.CONSENT_TITLE,
+                                    standing_setup.CONSENT_LINES,
+                                    (CardButton("yes", standing_setup.CONSENT_YES, LOOK_AMBER),
+                                     CardButton("later", standing_setup.CONSENT_LATER, LOOK_GHOST))))
+        draft = self._setup
+        if draft is None:
+            return cards
+        if draft.busy == "setup":
+            cards.append(NoticeCard(SETUP_CARD, "Setting it up", draft.words,
+                                    ("Jarvis is reading your sentence; this takes a few seconds.",), (),
+                                    tone=holo.TONE_CYAN))
+            return cards
+        job = draft.job
+        if job is None:
+            cards.append(NoticeCard(SETUP_CARD, "Couldn't set that up", draft.words, (draft.note,),
+                                    (CardButton("edit", "Edit", LOOK_GO), CardButton("dismiss", "Dismiss", LOOK_GHOST)),
+                                    tone=holo.TONE_STEEL))
+            return cards
+        accounts = getattr(self.host, "_google_accounts", None) or {}
+        lines = list(standing_setup.job_lines(job, self.config, self._hour24()))
+        if draft.say:
+            lines.append(f"Jarvis's note: {draft.say}")
+        if draft.dry is not None:
+            lines += list(standing_setup.dry_lines(job, draft.dry)) if isinstance(job, Rule) else []
+        lines.append(standing_setup.PRIVACY_LINE)
+        problem = standing_setup.turn_on_problem(job, self.config, accounts, consented)
+        busy = draft.busy == "dry"
+        buttons = []
+        if isinstance(job, Rule):
+            buttons.append(CardButton("dry", "Dry run again" if job.dry_run is not None else "Dry run", LOOK_GO,
+                                      enabled=not busy))
+        if job.status in (STATUS_DRAFT, STATUS_TRIED):
+            buttons.append(CardButton("on", "Turn on", LOOK_AMBER, enabled=not problem and not busy, tip=problem))
+        buttons += [CardButton("edit", "Edit", LOOK_GHOST, enabled=not busy),
+                    CardButton("discard", "Discard", LOOK_DANGER, enabled=not busy)]
+        kicker = ("New rule" if isinstance(job, Rule) else "New agent") + f" {DOT} check it first"
+        note = ("Trying it on your recent mail..." if busy else draft.note or
+                (problem if job.status in (STATUS_DRAFT, STATUS_TRIED) else ""))
+        cards.append(NoticeCard(SETUP_CARD, kicker, job.name, tuple(lines), tuple(buttons), note=note))
+        return cards
 
     # ---- telling the owner ----------------------------------------------------------------------------------------
 
@@ -1062,6 +1367,12 @@ class StandingController(QObject):
             return
         host._hint(action_id, "")
         host._approve_mail(action)
+
+
+def _warn_tone() -> str:
+    from . import hud
+
+    return hud.TONE_WARN
 
 
 def _reading_state() -> str:

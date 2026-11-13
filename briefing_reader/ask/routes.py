@@ -34,6 +34,12 @@ for 45 minutes"). Route.payload is the text as typed. The app takes it onto the 
 and there to a local route or the desktop planner (ask.modes.MODE_DESKTOP). Everything else stays a
 normal Ask; the other shortcuts keep their words ("show me my follow-ups" is FOLLOWUPS).
 
+STANDING (standing agents and rules, only while [standing] is on: RouteFlags.standing): "agent: <sentence>" and
+"rule: <sentence>" set a standing job up from the owner's own sentence (Route.part "agent" / "rule", Route.payload
+the sentence as typed after the colon); "run <name>" with the exact name of one of ``RouteFlags.standing_names``
+(the live agents, compared without case) is that agent's Run now (Route.part "run", Route.payload the name as the app
+knows it). Any other "run ..." stays a normal Ask.
+
 Pure; nothing is logged (Route's repr names its kind only).
 """
 
@@ -45,6 +51,8 @@ from dataclasses import dataclass
 ROUTE_NONE, ROUTE_MEMORY_SAVE, ROUTE_MEMORY_FORGET, ROUTE_MEMORY_SHOW, ROUTE_PLAN, ROUTE_PREP, ROUTE_FOLLOWUPS = (
     "none", "memory_save", "memory_forget", "memory_show", "plan", "prep", "followups")
 ROUTE_DESKTOP = "desktop"
+ROUTE_STANDING = "standing"
+STANDING_AGENT, STANDING_RULE, STANDING_RUN = "agent", "rule", "run"
 MEMORY_ROUTES = frozenset({ROUTE_MEMORY_SAVE, ROUTE_MEMORY_FORGET, ROUTE_MEMORY_SHOW})
 # The parts of a day a plan route names (the same words as ask.dayplan.PART_*).
 PART_DAY, PART_MORNING, PART_AFTERNOON, PART_EVENING, PART_TOMORROW = (
@@ -58,6 +66,8 @@ class RouteFlags:
     prep: bool = False
     followups: bool = False
     desktop: bool = False      # [desktop] enabled: clear desktop verbs go to the desktop pipeline
+    standing: bool = False     # [standing] enabled: "agent:" / "rule:" set a job up, "run <name>" runs one
+    standing_names: tuple[str, ...] = ()   # the live agents' names ("run <name>")
 
 
 @dataclass(frozen=True)
@@ -90,6 +100,8 @@ _PREP_RE = _pattern(r"(?:prep|prepare)\s+me(?:\s+(?:for|on)\s+(?P<target>\S.*))?
                     r"|brief\s+me\s+(?:for|on)\s+(?P<target2>(?:my|the)\s+(?:next\s+)?(?:meeting|call)"
                     r"|my\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?(?:\s+(?:meeting|call))?)"
                     r"|meeting\s+prep")
+_STANDING_RE = _pattern(r"(?P<kind>agent|rule)\s*:\s*(?P<words>\S.*)")
+_RUN_RE = _pattern(r"run\s+(?:my\s+|the\s+)?(?P<name>\S.*?)(?:\s+now)?")
 _FOLLOWUPS_RE = _pattern(r"(?:show\s+(?:me\s+)?)?(?:my\s+)?follow[- ]?ups?\??|any\s+follow[- ]?ups\??"
                          r"|what(?:'s|\s+is)\s+waiting\s+on\s+me\??|what\s+am\s+i\s+waiting\s+(?:on|for)\??"
                          r"|who\s+owes\s+me(?:\s+(?:a\s+reply|an\s+answer))?\??")
@@ -110,6 +122,10 @@ def route(text: str, flags: RouteFlags) -> Route:
     text = " ".join(str(text or "").split())
     if not text:
         return NO_ROUTE
+    if flags.standing:
+        found = _standing_route(text, flags.standing_names)
+        if found is not NO_ROUTE:
+            return found
     if flags.memory:
         found = _memory_route(text)
         if found is not NO_ROUTE:
@@ -131,6 +147,19 @@ def route(text: str, flags: RouteFlags) -> Route:
 
         if desktop_request(text):
             return Route(ROUTE_DESKTOP, text)
+    return NO_ROUTE
+
+
+def _standing_route(text: str, names: tuple[str, ...]) -> Route:
+    match = _STANDING_RE.fullmatch(text)
+    if match:
+        return Route(ROUTE_STANDING, match.group("words").strip(), match.group("kind").casefold())
+    match = _RUN_RE.fullmatch(text)
+    if match:
+        wanted = match.group("name").strip().rstrip(".!").casefold()
+        for name in names:
+            if " ".join(name.split()).casefold() == wanted:
+                return Route(ROUTE_STANDING, name, STANDING_RUN)
     return NO_ROUTE
 
 
