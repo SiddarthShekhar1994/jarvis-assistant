@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
 Registers the scheduled tasks for Jarvis Assistant: "Briefing AM", "Briefing PM",
-"Briefing catch-up" and "Briefing hotkey".
+"Briefing catch-up", "Briefing hotkey" and "Briefing agents".
 
 .DESCRIPTION
 Creates (or replaces) these Windows Task Scheduler tasks for your user, all
@@ -13,6 +13,8 @@ started from this folder:
                      ... -m briefing_reader --catch-up --slots ...
   Briefing hotkey    at logon, and started right away:
                      ... -m briefing_reader --hotkey-agent --slots ...
+  Briefing agents    at logon and every 5 minutes:
+                     ... -m briefing_reader --standing-run --origin task
 
 The tasks start pythonw.exe of Python <PythonVersion> directly (found with
 "py -<version>" when this script runs), not the pyw.exe App Execution Alias:
@@ -32,6 +34,9 @@ not announced or viewed (for example while the PC was asleep or locked); when
 nothing is due, or the app is already open, it ends at once without showing
 anything. The hotkey task listens for the global hotkey ([hotkey] in
 config.toml, Ctrl+Alt+J by default) that opens Jarvis, until you log off.
+
+The agents task is a check every 5 minutes for standing agents and rules; it
+does nothing until they are turned on in Jarvis.
 
 The script is safe to rerun: it overwrites the tasks. That is also how the
 app moves to another PC: copy the folder, install the packages, create .env,
@@ -55,7 +60,8 @@ Python version passed to the py launcher (py -<version>). Default 3.13.
 Run the AM, PM and catch-up tasks with python.exe instead of pythonw.exe, so
 a console window shows the log output. For troubleshooting only: in this mode
 the window stays inside the task, so the task keeps running (and keeps a PC it
-woke awake) until the window is closed. The hotkey task stays windowless.
+woke awake) until the window is closed. The hotkey and agents tasks stay
+windowless.
 
 .PARAMETER UseLauncherAlias
 Start the tasks through the py launcher's pyw.exe (py.exe with -Console) App
@@ -96,7 +102,9 @@ $ErrorActionPreference = "Stop"
 $TaskPath = "\"
 $CatchUpTaskName = "Briefing catch-up"
 $HotkeyTaskName = "Briefing hotkey"
+$AgentsTaskName = "Briefing agents"
 $CatchUpDelay = "PT20S"
+$AgentsInterval = New-TimeSpan -Minutes 5
 $TaskSessionUnlock = 8
 $ImportCheck = "import briefing_reader, PySide6.QtMultimedia, edge_tts, pyttsx3, requests, dotenv"
 # Reads [schedule] and [hotkey] from config.toml. environ={} keeps .env and the environment out of it.
@@ -386,6 +394,17 @@ function New-UnlockTrigger([string]$UserId, [string]$Delay) {
     return $trigger
 }
 
+function New-RepeatTrigger([TimeSpan]$Interval) {
+    # From midnight today, every $Interval with no end ("Indefinitely" in Task Scheduler).
+    # -RepetitionDuration is left out on purpose: without it the repetition has no end, while
+    # [TimeSpan]::MaxValue, the old way to say so, is refused at registration on Windows 10 and
+    # later. With no end there is nothing to stop at its end. The start is stored as UTC (see
+    # New-DailyTrigger), which does not matter for a repetition every few minutes.
+    $trigger = New-ScheduledTaskTrigger -Once -At ([datetime]::Today) -RepetitionInterval $Interval
+    $trigger.Repetition.StopAtDurationEnd = $false
+    return $trigger
+}
+
 function Get-NextOccurrence([TimeSpan]$TimeOfDay) {
     $candidate = [datetime]::Today.Add($TimeOfDay)
     if ($candidate -le (Get-Date)) { $candidate = $candidate.AddDays(1) }
@@ -445,7 +464,7 @@ Write-Host ""
 Write-Host ("Checking Python {0} and packages..." -f $PythonVersion)
 Test-PythonSetup $pyExe
 
-# Program and arguments of the tasks. The hotkey agent never gets a console window.
+# Program and arguments of the tasks. The hotkey agent and the agents check never get a console window.
 if ($UseLauncherAlias) {
     $argPrefix = "-$PythonVersion "
     $agentProgram = Resolve-Launcher "pyw.exe"
@@ -531,6 +550,12 @@ $catchUpSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontSt
 # Hotkey: runs until logoff (no limit); a second start while it runs is ignored.
 $hotkeySettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero)
+# Agents: a check at logon and every 5 minutes. The app reads its own settings and ends at once when
+# nothing is due, so the task is always installed. No wake, runs on battery, a start missed while the
+# PC was asleep or off runs as soon as possible, one at a time, and 30 minutes at most. Always
+# windowless, also with -Console.
+$agentsSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
 
 $descriptionTail = "Created by install-schedule.ps1; remove with uninstall-schedule.ps1."
 $catchUpWhen = "at logon and on unlock of $userId, 20 s later; no wake, one at a time"
@@ -571,6 +596,18 @@ if ($installHotkey) {
             $descriptionTail)
     }
 }
+# Always installed: the app checks its own settings and does nothing until standing agents or rules are on.
+$agentsArguments = "${argPrefix}-m briefing_reader --standing-run --origin task"
+$plans += @{
+    Name = $AgentsTaskName; Program = $agentProgram; Arguments = $agentsArguments; Settings = $agentsSettings
+    Action = (New-PlanAction $agentProgram $agentsArguments)
+    Triggers = @((New-LogonTrigger $userId ""), (New-RepeatTrigger $AgentsInterval)); Time = $null
+    When = ("at logon of $userId and every 5 minutes (a missed start runs as soon as possible); " +
+        "no wake, one at a time, at most 30 min")
+    Description = ("Jarvis Assistant: at logon and every 5 minutes, checks for standing agents and rules that " +
+        "are due and runs them (nothing happens until they are turned on in Jarvis). " +
+        "Runs '$(Split-Path -Leaf $agentProgram) $agentsArguments' in $ProjectRoot. $descriptionTail")
+}
 
 Write-Host ""
 if ($DryRun) {
@@ -600,6 +637,8 @@ if ($Console) {
 Write-Host "  Each run announces its briefing when it is ready; nothing is read until you press Play."
 Write-Host "  A run missed while the PC was asleep, off or locked is announced by the catch-up task when you"
 Write-Host "  log on or unlock within 3 hours of it; later than that it is skipped."
+Write-Host "  The agents task checks for standing agents and rules, also on battery and never waking the PC;"
+Write-Host "  it does nothing until they are turned on in Jarvis."
 
 $failed = @()
 if ($DryRun) {
@@ -675,6 +714,12 @@ else {
         }
         elseif ($plan.Name -eq $HotkeyTaskName) {
             $next = "at logon (running now)"
+        }
+        elseif ($plan.Name -eq $AgentsTaskName) {
+            $next = "at logon and every 5 minutes"
+            if ($null -ne $info.NextRunTime) {
+                $next = ([datetime]$info.NextRunTime).ToString("ddd yyyy-MM-dd HH:mm") + ", then every 5 minutes"
+            }
         }
         Write-Ok ("  Registered '{0}', next run: {1}" -f $plan.Name, $next)
     }

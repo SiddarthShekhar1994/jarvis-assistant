@@ -3,7 +3,9 @@ spoken line, and a standing Reply's check at click time.
 
     StandingController(host)   made by ui.AppController while [standing] and [ask] are on; ``host`` is the controller
         start()                the first load, then a folder check every 30 seconds (the run files, standing.json,
-                               standing_app.json and standing_state.json: what changed is read again)
+                               standing_app.json and standing_state.json: what changed is read again), and the
+                               fallback: while no scheduled check ran in 15 minutes (install-schedule.ps1 not rerun),
+                               Jarvis starts --standing-run --origin app himself every 5 minutes while he is open
         reload(announce=True)  the definitions, the app's state and the run files read again: the cards go to
                                Approvals (host._take_standing_cards), the screen gets its AgentsInfo, and the runs that
                                need the owner and were not told yet are announced
@@ -70,6 +72,7 @@ logger = logging.getLogger(__name__)
 
 TEST_GUARD_ENV = "JARVIS_DESKTOP_TEST_GUARD"     # "1" while the tests run: no runner process is ever started
 CHECK_MS = 30_000                 # the folder check
+FALLBACK_MS = 5 * 60_000          # the app starts a check itself this often while no scheduled check is fresh
 HELD_RECHECK_MS = 60_000          # a held line is tried again
 TELL_WITHIN = timedelta(hours=12)   # an older run that needs the owner is shown, never said
 FRESH_CHECK = timedelta(minutes=15)  # a background check this recent: background runs are on
@@ -292,15 +295,15 @@ def windows_busy() -> bool:
     return state.value in (1, 2, 3, 4, 6, 7)
 
 
-def _start_runner() -> bool:
-    """Run now: one --standing-run in the background (windowless, outside Jarvis's process). Never while the tests
-    run."""
+def _start_runner(origin: str = "now") -> bool:
+    """One --standing-run in the background (windowless, outside Jarvis's process): Run now ("now"), or the app's
+    fallback ("app"). Never while the tests run."""
     if os.environ.get(TEST_GUARD_ENV) == "1":
         logger.info("Standing: not starting a check while the tests run")
         return False
     from . import __main__ as entry
 
-    return bool(entry._start_detached(["--standing-run", "--origin", "now"], executable=entry._windowless_python()))
+    return bool(entry._start_detached(["--standing-run", "--origin", origin], executable=entry._windowless_python()))
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -345,6 +348,8 @@ class StandingController(QObject):
         # Seams the tests replace: Windows' busy state, starting a check, building a reader for an account.
         self.busy_probe: Callable[[], bool] = windows_busy
         self.start_runner: Callable[[], bool] = _start_runner
+        self.start_app_check: Callable[[], bool] = lambda: _start_runner("app")
+        self._fallback: QTimer | None = None
         self.reader_for: Callable[[str], Any] = self._reader
         self.thread_runner: Callable[[Callable[[], None]], None] = self._in_thread
         self.engine_factory: Callable[[], Any] = lambda: standing_setup.app_engine(self.config)
@@ -396,10 +401,30 @@ class StandingController(QObject):
             self._timer.setInterval(CHECK_MS)
             self._timer.timeout.connect(self._tick)
         self._timer.start()
+        if self._fallback is None:
+            self._fallback = QTimer(self)
+            self._fallback.setInterval(FALLBACK_MS)
+            self._fallback.timeout.connect(self.fallback_tick)
+        self._fallback.start()
+
+    def fallback_tick(self) -> bool:
+        """Every 5 minutes while Jarvis is open: no check from the scheduled task in 15 minutes (the owner has not
+        rerun install-schedule.ps1, or the PC skipped it) and something is on: Jarvis starts one check himself. True
+        when one was started."""
+        if self._closed or not self.app_state.consented() or self.app_state.paused_all:
+            return False
+        if not any(job.status == STATUS_LIVE for job in [*self.agents, *self.rules]):
+            return False
+        task_at = parse_stamp(read_runner_state(self.files).get("task_check"))
+        if task_at is not None and self._now() - task_at <= FRESH_CHECK:
+            return False
+        started = bool(self.start_app_check())
+        logger.info("Standing: no scheduled check lately; %s", "Jarvis started one" if started else "none started")
+        return started
 
     def shutdown(self) -> None:
         self._closed = True
-        for timer in (self._timer, self._held_timer):
+        for timer in (self._timer, self._held_timer, self._fallback):
             if timer is not None:
                 timer.stop()
 
@@ -590,16 +615,15 @@ class StandingController(QObject):
             parts.append("Paused")
         check = state.get("check") if isinstance(state.get("check"), Mapping) else {}
         at = parse_stamp(check.get("at")) if check else None
-        origin = str(check.get("origin") or "") if check else ""
-        if at is not None and now - at <= FRESH_CHECK and origin == "task":
+        task_at = parse_stamp(state.get("task_check"))
+        if task_at is not None and now - task_at <= FRESH_CHECK:
             parts.append("Background runs on")
-        elif at is not None and now - at <= FRESH_CHECK:
-            parts.append("Checks while Jarvis is open")
         else:
-            parts.append("Background runs off")
+            parts.append("Checks while Jarvis is open" if at is not None and now - at <= FRESH_CHECK
+                         else "Background runs off")
             if self.agents or self.rules:
-                notes.append(("Background runs need the scheduled task: run install-schedule.ps1 again.",
-                              "How", INSTALLER_LINK))
+                notes.append(("Background runs need the scheduled task: run install-schedule.ps1 again. Until then "
+                              "Jarvis checks every 5 minutes while he is open.", "How", INSTALLER_LINK))
         parts.append(f"{today.runs} of {self.settings.max_runs_per_day} runs today")
         upcoming = self._next_run(now, state)
         if upcoming is not None and not paused_all:

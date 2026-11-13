@@ -299,6 +299,40 @@ class ScreenTests(_Base):
         self.assertIn("0 OF 30 RUNS TODAY", meta)
 
 
+class FallbackTests(_Base):
+
+    def test_without_a_fresh_scheduled_check_jarvis_starts_one_himself(self) -> None:
+        checks: list[bool] = []
+        self.s.start_app_check = lambda: checks.append(True) or True
+        self.assertTrue(self.s.fallback_tick())
+        self.assertEqual(checks, [True])
+        from briefing_reader.standing.store import RunnerState
+
+        state = RunnerState(files_of(self.app.config))
+        state.checked("task", "done", NOW - timedelta(minutes=4))
+        state.save()
+        self.assertFalse(self.s.fallback_tick())                        # the task ran 4 minutes ago
+        self.s.reload()
+        self.assertIn("BACKGROUND RUNS ON", self.c.window.reading.agents_stage.agents_meta.text().upper())
+        AppState(files_of(self.app.config)).set_paused_all(True)
+        self.s.reload()
+        state.checked("task", "done", NOW - timedelta(minutes=40))
+        state.save()
+        self.assertFalse(self.s.fallback_tick())                        # paused: nothing is started
+        self.assertEqual(checks, [True])
+
+    def test_an_app_check_alone_says_background_runs_need_the_task(self) -> None:
+        from briefing_reader.standing.store import RunnerState
+
+        state = RunnerState(files_of(self.app.config))
+        state.checked("app", "done", NOW - timedelta(minutes=2))
+        state.save()
+        self.s.reload()
+        stage = self.c.window.reading.agents_stage
+        self.assertIn("CHECKS WHILE JARVIS IS OPEN", stage.agents_meta.text().upper())
+        self.assertTrue(any("install-schedule.ps1" in note for note in stage.notes()))
+
+
 class AnnounceTests(_Base):
 
     def test_a_standing_activation_reads_again_and_says_the_fixed_line_once(self) -> None:

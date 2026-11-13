@@ -357,6 +357,7 @@ class RunnerState:
         "proposed": {job id: {key: "YYYY-MM-DD"}}     what it proposed (a card's stable key) and when
         "holds":    {"until": at, "why": code}        no Claude run before ``until`` (a plan limit, a warning)
         "check":    {"at": at, "origin": "task" | "app", "status": code}   the last check (the heartbeat)
+        "task_check": at                               the last check the scheduled task started (the app's fallback)
         "announce": [run ids]                          runs that need the owner and were not yet told
     """
 
@@ -419,6 +420,8 @@ class RunnerState:
 
     def checked(self, origin: str, status: str, now: datetime | None = None) -> None:
         self.data["check"] = {"at": stamp(now), "origin": origin, "status": status}
+        if origin == "task":
+            self.data["task_check"] = stamp(now)
 
     def last_check(self) -> tuple[datetime | None, str, str]:
         check = self.data["check"]
