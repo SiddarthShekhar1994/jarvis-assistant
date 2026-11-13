@@ -1,0 +1,29 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "JarvisStandingRun",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["report", "summary", "needs_owner"],
+  "properties": {
+    "report": {
+      "type": "string",
+      "maxLength": 3000,
+      "description": "What the owner should know from this run, for <command>. No addresses, links, ids or codes."
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 120,
+      "description": "One short line for the list."
+    },
+    "needs_owner": {
+      "type": "boolean",
+      "description": "True when something needs the owner's attention or decision soon."
+    },
+    "lines": {
+      "type": "array",
+      "maxItems": 4,
+      "items": {"type": "string", "maxLength": 6000},
+      "description": "Todo:, Calendar: or Reply: lines, only of the kinds <job> allows."
+    }
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "JarvisRuleCheck",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["results"],
+  "properties": {
+    "results": {
+      "type": "array",
+      "maxItems": 8,
+      "description": "One result per email in <mail>, m1 to mN, in order.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["mail", "answer"],
+        "properties": {
+          "mail": {"type": "string", "pattern": "^m[1-8]$"},
+          "answer": {"type": "string", "enum": ["yes", "no"]},
+          "values": {
+            "type": "object",
+            "maxProperties": 5,
+            "additionalProperties": {"type": "string", "maxLength": 120},
+            "description": "For a yes: the values <rule> names that this email states, as it states them."
+          },
+          "draft": {
+            "type": "string",
+            "maxLength": 2000,
+            "description": "Only when <rule> asks for a reply and the answer is yes."
+          }
+        }
+      }
+    }
+  }
+}
