@@ -143,6 +143,8 @@ from .actions import (
     SEND_TEXT,
     SOURCE_ASK,
     SOURCE_BRIEFING,
+    SOURCE_STANDING,
+    STANDING_MODES,
     STATUS_CREATED,
     STATUS_DENIED,
     STATUS_DONE,
@@ -153,6 +155,8 @@ from .actions import (
     STATUS_SENT,
     STATUS_UNKNOWN,
     TODO,
+    MODE_STANDING_AGENT,
+    MODE_STANDING_RULE,
     CLOSED_FIRST_CANCEL_MESSAGE,
     CLOSED_FIRST_MESSAGE,
     UNDO_INTERRUPTED,
@@ -3986,8 +3990,14 @@ UNDO_FAILED_NOTE = "Undo didn't go through: {reason} - Retry tries again"
 UNDO_UNKNOWN_NOTE = "Undo may or may not have gone through - Retry checks the event first"
 UNDO_GONE_SUB = {CALENDAR: "removed from your calendar", TODO: "removed from your calendar",
                  RSVP: "your answer is back as it was", MOVE: "back at its old time"}
-_GROUP_TITLES = {SOURCE_ASK: "Ask", SOURCE_BRIEFING: "Briefing"}   # the NEEDS YOUR OK group headers
+# The NEEDS YOUR OK group headers, in the order the groups are shown (_merged_actions).
+_GROUP_TITLES = {SOURCE_ASK: "Ask", SOURCE_STANDING: "Agents", SOURCE_BRIEFING: "Briefing"}
 _ASK_CARDS_MAX = 16                    # Ask cards kept (this run, memory only); the oldest go first
+# Standing agents' and rules' cards kept on screen (loaded from their run files of the last days, which keep
+# them across a restart); the oldest that is not on its way goes first.
+_STANDING_CARDS_MAX = 40
+# A standing card's label says which kind of job proposed it ("Rule - Todo").
+_STANDING_TITLES = {MODE_STANDING_AGENT: "Agent", MODE_STANDING_RULE: "Rule"}
 # A planner mode's cards (the productivity bundle) say which mode proposed them ("Plan - block").
 _MODE_TITLES = MODE_TITLES
 PLAN_BLOCK_PASSED_NOTE = "This block's time has passed - plan again"
@@ -5416,9 +5426,10 @@ class AppController(QObject):
         self._skip_pending = False               # the next section start follows a skip or jump
 
     def _init_action_state(self) -> None:
-        self._actions: list[ProposedAction] = []   # the cards shown: ASK + BRIEFING (_merged_actions)
+        self._actions: list[ProposedAction] = []   # the cards shown: ASK + AGENTS + BRIEFING (_merged_actions)
         # One list per source (memory only; the decisions are saved by id like every card's).
-        self._source_lists: dict[str, list[ProposedAction]] = {SOURCE_ASK: [], SOURCE_BRIEFING: []}
+        self._source_lists: dict[str, list[ProposedAction]] = {SOURCE_ASK: [], SOURCE_STANDING: [],
+                                                               SOURCE_BRIEFING: []}
         self._ask_busy = False                     # an Ask is planning (the orb says PLANNING)
         self._autoplay = True                      # the reading starts playing once it is shown (not --ask)
         self._reading_settled = False              # this reading answered its scheduled slot (Read now, Play)
@@ -6365,8 +6376,8 @@ class AppController(QObject):
 
     def _pending_page_actions(self) -> list[ProposedAction]:
         """The briefing's own pending proposals: what the spoken "Needs your OK" reads (never an
-        Ask card) and what Ask sees of the briefing."""
-        return [action for action in self._pending_actions() if action.source != SOURCE_ASK]
+        Ask card, never a standing agent's or rule's) and what Ask sees of the briefing."""
+        return [action for action in self._pending_actions() if action.source == SOURCE_BRIEFING]
 
     def _set_source(self, source: str, actions: Sequence[ProposedAction]) -> None:
         """Replace one source's cards (the briefing's on a new page, Ask's after an answer); the
@@ -6376,19 +6387,21 @@ class AppController(QObject):
         self._set_actions(self._merged_actions())
 
     def _merged_actions(self) -> list[ProposedAction]:
-        """ASK first, then BRIEFING. An Ask card whose id the briefing also has is information
-        only ("Already in your list under BRIEFING"): the briefing's card stays the one to decide
-        (the same id is the same proposal and has one decision)."""
+        """ASK first, then AGENTS (standing agents' and rules'), then BRIEFING. A card whose id the briefing
+        also has is information only ("Already in your list under BRIEFING"): the briefing's card stays the one
+        to decide (the same id is the same proposal and has one decision); a standing card whose id an Ask card
+        has already is left out."""
         briefing = self._source_lists[SOURCE_BRIEFING]
         page_ids = {action.id for action in briefing}
         merged: list[ProposedAction] = []
         seen: set[str] = set()
-        for action in self._source_lists[SOURCE_ASK]:
-            if action.id in page_ids and not action.error:
-                action = with_error(action, ALREADY_LISTED_TEXT)
-            if action.id not in seen and action.id not in page_ids:
-                seen.add(action.id)
-                merged.append(action)
+        for source in (SOURCE_ASK, SOURCE_STANDING):
+            for action in self._source_lists.get(source, ()):
+                if action.id in page_ids and not action.error:
+                    action = with_error(action, ALREADY_LISTED_TEXT)
+                if action.id not in seen and action.id not in page_ids:
+                    seen.add(action.id)
+                    merged.append(action)
         return merged + briefing
 
     def _take_ask_cards(self, cards: Sequence[ProposedAction], replace_mode: str = "", window: Any = None,
@@ -6426,6 +6439,33 @@ class AppController(QObject):
                 break
             merged.remove(victim)
         self._set_source(SOURCE_ASK, merged)
+
+    def _take_standing_cards(self, cards: Sequence[ProposedAction]) -> None:
+        """The standing agents' and rules' cards (standing_ui loads them from their run files): they replace the
+        earlier ones, a card in its hidden hold, queued or on its way keeping its content (and staying even when
+        the new list leaves it out); at most _STANDING_CARDS_MAX stay, the oldest that is not on its way going
+        first. A card of another source or without a standing mode is refused here (logged by count)."""
+        old = {action.id: action for action in self._source_lists[SOURCE_STANDING]}
+        fresh: list[ProposedAction] = []
+        refused = 0
+        for card in cards:
+            if card.source != SOURCE_STANDING or card.mode not in STANDING_MODES:
+                refused += 1
+                continue
+            if card.id in self._jobs and card.id in old:
+                card = old[card.id]
+            if all(card.id != kept.id for kept in fresh):
+                fresh.append(card)
+        fresh_ids = {card.id for card in fresh}
+        fresh += [action for action in old.values() if action.id in self._jobs and action.id not in fresh_ids]
+        while len(fresh) > _STANDING_CARDS_MAX:
+            victim = next((action for action in reversed(fresh) if action.id not in self._jobs), None)
+            if victim is None:
+                break
+            fresh.remove(victim)
+        if refused:
+            logger.warning("Standing: %d card(s) of another source refused", refused)
+        self._set_source(SOURCE_STANDING, fresh)
 
     def _replaceable_nudge_card(self, action: ProposedAction, thread: tuple[str, str]) -> bool:
         """An unedited, undecided nudge card of ``thread`` (account, thread id), not held or on its way: what
@@ -6498,8 +6538,9 @@ class AppController(QObject):
             return action
 
     def _set_actions(self, actions: list[ProposedAction]) -> None:
-        """Show ``actions`` (all sources, merged) as the cards. With Ask cards among them each
-        source gets a group header (ASK, then BRIEFING) and Ask's labels read "ASK \u00b7 MOVE"."""
+        """Show ``actions`` (all sources, merged) as the cards. With Ask or standing cards among them each
+        source gets a group header (ASK, AGENTS, then BRIEFING), Ask's labels read "ASK \u00b7 MOVE" and a
+        standing card's "RULE \u00b7 TODO" (or "AGENT \u00b7 ...")."""
         if actions == self._actions:
             return
         self._actions = list(actions)
@@ -6522,7 +6563,7 @@ class AppController(QObject):
         reading = self.window.reading
         reading.clear_action_cards()
         today = self._now().date()
-        grouped = any(action.source == SOURCE_ASK for action in self._actions)
+        grouped = any(action.source != SOURCE_BRIEFING for action in self._actions)
         group = None
         for page_action in self._actions:
             if grouped and page_action.source != group:
@@ -6534,6 +6575,8 @@ class AppController(QObject):
             label = view.kind_label + (EDITED_MARK if self._is_edited(page_action) else "")
             if page_action.source == SOURCE_ASK:
                 label = f"{_MODE_TITLES.get(page_action.mode) or _GROUP_TITLES[SOURCE_ASK]} {DOT} {label}"
+            elif page_action.source == SOURCE_STANDING:
+                label = f"{_STANDING_TITLES.get(page_action.mode) or _GROUP_TITLES[SOURCE_STANDING]} {DOT} {label}"
             reading.add_action_card(action.id, label, view.title, _card_detail(action, view, today),
                                     view.decidable, **_card_options(action, view))
             self._show_card_state(action.id)   # also sets the note (warnings) while it waits
@@ -7313,8 +7356,12 @@ class AppController(QObject):
         today = self._now().date()
         view = card_view(action, today)
         kind = {RSVP: "RSVP"}.get(action.kind, action.kind.upper())
-        card_words = (f"{_MODE_TITLES[action.mode].upper()} {kind_label(action).upper()}" if action.mode in _MODE_TITLES
-                      else f"{action.source.upper()} {kind}")
+        if action.mode in _MODE_TITLES:
+            card_words = f"{_MODE_TITLES[action.mode].upper()} {kind_label(action).upper()}"
+        elif action.mode in _STANDING_TITLES:
+            card_words = f"{_STANDING_TITLES[action.mode].upper()} {kind}"
+        else:
+            card_words = f"{action.source.upper()} {kind}"
         fields: list[Any] = [("Card", card_words), ("Account", account_of(action)),
                              ("Card says", " - ".join(part for part in (view.title, _card_detail(action, view, today))
                                                       if part))]
@@ -8674,7 +8721,7 @@ class AppController(QObject):
         only). GUI thread."""
         from .ask.planner import briefing_context
 
-        page_cards = [action for action in self._actions if action.source != SOURCE_ASK]
+        page_cards = [action for action in self._actions if action.source == SOURCE_BRIEFING]
         try:
             context = briefing_context(self._briefing, self._pending_page_actions(), self._page_deadlines,
                                        config=self.config, now=self._now())

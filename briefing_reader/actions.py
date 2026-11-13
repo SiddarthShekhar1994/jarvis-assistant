@@ -66,6 +66,7 @@ from types import ModuleType
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
+from . import atomic
 from .format_chars import invisible_char
 from .models import DIVIDER, HEADING, PARAGRAPH, FlatLine
 
@@ -106,9 +107,15 @@ BUILTIN_LINK_HOSTS = ("mail.google.com", "docs.google.com", "drive.google.com",
                       "calendar.google.com", "meet.google.com", "*.slack.com", "*.instructure.com")
 DEFAULT_HEADINGS = ("Proposed actions",)
 DEFAULT_DURATION = timedelta(minutes=60)
-# Who proposed a card (ProposedAction.source): the briefing page, or Ask Jarvis (briefing_reader.ask).
+# Who proposed a card (ProposedAction.source): the briefing page, Ask Jarvis (briefing_reader.ask), or a
+# standing agent or rule (briefing_reader.standing: a run that happened on its own, maybe while Jarvis was closed).
 SOURCE_BRIEFING = "briefing"
 SOURCE_ASK = "ask"
+SOURCE_STANDING = "standing"
+# A standing card's mode (ProposedAction.mode): which kind of standing job proposed it.
+MODE_STANDING_AGENT = "standing-agent"
+MODE_STANDING_RULE = "standing-rule"
+STANDING_MODES = frozenset({MODE_STANDING_AGENT, MODE_STANDING_RULE})
 
 STATUS_CREATED = "created"   # Approve created the event
 STATUS_EXISTS = "exists"     # Approve found it already on the calendar
@@ -177,8 +184,10 @@ class ProposedAction:
     line, kept in memory only).
 
     ``source`` says who proposed it: the briefing page (SOURCE_BRIEFING, every
-    line of extract_actions) or Ask Jarvis (SOURCE_ASK). It is not part of the
-    id, so the same proposal from both has one id (and one decision).
+    line of extract_actions), Ask Jarvis (SOURCE_ASK) or a standing agent or rule
+    (SOURCE_STANDING). It is not part of the id, so the same proposal from two
+    sources has one id (and one decision). Only a SOURCE_BRIEFING card is the
+    briefing's own: never test for "not Ask" to mean it.
     ``unverified`` holds the recipients of an Ask Reply / Email that you did not
     type yourself (casefolded; memory only): each counts as NEW, even in a
     trusted domain, unless Jarvis sent to it before (recipients.review).
@@ -211,10 +220,10 @@ class ProposedAction:
     warnings: tuple[str, ...] = ()             # soft problems, shown as the card's amber note
     structured: bool = False                   # read by the key=value path (errored lines too)
     confirmed: frozenset[str] = frozenset()    # new recipients ticked on the card (casefolded; memory only)
-    source: str = "briefing"                   # SOURCE_BRIEFING or SOURCE_ASK; never part of the id
+    source: str = "briefing"                   # SOURCE_BRIEFING, SOURCE_ASK or SOURCE_STANDING; never in the id
     unverified: frozenset[str] = frozenset()   # Ask recipients you did not type (casefolded; memory only)
     web: bool = False                          # a web research card: its link follows the web rule
-    mode: str = ""                             # MODE_PLAN ("plan"), ...; "" for any other card; not in the id
+    mode: str = ""                             # MODE_PLAN ("plan"), STANDING_MODES, ...; "" for others; not in the id
     serves: str = ""                           # a plan block: the id of the Todo card it serves (memory only)
 
     @property
@@ -2766,7 +2775,8 @@ def _write_entries(path: Path, entries: dict[str, dict[str, str]]) -> bool:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(part, path)
+        # Another Jarvis process (a standing check) may be reading it this very moment: retry briefly.
+        atomic.replace(part, path)
         part = None
         return True
     except OSError as exc:
