@@ -123,8 +123,8 @@ from PySide6.QtWidgets import (
 )
 
 from . import (alive, approvals_view, brief_view, briefing_view, context_view, find_view, followups_view, live_view,
-               meetings_view, memory_view, offer_view, plan_view, settings_view, states_view, transcript_view,
-               voice_fx)
+               meetings_view, memory_view, offer_view, plan_view, settings_view, standing_view, states_view,
+               transcript_view, voice_fx)
 from . import dock as dock_mod
 from . import holo, home, hud
 from . import live as _live
@@ -281,6 +281,7 @@ from .models import (
     LAUNCH_OPEN,
     LAUNCH_READ,
     LAUNCH_SCHEDULED,
+    LAUNCH_STANDING,
     Briefing,
     BriefingHeader,
     Freshness,
@@ -1033,8 +1034,9 @@ SCREEN_APPROVALS = 4
 SCREEN_FOLLOWUPS = 5
 SCREEN_SETTINGS = 6
 SCREEN_MEETINGS = 7                 # [meetings]: the recorded meetings and the start card
+SCREEN_AGENTS = 8                   # [standing]: the standing agents and rules, their receipts and reports
 SCREENS = (SCREEN_HOME, SCREEN_BRIEFING, SCREEN_LIVE, SCREEN_MEMORY, SCREEN_APPROVALS, SCREEN_FOLLOWUPS,
-           SCREEN_SETTINGS, SCREEN_MEETINGS)
+           SCREEN_SETTINGS, SCREEN_MEETINGS, SCREEN_AGENTS)
 # The motion prototype: the Dock shows each screen's name from this reading-view width (a window of about
 # 1,036 px: the main column keeps the 824 px of the smallest window), and folds to glyphs below it.
 DOCK_LABELS_FROM = holo.DOCK_WIDTH_LABELLED + 824
@@ -1047,7 +1049,7 @@ _FIND_ICONS = {dock_mod.HOME: "home", **dock_mod.GLYPHS}
 _SCREEN_SLOTS = {SCREEN_HOME: dock_mod.HOME, SCREEN_BRIEFING: dock_mod.BRIEFING, SCREEN_LIVE: dock_mod.LIVE,
                  SCREEN_MEMORY: dock_mod.MEMORY, SCREEN_APPROVALS: dock_mod.APPROVALS,
                  SCREEN_FOLLOWUPS: dock_mod.FOLLOWUPS, SCREEN_SETTINGS: dock_mod.SETTINGS,
-                 SCREEN_MEETINGS: dock_mod.MEETINGS}
+                 SCREEN_MEETINGS: dock_mod.MEETINGS, SCREEN_AGENTS: dock_mod.AGENTS}
 _SLOT_SCREENS = {slot: screen for screen, slot in _SCREEN_SLOTS.items()}
 _LIST_HEIGHT_MAX = 100_000          # ... whose cards take the screen's whole height
 # Statuses the Briefing screen's transport already says (its quiet line leaves them out).
@@ -1421,6 +1423,7 @@ class ReadingView(QWidget):
         self.dock.set_slot_visible(dock_mod.MEMORY, False)       # the productivity bundle shows them
         self.dock.set_slot_visible(dock_mod.FOLLOWUPS, False)
         self.dock.set_slot_visible(dock_mod.MEETINGS, False)     # [meetings] shows it
+        self.dock.set_slot_visible(dock_mod.AGENTS, False)       # [standing] shows it (standing_ui)
         self.dock.set_slot_visible(dock_mod.DESKTOP, False)      # [desktop] shows it (set_desktop_available)
         self._desktop_on = False
         self._screen_hold: Callable[[int], None] | None = None   # on the desktop HUD: set_tab only records
@@ -1573,10 +1576,12 @@ class ReadingView(QWidget):
         # Part 2: a meeting's summary lends its draft and Add block cards from NEEDS YOUR OK, like the brief.
         self.meetings_stage.pageChanged.connect(self._schedule_moment_sync)
         self.meetings_stage.summaryLinkClicked.connect(self.homeLink)
+        self.agents_stage = standing_view.AgentsStage()          # [standing] (standing_ui fills it)
         self.home_screen = self._build_home()
         self._screens = _PageSwitch()
         for screen in (self.home_screen, self.briefing_screen, self.live_screen, self.memory_screen,
-                       self.approvals_screen, self.followups_screen, self.settings_page, self.meetings_stage):
+                       self.approvals_screen, self.followups_screen, self.settings_page, self.meetings_stage,
+                       self.agents_stage):
             self._screens.addWidget(screen)                   # in SCREENS order
         self._main = QWidget()
         column = QVBoxLayout(self._main)
@@ -2579,7 +2584,7 @@ class ReadingView(QWidget):
     def set_tab(self, index: int) -> None:
         """Open a screen while its Dock slot shows: SCREEN_HOME (hud.TAB_JARVIS), SCREEN_BRIEFING
         (hud.TAB_BRIEFING), SCREEN_LIVE (hud.TAB_LIVE), SCREEN_MEMORY (hud.TAB_MEMORY), SCREEN_APPROVALS,
-        SCREEN_FOLLOWUPS or SCREEN_SETTINGS. While Jarvis is on the desktop HUD (``hold_screens``) the hidden
+        SCREEN_FOLLOWUPS, SCREEN_SETTINGS, SCREEN_MEETINGS or SCREEN_AGENTS. While Jarvis is on the desktop HUD (``hold_screens``) the hidden
         window keeps its screen: the one asked for is only recorded, and the window comes back on it."""
         key = _SCREEN_SLOTS.get(index)
         if key is None or not self.dock.is_slot_visible(key):
@@ -2661,6 +2666,14 @@ class ReadingView(QWidget):
 
     def meetings_available(self) -> bool:
         return self.dock.is_slot_visible(dock_mod.MEETINGS)
+
+    def set_agents_available(self, available: bool) -> None:
+        """[standing] is on (with Ask): the Dock's Agents slot (Ctrl+9) and its screen (hidden: Home when it was
+        current)."""
+        self._set_slot_available(dock_mod.AGENTS, SCREEN_AGENTS, available)
+
+    def agents_available(self) -> bool:
+        return self.dock.is_slot_visible(dock_mod.AGENTS)
 
     def set_desktop_available(self, available: bool, hud_key: str = "") -> None:
         """[desktop] is on: the Dock's Desktop (the switch to the HUD; ``hud_key`` as people write it, "Ctrl+Alt+H",
@@ -3879,6 +3892,8 @@ TOAST_VIEW = "view"                    # the toast's View: the Briefing screen
 TOAST_PREP = "prep"                    # the toast's Prepare brief: Home with the prep offer's tile
 TOAST_TIMER = "timer"                  # P2.4: a Jarvis timer ended - its OK only puts the toast away
 TOAST_TIMER_TEXT = "OK"
+TOAST_AGENTS = "agents"                # the toast's View agents: the Agents screen ([standing])
+STANDING_TELL_DELAY_MS = 3000          # reading began: the standing news is told after the greeting
 FOCUS_SPEECH_KEPT = 8                  # P2.5: sentences focus mode holds at most (memory only) ...
 FOCUS_SPEECH_SAID = 3                  # ... and says, newest last, when it ends
 FOCUS_TOAST_AFTER_MS = states_view.TOAST_MS + 250   # a held toast waits this long for the one showing as focus ends
@@ -5275,6 +5290,7 @@ class AppController(QObject):
         self.talk: Any = self._create_talk()            # [talk]: the talk key's listening, or None while it is off
         self.wake: Any = self._create_wake()            # "Hey Jarvis" (wake_ui) beside the talk, or None without it
         self.voice_download: Any = self._create_voice_settings()   # [voice] engine "local": Settings > Voice's part
+        self.standing: Any = self._create_standing()    # [standing]: the Agents screen and its cards, or None
         self.window.reading.set_find_actions(self.productivity is not None)   # offers' links in the Find list
         # Jarvis's own voice: silent unless injected; start() builds the real one ([assistant] speak).
         self._voice_injected = voice_factory is not None
@@ -5362,7 +5378,7 @@ class AppController(QObject):
         if self._hud_active():
             # On the desktop HUD: the click brings the window back on the toast's screen (leave_hud comes forward on
             # this click, never with force_foreground's synthetic Alt).
-            screen = {TOAST_VIEW: SCREEN_BRIEFING, TOAST_PREP: SCREEN_HOME}.get(key)
+            screen = {TOAST_VIEW: SCREEN_BRIEFING, TOAST_PREP: SCREEN_HOME, TOAST_AGENTS: SCREEN_AGENTS}.get(key)
             if self.desktop.leave_hud(screen) and key == TOAST_PREP:
                 reading.close_moment()
             return
@@ -5371,6 +5387,8 @@ class AppController(QObject):
         elif key == TOAST_PREP:
             reading.set_tab(SCREEN_HOME)
             reading.close_moment()
+        elif key == TOAST_AGENTS:
+            reading.set_tab(SCREEN_AGENTS)
         force_foreground(self.window)
 
     def _config_path(self) -> Path:
@@ -5765,6 +5783,11 @@ class AppController(QObject):
         self._update_service_chips()
         if self.ask is not None:
             self.ask.start()   # checks Claude Code on the ask thread (no model request)
+        if self.standing is not None:
+            self.standing.start()   # the run files' cards, the folder check (nothing is said before reading)
+        if self.launch == LAUNCH_STANDING:
+            self._standing_show()
+            return
         if self.launch == LAUNCH_READ:
             self.enter_reading()
             force_foreground(self.window)
@@ -7215,6 +7238,8 @@ class AppController(QObject):
         if not mail.ready:
             self._hint(action_id, mail.note or NOT_READY_NOTE)
             return
+        if getattr(self, "standing", None) is not None and self.standing.reply_wait(action):
+            return   # a standing Reply's thread is read again first; Send goes on by itself when it passes
         self._start_send_hold(action, sender=mail.sender)
 
     def _unread(self, action: ProposedAction) -> bool:
@@ -12597,6 +12622,8 @@ class AppController(QObject):
     def _on_conversation_link(self, link_id: str) -> None:
         if link_id == VIEW_BRIEFING_LINK:
             self.window.reading.set_tab(hud.TAB_BRIEFING)
+        elif link_id.startswith("standing:") and getattr(self, "standing", None) is not None:
+            self.window.reading.set_tab(SCREEN_AGENTS)
         elif link_id.startswith("live:"):
             self._reveal_live(link_id)
         elif link_id.startswith(MEMORY_UNDO_LINK):
@@ -13699,6 +13726,7 @@ class AppController(QObject):
         self._request_agenda()
         self._sync_agenda_timer()
         self._prod_sync()
+        self._standing_soon()
         self._restore_live_window()
         if self.startup_error:
             self._show_reading_error(self.startup_error, can_retry=False)
@@ -14253,6 +14281,11 @@ class AppController(QObject):
         control on the desktop (Phase 3) the window key - OPEN or READ - is ignored: Esc or Stop
         first."""
         message = message if isinstance(message, dict) else {}
+        if message.get("cmd") == "standing":
+            # A background standing check has news: read the run files again and tell it; nothing comes forward.
+            if getattr(self, "standing", None) is not None and self.state != STATE_QUITTING:
+                self.standing.on_activation(message)
+            return
         run = _normalize_run(message.get("run"))
         now = message.get("now") is True
         ask = message.get("ask") is True
@@ -14313,6 +14346,54 @@ class AppController(QObject):
             self._activation_while_waiting(LAUNCH_OPEN, None)
         else:
             self._open_activation(ask=False)
+
+    # ---- standing agents and rules ([standing]) ------------------------------------------------------------
+
+    def _create_standing(self) -> Any:
+        """[standing] on, with Ask Jarvis: standing_ui.StandingController - the Agents screen (Ctrl+9), the standing
+        cards from the run files, the one spoken line and a standing Reply's check at click time. Off: None, and no
+        Agents surface shows (the run files on this PC go when the background check prunes them)."""
+        if not getattr(getattr(self.config, "standing", None), "enabled", False):
+            return None
+        if self.ask is None:
+            logger.info("Standing: [standing] is on but Ask Jarvis is off; the Agents screen stays hidden")
+            return None
+        from . import standing_ui
+
+        controller = standing_ui.StandingController(self, parent=self)
+        self.window.reading.tabChanged.connect(self._on_tab_for_standing)
+        return controller
+
+    def _on_tab_for_standing(self, index: int) -> None:
+        if index == SCREEN_AGENTS and self.standing is not None and self._window_active():
+            self.standing.on_screen_shown()
+
+    def _standing_soon(self) -> None:
+        """Reading began (an open, a scheduled arrival): the standing news is told a moment later, after the
+        greeting or the announcement."""
+        if getattr(self, "standing", None) is not None:
+            QTimer.singleShot(STANDING_TELL_DELAY_MS, self, self._standing_tell)
+
+    def _standing_tell(self) -> None:
+        if getattr(self, "standing", None) is not None and self.state == STATE_READING and not self._shut_down:
+            self.standing.announce()
+
+    def _standing_show(self) -> None:
+        """--standing-show: a background check found something that needs the owner while Jarvis was closed: shown
+        without the focus (as a scheduled briefing arrives) and told once. Nothing left to tell (told meanwhile, or
+        [standing] is off here) ends this start at once."""
+        standing = getattr(self, "standing", None)
+        if standing is None or not standing.has_news():
+            logger.info("Standing: nothing to tell; not showing")
+            self.quit()
+            return
+        logger.info("Standing: news from a background check; showing without the focus")
+        self._arriving = True
+        try:
+            self._show_assistant(take_focus=False)
+        finally:
+            self._arriving = False
+        standing.announce()
 
     # ---- talking to Jarvis ([talk]) -------------------------------------------------------------------------
 
@@ -14743,6 +14824,8 @@ class AppController(QObject):
             self.voice_download.shutdown()   # a download of the local voice stops (it carries on at the next click)
         if getattr(self, "meetings", None) is not None:
             self.meetings.shutdown()   # a recording stops and is saved; the pill goes
+        if getattr(self, "standing", None) is not None:
+            self.standing.shutdown()   # the folder check stops
         if getattr(self, "task_feed", None) is not None:
             self.task_feed.shutdown()  # the task's panel and cards: before the HUD's windows go
         if getattr(self, "desktop", None) is not None:

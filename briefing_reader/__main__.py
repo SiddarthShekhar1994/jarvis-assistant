@@ -30,6 +30,7 @@ import argparse
 import ctypes
 import dataclasses
 import getpass
+import json
 import logging
 import platform
 import os
@@ -67,6 +68,9 @@ TALK_ACTIVATION = {**OPEN_ACTIVATION, "talk": True}
 LAUNCH_OPEN = "open"
 LAUNCH_READ = "read"
 LAUNCH_SCHEDULED = "scheduled"
+LAUNCH_STANDING = "standing"
+# What --standing-show sends a running Jarvis instead of coming forward: a standing check has news.
+STANDING_ACTIVATION = {"cmd": "standing", "runs": []}
 _PAGE_ID_RE = re.compile(r"[0-9a-f]{32}")
 _PACKAGE_PARENT = Path(__file__).resolve().parent.parent
 
@@ -210,12 +214,15 @@ def _view_flag(args: argparse.Namespace) -> str:
 
 
 def launch_kind(args: argparse.Namespace) -> str:
-    """How this launch asks for Jarvis: --read READ; --open, --now, --ask or --hud OPEN; --run (or a due
-    --catch-up, which sets run) SCHEDULED; nothing OPEN."""
+    """How this launch asks for Jarvis: --read READ; --open, --now, --ask or --hud OPEN; --standing-show STANDING
+    (shown without the focus and told, as a scheduled briefing arrives); --run (or a due --catch-up, which sets run)
+    SCHEDULED; nothing OPEN."""
     if getattr(args, "read", False):
         return LAUNCH_READ
+    if getattr(args, "standing_show", False):
+        return LAUNCH_STANDING
     if (getattr(args, "open", False) or getattr(args, "now", False) or getattr(args, "ask", False)
-            or getattr(args, "hud", False) or getattr(args, "standing_show", False)):
+            or getattr(args, "hud", False)):
         return LAUNCH_OPEN
     if getattr(args, "run", None) or getattr(args, "catch_up", False):
         return LAUNCH_SCHEDULED
@@ -403,9 +410,24 @@ def _forward_to_running(name: str, run: str | None, *, launch: str, ask: bool = 
     """Ask the running app to come forward with this launch's kind (activation.forward_to_running_instance
     builds the message: "open": true, "read": true, or a run alone for a scheduled launch; --ask adds "ask": true
     and --hud "desktop": true)."""
+    if launch == LAUNCH_STANDING:
+        return _tell_running_standing(name)
     from .activation import forward_to_running_instance
     extra = {**({"ask": True} if ask else {}), **({"desktop": True} if desktop else {})}
     return forward_to_running_instance(name, run, launch=launch, **extra)
+
+
+def _tell_running_standing(name: str) -> int:
+    """--standing-show while Jarvis is running already: the standing message (he reads the run files again and tells
+    the owner), never a launch that brings him forward."""
+    from .activation import try_send
+    from PySide6.QtCore import QCoreApplication
+
+    app = QCoreApplication.instance() or QCoreApplication([sys.argv[0] if sys.argv else APP_NAME])
+    sent = try_send(name, (json.dumps(STANDING_ACTIVATION) + "\n").encode("utf-8"))
+    logger.info("Standing: Jarvis is running; %s", "told it" if sent else "it did not answer")
+    del app
+    return 0 if sent else 1
 
 
 # --------------------------------------------------------------------------

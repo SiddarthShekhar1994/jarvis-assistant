@@ -863,6 +863,8 @@ ICONS: dict[str, tuple[str, ...]] = {
     # Meetings (a microphone; a record dot).
     "meetings": ("M12 3.5a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0v-5a3 3 0 0 0-3-3z", "M6 11a6 6 0 0 0 12 0",
                  "M12 17v3.5M8.5 20.5h7"),
+    # Agents (the standing agents and rules: a clock whose hand comes round again).
+    "agents": ("M20 12a8 8 0 1 1-2.45-5.75", "M20 4.5v4.5h-4.5", "M12 8v4l2.6 1.6"),
     "record": ("M12 6a6 6 0 1 0 0 12a6 6 0 1 0 0-12z",),
     # Desktop (the Switch prototype's monitor: the Dock's switch to the HUD).
     "desktop": ("M4.5 4.5h15a1.5 1.5 0 0 1 1.5 1.5v8.5a1.5 1.5 0 0 1-1.5 1.5h-15a1.5 1.5 0 0 1-1.5-1.5V6"

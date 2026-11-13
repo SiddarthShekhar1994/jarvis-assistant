@@ -323,7 +323,7 @@ class CommandLineTests(unittest.TestCase):
         self.assertTrue(args.standing_run)
         self.assertEqual(args.origin, "app")
         shown = entry.build_parser().parse_args(["--standing-show"])
-        self.assertEqual(entry.launch_kind(shown), "open")
+        self.assertEqual(entry.launch_kind(shown), "standing")
         with self.assertRaises(SystemExit):
             entry.main(["--standing-show", "--standing-run"])
 

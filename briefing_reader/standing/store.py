@@ -330,6 +330,15 @@ class AppState:
                     self.data[key][item] = at
             return self._save()
 
+    def unmark(self, key: str, ids: Iterable[str]) -> bool:
+        """Take ``ids`` out of "withdrawn", "undone" or "announced" (a Delete's Undo brings its cards back)."""
+        if key not in ("withdrawn", "undone", "announced"):
+            raise ValueError(key)
+        with self._lock:
+            for item in ids:
+                self.data[key].pop(item, None)
+            return self._save()
+
     def clear_runs(self, now: datetime | None = None) -> bool:
         with self._lock:
             self.data["cleared_before"] = stamp(now)

@@ -69,6 +69,7 @@ class LabelledDockTests(unittest.TestCase):
         self.assertEqual(self.dock.width(), holo.DOCK_WIDTH_LABELLED)
         self.dock.set_hud_key("Ctrl+Alt+H")
         self.dock.set_slot_visible(dock.DESKTOP, True)               # [desktop] on: the Switch prototype's Dock
+        self.dock.set_slot_visible(dock.AGENTS, True)                # [standing] on
         settle()
         for key in dock.SLOTS:
             button = self.dock.button(key)
@@ -76,8 +77,8 @@ class LabelledDockTests(unittest.TestCase):
             rect = self.dock.slot_rect(key)
             self.assertEqual((rect.x(), rect.width(), rect.height()), (12, 176, 44))
         self.assertEqual([dock.LABELS[k] for k in dock.SLOTS],
-                         ["Home", "Briefing", "Approvals", "Live", "Memory", "Follow-ups", "Meetings", "Desktop",
-                          "Settings"])
+                         ["Home", "Briefing", "Approvals", "Live", "Memory", "Follow-ups", "Meetings", "Agents",
+                          "Desktop", "Settings"])
         self.assertEqual(self.dock.slot_rect(dock.SETTINGS).bottom(), 640 - 16)          # Settings at the bottom
         # Desktop: the HUD tag at the row's end, "Ctrl+Alt+H switches" right under it.
         tag = self.dock.button(dock.DESKTOP).tag_rect()
