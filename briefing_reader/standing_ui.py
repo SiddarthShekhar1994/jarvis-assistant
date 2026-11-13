@@ -29,6 +29,13 @@ The click-time Reply check
     recipients the run proposed must be on that message (its From, Reply-To, To or Cc). It passes once for two
     minutes; nothing is sent on a refusal, and the card says why.
 
+Tidy-up (a rule may star, label or archive the mail it matched, without a click)
+    Each receipt's tidy-up has its own ACTIVITY row: what Jarvis did, or why he did not. Its Undo (for UNDO_DAYS) takes
+    off exactly Jarvis's change, through the account's own tidy-up sign-in, and only when the message's labels are
+    still exactly what he left; a change a crash left unknown (the journal's "doing" with nothing after it) shows as
+    such. A rule with a tidy-up on an account with the gmail_tidy feature shows the tidy-up's own card first: its
+    words are the consent, and its button starts that sign-in (the owner signs in, in the browser).
+
 The spoken line
     A fixed line with counts (never the model's words); the job's name only with the local voice ([voice] engine
     "local": nothing leaves the PC). It waits while the PC is locked, during [standing] quiet hours, while a meeting
@@ -58,6 +65,7 @@ from . import holo, standing_setup
 from .actions import CALENDAR, REPLY, SOURCE_STANDING, STANDING_MODES, TODO, ProposedAction
 from .standing import cards as standing_cards
 from .standing import schedule
+from .standing import tidy as tidy_mod
 from .standing.model import (KIND_AGENT, KIND_RULE, STATUS_DRAFT, STATUS_LIVE, STATUS_PAUSED, STATUS_TRIED,
                              TRIGGER_EVERY, TRIGGER_MAIL, TRIGGER_TIME, WEEKDAYS, Agent,
                              DefinitionError, Rule, with_status)
@@ -103,6 +111,39 @@ NEITHER_TEXT = ("That doesn't sound like something to do again and again. Ask it
 SETUP_BUSY_TEXT = "Jarvis is already setting one up; a moment."
 SETUP_FAILED_TEXT = "Jarvis couldn't set that up just now; try again."
 CONSENT_CARD, SETUP_CARD = "consent", "setup"
+TIDY_CARD = "tidy:"               # + the alias: a tidy-up's own sign-in card
+UNDO_FILE = "standing_tidy_undo.jsonl"   # the app's Undo journal (the runner's is standing_tidy.jsonl)
+TIDY_DONE_WORDS = {"star": "Starred", "label": "Labelled", "archive": "Archived"}
+TIDY_NOT_WORDS = {"star": "Not starred", "label": "Not labelled", "archive": "Not archived"}
+TIDY_HELD_WORDS = {
+    "orders": "a mail in that batch read like instructions to Jarvis",
+    "jump": "far more of that batch said yes than in its dry run",
+    "dmarc": "the mail did not pass Gmail's sender check",
+    "own": "it is your own mail",
+    "sent": "it is sent mail or a draft",
+    "starred": "starred or important mail is never archived",
+    "broad": "its filter must name a sender and match few mails",
+    "not_set_up": "the account has no gmail_tidy feature in config.toml",
+    "not_signed_in": "the tidy-up's own sign-in is not done yet",
+    "account": "the account's tidy-up sign-in changed since Turn on",
+    "written": "you have written to that sender",
+    "cap": "the rule's tidy-ups for today are used up",
+    "paused": "everything was paused",
+    "failed": "Gmail refused it",
+    "already": "it was already so",
+}
+UNDO_PROBLEMS = {"changed": "Not undone: the mail's labels changed since Jarvis's change; nothing was changed.",
+                 "too_old": f"Not undone: a tidy-up can be undone for {tidy_mod.UNDO_DAYS} days.",
+                 "not_done": "There is nothing of Jarvis's to undo.",
+                 "signed_out": "Sign in for tidy-up first (the card on the Agents screen).",
+                 "failed": "Gmail refused the Undo; nothing changed."}
+TIDY_CARD_LINES = (
+    "A rule of yours may star, label or archive the mail it matched, without a click. Jarvis does that through a "
+    "sign-in of its own for this account, with Gmail's permission to change labels.",
+    "He changes only the one message a rule matched, and only star, the one label you picked, or archive. He never "
+    "sends, deletes, marks as read or touches any other label, and never archives mail from people you write to.",
+    "Every tidy-up has an Undo on the Agents screen for 7 days. Pause all stops them at once.",
+)
 STATUS_WORDS = {STATUS_LIVE: "LIVE", STATUS_PAUSED: "PAUSED", STATUS_DRAFT: "DRAFT", STATUS_TRIED: "TRIED"}
 RUN_LINES = {   # a run that made nothing to show as a receipt: its activity line
     "capped": "Reached its runs for today; it waits until tomorrow.",
@@ -317,6 +358,8 @@ class StandingController(QObject):
     _replyChecked = Signal(str, str, int)      # action id, problem ("" passed), sequence (from the worker)
     _setupDone = Signal(object, int)           # SetupOutcome, sequence (from the worker)
     _dryDone = Signal(str, object, int)        # rule id, DryOutcome, sequence (from the worker)
+    _tidyUndone = Signal(str, str)             # receipt key, problem ("" undone) (from the worker)
+    _tidySigned = Signal(str, str)             # alias, problem ("" signed in) (from the worker)
 
     def __init__(self, host: Any, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -358,6 +401,14 @@ class StandingController(QObject):
         self._busy = ""                                      # "setup" or "dry:<rule id>" while one runs
         self._work_seq = 0
         self._consent_later = False
+        self.tidy_accounts: Callable[[], Mapping[str, Any]] = self._tidy_accounts
+        self.tidy_for: Callable[[str], Any] = self._tidy_client
+        self._tidy_built: dict[str, Any] | None = None
+        self._tidy_later: set[str] = set()
+        self._tidy_busy: set[str] = set()
+        self._tidy_refused: dict[str, str] = {}               # receipt key -> why its Undo was refused (memory)
+        self._tidyUndone.connect(self._on_tidy_undone)
+        self._tidySigned.connect(self._on_tidy_signed)
         self._replyChecked.connect(self._on_reply_checked)
         self._setupDone.connect(self._on_setup_done)
         self._dryDone.connect(self._on_dry_done)
@@ -737,7 +788,62 @@ class StandingController(QObject):
                 row = self._receipt_row(run, receipt, name, when, waiting, store)
                 if row is not None:
                     rows.append(row)
+                tidy_row = self._tidy_row(run, receipt, name, when, now)
+                if tidy_row is not None:
+                    rows.append(tidy_row)
+        rows += self._unknown_rows(now, hour24)
         return rows, reports
+
+    def _tidy_row(self, run: RunView, receipt: Mapping[str, Any], name: str, when: str,
+                  now: datetime) -> ActivityRow | None:
+        made = receipt.get("tidy")
+        receipt_id = receipt.get("id")
+        if not isinstance(made, Mapping) or not isinstance(receipt_id, str):
+            return None
+        kind = str(made.get("kind") or "")
+        key = f"{run.id}:{receipt_id}:tidy"
+        subject = str(receipt.get("subject") or "a matched mail")
+        sender = str(receipt.get("name") or receipt.get("from") or "")
+        detail = f" {DOT} ".join(part for part in (sender, subject) if part)
+        if made.get("done"):
+            what = TIDY_DONE_WORDS.get(kind, "Tidied")
+            if made.get("thread_stays"):
+                detail += f" {DOT} its conversation stays in the inbox for its other messages"
+            if self.app_state.is_undone(key):
+                return ActivityRow(key, when, name, f"{what}, then undone: {subject}", detail, "Undone",
+                                   holo.TONE_STEEL)
+            refused = self._tidy_refused.get(key)
+            if refused in ("changed", "too_old"):
+                return ActivityRow(key, when, name, f"{what}: {subject}", detail,
+                                   "Changed since" if refused == "changed" else what, holo.TONE_STEEL,
+                                   undo_tip=UNDO_PROBLEMS[refused])
+            done_at = parse_stamp(made.get("at")) or run.ended
+            fresh = done_at is not None and now - done_at <= timedelta(days=tidy_mod.UNDO_DAYS)
+            busy = key in self._tidy_busy
+            return ActivityRow(key, when, name, f"{what}: {subject}", detail, what, holo.TONE_CYAN,
+                               can_undo=fresh and not busy, undo_text="Undo",
+                               undo_tip="Take off exactly Jarvis's change, if the mail is still as he left it")
+        held = str(made.get("held") or "")
+        if held in ("", "no"):
+            return None
+        why = TIDY_HELD_WORDS.get(held, held.replace("_", " "))
+        return ActivityRow(key, when, name, f"{TIDY_NOT_WORDS.get(kind, 'Not tidied')}: {why}", detail,
+                           "Gmail refused" if held == "failed" else "Not tidied",
+                           holo.TONE_ALERT if held == "failed" else holo.TONE_STEEL)
+
+    def _unknown_rows(self, now: datetime, hour24: bool) -> list[ActivityRow]:
+        """Tidy-ups a crash left between "doing" and "done": Jarvis may or may not have changed that message."""
+        rows: list[ActivityRow] = []
+        oldest = now - timedelta(days=max(1, int(self.settings.keep_days)))
+        for entry in tidy_mod.TidyJournal(self.files.tidy_journal).entries().values():
+            at = parse_stamp(entry.at)
+            if entry.state != tidy_mod.UNKNOWN or at is None or at < oldest:
+                continue
+            what = TIDY_DONE_WORDS.get(entry.kind, "Tidied").lower()
+            rows.append(ActivityRow(f"journal:{entry.id}", when_text(at, now, hour24), entry.account,
+                                    f"Not known: Jarvis may have {what} one message (the check stopped midway). "
+                                    "Look at it in Gmail.", state_text="Not known", tone=holo.TONE_AMBER))
+        return rows
 
     def _receipt_row(self, run: RunView, receipt: Mapping[str, Any], name: str, when: str, waiting: set[str],
                      store: Any) -> ActivityRow | None:
@@ -870,7 +976,11 @@ class StandingController(QObject):
         self.reload(announce=False)
 
     def undo_receipt(self, key: str) -> None:
-        """A receipt's Undo: its card, still waiting, is withdrawn from Approvals (nothing was sent)."""
+        """A receipt's Undo: its card, still waiting, is withdrawn from Approvals (nothing was sent); a tidy-up's row
+        takes off Jarvis's change (undo_tidy)."""
+        if key.endswith(":tidy"):
+            self.undo_tidy(key)
+            return
         run_id, _, receipt_id = key.partition(":")
         run = next((item for item in self.runs if item.id == run_id), None)
         receipt = next((item for item in (run.receipts if run is not None else ())
@@ -912,6 +1022,148 @@ class StandingController(QObject):
         elif link_id == INSTALLER_LINK:
             self.host._flash_note("Background runs: run install-schedule.ps1 again (README, step 9). It adds the "
                                   "\"Briefing agents\" task, which checks every 5 minutes.")
+
+    # ---- tidy-up: its Undo and its own sign-in --------------------------------------------------------------------
+
+    def _tidy_accounts(self) -> Mapping[str, Any]:
+        """The app's tidy-up sign-ins (executor.build_tidy_accounts; the app saves them, as it does every sign-in)."""
+        if self._tidy_built is None:
+            if not getattr(getattr(self.config, "calendar", None), "enabled", True):
+                self._tidy_built = {}
+            else:
+                from .executor import build_tidy_accounts
+
+                self._tidy_built = dict(build_tidy_accounts(self.config, persist=True))
+        return self._tidy_built
+
+    def _tidy_client(self, alias: str) -> Any:
+        account = self.tidy_accounts().get(alias)
+        return tidy_mod.GmailTidy(account) if account is not None else None
+
+    def undo_tidy(self, key: str) -> None:
+        """Take off exactly Jarvis's change (on a worker): the message's labels read again, and changed back only when
+        they are still exactly what he left, within UNDO_DAYS; journalled before the call (standing_tidy_undo.jsonl)."""
+        run_id, _, rest = key.partition(":")
+        receipt_id = rest[:-len(":tidy")] if rest.endswith(":tidy") else ""
+        run = next((item for item in self.runs if item.id == run_id), None)
+        receipt = next((item for item in (run.receipts if run is not None else ()) if item.get("id") == receipt_id),
+                       None)
+        made = receipt.get("tidy") if receipt is not None else None
+        if (receipt is None or not isinstance(made, Mapping) or self.app_state.is_undone(key)
+                or key in self._tidy_busy):
+            return
+        alias = str(receipt.get("account") or "")
+        message = str(receipt.get("message") or "")
+        client = self.tidy_for(alias)
+        if client is None:
+            self.host._flash_note(UNDO_PROBLEMS["signed_out"])
+            return
+        self._tidy_busy.add(key)
+        self._show()
+        now = self._now()
+        done_at = parse_stamp(made.get("at")) or (run.ended if run is not None else None)
+        change = tidy_mod.Change(tuple(str(item) for item in made.get("add") or ()),
+                                 tuple(str(item) for item in made.get("remove") or ())).reverse()
+        journal = tidy_mod.TidyJournal(self.files.data_dir / UNDO_FILE)
+        rule_id = run.job_id if run is not None else ""
+        logger.info("Standing: undoing a tidy-up of rule %s", rule_id)
+
+        def work() -> None:
+            problem = ""
+            try:
+                labels_now = client.labels_of(message)
+                problem = tidy_mod.undo_problem(made, labels_now, now, done_at)
+                if not problem:
+                    entry = journal.begin(rule=rule_id, account=alias, message=message,
+                                          thread=str(receipt.get("thread") or ""), kind=f"undo-{made.get('kind')}",
+                                          change=change, before=labels_now, now=now)
+                    try:
+                        after = client.modify(message, add=change.add, remove=change.remove)
+                    except Exception:  # noqa: BLE001 - Gmail refused it: journalled
+                        journal.failed(entry, now)
+                        raise
+                    journal.done(entry, after, now)
+            except Exception as exc:  # noqa: BLE001 - nothing (more) changed
+                logger.info("Standing: a tidy-up's Undo failed (%s)", type(exc).__name__)
+                problem = problem or "failed"
+            self._tidyUndone.emit(key, problem)
+
+        self.thread_runner(work)
+
+    def _on_tidy_undone(self, key: str, problem: str) -> None:
+        self._tidy_busy.discard(key)
+        if self._closed:
+            return
+        if problem:
+            self.host._flash_note(UNDO_PROBLEMS.get(problem, UNDO_PROBLEMS["failed"]))
+            if problem in ("changed", "too_old"):
+                self._tidy_refused[key] = problem          # not offered again: it is not Jarvis's change any more
+        else:
+            self.app_state.mark("undone", [key], self._now())
+            logger.info("Standing: a tidy-up was undone")
+        self.reload(announce=False)
+
+    def _tidy_wanted(self) -> list[str]:
+        """Accounts a rule of the owner's would tidy whose tidy-up sign-in (or its yes) is still missing."""
+        wanted: list[str] = []
+        for rule in self.rules:
+            alias = rule.account
+            if not rule.tidy.kind or alias in wanted or alias in self._tidy_later:
+                continue
+            if not standing_setup.can_tidy(self.config, alias):
+                continue                                  # the setup card says how to add the feature
+            account = self.tidy_accounts().get(alias)
+            signed = False
+            try:
+                signed = account is not None and bool(account.is_signed_in(tidy_mod.TIDY_FEATURE))
+            except Exception:  # noqa: BLE001 - unknown: ask
+                signed = False
+            if not signed or not self.app_state.tidy_consented(alias):
+                wanted.append(alias)
+        return wanted
+
+    def tidy_sign_in(self, alias: str) -> None:
+        """The tidy-up card's button: the owner's yes kept, then the account's tidy-up sign-in on a worker (the owner
+        signs in, in the browser; nothing is asked for but gmail.modify and who the account is)."""
+        account = self.tidy_accounts().get(alias)
+        if account is None or alias in self._tidy_busy:
+            return
+        if not self.app_state.set_tidy_consent(alias, True, self._now()):
+            self.host._flash_note("Jarvis couldn't save that (standing_app.json); nothing changed.")
+            return
+        self._tidy_busy.add(alias)
+        self._show()
+        logger.info("Standing: the tidy-up sign-in of the %s account", alias)
+
+        def work() -> None:
+            problem = ""
+            try:
+                if not account.is_signed_in(tidy_mod.TIDY_FEATURE):
+                    account.sign_in()
+            except Exception as exc:  # noqa: BLE001 - cancelled, denied or not set up: the card says so
+                problem = type(exc).__name__
+            self._tidySigned.emit(alias, problem)
+
+        self.thread_runner(work)
+
+    def _on_tidy_signed(self, alias: str, problem: str) -> None:
+        self._tidy_busy.discard(alias)
+        if self._closed:
+            return
+        if problem:
+            self.host._flash_note("The tidy-up sign-in did not finish; nothing was changed. Try again from the card.")
+        self.reload(announce=False)
+
+    def _tidy_cards(self) -> list[NoticeCard]:
+        cards = []
+        for alias in self._tidy_wanted():
+            busy = alias in self._tidy_busy
+            cards.append(NoticeCard(TIDY_CARD + alias, "Tidy-up needs its own sign-in",
+                                    f"Let Jarvis tidy {alias} mail for your rules", TIDY_CARD_LINES,
+                                    (CardButton("signin", "Sign in for tidy-up", LOOK_AMBER, enabled=not busy),
+                                     CardButton("later", "Not now", LOOK_GHOST, enabled=not busy)),
+                                    note="Finish the sign-in in your browser..." if busy else ""))
+        return cards
 
     # ---- setting a job up ([standing]: "agent:" / "rule:", the planner's hand-off) --------------------------------
 
@@ -1120,6 +1372,14 @@ class StandingController(QObject):
         bar.focus_input()
 
     def _on_card(self, card_id: str, action: str) -> None:
+        if card_id.startswith(TIDY_CARD):
+            alias = card_id[len(TIDY_CARD):]
+            if action == "signin":
+                self.tidy_sign_in(alias)
+            elif action == "later":
+                self._tidy_later.add(alias)
+                self._show()
+            return
         if card_id == CONSENT_CARD:
             if action == "yes":
                 if self.app_state.set_consent(True, self._now()):
@@ -1150,6 +1410,8 @@ class StandingController(QObject):
                                     standing_setup.CONSENT_LINES,
                                     (CardButton("yes", standing_setup.CONSENT_YES, LOOK_AMBER),
                                      CardButton("later", standing_setup.CONSENT_LATER, LOOK_GHOST))))
+        if consented:
+            cards += self._tidy_cards()
         draft = self._setup
         if draft is None:
             return cards

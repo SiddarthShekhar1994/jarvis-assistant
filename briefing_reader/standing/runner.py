@@ -13,6 +13,13 @@
            its sources read by Jarvis (the matched messages, scrubbed; an agent's calendar days and notes), one run,
            what it made (cards checked and never proposed twice, receipts), one run file. A job with nothing new
            makes no Claude run and no file. A rule's mail mark moves only after its run went through.
+           A rule's tidy-up (star, its label, archive: only the matched message) happens for each "yes" that passes
+           every gate (``_tidy``): the rule's own holds (orders in the batch, a yes rate far above the dry run's, a
+           failed DMARC check, the owner's own or sent mail, starred or important mail for an archive), then Pause
+           all read again, the account's gmail_tidy sign-in still the one saved and still the Google account Turn
+           on recorded, a filter that names a sender and a dry run of at most 90 matches, never archiving mail from
+           someone the owner has written to (recipients.json, read only), and the rule's tidy-ups a day. Each
+           change is journalled before the call (standing_tidy.jsonl) and its receipt says what happened.
         6. Old run files pruned, the state saved, the heartbeat written.
         7. Telling the owner, for runs that need them: a running Jarvis gets the activation {"cmd": "standing"};
            a closed one is started with --standing-show (shown without focus, announced once) unless it is quiet
@@ -39,6 +46,10 @@ from .mailwatch import Batch, anything_new, new_mail, read_message
 from .model import (KIND_AGENT, KIND_RULE, TRIGGER_EVERY, TRIGGER_MAIL, TRIGGER_MANUAL, TRIGGER_TIME, Agent, Rule,
                     live)
 from .rules import Item
+from . import tidy as tidy_mod
+from .dryrun import NARROW_FOR_TIDY
+from .filters import senders as filter_senders
+from .model import TIDY_ARCHIVE, TIDY_NONE
 from .store import (AppState, Definitions, RunFiles, RunnerState, RunRequests, StandingFiles, Usage, new_run_id,
                     parse_stamp, stamp)
 
@@ -68,6 +79,8 @@ class Deps:
     start_app: Callable[[], bool] = lambda: False
     extra_usage_held: Callable[[], bool] = lambda: False
     hold_extra_usage: Callable[[datetime], None] = lambda until: None   # Ask's shared hold (ask_usage.json)
+    tidy: Mapping[str, Any] = field(default_factory=dict)      # alias -> its tidy-up client (tidy.GmailTidy)
+    written_to: Callable[[str], bool] = lambda address: True   # the owner has written to this address (read only)
     time_zone_name: str = ""
     deadline_s: float = DEADLINE_S
 
@@ -269,7 +282,7 @@ class _Check:
             else:
                 receipt.update(kind="tell", values=dict(outcome_.values), refused=outcome_.refused)
             if rule.tidy.kind:
-                receipt["tidy"] = {"kind": rule.tidy.kind, "held": outcome_.tidy_held or "not_built"}
+                receipt["tidy"] = self._tidy(rule, outcome_)
             receipts.append(receipt)
         self.keep_mark(rule.id, rule.account, found)
         needs = bool(cards) or any(receipt["kind"] == "tell" for receipt in receipts)
@@ -278,6 +291,97 @@ class _Check:
                    counts={"mails": len(items), "yes": checked.yes, "cards": len(cards)})
         logger.info("Standing: rule %s checked %d mail(s): %d yes, %d card(s)%s", rule.id, len(items), checked.yes,
                     len(cards), " (a flood: more than one check takes)" if found.full else "")
+
+    def _tidy_held(self, rule: Rule, outcome: Any) -> str:
+        """Why this "yes" gets no tidy-up now ("" when every gate passes; see the module docstring)."""
+        if outcome.tidy_held:
+            return outcome.tidy_held
+        if AppState(self.files).paused_all:
+            return tidy_mod.HELD_PAUSED
+        account = (getattr(self.config, "accounts", None) or {}).get(rule.account)
+        if tidy_mod.TIDY_FEATURE not in tuple(getattr(account, "features", ()) or ()):
+            return tidy_mod.HELD_NOT_SET_UP
+        client = self.deps.tidy.get(rule.account)
+        if client is None or not AppState(self.files).tidy_consented(rule.account):
+            return tidy_mod.HELD_NOT_SIGNED_IN
+        google = client.account
+        try:
+            problem, _message = google.change_problem()
+            saved = google.still_saved()
+            binding = google.binding()
+        except Exception:  # noqa: BLE001 - unknown: no change
+            return tidy_mod.HELD_ACCOUNT
+        recorded = dict(rule.bindings).get(rule.account)
+        if problem or not saved or binding is None or not recorded or getattr(binding, "sub", "") != recorded:
+            return tidy_mod.HELD_ACCOUNT
+        if not filter_senders(rule.query) or rule.dry_run is None or rule.dry_run.matched > NARROW_FOR_TIDY:
+            return tidy_mod.HELD_BROAD
+        if rule.tidy.kind == TIDY_ARCHIVE:
+            sender = outcome.ref.sender.email if outcome.ref.sender is not None else ""
+            try:
+                written = bool(self.deps.written_to(sender))
+            except Exception:  # noqa: BLE001 - unknown: never archived
+                written = True
+            if not sender or written:
+                return tidy_mod.HELD_WRITTEN
+        if self.usage.today().tidy_of(rule.id) >= self.cfg.tidy_per_day:
+            return tidy_mod.HELD_CAP
+        return ""
+
+    def _tidy(self, rule: Rule, outcome: Any) -> dict[str, Any]:
+        """The rule's tidy-up of one matched message, every gate first; what its receipt keeps of it."""
+        kind = rule.tidy.kind
+        made: dict[str, Any] = {"kind": kind, "held": "", "done": False}
+        if not outcome.yes or kind == TIDY_NONE:
+            made["held"] = outcome.tidy_held or "no"
+            return made
+        held = self._tidy_held(rule, outcome)
+        if held:
+            made["held"] = held
+            return made
+        client = self.deps.tidy[rule.account]
+        ref = outcome.ref
+        try:
+            change = tidy_mod.change_for(rule)
+            before = client.labels_of(ref.message_id)
+        except Exception as exc:  # noqa: BLE001 - nothing changed
+            logger.info("Standing: rule %s: the tidy-up could not read the message (%s)", rule.id, type(exc).__name__)
+            made["held"] = tidy_mod.HELD_FAILED
+            return made
+        if change.done_in(before):
+            made["held"] = tidy_mod.HELD_ALREADY
+            return made
+        journal = tidy_mod.TidyJournal(self.files.tidy_journal)
+        try:
+            entry = journal.begin(rule=rule.id, account=rule.account, message=ref.message_id, thread=ref.thread_id,
+                                  kind=kind, change=change, before=before, now=self.deps.clock())
+        except OSError:
+            made["held"] = tidy_mod.HELD_FAILED           # no journal line, no change
+            return made
+        try:
+            after = client.modify(ref.message_id, add=change.add, remove=change.remove)
+        except Exception as exc:  # noqa: BLE001 - Gmail refused it: the journal says failed
+            logger.info("Standing: rule %s: a tidy-up was refused (%s)", rule.id, type(exc).__name__)
+            try:
+                journal.failed(entry, self.deps.clock())
+            except OSError:
+                pass
+            made.update(held=tidy_mod.HELD_FAILED, tidy=entry)
+            return made
+        try:
+            journal.done(entry, after, self.deps.clock())
+        except OSError:
+            pass                                          # read back as unknown: the receipt still says done
+        self.usage.add("tidy", rule.id, 1)
+        stays = False
+        if kind == TIDY_ARCHIVE:
+            try:
+                stays = client.thread_in_inbox(ref.thread_id, but=ref.message_id)
+            except Exception:  # noqa: BLE001 - not known: not said
+                stays = False
+        made.update(done=True, tidy=entry, add=list(change.add), remove=list(change.remove), before=sorted(before),
+                    after=sorted(after), thread_stays=stays, at=stamp(self.deps.clock()))
+        return made
 
     # ---- agents -------------------------------------------------------------------------------------------------
 
@@ -477,6 +581,8 @@ def real_deps(config: Any, instance: str) -> Deps:
 
     accounts = executor.build_accounts(config, persist=False)
     readers = executor.build_readers(config, accounts)
+    tidy_clients = {alias: tidy_mod.GmailTidy(account)
+                    for alias, account in executor.build_tidy_accounts(config, persist=False).items()}
     calendars = executor.build_calendars(config, accounts) if getattr(config.calendar, "enabled", True) else {}
     usage_log = UsageLog(config.data_dir / USAGE_FILE)
 
@@ -506,8 +612,12 @@ def real_deps(config: Any, instance: str) -> Deps:
         until = usage_log.hold_until()
         return until is not None
 
+    from ..recipients import RECIPIENTS_FILE, RecipientHistory
+
+    history = RecipientHistory(config.data_dir / RECIPIENTS_FILE)
+
     return Deps(readers=readers, engine=StandingEngine(config.ask, StandingFiles(config.data_dir)),
-                calendars=calendars, notes=notes, own=own,
+                calendars=calendars, notes=notes, own=own, tidy=tidy_clients, written_to=history.knows,
                 app_running=lambda: hotkey.mutex_exists("Local\\" + instance),
                 tell_app=lambda runs: hotkey.send_activation(instance, {"cmd": "standing", "runs": list(runs)[:50]}),
                 start_app=start_app, extra_usage_held=held, hold_extra_usage=usage_log.hold,

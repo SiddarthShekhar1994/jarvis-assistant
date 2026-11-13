@@ -96,7 +96,8 @@ MOTION_CHOICES = (MOTION_LIVELY, MOTION_CALM, MOTION_OFF)
 # "gmail_read" lets Ask Jarvis read the Gmail threads your request is about (read only; never used
 # to send, and nothing it reads is saved or logged); with the productivity bundle it also covers the
 # follow-up list's header scan (headers only, last 14 days), meeting prep reads and nudge drafts.
-ACCOUNT_FEATURES = ("calendar", "gmail_send", "gmail_read")
+# gmail_tidy: a standing rule may star, label or archive the mail it matched (its own sign-in per account).
+ACCOUNT_FEATURES = ("calendar", "gmail_send", "gmail_read", "gmail_tidy")
 BACKEND_GOOGLE = "google"
 BACKEND_COMPOSIO = "composio"     # accepted, but not built into this version
 ACCOUNT_BACKENDS = (BACKEND_GOOGLE, BACKEND_COMPOSIO)

@@ -349,7 +349,7 @@ class SignInTests(AuthTestCase):
         self.assertEqual(self.account(features=("calendar", "telepathy")).features, ("calendar",))
         self.assertEqual(self.account().requested_scopes(), CAL_SCOPES)
         self.assertEqual(set(FEATURE_SCOPES), {CALENDAR_FEATURE, google_auth.GMAIL_FEATURE,
-                                               google_auth.GMAIL_READ_FEATURE})
+                                               google_auth.GMAIL_READ_FEATURE, google_auth.TIDY_FEATURE})
         self.assertEqual(FEATURE_SCOPES[google_auth.GMAIL_FEATURE],
                          ("https://www.googleapis.com/auth/gmail.send",))   # send only: never read
         # Read only (Ask Jarvis): never a scope that could send, change or delete mail.

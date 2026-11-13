@@ -133,10 +133,12 @@ from .google_auth import (
     PROBLEM_SETUP,
     PROBLEM_SIGNED_OUT,
     PROBLEM_TIMEOUT,
+    TIDY_FEATURE,
     AccountBindings,
     GoogleAccount,
     logged_alias,
     migrate_legacy_token,
+    tidy_token_path,
 )
 from .live import (
     ACTION_CALL,
@@ -1628,7 +1630,9 @@ def account_features(config: Config, alias: str) -> tuple[str, ...]:
     """What ``alias`` signs in for: its configured features; "personal" always has the
     calendar (Calendar proposals, to-do blocks and the agenda use it)."""
     account = config.accounts.get(alias)
-    features = [name for name in (account.features if account is not None else ()) if name in FEATURE_SCOPES]
+    # gmail_tidy never joins the main sign-in: it has its own (build_tidy_accounts).
+    features = [name for name in (account.features if account is not None else ())
+                if name in FEATURE_SCOPES and name != TIDY_FEATURE]
     if alias == DEFAULT_ACCOUNT and CALENDAR_FEATURE not in features:
         features.insert(0, CALENDAR_FEATURE)
     return tuple(features)
@@ -1662,6 +1666,24 @@ def build_accounts(config: Config, *, flow_factory: Callable[[Any, list[str]], A
             alias, client_secret_path=config.calendar.client_secret_path, data_dir=config.data_dir,
             features=account_features(config, alias), flow_factory=flow_factory, refresh=refresh,
             bindings=bindings, persist=persist)
+    return accounts
+
+
+def build_tidy_accounts(config: Config, *, flow_factory: Callable[[Any, list[str]], Any] | None = None,
+                        refresh: Callable[[Any], None] | None = None, persist: bool = True) -> dict[str, GoogleAccount]:
+    """The tidy-up sign-ins: one GoogleAccount per alias with the gmail_tidy feature, asking only for gmail.modify (and
+    who the account is), its token in google_token_<alias>.tidy.json, bound like the alias's main sign-in (the same
+    accounts.json: a different Google account is refused). ``persist`` False: a background run's (memory only)."""
+    bindings = AccountBindings(config.data_dir / ACCOUNTS_FILE)
+    accounts: dict[str, GoogleAccount] = {}
+    for alias in google_aliases(config):
+        account = config.accounts.get(alias)
+        if account is None or TIDY_FEATURE not in account.features:
+            continue
+        accounts[alias] = GoogleAccount(
+            alias, client_secret_path=config.calendar.client_secret_path, data_dir=config.data_dir,
+            token_path=tidy_token_path(config.data_dir, alias), features=(TIDY_FEATURE,), flow_factory=flow_factory,
+            refresh=refresh, bindings=bindings, persist=persist)
     return accounts
 
 

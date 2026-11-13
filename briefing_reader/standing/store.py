@@ -339,6 +339,23 @@ class AppState:
                 self.data[key].pop(item, None)
             return self._save()
 
+    def tidy_consented(self, alias: str) -> bool:
+        """The owner said yes to a rule's tidy-up on ``alias`` (the card before its own sign-in)."""
+        consent = (self.data.get("tidy_consent") or {}).get(alias) if isinstance(self.data.get("tidy_consent"),
+                                                                                  dict) else None
+        return isinstance(consent, dict) and consent.get("version") == CONSENT_VERSION
+
+    def set_tidy_consent(self, alias: str, on: bool, now: datetime | None = None) -> bool:
+        with self._lock:
+            consents = dict(self.data.get("tidy_consent") or {}) if isinstance(self.data.get("tidy_consent"),
+                                                                                dict) else {}
+            if on:
+                consents[alias] = {"version": CONSENT_VERSION, "at": stamp(now)}
+            else:
+                consents.pop(alias, None)
+            self.data["tidy_consent"] = consents
+            return self._save()
+
     def clear_runs(self, now: datetime | None = None) -> bool:
         with self._lock:
             self.data["cleared_before"] = stamp(now)

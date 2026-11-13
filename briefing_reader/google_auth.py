@@ -111,6 +111,7 @@ logger = logging.getLogger(__name__)
 CALENDAR_FEATURE = "calendar"
 GMAIL_FEATURE = "gmail_send"
 GMAIL_READ_FEATURE = "gmail_read"
+TIDY_FEATURE = "gmail_tidy"
 FEATURE_SCOPES: dict[str, tuple[str, ...]] = {
     CALENDAR_FEATURE: ("https://www.googleapis.com/auth/calendar.events",
                        "https://www.googleapis.com/auth/calendar.settings.readonly"),
@@ -119,10 +120,14 @@ FEATURE_SCOPES: dict[str, tuple[str, ...]] = {
     # Read only (a restricted scope): Ask Jarvis reads the threads a request is about. It can
     # neither send nor change mail, and only gmail.GmailReader uses it.
     GMAIL_READ_FEATURE: ("https://www.googleapis.com/auth/gmail.readonly",),
+    # Change labels (a standing rule's tidy-up: star, one user label, archive - only standing.tidy uses it, on the one
+    # message a rule matched). It sits in a sign-in of its own per account (TIDY_TOKEN_PATTERN), never in the
+    # account's main sign-in: executor.account_features leaves it out there.
+    TIDY_FEATURE: ("https://www.googleapis.com/auth/gmail.modify",),
 }
 # What each feature lets Jarvis do, for messages ("Google did not allow Calendar access ...").
 FEATURE_WORDS = {CALENDAR_FEATURE: "Calendar access", GMAIL_FEATURE: "sending email",
-                 GMAIL_READ_FEATURE: "reading email"}
+                 GMAIL_READ_FEATURE: "reading email", TIDY_FEATURE: "tidying email (star, label, archive)"}
 # Asked for with every alias's sign-in (non-sensitive): the id_token then says which Google account
 # it is, so the alias can be bound to it (accounts.json).
 IDENTITY_SCOPES = ("openid", "https://www.googleapis.com/auth/userinfo.email")
@@ -136,6 +141,7 @@ TOKEN_SUB_KEY = "jarvis_account_sub"
 TOKEN_ASKED_KEY = "jarvis_asked_scopes"
 LEGACY_TOKEN = "google_token.json"
 TOKEN_PATTERN = "google_token_{alias}.json"
+TIDY_TOKEN_PATTERN = "google_token_{alias}.tidy.json"   # gmail_tidy's own sign-in (an alias has no dot: never a clash)
 LEGACY_ALIAS = "personal"          # the account google_token.json of older versions belongs to
 SETUP_HINT = "Set up Google sign-in: README step 8"
 SIGN_IN_SUCCESS_MESSAGE = "Jarvis is connected to Google Calendar. You can close this tab."
@@ -244,6 +250,13 @@ def token_path(data_dir: Path, alias: str) -> Path:
     if not valid_alias(alias):
         raise ValueError("not an account alias")
     return Path(data_dir) / TOKEN_PATTERN.format(alias=alias)
+
+
+def tidy_token_path(data_dir: Path, alias: str) -> Path:
+    """<data_dir>\\google_token_<alias>.tidy.json: the alias's tidy-up sign-in (gmail.modify only)."""
+    if not valid_alias(alias):
+        raise ValueError("not an account alias")
+    return Path(data_dir) / TIDY_TOKEN_PATTERN.format(alias=alias)
 
 
 def account_token_path(data_dir: Path, alias: str) -> Path:

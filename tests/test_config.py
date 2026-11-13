@@ -747,7 +747,7 @@ class AccountsConfigTests(ProjectTestCase):
     def test_gmail_send_alone(self) -> None:
         self.write_config('[accounts.work]\nfeatures = ["gmail_send"]\n')
         self.assertEqual(self.load_quietly().accounts["work"].features, ("gmail_send",))
-        self.assertEqual(config.ACCOUNT_FEATURES, ("calendar", "gmail_send", "gmail_read"))
+        self.assertEqual(config.ACCOUNT_FEATURES, ("calendar", "gmail_send", "gmail_read", "gmail_tidy"))
 
     def test_no_features(self) -> None:
         self.write_config("[accounts.work]\nfeatures = []\n")
