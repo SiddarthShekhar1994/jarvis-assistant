@@ -720,9 +720,19 @@ SCAN_LIST_FIELDS = "threads(id,historyId),nextPageToken"
 SCAN_GET_FIELDS = "id,historyId,messages(id,labelIds,internalDate,payload/headers)"
 OWN_PROFILE_FIELDS = "emailAddress"
 OWN_SEND_AS_FIELDS = "sendAs(sendAsEmail)"
+# Standing agents and rules (standing.mailwatch): the new mail a filter matches, as ids first (the field mask),
+# then one message's headers, then the one matched message itself; never a whole conversation, spam or trash.
+WATCH_HEADERS = ("From", "To", "Cc", "Reply-To", "Subject", "Date", "Message-ID", "Authentication-Results",
+                 "List-Id", "List-Unsubscribe", "Precedence", "Auto-Submitted")
+WATCH_LIST_FIELDS = "messages(id,threadId),nextPageToken,resultSizeEstimate"
+WATCH_GET_FIELDS = "id,threadId,labelIds,internalDate,payload/headers"
+WATCH_FULL_FIELDS = "id,threadId,labelIds,internalDate,payload"
+WATCH_PAGE_MAX = 100
+LABEL_FIELDS = "labels(id,name,type)"
 SCAN_UNCONFIRMED = "unconfirmed"   # the binding is not confirmed yet: AppController._ask_account fixes it
 SCAN_IDENTITY = "identity"         # the saved sign-in names no (or another) Google account: sign in again
 _HISTORY_RE = re.compile(r"\d{1,30}")
+_LABEL_ID_RE = re.compile(r"Label_[0-9A-Za-z_-]{1,64}")
 
 
 def is_rate_limited(error: BaseException) -> bool:
@@ -865,6 +875,72 @@ class GmailReader:
                                                     metadataHeaders=list(SCAN_HEADERS), fields=SCAN_GET_FIELDS)
             answer = self._execute(request, "reading a thread's headers")
         return answer if isinstance(answer, dict) else {}
+
+    # ---- standing agents and rules (standing.mailwatch) -----------------------------------
+
+    def list_messages(self, query: str, *, max_results: int) -> tuple[list[tuple[str, str]], int]:
+        """(message id, thread id) of at most ``max_results`` (1..WATCH_PAGE_MAX) newest messages matching
+        ``query`` (built by standing.filters from a checked filter), and Gmail's estimate of how many match
+        in all. Ids only (the field mask); never spam or trash."""
+        with self._lock:
+            service = self._get_service()
+            request = service.users().messages().list(userId="me", q=query,
+                                                      maxResults=max(1, min(WATCH_PAGE_MAX, int(max_results))),
+                                                      includeSpamTrash=False, fields=WATCH_LIST_FIELDS)
+            answer = self._execute(request, "listing new mail")
+        answer = answer if isinstance(answer, dict) else {}
+        found: list[tuple[str, str]] = []
+        for item in answer.get("messages") or ():
+            message_id = item.get("id") if isinstance(item, dict) else None
+            thread_id = item.get("threadId") if isinstance(item, dict) else None
+            if (isinstance(message_id, str) and _GMAIL_ID_RE.fullmatch(message_id) and isinstance(thread_id, str)
+                    and _GMAIL_ID_RE.fullmatch(thread_id) and all(message_id != seen for seen, _ in found)):
+                found.append((message_id, thread_id))
+        estimate = answer.get("resultSizeEstimate")
+        estimate = estimate if isinstance(estimate, int) and not isinstance(estimate, bool) and estimate >= 0 else 0
+        logger.info("%s: a filter listed %d message(s) (about %d in all)", self.log_name, len(found),
+                    max(estimate, len(found)))
+        return found, max(estimate, len(found))
+
+    def message_metadata(self, message_id: str) -> dict[str, Any]:
+        """users.messages.get(format="metadata") of one message: its ids, labels, date and WATCH_HEADERS only
+        (the field mask: never a snippet, a size or a body). MailReadError (404) when there is none."""
+        if not isinstance(message_id, str) or not _GMAIL_ID_RE.fullmatch(message_id):
+            raise MailReadError("That is not a Gmail message id")
+        with self._lock:
+            service = self._get_service()
+            request = service.users().messages().get(userId="me", id=message_id, format="metadata",
+                                                     metadataHeaders=list(WATCH_HEADERS), fields=WATCH_GET_FIELDS)
+            answer = self._execute(request, "reading a message's headers")
+        return answer if isinstance(answer, dict) else {}
+
+    def message(self, message_id: str) -> dict[str, Any]:
+        """users.messages.get(format="full") of ONE message: its headers and body (what a rule's check or an
+        agent's run reads of the mail its filter matched; never the rest of its conversation)."""
+        if not isinstance(message_id, str) or not _GMAIL_ID_RE.fullmatch(message_id):
+            raise MailReadError("That is not a Gmail message id")
+        with self._lock:
+            service = self._get_service()
+            request = service.users().messages().get(userId="me", id=message_id, format="full",
+                                                     fields=WATCH_FULL_FIELDS)
+            answer = self._execute(request, "reading a message")
+        return answer if isinstance(answer, dict) else {}
+
+    def labels(self) -> list[tuple[str, str]]:
+        """(id, name) of the account's own labels (type "user"; never a system label such as INBOX or SPAM),
+        for a rule that labels the mail it matched."""
+        with self._lock:
+            service = self._get_service()
+            answer = self._execute(service.users().labels().list(userId="me", fields=LABEL_FIELDS),
+                                   "listing labels")
+        found: list[tuple[str, str]] = []
+        for item in (answer.get("labels") if isinstance(answer, dict) else None) or ():
+            if not isinstance(item, dict) or item.get("type") != "user":
+                continue
+            label_id, name = item.get("id"), item.get("name")
+            if isinstance(label_id, str) and _LABEL_ID_RE.fullmatch(label_id) and isinstance(name, str) and name.strip():
+                found.append((label_id, " ".join(name.split())[:100]))
+        return found
 
     def own_addresses(self) -> tuple[str, ...]:
         """The owner's own addresses on this account: the profile's address and every "send as"

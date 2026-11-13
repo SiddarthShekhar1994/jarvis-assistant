@@ -1644,22 +1644,24 @@ def google_aliases(config: Config) -> list[str]:
 
 
 def build_accounts(config: Config, *, flow_factory: Callable[[Any, list[str]], Any] | None = None,
-                   refresh: Callable[[Any], None] | None = None) -> dict[str, GoogleAccount]:
+                   refresh: Callable[[Any], None] | None = None, persist: bool = True) -> dict[str, GoogleAccount]:
     """One GoogleAccount per Google alias, sharing the OAuth client of ``[calendar]
     client_secret``; tokens in ``config.data_dir`` (google_token_<alias>.json).
 
     The single google_token.json of older versions is moved to the personal account first
     (google_auth.migrate_legacy_token), so nobody has to sign in again. Nothing here opens the
-    browser or talks to Google.
+    browser or talks to Google. ``persist`` False: a background run's accounts (standing agents and rules): their
+    sign-ins live in memory only, nothing is moved, saved or deleted (google_auth.GoogleAccount ``persist``).
     """
-    migrate_legacy_token(config.data_dir)
+    if persist:
+        migrate_legacy_token(config.data_dir)
     bindings = AccountBindings(config.data_dir / ACCOUNTS_FILE)   # read on use; nothing is written here
     accounts: dict[str, GoogleAccount] = {}
     for alias in google_aliases(config):
         accounts[alias] = GoogleAccount(
             alias, client_secret_path=config.calendar.client_secret_path, data_dir=config.data_dir,
             features=account_features(config, alias), flow_factory=flow_factory, refresh=refresh,
-            bindings=bindings)
+            bindings=bindings, persist=persist)
     return accounts
 
 
