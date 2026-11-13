@@ -108,5 +108,3 @@ def held_elsewhere(name: str | None = None) -> bool:
         lock.release()
         return False
     return True
-
-
