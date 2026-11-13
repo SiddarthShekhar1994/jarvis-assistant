@@ -106,7 +106,7 @@ UNDO_SECONDS_RANGE = (3, 30)
 _MISSING = object()
 _KNOWN_TABLES = ("voice", "prompt", "polling", "sections", "notion", "calendar", "actions",
                  "accounts", "schedule", "hotkey", "agenda", "display", "ask", "research", "assistant", "live",
-                 "productivity", "ui", "meetings", "desktop", "agent", "talk", "instant")
+                 "productivity", "ui", "meetings", "desktop", "agent", "talk", "instant", "standing")
 # Library loggers kept at WARNING, also under --debug. The Google sign-in libraries log the
 # authorization code, the access token and the refresh token at DEBUG (requests_oauthlib),
 # before Jarvis could register them for redaction, so they never get DEBUG here.
@@ -478,6 +478,47 @@ class AgentConfig:
     speak_private: bool = False    # true: a line that may hold something private is said too (agent_ui.spoken: off)
 
 
+# Standing agents and rules ([standing], owner answers 2026-11-12): jobs that wake on their own and only propose.
+STANDING_RANGES = {"max_runs_per_day": (1, 200), "agent_runs_per_day": (1, 48), "rule_batch": (1, 8),
+                   "rule_checks_per_day": (1, 200), "tidy_per_day": (0, 200), "poll_minutes": (5, 60),
+                   "min_every_minutes": (30, 1440), "max_mail_per_run": (1, 50), "mail_chars": (500, 12000),
+                   "keep_days": (1, 30), "catch_up_hours": (0, 12), "timeout_seconds": (30, 600)}
+
+
+@dataclass(frozen=True)
+class StandingConfig:
+    """``[standing]``: standing agents and rules (off by default; JARVIS_STANDING_ENABLED overrides ``enabled``; they
+    also need [ask] on, for the owner's Claude Code). Each run is a planner mode with no tools: Jarvis reads the job's
+    sources himself, the run only proposes cards and writes a report, and a rule may star, label or archive the mail it
+    matched (the owner's choice of 2026-11-12, with an Undo receipt each). ``max_runs_per_day`` caps every Claude run of
+    every job together, by local date; ``agent_runs_per_day`` is each agent's own default cap; a rule checks at most
+    ``rule_batch`` mails in one run and ``rule_checks_per_day`` mails a day, and tidies at most ``tidy_per_day``. New
+    mail is looked for every ``poll_minutes`` (headers only), an interval job runs at most every
+    ``min_every_minutes``; a run missed by up to ``catch_up_hours`` runs once at wake. Reports, receipts and waiting
+    cards are kept ``keep_days`` on this PC. Between ``quiet_from`` and ``quiet_until`` nothing is said and Jarvis
+    never opens by himself; ``open_when_closed`` false keeps him closed at any time (the items wait for the next open).
+    """
+
+    enabled: bool = False
+    model: str = "sonnet"            # an agent's runs
+    rule_model: str = "haiku"        # a rule's checks (one yes/no and typed values per mail)
+    max_runs_per_day: int = 30
+    agent_runs_per_day: int = 6
+    rule_batch: int = 8
+    rule_checks_per_day: int = 40
+    tidy_per_day: int = 40
+    poll_minutes: int = 5
+    min_every_minutes: int = 30
+    max_mail_per_run: int = 20
+    mail_chars: int = 4000
+    keep_days: int = 7
+    catch_up_hours: int = 3
+    quiet_from: str = "22:00"
+    quiet_until: str = "08:00"
+    open_when_closed: bool = True
+    timeout_seconds: int = 120
+
+
 DEFAULT_TALK_KEY = "ctrl+alt+space"   # owner decision 2026-11-09: tap it, speak, and a short quiet ends the talk
 TALK_MODELS = ("small.en", "base.en", "medium.en", "distil-large-v3")   # faster-whisper models (default: small.en)
 SPEECH_DEVICES = ("auto", "cpu")     # "auto": an NVIDIA GPU when it works (gpu.py), else the CPU; "cpu": never the GPU
@@ -560,6 +601,7 @@ class Config:
     agent: AgentConfig = field(default_factory=AgentConfig)
     talk: TalkConfig = field(default_factory=TalkConfig)
     instant: InstantConfig = field(default_factory=InstantConfig)
+    standing: StandingConfig = field(default_factory=StandingConfig)
 
     @property
     def notion_url(self) -> str:
@@ -691,6 +733,7 @@ def load_config(project_root: Path | None = None, *,
         agent=_parse_agent(doc, environ),
         talk=_parse_talk(doc, environ, hotkey.combo, desktop.hud_key),
         instant=_parse_instant(doc, environ),
+        standing=_parse_standing(doc, environ),
     )
 
 
@@ -1425,6 +1468,23 @@ def _parse_instant(doc: Mapping[str, Any], environ: Mapping[str, str] | None = N
                          currency=r.boolean("currency", d.currency), town=" ".join(town.split()),
                          temperature=r.choice("temperature", d.temperature, INSTANT_TEMPERATURES),
                          calendar=r.boolean("calendar", d.calendar))
+
+
+STANDING_ENABLED_ENV = "JARVIS_STANDING_ENABLED"
+
+
+def _parse_standing(doc: Mapping[str, Any], environ: Mapping[str, str] | None = None) -> StandingConfig:
+    """``[standing]`` from config.toml; ``JARVIS_STANDING_ENABLED`` (e.g. in the gitignored ``.env``) overrides
+    ``enabled`` both ways, like JARVIS_AGENT_ENABLED. Bad values fall back to the defaults with a warning."""
+    d = StandingConfig()
+    r = _TableReader(doc, "standing", _field_names(StandingConfig))
+    enabled = _enabled_override(r.boolean("enabled", d.enabled), environ, STANDING_ENABLED_ENV, "standing.enabled")
+    numbers = {key: r.integer(key, getattr(d, key), low, high) for key, (low, high) in STANDING_RANGES.items()}
+    return StandingConfig(enabled=enabled, model=r.string("model", d.model, pattern=_MODEL_RE),
+                          rule_model=r.string("rule_model", d.rule_model, pattern=_MODEL_RE),
+                          quiet_from=r.time_of_day("quiet_from", d.quiet_from),
+                          quiet_until=r.time_of_day("quiet_until", d.quiet_until),
+                          open_when_closed=r.boolean("open_when_closed", d.open_when_closed), **numbers)
 
 
 def _parse_assistant(doc: Mapping[str, Any]) -> AssistantConfig:

@@ -169,6 +169,10 @@ class _FileLock:
             self._fh = None
 
 
+# The lock under another name for other Jarvis files shared by processes (standing.store's counts).
+FileLock = _FileLock
+
+
 class UsageLog:
     def __init__(self, path: Path, *, max_per_hour: int = 20, max_per_day: int = 60,
                  clock: Callable[[], datetime] | None = None, max_research_per_hour: int = 6,
