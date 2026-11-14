@@ -14490,8 +14490,11 @@ class AppController(QObject):
             return None
 
     def _look_call(self, name: str, *args: Any) -> Any:
+        # Never while the app quits, nor on a controller (or app) whose Qt object is gone: a signal that reaches a
+        # hook during the teardown must not touch objects that are being deleted.
         look = getattr(self, "look", None)
-        if look is None:
+        if look is None or self.state == STATE_QUITTING or not shiboken6.isValid(self) \
+                or not shiboken6.isValid(look):
             return None
         try:
             return getattr(look, name)(*args)

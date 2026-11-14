@@ -23,6 +23,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import shiboken6
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
@@ -188,6 +189,8 @@ class LookController(QObject):
         speaking = bool(getattr(host, "_utterance", "")) or bool(getattr(getattr(host, "voice", None), "speaking",
                                                                            False))
         player = getattr(host, "player", None)
+        if isinstance(player, QObject) and not shiboken6.isValid(player):
+            player = None                       # a player being replaced or deleted is not playing
         playing = player is not None and getattr(player, "state", "") in (PLAYING, WAITING)
         self.sounds.set_speaking(speaking or playing)
 
