@@ -722,20 +722,47 @@ class OwnerWaysTests(WaysApp):
         self.assertEqual(self.reading.board_count(), 4)
         self.assertEqual(sorted(self.tokens().values()), [2, 2])
 
-    def test_clear_with_nothing_pinned_folds_the_desk_and_they_go_after_8_s(self) -> None:
+    def test_clear_with_nothing_pinned_keeps_the_desk_for_its_bring_back_then_folds_after_8_s(self) -> None:
+        # Part 5c changed this on purpose: the desk used to leave at once, so "Bring back" could never be clicked.
         self.make()
         self.answer(1, "Today", "Budget lines")
         self.assertTrue(self.reading.desk_shown())
         self.board().request("clear")
         settle()
-        self.assertFalse(self.reading.desk_shown())                           # nothing left: Home returns to the stage
-        self.assertTrue(self.reading.stage.isVisible())
-        self.assertEqual(self.reading.board_chip_words(), "")
+        self.assertTrue(self.reading.desk_shown())                            # the bar, the row, the ring at the head
+        self.assertTrue(self.reading.board_held())
+        self.assertFalse(self.reading.stage.isVisible())
+        self.assertEqual(self.reading.board_count(), 0)                       # the header's count: what is left
+        self.assertEqual(self.reading.header.board_button.count(), 0)
+        self.assertEqual(self.tokens(), {view_.turn.entry_id: 0 for view_ in self.reading.desk_page().turns.views()
+                                         if not view_.you()})                 # its token went with them
+        self.assertEqual(self.board().cleared_ids(), self.desk.feed.cleared())
         self.clock.now += CLEAR_S
         self.desk._on_due()                                                   # noqa: SLF001
         settle()
+        self.assertFalse(self.reading.desk_shown())                           # nothing left: Home returns to the stage
+        self.assertTrue(self.reading.stage.isVisible())
+        self.assertEqual(self.reading.board_chip_words(), "")
         self.assertEqual(self.board().of_type("remove_group")[-1]["id"], "g1")
         self.assertEqual(self.board().cleared_ids(), [])
+
+    def test_clear_with_nothing_pinned_then_bring_back_restores_everything(self) -> None:
+        self.make()
+        self.answer(1, "Today", "Budget lines")
+        self.board().request("clear")
+        settle()
+        self.board().request("restore")
+        settle()
+        self.assertTrue(self.reading.desk_shown())
+        self.assertFalse(self.reading.board_held())
+        self.assertEqual(self.reading.board_count(), 2)
+        self.assertEqual(self.board().cleared_ids(), [])
+        self.assertEqual(sorted(self.tokens().values()), [2])
+        self.clock.now += CLEAR_S
+        self.desk._on_due()                                                   # noqa: SLF001 - nothing leaves now
+        settle()
+        self.assertEqual(self.reading.board_count(), 2)
+        self.assertTrue(self.reading.desk_shown())
 
     def test_the_requests_never_reach_further_than_the_board(self) -> None:
         self.make()

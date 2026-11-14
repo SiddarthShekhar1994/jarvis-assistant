@@ -1,0 +1,323 @@
+"""The new look, part 5c: open big (DESIGN-SPEC 3.5). Offscreen; the web engine never starts here: the board is
+tests.board_fakes' stand-in (a real BoardView whose page is a plain widget: every message checked and kept; the page's
+steps are its requests). tests/test_board_lockdown.py's "big" cases run it in the real page, with a real double click and
+real Esc, at 1x and 1.5x.
+
+Covered: the wide view's rectangle at 1120 x 700, 1232 x 640 and 900 x 600 (the column's left edge to the board's right
+edge, the body's top to 12 px above the ask bar); step 1 - the backdrop (one JPEG within the picture's caps, painted from
+the column and never the view, at 1x and 1.5x), the still over the view while its geometry is set (gone when the page
+is laid out, or after 400 ms), the geometry set ONCE with no animation (its changes counted), the Dock and the header
+dimmed to 20 % natively, the chips' edge kept from showing under the wide view; the page's step 2 asked with the
+board's own box; Esc's order (the page's scale-down, then the geometry set back once, then the native dim lifts; a page
+that never says "shut" is gone back from after its grace); a resize while big (still over both columns, set once, the
+page told the new box); open big ending at once off Home and going back when its frame leaves; what can't open big; F6
+skipping the covered conversation; no words in the logs.
+"""
+
+from __future__ import annotations
+
+import logging
+import unittest
+
+from PySide6.QtCore import QEvent, QObject, QRect
+from PySide6.QtGui import QColor, QImage
+from PySide6.QtWidgets import QApplication
+
+from briefing_reader import desk_big, desk_view, holo, ui
+from briefing_reader.board import protocol
+from briefing_reader.board.frames import Built
+from tests import board_fakes
+from tests.ui_fakes import AppHarness, fonts, settle
+
+_app: QApplication | None = None
+PAGE = {"kind": "picture", "title": "City Hack schedule", "meta": "9:05 AM", "body": {"caption": "city-hack.example.org"}}
+DAY = {"kind": "calendar", "title": "Today", "meta": "", "body": {"rows": [
+    {"time": "10:00-10:30", "title": "AI-Trader check-in", "meta": "", "state": "next"}]}}
+
+
+def setUpModule() -> None:
+    global _app
+    _app = QApplication.instance() or QApplication(["test_board_big", "-platform", "offscreen"])
+    fonts()
+
+
+class Moves(QObject):
+    """Every geometry change of the board's view, with the native dim at that moment."""
+
+    def __init__(self, board, reading) -> None:
+        super().__init__()
+        self.board, self.reading = board, reading
+        self.events: list[tuple[str, QRect, float]] = []
+
+    def eventFilter(self, _watched, event) -> bool:  # noqa: N802 - Qt override
+        if event.type() in (QEvent.Type.Resize, QEvent.Type.Move):
+            self.events.append((event.type().name, QRect(self.board.geometry()), self.reading.chrome_dim()))
+        return False
+
+    def geometries(self) -> list[QRect]:
+        """The distinct geometries set, in order (a Move and a Resize of one setGeometry are one)."""
+        found: list[QRect] = []
+        for _kind, rect, _dim in self.events:
+            if not found or found[-1] != rect:
+                found.append(rect)
+        return found
+
+
+# --------------------------------------------------------------------------
+# The wide view's rectangle (desk_view.desk_geometry)
+# --------------------------------------------------------------------------
+
+class GeometryTests(unittest.TestCase):
+    def test_from_the_column_s_left_edge_to_the_board_s_right_edge_and_above_the_ask_bar(self) -> None:
+        for (width, height, folded), big in (((908, 636, False), QRect(24, 0, 860, 548)),     # 1120 x 700
+                                             ((1020, 576, False), QRect(24, 0, 972, 488)),    # 1232 x 640
+                                             ((824, 536, True), QRect(20, 0, 780, 452))):     # 900 x 600
+            with self.subTest(size=(width, height)):
+                g = desk_view.desk_geometry(width, height, folded_dock=folded)
+                self.assertEqual(g.big, big)
+                self.assertEqual(g.big.left(), g.column.left())
+                self.assertEqual(g.big.right(), g.view.right())
+                self.assertEqual(g.big.top(), 0)                          # the body's top
+                self.assertEqual(g.ask.top() - (g.big.bottom() + 1), desk_view.BIG_GAP)   # 12 px above the ask bar
+                self.assertFalse(g.big.intersects(g.ask))                 # the ask bar stays outside, live
+
+
+# --------------------------------------------------------------------------
+# The backdrop: one JPEG within the caps, painted from the column (never the view)
+# --------------------------------------------------------------------------
+
+class BackdropTests(unittest.TestCase):
+    def test_a_jpeg_within_the_picture_s_caps(self) -> None:
+        small = QImage(356, 548, QImage.Format.Format_RGB32)
+        small.fill(QColor(holo.VOID))
+        src = desk_big.jpeg_url(small)
+        self.assertEqual(protocol.jpeg_src(src), src)
+        import random
+
+        rand = random.Random(3)
+        noisy = QImage(1600, 1200, QImage.Format.Format_RGB32)      # far too big at any quality: painted smaller
+        for y in range(0, 1200, 2):
+            for x in range(0, 1600, 2):
+                noisy.setPixelColor(x, y, QColor(rand.randrange(256), rand.randrange(256), rand.randrange(256)))
+        src = desk_big.jpeg_url(noisy)
+        self.assertTrue(src)
+        self.assertLessEqual(len(src), protocol.PICTURE_CAP)
+        self.assertEqual(protocol.jpeg_src(src), src)
+        self.assertEqual(protocol.check_message({"type": "backdrop", "src": src}).type, "backdrop")
+
+
+class BigApp(unittest.TestCase):
+    def make(self, *, size: tuple[int, int] = (1120, 700)) -> AppHarness:
+        self.boards: list = []
+        harness = AppHarness(self, board_factory=board_fakes.stand_in_factory(self.boards))
+        harness.reading(autoplay=False)
+        self.c = harness.c
+        self.window = self.c.window
+        self.reading = self.window.reading
+        self.window.resize(*size)
+        self.reading.set_tab(ui.SCREEN_HOME)
+        holo.set_motion_level(holo.MOTION_OFF)
+        self.addCleanup(holo.set_motion_level, holo.MOTION_LIVELY)
+        self.desk = self.c.look.desk
+        settle(6)
+        return harness
+
+    def answer(self, key: int = 1) -> list[str]:
+        desk = self.desk
+        self.c._you("What's new with City Hack?")
+        desk.on_answer_started(key, "What's new with City Hack?")
+        self.c._jarvis("The schedule moved, sir.")
+        answer = desk._answers[key]
+        answer.done = True
+        answer.say = "The schedule moved, sir."
+        entries = [(source, lambda fid, data=data: Built(({**data, "type": "frame", "id": fid},), 0), "", "", "")
+                   for source, data in (("page", PAGE), ("day", DAY))]
+        desk._put(answer, entries)
+        desk.feed.set_turn(key, desk._answer_entry())
+        desk._sync_counts()
+        settle(3)
+        return [desk.feed.frame_id(key, "page"), desk.feed.frame_id(key, "day")]
+
+    def board(self) -> board_fakes.StandInBoard:
+        return self.boards[0]
+
+    def watch(self) -> Moves:
+        moves = Moves(self.board(), self.reading)
+        self.board().installEventFilter(moves)
+        self.addCleanup(self.board().removeEventFilter, moves)
+        return moves
+
+    def open(self, frame_id: str) -> None:
+        self.board().request("open", id=frame_id)                     # the page's Enter, double click or button
+        settle()
+
+
+class OpenTests(BigApp):
+    def test_step_one_the_backdrop_then_the_geometry_once_and_the_native_dim(self) -> None:
+        for size in ((1120, 700), (900, 600)):
+            with self.subTest(size=size):
+                self.make(size=size)
+                page_id = self.answer()[0]
+                desk = self.reading.desk_page()
+                geometry = desk.geometry_now()
+                moves = self.watch()
+                sent_before = len(self.board().sent)
+                self.open(page_id)
+                self.assertEqual(self.desk.big.state(), "open")
+                self.assertEqual(moves.geometries(), [geometry.big])          # set ONCE, never frame by frame
+                self.assertEqual(self.board().geometry(), geometry.big)
+                sent = [message["type"] for message in self.board().sent[sent_before:]]
+                self.assertEqual(sent[sent.index("backdrop"):sent.index("big") + 1], ["backdrop", "big"])
+                big = self.board().of_type("big")[-1]
+                view = geometry.view
+                self.assertEqual(big, {"type": "big", "state": "open", "id": page_id, "x": view.x() - geometry.big.x(),
+                                       "y": view.y(), "w": view.width(), "h": view.height()})
+                self.assertEqual(self.reading.chrome_dim(), desk_big.DIM)       # the Dock and the header at 20 %
+                self.assertTrue(desk.veil.shown())                               # a still while it is set ...
+                self.assertTrue(desk.chip_slot.isHidden())                       # (the chips' edge never shows)
+                self.board().request("big", step="laid")
+                settle()
+                self.assertFalse(desk.veil.shown())                              # ... gone once the page is laid out
+                self.assertTrue(self.reading.board_big())
+
+    def test_the_backdrop_is_the_column_never_the_view_at_1x_and_1_5x(self) -> None:
+        self.make()
+        self.answer()
+        desk = self.reading.desk_page()
+        geometry = desk.geometry_now()
+        rect = QRect(geometry.big.x(), 0, geometry.view.x() - geometry.big.x(), geometry.big.height())
+        for dpr in (1.0, 1.5):
+            with self.subTest(dpr=dpr):
+                image = desk.column_image(rect, self.reading.ground_painter(), dpr=dpr)
+                self.assertEqual((image.width(), image.height()), (round(rect.width() * dpr),
+                                                                   round(rect.height() * dpr)))
+                self.assertEqual(image.devicePixelRatio(), dpr)
+                seam = round((geometry.seam.x() - rect.x()) * dpr)
+                self.assertEqual(QColor(image.pixel(seam, round(200 * dpr))).name(),
+                                 QColor(image.pixel(seam, round(201 * dpr))).name())   # the seam's line, drawn
+                src = desk_big.jpeg_url(image)
+                self.assertEqual(protocol.jpeg_src(src), src)                  # one JPEG within the caps
+        self.assertLess(rect.right(), geometry.view.x())                       # left of the view: never the view
+
+    def test_esc_the_scale_down_then_the_geometry_once_then_the_dim_lifts(self) -> None:
+        self.make()
+        page_id = self.answer()[0]
+        geometry = self.reading.desk_page().geometry_now()
+        self.open(page_id)
+        self.board().request("big", step="laid")
+        moves = self.watch()
+        self.board().request("big", step="back")                            # Esc in the page: its scale-down starts
+        settle()
+        self.assertEqual(self.desk.big.state(), "closing")
+        self.assertEqual(self.board().geometry(), geometry.big)              # the view still wide meanwhile ...
+        self.assertEqual(self.reading.chrome_dim(), desk_big.DIM)            # ... and the dim still on
+        self.assertEqual(moves.events, [])
+        self.board().request("big", step="shut")                            # the scale-down is over
+        settle()
+        self.assertEqual(moves.geometries(), [geometry.view])                # the geometry back, once ...
+        self.assertTrue(all(dim == desk_big.DIM for _kind, _rect, dim in moves.events))   # ... before the dim lifts
+        self.assertEqual(self.reading.chrome_dim(), 1.0)
+        self.assertEqual(self.desk.big.state(), "")
+        self.assertFalse(self.reading.board_big())
+        self.assertFalse(self.reading.desk_page().chip_slot.isHidden())
+
+    def test_a_page_that_never_says_shut_goes_back_after_its_grace(self) -> None:
+        self.make()
+        page_id = self.answer()[0]
+        self.open(page_id)
+        self.board().request("big", step="back")
+        settle()
+        self.assertTrue(self.desk.big._shut_timer.isActive())                 # noqa: SLF001
+        self.desk.big._on_shut_late()                                         # noqa: SLF001 - as its timer does
+        settle()
+        self.assertEqual(self.desk.big.state(), "")
+        self.assertEqual(self.board().geometry(), self.reading.desk_page().geometry_now().view)
+
+    def test_a_resize_while_big_keeps_it_over_both_columns(self) -> None:
+        self.make()
+        page_id = self.answer()[0]
+        self.open(page_id)
+        moves = self.watch()
+        self.window.resize(1232, 640)
+        settle(6)
+        geometry = self.reading.desk_page().geometry_now()
+        self.assertEqual(self.desk.big.state(), "open")
+        self.assertEqual(self.board().geometry(), geometry.big)               # both columns, the new layout ...
+        self.assertEqual(moves.geometries()[-1], geometry.big)
+        self.assertEqual(len(moves.geometries()), 1)                          # ... set once for it
+        big = self.board().of_type("big")[-1]
+        self.assertEqual((big["x"], big["w"], big["h"]), (geometry.view.x() - geometry.big.x(), geometry.view.width(),
+                                                          geometry.view.height()))
+        self.assertEqual(self.board().of_type("backdrop")[-1]["type"], "backdrop")   # painted again for it
+        self.assertEqual(self.desk.big.counts["relaid"], 1)
+
+    def test_it_ends_at_once_off_home(self) -> None:
+        self.make()
+        page_id = self.answer()[0]
+        self.open(page_id)
+        self.reading.set_tab(ui.SCREEN_APPROVALS)
+        settle()
+        self.assertEqual(self.desk.big.state(), "")
+        self.assertEqual(self.reading.chrome_dim(), 1.0)                     # the Dock and the header never left dim
+        self.assertEqual(self.board().of_type("big")[-1], {"type": "big", "state": "close", "id": ""})
+        self.assertEqual(self.board().geometry(), self.reading.desk_page().geometry_now().view)
+
+    def test_its_frame_leaving_the_board_sends_it_back(self) -> None:
+        self.make()
+        page_id = self.answer()[0]
+        self.open(page_id)
+        self.board().request("close", id=page_id)
+        settle()
+        self.assertEqual(self.desk.big.state(), "closing")
+        self.assertEqual(self.board().of_type("big")[-1]["state"], "close")
+
+    def test_what_can_t_open_big(self) -> None:
+        self.make()
+        page_id, day_id = self.answer()
+        big = self.desk.big
+        self.board().request("close", id=day_id)                             # a closed frame
+        settle()
+        self.open(day_id)
+        self.assertEqual(big.counts["refused:frame"], 1)
+        self.reading.set_tab(ui.SCREEN_APPROVALS)                            # not on Home
+        settle()
+        self.desk._on_open(page_id)                                          # noqa: SLF001 - as the page's request
+        self.assertEqual(big.counts["refused:not_shown"], 1)
+        self.reading.set_tab(ui.SCREEN_HOME)
+        settle()
+        self.open(page_id)
+        self.open(page_id)                                                   # already big
+        self.assertEqual(big.counts["refused:busy"], 1)
+        self.assertEqual(big.counts["opened"], 1)
+
+    def test_f6_skips_the_covered_conversation(self) -> None:
+        self.make()
+        page_id = self.answer()[0]
+        self.open(page_id)
+        self.window.activateWindow()
+        QApplication.setActiveWindow(self.window)
+        self.reading.focus_ask_bar()
+        settle()
+        self.reading.cycle_focus(True)                                        # from the ask bar: the board, not the
+        settle()                                                              # conversation under the wide view
+        self.assertEqual(self.board().sent[-1], {"type": "focus_part", "part": "board"})
+        self.board().page_widget.setFocus()
+        settle()
+        self.reading.cycle_focus(True)
+        settle(2)
+        self.assertTrue(self.reading.command_bar.isAncestorOf(QApplication.focusWidget()))
+
+    def test_the_logs_hold_no_words(self) -> None:
+        self.make()
+        with self.assertLogs("briefing_reader", level=logging.DEBUG) as logs:
+            page_id = self.answer()[0]
+            self.open(page_id)
+            self.board().request("big", step="back")
+            self.board().request("big", step="shut")
+            logging.getLogger("briefing_reader").debug("marker")
+        self.assertFalse(any("City Hack" in line or "city-hack" in line for line in logs.output))
+        self.assertTrue(any(f"frame {page_id} open big" in line for line in logs.output))
+
+
+if __name__ == "__main__":
+    unittest.main()

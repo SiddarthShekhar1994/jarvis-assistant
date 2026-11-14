@@ -27,8 +27,16 @@ memory. Part 5b's board ways, in the real page with the app's own controller and
 expanding), parking (the page's own reading report, the pill, the dashed strip entry, the scroll holding, Show, the
 quiet landing, the 220 ms room), pin and a 7th's note for 4 s, close and Bring back, All | Pinned, Clear and Bring back
 and the desk folding when nothing is left, the keyboard (F6 and Shift+F6 round, the arrows, Home / End, Esc), pairs at
-1232 x 640 with Left / Right, and the new messages refused by the page when hostile. Skipped when this PySide6 has no
-QtWebEngine 6.8+.
+1232 x 640 with Left / Right, and the new messages refused by the page when hostile. Part 5c, the lit frame and open
+big, with the app's own controller: Jarvis's sentence lights the frame it names - its brackets in its own colour
+(AMBER_HI on amber, never cyan), its lit ground, the stub from the view's left edge to it meeting the app's native
+part at the same place, both hidden while the board scrolls and back after, an arriving frame traced in LINE_FOCUS
+meanwhile, all gone with the speech; the changed lap and the same words sending nothing; three across at 1500 x 960
+(Left / Right in the row) and pairs at 1480 x 960; Clear with nothing pinned keeping the desk for its Bring back; a
+real double click opening big (the geometry set once, the backdrop the only new picture, the frame scaling from its
+rectangle to the whole view, the native dim), a resize keeping it over both columns, real Esc reversing it in order
+(the scale-down, the geometry set back once, then the dim lifting), at 900 x 600 and at 1.5x. Skipped when this
+PySide6 has no QtWebEngine 6.8+.
 """
 
 from __future__ import annotations
@@ -46,7 +54,8 @@ from briefing_reader.board import view
 
 PROBE = Path(__file__).with_name("board_probe.py")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CASES = ("lockdown", "control", "media", "keys", "fallback", "shell", "kinds", "desk", "desk_x15", "ways")
+CASES = ("lockdown", "control", "media", "keys", "fallback", "shell", "kinds", "desk", "desk_x15", "ways", "lit", "big",
+         "big_x15")
 REPORTS: dict[str, dict] = {}
 FAILURES: dict[str, str] = {}
 WINDOW_KEYS = ["Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+6", "Ctrl+7", "Ctrl+8", "Ctrl+9", "Ctrl+,",
@@ -650,8 +659,9 @@ class WaysTests(BoardProbeCase):
         self.assertEqual(gone["cleared"], "")
         self.assertEqual([item["id"] for item in gone["frames"]], report["pinned_left"])
         self.assertEqual(report["clear_gone_feed"], report["pinned_left"])
+        self.assertEqual(report["last_clear_held"], [True, True, 0])   # part 5c: the desk stays for Bring back ...
         self.assertEqual((report["last_clear_desk"], report["last_clear_stage"], report["last_clear_count"]),
-                         (False, True, 0))                             # nothing left: Home's stage again
+                         (False, True, 0))                             # ... then nothing left: Home's stage again
 
     def test_the_keyboard(self) -> None:
         keys = self.ways()["keys"]
@@ -691,3 +701,214 @@ class WaysTests(BoardProbeCase):
         report = self.ways()
         self.assertEqual(report["page_refused"], [False] * 9)
         self.assertTrue(report["hostile_changed_nothing"])
+
+
+def _color(value: object) -> str:
+    """A token as the page's computed colour ("rgb(r, g, b)" or "rgba(r, g, b, a)")."""
+    from PySide6.QtGui import QColor
+
+    color = value if isinstance(value, QColor) else QColor(value)
+    if color.alpha() == 255:
+        return f"rgb({color.red()}, {color.green()}, {color.blue()})"
+    return f"rgba({color.red()}, {color.green()}, {color.blue()}, {round(color.alphaF(), 2):g})"
+
+
+class LitTests(BoardProbeCase):
+    """Part 5c: the lit frame, its cue line's stub, changed, three across and Clear (tests/board_probe.py lit_case)."""
+
+    def lit(self) -> dict:
+        report = self.report("lit")
+        self.assertTrue(report["ready"])
+        return report
+
+    def test_the_sentence_lights_the_frame_it_names_in_its_own_colour(self) -> None:
+        from briefing_reader import holo
+
+        report = self.lit()
+        mail, day = report["ids"][0], report["ids"][1]
+        amber, cyan = report["amber_page"], report["cyan_page"]
+        self.assertEqual(amber["lit"], mail)                           # "Dana sent the budget numbers ...": the mail
+        self.assertEqual(cyan["lit"], day)                             # "Three meetings today ...": the calendar
+        self.assertEqual({b["color"] for b in amber["brackets"]}, {_color(holo.AMBER_HI)})   # never cyan on amber
+        self.assertEqual({b["color"] for b in cyan["brackets"]}, {_color(holo.HOLO_HI)})
+        self.assertEqual(len(amber["brackets"]), 4)
+        box = amber["litBox"]
+        corners = sorted((round(b["box"]["left"]), round(b["box"]["top"])) for b in amber["brackets"])
+        self.assertEqual(corners[0], (round(box["left"]) - 6, round(box["top"]) - 6))   # 6 px outside its corners
+        self.assertEqual({round(b["box"]["width"]) for b in amber["brackets"]}, {14})
+        self.assertEqual(round(box["left"]) - 6, 9)                    # the left ones in the view's 15 px pad
+        lit_frame = next(f for f in amber["frames"] if f["id"] == mail)
+        self.assertEqual(lit_frame["ground"], _color(holo.TILE_AMBER_LIT))
+        day_frame = next(f for f in cyan["frames"] if f["id"] == day)
+        self.assertEqual(day_frame["ground"], _color(holo.TILE_FOCUS))
+        for name in ("amber_native", "cyan_native"):                   # every ring's core glow halves
+            self.assertEqual(report[name]["rings"], [0.5] * 5, name)
+
+    def test_the_stub_runs_from_the_view_s_left_edge_and_meets_the_native_part(self) -> None:
+        from briefing_reader import holo
+
+        report = self.lit()
+        for page, native, color in ((report["amber_page"], report["amber_native"], holo.CUE_AMBER),
+                                    (report["cyan_page"], report["cyan_native"], holo.CUE)):
+            stub = page["stub"]
+            self.assertEqual(stub["visibility"], "visible")
+            self.assertEqual(round(stub["line"]["left"]), 0)           # from the view's left edge ...
+            dot_centre = stub["dot"]["left"] + stub["dot"]["width"] / 2
+            self.assertAlmostEqual(dot_centre, page["litBox"]["left"] - 6, delta=0.6)   # ... to a dot 6 px from it
+            self.assertEqual(round(stub["dot"]["width"]), 5)           # a 2.5 px dot
+            self.assertEqual(stub["color"], _color(color))
+            line_middle = stub["line"]["top"] + stub["line"]["height"] / 2
+            path = native["path"]
+            self.assertAlmostEqual(line_middle, path["end_y"] - native["board_top"], delta=0.6)   # they meet
+            self.assertEqual(path["seam_x"], native["seam"] + 0.5)     # the native part runs along the seam ...
+            self.assertLess(native["line_right"], native["view_left"])   # ... and never over the view
+            self.assertTrue(native["shown"])
+
+    def test_scrolling_hides_both_parts_and_they_come_back(self) -> None:
+        report = self.lit()
+        self.assertEqual(report["scrolling_page"]["stub"]["visibility"], "hidden")
+        self.assertFalse(report["scrolling_native"]["shown"])
+        after, native = report["after_scroll_page"], report["after_scroll_native"]
+        self.assertEqual(after["stub"]["visibility"], "visible")
+        self.assertNotIn("drawing", after["stub"]["cls"])              # back without the draw-in
+        self.assertTrue(native["shown"])
+        middle = after["stub"]["line"]["top"] + after["stub"]["line"]["height"] / 2
+        self.assertAlmostEqual(middle, native["path"]["end_y"] - native["board_top"], delta=0.6)
+
+    def test_an_arriving_frame_traces_in_line_focus_while_one_is_lit(self) -> None:
+        from briefing_reader import holo
+
+        report = self.lit()
+        arriving = next(f for f in report["arriving_page"]["frames"] if f["id"] == report["arriving_id"])
+        self.assertIn("arriving", arriving["cls"])
+        self.assertEqual(arriving["outline"], _color(holo.LINE_FOCUS))
+
+    def test_the_speech_ending_lights_nothing(self) -> None:
+        report = self.lit()
+        ended, native = report["ended_page"], report["ended_native"]
+        self.assertEqual((ended["lit"], ended["has_lit"], ended["stubs"]), ("", False, 0))
+        self.assertEqual((native["lit"], native["glow"], native["rings"]), ("", 1.0, [1.0] * 5))
+        self.assertFalse(native["shown"])
+
+    def test_changed_one_lap_then_the_tag_and_the_same_words_send_nothing(self) -> None:
+        report = self.lit()
+        mail = report["ids"][0]
+        lapping = next(f for f in report["lap_page"]["frames"] if f["id"] == mail)
+        after = next(f for f in report["after_lap_page"]["frames"] if f["id"] == mail)
+        self.assertIn("lap", lapping["cls"].split())
+        self.assertNotIn("lap", after["cls"].split())
+        self.assertIn("changed", after["cls"].split())
+        self.assertEqual(report["changed_frames"], 1)                  # sent again, once, in its own place
+        self.assertEqual(report["same_again_sent"], 0)                 # the same words: nothing at all
+        self.assertEqual(report["feed_counts"]["changed"], 1)
+
+    def test_three_across_from_756_px_and_pairs_below(self) -> None:
+        report = self.lit()
+        three = [f for f in report["three_page"]["frames"] if f["id"] in report["three_ids"]]
+        self.assertEqual([("trio" in f["cls"].split()) for f in three], [True] * 3)
+        self.assertEqual(len({round(f["top"]) for f in three}), 1)    # one row
+        self.assertGreaterEqual(min(f["width"] for f in three), 244)
+        self.assertIn("trios", report["three_page"]["board"].split())
+        self.assertEqual(report["three_view"][2], 819)                 # 1500 x 960: a 764 px frames area
+        a, b, c = report["three_ids"]
+        keys = report["three_keys"]
+        self.assertEqual((keys["right"], keys["right2"], keys["left"]), (b, c, b))   # Left / Right in the row
+        self.assertNotIn(keys["down"], report["three_ids"])            # Down leaves the row
+        pairs = {f["id"]: f for f in report["pairs_page"]["frames"]}
+        self.assertEqual(report["pairs_view"][2], 799)                 # 1480 x 960: a 744 px area, pairs
+        self.assertNotIn("trios", report["pairs_page"]["board"].split())
+        self.assertIn("pair-a", pairs[a]["cls"].split())
+        self.assertIn("pair-b", pairs[b]["cls"].split())
+        self.assertNotIn("pair-a", pairs[c]["cls"].split())           # the third alone, full width
+        self.assertGreater(pairs[c]["width"], 2 * 244)
+
+    def test_clear_with_nothing_pinned_keeps_the_desk_for_its_bring_back(self) -> None:
+        report = self.lit()
+        self.assertEqual((report["cleared_desk"], report["cleared_held"], report["cleared_count"]), (True, True, 0))
+        self.assertRegex(report["cleared_row"], r"^Board cleared \d+ FRAMES Bring back$")
+        self.assertTrue(report["cleared_bar"].startswith("Board 0 FRAMES"))
+        self.assertTrue(report["cleared_ring_head"])
+        self.assertEqual((report["after_clear_desk"], report["after_clear_stage"]), (False, True))
+
+    def test_the_new_messages_hostile_are_refused_by_the_page(self) -> None:
+        report = self.lit()
+        self.assertEqual(report["page_refused"], [False] * 11)
+        self.assertEqual(report["big_after_hostile"], "")
+
+
+class BigTests(BoardProbeCase):
+    """Part 5c: open big in Jarvis's own window (tests/board_probe.py big_case), at 1x and 1.5x."""
+
+    def check(self, case: str) -> dict:
+        report = self.report(case)
+        self.assertTrue(report["ready"])
+        return report
+
+    def test_open_big_in_two_steps(self) -> None:
+        for case in ("big", "big_x15"):
+            with self.subTest(case=case):
+                report = self.check(case)
+                self.assertEqual(report["big_rect"], [24, 0, 860, 550])     # the column's left edge to the board's
+                self.assertTrue(report["veil_shown"])                         # a still over it while it is set
+                self.assertFalse(report["veil_after"])                        # gone once the page is laid out
+                self.assertEqual(report["open_view"], report["big_rect"])
+                self.assertEqual([event[0] for event in report["moves_open"]], ["Move", "Resize"])   # once
+                self.assertEqual(report["open_dim"], 0.2)                     # the Dock and the header at 20 %
+                mid, done = report["mid_open"], report["open"]
+                self.assertNotEqual(mid["transform"], "none")                 # it grows ...
+                self.assertLess(mid["card"]["width"], done["card"]["width"])
+                self.assertEqual([round(v) for v in done["card"].values()], [0, 0, 860, 550])   # ... to the view
+                self.assertEqual(done["transform"], "none")
+                self.assertTrue(done["cardFocus"])
+                self.assertTrue(done["cardMeta"].endswith("· Open big"))
+                self.assertEqual(done["cardFoot"], "ESC BACK TO THE BOARD")
+                self.assertEqual(done["boardOpacity"], "0.2")
+                backdrop = done["backdrop"]
+                self.assertEqual((backdrop["display"], backdrop["src"], backdrop["opacity"]),
+                                 ("block", "data:image/jpeg;base64,", "0.2"))
+                self.assertEqual([round(v) for v in backdrop["box"].values()], [0, 0, 357, 550])
+                outside = [image for image in done["images"] if not image["inBoard"] and not image["inCard"]]
+                self.assertEqual([image["id"] for image in outside], ["backdrop"])   # the one new picture
+                self.assertTrue(all(image["src"] == "data:image/jpeg;base64," for image in done["images"]))
+                self.assertEqual(report["blocked_after"], report["blocked_before"])  # nothing else was asked for
+                self.assertEqual(set(report["allowed"]), {"jarvis-board"})
+
+    def test_a_resize_keeps_it_over_both_columns_and_900x600_too(self) -> None:
+        for case in ("big", "big_x15"):
+            with self.subTest(case=case):
+                report = self.check(case)
+                self.assertEqual(report["resized_state"], "open")
+                self.assertEqual(report["resized_view"], report["resized_rect"])
+                self.assertEqual(len(report["moves_resized"]), 2)            # set once for the new layout
+                self.assertEqual([round(v) for v in report["resized"]["card"].values()][2:],
+                                 report["resized_rect"][2:])
+                self.assertEqual(report["small_rect"], [20, 0, 780, 454])     # 900 x 600: the compact column
+                self.assertEqual(report["small_view"], report["small_rect"])
+                self.assertEqual(len(report["moves_small"]), 2)
+                self.assertEqual([round(v) for v in report["small"]["card"].values()], [0, 0, 780, 454])
+                self.assertEqual(report["small_closed_view"], [317, 12, 483, 526])
+
+    def test_esc_reverses_it_in_order(self) -> None:
+        for case in ("big", "big_x15"):
+            with self.subTest(case=case):
+                report = self.check(case)
+                mid = report["mid_close"]
+                self.assertNotEqual(mid["transform"], "none")                 # the scale-down first ...
+                self.assertEqual(report["mid_close_dim"], 0.2)
+                self.assertEqual(report["mid_close_view"], report["resized_rect"])   # ... the view still wide
+                self.assertEqual([step for _who, step, _at in report["order"]], ["back", "shut", "laid"])
+                steps = report["dims_at_steps"][:3]                          # (the later 900 x 600 round after)
+                self.assertEqual([step[0] for step in steps], ["back", "shut", "laid"])
+                (_b, back_dim, back_view), (_s, shut_dim, shut_view), _laid = steps
+                self.assertEqual((back_dim, back_view), (0.2, report["resized_rect"]))
+                self.assertEqual(shut_view, report["closed_rect"])           # then the geometry, once ...
+                self.assertEqual(shut_dim, 0.2)                               # ... and only then the dim lifts
+                self.assertEqual([event[0] for event in report["moves_close"]], ["Move", "Resize"])
+                self.assertEqual((report["closed_view"], report["closed_dim"]), (report["closed_rect"], 1.0))
+                self.assertGreaterEqual(report["shut_s"], 0.2)                # its 220 ms
+                closed = report["closed"]
+                self.assertEqual((closed["card"], closed["body"]), (None, "has-bar"))
+                self.assertEqual(closed["backdrop"]["display"], "none")
+                self.assertFalse(report["layer_after_close"])                 # nothing left over the board ...
+                self.assertTrue(report["hit_after_close"])                    # ... a click reaches its frame
+                self.assertTrue(report["esc_again_ask"])                      # Esc again: the ask bar

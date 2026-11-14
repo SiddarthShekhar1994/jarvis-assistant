@@ -11,7 +11,13 @@ the board itself is board.view.BoardView (made and fed by desk_ui.DeskController
     DeskPage(QWidget)      the desk: ``head`` (RingHead), ``turns`` (DeskTurns), the chips row and the ask bar's
                            places (``chip_row``, ``ask_slot``: the app moves Home's own chip row and command bar in),
                            ``set_board(view)`` (the board's place: its geometry is set once per layout, never
-                           animated), the seam it paints; ``apply_geometry()``
+                           animated), the seam it paints; ``apply_geometry()``. Part 5c: ``cue_line`` (CueLine: the
+                           cue line's native part, from the column to the seam, never over the view), ``set_big(on)``
+                           (open big: the view spans both columns, ``geometry.big``, set once), ``veil`` (Veil: a
+                           still over the view while its geometry is set), ``column_image(rect)`` (the column as it
+                           looks, never the view: open big's backdrop)
+    CueLine, CuePath       the cue line's native part and where it runs (part 5c)
+    Veil                   open big's still (part 5c)
     RingHead               the ring (an orb.OrbWidget, 120 px centred with hairlines to the column's edges, cyan 0.22
                            fading out; or 92 px at the left with the state word and "Earlier · 2 turns", which opens
                            today's transcript drawer)
@@ -36,7 +42,7 @@ import math
 import re
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import shiboken6
@@ -51,6 +57,8 @@ from PySide6.QtGui import (
     QPainterPath,
     QPen,
     QPixmap,
+    QRadialGradient,
+    QRegion,
     QTextCharFormat,
     QTextLayout,
     QTextOption,
@@ -93,6 +101,7 @@ CHIPS_MARGIN = 12
 ASK_HEIGHT = 52             # the ask bar, the column's full width
 DRAWER_BELOW = 360          # a frames area under this: the board opens as a drawer instead
 HAIRLINE_GAP = 14           # between a hairline's end and the ring
+BIG_GAP = 12                # open big: the wide view ends this far above the ask bar (DESIGN-SPEC 3.5)
 
 
 @dataclass(frozen=True)
@@ -111,6 +120,9 @@ class DeskGeometry:
     frames_x: int               # the frames' left edge (view + 15)
     frames_width: int           # the frames area (the view less its pad, the strip and its gap)
     drawer: bool                # the frames area would be under DRAWER_BELOW: the board as a drawer instead
+    # open big's wide view (part 5c): the column's left edge to the board's right edge, the body's top to BIG_GAP above
+    # the ask bar (the ask bar stays outside it, live)
+    big: QRect = field(default_factory=QRect)
 
 
 def desk_geometry(width: int, height: int, *, folded_dock: bool) -> DeskGeometry:
@@ -136,9 +148,10 @@ def desk_geometry(width: int, height: int, *, folded_dock: bool) -> DeskGeometry
     view_x = seam_x + 1
     view = QRect(view_x, VIEW_TOP, max(0, width - view_x - GUTTER), max(0, height - VIEW_TOP))
     frames_width = view.width() - PAD - STRIP
+    big = QRect(QPoint(left, 0), QPoint(view.right(), max(0, ask.top() - BIG_GAP - 1)))
     return DeskGeometry(compact=compact, column=column, head=head, ring=ring, turns=turns, chips=chips, ask=ask,
                         seam=seam, view=view, frames_x=view_x + PAD, frames_width=frames_width,
-                        drawer=frames_width < DRAWER_BELOW)
+                        drawer=frames_width < DRAWER_BELOW, big=big)
 
 
 # --------------------------------------------------------------------------
@@ -204,6 +217,7 @@ class TextBlock:
         self.marks = tuple(marks)
         self._width = -1.0
         self._layouts: list[tuple[QTextLayout, int]] = []
+        self._starts: list[int] = []     # each paragraph's first character in ``text``
         self.lines = 0
         self.natural = 0.0           # the widest line laid out
 
@@ -214,6 +228,7 @@ class TextBlock:
             return self.lines * self.line
         self._width = width
         self._layouts = []
+        self._starts = []
         self.lines = 0
         self.natural = 0.0
         offset = 0
@@ -250,9 +265,37 @@ class TextBlock:
             if count == 0:
                 count = 1
             self._layouts.append((layout, count))
+            self._starts.append(offset)
             self.lines += count
             offset += len(paragraph) + 1
         return self.lines * self.line
+
+    def point_at(self, offset: int, *, line_end: bool = False) -> QPointF | None:
+        """Where the character place ``offset`` of ``text`` is once laid out: x at it (the end of the character before
+        it), y the middle of its line; ``line_end``: x at the end of the words on that line instead, when more words
+        follow it there (a line drawn from it never crosses them). None when there is no such place (lay it out
+        first)."""
+        if offset < 0 or offset > len(self.text) or not self._layouts:
+            return None
+        index = 0
+        for position, start in enumerate(self._starts):
+            if start <= offset:
+                index = position
+        layout, _count = self._layouts[index]
+        local = min(max(0, offset - self._starts[index]), len(layout.text()))
+        line = layout.lineForTextPosition(local)
+        if not line.isValid() or (local > 0 and local == line.textStart() and line.lineNumber() > 0):
+            # the place right after a line's last word is the next line's start: it belongs to the line before
+            number = line.lineNumber() - 1 if line.isValid() else layout.lineCount() - 1
+            if number < 0:
+                return None
+            line = layout.lineAt(number)
+        found = line.cursorToX(local)
+        x = float(found[0] if isinstance(found, tuple) else found)
+        if line_end:
+            x = max(x, float(line.x() + line.naturalTextWidth()))
+        metrics = QFontMetricsF(self.font)
+        return QPointF(x, line.y() + metrics.height() / 2)
 
     def paint(self, painter: QPainter, origin: QPointF, color: str | QColor) -> None:
         painter.save()
@@ -667,6 +710,18 @@ class TurnView(QWidget):
         super().resizeEvent(event)
         self._place()
 
+    def text_point(self, offset: int, *, line_end: bool = False) -> QPointF | None:
+        """Where character place ``offset`` of a Jarvis turn's words is painted (x at it, y its line's middle; with
+        ``line_end`` the end of the words on that line), in this widget's px: the cue line starts beside a sentence's
+        end (part 5c). None for the owner's turns."""
+        if self._block is None or self.you():
+            return None
+        self._block.layout(self._text_width(max(1, self.width())))
+        point = self._block.point_at(offset, line_end=line_end)
+        if point is None:
+            return None
+        return QPointF(point.x(), point.y() + self.LABEL_H + self.LABEL_GAP)
+
     def text_rect(self) -> QRectF:
         """Where the words are painted (tests measure that nothing is clipped)."""
         if self._block is None:
@@ -858,9 +913,8 @@ class DeskTurns(QScrollArea):
         if text == self._live:
             return
         newest = next((turn for turn in reversed(self._turns) if turn.role != hud.ROLE_YOU), None)
-        if text and newest is not None and newest.entry_id > self._live_after and \
-                " ".join(newest.text.split()).startswith(text[:40]):
-            text = ""                          # it is there already as his turn
+        if text and newest is not None and " ".join(newest.text.split()).startswith(text[:40]):
+            text = ""                          # it is there already as his turn (spoken after it came, or before)
         self._live = text
         self._rebuild()
 
@@ -875,6 +929,10 @@ class DeskTurns(QScrollArea):
     def views(self) -> list[TurnView]:
         """The turns shown, oldest first."""
         return list(self._order)
+
+    def current_view(self) -> TurnView | None:
+        """The current turn (Jarvis's newest, Sora 16/25): the one a sentence being said is found in (part 5c)."""
+        return next((view for view in reversed(self._order) if view.current()), None)
 
     def live_text(self) -> str:
         return self._live
@@ -1131,6 +1189,243 @@ class RingFlight(QWidget):
 
 
 # --------------------------------------------------------------------------
+# The cue line's native part (part 5c, DESIGN-SPEC 5 and 8)
+# --------------------------------------------------------------------------
+
+CUE_DRAW_MS = 200           # the native part draws in (cubic-out), then the page's 15 px stub (to 240 ms)
+CUE_FADE_MS = 400           # it fades this long after its sentence
+CUE_PEN = 1.2               # px
+CUE_DOT = 3.0               # the dot beside the sentence's end (6 px; the page's at the frame is 2.5 px)
+CUE_DOT_GAP = 6             # between the sentence's last letter and that dot ...
+CUE_LINE_GAP = 4            # ... and between the dot and the line
+CUE_TICK_MS = 16
+
+
+def _cubic_out(p: float) -> float:
+    p = max(0.0, min(1.0, p))
+    return 1.0 - (1.0 - p) ** 3
+
+
+@dataclass(frozen=True)
+class CuePath:
+    """Where the native part runs, in the desk's px: from beside the sentence's end (``start``: its last letter's right
+    edge, its line's middle) along to the seam (``seam_x``, its middle) and along it to ``end_y`` (the lit frame's
+    anchor, where the page's stub takes over); ``amber`` for a frame that waits (CUE_AMBER, else CUE)."""
+
+    start: QPointF
+    seam_x: float
+    end_y: float
+    amber: bool = False
+
+    def points(self) -> tuple[QPointF, QPointF, QPointF, QPointF]:
+        """(the dot's centre, the line's start, the corner at the seam, the end)."""
+        dot = QPointF(min(self.start.x() + CUE_DOT_GAP + CUE_DOT, self.seam_x - CUE_DOT), self.start.y())
+        first = QPointF(min(dot.x() + CUE_DOT + CUE_LINE_GAP, self.seam_x), self.start.y())
+        return dot, first, QPointF(self.seam_x, self.start.y()), QPointF(self.seam_x, self.end_y)
+
+
+class CueLine(QWidget):
+    """The cue line's native part (DESIGN-SPEC 8): a dot beside the end of the sentence being said, then a 1.2 px line
+    to the seam and along it, in the frame's colour; it stops at the seam and is never drawn over the board's view
+    (its geometry ends at the seam: the desk sets it). ``show_path(path, draw)``: drawn in over CUE_DRAW_MS
+    (cubic-out) when ``draw``, else at once (calm and motion off: always at once); ``move_path(path)``: the same line
+    elsewhere, at once; ``set_hidden(hidden)``: out of sight while the board scrolls, back at once; ``fade()``: it goes
+    over CUE_FADE_MS (calm x1.6; motion off: at once), and a new line may draw meanwhile. Never the mouse's or the
+    focus."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("deskCueLine")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._path: CuePath | None = None
+        self._drawn_at = 0.0               # when its draw-in began (monotonic s; 0: at once)
+        self._draw_s = 0.0
+        self._leaving: CuePath | None = None
+        self._leave_at = 0.0
+        self._leave_s = 0.0
+        self._hidden = False
+        self._timer = QTimer(self)
+        self._timer.setInterval(CUE_TICK_MS)
+        self._timer.timeout.connect(self._tick)
+
+    # ---- what it shows -------------------------------------------------------------------------------------------
+
+    def path(self) -> CuePath | None:
+        return self._path
+
+    def shown(self) -> bool:
+        """A line is drawn now (or drawing in): not faded, not hidden."""
+        return self._path is not None and not self._hidden
+
+    def drawing(self) -> bool:
+        return self._path is not None and self._progress() < 1.0
+
+    def show_path(self, path: CuePath, *, draw: bool = True) -> None:
+        level = holo.motion_level()
+        if self._path is not None and self._path != path:
+            self.fade()                        # the line before goes as this one comes
+        self._path = path
+        self._draw_s = CUE_DRAW_MS / 1000.0 if draw and level == holo.MOTION_LIVELY else 0.0
+        self._drawn_at = time.monotonic()
+        self._run()
+        self.update()
+
+    def move_path(self, path: CuePath) -> None:
+        if self._path is None:
+            self.show_path(path, draw=False)
+            return
+        if path != self._path:
+            self._path = path
+            self.update()
+
+    def set_hidden(self, hidden: bool) -> None:
+        if bool(hidden) != self._hidden:
+            self._hidden = bool(hidden)
+            if not hidden:
+                self._draw_s = 0.0             # back after the board scrolled: without the draw-in
+                self._run()
+            self.update()
+
+    def fade(self) -> None:
+        """The line goes (DESIGN-SPEC 5: 400 ms after its sentence; calm x1.6; off: removed at once)."""
+        if self._path is None:
+            return
+        level = holo.motion_level()
+        self._leaving = self._path if level != holo.MOTION_OFF and not self._hidden else None
+        self._leave_s = CUE_FADE_MS * (CALM if level == holo.MOTION_CALM else 1.0) / 1000.0
+        self._leave_at = time.monotonic()
+        self._path = None
+        self._run()
+        self.update()
+
+    def clear(self) -> None:
+        """Nothing at once (open big covers the column; the desk folded)."""
+        self._path = self._leaving = None
+        self._timer.stop()
+        self.update()
+
+    # ---- motion --------------------------------------------------------------------------------------------------
+
+    def _progress(self, now: float | None = None) -> float:
+        if self._draw_s <= 0.0:
+            return 1.0
+        return _cubic_out(((time.monotonic() if now is None else now) - self._drawn_at) / self._draw_s)
+
+    def _leave_alpha(self, now: float | None = None) -> float:
+        if self._leaving is None or self._leave_s <= 0.0:
+            return 0.0
+        return max(0.0, 1.0 - ((time.monotonic() if now is None else now) - self._leave_at) / self._leave_s)
+
+    def _run(self) -> None:
+        if self.drawing() or self._leaving is not None:
+            if not self._timer.isActive():
+                self._timer.start()
+        else:
+            self._timer.stop()
+
+    def _tick(self) -> None:
+        if not shiboken6.isValid(self):
+            return
+        if self._leaving is not None and self._leave_alpha() <= 0.0:
+            self._leaving = None
+        self._run()
+        self.update()
+
+    # ---- painting ------------------------------------------------------------------------------------------------
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        if self._hidden or (self._path is None and self._leaving is None):
+            return
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            if self._leaving is not None:
+                self._draw(painter, self._leaving, self._leave_alpha(), 1.0)
+            if self._path is not None:
+                self._draw(painter, self._path, 1.0, self._progress())
+        finally:
+            painter.end()
+
+    @staticmethod
+    def _draw(painter: QPainter, path: CuePath, alpha: float, progress: float) -> None:
+        if alpha <= 0.0:
+            return
+        line = holo.CUE_AMBER if path.amber else holo.CUE
+        hi = QColor(holo.AMBER_HI if path.amber else holo.HOLO_HI)
+        dot, first, corner, end = path.points()
+        painter.save()
+        try:
+            painter.setOpacity(alpha)
+            glow = QRadialGradient(dot, CUE_DOT * 2.6)          # the sentence's dot, softly lit
+            glow.setColorAt(0.0, holo.alpha(hi, 0.35))
+            glow.setColorAt(1.0, holo.alpha(hi, 0.0))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(glow)
+            painter.drawEllipse(dot, CUE_DOT * 2.6, CUE_DOT * 2.6)
+            painter.setBrush(hi)
+            painter.drawEllipse(dot, CUE_DOT, CUE_DOT)
+            across = abs(corner.x() - first.x())
+            down = abs(end.y() - corner.y())
+            reach = (across + down) * max(0.0, min(1.0, progress))
+            if reach <= 0.0:
+                return
+            pen = QPen(QColor(line), CUE_PEN)
+            pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            trace = QPainterPath(first)
+            if reach <= across:
+                trace.lineTo(first.x() + reach, first.y())
+            else:
+                trace.lineTo(corner)
+                step = reach - across
+                trace.lineTo(corner.x(), corner.y() + (step if end.y() >= corner.y() else -step))
+            painter.drawPath(trace)
+        finally:
+            painter.restore()
+
+
+class Veil(QWidget):
+    """A still of the window where the board's view is about to be set (open big, part 5c): over the view for the
+    moment its geometry changes, until the page has laid itself out at the new size, so nothing jumps; then gone.
+    Never the mouse's or the focus."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("deskVeil")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._pixmap: QPixmap | None = None
+        self.hide()
+
+    def show_still(self, pixmap: QPixmap, rect: QRect) -> None:
+        self._pixmap = pixmap
+        self.setGeometry(rect)
+        self.show()
+        self.raise_()
+        self.update()
+
+    def clear(self) -> None:
+        self._pixmap = None
+        self.hide()
+
+    def shown(self) -> bool:
+        return self._pixmap is not None and not self.isHidden()
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        if self._pixmap is None:
+            return
+        painter = QPainter(self)
+        try:
+            painter.drawPixmap(QRectF(self.rect()), self._pixmap, QRectF(self._pixmap.rect()))
+        finally:
+            painter.end()
+
+
+# --------------------------------------------------------------------------
 # The desk
 # --------------------------------------------------------------------------
 
@@ -1155,8 +1450,11 @@ class DeskPage(QWidget):
         self.chip_slot.setObjectName("deskChips")
         self.ask_slot = QWidget(self)           # ... and its command bar
         self.ask_slot.setObjectName("deskAsk")
+        self.cue_line = CueLine(self)           # part 5c: the cue line's native part, from the column to the seam
+        self.veil = Veil(self)                  # ... and open big's still over the view while its geometry is set
         self._board: QWidget | None = None
         self._folded_dock = False
+        self._big = False                       # open big: the board's view spans both columns (geometry.big)
         self._geometry = desk_geometry(0, 0, folded_dock=False)
         self._view_rect = QRect()
 
@@ -1182,6 +1480,23 @@ class DeskPage(QWidget):
     def board(self) -> QWidget | None:
         return self._board
 
+    def set_big(self, big: bool) -> bool:
+        """Open big (part 5c, DESIGN-SPEC 3.5): the board's view spans both columns (``geometry.big``), or is back in
+        its column - set once, never animated. True when the geometry changed."""
+        if bool(big) == self._big:
+            return False
+        self._big = bool(big)
+        before = QRect(self._view_rect)
+        self.apply_geometry()
+        return self._view_rect != before
+
+    def big_shown(self) -> bool:
+        return self._big
+
+    def view_target(self) -> QRect:
+        """Where the board's view goes in this layout: its column, or both columns while big."""
+        return QRect(self._geometry.big if self._big else self._geometry.view)
+
     def apply_geometry(self) -> None:
         geometry = desk_geometry(self.width(), self.height(), folded_dock=self._folded_dock)
         self._geometry = geometry
@@ -1196,13 +1511,48 @@ class DeskPage(QWidget):
                                                            chip_margin + 1))
         bar_margin = 4
         self.ask_slot.setGeometry(geometry.ask.adjusted(-bar_margin, -bar_margin, bar_margin, bar_margin))
+        # The cue line's native part: from the column's left edge to the seam, never over the view (it starts past it).
+        self.cue_line.setGeometry(0, 0, geometry.seam.x() + 1, max(0, self.height()))
+        self.cue_line.raise_()
         board = self._board
+        target = geometry.big if self._big else geometry.view
         if board is not None and shiboken6.isValid(board) and board.parentWidget() is self \
-                and board.geometry() != geometry.view:
-            board.setGeometry(geometry.view)       # set once for this layout (never animated)
-            self._view_rect = QRect(geometry.view)
+                and board.geometry() != target:
+            board.setGeometry(target)              # set once for this layout (never animated)
+            self._view_rect = QRect(target)
             self.geometryChanged.emit()
+        if not self.veil.isHidden():
+            self.veil.raise_()
         self.update()
+
+    def column_image(self, rect: QRect, ground: Callable[[QPainter, QWidget], None] | None = None,
+                     dpr: float | None = None) -> QImage:
+        """The conversation column as it looks in ``rect`` (the desk's px) - the window's ground (``ground``: the
+        window's ground painter), the ring head, the turns, the chips and the seam; never the board's view, never the
+        cue line - at ``dpr`` (default the screen's): open big's backdrop (part 5c), made while the view may already
+        cover the column."""
+        ratio = float(dpr or self.devicePixelRatioF() or 1.0)
+        image = QImage(max(1, round(rect.width() * ratio)), max(1, round(rect.height() * ratio)),
+                       QImage.Format.Format_RGB32)
+        image.setDevicePixelRatio(ratio)
+        image.fill(QColor(holo.VOID))
+        painter = QPainter(image)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            painter.translate(-rect.left(), -rect.top())
+            if ground is not None:
+                try:
+                    ground(painter, self)
+                except Exception:  # noqa: BLE001 - the void under it instead
+                    pass
+            painter.fillRect(QRectF(self._geometry.seam), holo.LINE_FAINT)
+            for child in (self.head, self.turns, self.chip_slot):
+                if child.isVisible() and child.geometry().intersects(rect):
+                    child.render(painter, child.pos(), QRegion(), QWidget.RenderFlag.DrawChildren)
+        finally:
+            painter.end()
+        return image
 
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
@@ -1218,5 +1568,6 @@ class DeskPage(QWidget):
             painter.end()
 
 
-__all__ =["BoardHint", "DeskGeometry", "DeskPage", "DeskTurns", "FramesToken", "HINT_KEY", "HINT_TEXT", "RingFlight",
-           "RingHead", "TextBlock", "Turn", "TurnView", "desk_geometry", "earlier_text", "highlights", "token_text"]
+__all__ = ["BIG_GAP", "BoardHint", "CueLine", "CuePath", "DeskGeometry", "DeskPage", "DeskTurns", "FramesToken",
+           "HINT_KEY", "HINT_TEXT", "RingFlight", "RingHead", "TextBlock", "Turn", "TurnView", "Veil", "desk_geometry",
+           "earlier_text", "highlights", "token_text"]

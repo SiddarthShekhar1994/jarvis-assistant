@@ -16,8 +16,18 @@ brought back), Clear (every unpinned frame out of sight with Bring back for CLEA
 folds through ReadingView.set_board_count), restore (that Bring back), show_new and reading (parking: a group that comes
 while the owner reads the board - the pointer over it, the focus in it, a scroll or key in it within QUIET_S - parks
 under the pill "New answer above · Show" and lands after QUIET_S quiet seconds or on Show; only then do older groups
-fold), focus_out (Esc and F6 back to the ask bar or the conversation); F6 into the board (``focus_board``). Focus, open,
-retry and layout are counted only (part 5c gives open its work).
+fold), focus_out (Esc and F6 back to the ask bar or the conversation); F6 into the board (``focus_board``). Focus and
+retry are counted only.
+
+Part 5c (DESIGN-SPEC 1, 3.4, 3.5, 7): ``cue`` (desk_cue.CueController: while Jarvis speaks, the frame the sentence names
+is lit, every ring's glow halves, and the cue line runs to it; ``on_speech`` / ``on_muted`` from the app), ``big``
+(desk_big.BigController: open big's two steps on the page's open request - Enter, a double click, its button), the
+page's layout (the cue line's other end), a Clear with nothing pinned keeps the desk for its Bring back
+(ReadingView.set_board_held), each frame's source key (``key``: the same thread, day, page or list; a later answer's
+frame built from it is the same frame, "changed" when what it says differs), and the board's sounds through the look
+controller (``look``): a frame lands (FRAME, by its place in its group: the first four), a group settles (SETTLED, once,
+after its last frame), a changed light (CHANGED), open big and back (OPEN_BIG / CLOSE_BIG) - only while the desk is on
+screen; SoundBoard's gate and LookController's quiet rules hold them otherwise.
 
 What feeds it (board.feed.BoardFeed keeps the groups; board.frames builds the frames), one answer = one group (its time;
 its topic: Ask's coming ``topic`` field, else the first frame's title):
@@ -56,12 +66,15 @@ import shiboken6
 from PySide6.QtCore import QObject, QTimer
 from PySide6.QtWidgets import QWidget
 
+from . import holo, hud
 from . import live as live_events
 from . import pictures
 from .board import feed as feed_mod
 from .board import frames as board_frames
 from .board import protocol as board_protocol
 from .board.feed import BoardFeed, ReadingWatch, spoken_rank
+from .desk_big import BigController
+from .desk_cue import CueController
 from .text_prep import format_time
 
 logger = logging.getLogger(__name__)
@@ -106,6 +119,26 @@ def about_todos(words: str) -> bool:
 
 def about_followups(words: str) -> bool:
     return bool(_FOLLOWUP_WORDS.search(words or ""))
+
+
+def picture_key(picture: Any, merge: str = "") -> str:
+    """A LIVE picture's source key (part 5c): the same mail thread (its merge key, "mail:work:t1"), the same page
+    (its address), the same web search (its query) or the same day picture; "" for none (never rebuilt across
+    answers)."""
+    kind = getattr(picture, "kind", "")
+    if kind == pictures.KIND_EMAIL:
+        return merge
+    if kind == pictures.KIND_PAGE:
+        url = str(getattr(getattr(picture, "page", None), "url", "") or "")
+        return f"page:{url}" if url else ""
+    if kind == pictures.KIND_SEARCH:
+        query = " ".join(str(getattr(getattr(picture, "search", None), "query", "") or "").split()).casefold()
+        return f"search:{query}" if query else ""
+    if kind == pictures.KIND_DAY:
+        day = getattr(picture, "day", None)
+        days = "|".join(str(item) for item in (getattr(day, "days", ()) or ()))
+        return f"plan:{days}:{getattr(day, 'change', '')}" if days else ""
+    return ""
 
 
 def default_factory(parent: QWidget) -> Any:
@@ -160,14 +193,18 @@ class DeskController(QObject):
     QUIET_S = feed_mod.QUIET_S
 
     def __init__(self, host: Any, *, factory: Callable[[QWidget], Any] | None = None,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic, look: Any = None) -> None:
         super().__init__(host if isinstance(host, QObject) else None)
         self.host = host
+        self.look = look                    # look_ui.LookController: the board's sounds (part 5c)
         self.reading = host.window.reading
         self.feed = BoardFeed(close_s=self.CLOSE_S, clear_s=self.CLEAR_S)
         self.board: Any = None
         self._factory = factory or default_factory
         self._clock = clock
+        self._landed: set[str] = set()      # frames whose landing was heard of (a page that restarts: no sound again)
+        self._done: dict[str, set[str]] = {}    # group id -> its frames whose draw-in is done
+        self._settled: set[str] = set()     # groups that settled (SETTLED once each)
         self._made = False                  # the factory ran (once: one board for the window's life)
         self._answers: dict[int, _Answer] = {}
         self._current = 0
@@ -188,10 +225,14 @@ class DeskController(QObject):
         reading.set_board_available(True)
         reading.set_board_hint(self._hints_left())
         reading.set_turn_frames(self._turn_frames)
+        self.cue = CueController(self)      # part 5c: the lit frame and the cue line
+        self.big = BigController(self)      # ... and open big
         reading.deskShown.connect(self._on_desk_shown)
         reading.boardTokenClicked.connect(self._on_token)
         reading.deskLayoutChanged.connect(self._sync_compact)
+        reading.deskLayoutChanged.connect(self.big.on_layout)
         reading.boardFocusRequested.connect(self.focus_board)
+        reading.tabChanged.connect(self._on_tab)
         feed = getattr(host, "_live_feed", None)
         if feed is not None:
             feed.attach(self)               # every LIVE change, on the GUI thread (apply)
@@ -228,9 +269,12 @@ class DeskController(QObject):
         view.ready.connect(self._on_ready)
         view.unavailable.connect(self._on_unavailable)
         view.approvalsRequested.connect(self._on_go_approvals)
-        for name in ("frameFocused", "openRequested", "retryRequested"):
+        for name in ("frameFocused", "retryRequested"):
             getattr(view, name).connect(lambda _frame_id, word=name: self._count_request(word))
-        view.layoutChanged.connect(lambda _layout: self._count_request("layoutChanged"))
+        view.openRequested.connect(self._on_open)
+        view.layoutChanged.connect(self._on_layout)
+        view.frameLanded.connect(self._on_landed)
+        view.bigStep.connect(self.big.on_step)
         view.pinRequested.connect(self._on_pin)
         view.closeRequested.connect(self._on_close)
         view.bringBackRequested.connect(self._on_bring_back)
@@ -246,7 +290,75 @@ class DeskController(QObject):
         return view
 
     def _count_request(self, word: str) -> None:
-        self.counts[f"request:{word}"] += 1      # counts only (part 5c gives open its work)
+        self.counts[f"request:{word}"] += 1      # counts only
+
+    # ---- part 5c: the desk on screen, the cue line's layout, open big, the board's sounds --------------------------
+
+    def on_screen(self) -> bool:
+        """The desk is what the owner sees now: Home, the desk shown, the window up (not minimised)."""
+        reading = self.reading
+        if not reading.desk_shown() or reading.current_tab() != hud.TAB_JARVIS or not reading.isVisible():
+            return False
+        window = reading.window()
+        return not (window is not None and window.isMinimized())
+
+    def sound(self, name: str, *args: Any) -> None:
+        """One of the look controller's board sounds (its gate and SoundBoard's decide); never stops the board."""
+        look = self.look
+        if look is None or (isinstance(look, QObject) and not shiboken6.isValid(look)):
+            return
+        try:
+            getattr(look, name)(*args)
+        except Exception as exc:  # noqa: BLE001 - a sound never stops the board
+            logger.debug("Board: a sound failed (%s)", type(exc).__name__)
+
+    def on_speech(self, text: str) -> None:
+        """An utterance of Jarvis's started ("": he is done, stopped or muted): the lit frame and the cue line."""
+        self.cue.on_speech(text)
+
+    def on_muted(self) -> None:
+        self.cue.on_muted()
+
+    def _on_layout(self, layout: Any) -> None:
+        self._count_request("layoutChanged")
+        self.cue.on_layout(layout)
+
+    def _on_open(self, frame_id: str) -> None:
+        self._count_request("openRequested")
+        self.big.open(frame_id)
+
+    def _on_tab(self, index: int) -> None:
+        if index != hud.TAB_JARVIS:
+            self.big.end_now()                   # another screen: the Dock and the header are never left dim
+            self.cue.clear()
+
+    def _on_landed(self, frame_id: str, step: str) -> None:
+        """A frame drew in on the page: its outline complete (FRAME, the first four of its group, by its place), then
+        its draw-in done (SETTLED once its group's last frame is done, groups of two or more). A frame heard of before
+        (a page that came back after its renderer stopped) never sounds again."""
+        self._count_request(f"landed:{step}")
+        group = self.feed.group_of(frame_id)
+        if not group:
+            return
+        if step == "outline":
+            if frame_id in self._landed:
+                return
+            self._landed.add(frame_id)
+            order = self.feed.group_order(group)
+            place = order.index(frame_id) if frame_id in order else -1
+            if 0 <= place < 4 and self.on_screen():
+                self.sound("on_frame_landed", place)
+            return
+        self._landed.add(frame_id)
+        done = self._done.setdefault(group, set())
+        done.add(frame_id)
+        members = [member for member in self.feed.group_order(group)
+                   if not self.feed.flags(member).get("closed") and not self.feed.flags(member).get("cleared")]
+        if group in self._settled or len(members) < 2 or not all(member in done for member in members):
+            return
+        self._settled.add(group)
+        if self.on_screen():
+            self.sound("on_group_settled")
 
     # ---- the owner's own ways (part 5b, DESIGN-SPEC 3.5): the feed decides, the page gets what differs -------------
 
@@ -363,13 +475,18 @@ class DeskController(QObject):
         if self._readies == 1:
             logger.info("Board: ready %d ms after it started", int((time.monotonic() - self._started_at) * 1000))
             return
-        # The page came back after its renderer stopped: it holds nothing - the board as it is, again.
+        # The page came back after its renderer stopped: it holds nothing - the board as it is, again (open big ends
+        # at once: the page lost it; the lit frame is sent again with the cue).
+        self.big.end_now()
+        self.cue.reset_page()
         self._send(self.feed.resend())
         if self.reading.desk_shown():
             self._send([{"type": "desk", "state": "enter"}])
 
     def _on_unavailable(self, reason: str) -> None:
         self.counts[f"fallback:{reason}"] += 1
+        self.big.end_now()
+        self.cue.clear()
         logger.info("Board: read-only tiles in its place (%s)", reason)
 
     def _send(self, messages: list[dict[str, Any]]) -> None:
@@ -381,9 +498,25 @@ class DeskController(QObject):
                 self.counts[f"sent:{message.get('type', '')}"] += 1
             else:
                 self.counts["refused"] += 1
-        self._sync_counts()
+        if not messages or any(message.get("type") not in ("lit", "backdrop", "big", "focus_part", "motion")
+                               for message in messages):
+            self._sync_counts()                  # (also when the feed changed and the page has it already)
+            self._after_board_change()
+
+    def _after_board_change(self) -> None:
+        """The board changed: the changed light's sound, the lit frame matched again, a big frame that left goes."""
+        changed = self.feed.take_changed()
+        if changed and holo.motion_level() == holo.MOTION_LIVELY and self.on_screen():
+            self.sound("on_frame_changed")       # the page runs its one light (calm: the badge only, no light)
+        if changed:
+            logger.info("Board: %d frame(s) changed", len(changed))
+        self.cue.refresh()
+        self.big.check()
 
     def _sync_counts(self) -> None:
+        # A Clear's Bring back keeps the desk (part 5c) even with nothing left: held first, so the count's 0 never
+        # folds it while the row is offered.
+        self.reading.set_board_held(self.feed.clearing())
         self.reading.set_board_count(self.feed.frames())
         self.reading.refresh_turn_frames()
 
@@ -412,6 +545,8 @@ class DeskController(QObject):
                         logger.debug("Board: the hint count was not saved (%s)", type(exc).__name__)
                 self.reading.set_board_hint(self._hints_left())
         else:
+            self.big.end_now()                  # part 5c: open big ends at once, the Dock and the header undimmed
+            self.cue.clear()
             self._watch.reset()                 # out of sight: nobody reads it (a parked answer lands)
             self._send([{"type": "desk", "state": "leave"}])
             self._land()
@@ -503,7 +638,7 @@ class DeskController(QObject):
     def _picture_entry(self, answer: _Answer, item: _Item) -> tuple[Any, ...]:
         return (item.source, lambda frame_id: board_frames.from_picture(item.picture, frame_id=frame_id,
                                                                        now=self._now(), hour24=self._hour24()),
-                item.merge, "")
+                item.merge, "", picture_key(item.picture, item.merge))
 
     def on_ask_outcome(self, outcome: Any, task_id: int = 0) -> None:
         """A finished answer: its frames go up as one group (see the module doc)."""
@@ -563,8 +698,10 @@ class DeskController(QObject):
         park = self._reading_now()
         if not park and self.feed.parked_groups():
             self._land()
-        for source, build, merge, approvals in entries:
-            frame_id = self.feed.frame_id(answer.key, source, merge)
+        for entry in entries:
+            source, build, merge, approvals = entry[:4]
+            key = str(entry[4] or "") if len(entry) > 4 else ""      # part 5c: the frame's source key
+            frame_id = self.feed.frame_id(answer.key, source, merge, key)
             try:
                 built = build(frame_id)
             except Exception as exc:  # noqa: BLE001 - one frame that can't be built never stops the others
@@ -575,7 +712,7 @@ class DeskController(QObject):
             frame = built.messages[0]
             rank = spoken_rank(answer.say, self._rank_words(frame))
             messages += self.feed.put(answer.key, source, built.messages, when=answer.when, merge=merge,
-                                      approvals=approvals, rank=rank, park=park)
+                                      approvals=approvals, rank=rank, park=park, key=key)
             self.counts[f"frame:{frame.get('kind', '')}"] += 1
         self._send(messages)
         if self.feed.parked_groups():
@@ -613,12 +750,13 @@ class DeskController(QObject):
                 return board_frames.from_picture(picture, frame_id=frame_id, now=now, hour24=self._hour24(),
                                                  title="Today")
 
-            return [("calendar:today", today, "", "")]
+            return [("calendar:today", today, "", "", f"day:{now.date().isoformat()}")]
         if answer.week is not None:
             week = answer.week
             return [("calendar:week", lambda frame_id: board_frames.from_picture(week, frame_id=frame_id,
                                                                                  now=self._now(),
-                                                                                 hour24=self._hour24()), "", "")]
+                                                                                 hour24=self._hour24()), "", "",
+                     f"week:{self._now().date().isoformat()}")]
         return []
 
     def _research_entries(self, outcome: Any) -> list[tuple[Any, ...]]:
@@ -658,14 +796,14 @@ class DeskController(QObject):
                     return board_frames.from_picture(picture, frame_id=frame_id, now=self._now(),
                                                      hour24=self._hour24())
 
-                entries.append((f"card:{card.id}", outgoing, merge, card.id))
+                entries.append((f"card:{card.id}", outgoing, merge, card.id, merge or f"card:{card.id}"))
             elif card.kind in (actions.CALENDAR, actions.MOVE, actions.CANCEL, actions.RSVP):
                 def change(frame_id: str, card: Any = card) -> Any:
                     picture = host._live_day_picture(card)
                     return board_frames.from_picture(picture, frame_id=frame_id, now=self._now(),
                                                      hour24=self._hour24())
 
-                entries.append((f"card:{card.id}", change, "", ""))
+                entries.append((f"card:{card.id}", change, "", "", f"card:{card.id}"))
         return entries
 
     def _mail_of(self, card: Any) -> SimpleNamespace:
@@ -713,7 +851,7 @@ class DeskController(QObject):
         if not todos and not deadlines:
             return []
         return [("todos", lambda frame_id: board_frames.from_todos(todos, deadlines, frame_id=frame_id, now=self._now(),
-                                                                   statuses=statuses), "", "")]
+                                                                   statuses=statuses), "", "", "todos")]
 
     def _followup_entries(self, words: str) -> list[tuple[Any, ...]]:
         """The follow-ups, when the answer speaks of them (the productivity bundle's list, waiting first)."""
@@ -728,7 +866,8 @@ class DeskController(QObject):
         if not rows:
             return []
         now = self._now()
-        return [("followups", lambda frame_id: board_frames.from_followups(rows, frame_id=frame_id, now=now), "", "")]
+        return [("followups", lambda frame_id: board_frames.from_followups(rows, frame_id=frame_id, now=now), "", "",
+                 "followups")]
 
     # ---- teardown --------------------------------------------------------------------------------------------------
 
@@ -736,6 +875,8 @@ class DeskController(QObject):
         """Jarvis closes: the board's page, renderer and profile go now."""
         self._due_timer.stop()
         self._land_timer.stop()
+        self.cue.shutdown()
+        self.big.shutdown()
         feed = getattr(self.host, "_live_feed", None)
         if feed is not None:
             try:

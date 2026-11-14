@@ -63,7 +63,9 @@ OrbWidget(px=HERO)
     transitions. ``play_intro(calm=False, start=None)``: the start-up, in nine staggered stages (``INTRO_STAGGER_S``,
     ``INTRO_LAYER_S``: about 1.2 s; calm about 1.6 s, without the turn): the core, its glow, the band sweeping in
     clockwise from 12 o'clock as it rolls in from -80 deg, the tracks, the sight drawing round from 12 o'clock, then
-    the brackets; never under reduced motion. ``set_dim(level)``, ``dim()``; ``set_recording(bool)``,
+    the brackets; never under reduced motion. ``set_glow_share(share)``, ``glow_share()`` (the new look, part 5c:
+    ``LIT_GLOW`` while a frame on the board is lit - the core glow halves, eased over 200 ms; MiniOrb has it too, and
+    the paint does no more work). ``set_dim(level)``, ``dim()``; ``set_recording(bool)``,
     ``is_recording()``. ``is_animating()``, ``frame_interval()``, ``detail()`` (``"full"`` / ``"reduced"`` /
     ``"compact"``), ``sample(now=None) -> OrbFrame`` (the computed values, for tests), ``paint_times()``,
     ``snapshot()`` (the ring now without its ground, in a transparent pixmap of the widget's size: the switch to the
@@ -194,6 +196,8 @@ RELEASE_S = 0.70               # tipping back: ease-in-out sine
 BRACKET_DELAY_S = 0.14
 BRACKET_S = 0.28
 SIGHT_S = 0.12                 # the crosshair and notches fade in over the last 120 ms of the turn
+GLOW_SHARE_S = 0.20            # the core glow eases to its share (a lit frame halves it) with the lit brackets
+LIT_GLOW = 0.5                 # the core glow's share while a frame on the board is lit (DESIGN-SPEC 1, 3.4)
 BAND_FADE_S = 0.28
 BAND_FADE_FACING_S = 0.09
 CALM_STRETCH = 1.6
@@ -1124,6 +1128,24 @@ class _OrbBase(QWidget):
         """Deep idle started or ended (the frame clock tells every orb)."""
         self._sync()
 
+    def set_glow_share(self, share: float) -> None:
+        """The core glow at ``share`` of its strength (the new look, part 5c: ``LIT_GLOW`` - it halves - while a frame
+        on the board is lit, so one thing is bright at a time; 1.0 as it is). Nothing else of the ring changes and the
+        paint does no more work: the glow's own alpha is scaled."""
+        share = max(0.0, min(1.0, float(share)))
+        if share == getattr(self, "_glow_share", 1.0):
+            return
+        self._glow_share = share
+        self._glow_changed(self._now())
+        self._sync()
+        self.update()
+
+    def glow_share(self) -> float:
+        return getattr(self, "_glow_share", 1.0)
+
+    def _glow_changed(self, now: float) -> None:
+        """The glow's share changed (subclasses ease to it)."""
+
     def _update_name(self) -> None:
         self.setAccessibleName(f"Jarvis, {self.state_word().lower()}")
         self.setAccessibleDescription(f"Jarvis is {self._describe()}")
@@ -1317,6 +1339,7 @@ class OrbWidget(_OrbBase):
             "core_r": _Tween(core_r), "glow_r": _Tween(glow_r), "glow": _Tween(glow), "core_op": _Tween(1.0),
             "life": _Tween(1.0), "alert": _Tween(0.0), "slash": _Tween(0.0), "echo": _Tween(0.0),
             "spikes": _Tween(0.0), "voice": _Tween(0.0), "pace": _Tween(DEEP_PACE if frame_clock().deep() else 1.0),
+            "glow_share": _Tween(1.0),
         }
         self._band = _Fade(self._look)
         self._ink = _Fade(holo.HOLO)
@@ -1557,6 +1580,13 @@ class OrbWidget(_OrbBase):
         if _still() or self._frozen is not None:
             self.settle()
 
+    def _glow_changed(self, now: float) -> None:
+        """The glow eases to its share with the lit frame's brackets (200 ms, x1.6 calm; at once with motion off)."""
+        tween = self._tw["glow_share"]
+        tween.to(self.glow_share(), now, GLOW_SHARE_S * _stretch(), _STD)
+        if _still() or self._frozen is not None:
+            tween.settle()
+
     def _deep_changed(self, deep: bool) -> None:
         now = self._now()
         pace = self._tw["pace"]
@@ -1735,7 +1765,8 @@ class OrbWidget(_OrbBase):
             band_gain=gain, sway=sway, lit=lit, level=level, voice=voice,
             head=self._think if look == THINKING else self._scan, sight=sight, close=tw["close"].value(now),
             brackets=tw["brackets"].value(now), ink=ink, tones=tuple(tones), tracks=1.0, core_r=tw["core_r"].value(now),
-            glow_r=tw["glow_r"].value(now), glow=tw["glow"].value(now), core_op=tw["core_op"].value(now),
+            glow_r=tw["glow_r"].value(now), glow=tw["glow"].value(now) * tw["glow_share"].value(now),
+            core_op=tw["core_op"].value(now),
             core_scale=core_scale, core_looks=self._core_look.weights(now), alert=alert, arc=arc,
             slash=tw["slash"].value(now), echo=tw["echo"].value(now), dashed=self._offline, compact=self._compact(),
             fine=not (self._compact() or self._degraded), spikes=spikes, spike_lens=lens,
@@ -1980,13 +2011,14 @@ class OrbWidget(_OrbBase):
 def paint_mini_orb(painter: QPainter, center: QPointF, base: str, muted: bool = False, offline: bool = False, *,
                    t: float = 0.0, ring_angle: float = 0.0, ring_color: str | QColor = holo.DOCK,
                    scale: float = 1.0, voice: bool = False, pose: tuple[float, float, float] | None = None,
-                   level: float = 0.0, recording: bool = False) -> None:
+                   level: float = 0.0, recording: bool = False, glow_share: float = 1.0) -> None:
     """The 36 px ring (DESIGN-SPEC 4.4): 16 segments (r100-152) in the look's pose (``pose``: tilt, roll, phase
     during a turn), the core (x 1.8) and its glow (x 1.2), no sight; listening by voice is a centre ring with four
     ticks, the offline voice a dashed centre ring, waiting a faint orbit track with its 2-segment tick, needs you an
     amber badge dot with a keyline in ``ring_color`` (the ground's), muted a strike. ``ring_angle`` turns the
     thinking head from its rest; ``t`` pulses the core while listening or speaking; ``level`` lights the band from 6
-    o'clock while listening; ``recording`` adds the coral ring."""
+    o'clock while listening; ``recording`` adds the coral ring; ``glow_share`` scales the glow (a lit frame halves
+    it)."""
     look = ring_look(base, muted, offline, voice)
     rest = POSES[look]
     tilt, roll, phase = pose if pose is not None else (rest.tilt, rest.roll, 0.5 if look == LISTENING else 0.0)
@@ -2023,6 +2055,7 @@ def paint_mini_orb(painter: QPainter, center: QPointF, base: str, muted: bool = 
             painter.drawEllipse(QPointF(0, 0), DOCK_TRACK, DOCK_TRACK)
         painter.setTransform(face)
         painter.setPen(Qt.PenStyle.NoPen)
+        glow *= max(0.0, min(1.0, float(glow_share)))
         if glow > 0.0 and not offline:
             r = glow_r * 1.2
             painter.setOpacity(glow)
@@ -2150,7 +2183,7 @@ class MiniOrb(_OrbBase):
             paint_mini_orb(painter, QPointF(self.width() / 2, self.height() / 2), self._base, self._muted,
                            self._offline, t=0.25 if still else now, ring_angle=self._head,
                            ring_color=self._ring_color, voice=self._voice, pose=pose, level=self._level,
-                           recording=self._recording)
+                           recording=self._recording, glow_share=self.glow_share())
         finally:
             painter.end()
 

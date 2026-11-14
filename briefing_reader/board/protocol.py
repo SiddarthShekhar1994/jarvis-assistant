@@ -53,6 +53,16 @@ In (app -> page): check_message(message, known, groups=()) -> Checked
         focus_part {"part": board / strip / next / prev}: F6's cycle - the keyboard focus to the frames or the index
                  strip; next / prev from where it is (past the strip the page asks for focus_out "ask", before the
                  frames for focus_out "conversation")
+      Part 5c, the lit frame and open big (DESIGN-SPEC 3.4, 3.5, 8):
+        lit      + "cue" (only when given): the app draws the cue line's native part to this frame, so the page draws
+                 its 15 px stub (from the view's left edge to the frame, a 2.5 px dot 6 px from it); false or absent:
+                 the brackets only
+        backdrop {"src"}: the conversation column as the app grabbed it, ONE JPEG data: URL under the picture's caps
+                 (at most PICTURE_CAP characters, PICTURE_BYTES of JPEG): the page paints it where the column was
+                 while the view is wide for open big
+        big      {"state": open / close, "id", "x", "y", "w", "h"}: open - that frame grows to the whole view; the view
+                 is wide now and the board keeps its own box in it (x, y, w, h: px, BIG_LIMIT at most); close - it
+                 goes back to its place ("id" "" or the frame's; no box)
     The ids of lit, remove and picture must be frames the app sent (``known``), and a group's those of groups it sent
     (``groups``); a new frame past MAX_FRAMES is refused.
 
@@ -69,6 +79,11 @@ Out (page -> app): check_request(kind, payload, known) -> Request
                           sent when either changes and on a wheel, a key or a press in the page (a sign of reading)
         focus_out {"to": ask / conversation}   Esc, or F6 past the board: the keyboard focus to the ask bar or the
                           conversation
+      Part 5c:
+        landed {"id", "step": outline / done}   a frame drawing in: its outline is complete (a frame lands), then its
+                          whole draw-in is done (at once when nothing animates) - the board's sounds
+        big {"step": back / laid / shut}        open big: the owner asked to go back (Esc, a click beside the big
+                          frame), the page is laid out at the view's new size, the frame's scale-down has finished
     Anything else is refused. A log line may carry kind_word(kind) and the reason word, never the payload.
 """
 
@@ -106,9 +121,13 @@ TICK_CAP = 8                     # ... each at most this long ("12")
 PILL_CAP = 16                    # the calendar's now pill ("9:41")
 DAY_MINUTES = 24 * 60
 PLACE_LIMIT = 1_000_000          # px: a layout's top / height beyond this is not a place
+BIG_LIMIT = 100_000              # px: the board's box in the wide view (open big) is at most this
 
 MESSAGE_TYPES = ("frame", "lit", "remove", "clear", "motion", "picture", "group", "remove_group", "bar", "desk",
-                 "reveal", "cleared", "focus_part")
+                 "reveal", "cleared", "focus_part", "backdrop", "big")
+BIG_STATES = ("open", "close")                      # big's "state"
+LANDED_STEPS = ("outline", "done")                  # landed's "step"
+BIG_STEPS = ("back", "laid", "shut")                # the big request's "step"
 STATUSES = ("ok", "failed", "empty")
 DESK_STATES = ("enter", "leave")
 FOCUS_PARTS = ("board", "strip", "next", "prev")      # focus_part (F6's cycle)
@@ -120,7 +139,7 @@ SPAN_KINDS = ("busy", "next", "free")
 TODO_STATES = ("open", "waits", "done")
 MOTION_LEVELS = ("lively", "calm", "off")
 REQUEST_KINDS = ("ready", "layout", "focus", "open", "close", "pin", "bring_back", "retry", "go_approvals",
-                 "clear", "restore", "show_new", "reading", "focus_out")
+                 "clear", "restore", "show_new", "reading", "focus_out", "landed", "big")
 _ID_KINDS = frozenset({"focus", "open", "close", "bring_back", "retry", "go_approvals"})
 _BARE_KINDS = frozenset({"clear", "restore", "show_new"})     # a payload of no field at all
 _ID = re.compile(r"[A-Za-z0-9_-]{1,%d}" % ID_CAP)
@@ -165,7 +184,8 @@ class Checked:
 @dataclass(frozen=True)
 class Request:
     """A request of the page that passed. ``places``: a layout's (id, top, height) per frame, in the view's px;
-    ``pointer`` / ``focused``: a reading request's flags; ``to``: where focus_out sends the keyboard focus."""
+    ``pointer`` / ``focused``: a reading request's flags; ``to``: where focus_out sends the keyboard focus; ``step``:
+    a landed or big request's step."""
 
     kind: str
     frame_id: str = ""
@@ -175,6 +195,7 @@ class Request:
     pointer: bool = False
     focused: bool = False
     to: str = ""
+    step: str = ""
 
 
 def kind_word(kind: Any) -> str:
@@ -432,10 +453,9 @@ def _bar(value: dict[str, Any]) -> dict[str, Any]:
             "pinned": _number(fields.get("pinned", 0), 0, frames), "compact": _flag(fields.get("compact", False))}
 
 
-def _picture(value: dict[str, Any], known: Collection[str]) -> tuple[dict[str, Any], str]:
-    fields = _fields(value, ("type", "id", "src"), ("type", "id", "src"))
-    frame_id = _known_id(fields["id"], known)
-    src = fields["src"]
+def jpeg_src(src: Any) -> str:
+    """``src`` when it is ONE JPEG as a data:image/jpeg;base64 URL within the picture's caps (at most PICTURE_CAP
+    characters, a JPEG of at most PICTURE_BYTES), else Refused(R_PICTURE). A picture's and a backdrop's."""
     if type(src) is not str or len(src) > PICTURE_CAP or not src.startswith(PICTURE_PREFIX):
         raise Refused(R_PICTURE)
     data = src[len(PICTURE_PREFIX):]
@@ -447,7 +467,45 @@ def _picture(value: dict[str, Any], known: Collection[str]) -> tuple[dict[str, A
         raise Refused(R_PICTURE) from None
     if len(jpeg) > PICTURE_BYTES or not jpeg.startswith(_JPEG):
         raise Refused(R_PICTURE)
-    return {"type": "picture", "id": frame_id, "src": src}, frame_id
+    return src
+
+
+def _picture(value: dict[str, Any], known: Collection[str]) -> tuple[dict[str, Any], str]:
+    fields = _fields(value, ("type", "id", "src"), ("type", "id", "src"))
+    frame_id = _known_id(fields["id"], known)
+    return {"type": "picture", "id": frame_id, "src": jpeg_src(fields["src"])}, frame_id
+
+
+def _lit(value: dict[str, Any], known: Collection[str]) -> tuple[dict[str, Any], str]:
+    """The frame Jarvis speaks of ("" none) and, when given, whether the app draws the cue line's native part to it
+    (the page then draws its 15 px stub)."""
+    fields = _fields(value, ("type", "id", "cue"), ("type", "id"))
+    clean: dict[str, Any] = {"type": "lit", "id": ""}
+    frame_id = ""
+    if fields["id"] != "":
+        frame_id = clean["id"] = _known_id(fields["id"], known)
+    if "cue" in fields:
+        clean["cue"] = _flag(fields["cue"]) and bool(frame_id)
+    return clean, frame_id
+
+
+def _big(value: dict[str, Any], known: Collection[str]) -> tuple[dict[str, Any], str]:
+    """Open big (DESIGN-SPEC 3.5): open - the frame (one the app sent) and the board's own box in the wide view;
+    close - back to the board (its "id" "" or the frame's, no box)."""
+    state = value.get("state") if type(value) is dict else None
+    if state == "open":
+        fields = _fields(value, ("type", "state", "id", "x", "y", "w", "h"), ("type", "state", "id", "x", "y", "w", "h"))
+        frame_id = _known_id(fields["id"], known)
+        box = {name: _number(fields[name], 0, BIG_LIMIT) for name in ("x", "y", "w", "h")}
+        if box["w"] < 1 or box["h"] < 1:
+            raise Refused(R_SHAPE)
+        return {"type": "big", "state": "open", "id": frame_id, **box}, frame_id
+    fields = _fields(value, ("type", "state", "id"), ("type", "state"))
+    _choice(fields["state"], BIG_STATES)
+    frame_id = ""
+    if fields.get("id", "") != "":
+        frame_id = _known_id(fields["id"], known)
+    return {"type": "big", "state": "close", "id": frame_id}, frame_id
 
 
 def check_message(message: Any, known: Collection[str] = (), groups: Collection[str] = ()) -> Checked:
@@ -485,13 +543,18 @@ def check_message(message: Any, known: Collection[str] = (), groups: Collection[
     elif kind == "picture":
         clean, frame_id = _picture(message, known)
         image = len(clean["src"])
-    elif kind in ("lit", "remove"):
+    elif kind == "backdrop":
+        fields = _fields(message, ("type", "src"), ("type", "src"))
+        clean = {"type": "backdrop", "src": jpeg_src(fields["src"])}
+        image = len(clean["src"])
+    elif kind == "big":
+        clean, frame_id = _big(message, known)
+    elif kind == "lit":
+        clean, frame_id = _lit(message, known)
+    elif kind == "remove":
         fields = _fields(message, ("type", "id"), ("type", "id"))
-        if kind == "lit" and fields["id"] == "":
-            clean = {"type": "lit", "id": ""}
-        else:
-            frame_id = _known_id(fields["id"], known)
-            clean = {"type": kind, "id": frame_id}
+        frame_id = _known_id(fields["id"], known)
+        clean = {"type": kind, "id": frame_id}
     elif kind == "clear":
         _fields(message, ("type",))
         clean = {"type": "clear"}
@@ -565,6 +628,12 @@ def check_request(kind: Any, payload: Any, known: Collection[str]) -> Request:
     if kind == "focus_out":
         fields = _fields(value, ("to",), ("to",))
         return Request("focus_out", to=_choice(fields["to"], FOCUS_OUT))
+    if kind == "landed":
+        fields = _fields(value, ("id", "step"), ("id", "step"))
+        return Request("landed", _known_id(fields["id"], known), step=_choice(fields["step"], LANDED_STEPS))
+    if kind == "big":
+        fields = _fields(value, ("step",), ("step",))
+        return Request("big", step=_choice(fields["step"], BIG_STEPS))
     if kind not in _ID_KINDS:
         raise Refused(R_KIND)
     fields = _fields(value, ("id",), ("id",))

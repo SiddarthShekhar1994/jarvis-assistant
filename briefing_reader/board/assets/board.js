@@ -1,12 +1,12 @@
-/* The board's page (the new look, parts 3, 4, 5a and 5b): Jarvis's own code, no library. Every element is made with
+/* The board's page (the new look, parts 3, 4, 5a, 5b and 5c): Jarvis's own code, no library. Every element is made with
    createElement, every word is set with textContent and every listener with addEventListener: no markup is ever read,
    no address is ever opened. The app sends board.apply(<JSON text>), checked in Python first and checked here again;
    the page answers on its web channel with bridge.post(kind, <JSON text>), the short list Python accepts (ready, layout,
-   focus, open, close, pin, bring_back, retry, go_approvals, clear, restore, show_new, reading, focus_out). DESIGN-SPEC
-   3.1 (the bar, the groups, the index strip, "N more below" and the fades), 3.2 (the frame), 3.3 (the kinds and the
-   satellite), 3.4 (its states), 3.5 (order, parking, pin, close, Clear), 3.6 (the keyboard) and 5 (motion). The app is
-   the source of truth: what the owner does shows here at once, the app decides and sends a frame's flags again when its
-   decision differs. */
+   focus, open, close, pin, bring_back, retry, go_approvals, clear, restore, show_new, reading, focus_out, landed, big).
+   DESIGN-SPEC 3.1 (the bar, the groups, the index strip, "N more below" and the fades), 3.2 (the frame), 3.3 (the kinds
+   and the satellite), 3.4 (its states: lit, changed), 3.5 (order, parking, pin, close, Clear, open big), 3.6 (the
+   keyboard), 5 (motion) and 8 (the cue line's stub). The app is the source of truth: what the owner does shows here at
+   once, the app decides and sends a frame's flags again when its decision differs. */
 (function () {
   'use strict';
 
@@ -42,11 +42,18 @@
   var VIEW_MS = 16;                            // the strip, "N more below" and the fades follow a change this soon
   var READING_MS = 1000;                       // a sign of reading (a wheel, a key, a press) at most once a second
   var BATCH_MS = 300, FONT_WAIT_MS = 1500;
-  // The frames area's own rules (DESIGN-SPEC 2.1, 2.3, 3.1): small kinds pair from a 500 px area; a frame is in view
-  // between 6 px from its top and 40 px from its end; one whose bottom edge is inside the last 16 px is not fully in
-  // view (it counts in "N more below").
-  var PAIRS_FROM = 500, IN_VIEW_TOP = 6, IN_VIEW_END = 40, EDGE = 16;
+  // The frames area's own rules (DESIGN-SPEC 2.1, 2.3, 3.1): small kinds pair from a 500 px area and go three across
+  // from 756 px (each at least 244 px); a frame is in view between 6 px from its top and 40 px from its end; one whose
+  // bottom edge is inside the last 16 px is not fully in view (it counts in "N more below").
+  var PAIRS_FROM = 500, TRIOS_FROM = 756, IN_VIEW_TOP = 6, IN_VIEW_END = 40, EDGE = 16;
   var SMALL_KINDS = ['todos', 'timeline', 'chart', 'maths'];
+  // Part 5c: a frame lands when its outline is complete (260 ms into its draw-in); the cue line's stub draws in after
+  // the app's native part (board.css: 200 ms, then 40 ms) and fades 400 ms after its sentence; it meets the frame in
+  // the middle of the part of it in sight (at least 4 px: desk_cue.anchor does the same), its dot 6 px from the frame.
+  // Open big scales 260 ms up and 220 ms down.
+  var OUTLINE_MS = 260, CUE_FADE_MS = 400, MIN_SEEN = 4, DOT_GAP = 6;
+  var SCALE_MS = 260, UNSCALE_MS = 220, BIG_LIMIT = 100000;
+  var LANDED_STEPS = ['outline', 'done'];
   var SVG = 'http://www.w3.org/2000/svg';
   var WORDS = {
     changed: 'Changed', tryAgain: 'Try again', bringBack: 'Bring back', closed: 'Closed: ',
@@ -57,7 +64,8 @@
     clear: 'Clear', show: 'Show', newAbove: 'New answer above', moreBelow: ' more below', boardCleared: 'Board cleared',
     pinsFull: '6 pins at most · unpin one first', strip: 'Frames on the board', waitsOnYou: ', waits on you',
     newAnswer: 'New answer, ', showMore: ', show it in full', clearAll: 'Clear: take away every unpinned frame',
-    bringBackCleared: 'Bring back the cleared frames', showNew: 'New answer above: show it'
+    bringBackCleared: 'Bring back the cleared frames', showNew: 'New answer above: show it',
+    openBigMeta: 'Open big', backToBoard: 'Esc back to the board'
   };
   // Each kind's glyph (holo's icons, drawn by tokens.css) and its name (the index strip's accessible names).
   var GLYPHS = {text: 'read-all', calendar: 'calendar', mail_thread: 'mail', mail_list: 'inbox', todos: 'todos',
@@ -285,6 +293,11 @@
   var records = new WeakMap();                 // element -> record
   var sections = new WeakMap();                // a group's section -> its record
   var lit = '';
+  var litCue = false;                          // the app draws the cue line's native part to the lit frame
+  var stub = null;                             // the cue line's last 15 px: {el, id}
+  var big = null;                              // open big: {id, rec, card, state: wait / open / closing / shut, box}
+  var bigLayer = null;                         // the big frame's layer over the whole view
+  var backdrop = null;                         // the conversation column as the app painted it
   var focused = '';
   var motion = 'lively';
   var K = 1;                                   // the motion's multiplier, as --k in board.css
@@ -466,12 +479,24 @@
   function build(id) {
     var art = make('article', 'frame');
     var rec = {id: id, el: art, kind: '', data: null, pinned: false, closed: false, picture: null,
-               closedTimer: 0, drawTimer: 0, lapTimer: 0, noteTimer: 0, group: '', fact: '', sat: false,
-               expanded: false, cleared: false, away: false, paired: '', partner: null, ix: null, ixGlyph: null,
-               ixKind: ''};
+               closedTimer: 0, drawTimer: 0, outlineTimer: 0, lapTimer: 0, noteTimer: 0, group: '', fact: '',
+               sat: false, expanded: false, cleared: false, away: false, paired: '', mates: null, ix: null,
+               ixGlyph: null, ixKind: ''};
     records.set(art, rec);
     art.tabIndex = 0;
     art.setAttribute('aria-labelledby', 'title-' + id);
+    // A double click opens it big (part 5c), as Enter does; never on its own controls, and it selects no words.
+    art.addEventListener('mousedown', function (event) {
+      if (event.detail > 1) {
+        event.preventDefault();
+      }
+    });
+    art.addEventListener('dblclick', function (event) {
+      if ((event.target.closest && event.target.closest('button')) || rec.sat || rec.closed || !current(rec)) {
+        return;
+      }
+      post('open', {id: id});
+    });
     art.appendChild(border('fx-outline'));
     ['tl', 'tr', 'bl', 'br'].forEach(function (corner) {
       art.appendChild(make('span', 'fx-tick ' + corner));
@@ -736,46 +761,56 @@
     scheduleLayout();
   }
 
-  function pairUp() {                          // two small kinds side by side from a 500 px frames area (2.3)
-    var wide = root.classList.contains('pairs');
+  function pairUp() {                          // small kinds side by side: two from a 500 px area, three from 756 (2.3)
+    var across = root.classList.contains('trios') ? 3 : root.classList.contains('pairs') ? 2 : 1;
     frames.forEach(function (rec) {
       rec.paired = '';
-      rec.partner = null;
+      rec.mates = null;
     });
     groups.forEach(function (group) {
-      var waiting = null;
+      var run = [];
+      function rowUp() {                       // adjacent small kinds, at most ``across`` a row; one alone stays full
+        while (run.length) {
+          var row = run.splice(0, Math.min(across, run.length));
+          if (row.length > 1) {
+            row.forEach(function (rec, index) {
+              rec.paired = 'abc'.charAt(index);
+              rec.mates = row;
+            });
+          }
+        }
+      }
       Array.prototype.forEach.call(group.list.children, function (node) {
         var rec = records.get(node);
         if (!current(rec) || rec.away) {
-          return;                              // out of sight: it neither pairs nor breaks a pair
+          return;                              // out of sight: it neither joins a row nor breaks one
         }
-        var small = wide && SMALL_KINDS.indexOf(rec.kind) >= 0 && !rec.sat && !rec.closed;
-        if (small && waiting) {
-          waiting.paired = 'a';
-          rec.paired = 'b';
-          waiting.partner = rec;
-          rec.partner = waiting;
-          waiting = null;
+        if (across > 1 && SMALL_KINDS.indexOf(rec.kind) >= 0 && !rec.sat && !rec.closed) {
+          run.push(rec);
         } else {
-          waiting = small ? rec : null;
+          rowUp();
         }
       });
+      rowUp();
     });
     frames.forEach(function (rec) {
-      rec.el.classList.toggle('pair-a', rec.paired === 'a');
-      rec.el.classList.toggle('pair-b', rec.paired === 'b');
+      var size = rec.mates ? rec.mates.length : 0;
+      rec.el.classList.toggle('pair-a', size === 2 && rec.paired === 'a');
+      rec.el.classList.toggle('pair-b', size === 2 && rec.paired === 'b');
+      rec.el.classList.toggle('trio', size === 3);
     });
   }
 
-  function measureWidth() {                    // the frames area's width: pairs from 500 px
+  function measureWidth() {                    // the frames area's width: pairs from 500 px, three across from 756
     if (!root) {
       return;
     }
     var style = getComputedStyle(root);
     var width = root.clientWidth - parseFloat(style.paddingLeft || '0') - parseFloat(style.paddingRight || '0');
-    var wide = width >= PAIRS_FROM;
-    if (wide !== root.classList.contains('pairs')) {
-      root.classList.toggle('pairs', wide);
+    var pairs = width >= PAIRS_FROM, trios = width >= TRIOS_FROM;
+    if (pairs !== root.classList.contains('pairs') || trios !== root.classList.contains('trios')) {
+      root.classList.toggle('pairs', pairs);
+      root.classList.toggle('trios', trios);
       refresh();
     }
   }
@@ -797,6 +832,7 @@
             function () {
               el.classList.remove('sizing');
               scheduleView();
+              scheduleLayout();                // the frames moved: the cue line's other end follows
             });
     }, ROOM_WAIT_MS);
   }
@@ -811,17 +847,26 @@
     K = reducedMotion() ? 0 : MOTIONS[level];
   }
 
+  function landed(rec, step) {                 // the board's sounds (part 5c): the app hears a frame land, then settle
+    if (current(rec) && onDesk()) {
+      post('landed', {id: rec.id, step: step});
+    }
+  }
+
   function arrive(rec) {                       // the outline traces, the ticks snap on, the content comes in
     var index = batch;
     batch += 1;
     clearTimeout(batchTimer);
     batchTimer = setTimeout(function () { batch = 0; }, BATCH_MS);
     if (K === 0 || index >= MAX_ANIMATED) {
-      return;                                  // filled at once
+      landed(rec, 'done');                     // filled at once
+      return;
     }
     rec.el.style.setProperty('--i', String(index));
     rec.el.classList.add('arriving');
     clearTimeout(rec.drawTimer);
+    clearTimeout(rec.outlineTimer);
+    rec.outlineTimer = setTimeout(function () { landed(rec, 'outline'); }, (index * STAGGER_MS + OUTLINE_MS) * K);
     rec.drawTimer = setTimeout(function () {
       rec.el.classList.remove('arriving');
       rec.el.style.removeProperty('--i');
@@ -829,6 +874,7 @@
         rec.ix.classList.remove('arr');
       }
       scheduleLayout();
+      landed(rec, 'done');
     }, (index * STAGGER_MS + DRAW_MS) * K + 50);
   }
 
@@ -970,11 +1016,17 @@
     }
     clearTimeout(rec.closedTimer);
     clearTimeout(rec.drawTimer);
+    clearTimeout(rec.outlineTimer);
     clearTimeout(rec.lapTimer);
     clearTimeout(rec.noteTimer);
     if (lit === rec.id) {
       lit = '';
+      litCue = false;
       root.classList.remove('has-lit');
+      fadeStub();
+    }
+    if (big && big.id === rec.id) {
+      shrink(false);                           // its frame left the board: back at once (nothing to go back to)
     }
     if (focused === rec.id) {
       focused = '';
@@ -1006,11 +1058,11 @@
 
   // ---- the keyboard (DESIGN-SPEC 3.6) -----------------------------------------------------------------------------
 
-  function rows() {                            // the frames shown as rows: a pair is one row (Left / Right within it)
+  function rows() {                            // the frames shown as rows: a pair or three across is one row (Left / Right)
     var found = [];
     boardFrames().forEach(function (rec) {
       var last = found[found.length - 1];
-      if (rec.paired === 'b' && last && last[0] === rec.partner) {
+      if (rec.mates && rec.mates[0] !== rec && last && last[0] === rec.mates[0]) {
         last.push(rec);
       } else {
         found.push([rec]);
@@ -1062,8 +1114,15 @@
     document.documentElement.classList.add('keys');   // the keyboard's own focus shows (as :focus-visible)
     signOfReading();
     var key = event.key;
+    if (big && (big.state === 'wait' || big.state === 'open')) {
+      if (key === 'Escape') {
+        shrink(true);                          // Esc leaves open big first (the board again; the next Esc: the ask bar)
+        event.preventDefault();
+      }
+      return;                                  // the board's own keys wait under the big frame
+    }
     if (key === 'Escape') {
-      post('focus_out', {to: 'ask'});        // Esc: back to the ask bar (5c leaves open big first)
+      post('focus_out', {to: 'ask'});        // Esc with nothing big: back to the ask bar
       event.preventDefault();
       return;
     }
@@ -1399,6 +1458,7 @@
       brace.classList.remove('shown');
     }
     rove(first);
+    placeStub();
   }
 
   function stripButtons() {
@@ -1468,13 +1528,73 @@
     if (!scrolling) {
       scrolling = true;
       scheduleLayout();
+      placeStub();                             // the cue line hides while the board scrolls ...
     }
     scheduleView();
     clearTimeout(scrollTimer);
     scrollTimer = setTimeout(function () {
       scrolling = false;
       scheduleLayout();
+      placeStub();                             // ... and is back 150 ms after it stops, without the draw-in
     }, SCROLL_END_MS);
+  }
+
+  // ---- the lit frame's cue line: its last 15 px, from the view's left edge to the frame (DESIGN-SPEC 8) -------------
+
+  function cueY(rec) {                         // where the cue line meets the frame: desk_cue.anchor's whole numbers
+    var box = root.getBoundingClientRect(), place = rec.el.getBoundingClientRect();
+    var top = Math.round(place.top);
+    var low = Math.max(top, Math.round(box.top));
+    var high = Math.min(top + Math.round(place.height), Math.round(box.bottom));
+    return high - low < MIN_SEEN ? null : Math.floor((low + high) / 2);
+  }
+
+  function fadeStub() {                        // 400 ms after its sentence (calm x1.6; off: at once)
+    var gone = stub;
+    stub = null;
+    if (!gone) {
+      return;
+    }
+    gone.el.classList.remove('drawing');
+    if (K === 0 || gone.el.classList.contains('away')) {
+      gone.el.remove();
+      return;
+    }
+    gone.el.classList.add('leaving');
+    setTimeout(function () { gone.el.remove(); }, CUE_FADE_MS * K + 40);
+  }
+
+  function showStub(rec, draw) {               // drawn in after the native part (lively), at once otherwise
+    if (stub && stub.id !== rec.id) {
+      fadeStub();
+    }
+    if (!stub) {
+      var el = make('div', 'cue-stub');
+      el.setAttribute('aria-hidden', 'true');
+      el.append(make('i', 'cs-line'), make('i', 'cs-dot'));
+      document.body.appendChild(el);
+      stub = {el: el, id: rec.id};
+      el.classList.toggle('drawing', !!draw && motion === 'lively' && K > 0);
+    }
+    placeStub();
+  }
+
+  function placeStub() {                       // from the frame's own place, so it never lags; away while scrolling
+    if (!stub) {
+      return;
+    }
+    var rec = frames.get(stub.id);
+    var y = rec && litCue && lit === stub.id && !rec.away && !rec.closed && !parked(rec) ? cueY(rec) : null;
+    var away = scrolling || y === null || !!big;
+    stub.el.classList.toggle('away', away);
+    if (away) {
+      stub.el.classList.remove('drawing');     // it comes back without the draw-in
+      return;
+    }
+    var dot = Math.max(DOT_GAP, Math.round(rec.el.getBoundingClientRect().left) - DOT_GAP);
+    stub.el.classList.toggle('amber', rec.el.classList.contains('waits'));
+    stub.el.style.setProperty('--y', y + 'px');
+    stub.el.style.setProperty('--dot', dot + 'px');
   }
 
   // ---- the app's messages -----------------------------------------------------------------------------------------------
@@ -1513,25 +1633,43 @@
     if (lit === message.id) {
       rec.el.classList.add('lit');
     }
+    if (big && big.id === message.id && big.card && big.state === 'open') {
+      fillCard(big.card, rec);                 // the big frame shows what its frame says now
+    }
     refresh();
     return true;
   };
 
+  // The frame Jarvis speaks of (part 5c, DESIGN-SPEC 3.4): its brackets close from 10 px out and its ground lights;
+  // "cue": the app draws the cue line's native part to it, so the page draws the stub (drawn in for a new lit frame,
+  // at once when the cue comes back for the same one). One thing bright at a time: an arriving frame traces in
+  // LINE_FOCUS meanwhile.
   HANDLERS.lit = function (message) {
-    if (!onlyKeys(message, ['type', 'id']) || typeof message.id !== 'string'
-        || (message.id !== '' && !ID.test(message.id))) {
+    if (!onlyKeys(message, ['type', 'id', 'cue']) || typeof message.id !== 'string'
+        || (message.id !== '' && !ID.test(message.id))
+        || (message.cue !== undefined && typeof message.cue !== 'boolean')) {
       return drop('shape');
     }
-    var old = frames.get(lit);
-    if (old) {
-      old.el.classList.remove('lit');
+    var rec = message.id ? frames.get(message.id) || null : null;
+    var same = !!rec && lit === message.id;
+    if (!same) {
+      var old = frames.get(lit);
+      if (old) {
+        old.el.classList.remove('lit');
+      }
+      lit = rec ? message.id : '';
+      if (rec) {
+        rec.el.classList.add('lit');
+      }
+      root.classList.toggle('has-lit', !!rec);
+      fadeStub();
     }
-    var rec = message.id ? frames.get(message.id) : null;
-    lit = rec ? message.id : '';
-    if (rec) {
-      rec.el.classList.add('lit');
+    litCue = !!rec && message.cue === true;
+    if (litCue) {
+      showStub(rec, !same);
+    } else {
+      fadeStub();
     }
-    root.classList.toggle('has-lit', !!rec);
     return true;
   };
 
@@ -1561,6 +1699,8 @@
     });
     groups.clear();
     lit = '';
+    litCue = false;
+    fadeStub();
     filter = 'all';
     root.classList.remove('has-lit');
     refresh();
@@ -1789,6 +1929,10 @@
       return drop('shape');
     }
     document.documentElement.classList.add('keys');
+    if (big && big.card) {
+      big.card.focus({preventScroll: true});   // open big: the keyboard is on the big frame (Esc goes back)
+      return true;
+    }
     var inStrip = !!stripParts && stripParts.nav.contains(document.activeElement);
     var part = message.part;
     if (part === 'next') {
@@ -1846,6 +1990,244 @@
     return true;
   };
 
+  // ---- open big (part 5c, DESIGN-SPEC 3.5): the view is wide for a moment, the frame grows to the whole of it ---------
+
+  function jpegUrl(src) {                      // ONE JPEG data: URL within the picture's caps (as Python checks it)
+    return typeof src === 'string' && src.length <= PICTURE_CAP && src.indexOf(PICTURE_PREFIX) === 0
+      && src.length > PICTURE_PREFIX.length && BASE64.test(src.slice(PICTURE_PREFIX.length));
+  }
+
+  HANDLERS.backdrop = function (message) {     // the conversation column, painted where it was while the view is wide
+    if (!onlyKeys(message, ['type', 'src'])) {
+      return drop('shape');
+    }
+    if (!jpegUrl(message.src)) {
+      return drop('picture');
+    }
+    if (!backdrop) {
+      backdrop = make('img', '');
+      backdrop.id = 'backdrop';
+      backdrop.alt = '';
+      backdrop.draggable = false;
+      backdrop.setAttribute('aria-hidden', 'true');
+      backdrop.addEventListener('click', function () { shrink(true); });
+      document.body.insertBefore(backdrop, document.body.firstChild);
+    }
+    backdrop.src = message.src;                // a data: picture the app made; nothing else loads (img-src data:)
+    return true;
+  };
+
+  HANDLERS.big = function (message) {
+    var state = message ? message.state : '';
+    if (state === 'open') {
+      if (!onlyKeys(message, ['type', 'state', 'id', 'x', 'y', 'w', 'h']) || typeof message.id !== 'string'
+          || !ID.test(message.id) || !whole(message.x, 0, BIG_LIMIT) || !whole(message.y, 0, BIG_LIMIT)
+          || !whole(message.w, 1, BIG_LIMIT) || !whole(message.h, 1, BIG_LIMIT)) {
+        return drop('shape');
+      }
+      var rec = frames.get(message.id);
+      if (!rec) {
+        return drop('id');
+      }
+      var box = {x: message.x, y: message.y, w: message.w, h: message.h};
+      if (big && big.id === message.id && (big.state === 'wait' || big.state === 'open')) {
+        big.box = box;                         // the window was resized while big: the same frame, a new box
+        placeBig();
+        return true;
+      }
+      if (big) {
+        endBig();
+      }
+      big = {id: message.id, rec: rec, card: null, state: 'wait', box: box};
+      placeBig();
+      return true;
+    }
+    if (!onlyKeys(message, ['type', 'state', 'id']) || state !== 'close' || typeof message.id !== 'string'
+        || (message.id !== '' && !ID.test(message.id))) {
+      return drop('shape');
+    }
+    shrink(false);                             // the app's own reason (its frame left, the desk went): back
+    return true;
+  };
+
+  function isWide() {                          // the view is as wide as the app made it: the board's box ends at its edge
+    return !!big && big.box.x > 0 && Math.abs(window.innerWidth - (big.box.x + big.box.w)) <= 2;
+  }
+
+  function laidOut() {                         // the page shows itself at the view's new size: the app's still goes
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () { post('big', {step: 'laid'}); });
+    });
+  }
+
+  function placeBig() {                        // on each big message and resize: the board keeps its own box
+    var body = document.body;
+    var wide = isWide();
+    if (wide) {
+      body.style.setProperty('--bx', big.box.x + 'px');
+      body.style.setProperty('--by', big.box.y + 'px');
+      body.style.setProperty('--bw', big.box.w + 'px');
+      body.style.setProperty('--bh', big.box.h + 'px');
+    }
+    body.classList.toggle('wide', wide);
+    if (big && big.state === 'wait' && wide) {
+      big.state = 'open';
+      grow();
+    } else if (big && big.state === 'shut' && !wide) {
+      big = null;                              // the app set the geometry back
+      laidOut();
+    }
+    placeStub();
+  }
+
+  function fillCard(card, rec) {               // the big frame: the frame's words at the whole view's size
+    var data = rec.data;
+    var body;
+    try {
+      body = makeBody(data);
+    } catch (error) {
+      return;
+    }
+    var head = make('div', 'f-head');
+    var title = make('h2', 'f-title t-frame-title', data.title);
+    title.id = 'big-title';
+    head.append(glyph(GLYPHS[data.kind] || 'read-all', 'f-glyph'), title,
+                make('span', 'f-meta t-badge', data.meta ? data.meta + ' · ' + WORDS.openBigMeta : WORDS.openBigMeta));
+    var parts = [head, body];
+    if (rec.picture) {
+      var picture = make('img', 'f-pic');
+      picture.alt = '';
+      picture.draggable = false;
+      picture.src = rec.picture.src;          // the frame's own data: picture again
+      var slot = body.querySelector('.pic-slot');
+      if (slot) {
+        slot.appendChild(picture);
+      } else {
+        parts.push(picture);
+      }
+    }
+    if (data.waits) {
+      var chip = button('f-wait', '', function () { post('go_approvals', {id: rec.id}); });
+      chip.addEventListener('mousedown', function (event) { event.preventDefault(); });
+      chip.append(glyph('diamond', 'f-dia', true), make('span', 'f-words', data.waits), glyph('chevron', 'f-chev'),
+                  make('span', 'f-key t-kbd', WORDS.approvalsKey));
+      parts.push(chip);
+    }
+    parts.push(make('div', 'f-back t-badge', WORDS.backToBoard));
+    card.className = 'frame big-card' + (data.waits ? ' waits' : '') + (data.status === 'failed' ? ' failed' : '')
+      + (data.status === 'empty' ? ' empty' : '');
+    card.replaceChildren.apply(card, parts);
+  }
+
+  function grow() {                            // the frame grows from its rectangle to the whole view (260 ms expo-out)
+    var rec = big.rec;
+    if (!bigLayer) {
+      bigLayer = make('div', '');
+      bigLayer.id = 'big';
+      var scrim = make('div', 'big-scrim');
+      scrim.setAttribute('aria-hidden', 'true');   // a click beside the big frame goes back (Esc says so for keys)
+      scrim.addEventListener('click', function () { shrink(true); });
+      bigLayer.appendChild(scrim);
+    }
+    var card = make('article', 'frame big-card');
+    card.tabIndex = -1;
+    card.setAttribute('aria-labelledby', 'big-title');
+    card.addEventListener('mousedown', function (event) {
+      if (event.detail > 1) {
+        event.preventDefault();
+      }
+    });
+    card.addEventListener('dblclick', function (event) {
+      if (!(event.target.closest && event.target.closest('button'))) {
+        shrink(true);
+      }
+    });
+    fillCard(card, rec);
+    big.card = card;
+    bigLayer.appendChild(card);
+    document.body.appendChild(bigLayer);
+    document.body.classList.add('dim');        // the backdrop and the other frames go to 20 %
+    var from = rec.el.getBoundingClientRect();
+    var start = function () {
+      if (!big || big.card !== card) {
+        return;
+      }
+      laidOut();
+      card.focus({preventScroll: true});
+      if (K === 0 || !card.animate || from.width < 1 || from.height < 1) {
+        return;                                // motion off: there at once
+      }
+      var width = window.innerWidth, height = window.innerHeight;
+      card.animate([
+        {transform: 'translate(' + from.left + 'px, ' + from.top + 'px) scale(' + (from.width / width) + ', '
+          + (from.height / height) + ')', opacity: 0.35},
+        {opacity: 1, offset: 0.4},
+        {transform: 'none', opacity: 1}
+      ], {duration: SCALE_MS * K, easing: easeOut});
+    };
+    var decoded = backdrop && backdrop.decode ? backdrop.decode() : Promise.resolve();
+    decoded.then(start, start);
+  }
+
+  function shrink(byOwner) {                   // back to the board: the scale-down (220 ms), then the app's geometry
+    if (!big || big.state === 'closing' || big.state === 'shut') {
+      return;
+    }
+    var card = big.card, rec = big.rec, mine = big;
+    big.state = 'closing';
+    if (byOwner) {
+      post('big', {step: 'back'});
+    }
+    document.body.classList.remove('dim');
+    var hadFocus = !!card && card.contains(document.activeElement);
+    var done = function () {
+      if (big !== mine) {
+        return;
+      }
+      if (card) {
+        card.remove();
+      }
+      if (bigLayer) {
+        bigLayer.remove();                     // its scrim never stays over the board
+      }
+      mine.card = null;
+      mine.state = 'shut';
+      if (hadFocus && current(rec)) {
+        target(rec).focus({preventScroll: true});
+      }
+      post('big', {step: 'shut'});
+      if (!isWide()) {
+        placeBig();                            // the view was never wide (or is narrow again already)
+      }
+    };
+    if (!card || K === 0 || !card.animate || !current(rec) || rec.away || rec.closed) {
+      done();
+      return;
+    }
+    var to = rec.el.getBoundingClientRect();
+    var width = window.innerWidth, height = window.innerHeight;
+    after(card.animate([
+      {transform: 'none', opacity: 1},
+      {opacity: 1, offset: 0.6},
+      {transform: 'translate(' + to.left + 'px, ' + to.top + 'px) scale(' + (to.width / width) + ', '
+        + (to.height / height) + ')', opacity: 0}
+    ], {duration: UNSCALE_MS * K, easing: easeOut, fill: 'forwards'}), done);
+  }
+
+  function endBig() {                          // gone at once (another frame takes its place)
+    if (!big) {
+      return;
+    }
+    if (big.card) {
+      big.card.remove();
+    }
+    if (bigLayer) {
+      bigLayer.remove();
+    }
+    document.body.classList.remove('dim');
+    big = null;
+  }
+
   function apply(text) {
     try {
       if (typeof text !== 'string' || text.length > MESSAGE_CAP + PICTURE_CAP) {
@@ -1859,7 +2241,8 @@
       if (!handle) {
         return drop('type');
       }
-      var picture = message.type === 'picture' && typeof message.src === 'string' ? message.src.length : 0;
+      var picture = (message.type === 'picture' || message.type === 'backdrop') && typeof message.src === 'string'
+        ? message.src.length : 0;
       if (text.length - picture > MESSAGE_CAP) {
         return drop('size');
       }
@@ -1919,6 +2302,7 @@
     root.addEventListener('scroll', onScroll, {passive: true});
     document.addEventListener('dragstart', function (event) { event.preventDefault(); });   // nothing leaves the page
     window.addEventListener('resize', function () {
+      placeBig();                              // first: the board keeps its own box in a wide view (open big)
       measureWidth();
       scheduleView();
       scheduleLayout();
@@ -1932,7 +2316,9 @@
   Object.defineProperty(window, 'board', {
     value: Object.freeze({
       apply: apply,
-      counts: function () { return Object.assign({frames: frames.size, groups: groups.size}, dropped); }
+      counts: function () {
+        return Object.assign({frames: frames.size, groups: groups.size, big: big ? big.state : '', lit: lit}, dropped);
+      }
     }),
     writable: false, configurable: false, enumerable: false
   });

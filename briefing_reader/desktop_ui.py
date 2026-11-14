@@ -2502,6 +2502,9 @@ class DesktopController(QObject):
         win.orb.set_recording(bool(elapsed))
         voice = getattr(reading, "voice_listening", None)
         win.orb.set_voice_listening(bool(voice()) if callable(voice) else False)   # the voice locks it; typing leans
+        share = getattr(reading, "glow_share", None)
+        if callable(share):
+            win.orb.set_glow_share(share())                  # the new look: a lit frame halves the core glow
         base, muted, offline = reading.look()
         win.set_look(base, muted=muted, offline=offline, word=reading.task_word(base, muted))
         self._refresh_flight()                               # the chips arrive with the counts as they are now

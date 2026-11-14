@@ -4,12 +4,15 @@ Qt-free and pure: no file, no log, no clock (the caller says when: ``now`` is a 
 raises for odd data.
 
     BoardFeed(max_frames=protocol.MAX_FRAMES, max_groups=protocol.MAX_GROUPS, close_s=CLOSE_S, clear_s=CLEAR_S)
-        frame_id(answer, source, merge="") -> str
+        frame_id(answer, source, merge="", key="") -> str
             the frame id a source's frame takes, made before its builder runs (board.frames builders take it): the
             same id again for the same source of the same answer (an update in place: a page picture that comes ready),
             and the id of the frame already there when ``merge`` names one of the answer's frames (a mail thread and
-            the reply to it that waits on Approvals: "account:thread id" for both)
-        put(answer, source, messages, *, when, topic="", merge="", approvals="", rank=0.0, park=False) -> list[dict]
+            the reply to it that waits on Approvals: "account:thread id" for both). Part 5c: ``key`` is the frame's
+            source - the same thread, day, page or list ("mail:work:t1", "day:2026-11-17") - and a frame of another
+            answer built from it, still on the board (not closed, not cleared), lends its id: it is built again
+        put(answer, source, messages, *, when, topic="", merge="", approvals="", rank=0.0, park=False, key="")
+            -> list[dict]
             a builder's messages (board.frames.Built.messages: the frame, then its picture) for ``answer``'s group,
             and returns what to send, in order: the room made (whole groups leaving), the group (new: on top of the
             board, its header ``when`` - "9:41 AM" - and ``topic``, else the first frame's title, at most 40
@@ -20,7 +23,10 @@ raises for odd data.
             reply that waits on it are ONE frame: the mail as read, with the reply's amber chip ("Reply waits on
             Approvals"), whose go_approvals opens the reply's card (``approvals``: that card's action id). In a group a
             frame that waits on the owner comes first, then the frames in the order Jarvis speaks of them (``rank``,
-            then their arrival)
+            then their arrival). A frame built again from its ``key`` by a later answer stays in its own place: when
+            what it says differs (``substance``: its own data, not the clock's) it is sent again with "changed" (the
+            page's one light, then CHANGED stays; take_changed() lists it once); when it says the same, nothing at
+            all is sent (a waiting reply's newer card still becomes what its chip opens)
         land() -> list[dict]                       the parked groups land (on top); every other group is then older,
                                                    so its unpinned frames fold to satellites on the page
         pin(frame_id, on) / close(frame_id, now) / bring_back(frame_id) -> list[dict]
@@ -35,6 +41,9 @@ raises for odd data.
             cleared ones; when the next one is due
         set_pinned(frame_id, on) -> bool           pinned or not (False: refused, the 7th); a group with a pinned frame
                                                    never leaves for room, and nothing pinned is ever cleared
+        clearing() -> bool                         a Clear's Bring back is offered (its row shows, also with nothing
+                                                   left on the board: the desk stays for it)
+        take_changed() -> list[str]                the frames sent again with "changed" since the last call
         set_compact(compact) -> list[dict]         the bar without its frames count (the folded Dock's column)
         set_turn(answer, entry_id)                 the conversation turn that put the answer's frames up
         turn_frames(entry_id) -> (group id, count) its group and how many of its frames are on the board now (cleared
@@ -76,6 +85,30 @@ def _same(message: dict[str, Any]) -> str:
     return json.dumps(message, sort_keys=True, ensure_ascii=True)
 
 
+def substance(frame: dict[str, Any]) -> str:
+    """What a frame says, as one string to compare (part 5c's "changed"): its kind, title, status and its body's own
+    data - never the clock's: a day's events (time and title; not its now line, its "IN 19 MIN" or its free gaps), a
+    mail list's senders, subjects and what waits (not their ages), to-dos' words and states (not their due words); the
+    other kinds' bodies as they are. Never raises."""
+    try:
+        kind = str(frame.get("kind", ""))
+        body = frame.get("body") if isinstance(frame.get("body"), dict) else {}
+        rows = body.get("rows") if isinstance(body.get("rows"), list) else []
+        rows = [row for row in rows if isinstance(row, dict)]
+        if kind == "calendar":
+            stable: Any = [[row.get("time", ""), row.get("title", "")] for row in rows if row.get("state") != "free"]
+        elif kind == "mail_list":
+            stable = [[row.get("sender", ""), row.get("subject", ""), row.get("meta", "")] for row in rows]
+        elif kind == "todos":
+            stable = [[row.get("text", ""), row.get("state", "")] for row in rows]
+        else:
+            stable = body
+        return json.dumps([kind, frame.get("title", ""), frame.get("status", "ok"), frame.get("status_text", ""),
+                           stable], sort_keys=True, ensure_ascii=True, default=str)
+    except (TypeError, ValueError, AttributeError):
+        return ""
+
+
 @dataclass
 class _Part:
     """One source's frame (and picture) as its builder made it."""
@@ -103,6 +136,8 @@ class _Frame:
     leave_at: float | None = None  # a closed frame leaves then
     sent: str = ""                 # the frame message the page has (unchanged ones are not sent again)
     sent_picture: str = ""
+    key: str = ""                  # its source (part 5c): a later answer built from it builds this frame again
+    changed: bool = False          # it was built again and said something else: CHANGED stays
 
     def shown(self) -> tuple[dict[str, Any], dict[str, Any] | None, str]:
         """(the frame message, its picture message or None, the card go_approvals opens): a merged frame is the mail as
@@ -157,16 +192,19 @@ class BoardFeed:
         self._seq = 0
         self._next_frame = 0
         self._next_group = 0
+        self._just_changed: list[str] = []
         self._counts = {"frames": 0, "groups": 0, "left": 0, "refused": 0, "merged": 0, "pins_refused": 0,
-                        "closed": 0, "cleared": 0, "parked": 0, "landed": 0}
+                        "closed": 0, "cleared": 0, "parked": 0, "landed": 0, "changed": 0, "rebuilt": 0}
 
     # ---- ids ---------------------------------------------------------------------------------------------------------
 
-    def frame_id(self, answer: Hashable, source: str, merge: str = "") -> str:
+    def frame_id(self, answer: Hashable, source: str, merge: str = "", key: str = "") -> str:
         """See the module doc."""
         found = self._ids.get((answer, source))
         if found is None and merge:
             found = self._ids.get((answer, "merge:" + merge))
+        if found is None and key:
+            found = self._keyed(key)
         if found is None:
             self._next_frame += 1
             found = f"f{self._next_frame}"
@@ -174,6 +212,13 @@ class BoardFeed:
         if merge:
             self._ids.setdefault((answer, "merge:" + merge), found)
         return found
+
+    def _keyed(self, key: str) -> str | None:
+        """The frame on the board built from ``key`` (not closed, not taken away by a Clear), else None."""
+        for frame in self._frames.values():
+            if frame.key == key and not frame.closed and not frame.cleared:
+                return frame.id
+        return None
 
     # ---- reading ---------------------------------------------------------------------------------------------------
 
@@ -190,6 +235,15 @@ class BoardFeed:
     def cleared(self) -> list[str]:
         """The frames the bar's Clear took away (still offered back), in board order."""
         return [frame_id for frame_id in self.frame_ids() if self._frames[frame_id].cleared]
+
+    def clearing(self) -> bool:
+        """A Clear's Bring back is offered now (its row shows until it is used or CLEAR_S pass)."""
+        return self._clear_until is not None
+
+    def take_changed(self) -> list[str]:
+        """The frames sent again with "changed" (built again, saying something else) since the last call."""
+        found, self._just_changed = list(dict.fromkeys(self._just_changed)), []
+        return [frame_id for frame_id in found if frame_id in self._frames]
 
     def parked_groups(self) -> list[str]:
         """The groups parked out of sight (they came while the owner read the board), oldest first."""
@@ -279,7 +333,7 @@ class BoardFeed:
 
     def put(self, answer: Hashable, source: str, messages: Sequence[dict[str, Any]], *, when: str = "",
             topic: str = "", merge: str = "", approvals: str = "", rank: float = 0.0,
-            park: bool = False) -> list[dict[str, Any]]:
+            park: bool = False, key: str = "") -> list[dict[str, Any]]:
         """See the module doc."""
         frame_message = next((dict(item) for item in messages if isinstance(item, dict)
                               and item.get("type") == "frame"), None)
@@ -294,6 +348,8 @@ class BoardFeed:
         out: list[dict[str, Any]] = []
         frame = self._frames.get(frame_id)
         group = self._groups.get(self._by_answer.get(answer, ""))
+        if frame is not None and key and frame.key == key and (group is None or frame.group != group.id):
+            return self._rebuild(frame, source, frame_message, picture, approvals)
         if frame is None:
             if group is None and answer in self._dismissed:
                 self._counts["refused"] += 1       # the owner closed or cleared this answer away: no late frame
@@ -310,7 +366,7 @@ class BoardFeed:
                 group, made = self._new_group(answer, when, topic or str(frame_message.get("title", "")), park)
                 out += made
             self._seq += 1
-            frame = _Frame(frame_id, group.id, merge, self._seq, float(rank))
+            frame = _Frame(frame_id, group.id, merge, self._seq, float(rank), key=str(key or ""))
             self._frames[frame_id] = frame
             group.frames.append(frame_id)
             self._counts["frames"] += 1
@@ -342,14 +398,56 @@ class BoardFeed:
         out += self._bar_if_changed()
         return out
 
+    def _rebuild(self, frame: _Frame, source: str, message: dict[str, Any], picture: dict[str, Any] | None,
+                 approvals: str) -> list[dict[str, Any]]:
+        """A frame on the board built again from its key by another answer (see the module doc): in its own place;
+        "changed" when what it says differs, nothing at all when it says the same."""
+        before = frame.shown()[0]
+        old = frame.parts.get(source)
+        self._seq += 1
+        frame.parts[source] = _Part(source, message, picture, str(approvals or ""), self._seq)
+        after = frame.shown()[0]
+        if message.get("waits"):
+            pass                                   # a waiting reply's newer card: what its chip opens (no figure)
+        elif substance(after) == substance(before):
+            if old is None:                        # the same words again: nothing changes
+                del frame.parts[source]
+            else:
+                frame.parts[source] = old
+            return []
+        elif before.get("status", "ok") == "ok" and after.get("status", "ok") == "ok":
+            frame.changed = True
+            self._just_changed.append(frame.id)
+            self._counts["changed"] += 1
+        self._counts["rebuilt"] += 1
+        out: list[dict[str, Any]] = []
+        shown = self._shown(frame)
+        text = _same(shown)
+        if text != frame.sent:
+            frame.sent = text
+            out.append(shown)
+        shown_picture = frame.shown()[1]
+        if shown_picture is not None:
+            picture_message = dict(shown_picture)
+            picture_message["id"] = frame.id
+            picture_text = _same(picture_message)
+            if picture_text != frame.sent_picture:
+                frame.sent_picture = picture_text
+                out.append(picture_message)
+        group = self._groups.get(frame.group)
+        if group is not None:
+            out += self._order(group)
+        return out + self._bar_if_changed()
+
     def _shown(self, frame: _Frame) -> dict[str, Any]:
         """The frame message as the page should have it: the builder's (merged) frame, its id and group, the app's own
-        flags and its satellite's fact."""
+        flags (changed too) and its satellite's fact."""
         shown = frame.shown()[0]
         shown["id"] = frame.id
         shown["group"] = frame.group
         shown["pinned"] = frame.pinned
         shown["closed"] = frame.closed
+        shown["changed"] = frame.changed or bool(shown.get("changed", False))
         shown["fact"] = fact_of(shown)
         return shown
 
@@ -678,4 +776,4 @@ def spoken_rank(say: str, words: Iterable[str]) -> float:
     return best / (len(line) + 1) if best <= len(line) else 1.0
 
 
-__all__ = ["BoardFeed", "CLEAR_S", "CLOSE_S", "QUIET_S", "ReadingWatch", "spoken_rank"]
+__all__ = ["BoardFeed", "CLEAR_S", "CLOSE_S", "QUIET_S", "ReadingWatch", "spoken_rank", "substance"]

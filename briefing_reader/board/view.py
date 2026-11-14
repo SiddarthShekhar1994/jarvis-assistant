@@ -20,7 +20,9 @@ its place when it can't be.
                           frames' 448 px (no index strip). Part 5b: clearRequested(), restoreRequested(),
                           showNewRequested(), readingChanged(pointer, focus), focusOutRequested(to); focus_part(part)
                           (F6: the keyboard focus to the page, then its frames or its index strip); the read-only tiles
-                          leave out a parked answer and what a Clear took away
+                          leave out a parked answer and what a Clear took away. Part 5c: frameLanded(id, step) (a frame
+                          drawing in: "outline", then "done"), bigStep(step) (open big: "back", "laid", "shut"); the
+                          lit, backdrop and big messages (the fallback's tiles have neither)
     BoardBridge           the one object the page sees on its web channel: post(kind, payload), checked against
                           board.protocol (the kinds on the list, the frame ids the app sent); anything else dropped and
                           counted (a log line names the kind only when it is on the list, else "unknown")
@@ -489,6 +491,10 @@ class BoardView(QWidget):
     showNewRequested = Signal()
     readingChanged = Signal(bool, bool)
     focusOutRequested = Signal(str)
+    # Part 5c: a frame drawing in (its id; "outline" complete, then its draw-in "done") and open big's steps ("back",
+    # "laid", "shut").
+    frameLanded = Signal(str, str)
+    bigStep = Signal(str)
     unavailable = Signal(str)              # the reason word (no_engine, sandbox, unsafe_flags, no_ready, ...)
 
     def __init__(self, parent: QWidget | None = None, *, start_delay_ms: int = START_DELAY_MS,
@@ -998,6 +1004,10 @@ class BoardView(QWidget):
             self.readingChanged.emit(request.pointer, request.focused)
         elif kind == "focus_out":
             self.focusOutRequested.emit(request.to)
+        elif kind == "landed":
+            self.frameLanded.emit(request.frame_id, request.step)
+        elif kind == "big":
+            self.bigStep.emit(request.step)
 
     def _on_ready(self) -> None:
         if self._phase != _LOADING or self._load_pending:

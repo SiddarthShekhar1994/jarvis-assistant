@@ -1178,7 +1178,10 @@ class ReadingView(QWidget):
     ``open_card(action_id)``: Approvals at that card (the board's go_approvals). Part 5b: F6 / Shift+F6
     (``cycle_focus``) go round the desk - the ask bar, the conversation (``focus_conversation``), the board and its
     index strip (``boardFocusRequested``: the page's own parts) - and Esc in the board or the conversation comes back to
-    the ask bar (``focus_ask_bar``).
+    the ask bar (``focus_ask_bar``). Part 5c: ``set_board_held`` keeps the desk while a Clear's Bring back is offered
+    with nothing left on the board (the header's count says 0); ``set_frame_lit`` halves every ring's core glow while
+    a frame is lit (``glow_share()``: the HUD's ring follows through glanceChanged); open big's native dim of the Dock
+    and the header (``set_chrome_dim``) and ``set_board_big`` (F6 then skips the covered conversation).
     """
 
     playPause = Signal()
@@ -1508,6 +1511,12 @@ class ReadingView(QWidget):
         # until the board can be (set_board_available: [look] board on), and the desk itself at its first use.
         self._board_on = False                    # the board can be (the header's button, Ctrl+B, the hint line)
         self._board_count = 0                     # frames on the board
+        self._board_held = False                  # part 5c: a Clear's Bring back is offered: the desk stays for it
+        self._frame_lit = False                   # part 5c: a frame is lit (every ring's core glow halves)
+        self._board_big = False                   # part 5c: a frame is open big (the view spans both columns)
+        self._chrome_dim = 1.0                    # part 5c: the Dock and the header's strength (open big: 0.2)
+        self._chrome_effects: list[Any] = []
+        self._chrome_anim: Any = None
         self._board_folded = False                # Ctrl+B folded it: Home's stage with "9 on the board"
         self._board_hint = False                  # empty Home's hint line may show (seen fewer than three times)
         self._board_view: QWidget | None = None   # the board's one view (desk_ui makes it), in the desk or the drawer
@@ -2635,6 +2644,100 @@ class ReadingView(QWidget):
         """The frames on the board (0 while the board can't be): the HUD's "9 on the board"."""
         return self._board_count if self._board_on else 0
 
+    def set_board_held(self, held: bool) -> None:
+        """A Clear's Bring back is offered (part 5c): the desk stays - the bar, the "Board cleared · N FRAMES · Bring
+        back" row, the ring at the column head - even with nothing left on the board; released with nothing on it,
+        the desk leaves through set_board_count's path and Home's stage returns."""
+        held = bool(held)
+        if held != self._board_held:
+            self._board_held = held
+            self._sync_desk()
+
+    def board_held(self) -> bool:
+        return self._board_held
+
+    def set_frame_lit(self, lit: bool) -> None:
+        """A frame on the board is lit (Jarvis speaks of it; part 5c): the core glow of every ring that mirrors the
+        main one halves (DESIGN-SPEC 1: one thing bright at a time) - Home's, the desk's, the Dock's, Briefing's,
+        Plan's, and the HUD's through glanceChanged."""
+        lit = bool(lit)
+        if lit == self._frame_lit:
+            return
+        self._frame_lit = lit
+        share = self.glow_share()
+        desk_ring = self._desk.head.orb if self._desk is not None else None
+        for ring in (self.hero, self.dock.mini_orb(), self.briefing_orb, self.plan_stage.orb, desk_ring):
+            if ring is not None:
+                ring.set_glow_share(share)
+        self.glanceChanged.emit()
+
+    def frame_lit(self) -> bool:
+        return self._frame_lit
+
+    def glow_share(self) -> float:
+        """The rings' core glow now: orb.LIT_GLOW while a frame is lit, else 1."""
+        return orb_mod.LIT_GLOW if self._frame_lit else 1.0
+
+    def set_board_big(self, big: bool) -> None:
+        """A frame is open big (part 5c): the board's view covers the conversation, so F6 skips it."""
+        self._board_big = bool(big)
+
+    def board_big(self) -> bool:
+        return self._board_big
+
+    def set_chrome_dim(self, level: float, ms: int = 0) -> None:
+        """Open big's native dim (part 5c, DESIGN-SPEC 3.5): the Dock and the header at ``level`` of their strength
+        (0.2 while big, 1.0 back), eased over ``ms`` (expo-out; 0: at once). At 1.0 the effects go."""
+        from PySide6.QtCore import QVariantAnimation
+        from PySide6.QtWidgets import QGraphicsOpacityEffect
+
+        level = max(0.0, min(1.0, float(level)))
+        if self._chrome_anim is not None:
+            self._chrome_anim.stop()
+            self._chrome_anim = None
+        if level >= 1.0 and not self._chrome_effects:
+            self._chrome_dim = 1.0
+            return
+        if not self._chrome_effects:
+            for widget in (self.dock, self.header):
+                effect = QGraphicsOpacityEffect(widget)
+                effect.setOpacity(1.0)
+                widget.setGraphicsEffect(effect)
+                self._chrome_effects.append(effect)
+        start = self._chrome_dim
+
+        def apply(value: Any) -> None:
+            self._chrome_dim = float(value)
+            for effect in self._chrome_effects:
+                if shiboken6.isValid(effect):
+                    effect.setOpacity(self._chrome_dim)
+
+        def finish() -> None:
+            apply(level)
+            self._chrome_anim = None
+            if level >= 1.0:
+                for widget in (self.dock, self.header):
+                    if shiboken6.isValid(widget):
+                        widget.setGraphicsEffect(None)       # deletes its effect: no offscreen pass any more
+                self._chrome_effects = []
+
+        if ms <= 0 or start == level:
+            finish()
+            return
+        animation = QVariantAnimation(self)
+        animation.setStartValue(float(start))
+        animation.setEndValue(float(level))
+        animation.setDuration(int(ms))
+        animation.setEasingCurve(QEasingCurve.Type.OutExpo)
+        animation.valueChanged.connect(apply)
+        animation.finished.connect(finish)
+        self._chrome_anim = animation
+        animation.start()
+
+    def chrome_dim(self) -> float:
+        """The Dock and the header's strength now (1.0: not dimmed)."""
+        return self._chrome_dim
+
     def board_folded(self) -> bool:
         return self._board_folded
 
@@ -2643,6 +2746,10 @@ class ReadingView(QWidget):
         self._ground_painter = painter_fn
         if self._desk is not None and painter_fn is not None:
             self._desk.head.orb.set_ground(painter_fn)
+
+    def ground_painter(self) -> Callable[..., Any] | None:
+        """The window's ground painter (``fn(painter, widget)``): open big's backdrop is painted on it (part 5c)."""
+        return self._ground_painter
 
     def set_turn_frames(self, frames_for: Callable[[int], int]) -> None:
         """How many frames a turn (its entry id) has on the board now: its "4 frames on the board"."""
@@ -2664,6 +2771,7 @@ class ReadingView(QWidget):
             page.geometryChanged.connect(self.deskLayoutChanged)
             page.turns.escaped.connect(self.focus_ask_bar)
             page.set_folded_dock(self.width() < DOCK_LABELS_FROM if self.width() > 0 else False)
+            page.head.orb.set_glow_share(self.glow_share())     # part 5c: a lit frame halves its glow too
             if self._ground_painter is not None:
                 page.head.orb.set_ground(self._ground_painter)
             self._home_switch.addWidget(page)
@@ -2753,8 +2861,8 @@ class ReadingView(QWidget):
         self._sync_desk(fly=False)
 
     def _desk_wanted(self) -> bool:
-        return (self._board_on and self._board_count > 0 and not self._board_folded and not self._moment
-                and not self.board_in_drawer())
+        return (self._board_on and (self._board_count > 0 or self._board_held) and not self._board_folded
+                and not self._moment and not self.board_in_drawer())
 
     def _sync_desk(self, *, fly: bool = True) -> None:
         wanted = self._desk_wanted()
@@ -2915,6 +3023,12 @@ class ReadingView(QWidget):
             return (focus is not None and widget is not None and shiboken6.isValid(widget)
                     and (focus is widget or widget.isAncestorOf(focus)))
 
+        if self._board_big:                      # open big covers the conversation: the ask bar and the board only
+            if within(self._board_view):
+                self.focus_ask_bar()
+            else:
+                self.boardFocusRequested.emit("board")
+            return
         if within(self._board_view):
             self.boardFocusRequested.emit("next" if forward else "prev")
         elif within(desk.turns):
@@ -13088,6 +13202,7 @@ class AppController(QObject):
         self._voice_call("set_muted", bool(muted))
         if muted:
             self._prod_call("on_muted")   # an offer not said yet stays text only: unmuting never says it (R37)
+        self._look_call("on_muted", bool(muted))   # the new look: a lit frame and its cue line go with his voice
         self._sync_speaker()
 
     def _sync_speaker(self) -> None:

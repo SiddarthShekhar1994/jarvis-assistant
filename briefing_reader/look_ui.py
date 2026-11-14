@@ -11,7 +11,17 @@ never lets it stop the app. Its hooks:
 - ``on_answer_started(task_id, text)`` / ``on_ask_outcome(outcome, task_id)``: an answer's group on the board;
 - ``on_pending(count)``: WAITS when the number of cards waiting for the owner goes up (never at the first count);
 - ``on_action_result(status, failed)``: DONE when an approved card's action finished, FAILED when it failed;
-- ``on_speaking()``: Jarvis's voice or a briefing started or stopped.
+- ``on_speaking()``: Jarvis's voice or a briefing started or stopped (part 5c: his utterance goes on to the desk, whose
+  sentence being said lights the frame it is about); ``on_muted(muted)``: his voice was muted (nothing lit).
+
+Part 5c, the board's sounds (the desk calls them; SoundBoard's gate and this controller's quiet rules decide, so they
+are never heard while Jarvis speaks - dropped, never queued -, muted, in quiet hours, focus mode, while a meeting
+records, locked, while Windows says busy or full screen, with sounds off, or under the test guard):
+
+- ``on_frame_landed(place)``: FRAME, the variant by the frame's place in its group (frame0-frame3);
+- ``on_group_settled()``: SETTLED, once, after a group's last frame;
+- ``on_frame_changed()``: CHANGED, as the changed light starts;
+- ``on_big(opened)``: OPEN_BIG / CLOSE_BIG.
 
 Settings > Look shows the switches as they are and has the one thing it changes on this PC: the sounds on or off
 (assistant.json's "look" table). [look] in config.toml sets the defaults; ``sounds = "off"`` there wins.
@@ -135,7 +145,7 @@ class LookController(QObject):
         factory = getattr(self.host, "_board_factory", None)
         if not desk_ui.can_have_board(factory):
             return None
-        return desk_ui.DeskController(self.host, factory=factory)
+        return desk_ui.DeskController(self.host, factory=factory, look=self)
 
     # ---- the switches ---------------------------------------------------------------------------
 
@@ -211,6 +221,30 @@ class LookController(QObject):
             player = None                       # a player being replaced or deleted is not playing
         playing = player is not None and getattr(player, "state", "") in (PLAYING, WAITING)
         self.sounds.set_speaking(speaking or playing)
+        if self.desk is not None:               # part 5c: the sentence he says lights the frame it is about
+            self.desk.on_speech(str(getattr(host, "_utterance", "") or ""))
+
+    def on_muted(self, muted: bool) -> None:
+        """His voice was muted (or unmuted): a lit frame and its cue line go at once."""
+        if muted and self.desk is not None:
+            self.desk.on_muted()
+
+    # ---- the board's sounds (part 5c) -----------------------------------------------------------------------------
+
+    def on_frame_landed(self, place: int) -> str:
+        """A frame finished drawing in, the ``place``-th of its group (only the first four sound)."""
+        if not 0 <= int(place) < len(sounds.FRAME_STEPS):
+            return sounds.R_UNKNOWN
+        return self.sounds.play(sounds.FRAME, int(place))
+
+    def on_group_settled(self) -> str:
+        return self.sounds.play(sounds.SETTLED)
+
+    def on_frame_changed(self) -> str:
+        return self.sounds.play(sounds.CHANGED)
+
+    def on_big(self, opened: bool) -> str:
+        return self.sounds.play(sounds.OPEN_BIG if opened else sounds.CLOSE_BIG)
 
     def on_talk_state(self, state: str) -> None:
         """The talk key's or "Hey Jarvis"'s listening: HEARD as it opens."""

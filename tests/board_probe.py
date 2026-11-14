@@ -46,6 +46,18 @@ Cases:
                the pill, the dashed strip entry, the scroll holding; Show; quiet), the room a group makes (220 ms),
                the keyboard (real F6, Shift+F6, the arrows, Home / End, Esc), pairs at 1232 x 640 (Left / Right), and
                the new messages refused by the page when hostile
+    lit        part 5c with the app's own controller: Jarvis's sentence lights the frame it names (his voice's
+               timeline handed to the app as the voice gives it) - its brackets in its own colour (AMBER_HI on amber,
+               never cyan), its ground, the stub from the view's left edge to it (the dot 6 px from it, where the
+               app's native part ends), hidden while the board scrolls and back after, gone with the speech; an
+               arriving frame traced in LINE_FOCUS while one is lit; the changed lap (a frame built again from its
+               source by a later answer: the light, then CHANGED; the same words again: nothing sent); three across
+               at 1500 x 960 (Left / Right in the row) and pairs at 1480 x 960; Clear with nothing pinned (the desk
+               stays for the Bring back row, then folds); the new messages refused by the page when hostile
+    big        part 5c's open big in Jarvis's own window with the app's controller: a real double click opens it (the
+               geometry set once, the backdrop the only new picture, the frame's scale from its rectangle to the
+               whole view, the native dim), a resize to 900 x 600 keeps it spanning both columns, real Esc reverses
+               it (the scale-down, then the geometry set back once, then the dim lifts); big_x15 at 1.5x
 
 Qt runs offscreen and Chromium's proxy is a dead address (snapshots.OFFLINE_FLAGS, as the board's engine always runs in a
 test): nothing can reach the network whatever the page does. No window is shown on the real screen.
@@ -898,6 +910,10 @@ def main(case: str) -> dict[str, Any]:
         report.update(desk_case(wait_until, pump, main_world, settle_end))
     elif case == "ways":
         report.update(ways_case(wait_until, pump, main_world, settle_end))
+    elif case == "lit":
+        report.update(lit_case(wait_until, pump, main_world, settle_end))
+    elif case in ("big", "big_x15"):
+        report.update(big_case(wait_until, pump, main_world, settle_end))
     else:
         report["error"] = f"unknown case {case!r}"
     report["webengine_flags_offline"] = all(flag in os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
@@ -1503,11 +1519,511 @@ def ways_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> d
         key(Qt.Key.Key_P)
     click(rect("document.querySelector('#bar .b-clear')"))
     pump(0.4)
+    # Part 5c: the desk stays for the Bring back row (the header's count says what is left: 0), then folds.
+    report["last_clear_held"] = [reading.desk_shown(), reading.board_held(), reading.board_count()]
+    pump(1.9)
     report["last_clear_desk"] = reading.desk_shown()
     report["last_clear_stage"] = reading.stage.isVisible()
     report["last_clear_count"] = reading.board_count()
     report["desk_counts"] = {key_: value for key_, value in desk.counts.items() if isinstance(value, int)}
     report["counts"] = {key_: value for key_, value in board.counts().items() if isinstance(value, int)}
+    window.hide()
+    settle_end(report, board)
+    shim.close()
+    return report
+
+
+class _Shim:
+    """What AppHarness asks of a test: addCleanup."""
+
+    def __init__(self) -> None:
+        self.cleanups: list = []
+
+    def addCleanup(self, fn: Any, *args: Any) -> None:  # noqa: N802 - unittest's name
+        self.cleanups.append((fn, args))
+
+    def close(self) -> None:
+        for fn, args in reversed(self.cleanups):
+            try:
+                fn(*args)
+            except Exception:  # noqa: BLE001
+                pass
+
+
+SAY = "Three meetings today, sir. Dana sent the budget numbers, and a reply waits for your OK."
+
+_LIT_PAGE = r"""JSON.stringify((function () {
+  function box(n) { if (!n) { return null; } var r = n.getBoundingClientRect(); return {left: r.left, top: r.top, width: r.width, height: r.height}; }
+  var root = document.getElementById('board'), lit = root.querySelector('.frame.lit'), stub = document.querySelector('.cue-stub');
+  var frames = Array.prototype.map.call(root.querySelectorAll('.frame'), function (f) {
+    var r = f.getBoundingClientRect(), tag = f.querySelector('.f-tag');
+    return {id: f.querySelector('.f-title').id.slice(6), cls: f.className, top: r.top, left: r.left, width: r.width,
+            height: r.height, ground: getComputedStyle(f).backgroundColor,
+            outline: getComputedStyle(f.querySelector('.fx-outline rect')).stroke,
+            tag: tag ? getComputedStyle(tag).display : ''};
+  });
+  return {lit: lit ? lit.querySelector('.f-title').id.slice(6) : '', has_lit: root.classList.contains('has-lit'),
+          brackets: lit ? Array.prototype.map.call(lit.querySelectorAll('.fx-bracket'), function (b) {
+            var s = getComputedStyle(b); return {color: s.borderTopColor === 'rgba(0, 0, 0, 0)' ? s.borderBottomColor : s.borderTopColor,
+              opacity: s.opacity, box: box(b)}; }) : [],
+          litBox: box(lit), stub: stub ? {cls: stub.className, line: box(stub.querySelector('.cs-line')),
+            dot: box(stub.querySelector('.cs-dot')), color: getComputedStyle(stub.querySelector('.cs-line')).backgroundColor,
+            visibility: getComputedStyle(stub).visibility} : null,
+          stubs: document.querySelectorAll('.cue-stub').length, frames: frames, board: root.className,
+          active: document.activeElement && document.activeElement.querySelector && document.activeElement.querySelector('.f-title')
+            ? document.activeElement.querySelector('.f-title').id.slice(6) : '',
+          counts: board.counts()};
+})())"""
+
+
+def _app_case(shim: Any, wait_until: Any, pump: Any, size: tuple[int, int]) -> tuple[Any, Any, list, Any]:
+    """The whole app offscreen with the real board (tests.ui_fakes.AppHarness: nothing real reached), on Home."""
+    from briefing_reader import ui
+    from briefing_reader.board import view
+    from tests.ui_fakes import B_TODO, AppHarness
+
+    boards: list = []
+
+    def factory(parent: Any) -> Any:
+        made = view.BoardView(parent, start_delay_ms=0)
+        boards.append(made)
+        return made
+
+    harness = AppHarness(shim, lines=(B_TODO,), board_factory=factory)
+    harness.reading(autoplay=False)
+    c = harness.c
+    c.window.resize(*size)
+    c.window.reading.set_tab(ui.SCREEN_HOME)
+    c.window.show()
+    c.window.activateWindow()
+    pump(0.3)
+    return harness, c, boards, c.look.desk
+
+
+def _put_answer(c: Any, desk: Any, built: dict, key: int, names: list[tuple[str, str]], *, say: str = "",
+                keys: dict | None = None, when: str = "") -> list[str]:
+    """An answer shown on Home (the controller's own steps): (source, kind_frames name) each, with source keys."""
+    c._you(f"Question {key}?")
+    desk.on_answer_started(key, f"Question {key}?")
+    c._jarvis(say or f"Answer {key}, sir.")
+    answered = desk._answers[key]
+    answered.done = True
+    answered.say = say or f"Answer {key}, sir."
+    desk.ensure_board()
+    park = desk._reading_now()
+    if not park and desk.feed.parked_groups():
+        desk._land()
+    messages: list = []
+    ids: list[str] = []
+    for rank, (source, name) in enumerate(names):
+        merge = "mail:work:t1" if name in ("mail", "reply", "mail2") else ""
+        source_key = (keys or {}).get(source, merge)
+        frame_id = desk.feed.frame_id(key, source, merge, source_key)
+        ids.append(frame_id)
+        messages += desk.feed.put(key, source, [dict(message, id=frame_id) for message in built[name].messages],
+                                  when=when or f"9:{key % 60:02d} AM", merge=merge,
+                                  approvals="card-1" if name == "reply" else "", rank=float(rank), park=park,
+                                  key=source_key)
+    desk._send(messages)
+    desk.feed.set_turn(key, desk._answer_entry())
+    desk._sync_counts()
+    return list(dict.fromkeys(ids))
+
+
+def _speak(c: Any, text: str, sentence: int) -> int:
+    """Jarvis says ``text`` and is in its ``sentence``-th sentence: his voice's timeline as the voice gives it."""
+    from briefing_reader import voice_fx
+    from briefing_reader.board import lit as lit_mod
+
+    spans = lit_mod.sentence_spans(text)
+    words, at_ms, position = [], 0, -1
+    for index, (start, end) in enumerate(spans):
+        for word, _a, _b in lit_mod.tokens(text[start:end]):
+            words.append((at_ms, at_ms + 280, word))
+            if index == sentence and position < 0:
+                position = at_ms + 140
+            at_ms += 300
+    timeline = voice_fx.VoiceTimeline(words=tuple(words), duration_ms=at_ms)
+    c._voice_timeline = lambda: timeline
+    c._voice_position = lambda: position
+    c._on_voice_speaking(text)
+    return position
+
+
+def lit_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> dict[str, Any]:
+    """Part 5c's lit frame, cue stub, changed lap, three across and Clear with nothing pinned (see the module doc)."""
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    from briefing_reader import desk_ui, holo
+    from briefing_reader.board import view
+
+    report: dict[str, Any] = {}
+    desk_ui.DeskController.CLEAR_S = 1.5          # the 8 s made short here (the unit tests hold the 8 s)
+    holo.set_motion_level("off")
+    shim = _Shim()
+    harness, c, boards, desk = _app_case(shim, wait_until, pump, (1120, 700))
+    window, reading = c.window, c.window.reading
+    jpeg = tiny_jpeg_url(320, 180)
+    built = dict(kind_frames(jpeg))
+    ids = _put_answer(c, desk, built, 41, [("mail", "mail"), ("reply", "reply"), ("day", "day"), ("todos", "todos")],
+                      say=SAY, keys={"day": "day:2026-11-17", "todos": "todos"})
+    board = boards[0]
+    wait_until(board.is_ready, 40)
+    pump(1.2)
+    report["ready"] = board.is_ready()
+    report["ids"] = ids
+
+    def page() -> dict:
+        return json.loads(main_world(board, _LIT_PAGE))
+
+    def frame_js(frame_id: str) -> str:
+        return f"document.getElementById('title-{frame_id}').closest('.frame')"
+
+    def native() -> dict:
+        path = desk.cue.path()
+        line = reading.desk_page().cue_line
+        top = board.mapTo(reading.desk_page(), QPoint(0, 0)).y()
+        return {"lit": desk.cue.lit(), "glow": reading.glow_share(),
+                "rings": [ring.glow_share() for ring in (reading.hero, reading.dock.mini_orb(), reading.briefing_orb,
+                                                         reading.plan_stage.orb, reading.desk_page().head.orb)],
+                "path": None if path is None else {"start": [path.start.x(), path.start.y()], "seam_x": path.seam_x,
+                                                   "end_y": path.end_y, "amber": path.amber},
+                "shown": line.shown(), "line_right": line.geometry().right(), "view_left": board.geometry().left(),
+                "seam": reading.desk_page().geometry_now().seam.x(), "board_top": top}
+
+    # ---- the second sentence names the mail (Dana, numbers): it is lit, amber ----------------------------------------
+    _speak(c, SAY, 1)
+    pump(0.6)
+    report["amber_page"] = page()
+    report["amber_native"] = native()
+    # ---- the board scrolls: the stub hides (and the native part), then both are back -------------------------------
+    main_world(board, "document.getElementById('board').scrollTop = 60; 1")
+    pump(0.06)
+    report["scrolling_page"] = page()
+    report["scrolling_native"] = native()
+    pump(0.6)
+    report["after_scroll_page"] = page()
+    report["after_scroll_native"] = native()
+    main_world(board, "document.getElementById('board').scrollTop = 0; 1")
+    pump(0.6)
+    # ---- the first sentence names today's calendar: it is lit, in cyan -----------------------------------------------
+    _speak(c, SAY + " ", 0)               # a new utterance (the same words): the first sentence
+    pump(0.6)
+    report["cyan_page"] = page()
+    report["cyan_native"] = native()
+    # ---- an answer arrives while a frame is lit: it traces in LINE_FOCUS (lively motion) ---------------------------
+    holo.set_motion_level("lively")
+    board.set_motion("lively")
+    pump(0.2)
+    arriving = _put_answer(c, desk, built, 42, [("research", "research")])
+    pump(0.15)
+    report["arriving_page"] = page()
+    report["arriving_id"] = arriving[0]
+    report["line_focus"] = holo.LINE_FOCUS.name() if hasattr(holo.LINE_FOCUS, "name") else str(holo.LINE_FOCUS)
+    pump(1.2)
+    # ---- the speech ends: nothing lit, the glow back, no stub ---------------------------------------------------------
+    c._on_voice_speaking("")
+    pump(0.6)
+    report["ended_page"] = page()
+    report["ended_native"] = native()
+    # ---- changed: a later answer builds the mail again from its thread with other words (lively: the lap) --------
+    nobody = desk._watch
+    nobody.reset()
+    sent_before = board.counts().get("sent:frame", 0)
+    changed_mail = dict(built["mail"].messages[0])
+    changed_mail["body"] = dict(changed_mail["body"], text="Line 14 is now 3,400 (it was 2,900 on Friday).")
+    from briefing_reader.board.frames import Built
+
+    built["mail2"] = Built((changed_mail,), 0)
+    _put_answer(c, desk, built, 43, [("mail-again", "mail2")], keys={"mail-again": "mail:work:t1"})
+    pump(0.3)
+    report["lap_page"] = page()
+    pump(1.2)
+    report["after_lap_page"] = page()
+    report["changed_frames"] = board.counts().get("sent:frame", 0) - sent_before
+    sent_again = board.counts().get("sent:frame", 0)
+    _put_answer(c, desk, built, 44, [("mail-third", "mail2")], keys={"mail-third": "mail:work:t1"})
+    pump(0.3)
+    report["same_again_sent"] = board.counts().get("sent:frame", 0) - sent_again
+    report["feed_counts"] = desk.feed.counts()
+    holo.set_motion_level("off")
+    board.set_motion("off")
+    pump(0.2)
+    # ---- three across at 1500 x 960, pairs at 1480 x 960 ------------------------------------------------------------
+    window.resize(1500, 960)
+    pump(0.6)
+    three = _put_answer(c, desk, built, 45, [("todo-a", "todos"), ("todo-b", "todos"), ("todo-c", "todos")],
+                        keys={"todo-a": "", "todo-b": "", "todo-c": ""})
+    pump(0.8)
+    report["three_ids"] = three
+    report["three_page"] = page()
+    report["three_view"] = list(board.geometry().getRect())
+    board.web_view().setFocus(Qt.FocusReason.OtherFocusReason)
+    wait_until(lambda: view.keeps_space(QApplication.focusWidget()), 5)
+    main_world(board, f"{frame_js(three[0])}.focus(); 1")
+    pump(0.2)
+    keys: dict[str, str] = {}
+    for name, code in (("right", Qt.Key.Key_Right), ("right2", Qt.Key.Key_Right), ("left", Qt.Key.Key_Left),
+                       ("down", Qt.Key.Key_Down)):
+        QTest.keyClick(QApplication.focusWidget() or window, code)
+        pump(0.25)
+        keys[name] = page()["active"]
+    report["three_keys"] = keys
+    window.resize(1480, 960)
+    pump(0.8)
+    report["pairs_page"] = page()
+    report["pairs_view"] = list(board.geometry().getRect())
+    window.resize(1120, 700)
+    pump(0.6)
+    # ---- Clear with nothing pinned: the desk stays for its Bring back row, then folds --------------------------------
+    for frame_id in desk.feed.frame_ids():
+        if desk.feed.flags(frame_id).get("pinned"):
+            desk.feed.set_pinned(frame_id, False)
+    desk._watch.reset()
+    desk._on_clear()
+    pump(0.4)
+    report["cleared_desk"] = reading.desk_shown()
+    report["cleared_held"] = reading.board_held()
+    report["cleared_count"] = reading.board_count()
+    report["cleared_row"] = main_world(board, "(function () { var r = document.querySelector('.cleared-row'); "
+                                              "return r.classList.contains('shown') ? r.innerText.replace(/\\s+/g, ' ')"
+                                              ".trim() : ''; })()")
+    report["cleared_bar"] = main_world(board, "document.getElementById('bar').innerText.replace(/\\s+/g, ' ').trim()")
+    report["cleared_ring_head"] = reading.desk_page().head.isVisible()
+    pump(1.9)
+    report["after_clear_desk"] = reading.desk_shown()
+    report["after_clear_stage"] = reading.stage.isVisible()
+    # ---- the new messages, hostile, straight into the page: refused -------------------------------------------------
+    known = sorted(board.known_ids())[0] if board.known_ids() else "f1"
+    hostile = [
+        {"type": "lit", "id": known, "cue": "yes"},
+        {"type": "lit", "id": known, "cue": True, "x": 1},
+        {"type": "backdrop", "src": "data:image/png;base64,iVBORw0KGgo="},
+        {"type": "backdrop", "src": "https://example.com/x.jpg"},
+        {"type": "backdrop", "src": jpeg, "id": known},
+        {"type": "big", "state": "open", "id": known, "x": -1, "y": 0, "w": 10, "h": 10},
+        {"type": "big", "state": "open", "id": known, "x": "1", "y": 0, "w": 10, "h": 10},
+        {"type": "big", "state": "open", "id": known, "x": 0, "y": 0, "w": 0, "h": 10},
+        {"type": "big", "state": "open", "id": "<b>", "x": 0, "y": 0, "w": 10, "h": 10},
+        {"type": "big", "state": "close", "id": "", "x": 0},
+        {"type": "big", "state": "half"},
+    ]
+    report["page_refused"] = json.loads(main_world(board, "JSON.stringify(%s.map(function (m) { "
+                                                          "return board.apply(JSON.stringify(m)); }))"
+                                                          % json.dumps(hostile)))
+    report["big_after_hostile"] = main_world(board, "board.counts().big")
+    report["counts"] = {key_: value for key_, value in board.counts().items() if isinstance(value, int)}
+    report["desk_counts"] = {key_: value for key_, value in desk.counts.items() if isinstance(value, int)}
+    report["cue_counts"] = dict(desk.cue.counts)
+    window.hide()
+    settle_end(report, board)
+    shim.close()
+    return report
+
+
+def _double_click(target: Any, point: Any) -> None:
+    """A real double click at ``point``: two presses and releases 40 ms apart with their own timestamps, as a mouse
+    gives them (Chromium makes its dblclick from the pair; QTest's double-click event reaches it as one press, and its
+    separate clicks are kept a double-click interval apart on purpose)."""
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtWidgets import QApplication
+
+    local = QPointF(point)
+    global_point = QPointF(target.mapToGlobal(point))
+    base = int(time.monotonic() * 1000)
+    for index, (kind, buttons) in enumerate(((QEvent.Type.MouseButtonPress, Qt.MouseButton.LeftButton),
+                                             (QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton),
+                                             (QEvent.Type.MouseButtonPress, Qt.MouseButton.LeftButton),
+                                             (QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton))):
+        event = QMouseEvent(kind, local, global_point, Qt.MouseButton.LeftButton, buttons,
+                            Qt.KeyboardModifier.NoModifier)
+        event.setTimestamp(base + index * 40)
+        QApplication.sendEvent(target, event)
+
+
+_BIG_PAGE = r"""JSON.stringify((function () {
+  function box(n) { if (!n) { return null; } var r = n.getBoundingClientRect(); return {left: r.left, top: r.top, width: r.width, height: r.height}; }
+  var card = document.querySelector('#big .big-card'), back = document.getElementById('backdrop');
+  var images = Array.prototype.map.call(document.images, function (i) {
+    return {id: i.id, src: i.src.slice(0, 23), inBoard: !!i.closest('#board'), inCard: !!i.closest('#big')}; });
+  return {card: box(card), cardMeta: card ? card.querySelector('.f-meta').textContent : '',
+          cardFoot: card ? card.querySelector('.f-back').innerText : '', cardFocus: !!card && document.activeElement === card,
+          transform: card ? getComputedStyle(card).transform : '',
+          backdrop: back ? {display: getComputedStyle(back).display, box: box(back), src: back.src.slice(0, 23),
+                            opacity: getComputedStyle(back).opacity} : null,
+          board: box(document.getElementById('board')), boardOpacity: getComputedStyle(document.getElementById('board')).opacity,
+          body: document.body.className, inner: [window.innerWidth, window.innerHeight], images: images,
+          frame: box(document.querySelector('#board .frame')), counts: board.counts(),
+          shapes: Array.prototype.map.call(document.querySelectorAll('#board .frame'), function (f) {
+            return f.className + ' h=' + Math.round(f.getBoundingClientRect().height) + ' a=' + f.getAnimations().length
+              + ' ' + Array.prototype.map.call(f.children, function (k) { return Math.round(k.getBoundingClientRect().height); }).join(','); })};
+})())"""
+
+
+def big_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> dict[str, Any]:
+    """Part 5c's open big in Jarvis's own window with the app's controller (see the module doc)."""
+    from PySide6.QtCore import QEvent, QObject, QPoint, Qt
+    from PySide6.QtTest import QTest
+
+    from briefing_reader import holo
+
+    report: dict[str, Any] = {}
+    holo.set_motion_level("off")
+    shim = _Shim()
+    harness, c, boards, desk = _app_case(shim, wait_until, pump, (1120, 700))
+    window, reading = c.window, c.window.reading
+    built = dict(kind_frames(tiny_jpeg_url(320, 180)))
+    ids = _put_answer(c, desk, built, 51, [("page", "page"), ("day", "day"), ("mail", "mail")])
+    board = boards[0]
+    wait_until(board.is_ready, 40)
+    pump(1.2)
+    report["ready"] = board.is_ready()
+    page_id = ids[0]
+
+    class Moves(QObject):
+        """Every geometry change of the board's view (it is set once each way, never frame by frame)."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.events: list[list[Any]] = []
+
+        def eventFilter(self, watched: Any, event: Any) -> bool:  # noqa: N802 - Qt override
+            if event.type() in (QEvent.Type.Resize, QEvent.Type.Move):
+                self.events.append([event.type().name, list(board.geometry().getRect()),
+                                    round(time.monotonic(), 3)])
+            return False
+
+    moves = Moves()
+    board.installEventFilter(moves)
+    order: list[list[Any]] = []
+    board.bigStep.connect(lambda step: order.append(["page", step, round(time.monotonic(), 3)]))
+
+    def page() -> dict:
+        return json.loads(main_world(board, _BIG_PAGE))
+
+    def frame_box(frame_id: str) -> dict:
+        return json.loads(main_world(board, "JSON.stringify((function () { var r = document.getElementById('title-%s')"
+                                            ".closest('.frame').getBoundingClientRect(); return {left: r.left, top: r.top,"
+                                            " width: r.width, height: r.height}; })())" % frame_id))
+
+    report["blocked_before"] = dict(board.counts().get("blocked", {}))
+    report["view_before"] = list(board.geometry().getRect())
+    geometry = reading.desk_page().geometry_now()
+    report["big_rect"] = list(geometry.big.getRect())
+    report["view_rect"] = list(geometry.view.getRect())
+    # ---- a real double click on the page picture's frame opens it big (lively: the scale is sampled) ----------------
+    holo.set_motion_level("lively")
+    board.set_motion("lively")
+    pump(0.2)
+    start = frame_box(page_id)
+    report["frame_start"] = start
+    proxy = board.web_view().focusProxy()
+    point = QPoint(int(start["left"] + start["width"] / 2), int(start["top"] + 30))
+    _double_click(proxy, point)
+    opened_at = time.monotonic()
+    wait_until(lambda: desk.big.state() == "open", 5)
+    report["veil_shown"] = reading.desk_page().veil.shown()
+    wait_until(lambda: page()["card"] is not None, 5)
+    pump(0.06)
+    report["mid_open"] = page()
+    pump(0.7)
+    report["open"] = page()
+    report["open_view"] = list(board.geometry().getRect())
+    report["open_dim"] = round(reading.chrome_dim(), 3)
+    report["veil_after"] = reading.desk_page().veil.shown()
+    report["moves_open"] = list(moves.events)
+    report["open_s"] = round(time.monotonic() - opened_at, 2)
+    report["big_counts"] = dict(desk.big.counts)
+    # ---- a resize while big (1232 x 640, the Dock still labelled): it keeps spanning both columns, set once ----------
+    moves.events.clear()
+    window.resize(1232, 640)
+    pump(0.8)
+    report["resized_rect"] = list(reading.desk_page().geometry_now().big.getRect())
+    report["resized_view"] = list(board.geometry().getRect())
+    report["resized"] = page()
+    report["moves_resized"] = list(moves.events)
+    report["resized_state"] = desk.big.state()
+    # ---- real Esc: the scale-down first, then the geometry set back once, then the dim lifts ------------------------
+    moves.events.clear()
+    order.clear()
+    dims: list[list[Any]] = []
+    board.bigStep.connect(lambda step: dims.append([step, round(reading.chrome_dim(), 3),
+                                                     list(board.geometry().getRect())]))
+    board.web_view().setFocus(Qt.FocusReason.OtherFocusReason)
+    pump(0.2)
+    QTest.keyClick(board.web_view().focusProxy(), Qt.Key.Key_Escape)
+    esc_at = time.monotonic()
+    pump(0.08)
+    report["mid_close"] = page()
+    report["mid_close_dim"] = round(reading.chrome_dim(), 3)
+    report["mid_close_view"] = list(board.geometry().getRect())
+    wait_until(lambda: not desk.big.state(), 5)
+    shut_at = time.monotonic()
+    pump(0.6)
+    report["closed"] = page()
+    report["closed_view"] = list(board.geometry().getRect())
+    report["closed_rect"] = list(reading.desk_page().geometry_now().view.getRect())
+    report["closed_dim"] = round(reading.chrome_dim(), 3)
+    report["moves_close"] = list(moves.events)
+    report["order"] = list(order)
+    report["dims_at_steps"] = dims
+    report["layer_after_close"] = main_world(board, "!!document.getElementById('big')")
+    report["hit_after_close"] = main_world(board, "(function () { var r = document.getElementById('title-%s')"
+                                                  ".closest('.frame').getBoundingClientRect(); var n = document."
+                                                  "elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);"
+                                                  " var f = n && n.closest ? n.closest('.frame') : null; return f ? "
+                                                  "f.querySelector('.f-title').id.slice(6) : ''; })()" % page_id)
+    report["esc_at"] = round(esc_at, 3)
+    report["shut_s"] = round(shut_at - esc_at, 3)
+    report["blocked_after"] = dict(board.counts().get("blocked", {}))
+    report["allowed"] = dict(board.counts().get("allowed", {}))
+    # ---- 900 x 600 (the Dock folded, the compact column): open big spans both columns there too -------------------
+    holo.set_motion_level("off")
+    board.set_motion("off")
+    window.resize(900, 600)
+    pump(0.8)
+    window.activateWindow()
+    board.web_view().setFocus(Qt.FocusReason.OtherFocusReason)
+    pump(0.3)
+    moves.events.clear()
+    main_world(board, "window.__ev = []; ['mousedown', 'dblclick'].forEach(function (n) { document.addEventListener(n, "
+                      "function (e) { window.__ev.push(n + ':' + e.detail); }, true); }); 1")
+    small = frame_box(page_id)
+    _double_click(board.web_view().focusProxy(), QPoint(int(small["left"] + small["width"] / 2), int(small["top"] + 30)))
+    wait_until(lambda: desk.big.state() == "open", 5)
+    report["small_events"] = main_world(board, "JSON.stringify(window.__ev)")
+    report["small_box"] = small
+    report["requests"] = {key_: value for key_, value in board.counts().items()
+                          if key_.startswith(("accepted:", "dropped:", "why:"))}
+    report["small_big_counts"] = dict(desk.big.counts)
+    report["small_desk_shown"] = [reading.desk_shown(), reading.current_tab(), reading.isVisible(),
+                                  desk.on_screen(), board.is_ready(), reading.desk_page().board() is board]
+    pump(0.6)
+    report["small_rect"] = list(reading.desk_page().geometry_now().big.getRect())
+    report["small_view"] = list(board.geometry().getRect())
+    report["small"] = page()
+    report["moves_small"] = list(moves.events)
+    board.web_view().setFocus(Qt.FocusReason.OtherFocusReason)
+    pump(0.2)
+    QTest.keyClick(board.web_view().focusProxy(), Qt.Key.Key_Escape)
+    wait_until(lambda: not desk.big.state(), 5)
+    pump(0.5)
+    report["small_closed_view"] = list(board.geometry().getRect())
+    report["small_closed"] = page()
+    # ---- Esc again with nothing big: the ask bar ---------------------------------------------------------------------
+    board.web_view().setFocus(Qt.FocusReason.OtherFocusReason)
+    pump(0.2)
+    QTest.keyClick(board.web_view().focusProxy(), Qt.Key.Key_Escape)
+    pump(0.3)
+    from PySide6.QtWidgets import QApplication
+
+    report["esc_again_ask"] = reading.command_bar.isAncestorOf(QApplication.focusWidget())
+    report["desk_counts"] = {key_: value for key_, value in desk.counts.items() if isinstance(value, int)}
+    report["big_counts_end"] = dict(desk.big.counts)
+    board.removeEventFilter(moves)
     window.hide()
     settle_end(report, board)
     shim.close()
