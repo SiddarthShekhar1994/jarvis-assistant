@@ -174,6 +174,7 @@ def run_setup(engine: Any, words: str, config: Any, usage: Any, *, now: datetime
         if isinstance(preferred, str):
             logger.info("Standing: a setup named no account Jarvis can read now")
             return SetupOutcome(say=say, refusal=preferred)
+        say = left_out(job, preferred) or say        # the run's own note may name the account left out
         job = preferred
     logger.info("Standing: set up a draft %s %s", job.kind, job.id)
     return SetupOutcome(job=job, say=say)
@@ -285,6 +286,29 @@ def prefer_signed_in(job: Agent | Rule, words: str, accounts: Mapping[str, Any],
     if len(ready) == 1:
         return replace(job, account=ready[0])
     return "Say which account the rule watches (for example: my personal mail)."
+
+
+def left_out(before: Agent | Rule, after: Agent | Rule) -> str:
+    """Jarvis's own note on the setup card when prefer_signed_in left an account out of an agent or moved a rule off
+    it ("" when nothing changed): the setup run's own note may name that account ("your personal and work mail"), and
+    the card would say two things."""
+    gone = [alias for alias in before.accounts if alias not in after.accounts]
+    if not gone:
+        return ""
+    rule = isinstance(after, Rule)
+    kept = list(after.accounts)
+    one = len(gone) == 1
+    if rule:
+        head = f"It watches the {after.account} account"
+    elif kept:
+        owner = "account's" if len(kept) == 1 else "accounts'"
+        head = f"It reads only the {_joined(kept)} {owner} mail"
+    else:
+        head = "It reads no mail"
+    names, them = _joined(gone), "it" if one else "them"
+    return (f"{head}, since {names} {'is' if one else 'are'} not signed in to Jarvis and your sentence did not name "
+            f"{them}. To {'watch' if rule else 'add'} {names}{' instead' if rule else ''}, Edit and name {them} (for "
+            f"example: my {gone[0]} mail).")
 
 
 def signed_out(job: Agent | Rule, accounts: Mapping[str, Any]) -> tuple[str, ...]:

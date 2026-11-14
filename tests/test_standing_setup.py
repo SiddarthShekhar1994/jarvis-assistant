@@ -666,6 +666,34 @@ class PreferSignedInTests(_Base):
         self.type("rule: " + WORDS)
         self.assertEqual(Definitions(files_of(self.app.config)).load()[1][0].account, "personal")
 
+    def test_the_card_says_what_was_left_out_and_why_never_the_setups_own_note(self) -> None:
+        self.accounts()
+        self.engine.answers.append({**BOTH_ANSWER, "say": "A morning look at what Pat sent to your personal and work "
+                                                          "mail."})
+        self.type("agent: " + AGENT_WORDS)                         # names no account
+        texts = self.card().line_texts()
+        self.assertFalse(any("personal and work" in line for line in texts))        # it reads personal only
+        self.assertIn("Jarvis's note: It reads only the personal account's mail, since work is not signed in to "
+                      "Jarvis and your sentence did not name it. To add work, Edit and name it (for example: my work "
+                      "mail).", texts)
+        self.assertTrue(self.card().button("on").isEnabled())
+
+    def test_a_moved_rules_card_says_which_account_it_watches_and_why(self) -> None:
+        self.accounts()
+        self.engine.answers.append({**RULE_ANSWER, "say": "A rule on your work mail for Example Billing's invoices."})
+        self.type("rule: " + WORDS)
+        texts = self.card().line_texts()
+        self.assertFalse(any("your work mail" in line for line in texts))
+        self.assertIn("Jarvis's note: It watches the personal account, since work is not signed in to Jarvis and your "
+                      "sentence did not name it. To watch work instead, Edit and name it (for example: my work "
+                      "mail).", texts)
+
+    def test_a_named_account_keeps_the_setups_own_note(self) -> None:
+        self.accounts()
+        self.engine.answers.append({**BOTH_ANSWER, "say": "A morning look at your personal and work mail."})
+        self.type("agent: " + BOTH_WORDS)                          # names both: work stays, signed out
+        self.assertIn("Jarvis's note: A morning look at your personal and work mail.", self.card().line_texts())
+
 
 if __name__ == "__main__":
     unittest.main()
