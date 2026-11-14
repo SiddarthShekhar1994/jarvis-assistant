@@ -6,12 +6,25 @@ In (app -> page): check_message(message, known) -> Checked
     its JSON (json.dumps, ASCII only, no NaN or Infinity) is at most MESSAGE_CAP bytes. A "picture" message may also carry
     ONE image: a data:image/jpeg;base64 URL of at most PICTURE_CAP bytes that decodes to a JPEG of at most PICTURE_BYTES.
     Strings are kept exactly as given, control and bidi characters too: the page sets every one as text (textContent),
-    never as markup. The types:
+    never as markup. A string's cap counts what the page counts (JavaScript's length: UTF-16 code units, so a character
+    outside the BMP counts two). The types:
         frame    {"id", "kind", "title", "meta", "body", "status", "status_text", "status_meta", "waits", "changed",
                   "pinned", "closed"}: adds a frame (it draws in) or updates the one with that id in place. "body" is the
                   kind's own (KINDS: one checker per kind, as the page has one renderer per kind); "status" ok / failed
                   (status_text says what failed; the page offers Try again) / empty (status_text, status_meta "Checked
                   9:44 AM"); "waits" the words of its amber chip ("" = it waits on nothing).
+                  The bodies (DESIGN-SPEC 3.3; every string capped, every list at most ROWS_CAP rows, no other key):
+                    text         {"text", "rows"?: [{"lead", "text", "meta"}]}        (rows only when given)
+                    calendar     {"first", "last" (the day bar's minutes after midnight; equal: no bar), "now_min" (its
+                                  now tick, -1 none), "ticks": [{"at", "text"}], "spans": [{"start", "end", "kind" busy /
+                                  next / free}], "now" (the horizon's pill, "" none), "rows": [{"time", "title", "meta",
+                                  "state" CALENDAR_STATES}]}
+                    mail_thread  {"sender", "time", "text"}       (the text clamped to 3 lines by the page's style only)
+                    mail_list    {"rows": [{"sender", "time", "subject", "meta", "unread"}]}
+                    todos        {"rows": [{"text", "meta", "state" open / waits / done}]}
+                    picture      {"caption"}                      (its JPEG comes in its own picture message)
+                  A row whose main words are empty (a text row's lead and text, a calendar row's time and title, a mail
+                  row's sender and subject, a to-do's text) is the "+N MORE" row: only its meta shows.
         lit      {"id"}: the frame Jarvis is talking about ("" = none)
         remove   {"id"}; clear {}
         motion   {"level": lively / calm / off}
@@ -48,10 +61,21 @@ META_CAP = 40
 TEXT_CAP = 400
 WORDS_CAP = 160                  # what failed, or what is empty
 WAITS_CAP = 60
+ROWS_CAP = 8                     # rows of a frame's body (DESIGN-SPEC 3.5)
+SPANS_CAP = 32                   # a calendar's day bar: its events and free gaps ...
+TICKS_CAP = 13                   # ... its hour labels (every two hours of a whole day) ...
+TICK_CAP = 8                     # ... each at most this long ("12")
+PILL_CAP = 16                    # the calendar's now pill ("9:41")
+DAY_MINUTES = 24 * 60
 PLACE_LIMIT = 1_000_000          # px: a layout's top / height beyond this is not a place
 
 MESSAGE_TYPES = ("frame", "lit", "remove", "clear", "motion", "picture")
 STATUSES = ("ok", "failed", "empty")
+# A calendar row: past (dim), now (on now), next (the next event: its meta "IN 19 MIN"), free (a dashed gap), new (what
+# a card adds or moves to), struck (where it was, or what is cancelled), today (a week's row for today).
+CALENDAR_STATES = ("", "past", "now", "next", "free", "new", "struck", "today")
+SPAN_KINDS = ("busy", "next", "free")
+TODO_STATES = ("open", "waits", "done")
 MOTION_LEVELS = ("lively", "calm", "off")
 REQUEST_KINDS = ("ready", "layout", "focus", "open", "close", "pin", "bring_back", "retry", "go_approvals")
 _ID_KINDS = frozenset({"focus", "open", "close", "bring_back", "retry", "go_approvals"})
@@ -108,6 +132,17 @@ def kind_word(kind: Any) -> str:
     return kind if isinstance(kind, str) and kind in REQUEST_KINDS else "unknown"
 
 
+def units(text: str) -> int:
+    """The length of ``text`` as the page counts it (JavaScript's String length: UTF-16 code units; a character outside
+    the Basic Multilingual Plane counts two)."""
+    return len(text) + sum(1 for char in text if ord(char) > 0xFFFF)
+
+
+def is_frame_id(value: Any) -> bool:
+    """A frame id: 1 to ID_CAP letters, digits, "-" or "_" (a builder's caller gives it; never the page's words)."""
+    return type(value) is str and _ID.fullmatch(value) is not None
+
+
 # --------------------------------------------------------------------------
 # Fields
 # --------------------------------------------------------------------------
@@ -126,8 +161,22 @@ def _fields(value: Any, allowed: Collection[str], required: Collection[str] = ()
 def _text(value: Any, cap: int) -> str:
     if type(value) is not str:
         raise Refused(R_SHAPE)
+    if len(value) > cap or units(value) > cap:     # the first test first: a huge string is never walked
+        raise Refused(R_TOO_LONG)
+    return value
+
+
+def _list(value: Any, cap: int) -> list[Any]:
+    if type(value) is not list:
+        raise Refused(R_SHAPE)
     if len(value) > cap:
         raise Refused(R_TOO_LONG)
+    return value
+
+
+def _number(value: Any, low: int, high: int) -> int:
+    if type(value) is not int or not low <= value <= high:     # a bool is not a number here; nor is 1.0
+        raise Refused(R_SHAPE)
     return value
 
 
@@ -160,13 +209,104 @@ def _known_id(value: Any, known: Collection[str]) -> str:
 # The kinds: one body checker per kind (the page has one renderer per kind)
 # --------------------------------------------------------------------------
 
+def _rows(value: Any, row: Callable[[Any], dict[str, Any]]) -> list[dict[str, Any]]:
+    return [row(item) for item in _list(value, ROWS_CAP)]
+
+
+def _text_row(value: Any) -> dict[str, Any]:
+    fields = _fields(value, ("lead", "text", "meta"))
+    return {"lead": _text(fields.get("lead", ""), META_CAP), "text": _text(fields.get("text", ""), TITLE_CAP),
+            "meta": _text(fields.get("meta", ""), META_CAP)}
+
+
 def _text_body(body: Any) -> dict[str, Any]:
-    """The generic kind: a frame of plain text (title and meta are the frame's own)."""
-    fields = _fields(body, ("text",))
-    return {"text": _text(fields.get("text", ""), TEXT_CAP)}
+    """The generic kind: a frame of plain text (title and meta are the frame's own), and rows of a lead, words and a
+    meta when it has them (a research answer's sources, a web search's results: the host as words, never a link)."""
+    fields = _fields(body, ("text", "rows"))
+    clean: dict[str, Any] = {"text": _text(fields.get("text", ""), TEXT_CAP)}
+    if "rows" in fields:
+        clean["rows"] = _rows(fields["rows"], _text_row)
+    return clean
 
 
-KINDS: dict[str, Callable[[Any], dict[str, Any]]] = {"text": _text_body}
+def _tick(value: Any, first: int, last: int) -> dict[str, Any]:
+    fields = _fields(value, ("at", "text"), ("at", "text"))
+    return {"at": _number(fields["at"], first, last), "text": _text(fields["text"], TICK_CAP)}
+
+
+def _span(value: Any, first: int, last: int) -> dict[str, Any]:
+    fields = _fields(value, ("start", "end", "kind"), ("start", "end", "kind"))
+    start = _number(fields["start"], first, last)
+    return {"start": start, "end": _number(fields["end"], start, last), "kind": _choice(fields["kind"], SPAN_KINDS)}
+
+
+def _calendar_row(value: Any) -> dict[str, Any]:
+    fields = _fields(value, ("time", "title", "meta", "state"))
+    return {"time": _text(fields.get("time", ""), META_CAP), "title": _text(fields.get("title", ""), TITLE_CAP),
+            "meta": _text(fields.get("meta", ""), META_CAP),
+            "state": _choice(fields.get("state", ""), CALENDAR_STATES)}
+
+
+def _calendar_body(body: Any) -> dict[str, Any]:
+    """A day (its bar from the first to the last hour, the now tick, the now-line horizon, rows with time running down)
+    or a week (rows only: one per day)."""
+    fields = _fields(body, ("first", "last", "now_min", "ticks", "spans", "now", "rows"))
+    first = _number(fields.get("first", 0), 0, DAY_MINUTES)
+    last = _number(fields.get("last", 0), first, DAY_MINUTES)
+    ticks = [_tick(item, first, last) for item in _list(fields.get("ticks", []), TICKS_CAP)]
+    spans = [_span(item, first, last) for item in _list(fields.get("spans", []), SPANS_CAP)]
+    now_min = fields.get("now_min", -1)
+    if not (type(now_min) is int and (now_min == -1 or (last > first and first <= now_min <= last))):
+        raise Refused(R_SHAPE)
+    if last == first and (ticks or spans):         # no bar: nothing on it
+        raise Refused(R_SHAPE)
+    return {"first": first, "last": last, "now_min": now_min, "ticks": ticks, "spans": spans,
+            "now": _text(fields.get("now", ""), PILL_CAP), "rows": _rows(fields.get("rows", []), _calendar_row)}
+
+
+def _mail_thread_body(body: Any) -> dict[str, Any]:
+    """A mail: who (600), when, and its plain text (the page clamps it to 3 lines with its style; never cut in the
+    page's words). A reply that waits on Approvals is the frame's own "waits"."""
+    fields = _fields(body, ("sender", "time", "text"))
+    return {"sender": _text(fields.get("sender", ""), TITLE_CAP), "time": _text(fields.get("time", ""), META_CAP),
+            "text": _text(fields.get("text", ""), TEXT_CAP)}
+
+
+def _mail_row(value: Any) -> dict[str, Any]:
+    fields = _fields(value, ("sender", "time", "subject", "meta", "unread"))
+    return {"sender": _text(fields.get("sender", ""), TITLE_CAP), "time": _text(fields.get("time", ""), META_CAP),
+            "subject": _text(fields.get("subject", ""), TITLE_CAP), "meta": _text(fields.get("meta", ""), META_CAP),
+            "unread": _flag(fields.get("unread", False))}
+
+
+def _mail_list_body(body: Any) -> dict[str, Any]:
+    """Mails, one row each: an unread dot, the sender, the time at the right and the subject below."""
+    fields = _fields(body, ("rows",))
+    return {"rows": _rows(fields.get("rows", []), _mail_row)}
+
+
+def _todo_row(value: Any) -> dict[str, Any]:
+    fields = _fields(value, ("text", "meta", "state"))
+    return {"text": _text(fields.get("text", ""), TITLE_CAP), "meta": _text(fields.get("meta", ""), META_CAP),
+            "state": _choice(fields.get("state", "open"), TODO_STATES)}
+
+
+def _todos_body(body: Any) -> dict[str, Any]:
+    """To-dos: a box each; one that waits on the owner's OK an amber diamond and WAITS; a done one a check and DONE."""
+    fields = _fields(body, ("rows",))
+    return {"rows": _rows(fields.get("rows", []), _todo_row)}
+
+
+def _picture_body(body: Any) -> dict[str, Any]:
+    """A page picture: its caption (the host, as words) under the JPEG of its own picture message; it never navigates."""
+    fields = _fields(body, ("caption",))
+    return {"caption": _text(fields.get("caption", ""), TITLE_CAP)}
+
+
+KINDS: dict[str, Callable[[Any], dict[str, Any]]] = {
+    "text": _text_body, "calendar": _calendar_body, "mail_thread": _mail_thread_body, "mail_list": _mail_list_body,
+    "todos": _todos_body, "picture": _picture_body,
+}
 
 
 # --------------------------------------------------------------------------

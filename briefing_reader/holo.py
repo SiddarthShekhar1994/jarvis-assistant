@@ -884,6 +884,16 @@ ICONS: dict[str, tuple[str, ...]] = {
     # The board (the new look): a frame's Pin and Open big.
     "pin": ("M9.5 4h5", "M10.5 4v4.5l-3 3.5h9l-3-3.5V4", "M12 12v8"),
     "expand": ("M14 4h6v6", "M10 20H4v-6", "M20 4l-6 6", "M4 20l6-6"),
+    # ... and its kinds' glyphs (DESIGN-SPEC 3.2: a mail, a mail list, to-dos, a picture), and the second screen's
+    # "Text hidden on this screen" (an eye, struck through).
+    "mail": ("M5.5 6h13a2 2 0 0 1 2 2v8.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z", "M4 7.5l8 6 8-6"),
+    "inbox": ("M4 13.5l2.5-8h11l2.5 8v5H4z", "M4 13.5h4.5l1 2h5l1-2H20"),
+    "todos": ("M5 4.5h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1z", "M13.5 7.5H20",
+              "M4.5 16l2 2 3.5-4", "M13.5 16.5H20"),
+    "image": ("M5.5 5h13a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z",
+              "M7.4 10a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0-3.2 0z", "M20 15.5l-4.5-4.5L7 19"),
+    "hidden": ("M3 12c2.2-3.6 5.4-5.5 9-5.5s6.8 1.9 9 5.5c-2.2 3.6-5.4 5.5-9 5.5S5.2 15.6 3 12z",
+               "M9.5 12a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0-5 0z", "M4.5 19.5l15-15"),
 }
 FILLED_ICONS: dict[str, str] = {
     "play": "M8 5.5v13l10.5-6.5z",

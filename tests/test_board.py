@@ -6,7 +6,9 @@ Infinity, control and bidi characters kept as text, a 2 MB picture refused) and 
 the page may make (the list, the frame ids, sizes, rates; the bridge refuses a deleteLater); the scheme's allowlist and
 content types, qwebchannel.js from Qt's own resource, tokens.css written from holo; the page's policy and a static check
 of its script; the fallback tile and every way BoardView falls back to it by itself; the window's keys with the focus in
-the page and Space (ui._keeps_space); and the snapshot_engine helpers the board starts Chromium through.
+the page and Space (ui._keeps_space); and the snapshot_engine helpers the board starts Chromium through. Part 4 changed
+two of these on purpose: the kinds on the list (tests/test_board_frames.py checks each), and a board that fell back still
+takes messages and shows them as read-only tiles (tests/test_board_glance.py).
 """
 
 from __future__ import annotations
@@ -109,7 +111,8 @@ class MessageTests(unittest.TestCase):
         self.assertEqual(self.refused(frame(changed="yes")), protocol.R_SHAPE)
         self.assertEqual(self.refused(frame(changed=1)), protocol.R_SHAPE)        # a bool, not a number
         self.assertEqual(self.refused(frame(status="lost")), protocol.R_FIELD)
-        self.assertEqual(self.refused(frame(kind="calendar")), protocol.R_KIND)    # part 4's kinds are not here yet
+        self.assertEqual(self.refused(frame(kind="chart")), protocol.R_KIND)       # part 6's kinds are not here yet
+        self.assertEqual(self.refused(frame(kind="Calendar")), protocol.R_KIND)
         self.assertEqual(self.refused(frame(kind=["text"])), protocol.R_KIND)
         self.assertEqual(self.refused({"type": "script"}), protocol.R_TYPE)
         self.assertEqual(self.refused({"type": None}), protocol.R_TYPE)
@@ -563,7 +566,13 @@ class PageTests(unittest.TestCase):
         self.assertEqual({key: int(value) for key, value in caps.items()},
                          {"title": protocol.TITLE_CAP, "meta": protocol.META_CAP, "text": protocol.TEXT_CAP,
                           "status_text": protocol.WORDS_CAP, "status_meta": protocol.META_CAP,
-                          "waits": protocol.WAITS_CAP})
+                          "waits": protocol.WAITS_CAP, "rows": protocol.ROWS_CAP, "spans": protocol.SPANS_CAP,
+                          "ticks": protocol.TICKS_CAP, "tick": protocol.TICK_CAP, "pill": protocol.PILL_CAP})
+        self.assertEqual(number("DAY_MINUTES"), protocol.DAY_MINUTES)
+        for name, values in (("CALENDAR_STATES", protocol.CALENDAR_STATES), ("SPAN_KINDS", protocol.SPAN_KINDS),
+                             ("TODO_STATES", protocol.TODO_STATES)):
+            found = re.search(rf"var {name} = \[([^\]]*)\]", self.js).group(1)
+            self.assertEqual(re.findall(r"'(\w*)'", found), list(values), name)
         self.assertEqual(set(re.findall(r"HANDLERS\.(\w+) = function", self.js)), set(protocol.MESSAGE_TYPES))
         self.assertEqual(set(re.findall(r"KINDS\.(\w+) = function", self.js)), set(protocol.KINDS))
         self.assertEqual(set(re.findall(r"post\('(\w+)'", self.js)), set(protocol.REQUEST_KINDS))
@@ -629,8 +638,15 @@ class ViewTests(unittest.TestCase):
         self.assertIsNone(board.web_view())
         self.assertEqual(board.fallback().words(), (view.CANT_START, ""))
         self.assertTrue(board.fallback().isVisibleTo(board))
-        self.assertFalse(board.apply(frame()))
+        # Fallen back, a message is still checked, and its frame shows as a read-only tile (part 4).
+        self.assertTrue(board.apply(frame()))
+        self.assertEqual(board.fallback().words(), (view.CANT_START, "READ-ONLY TILES BELOW"))
+        self.assertEqual([tile["id"] for tile in board.tiles().frames()], ["f1"])
+        self.assertFalse(board.apply({"type": "script"}))
         self.assertFalse(board.set_motion("calm"))
+        self.assertEqual((board.counts()["tiles:frame"], board.counts()["refused:type"]), (1, 1))
+        board.shutdown()
+        self.assertFalse(board.apply(frame()))
         self.assertEqual(board.counts()["dropped:unavailable"], 1)
         self.assertEqual("PySide6.QtWebEngineCore" in sys.modules, before)
 

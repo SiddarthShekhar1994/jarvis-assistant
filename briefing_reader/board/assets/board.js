@@ -1,8 +1,9 @@
-/* The board's page (the new look, part 3): Jarvis's own code, no library. Every element is made with createElement,
-   every word is set with textContent and every listener with addEventListener: no markup is ever read, no address is
-   ever opened. The app sends board.apply(<JSON text>), checked in Python first and checked here again; the page answers
-   on its web channel with bridge.post(kind, <JSON text>), the short list Python accepts (ready, layout, focus, open,
-   close, pin, bring_back, retry, go_approvals). DESIGN-SPEC 3.2 (the frame), 3.4 (its states) and 5 (motion). */
+/* The board's page (the new look, parts 3 and 4): Jarvis's own code, no library. Every element is made with
+   createElement, every word is set with textContent and every listener with addEventListener: no markup is ever read,
+   no address is ever opened. The app sends board.apply(<JSON text>), checked in Python first and checked here again;
+   the page answers on its web channel with bridge.post(kind, <JSON text>), the short list Python accepts (ready, layout,
+   focus, open, close, pin, bring_back, retry, go_approvals). DESIGN-SPEC 3.2 (the frame), 3.3 (the kinds), 3.4 (its
+   states) and 5 (motion). */
 (function () {
   'use strict';
 
@@ -11,10 +12,15 @@
   var PICTURE_PREFIX = 'data:image/jpeg;base64,';
   var BASE64 = /^[A-Za-z0-9+\/]*={0,2}$/;
   var ID = /^[A-Za-z0-9_-]{1,40}$/;
-  var CAPS = {title: 60, meta: 40, text: 400, status_text: 160, status_meta: 40, waits: 60};
+  var CAPS = {title: 60, meta: 40, text: 400, status_text: 160, status_meta: 40, waits: 60, rows: 8, spans: 32,
+              ticks: 13, tick: 8, pill: 16};
+  var DAY_MINUTES = 1440;
   var FRAME_FIELDS = ['type', 'id', 'kind', 'title', 'meta', 'body', 'status', 'status_text', 'status_meta', 'waits',
                       'changed', 'pinned', 'closed'];
   var STATUSES = ['ok', 'failed', 'empty'];
+  var CALENDAR_STATES = ['', 'past', 'now', 'next', 'free', 'new', 'struck', 'today'];
+  var SPAN_KINDS = ['busy', 'next', 'free'];
+  var TODO_STATES = ['open', 'waits', 'done'];
   var MOTIONS = {lively: 1, calm: 1.6, off: 0};
   var MAX_FRAMES = 24;
   var MAX_ANIMATED = 6;                        // frames of one arrival that draw in; the rest are there at once
@@ -27,20 +33,220 @@
   var WORDS = {
     changed: 'Changed', tryAgain: 'Try again', bringBack: 'Bring back', closed: 'Closed: ',
     keysFirst: 'Enter open big · P pin', keysSecond: 'Del close · Esc ask bar', dot: '·',
-    approvalsKey: 'Ctrl 3', pin: 'Pin', unpin: 'Unpin', openBig: 'Open big', close: 'Close'
+    approvalsKey: 'Ctrl 3', pin: 'Pin', unpin: 'Unpin', openBig: 'Open big', close: 'Close',
+    waits: 'Waits', done: 'Done', pictureOnly: 'Picture only', unread: 'Unread'
   };
-  var GLYPHS = {text: 'read-all'};             // each kind's glyph (holo's icons, drawn by tokens.css)
+  // Each kind's glyph (holo's icons, drawn by tokens.css).
+  var GLYPHS = {text: 'read-all', calendar: 'calendar', mail_thread: 'mail', mail_list: 'inbox', todos: 'todos',
+                picture: 'image'};
 
-  // The renderer table: one function per kind. It fills the frame's body from the frame's own data and throws on data
-  // it can't show (the message is then dropped and nothing changes). Part 4 adds the real kinds here.
+  // The renderer table: one function per kind (DESIGN-SPEC 3.3). Each checks the frame's body as board.protocol does
+  // (its keys, types, caps and lists) and throws on anything it can't show - the message is then dropped and nothing
+  // changes - then fills the body from that data, every word as text. A row whose main words are empty is the
+  // "+N MORE" row: only its meta shows.
   var KINDS = Object.create(null);
+
   KINDS.text = function (body, frame) {
-    if (!onlyKeys(frame.body, ['text']) || !words(frame.body.text, CAPS.text)) {
+    var data = frame.body;
+    if (!onlyKeys(data, ['text', 'rows']) || !words(data.text, CAPS.text)) {
       throw new TypeError('text');
     }
-    if (frame.body.text) {
-      body.appendChild(make('p', 'f-text t-body-sm', frame.body.text));
+    var rows = data.rows === undefined ? [] : rowsOf(data, ['lead', 'text', 'meta'], function (row) {
+      return words(row.lead, CAPS.meta) && words(row.text, CAPS.title) && words(row.meta, CAPS.meta);
+    });
+    if (data.text) {
+      body.appendChild(make('p', 'f-text t-body-sm', data.text));
     }
+    if (!rows.length) {
+      return;
+    }
+    var leads = rows.some(function (row) { return row.lead !== ''; });
+    var table = make('div', 'tx-rows' + (leads ? ' leads' : ''));
+    rows.forEach(function (row) {
+      if (!row.lead && !row.text) {
+        table.appendChild(more(row.meta));
+        return;
+      }
+      var line = make('div', 'tx-row');
+      if (leads) {
+        line.appendChild(make('span', 'tx-lead t-frame-time', row.lead));
+      }
+      line.append(make('span', 'tx-text', row.text), make('span', 'tx-meta', row.meta));
+      table.appendChild(line);
+    });
+    body.appendChild(table);
+  };
+
+  KINDS.calendar = function (body, frame) {
+    var data = frame.body;
+    if (!onlyKeys(data, ['first', 'last', 'now_min', 'ticks', 'spans', 'now', 'rows'])
+        || !whole(data.first, 0, DAY_MINUTES) || !whole(data.last, data.first, DAY_MINUTES)
+        || !whole(data.now_min, -1, DAY_MINUTES) || !words(data.now, CAPS.pill)
+        || !list(data.ticks, CAPS.ticks) || !list(data.spans, CAPS.spans)) {
+      throw new TypeError('calendar');
+    }
+    var bar = data.last > data.first;
+    var ticksOk = data.ticks.every(function (tick) {
+      return onlyKeys(tick, ['at', 'text']) && whole(tick.at, data.first, data.last) && words(tick.text, CAPS.tick);
+    });
+    var spansOk = data.spans.every(function (span) {
+      return onlyKeys(span, ['start', 'end', 'kind']) && whole(span.start, data.first, data.last)
+        && whole(span.end, span.start, data.last) && SPAN_KINDS.indexOf(span.kind) >= 0;
+    });
+    if (!ticksOk || !spansOk || (data.now_min !== -1 && (!bar || data.now_min < data.first || data.now_min > data.last))
+        || (!bar && (data.ticks.length || data.spans.length))) {
+      throw new TypeError('calendar');
+    }
+    var rows = rowsOf(data, ['time', 'title', 'meta', 'state'], function (row) {
+      return words(row.time, CAPS.meta) && words(row.title, CAPS.title) && words(row.meta, CAPS.meta)
+        && CALENDAR_STATES.indexOf(row.state) >= 0;
+    });
+    if (bar) {
+      var length = data.last - data.first;
+      var strip = make('div', 'cal-bar');
+      strip.setAttribute('aria-hidden', 'true');
+      data.spans.forEach(function (span) {
+        var piece = make('i', 'cal-span ' + span.kind);
+        place(piece, (span.start - data.first) / length, (span.end - span.start) / length);
+        strip.appendChild(piece);
+      });
+      if (data.now_min >= 0) {
+        var tick = make('i', 'cal-tick');
+        place(tick, (data.now_min - data.first) / length, 0);
+        strip.appendChild(tick);
+      }
+      var hours = make('div', 'cal-hours');
+      hours.setAttribute('aria-hidden', 'true');
+      data.ticks.forEach(function (mark) {
+        var at = (mark.at - data.first) / length;
+        var label = make('span', at <= 0 ? 'start' : at >= 1 ? 'end' : '', mark.text);
+        place(label, at, 0);
+        hours.appendChild(label);
+      });
+      body.append(strip, hours);
+    }
+    var table = make('div', 'cal-rows');
+    var horizon = -1;                          // the now-line goes between the past and what comes next
+    if (data.now) {
+      horizon = rows.length;
+      for (var index = 0; index < rows.length; index += 1) {
+        if (rows[index].state !== 'past') {
+          horizon = index;
+          break;
+        }
+      }
+    }
+    rows.forEach(function (row, index) {
+      if (index === horizon) {
+        table.appendChild(nowLine(data.now));
+      }
+      if (!row.time && !row.title) {
+        table.appendChild(more(row.meta));
+        return;
+      }
+      var line = make('div', 'cal-row' + (row.state ? ' ' + row.state : ''));
+      line.append(make('span', 'cal-time t-frame-time', row.time), make('span', 'cal-title', row.title),
+                  make('span', 'cal-meta', row.meta));
+      table.appendChild(line);
+    });
+    if (horizon === rows.length && horizon >= 0) {
+      table.appendChild(nowLine(data.now));
+    }
+    if (table.firstChild) {
+      body.appendChild(table);
+    }
+  };
+
+  KINDS.mail_thread = function (body, frame) {
+    var data = frame.body;
+    if (!onlyKeys(data, ['sender', 'time', 'text']) || !words(data.sender, CAPS.title) || !words(data.time, CAPS.meta)
+        || !words(data.text, CAPS.text)) {
+      throw new TypeError('mail_thread');
+    }
+    if (data.sender || data.time) {
+      var from = make('div', 'mt-from');
+      if (data.sender) {
+        from.appendChild(make('b', 'mt-sender', data.sender));
+      }
+      if (data.time) {
+        from.appendChild(make('span', 'mt-time t-badge', data.time));
+      }
+      body.appendChild(from);
+    }
+    if (data.text) {
+      body.appendChild(make('p', 'mt-text', data.text));     // clamped to 3 lines by its style, never in its words
+    }
+  };
+
+  KINDS.mail_list = function (body, frame) {
+    var data = frame.body;
+    if (!onlyKeys(data, ['rows'])) {
+      throw new TypeError('mail_list');
+    }
+    var rows = rowsOf(data, ['sender', 'time', 'subject', 'meta', 'unread'], function (row) {
+      return words(row.sender, CAPS.title) && words(row.time, CAPS.meta) && words(row.subject, CAPS.title)
+        && words(row.meta, CAPS.meta) && typeof row.unread === 'boolean';
+    });
+    rows.forEach(function (row) {
+      if (!row.sender && !row.subject) {
+        body.appendChild(more(row.meta));
+        return;
+      }
+      var line = make('div', 'ml-row' + (row.unread ? ' unread' : ''));
+      var dot = make('i', 'ml-dot');
+      if (row.unread) {
+        dot.setAttribute('role', 'img');
+        dot.setAttribute('aria-label', WORDS.unread);
+      }
+      var side = make('span', 'ml-side t-badge');
+      if (row.meta) {
+        side.appendChild(make('span', 'ml-meta', row.meta));
+      }
+      if (row.meta && row.time) {
+        side.appendChild(make('span', 'ml-dotsep', WORDS.dot));
+      }
+      if (row.time) {
+        side.appendChild(make('span', 'ml-time', row.time));
+      }
+      line.append(dot, make('span', 'ml-sender', row.sender), side, make('span', 'ml-subject', row.subject));
+      body.appendChild(line);
+    });
+  };
+
+  KINDS.todos = function (body, frame) {
+    var data = frame.body;
+    if (!onlyKeys(data, ['rows'])) {
+      throw new TypeError('todos');
+    }
+    var rows = rowsOf(data, ['text', 'meta', 'state'], function (row) {
+      return words(row.text, CAPS.title) && words(row.meta, CAPS.meta) && TODO_STATES.indexOf(row.state) >= 0;
+    });
+    rows.forEach(function (row) {
+      if (!row.text) {
+        body.appendChild(more(row.meta));
+        return;
+      }
+      var line = make('div', 'td-row ' + row.state);
+      var box = make('i', 'td-box');
+      if (row.state === 'waits') {
+        box.appendChild(glyph('diamond', 'td-mark', true));
+      } else if (row.state === 'done') {
+        box.appendChild(glyph('check', 'td-mark'));
+      }
+      var state = row.state === 'waits' ? WORDS.waits : row.state === 'done' ? WORDS.done : row.meta;
+      line.append(box, make('span', 'td-text', row.text), make('span', 'td-meta t-badge', state));
+      body.appendChild(line);
+    });
+  };
+
+  KINDS.picture = function (body, frame) {
+    var data = frame.body;
+    if (!onlyKeys(data, ['caption']) || !words(data.caption, CAPS.title)) {
+      throw new TypeError('picture');
+    }
+    var caption = make('p', 'pic-cap');
+    caption.append(make('span', 'pic-host', data.caption), make('span', 'pic-only t-badge', WORDS.pictureOnly));
+    body.append(make('div', 'pic-slot'), caption);   // its JPEG comes in its own picture message, into the slot
   };
 
   var root = null;
@@ -116,6 +322,53 @@
     return Object.keys(value).every(function (key) { return keys.indexOf(key) >= 0; });
   }
 
+  function whole(value, low, high) {           // a whole number from low to high (never a boolean, never 1.5)
+    return typeof value === 'number' && Math.floor(value) === value && value >= low && value <= high;
+  }
+
+  function list(value, cap) {
+    return Array.isArray(value) && value.length <= cap;
+  }
+
+  function rowsOf(data, keys, check) {         // a body's rows, each with exactly its keys and checked; else throws
+    var rows = data.rows;
+    if (!list(rows, CAPS.rows) || !rows.every(function (row) {
+      return onlyKeys(row, keys) && keys.every(function (key) { return key in row; }) && check(row);
+    })) {
+      throw new TypeError('rows');
+    }
+    return rows;
+  }
+
+  function more(text) {                        // the "+N MORE" row: its meta only
+    return make('p', 'x-more t-badge', text);
+  }
+
+  function place(node, at, width) {            // a mark on the calendar's bar or under it, in fractions of the day
+    node.style.setProperty('--at', (Math.max(0, Math.min(1, at)) * 100).toFixed(3) + '%');
+    node.style.setProperty('--w', (Math.max(0, Math.min(1, width)) * 100).toFixed(3) + '%');
+  }
+
+  function nowLine(text) {                     // the now-line horizon: the pill, then a hairline fading out
+    var line = make('div', 'cal-now');
+    var rule = make('i', 'cal-rule');
+    rule.setAttribute('aria-hidden', 'true');
+    line.append(make('span', 'cal-pill', text), rule);
+    return line;
+  }
+
+  function placePicture(rec) {                // a picture frame's slot (above its caption), else after the body
+    if (!rec.picture) {
+      return;
+    }
+    var slot = rec.body.querySelector('.pic-slot');
+    if (slot) {
+      slot.appendChild(rec.picture);
+    } else {
+      rec.body.after(rec.picture);
+    }
+  }
+
   function token(name) {
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   }
@@ -189,7 +442,10 @@
     rec.body = make('div', 'f-body');
     art.appendChild(rec.body);
 
+    // The amber chip opens its card on Approvals (the native one) and does nothing else: a click never even moves the
+    // focus (Enter and Space on it, from the keyboard, press it as any button).
     rec.wait = button('f-wait', '', function () { post('go_approvals', {id: id}); });
+    rec.wait.addEventListener('mousedown', function (event) { event.preventDefault(); });
     rec.waitWords = make('span', 'f-words');
     rec.wait.append(glyph('diamond', 'f-dia', true), rec.waitWords, glyph('chevron', 'f-chev'),
                     make('span', 'f-key t-kbd', WORDS.approvalsKey));
@@ -246,6 +502,7 @@
     rec.meta.textContent = message.meta;
     rec.body.replaceWith(body);
     rec.body = body;
+    placePicture(rec);                         // an update in place keeps the frame's picture
     rec.waitWords.textContent = message.waits;
     rec.el.classList.toggle('waits', message.waits !== '');
     rec.el.classList.toggle('failed', message.status === 'failed');
@@ -605,13 +862,13 @@
     var picture = make('img', 'f-pic');
     picture.alt = '';
     picture.decoding = 'async';
+    picture.draggable = false;                 // a picture only: never dragged out, never a link
     picture.src = src;                         // a data: picture the app re-encoded; nothing else loads (img-src data:)
     if (rec.picture) {
-      rec.picture.replaceWith(picture);
-    } else {
-      rec.body.after(picture);
+      rec.picture.remove();
     }
-    rec.picture = picture;
+    rec.picture = picture;                     // one picture per frame: a new one replaces it
+    placePicture(rec);
     scheduleLayout();
     return true;
   };
@@ -684,6 +941,7 @@
     root.addEventListener('focusin', onFocusIn);
     root.addEventListener('focusout', onFocusOut);
     root.addEventListener('scroll', onScroll, {passive: true});
+    document.addEventListener('dragstart', function (event) { event.preventDefault(); });   // nothing leaves the page
     window.addEventListener('resize', scheduleLayout);
     easeOut = token('--ease-out') || easeOut;
     setMotion(motion);

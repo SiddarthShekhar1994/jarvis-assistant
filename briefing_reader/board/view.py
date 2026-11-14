@@ -11,7 +11,10 @@ its place when it can't be.
                           retryRequested(id), approvalsRequested(id). When the web engine is missing (no QtWebEngine 6.8+,
                           no scheme), refuses to start (a sandbox turned off, unsafe flags), the page does not say it is
                           ready within READY_TIMEOUT_MS, or its renderer stops more than MAX_RESTARTS times, it shows
-                          BoardFallback by itself and emits unavailable(reason): no web view and no renderer are left
+                          BoardFallback by itself and emits unavailable(reason): no web view and no renderer are left.
+                          Fallen back, apply() still checks each message, and the frames the app sent (also those sent
+                          before, kept as the page had them) show as read-only tiles (glance.GlanceTiles) under the
+                          fallback tile, which then says READ-ONLY TILES BELOW
     BoardBridge           the one object the page sees on its web channel: post(kind, payload), checked against
                           board.protocol (the kinds on the list, the frame ids the app sent); anything else dropped and
                           counted (a log line names the kind only when it is on the list, else "unknown")
@@ -43,12 +46,13 @@ from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from typing import Any
 
-from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QThread, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
+from PySide6.QtCore import QBuffer, QByteArray, QEvent, QIODevice, QObject, QRectF, Qt, QThread, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QColor, QImage, QImageReader, QPainter, QPainterPath, QPen
+from PySide6.QtWidgets import QApplication, QFrame, QScrollArea, QVBoxLayout, QWidget
 
 from .. import holo, hud, snapshot_engine, snapshots
 from . import protocol, scheme
+from .glance import GlanceTiles
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +63,8 @@ QUEUE_CAP = 64                # messages kept while the page is not ready yet (t
 POSTS_PER_S = 40              # requests of the page a second, at most ...
 LAYOUTS_PER_S = 12            # ... layout ones among them (the page sends at most 10; a little slack for timing)
 PAD = 15                      # the view's inner pad (DESIGN-SPEC 2.1): the fallback tile keeps the frames' left edge
+TILES_GAP = 12                # between the fallback tile and the read-only tiles under it
+TILE_PICTURE_PIXELS = 4_000_000   # a read-only tile's picture bigger than this is never decoded (the app's are 960 wide)
 
 CANT_START = "The board can't start on this PC. Answers still show here as text."
 READ_ONLY_BELOW = "Read-only tiles below"     # badge role (caps), only with read-only tiles under the tile
@@ -135,6 +141,29 @@ def _quietly(step: Callable[[], Any]) -> None:
         step()
     except Exception:  # noqa: BLE001 - an object already gone never stops the next step
         pass
+
+
+def tile_picture(src: str) -> QImage | None:
+    """A picture message's data: URL (checked by board.protocol: one JPEG of at most PICTURE_BYTES) as the image a
+    read-only tile draws; None when it is not one, or is bigger than TILE_PICTURE_PIXELS (never decoded then)."""
+    try:
+        if not isinstance(src, str) or not src.startswith(protocol.PICTURE_PREFIX):
+            return None
+        import base64
+
+        data = base64.b64decode(src[len(protocol.PICTURE_PREFIX):], validate=True)
+        source = QBuffer()
+        source.setData(QByteArray(data))
+        source.open(QIODevice.OpenModeFlag.ReadOnly)
+        reader = QImageReader(source, b"jpeg")
+        size = reader.size()
+        if not size.isValid() or size.width() <= 0 or size.height() <= 0 or \
+                size.width() * size.height() > TILE_PICTURE_PIXELS:
+            return None
+        image = reader.read()
+        return None if image.isNull() else image
+    except Exception:  # noqa: BLE001 - no picture on the tile rather than an error
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -370,6 +399,12 @@ class BoardView(QWidget):
         self._phase = _IDLE
         self._reason = ""
         self._known: set[str] = set()
+        # The app's frames as the page has them, in the order they came: each frame's last message and its picture's
+        # data: URL. The read-only tiles show them if the board falls back (also after messages were queued or sent).
+        self._frames: dict[str, dict[str, Any]] = {}
+        self._pictures: dict[str, str] = {}
+        self._images: dict[str, tuple[str, QImage | None]] = {}
+        self._tiles: GlanceTiles | None = None
         self._queue: deque[str] = deque()
         self._motion = holo.motion_level()
         self._counts: Counter[str] = Counter()
@@ -428,6 +463,10 @@ class BoardView(QWidget):
     def fallback(self) -> BoardFallback | None:
         return self._fallback
 
+    def tiles(self) -> GlanceTiles | None:
+        """The read-only tiles under the fallback tile (None while the board can work)."""
+        return self._tiles
+
     def web_view(self) -> Any:
         """The one QWebEngineView (None before it starts and after it fell back or shut down)."""
         return self._view
@@ -452,10 +491,11 @@ class BoardView(QWidget):
         return data
 
     def apply(self, message: Any) -> bool:
-        """Send ``message`` to the page (board.protocol.check_message; the page checks it again). False when it was
-        refused (counted, with the reason word in the log) or the board can't take it (fallen back, shut down). Before
-        the page is ready, messages wait (at most QUEUE_CAP)."""
-        if self._phase in (_FALLBACK, _SHUT):
+        """Send ``message`` to the page (board.protocol.check_message; the page checks it again). Fallen back, it is
+        still checked, and the frames show as read-only tiles under the fallback tile. False when it was refused
+        (counted, with the reason word in the log) or the board is shut down. Before the page is ready, messages wait
+        (at most QUEUE_CAP)."""
+        if self._phase == _SHUT:
             self._counts["dropped:unavailable"] += 1
             return False
         try:
@@ -464,12 +504,12 @@ class BoardView(QWidget):
             self._counts[f"refused:{refused.reason}"] += 1
             self._log_once(f"refused:{refused.reason}", "Board: a message was refused (%s)", refused.reason)
             return False
-        if checked.type == "frame":
-            self._known.add(checked.frame_id)
-        elif checked.type == "remove":
-            self._known.discard(checked.frame_id)
-        elif checked.type == "clear":
-            self._known.clear()
+        self._remember(checked)
+        if self._phase == _FALLBACK:
+            self._counts[f"tiles:{checked.type}"] += 1
+            if checked.type in ("frame", "remove", "clear", "picture"):
+                self._show_tiles()
+            return True
         self._counts[f"sent:{checked.type}"] += 1
         if self._phase == _READY:
             self._run(checked.text)
@@ -479,6 +519,45 @@ class BoardView(QWidget):
                 self._counts["dropped:queue"] += 1
             self._queue.append(checked.text)
         return True
+
+    def _remember(self, checked: protocol.Checked) -> None:
+        """The known ids and the frames' mirror follow a message that passed (``checked.text`` is its clean JSON)."""
+        kind, frame_id = checked.type, checked.frame_id
+        if kind == "frame":
+            self._known.add(frame_id)
+            self._frames[frame_id] = json.loads(checked.text)     # an update keeps its place
+        elif kind == "remove":
+            self._known.discard(frame_id)
+            self._frames.pop(frame_id, None)
+            self._pictures.pop(frame_id, None)
+        elif kind == "clear":
+            self._known.clear()
+            self._frames.clear()
+            self._pictures.clear()
+        elif kind == "picture":
+            self._pictures[frame_id] = json.loads(checked.text)["src"]
+
+    def _show_tiles(self) -> None:
+        """The read-only tiles show the frames as they are now; the fallback tile says READ-ONLY TILES BELOW while a
+        frame shows."""
+        tiles = self._tiles
+        if tiles is None or not _alive(tiles):
+            return
+        images: dict[str, QImage] = {}
+        kept: dict[str, tuple[str, QImage | None]] = {}
+        for frame_id, src in self._pictures.items():
+            cached = self._images.get(frame_id)
+            if cached is None or cached[0] is not src:          # decoded once per picture message
+                cached = (src, tile_picture(src))
+                if cached[1] is None:
+                    self._counts["tiles:picture_left_out"] += 1
+            kept[frame_id] = cached
+            if cached[1] is not None:
+                images[frame_id] = cached[1]
+        self._images = kept
+        tiles.set_frames(list(self._frames.values()), images)
+        if self._fallback is not None and _alive(self._fallback):
+            self._fallback.set_tiles_below(bool(tiles.frames()))
 
     def set_motion(self, level: str) -> bool:
         """The motion the page plays: "lively", "calm" (x1.6) or "off" (each moment's end state at once), as holo's
@@ -497,6 +576,9 @@ class BoardView(QWidget):
         self._start_timer.stop()
         self._ready_timer.stop()
         self._queue.clear()
+        self._frames.clear()
+        self._pictures.clear()
+        self._images.clear()
         self._teardown()
         if self._blocked:
             logger.info("Board: closed (requests blocked: %s)",
@@ -778,10 +860,24 @@ class BoardView(QWidget):
         box_layout.setSpacing(0)
         self._fallback = BoardFallback(box)
         box_layout.addWidget(self._fallback)
-        box_layout.addStretch(1)
+        box_layout.addSpacing(TILES_GAP)
+        # The frames as read-only tiles under it (DESIGN-SPEC 3.6), in a see-through area that scrolls when they are
+        # taller than the board: nothing is cut off. Nothing in them is clickable; they never take the focus.
+        area = QScrollArea(box)
+        area.setObjectName("boardTiles")
+        area.setFrameShape(QFrame.Shape.NoFrame)
+        area.setWidgetResizable(True)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        area.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        area.viewport().setAutoFillBackground(False)
+        area.setStyleSheet("QScrollArea#boardTiles { background: transparent; border: none; }")
+        self._tiles = GlanceTiles(area)
+        area.setWidget(self._tiles)
+        box_layout.addWidget(area, 1)
         self._fallback_box = box
         self._layout.addWidget(box)
         box.show()
+        self._show_tiles()
         logger.info("Board: it can't start on this PC (%s)", word)
         self.unavailable.emit(word)
 
@@ -833,4 +929,5 @@ def keeps_space(widget: QWidget | None) -> bool:
 
 
 __all__ = ["BoardBridge", "BoardFallback", "BoardLayout", "BoardView", "CANT_START", "MAX_RESTARTS", "READY_TIMEOUT_MS",
-           "READ_ONLY_BELOW", "START_DELAY_MS", "WINDOW_KEYS", "WindowKeysFilter", "is_window_key", "keeps_space"]
+           "READ_ONLY_BELOW", "START_DELAY_MS", "TILE_PICTURE_PIXELS", "WINDOW_KEYS", "WindowKeysFilter", "is_window_key",
+           "keeps_space", "tile_picture"]

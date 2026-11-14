@@ -23,6 +23,14 @@ Cases:
     shell      the page shell itself: the draw-in's timings lively, calm (x1.6, no rise) and off (the end state at
                once), the changed light, the stagger of an arrival (six at most), the waits / failed / empty / focused /
                closed states and their controls asking the app, and titles that wrap with no text cut when narrow
+    kinds      part 4's kinds, built by board.frames from LIVE's pictures, research, to-dos and follow-ups (hostile words
+               among them): each renders with every word of its data as text and no element of its own making; the
+               mail's text is whole in the page and clamped to 3 lines by style only; the waits chip (a click, then
+               Enter on it) asks for go_approvals and nothing else; the picture shows only its data: JPEG, at 80 % until
+               lit or focused, and a real click on it focuses its frame and nothing else (no navigation, no request);
+               re-sending a frame updates it in place with no draw-in (the changed lap only when changed) and keeps its
+               picture; bodies Python would refuse, put into board.apply directly, are refused by the page too; at
+               300 px no word is cut
 
 Qt runs offscreen and Chromium's proxy is a dead address (snapshots.OFFLINE_FLAGS, as the board's engine always runs in a
 test): nothing can reach the network whatever the page does. No window is shown on the real screen.
@@ -226,14 +234,14 @@ def process_kinds(pids: list[int]) -> list[str]:
     return sorted(kinds)
 
 
-def tiny_jpeg_url() -> str:
+def tiny_jpeg_url(width: int = 96, height: int = 54) -> str:
     """A real JPEG the probe makes (as the app re-encodes a page picture), as a data: URL."""
     import base64
 
     from PySide6.QtCore import QBuffer, QByteArray, QIODevice
     from PySide6.QtGui import QColor, QImage
 
-    image = QImage(96, 54, QImage.Format.Format_RGB32)
+    image = QImage(width, height, QImage.Format.Format_RGB32)
     image.fill(QColor("#1e6091"))
     data = QByteArray()
     buffer = QBuffer(data)
@@ -241,6 +249,90 @@ def tiny_jpeg_url() -> str:
     image.save(buffer, "JPG", 80)
     buffer.close()
     return "data:image/jpeg;base64," + base64.b64encode(bytes(data.data())).decode("ascii")
+
+
+PROBE_MAIL = ("Here are the Q4 numbers - line 14 changed since Friday, the rest is the same. <b>Bold</b> stays words, "
+              "as does javascript:window.pwned=7 and a link <a href=\"https://example.com/\">here</a>. " * 3)
+
+
+def kind_frames(jpeg_url: str) -> list[tuple[str, Any]]:
+    """Part 4's frames as the builders make them (board.frames), from invented data with hostile words among it."""
+    from datetime import date, datetime, timedelta, timezone
+
+    from briefing_reader import pictures
+    from briefing_reader.actions import parse_action_line
+    from briefing_reader.agenda import Deadline
+    from briefing_reader.ask.mail import MailMessage, MailPerson, MailThread
+    from briefing_reader.ask.research import ResearchAnswer
+    from briefing_reader.board import frames
+    from briefing_reader.followups import OWED, WAITING, FollowupItem
+    from briefing_reader.gcal import EventBrief
+    from briefing_reader.gmail import MailView
+
+    zone = timezone(timedelta(hours=-7))
+    now = datetime(2026, 11, 17, 9, 41, tzinfo=zone)
+
+    def at(hour: int, minute: int = 0) -> datetime:
+        return datetime(2026, 11, 17, hour, minute, tzinfo=zone)
+
+    thread = MailThread("work", "t1", "Re: Budget numbers <img src=x>", (MailMessage(
+        "g1", sender=MailPerson("dana@example.edu", "Dana Whitfield"), sent_at=at(8, 12),
+        subject="Re: Budget numbers <img src=x>", text=PROBE_MAIL),))
+    reply = MailView("me@example.edu", "dana@example.edu", "", "Re: Budget numbers", "<abc@example.com>", "", "t1",
+                     "Hi Dana, thanks - looks right. <script>window.pwned=8</script>")
+    day = {"work": [EventBrief("e0", "primary", "Breakfast", start=at(8), end=at(8, 30)),
+                    EventBrief("e1", "primary", "AI-Trader check-in", start=at(10), end=at(10, 30)),
+                    EventBrief("e2", "primary", "Study group <i>2F</i>", start=at(13), end=at(14)),
+                    EventBrief("e3", "primary", "Project Development check-in", start=at(16), end=at(16, 45))]}
+    import base64
+
+    page = pictures.page_ready("https://city-hack.example.org/schedule", width=320, height=180,
+                               image=base64.b64decode(jpeg_url.split(",", 1)[1]))
+    search = pictures.search_picture("city hack schedule", [("City Hack 2026", "https://city-hack.example.org/"),
+                                                            ("<b>Evil</b>", "javascript:window.pwned=9")])
+    todo = parse_action_line("Todo: title=Send budget comments to Dana | due=2026-11-19 | acct=work | link=")
+    done = parse_action_line("Todo: title=Print boarding pass | due=2026-11-18 | acct=work | link=")
+    return [
+        ("mail", frames.from_picture(pictures.email_picture(thread, tz=zone), frame_id="m1", now=now)),
+        ("reply", frames.from_picture(pictures.outgoing_picture(reply, account="work"), frame_id="m2", now=now)),
+        ("day", frames.from_picture(pictures.plan_picture(day, (), day=date(2026, 11, 17), now=now, hour24=True),
+                                    frame_id="c1", now=now, title="Today")),
+        ("week", frames.from_picture(pictures.week_picture(day, at(0), at(0) + timedelta(days=7), now=now),
+                                     frame_id="w1", now=now)),
+        ("page", frames.from_picture(page, frame_id="p1", now=now)),
+        ("search", frames.from_picture(search, frame_id="s1", now=now)),
+        ("research", frames.from_research(ResearchAnswer(
+            "The schedule moved to Friday. <img src=x onerror=window.pwned=10>",
+            (("City Hack schedule", "https://city-hack.example.org/s"), ("Evil", "javascript:window.pwned=11"))),
+            frame_id="r1")),
+        ("todos", frames.from_todos([todo, done], [Deadline("LING essay draft", date(2026, 11, 19))], frame_id="t1",
+                                    now=now, statuses={done.id: "done"})),
+        ("followups", frames.from_followups([
+            FollowupItem("r1", "k", WAITING, "work", thread_id="t", last_gmail_id="g", who="Prof. Ana Ruiz",
+                         subject="Lab section moved <u>Thursday</u>", since=now - timedelta(hours=30)),
+            FollowupItem("r2", "k", OWED, "work", thread_id="t", last_gmail_id="g", who="City Hack",
+                         subject="Registration closes Friday", since=now - timedelta(days=3))], frame_id="f1",
+            now=now)),
+    ]
+
+
+def shown_words(frame: dict[str, Any]) -> list[str]:
+    """Every word a frame's data says the page shows (a "+N MORE" row's meta only; a to-do's state word for its
+    meta)."""
+    found = [frame["title"], frame["meta"], frame["waits"], frame["status_text"], frame["status_meta"]]
+    body = frame["body"]
+    for key, value in body.items():
+        if isinstance(value, str):
+            found.append(value)
+    for row in body.get("rows", []):
+        found += [value for value in row.values() if isinstance(value, str) and value not in ("", "open", "waits",
+                                                                                              "done", *_STATES)]
+    for tick in body.get("ticks", []):
+        found.append(tick["text"])
+    return [words for words in found if words]
+
+
+_STATES = ("past", "now", "next", "free", "new", "struck", "today")
 
 
 def main(case: str) -> dict[str, Any]:
@@ -520,6 +612,148 @@ def main(case: str) -> dict[str, Any]:
         report["seen"] = [item for item in seen if item[0] not in ("layoutChanged", "frameFocused")]
         settle_end(report, board)
 
+    elif case == "kinds":
+        from PySide6.QtCore import QPoint
+        from PySide6.QtTest import QTest
+
+        host, board = make()
+        host.show()
+        host.activateWindow()
+        wait_until(lambda: QApplication.activeWindow() is host, 5)
+        wait_until(board.is_ready, 40)
+        report["ready"] = board.is_ready()
+        board.set_motion("lively")
+        jpeg = tiny_jpeg_url(320, 180)
+        built = kind_frames(jpeg)
+        report["applied"] = [board.apply(message) for _name, one in built for message in one.messages]
+        report["refused_pictures"] = sum(one.refused for _name, one in built)
+        sent = {one.messages[0]["id"]: json.loads(protocol.check_message(one.messages[0], set()).text)
+                for _name, one in built}
+        report["expected"] = {frame_id: shown_words(frame) for frame_id, frame in sent.items()}
+        report["kinds"] = {frame_id: frame["kind"] for frame_id, frame in sent.items()}
+        pump(1.5)
+        before = board.counts()
+        report["allowed_before"] = before["allowed"]
+        report["rendered"] = json.loads(main_world(board, """JSON.stringify((function () {
+            var made = 'a, script, iframe, style, object, embed, form, link, base, u, img:not(.f-pic), '
+              + 'b:not(.mt-sender):not(.f-closed b), i:not([class]):not(.fx-skeleton i)';   // none is the page's
+            var found = {};
+            document.querySelectorAll('#board .frame').forEach(function (f) {
+              var id = f.querySelector('.f-title').id.slice(6);
+              found[id] = {text: f.textContent, classes: f.className,
+                           glyph: f.querySelector('.f-glyph path').getAttribute('class'),
+                           markup: f.querySelectorAll(made).length,
+                           images: f.querySelectorAll('img').length};
+            });
+            var mail = document.getElementById('title-m1').closest('.frame').querySelector('.mt-text');
+            var line = parseFloat(getComputedStyle(mail).lineHeight);
+            var picture = document.querySelector('#board .f-pic');
+            return {frames: found, scripts: document.scripts.length, pwned: typeof window.pwned,
+                    mail: {text: mail.textContent, lines: Math.round(mail.getBoundingClientRect().height / line),
+                           clamped: mail.scrollHeight > mail.clientHeight + 1},
+                    picture: {src: picture.getAttribute('src').slice(0, 23), loaded: picture.complete && picture.naturalWidth === 320,
+                              inSlot: !!picture.closest('.pic-slot'), filter: getComputedStyle(picture).filter,
+                              draggable: picture.draggable},
+                    horizon: (function () {
+                      var rows = Array.from(document.getElementById('title-c1').closest('.frame').querySelectorAll('.cal-rows > *'));
+                      var at = rows.findIndex(function (el) { return el.classList.contains('cal-now'); });
+                      return {at: at, before: rows[at - 1] ? rows[at - 1].className : '', after: rows[at + 1] ? rows[at + 1].className : ''};
+                    })()};
+          })())"""))
+        report["mail_text"] = sent["m1"]["body"]["text"]
+        # The waits chip: a click, then Enter on it (a real key), ask for go_approvals and nothing else.
+        chip = "document.getElementById('title-m2').closest('.frame').querySelector('.f-wait')"
+        mark = len(seen)
+        main_world(board, f"{chip}.click(); 1")
+        pump(0.4)
+        report["chip_click"] = [item for item in seen[mark:] if item[0] != "layoutChanged"]
+        board.web_view().setFocus(Qt.FocusReason.OtherFocusReason)
+        wait_until(lambda: view.keeps_space(QApplication.focusWidget()), 5)
+        main_world(board, f"{chip}.focus(); 1")
+        pump(0.4)
+        mark = len(seen)
+        QTest.keyClick(QApplication.focusWidget(), Qt.Key.Key_Return)
+        pump(0.5)
+        report["chip_enter"] = [item for item in seen[mark:] if item[0] != "layoutChanged"]
+        # The picture: a real click on it focuses its frame, and nothing else happens.
+        main_world(board, "document.querySelector('#board .f-pic').scrollIntoView({block: 'center'}); 1")
+        pump(0.6)
+        box = json.loads(main_world(board, "JSON.stringify((function () { var r = document.querySelector("
+                                           "'#board .f-pic').getBoundingClientRect(); return [r.left, r.top, r.width,"
+                                           " r.height]; })())"))
+        mark = len(seen)
+        url_before = board.web_view().page().url().toString()
+        QTest.mouseClick(board.web_view().focusProxy(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                         QPoint(int(box[0] + box[2] / 2), int(box[1] + box[3] / 2)))
+        pump(0.6)
+        report["picture_click"] = {
+            "seen": [item for item in seen[mark:] if item[0] != "layoutChanged"],
+            "focused": main_world(board, "(document.activeElement.querySelector('.f-pic') ? 'picture frame' : "
+                                         "document.activeElement.className)"),
+            "filter_focused": main_world(board, "getComputedStyle(document.querySelector('#board .f-pic')).filter"),
+            "drag_refused": main_world(board, "(function () { var e = new DragEvent('dragstart', {bubbles: true, "
+                                              "cancelable: true}); document.querySelector('#board .f-pic')"
+                                              ".dispatchEvent(e); return e.defaultPrevented; })()"),
+            "url_same": board.web_view().page().url().toString() == url_before,
+        }
+        main_world(board, "document.activeElement.blur(); 1")
+        board.apply({"type": "lit", "id": "p1"})
+        pump(0.3)
+        report["picture_lit_filter"] = main_world(board, "getComputedStyle(document.querySelector('#board .f-pic'))"
+                                                         ".filter")
+        board.apply({"type": "lit", "id": ""})
+        # An update in place: the same element, no draw-in; the lap only when changed; the picture stays.
+        main_world(board, "document.getElementById('title-c1').closest('.frame').__probe = 7; "
+                          "document.getElementById('title-p1').closest('.frame').__probe = 8; 1")
+        update = json.loads(json.dumps(sent["c1"]))
+        update["body"]["rows"][0]["title"] = "Breakfast moved"
+        board.apply(update)
+        board.apply(dict(sent["p1"], meta="9:42 AM"))
+        pump(0.2)
+        report["update"] = json.loads(main_world(board, """JSON.stringify((function () {
+            var c = document.getElementById('title-c1').closest('.frame');
+            var p = document.getElementById('title-p1').closest('.frame');
+            return {same: c.__probe === 7 && p.__probe === 8, classes: c.className, text: c.textContent.indexOf('Breakfast moved') >= 0,
+                    pictures: p.querySelectorAll('.pic-slot img').length, meta: p.querySelector('.f-meta').textContent};
+          })())"""))
+        board.apply(dict(update, changed=True))
+        pump(0.2)
+        report["update_changed"] = main_world(board, "document.getElementById('title-c1').closest('.frame').className")
+        # Bodies Python refuses are refused by the page too (put into board.apply directly).
+        base = {"type": "frame", "id": "bad", "title": "x", "meta": "", "status": "ok", "status_text": "",
+                "status_meta": "", "waits": "", "changed": False, "pinned": False, "closed": False}
+        bad = [
+            dict(base, kind="calendar", body={"first": 0, "last": 600, "now_min": -1, "ticks": [], "now": "",
+                                              "spans": [{"start": 700, "end": 800, "kind": "busy"}], "rows": []}),
+            dict(base, kind="calendar", body={"first": 0, "last": 600, "now_min": -1, "ticks": [], "spans": [],
+                                              "now": "", "rows": [{"time": "", "title": "", "meta": "",
+                                                                   "state": "soon"}]}),
+            dict(base, kind="todos", body={"rows": [{"text": "x", "meta": "", "state": "open"}] * 9}),
+            dict(base, kind="mail_list", body={"rows": [{"sender": "x", "time": "", "subject": "", "meta": "",
+                                                         "unread": "yes"}]}),
+            dict(base, kind="text", body={"text": "", "rows": [{"lead": "", "text": "x", "meta": "", "html": "<b>"}]}),
+            dict(base, kind="picture", body={"caption": "x" * 61}),
+            dict(base, kind="mail_thread", body={"sender": "", "time": "", "text": "", "href": "x"}),
+            dict(base, kind="todos", body={"rows": [{"text": "x", "meta": ""}]}),
+        ]
+        report["page_refuses"] = [main_world(board, f"board.apply({json.dumps(json.dumps(item))})") for item in bad]
+        report["bad_frames"] = main_world(board, "document.querySelectorAll('#title-bad').length")
+        # At 300 px no word is cut.
+        board.setGeometry(0, 0, 300, 700)
+        pump(1.0)
+        report["narrow"] = json.loads(main_world(board, """JSON.stringify((function () {
+            var words = Array.from(document.querySelectorAll('#board .frame span, #board .frame p, #board .frame b, #board .frame h2'));
+            var root = document.getElementById('board');
+            return {cut: words.filter(function (el) { return el.scrollWidth > el.clientWidth + 1; }).map(function (el) { return el.className; }),
+                    words: words.length, page_cut: root.scrollWidth > root.clientWidth};
+          })())"""))
+        after = board.counts()
+        report["allowed_after"] = after["allowed"]
+        report["blocked_after"] = after["blocked"]
+        report["navigation_refused"] = after.get("refused:navigation", 0)
+        report["seen"] = [item for item in seen if item[0] not in ("layoutChanged",)]
+        settle_end(report, board)
+
     elif case == "media":
         host, board = make()
         host.show()
@@ -616,6 +850,10 @@ def main(case: str) -> dict[str, Any]:
                             "children": len(children()), "words": list(refused.fallback().words()),
                             "web_view": refused.web_view() is not None, "apply": refused.apply(
                                 {"type": "frame", "id": "x", "kind": "text", "title": "x"})}
+        # Fallen back, frames still come: read-only tiles under the tile (glance.GlanceTiles), never the web engine.
+        report["unsafe"]["words_after"] = list(refused.fallback().words())
+        report["unsafe"]["tiles"] = [frame["id"] for frame in refused.tiles().frames()]
+        report["unsafe"]["started_after"] = snapshot_engine._ENGINE.started
         os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(snapshots.OFFLINE_FLAGS)
         # 2. A page that does not say it is ready in time.
         host2, late = make(ready_timeout_ms=1)

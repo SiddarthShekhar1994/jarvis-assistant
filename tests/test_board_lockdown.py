@@ -12,8 +12,12 @@ list and frames the app sent, and survives a deleteLater. The control case shows
 taken out: the engine's rules for a local scheme and the request interceptor still let nothing out. The window's keys
 still fire and Space never plays the briefing with the focus in the page, also after the renderer is killed; the board
 falls back to its native tile, leaving no renderer, when it may not start, is not ready in time or keeps crashing; and
-the page shell plays the design's states and motion (lively, calm, off) for real. Skipped when this PySide6 has no
-QtWebEngine 6.8+.
+the page shell plays the design's states and motion (lively, calm, off) for real. Part 4's kinds (calendar, mail
+thread and list, to-dos, picture, text with rows), built by board.frames, render with every word as text; the mail's
+text is whole and clamped by style; the waits chip asks for go_approvals and nothing else; the picture loads nothing but
+its data: JPEG and a click on it only focuses its frame; an update in place does not draw in again; the page refuses the
+bodies Python refuses; and a board that fell back still shows the frames as read-only tiles. Skipped when this PySide6
+has no QtWebEngine 6.8+.
 """
 
 from __future__ import annotations
@@ -31,7 +35,7 @@ from briefing_reader.board import view
 
 PROBE = Path(__file__).with_name("board_probe.py")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CASES = ("lockdown", "control", "media", "keys", "fallback", "shell")
+CASES = ("lockdown", "control", "media", "keys", "fallback", "shell", "kinds")
 REPORTS: dict[str, dict] = {}
 FAILURES: dict[str, str] = {}
 WINDOW_KEYS = ["Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+6", "Ctrl+7", "Ctrl+8", "Ctrl+9", "Ctrl+,",
@@ -318,6 +322,92 @@ class ShellTests(BoardProbeCase):
         self.assertEqual(wrap["numerals"], "tabular-nums")
 
 
+class KindsTests(BoardProbeCase):
+    """Part 4's kinds in the real page, built by board.frames (DESIGN-SPEC 3.3)."""
+
+    def test_every_kind_renders_with_its_words_as_text(self) -> None:
+        report = self.report("kinds")
+        self.assertTrue(report["ready"])
+        self.assertEqual(report["applied"], [True] * 10)               # nine frames and the page's picture
+        self.assertEqual(report["refused_pictures"], 0)
+        frames = report["rendered"]["frames"]
+        self.assertEqual(set(frames), set(report["kinds"]))
+        glyphs = {"mail_thread": "g-mail", "calendar": "g-calendar", "picture": "g-image", "text": "g-read-all",
+                  "todos": "g-todos", "mail_list": "g-inbox"}
+        for frame_id, words in report["expected"].items():
+            found = frames[frame_id]
+            self.assertEqual(found["glyph"], glyphs[report["kinds"][frame_id]], frame_id)
+            for word in words:
+                self.assertIn(word, found["text"], frame_id)          # every word of its data, as text
+            self.assertEqual(found["markup"], 0, frame_id)            # no element came of any of it
+            self.assertNotIn("arriving", found["classes"])
+        self.assertEqual(frames["p1"]["images"], 1)
+        self.assertEqual(sum(found["images"] for found in frames.values()), 1)
+        self.assertIn("waits", frames["m2"]["classes"])
+        self.assertEqual(report["rendered"]["scripts"], 2)
+        self.assertEqual(report["rendered"]["pwned"], "undefined")
+
+    def test_the_mails_text_is_whole_and_clamped_to_three_lines_by_style_only(self) -> None:
+        mail = self.report("kinds")["rendered"]["mail"]
+        self.assertEqual(mail["text"], self.report("kinds")["mail_text"])
+        self.assertEqual(mail["lines"], 3)
+        self.assertTrue(mail["clamped"])
+
+    def test_the_now_line_stands_between_the_past_and_what_comes_next(self) -> None:
+        horizon = self.report("kinds")["rendered"]["horizon"]
+        self.assertGreater(horizon["at"], 0)
+        self.assertIn("past", horizon["before"])
+        self.assertNotIn("past", horizon["after"])
+
+    def test_the_waits_chip_asks_for_approvals_and_nothing_else(self) -> None:
+        report = self.report("kinds")
+        self.assertEqual(report["chip_click"], [["approvalsRequested", "m2"]])
+        self.assertEqual(report["chip_enter"], [["approvalsRequested", "m2"]])
+        asked = {item[0] for item in report["seen"]}
+        self.assertEqual(asked, {"ready", "approvalsRequested", "frameFocused"})   # no open, close, pin, retry
+
+    def test_the_picture_is_its_data_jpeg_only_and_a_click_only_focuses_its_frame(self) -> None:
+        report = self.report("kinds")
+        picture = report["rendered"]["picture"]
+        self.assertEqual(picture["src"], "data:image/jpeg;base64,")
+        self.assertTrue(picture["loaded"])
+        self.assertTrue(picture["inSlot"])
+        self.assertFalse(picture["draggable"])
+        self.assertEqual(picture["filter"], "brightness(0.8)")         # 80 % until focused or lit
+        click = report["picture_click"]
+        self.assertEqual(click["seen"], [["frameFocused", "p1"]])
+        self.assertEqual(click["focused"], "picture frame")
+        self.assertEqual(click["filter_focused"], "none")
+        self.assertTrue(click["drag_refused"])
+        self.assertTrue(click["url_same"])
+        self.assertEqual(report["picture_lit_filter"], "none")
+        self.assertEqual(report["navigation_refused"], 0)             # it never even tried to go anywhere
+        self.assertEqual(report["allowed_before"], {"jarvis-board": 9})
+        self.assertEqual(report["allowed_after"], {"jarvis-board": 9})   # nothing more was loaded
+        self.assertEqual(report["blocked_after"], {})
+
+    def test_an_update_in_place_does_not_draw_in_again(self) -> None:
+        report = self.report("kinds")
+        update = report["update"]
+        self.assertTrue(update["same"])                                # the same element
+        self.assertEqual(update["classes"], "frame")                   # no draw-in, no lap
+        self.assertTrue(update["text"])
+        self.assertEqual(update["pictures"], 1)                        # the picture stays
+        self.assertEqual(update["meta"], "9:42 AM")
+        self.assertEqual(report["update_changed"].split(), ["frame", "lap"])   # changed: the lap, only then
+
+    def test_the_page_refuses_bodies_python_refuses(self) -> None:
+        report = self.report("kinds")
+        self.assertEqual(report["page_refuses"], [False] * 8)
+        self.assertEqual(report["bad_frames"], 0)
+
+    def test_no_word_is_cut_at_300_px(self) -> None:
+        narrow = self.report("kinds")["narrow"]
+        self.assertEqual(narrow["cut"], [])
+        self.assertGreater(narrow["words"], 100)
+        self.assertFalse(narrow["page_cut"])
+
+
 class FallbackTests(BoardProbeCase):
     def test_inherited_unsafe_settings_never_start_chromium(self) -> None:
         unsafe = self.report("fallback")["unsafe"]
@@ -326,7 +416,10 @@ class FallbackTests(BoardProbeCase):
         self.assertEqual(unsafe["children"], 0)
         self.assertEqual(unsafe["words"], [view.CANT_START, ""])
         self.assertFalse(unsafe["web_view"])
-        self.assertFalse(unsafe["apply"])
+        self.assertTrue(unsafe["apply"])                              # part 4: still checked, shown as a tile
+        self.assertEqual(unsafe["words_after"], [view.CANT_START, "READ-ONLY TILES BELOW"])
+        self.assertEqual(unsafe["tiles"], ["x"])
+        self.assertFalse(unsafe["started_after"])
 
     def test_a_page_not_ready_in_time_leaves_the_tile_and_no_renderer(self) -> None:
         late = self.report("fallback")["late"]

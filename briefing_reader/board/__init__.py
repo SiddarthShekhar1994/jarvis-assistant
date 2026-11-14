@@ -12,6 +12,14 @@ Built so far (part 3, the host):
 * ``assets``: board.html (its content security policy), board.css and board.js: Jarvis's own code only, no library;
   every element made with createElement, every word set as text.
 
+Part 4, the frames from what Jarvis already knows:
+
+* ``frames``: the builders (Qt-free) from LIVE's pictures, a web research answer, to-dos and deadlines, and follow-ups
+  to the frame messages ``protocol`` checks (calendar, mail_thread, mail_list, todos, picture, and text with rows):
+  every string cleaned with live's cleaner and capped as the page counts it.
+* ``glance``: the glance painter (QPainter only): read-only tiles of those frames, for the board's fallback (GlanceTiles
+  under its "can't start" tile) and later the second screen (private: mail text hidden).
+
 Nothing in the app makes a board yet (part 5 puts it on Home). Importing this package imports nothing of the web
 engine; only ``view`` starts it, and only through snapshot_engine.
 """
