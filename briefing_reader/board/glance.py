@@ -857,9 +857,41 @@ def _paint_op(painter: QPainter, op: Op, types: _Type) -> None:
 # GlanceTiles
 # --------------------------------------------------------------------------
 
+GROUP_HEAD = 16                 # a group's header line (DESIGN-SPEC 3.1: its time and topic over a LINE_FAINT rule) ...
+GROUP_HEAD_GAP = 12             # ... and the gap under it
+
+
+def paint_group_head(painter: QPainter, rect: QRectF, time_text: str, topic: str, *, older: bool = False,
+                     scale: float = 1.0) -> None:
+    """A group's header in ``rect`` (one line): its time (badge role) and its topic (Sora 12.5), INK_3 (INK_4 when
+    older), then a LINE_FAINT rule to the right edge (left out when there is no room for it: the words are never
+    cut - the topic is at most 40 characters)."""
+    types = _type(scale)
+    color = QColor(holo.INK_4 if older else holo.INK_3)
+    painter.save()
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        x = rect.left()
+        align = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        for key, words in (("badge", time_text), ("caption", topic)):
+            shown = types.words(key, words)
+            if not shown:
+                continue
+            width = types.width(key, shown)
+            painter.setFont(types.fonts[key])
+            painter.setPen(color)
+            painter.drawText(QRectF(x, rect.top(), width + 2, rect.height()), align, shown)
+            x += width + 10 * scale
+        if rect.right() - x >= 24 * scale:
+            painter.fillRect(QRectF(x, round(rect.center().y()), rect.right() - x, 1.0), _color(holo.LINE_FAINT))
+    finally:
+        painter.restore()
+
+
 class GlanceTiles(QWidget):
     """The read-only tiles of a list of frames, one under the other, each as tall as it needs (closed frames left out).
-    ``pictures``: a frame id's picture. Never takes the focus; a screen reader hears each tile's title."""
+    ``pictures``: a frame id's picture; ``headers``: a group's header (time, topic, older) drawn above the frame it
+    starts with (part 5a: the board's groups). Never takes the focus; a screen reader hears each tile's title."""
 
     def __init__(self, parent: QWidget | None = None, *, scale: float = 1.0, private: bool = False,
                  ground: bool = True) -> None:
@@ -875,11 +907,15 @@ class GlanceTiles(QWidget):
         self._ground = bool(ground)
         self._frames: tuple[Mapping[str, Any], ...] = ()
         self._pictures: dict[str, QImage] = {}
+        self._headers: dict[str, tuple[str, str, bool]] = {}
         self._heights: dict[int, tuple[int, ...]] = {}
 
-    def set_frames(self, frames: Sequence[Mapping[str, Any]], pictures: Mapping[str, QImage] | None = None) -> None:
+    def set_frames(self, frames: Sequence[Mapping[str, Any]], pictures: Mapping[str, QImage] | None = None, *,
+                   headers: Mapping[str, tuple[str, str, bool]] | None = None) -> None:
         self._frames = tuple(frame for frame in frames if isinstance(frame, Mapping) and not frame.get("closed"))
         self._pictures = {key: value for key, value in (pictures or {}).items() if isinstance(value, QImage)}
+        self._headers = {str(key): (str(value[0]), str(value[1]), bool(value[2]))
+                         for key, value in (headers or {}).items() if isinstance(value, tuple) and len(value) == 3}
         self._heights.clear()
         self.setAccessibleName("Read-only tiles")
         self.setAccessibleDescription("; ".join(str(frame.get("title", "")) for frame in self._frames))
@@ -889,6 +925,14 @@ class GlanceTiles(QWidget):
 
     def frames(self) -> tuple[Mapping[str, Any], ...]:
         return self._frames
+
+    def headers(self) -> dict[str, tuple[str, str, bool]]:
+        """The groups' headers, by the frame each one is drawn above."""
+        return dict(self._headers)
+
+    def _head(self, frame: Mapping[str, Any]) -> float:
+        """The room a group's header takes above ``frame`` (0 when none starts there)."""
+        return (GROUP_HEAD + GROUP_HEAD_GAP) * self._scale if str(frame.get("id", "")) in self._headers else 0.0
 
     def _tile_heights(self, width: int) -> tuple[int, ...]:
         found = self._heights.get(width)
@@ -904,10 +948,22 @@ class GlanceTiles(QWidget):
         width = max(1, self.width())
         rects: list[QRectF] = []
         y = 0.0
-        for height in self._tile_heights(width):
+        for frame, height in zip(self._frames, self._tile_heights(width)):
+            y += self._head(frame)
             rects.append(QRectF(0.0, y, float(width), float(height)))
             y += height + GAP * self._scale
         return rects
+
+    def head_rects(self) -> dict[str, QRectF]:
+        """Where each group's header goes (by the frame it is drawn above), in this widget's px."""
+        width = max(1, self.width())
+        heads: dict[str, QRectF] = {}
+        for frame, rect in zip(self._frames, self.tile_rects()):
+            key = str(frame.get("id", ""))
+            if key in self._headers:
+                top = rect.top() - (GROUP_HEAD + GROUP_HEAD_GAP) * self._scale
+                heads[key] = QRectF(0.0, top, float(width), GROUP_HEAD * self._scale)
+        return heads
 
     def hasHeightForWidth(self) -> bool:  # noqa: N802 - Qt override
         return True
@@ -916,7 +972,8 @@ class GlanceTiles(QWidget):
         heights = self._tile_heights(max(1, int(width)))
         if not heights:
             return 0
-        return int(sum(heights) + GAP * self._scale * (len(heights) - 1))
+        heads = sum(self._head(frame) for frame in self._frames)
+        return int(-(-(sum(heights) + heads + GAP * self._scale * (len(heights) - 1)) // 1))
 
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
         width = max(1, self.width())
@@ -931,12 +988,17 @@ class GlanceTiles(QWidget):
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         painter = QPainter(self)
         try:
+            heads = self.head_rects()
             for frame, rect in zip(self._frames, self.tile_rects()):
+                key = str(frame.get("id", ""))
+                if key in heads:
+                    time_text, topic, older = self._headers[key]
+                    paint_group_head(painter, heads[key], time_text, topic, older=older, scale=self._scale)
                 paint_tile(painter, rect, frame, scale=self._scale, private=self._private,
-                           picture=self._pictures.get(str(frame.get("id", ""))), ground=self._ground)
+                           picture=self._pictures.get(key), ground=self._ground)
         finally:
             painter.end()
 
 
-__all__ = ["CHANGED", "GAP", "GLYPHS", "GlanceTiles", "HIDDEN", "MORE", "ON_MAIN", "Op", "PICTURE_ONLY", "TileLayout",
-           "paint_tile", "tile_height", "tile_layout"]
+__all__ = ["CHANGED", "GAP", "GLYPHS", "GROUP_HEAD", "GlanceTiles", "HIDDEN", "MORE", "ON_MAIN", "Op", "PICTURE_ONLY",
+           "TileLayout", "paint_group_head", "paint_tile", "tile_height", "tile_layout"]

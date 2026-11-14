@@ -405,6 +405,54 @@ button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 #board.has-lit .frame.arriving .fx-tick { border-color: var(--line-focus); }
 #board.has-lit .frame.arriving .f-glyph { color: var(--holo-lo); }
 
+/* ---- the desk (part 5a, DESIGN-SPEC 2.1 and 3.1): the bar on top, the frames area under it, groups ---- */
+/* The bar: "Board", the counts, then All | Pinned and Clear (drawn; part 5b makes them work). With it the frames area
+   starts 44 px down and leaves the index strip's 28 px at the right, fades over its last 44 px and keeps the bottom
+   24 px gutter clear. Without a bar message (parts 3 and 4) the page is as it was. */
+#bar {
+  position: absolute; left: 0; right: 0; top: 0; height: 32px; z-index: 2;
+  display: none; align-items: center; gap: 12px; padding: 0 40px 0 var(--pad);
+}
+body.has-bar #bar { display: flex; }
+.b-title { flex: none; color: var(--ink-1); font: 600 15px/20px var(--font-display); letter-spacing: .02em; }
+.b-count { flex: none; color: var(--ink-3); }
+.b-waits { flex: none; display: inline-flex; align-items: center; gap: 6px; color: var(--amber); }
+.b-waits[hidden] { display: none; }
+.b-waits .b-dia { width: 9px; height: 9px; }
+body.compact .b-count { display: none; }
+.b-seg {
+  flex: none; margin-left: auto; display: flex; height: 28px; overflow: hidden;
+  border: 1px solid var(--line); border-radius: var(--radius-button-sm);
+}
+.b-seg button { padding: 0 10px; color: var(--ink-3); font: 500 12px/26px var(--font-body); white-space: nowrap; cursor: default; }
+.b-seg button.on { background: var(--tile-focus); color: var(--ink-1); }
+.b-seg button + button { border-left: 1px solid var(--line); }
+.b-clear {
+  flex: none; height: 28px; padding: 0 11px; border: 1px solid var(--line); border-radius: var(--radius-button-sm);
+  color: var(--ink-2); font: 600 12px/26px var(--font-display); letter-spacing: .02em; cursor: default;
+}
+body.has-bar #board {
+  top: 44px; bottom: 24px; right: 28px; padding: 6px 12px 40px var(--pad);
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 44px), transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 44px), transparent 100%);
+}
+
+/* a group: its time and topic over a LINE_FAINT rule (older groups in INK_4), then its frames */
+.group { flex: none; display: flex; flex-direction: column; gap: 12px; }
+.g-frames { display: flex; flex-direction: column; gap: 12px; }
+.g-head { display: flex; align-items: center; gap: 10px; min-width: 0; margin: 2px 0 -2px; }
+.g-time { flex: none; color: var(--ink-3); white-space: nowrap; }
+.g-topic {                                    /* at most 40 characters: one line at every width, and wrapped, never cut */
+  flex: 0 1 auto; min-width: 0; color: var(--ink-3); font: 400 12.5px/16px var(--font-body);
+  overflow-wrap: anywhere; unicode-bidi: plaintext;
+}
+.g-rule { flex: 1 1 24px; min-width: 24px; height: 1px; background: var(--line-faint); }
+.group.older .g-time, .group.older .g-topic { color: var(--ink-4); }
+
+/* the desk forms: the board fades in and slides 24 px from the right (280 ms; calm x1.6; off at once) */
+:root.desk-in #board, :root.desk-in #bar { animation: desk-in calc(280ms * var(--k)) var(--ease-out) both; }
+@keyframes desk-in { from { opacity: 0; transform: translateX(24px); } }
+
 /* ---- changed: one light runs once round the border, then CHANGED stays ---- */
 .frame.lap .fx-light { display: block; }
 .fx-light rect {

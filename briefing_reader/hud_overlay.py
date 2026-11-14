@@ -22,7 +22,9 @@ the chips and the cards (``Glow``) as well as the brackets and tethers.
     (``WA_AlwaysShowToolTips``: the HUD is never the active window). ``place_on(screen)`` /
     ``place_in(area)``, ``area()``; ``set_caption(text)``; ``set_look(base, muted=, offline=, word=)`` (the orb and the
     state word); ``set_briefing_ready(bool)``, ``set_pending(count)``, ``set_recording(elapsed, warning="")``,
-    ``set_timer(text)`` (a chip whose words did not change is not repainted); ``chip_texts()``. P2.5: under the chips
+    ``set_timer(text)`` (a chip whose words did not change is not repainted); ``chip_texts()``. The new look (part
+    5a): the amber chips lead with the drawn diamond instead of a dot, and ``set_board(count)`` shows "9 on the board"
+    (``CHIP_BOARD``, after the amber chip, the board's glyph) while the board holds frames. P2.5: under the chips
     the instant row (``set_instant(items, dnd=, undo_all=)``, ``instant_texts()``; ``instant``, ``dnd_chip``,
     ``undo_all``): one cyan ``InstantChip`` per kind of change done at once - what it did and its NoFocus Undo link
     (``instantUndo(key)``) -, "Do Not Disturb - Turn on" while focus mode runs (``dndClicked``: Windows' own switch)
@@ -187,6 +189,7 @@ _BAR_SHINE = holo.alpha(holo.HOLO_HI, 0.12)
 # The chips (under the bar) and the button beside it.
 CHIP_BRIEFING = "briefing"
 CHIP_APPROVALS = "approvals"
+CHIP_BOARD = "board"                        # the new look: "9 on the board" while the board holds frames
 CHIP_REC = "rec"
 CHIP_KEYS = (CHIP_BRIEFING, CHIP_APPROVALS, CHIP_REC)
 CHIP_TIMER = "timer"                        # P2.4: while a Jarvis timer runs (after the others; P2.5's row follows)
@@ -245,6 +248,11 @@ _SWP_NOSIZE = 0x0001
 _SWP_NOMOVE = 0x0002
 _SWP_NOACTIVATE = 0x0010
 _SWP_NOOWNERZORDER = 0x0200
+
+
+def board_text(count: int) -> str:
+    """The board's chip: "9 on the board" (DESIGN-SPEC 3.6)."""
+    return f"{max(0, int(count))} on the board"
 
 
 def needs_ok_text(count: int) -> str:
@@ -639,6 +647,8 @@ class _CaptionLine(QWidget):
 
 _CHIP_LOOKS = {   # fill, border, hover border, text, dot, chevron
     CHIP_BRIEFING: (holo.TILE, holo.alpha(holo.HOLO, 0.42), QColor(holo.HOLO), holo.INK_1, holo.HOLO, holo.INK_4),
+    CHIP_BOARD: (holo.TILE, holo.alpha(holo.HOLO, 0.42), QColor(holo.HOLO), holo.INK_1, holo.HOLO_LO, holo.INK_4),
+    # (the amber looks lead with the drawn diamond: _DIAMOND_LOOKS)
     CHIP_APPROVALS: (holo.TILE_AMBER, holo.alpha(holo.AMBER, 0.60), QColor(holo.AMBER), holo.AMBER_TX, holo.AMBER,
                      _AMBER_CHEVRON),
     CHIP_REC: (holo.RAISED, holo.alpha(holo.ALERT, 0.55), QColor(holo.ALERT), holo.INK_1, holo.ALERT, holo.INK_4),
@@ -650,6 +660,9 @@ _CHIP_LOOKS = {   # fill, border, hover border, text, dot, chevron
     CHIP_WAKE_PROBLEM: (holo.TILE_AMBER, holo.alpha(holo.AMBER, 0.60), QColor(holo.AMBER), holo.AMBER_TX, holo.AMBER,
                         _AMBER_CHEVRON),
 }
+
+
+_DIAMOND_LOOKS = frozenset({CHIP_APPROVALS, CHIP_WAKE_PROBLEM})     # amber: the diamond leads (the new look)
 
 
 class HudChip(QAbstractButton):
@@ -748,11 +761,16 @@ class HudChip(QAbstractButton):
             painter.setBrush(QColor(fill))
             painter.drawRoundedRect(rect, radius, radius)
             center = QPointF(self.PAD + 3.5, rect.center().y())
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(holo.alpha(dot, 0.25))
-            painter.drawEllipse(center, 6.0, 6.0)
-            painter.setBrush(QColor(dot))
-            painter.drawEllipse(center, 3.5, 3.5)
+            if self._look in _DIAMOND_LOOKS:         # waits on the owner: the drawn diamond (the new look)
+                holo.paint_icon(painter, QRectF(center.x() - 5.5, center.y() - 5.5, 11, 11), "diamond", dot)
+            elif self._key == CHIP_BOARD:            # the board's glyph
+                holo.paint_icon(painter, QRectF(center.x() - 6.5, center.y() - 6.5, 13, 13), "board", dot)
+            else:
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(holo.alpha(dot, 0.25))
+                painter.drawEllipse(center, 6.0, 6.0)
+                painter.setBrush(QColor(dot))
+                painter.drawEllipse(center, 3.5, 3.5)
             x = self.PAD + 7 + 8
             text = self.shown_text()
             painter.setFont(self._font)
@@ -1075,7 +1093,7 @@ class HudWindow(_OverlayWindow):
         self.back_button = _BackButton(BRING_BACK_TEXT, self)
         self.back_button.clicked.connect(self.bringBackClicked)
         self.chips: dict[str, HudChip] = {}
-        for key in (*CHIP_KEYS, CHIP_TIMER):
+        for key in (CHIP_BRIEFING, CHIP_APPROVALS, CHIP_BOARD, CHIP_REC, CHIP_TIMER):    # left to right
             chip = HudChip(key, self, read_only=key == CHIP_TIMER)     # p2r-8: the timer's chip only says when
             chip.hide()
             if not chip.read_only():
@@ -1354,6 +1372,13 @@ class HudWindow(_OverlayWindow):
 
     def set_briefing_ready(self, ready: bool) -> None:
         self._show_chip(CHIP_BRIEFING, bool(ready))
+
+    def set_board(self, count: int) -> None:
+        """"9 on the board" while the board holds frames (its click brings Jarvis back with the board); none at 0."""
+        count = max(0, int(count or 0))
+        if count:
+            self.chips[CHIP_BOARD].setText(board_text(count))
+        self._show_chip(CHIP_BOARD, count > 0)
 
     def set_pending(self, count: int) -> None:
         """"N need your OK" (amber) while ``count`` approvals wait; none at 0."""

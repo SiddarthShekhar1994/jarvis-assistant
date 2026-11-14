@@ -894,6 +894,9 @@ ICONS: dict[str, tuple[str, ...]] = {
               "M7.4 10a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0-3.2 0z", "M20 15.5l-4.5-4.5L7 19"),
     "hidden": ("M3 12c2.2-3.6 5.4-5.5 9-5.5s6.8 1.9 9 5.5c-2.2 3.6-5.4 5.5-9 5.5S5.2 15.6 3 12z",
                "M9.5 12a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0-5 0z", "M4.5 19.5l15-15"),
+    # The board (part 5a): a panel beside a column - the header's Board button, "9 on the board", a turn's frames.
+    "board": ("M5.5 5h13a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z", "M10 5v14",
+              "M13 9.5h4.5M13 13h4.5"),
 }
 FILLED_ICONS: dict[str, str] = {
     "play": "M8 5.5v13l10.5-6.5z",
@@ -1364,17 +1367,21 @@ class ActionChip(QAbstractButton):
     """The pill on Home ("Briefing ready" or "2 need your OK" + a chevron): 32 high, the chevron trailing.
 
     ``ping`` adds the leading cyan dot that pings three times when the chip appears (not in
-    reduced motion). Same ``MARGIN`` convention as HoloButton.
+    reduced motion). An amber chip leads with the drawn diamond (the new look: what waits on the owner is a shape as
+    well as a colour, everywhere); ``icon`` leads with that glyph instead ("9 on the board": the board's).
+    Same ``MARGIN`` convention as HoloButton.
     """
 
     MARGIN = 4
     HEIGHT = 32
+    LEAD = 15                       # the leading mark (dot, diamond or glyph) and its gap
 
-    def __init__(self, text: str = "", tone: str = CHIP_CYAN, *, ping: bool = False,
+    def __init__(self, text: str = "", tone: str = CHIP_CYAN, *, ping: bool = False, icon: str | None = None,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._tone = tone if tone in _CHIP_LOOKS else CHIP_CYAN
         self._ping = ping
+        self._icon = icon if icon in ICONS else None
         self._hover = 0.0
         self._focus_ring = False
         self._ping_progress = -1.0
@@ -1418,9 +1425,17 @@ class ActionChip(QAbstractButton):
         self._hover = value
         self.update()
 
+    def _lead(self) -> str:
+        """The leading mark: "dot" (ping), "diamond" (amber), "icon" or "" (none)."""
+        if self._ping:
+            return "dot"
+        if self._tone == CHIP_AMBER:
+            return "diamond"
+        return "icon" if self._icon else ""
+
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
         metrics = QFontMetricsF(font("button_sm"))
-        width = 13 + (15 if self._ping else 0) + metrics.horizontalAdvance(self.text()) + 8 + 13 + 10
+        width = 13 + (self.LEAD if self._lead() else 0) + metrics.horizontalAdvance(self.text()) + 8 + 13 + 10
         return QSize(math.ceil(width) + 2 * self.MARGIN, self.HEIGHT + 2 * self.MARGIN)
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
@@ -1469,13 +1484,19 @@ class ActionChip(QAbstractButton):
             painter.setBrush(mix(fill, hover_fill, self._hover))
             painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
             x = rect.left() + 13
-            if self._ping:
+            lead = self._lead()
+            if lead == "dot":
                 center = QPointF(x + 3.5, rect.center().y())
                 paint_ping(painter, center, self._ping_progress)
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(QColor(HOLO))
                 painter.drawEllipse(center, 3.5, 3.5)
-                x += 15
+            elif lead == "diamond":       # waits on the owner: the drawn diamond, not a dot
+                paint_icon(painter, QRectF(x - 1, rect.center().y() - 5, 10, 10), "diamond", AMBER)
+            elif lead == "icon":
+                paint_icon(painter, QRectF(x - 2, rect.center().y() - 6.5, 13, 13), self._icon or "", HOLO_LO)
+            if lead:
+                x += self.LEAD
             ink = mix(label, hover_label, self._hover)
             painter.setFont(font("button_sm"))
             painter.setPen(ink)

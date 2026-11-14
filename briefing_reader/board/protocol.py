@@ -1,7 +1,7 @@
 """The board's messages, both ways (the new look, part 3; PLAN section 3, DESIGN-SPEC section 8). Qt-free and pure: no
 file, no log, no network; nothing here raises but Refused.
 
-In (app -> page): check_message(message, known) -> Checked
+In (app -> page): check_message(message, known, groups=()) -> Checked
     A message is a dict of known fields of the right types, rebuilt here field by field (never the caller's object), and
     its JSON (json.dumps, ASCII only, no NaN or Infinity) is at most MESSAGE_CAP bytes. A "picture" message may also carry
     ONE image: a data:image/jpeg;base64 URL of at most PICTURE_CAP bytes that decodes to a JPEG of at most PICTURE_BYTES.
@@ -25,11 +25,23 @@ In (app -> page): check_message(message, known) -> Checked
                     picture      {"caption"}                      (its JPEG comes in its own picture message)
                   A row whose main words are empty (a text row's lead and text, a calendar row's time and title, a mail
                   row's sender and subject, a to-do's text) is the "+N MORE" row: only its meta shows.
+                  "group" (part 5a, only when given): the group (one answer) the frame belongs to - a group the app sent
+                  (``groups``); the page puts the frame in that group's place on the board.
         lit      {"id"}: the frame Jarvis is talking about ("" = none)
         remove   {"id"}; clear {}
         motion   {"level": lively / calm / off}
         picture  {"id", "src"}: the frame's one picture
-    The ids of lit, remove and picture must be frames the app sent (``known``); a new frame past MAX_FRAMES is refused.
+      Part 5a, the board on Home (DESIGN-SPEC 3.1, 3.5):
+        group    {"id", "time", "topic", "frames", "older"}: one answer's group - its header (the time, "9:41 AM", and
+                 the topic, at most TOPIC_CAP), its frames in board order (ids the app sent), "older" (INK_4) for every
+                 group but the newest. A new group goes on top of the board; past MAX_GROUPS it is refused
+        remove_group {"id"}: a group the app sent leaves whole, with its frames
+        bar      {"frames", "waits", "pinned", "compact"}: the board bar's counts ("9 FRAMES", "1 WAITS", "Pinned 1");
+                 "compact" (the folded Dock's narrow column) drops the frames count
+        desk     {"state": enter / leave}: the desk formed (the board fades and slides in) or folded
+        reveal   {"group"}: the board scrolls to that group (a conversation turn's "4 frames on the board")
+    The ids of lit, remove and picture must be frames the app sent (``known``), and a group's those of groups it sent
+    (``groups``); a new frame past MAX_FRAMES is refused.
 
 Out (page -> app): check_request(kind, payload, known) -> Request
     kind one of REQUEST_KINDS; payload a small JSON object (at most PAYLOAD_CAP characters, no NaN or Infinity) of that
@@ -55,6 +67,9 @@ PICTURE_BYTES = 300 * 1024       # bytes of the JPEG in it (the app re-encodes t
 PICTURE_PREFIX = "data:image/jpeg;base64,"
 PAYLOAD_CAP = 4096               # characters of a request's payload
 MAX_FRAMES = 24                  # frames on the board at once (DESIGN-SPEC 3.5)
+MAX_GROUPS = 8                   # groups (one answer each) on the board at once (DESIGN-SPEC 3.5)
+TOPIC_CAP = 40                   # a group's topic (DESIGN-SPEC 3.1)
+TIME_CAP = 16                    # a group's time ("9:41 AM", "13:05")
 ID_CAP = 40
 TITLE_CAP = 60                   # characters (DESIGN-SPEC 3.5: title 60, text 400)
 META_CAP = 40
@@ -69,8 +84,10 @@ PILL_CAP = 16                    # the calendar's now pill ("9:41")
 DAY_MINUTES = 24 * 60
 PLACE_LIMIT = 1_000_000          # px: a layout's top / height beyond this is not a place
 
-MESSAGE_TYPES = ("frame", "lit", "remove", "clear", "motion", "picture")
+MESSAGE_TYPES = ("frame", "lit", "remove", "clear", "motion", "picture", "group", "remove_group", "bar", "desk",
+                 "reveal")
 STATUSES = ("ok", "failed", "empty")
+DESK_STATES = ("enter", "leave")
 # A calendar row: past (dim), now (on now), next (the next event: its meta "IN 19 MIN"), free (a dashed gap), new (what
 # a card adds or moves to), struck (where it was, or what is cancelled), today (a week's row for today).
 CALENDAR_STATES = ("", "past", "now", "next", "free", "new", "struck", "today")
@@ -106,14 +123,16 @@ class Refused(ValueError):
 
 @dataclass(frozen=True)
 class Checked:
-    """A message that passed: its type, the JSON text the page gets, and the frame id it is about ("" = none)."""
+    """A message that passed: its type, the JSON text the page gets, the frame id it is about ("" = none) and the group
+    it names ("" = none: a frame without a group; a group, remove_group or reveal message's own)."""
 
     type: str
     text: str
     frame_id: str = ""
+    group_id: str = ""
 
     def __repr__(self) -> str:   # never the text
-        return f"Checked(type={self.type!r}, bytes={len(self.text)}, id={self.frame_id!r})"
+        return f"Checked(type={self.type!r}, bytes={len(self.text)}, id={self.frame_id!r}, group={self.group_id!r})"
 
 
 @dataclass(frozen=True)
@@ -314,10 +333,10 @@ KINDS: dict[str, Callable[[Any], dict[str, Any]]] = {
 # --------------------------------------------------------------------------
 
 _FRAME_FIELDS = ("type", "id", "kind", "title", "meta", "body", "status", "status_text", "status_meta", "waits",
-                 "changed", "pinned", "closed")
+                 "changed", "pinned", "closed", "group")
 
 
-def _frame(value: dict[str, Any], known: Collection[str]) -> tuple[dict[str, Any], str]:
+def _frame(value: dict[str, Any], known: Collection[str], groups: Collection[str]) -> tuple[dict[str, Any], str, str]:
     fields = _fields(value, _FRAME_FIELDS, ("type", "id", "kind", "title"))
     frame_id = _frame_id(fields["id"])
     if frame_id not in known and len(known) >= MAX_FRAMES:
@@ -338,7 +357,34 @@ def _frame(value: dict[str, Any], known: Collection[str]) -> tuple[dict[str, Any
         "pinned": _flag(fields.get("pinned", False)),
         "closed": _flag(fields.get("closed", False)),
     }
-    return clean, frame_id
+    group_id = ""
+    if "group" in fields:       # part 5a: the answer it belongs to (only when given: a group the app sent)
+        group_id = clean["group"] = _known_id(fields["group"], groups)
+    return clean, frame_id, group_id
+
+
+def _group(value: dict[str, Any], known: Collection[str], groups: Collection[str]) -> tuple[dict[str, Any], str]:
+    """One answer's group: its header's time and topic, its frames in board order, and whether it is older than the
+    newest (its header in INK_4)."""
+    fields = _fields(value, ("type", "id", "time", "topic", "frames", "older"),
+                     ("type", "id", "time", "topic", "frames"))
+    group_id = _frame_id(fields["id"])
+    if group_id not in groups and len(groups) >= MAX_GROUPS:
+        raise Refused(R_FULL)
+    order = [_known_id(item, known) for item in _list(fields["frames"], MAX_FRAMES)]
+    if len(set(order)) != len(order):
+        raise Refused(R_ID)
+    return {"type": "group", "id": group_id, "time": _text(fields["time"], TIME_CAP),
+            "topic": _text(fields["topic"], TOPIC_CAP), "frames": order,
+            "older": _flag(fields.get("older", False))}, group_id
+
+
+def _bar(value: dict[str, Any]) -> dict[str, Any]:
+    """The board bar's counts: frames (at most MAX_FRAMES), how many wait on the owner and how many are pinned."""
+    fields = _fields(value, ("type", "frames", "waits", "pinned", "compact"), ("type", "frames"))
+    frames = _number(fields["frames"], 0, MAX_FRAMES)
+    return {"type": "bar", "frames": frames, "waits": _number(fields.get("waits", 0), 0, frames),
+            "pinned": _number(fields.get("pinned", 0), 0, frames), "compact": _flag(fields.get("compact", False))}
 
 
 def _picture(value: dict[str, Any], known: Collection[str]) -> tuple[dict[str, Any], str]:
@@ -359,17 +405,33 @@ def _picture(value: dict[str, Any], known: Collection[str]) -> tuple[dict[str, A
     return {"type": "picture", "id": frame_id, "src": src}, frame_id
 
 
-def check_message(message: Any, known: Collection[str] = ()) -> Checked:
-    """``message`` as the page gets it (see the module doc), or Refused. ``known``: the ids of the frames the app sent."""
+def check_message(message: Any, known: Collection[str] = (), groups: Collection[str] = ()) -> Checked:
+    """``message`` as the page gets it (see the module doc), or Refused. ``known``: the ids of the frames the app sent;
+    ``groups``: those of the groups it sent."""
     if type(message) is not dict:
         raise Refused(R_SHAPE)
     kind = message.get("type")
     if type(kind) is not str or kind not in MESSAGE_TYPES:
         raise Refused(R_TYPE)
     image = 0
-    frame_id = ""
+    frame_id = group_id = ""
     if kind == "frame":
-        clean, frame_id = _frame(message, known)
+        clean, frame_id, group_id = _frame(message, known, groups)
+    elif kind == "group":
+        clean, group_id = _group(message, known, groups)
+    elif kind == "remove_group":
+        fields = _fields(message, ("type", "id"), ("type", "id"))
+        group_id = _known_id(fields["id"], groups)
+        clean = {"type": "remove_group", "id": group_id}
+    elif kind == "reveal":
+        fields = _fields(message, ("type", "group"), ("type", "group"))
+        group_id = _known_id(fields["group"], groups)
+        clean = {"type": "reveal", "group": group_id}
+    elif kind == "bar":
+        clean = _bar(message)
+    elif kind == "desk":
+        fields = _fields(message, ("type", "state"), ("type", "state"))
+        clean = {"type": "desk", "state": _choice(fields["state"], DESK_STATES)}
     elif kind == "picture":
         clean, frame_id = _picture(message, known)
         image = len(clean["src"])
@@ -392,7 +454,7 @@ def check_message(message: Any, known: Collection[str] = ()) -> Checked:
         raise Refused(R_SHAPE) from None
     if len(text) - image > MESSAGE_CAP:
         raise Refused(R_SIZE)
-    return Checked(kind, text, frame_id)
+    return Checked(kind, text, frame_id, group_id)
 
 
 # --------------------------------------------------------------------------

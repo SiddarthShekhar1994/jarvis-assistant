@@ -563,10 +563,12 @@ class ChipTests(_OverlayTest):
         win.place_in(QRect(0, 0, 1280, 760))
         win.set_briefing_ready(True)
         win.set_pending(3)
+        win.set_board(9)                                                  # the new look: "9 on the board"
         win.set_recording("1:02:09")
         win.set_timer("Timer \u00b7 ends 10:32 AM")                       # P2.4: a Jarvis timer runs
         win.set_wake("Listening for \u201cHey Jarvis\u201d", "listening")      # "Hey Jarvis" is on and listens
         self.assertEqual(win.chip_texts()[-2:], ["Timer \u00b7 ends 10:32 AM", "Hey Jarvis"])
+        self.assertEqual(win.chip_texts()[1:3], [ui.needs_ok_chip(3), "9 on the board"])   # after the amber one
         bar = win.bar_rect_local()
         x = bar.left() + hud_overlay.ORB_PAD
         for chip in win.chips.values():

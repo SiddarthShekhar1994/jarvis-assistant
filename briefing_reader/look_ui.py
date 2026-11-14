@@ -1,12 +1,14 @@
-"""The new look's controller (build-plan item 2): the soft sounds (part 1) and Settings > Look; the board and the
-second screen join it in later parts.
+"""The new look's controller (build-plan item 2): the soft sounds (part 1), Settings > Look, and (part 5a) the board on
+Home (``desk``: desk_ui.DeskController while ``[look] board`` is on); the second screen joins it in a later part.
 
 The app (``ui.AppController``) makes one ``LookController`` and calls it through ``_look_call(name, *args)``, which
 never lets it stop the app. Its hooks:
 
 - ``on_talk_state(state)``: the talk key's or "Hey Jarvis"'s listening (HEARD as it opens);
 - ``on_wake_chime()``: "Hey Jarvis"'s own chime played (HEARD is skipped for a second);
-- ``on_ask_started()`` / ``on_ask_answer()``: THINKING when nothing was said 400 ms after a request went in;
+- ``on_ask_started()`` / ``on_ask_answer()``: THINKING when nothing was said 400 ms after a request went in (and the
+  board starts with the first Ask);
+- ``on_answer_started(task_id, text)`` / ``on_ask_outcome(outcome, task_id)``: an answer's group on the board;
 - ``on_pending(count)``: WAITS when the number of cards waiting for the owner goes up (never at the first count);
 - ``on_action_result(status, failed)``: DONE when an approved card's action finished, FAILED when it failed;
 - ``on_speaking()``: Jarvis's voice or a briefing started or stopped.
@@ -116,8 +118,24 @@ class LookController(QObject):
         self._save_problem = ""
         self.panel: LookSettingsPanel | None = None
         self._install_settings()
+        self.desk = self._make_desk()        # part 5a: the board on Home ([look] board), or None
         if start_sounds:
             self.sounds.start()
+
+    def _make_desk(self) -> Any:
+        """The board on Home (desk_ui.DeskController) while ``[look] board`` is on and a board can be here; None with
+        it off (Home exactly as it was), without a main window, or on a test platform without a factory."""
+        if not getattr(getattr(self.config, "look", None), "board", True):
+            return None
+        window = getattr(self.host, "window", None)
+        if getattr(window, "reading", None) is None:
+            return None
+        from . import desk_ui
+
+        factory = getattr(self.host, "_board_factory", None)
+        if not desk_ui.can_have_board(factory):
+            return None
+        return desk_ui.DeskController(self.host, factory=factory)
 
     # ---- the switches ---------------------------------------------------------------------------
 
@@ -209,6 +227,18 @@ class LookController(QObject):
     def on_ask_started(self) -> None:
         self._answered = False
         self._thinking.start()
+        if self.desk is not None:
+            self.desk.on_ask_started()      # the board starts with the first Ask (never at the app's start)
+
+    def on_answer_started(self, task_id: int, text: str) -> None:
+        """An Ask shown on Home started (its LIVE task id; the owner's words): its group-to-be on the board."""
+        if self.desk is not None:
+            self.desk.on_answer_started(task_id, text)
+
+    def on_ask_outcome(self, outcome: Any, task_id: int = 0) -> None:
+        """A finished answer: its frames go up on the board as one group."""
+        if self.desk is not None:
+            self.desk.on_ask_outcome(outcome, task_id)
 
     def on_ask_answer(self) -> None:
         self._answered = True

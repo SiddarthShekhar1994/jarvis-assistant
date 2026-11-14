@@ -1042,9 +1042,13 @@ class DesktopController(QObject):
 
     def _on_chip(self, key: str) -> None:
         """A chip's click: the window back on its screen ("Briefing ready" Briefing, "N need your OK" Approvals,
-        REC Meetings)."""
+        REC Meetings; the new look's "9 on the board" Home with the board showing)."""
         screen = self._chip_screens.get(key)
         if screen is not None:
+            if key == hud_overlay.CHIP_BOARD:
+                show_board = getattr(self.reading, "show_board", None)
+                if callable(show_board):
+                    show_board(False)        # unfolded: Home comes back as the desk (the switch shows it)
             self.leave_hud(screen)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt override
@@ -2486,6 +2490,8 @@ class DesktopController(QObject):
             return
         win.set_briefing_ready(reading.is_new_briefing())
         win.set_pending(reading.pending_count() + self.waiting_count())    # a NEEDS YOUR OK card counts (P2.3)
+        board_count = getattr(reading, "board_count", None)
+        win.set_board(board_count() if callable(board_count) else 0)       # the new look: "9 on the board"
         elapsed, warning = reading.recording_state()
         win.set_recording(elapsed, warning)
         win.set_timer(pcctl.chip_text(self.timers.running(), self._hour24))     # P2.4: while a timer runs

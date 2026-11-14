@@ -54,6 +54,7 @@ PANEL_PAD = 12
 FIELD_HEIGHT = 46
 ROW_HEIGHT = 46
 PILL_WIDTH = 320
+PILL_NARROW = 280      # the new look: the pill a little narrower before it folds (the header's Board button)
 PILL_HEIGHT = 40
 
 
@@ -113,8 +114,21 @@ class FindButton(QAbstractButton):
     def is_compact(self) -> bool:
         return self._compact
 
+    def set_narrow(self, narrow: bool) -> None:
+        """The pill PILL_NARROW wide (its words and CTRL K whole): the header's first step before it folds."""
+        narrow = bool(narrow)
+        if narrow != getattr(self, "_narrow", False):
+            self._narrow = narrow
+            self.updateGeometry()
+            self.update()
+
+    def is_narrow(self) -> bool:
+        return bool(getattr(self, "_narrow", False)) and not self._compact
+
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
-        return QSize(PILL_HEIGHT if self._compact else PILL_WIDTH, PILL_HEIGHT)
+        if self._compact:
+            return QSize(PILL_HEIGHT, PILL_HEIGHT)
+        return QSize(PILL_NARROW if getattr(self, "_narrow", False) else PILL_WIDTH, PILL_HEIGHT)
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
         return self.sizeHint()

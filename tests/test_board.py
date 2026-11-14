@@ -567,7 +567,12 @@ class PageTests(unittest.TestCase):
                          {"title": protocol.TITLE_CAP, "meta": protocol.META_CAP, "text": protocol.TEXT_CAP,
                           "status_text": protocol.WORDS_CAP, "status_meta": protocol.META_CAP,
                           "waits": protocol.WAITS_CAP, "rows": protocol.ROWS_CAP, "spans": protocol.SPANS_CAP,
-                          "ticks": protocol.TICKS_CAP, "tick": protocol.TICK_CAP, "pill": protocol.PILL_CAP})
+                          "ticks": protocol.TICKS_CAP, "tick": protocol.TICK_CAP, "pill": protocol.PILL_CAP,
+                          # part 5a: a group's topic and time
+                          "topic": protocol.TOPIC_CAP, "time": protocol.TIME_CAP})
+        self.assertEqual(number("MAX_GROUPS"), protocol.MAX_GROUPS)
+        desk = re.search(r"var DESK_STATES = \[([^\]]*)\]", self.js).group(1)
+        self.assertEqual(re.findall(r"'(\w+)'", desk), list(protocol.DESK_STATES))
         self.assertEqual(number("DAY_MINUTES"), protocol.DAY_MINUTES)
         for name, values in (("CALENDAR_STATES", protocol.CALENDAR_STATES), ("SPAN_KINDS", protocol.SPAN_KINDS),
                              ("TODO_STATES", protocol.TODO_STATES)):

@@ -45,8 +45,11 @@ Public API
     (``set_hold(word)``: the confirmed "SENT" with an **Undo** link, ``undoClicked``; never a number),
     the "Find or ask anything" pill (``find_button``, a find_view.FindButton: ``findClicked``; Ctrl+K;
     folded to a round search button when the header is too narrow), then the clock button (opens the
-    Day view: ``clockClicked``), a divider, mute (``muteClicked``; ``set_mute_visible``,
-    ``set_muted``), minimize (``minimizeClicked``) and close = Done (``closeClicked``).
+    Day view: ``clockClicked``), a divider, the new look's Board button (``board_button``, a BoardButton: the board's
+    glyph, "Board (Ctrl+B)", a cyan count badge while the board holds frames, dimmed while empty; ``boardClicked``,
+    ``set_board_visible``, ``set_board_count``; with it the Find pill first narrows a little, then folds), mute
+    (``muteClicked``; ``set_mute_visible``, ``set_muted``), minimize (``minimizeClicked``) and close = Done
+    (``closeClicked``).
     ``type_wordmark()`` types J.A.R.V.I.S. in (the start-up: 1.1 s after 250 ms, letter by letter; the
     accessible name stays "Jarvis"), ``wordmark_typing()``.
 
@@ -1189,6 +1192,60 @@ class _HeaderIcon(holo.HoloButton):
         return fill, border, label
 
 
+BOARD_LABEL = "Board (Ctrl+B)"
+
+
+class BoardButton(_HeaderIcon):
+    """The new look's header button (DESIGN-SPEC 2.4): the board's glyph, "Board (Ctrl+B)"; a cyan count badge while
+    the board holds frames (never amber), dimmed while it is empty."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(BOARD_LABEL, "board", parent)
+        self.setToolTip(BOARD_LABEL)
+        self._count = 0
+
+    def set_count(self, count: int) -> None:
+        count = max(0, int(count))
+        if count != self._count:
+            self._count = count
+            self.setAccessibleName(f"{BOARD_LABEL}, {count} on the board" if count else BOARD_LABEL)
+            self.update()
+
+    def count(self) -> int:
+        return self._count
+
+    def colors(self) -> tuple[QColor, QColor, QColor]:
+        fill, _border, _label = super().colors()
+        if self._count:
+            return QColor(holo.TILE_FOCUS), holo.mix(holo.LINE_STRONG, holo.LINE_FOCUS, self._hover), \
+                QColor(holo.HOLO_HI)
+        return fill, holo.mix(holo.LINE_FAINT, holo.LINE, self._hover), holo.mix(holo.INK_4, holo.INK_2, self._hover)
+
+    def badge_rect(self) -> QRectF:
+        """The count badge, at the circle's top right (inside the widget)."""
+        width = max(17.0, QFontMetricsF(holo.font("badge")).horizontalAdvance(holo.count_text(self._count)) + 8)
+        return QRectF(self.width() - width, 0.0, width, 17.0)
+
+    def paintEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().paintEvent(event)
+        if not self._count:
+            return
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            rect = self.badge_rect()
+            painter.setPen(QPen(QColor(holo.VOID), 2.0))
+            painter.setBrush(QColor(holo.HOLO))
+            painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 7.5, 7.5)
+            font = holo.font("badge")
+            font.setWeight(QFont.Weight.DemiBold)
+            painter.setFont(font)
+            painter.setPen(QColor(holo.HOLO_INK))
+            painter.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), holo.count_text(self._count))
+        finally:
+            painter.end()
+
+
 class _Divider(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1206,6 +1263,7 @@ class HoloHeader(QWidget):
     clockClicked = Signal()
     findClicked = Signal()               # the "Find or ask anything" pill (Ctrl+K does the same)
     undoClicked = Signal()               # the hold's Undo (while ``set_hold`` shows one)
+    boardClicked = Signal()              # the new look's Board button (Ctrl+B does the same)
     muteClicked = Signal()
     minimizeClicked = Signal()
     closeClicked = Signal()
@@ -1243,6 +1301,10 @@ class HoloHeader(QWidget):
         self.undo_button.hide()
         self.clock = _ClockButton()
         self.clock.clicked.connect(self.clockClicked)
+        # The new look: one round button before mute, shown while the board can be (set_board_visible).
+        self.board_button = BoardButton()
+        self.board_button.clicked.connect(self.boardClicked)
+        self.board_button.hide()
         self.mute_button = _HeaderIcon(MUTE_LABEL, "speaker")
         self.mute_button.setCheckable(False)
         self.mute_button.clicked.connect(self.muteClicked)
@@ -1267,7 +1329,7 @@ class HoloHeader(QWidget):
         row.addSpacing(8)
         row.addWidget(self.clock, 0, Qt.AlignmentFlag.AlignVCenter)
         row.addWidget(self._divider, 0, Qt.AlignmentFlag.AlignVCenter)
-        for button in (self.mute_button, self.minimize_button, self.close_button):
+        for button in (self.board_button, self.mute_button, self.minimize_button, self.close_button):
             row.addWidget(button, 0, Qt.AlignmentFlag.AlignVCenter)
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
@@ -1349,14 +1411,19 @@ class HoloHeader(QWidget):
 
     def _fit_notes(self) -> None:
         """Too narrow for everything (the smallest window, a hold showing): first the Find pill folds to its
-        round search button, then the notes show their dots only (their names stay as long as they fit)."""
+        round search button, then the notes show their dots only (their names stay as long as they fit). With the new
+        look's Board button the pill first narrows a little (its words and CTRL K whole), then folds."""
         notes = [note for note in self._services.values() if not note.isHidden()]
         layout = self.layout()
-        for compact_notes, compact_find in ((False, False), (False, True), (True, True)):
+        steps = ((False, False, False), (False, False, True), (True, False, True))
+        if self.board_visible():
+            steps = ((False, False, False), (False, True, False), *steps[1:])
+        for compact_notes, narrow_find, compact_find in steps:
             if compact_notes and not notes:
                 return
             for note in notes:
                 note.set_compact(compact_notes)
+            self.find_button.set_narrow(narrow_find)
             self.find_button.set_compact(compact_find)
             layout.invalidate()
             if layout.minimumSize().width() <= self.width():
@@ -1398,6 +1465,20 @@ class HoloHeader(QWidget):
 
     def clock_texts(self) -> tuple[str, str]:
         return self.clock.texts()
+
+    # ---- the board (the new look) --------------------------------------------------------------------
+
+    def set_board_visible(self, visible: bool) -> None:
+        """The Board button (shown while the board can be: [look] board on)."""
+        self.board_button.setVisible(bool(visible))
+        self._fit_notes()
+
+    def board_visible(self) -> bool:
+        return not self.board_button.isHidden()
+
+    def set_board_count(self, count: int) -> None:
+        """The Board button's cyan badge: the frames on the board (none, and dimmed, at 0)."""
+        self.board_button.set_count(count)
 
     # ---- mute ------------------------------------------------------------------------------------
 

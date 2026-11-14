@@ -1,9 +1,9 @@
-/* The board's page (the new look, parts 3 and 4): Jarvis's own code, no library. Every element is made with
+/* The board's page (the new look, parts 3, 4 and 5a): Jarvis's own code, no library. Every element is made with
    createElement, every word is set with textContent and every listener with addEventListener: no markup is ever read,
    no address is ever opened. The app sends board.apply(<JSON text>), checked in Python first and checked here again;
    the page answers on its web channel with bridge.post(kind, <JSON text>), the short list Python accepts (ready, layout,
-   focus, open, close, pin, bring_back, retry, go_approvals). DESIGN-SPEC 3.2 (the frame), 3.3 (the kinds), 3.4 (its
-   states) and 5 (motion). */
+   focus, open, close, pin, bring_back, retry, go_approvals). DESIGN-SPEC 3.1 (the bar and the groups), 3.2 (the
+   frame), 3.3 (the kinds), 3.4 (its states) and 5 (motion). */
 (function () {
   'use strict';
 
@@ -13,10 +13,13 @@
   var BASE64 = /^[A-Za-z0-9+\/]*={0,2}$/;
   var ID = /^[A-Za-z0-9_-]{1,40}$/;
   var CAPS = {title: 60, meta: 40, text: 400, status_text: 160, status_meta: 40, waits: 60, rows: 8, spans: 32,
-              ticks: 13, tick: 8, pill: 16};
+              ticks: 13, tick: 8, pill: 16, topic: 40, time: 16};
   var DAY_MINUTES = 1440;
   var FRAME_FIELDS = ['type', 'id', 'kind', 'title', 'meta', 'body', 'status', 'status_text', 'status_meta', 'waits',
-                      'changed', 'pinned', 'closed'];
+                      'changed', 'pinned', 'closed', 'group'];
+  var MAX_GROUPS = 8;
+  var DESK_STATES = ['enter', 'leave'];
+  var GROUP_FADE_MS = 160;                     // a group that leaves for room fades, then goes
   var STATUSES = ['ok', 'failed', 'empty'];
   var CALENDAR_STATES = ['', 'past', 'now', 'next', 'free', 'new', 'struck', 'today'];
   var SPAN_KINDS = ['busy', 'next', 'free'];
@@ -34,7 +37,9 @@
     changed: 'Changed', tryAgain: 'Try again', bringBack: 'Bring back', closed: 'Closed: ',
     keysFirst: 'Enter open big · P pin', keysSecond: 'Del close · Esc ask bar', dot: '·',
     approvalsKey: 'Ctrl 3', pin: 'Pin', unpin: 'Unpin', openBig: 'Open big', close: 'Close',
-    waits: 'Waits', done: 'Done', pictureOnly: 'Picture only', unread: 'Unread'
+    waits: 'Waits', done: 'Done', pictureOnly: 'Picture only', unread: 'Unread',
+    board: 'Board', frame: ' frame', frames: ' frames', waitsCount: ' waits', all: 'All', pinned: 'Pinned',
+    clear: 'Clear', show: 'Show'
   };
   // Each kind's glyph (holo's icons, drawn by tokens.css).
   var GLYPHS = {text: 'read-all', calendar: 'calendar', mail_thread: 'mail', mail_list: 'inbox', todos: 'todos',
@@ -253,6 +258,8 @@
   var bridge = null;
   var readySent = false;
   var frames = new Map();                      // id -> the frame's record (in arrival order)
+  var groups = new Map();                      // id -> a group's record (its section, header and frames' order)
+  var barParts = null;                         // the board bar's elements, made with the first bar message
   var records = new WeakMap();                 // element -> record
   var lit = '';
   var focused = '';
@@ -407,7 +414,7 @@
   function build(id) {
     var art = make('article', 'frame');
     var rec = {id: id, el: art, kind: '', data: null, pinned: false, closed: false, picture: null,
-               closedTimer: 0, drawTimer: 0, lapTimer: 0};
+               closedTimer: 0, drawTimer: 0, lapTimer: 0, group: ''};
     records.set(art, rec);
     art.tabIndex = 0;
     art.setAttribute('aria-labelledby', 'title-' + id);
@@ -526,7 +533,57 @@
       && words(message.waits, CAPS.waits) && STATUSES.indexOf(message.status) >= 0
       && typeof message.changed === 'boolean' && typeof message.pinned === 'boolean'
       && typeof message.closed === 'boolean'
+      && (message.group === undefined || (typeof message.group === 'string' && groups.has(message.group)))
       && !!message.body && typeof message.body === 'object' && !Array.isArray(message.body);
+  }
+
+  // ---- groups: one answer each, the newest on top (DESIGN-SPEC 3.1, 3.5) ----------------------------------------
+
+  function makeGroup(id) {
+    var section = make('section', 'group');
+    section.setAttribute('aria-labelledby', 'group-' + id);
+    var head = make('div', 'g-head');
+    head.id = 'group-' + id;
+    var rule = make('i', 'g-rule');
+    rule.setAttribute('aria-hidden', 'true');
+    var group = {id: id, el: section, time: make('span', 'g-time t-badge'), topic: make('span', 'g-topic'),
+                 list: make('div', 'g-frames'), order: []};
+    head.append(group.time, group.topic, rule);
+    section.append(head, group.list);
+    return group;
+  }
+
+  function arrange(group) {                    // the group's frames in its order (a frame not in it stays at the end)
+    var cursor = group.list.firstChild;
+    group.order.forEach(function (id) {
+      var rec = frames.get(id);
+      if (!rec || rec.group !== group.id) {
+        return;
+      }
+      if (rec.el === cursor) {
+        cursor = cursor.nextSibling;
+      } else {
+        group.list.insertBefore(rec.el, cursor);
+      }
+    });
+  }
+
+  function placeFrame(rec, groupId) {          // a new frame: at its group's end, else at the board's
+    var group = groupId ? groups.get(groupId) : null;
+    if (group) {
+      rec.group = group.id;
+      group.list.appendChild(rec.el);
+      arrange(group);
+    } else {
+      root.appendChild(rec.el);
+    }
+  }
+
+  function boardFrames() {                     // the frames in board order (every group's, top to bottom)
+    return Array.prototype.filter.call(root.querySelectorAll('.frame'), function (node) {
+      var rec = records.get(node);
+      return !!rec && !rec.closed && frames.get(rec.id) === rec;
+    });
   }
 
   // ---- motion -------------------------------------------------------------------------------------------------------
@@ -644,7 +701,7 @@
     }
   }
 
-  function forget(rec, animate) {              // the frame leaves the board
+  function release(rec) {                      // the frame is no longer the board's (its element may stay a moment)
     if (frames.get(rec.id) === rec) {
       frames.delete(rec.id);
     }
@@ -658,6 +715,10 @@
     if (focused === rec.id) {
       focused = '';
     }
+  }
+
+  function forget(rec, animate) {              // the frame leaves the board
+    release(rec);
     var el = rec.el;
     if (!animate || K === 0 || !el.animate) {
       el.remove();
@@ -694,10 +755,7 @@
     } else if (key === 'Delete') {
       close(rec);
     } else if (key === 'ArrowDown' || key === 'ArrowUp' || key === 'Home' || key === 'End') {
-      var list = Array.prototype.filter.call(root.children, function (node) {
-        var other = records.get(node);
-        return !!other && !other.closed && frames.get(other.id) === other;
-      });
+      var list = boardFrames();
       var at = list.indexOf(rec.el);
       var next = key === 'Home' ? list[0] : key === 'End' ? list[list.length - 1]
         : list[at + (key === 'ArrowDown' ? 1 : -1)];
@@ -777,7 +835,7 @@
     if (!rec) {
       rec = build(message.id);
       frames.set(message.id, rec);
-      root.appendChild(rec.el);
+      placeFrame(rec, message.group || '');
     }
     fill(rec, message, body);
     if (!before) {
@@ -832,8 +890,130 @@
       return drop('shape');
     }
     Array.from(frames.values()).forEach(function (rec) { forget(rec, false); });
+    groups.forEach(function (group) { group.el.remove(); });
+    groups.clear();
     lit = '';
     root.classList.remove('has-lit');
+    return true;
+  };
+
+  HANDLERS.group = function (message) {
+    if (!onlyKeys(message, ['type', 'id', 'time', 'topic', 'frames', 'older']) || typeof message.id !== 'string'
+        || !ID.test(message.id) || !words(message.time, CAPS.time) || !words(message.topic, CAPS.topic)
+        || !list(message.frames, MAX_FRAMES) || typeof message.older !== 'boolean'
+        || !message.frames.every(function (id) { return typeof id === 'string' && frames.has(id); })) {
+      return drop('shape');
+    }
+    var group = groups.get(message.id);
+    if (!group) {
+      if (groups.size >= MAX_GROUPS) {
+        return drop('full');
+      }
+      group = makeGroup(message.id);
+      groups.set(message.id, group);
+      root.insertBefore(group.el, root.firstChild);     // the newest group on top
+    }
+    group.time.textContent = message.time;
+    group.topic.textContent = message.topic;
+    group.el.classList.toggle('older', message.older);
+    group.order = message.frames.slice();
+    arrange(group);
+    scheduleLayout();
+    return true;
+  };
+
+  HANDLERS.remove_group = function (message) {
+    if (!onlyKeys(message, ['type', 'id']) || typeof message.id !== 'string' || !ID.test(message.id)) {
+      return drop('shape');
+    }
+    var group = groups.get(message.id);
+    if (!group) {
+      return true;
+    }
+    groups.delete(message.id);
+    Array.from(frames.values()).forEach(function (rec) {     // the whole group leaves, its frames with it
+      if (rec.group === group.id) {
+        release(rec);
+      }
+    });
+    var el = group.el;
+    el.setAttribute('aria-hidden', 'true');
+    el.classList.add('leaving');
+    if (K === 0 || !el.animate) {
+      el.remove();
+    } else {
+      after(el.animate([{opacity: 1}, {opacity: 0}], {duration: GROUP_FADE_MS * K, easing: easeOut, fill: 'forwards'}),
+            function () { el.remove(); scheduleLayout(); });
+    }
+    scheduleLayout();
+    return true;
+  };
+
+  function makeBar() {                         // "Board", the counts, and All | Pinned and Clear (5b makes them work)
+    var bar = make('header', 'bar');
+    bar.id = 'bar';
+    var waits = make('span', 'b-waits t-badge');
+    var waitsWords = make('span', '');
+    waits.append(glyph('diamond', 'b-dia', true), waitsWords);
+    var seg = make('div', 'b-seg');
+    seg.setAttribute('role', 'group');
+    var all = make('button', 'on', WORDS.all);
+    var pinned = make('button', '', WORDS.pinned);
+    var clear = make('button', 'b-clear', WORDS.clear);
+    [all, pinned, clear].forEach(function (node) {   // drawn, not working yet: never the focus, never a click
+      node.type = 'button';
+      node.tabIndex = -1;
+      node.setAttribute('aria-disabled', 'true');
+    });
+    seg.append(all, pinned);
+    var count = make('span', 'b-count t-badge');
+    bar.append(make('span', 'b-title', WORDS.board), count, waits, seg, clear);
+    document.body.insertBefore(bar, root);
+    return {bar: bar, count: count, waits: waits, waitsWords: waitsWords, pinned: pinned};
+  }
+
+  HANDLERS.bar = function (message) {
+    if (!onlyKeys(message, ['type', 'frames', 'waits', 'pinned', 'compact'])
+        || !whole(message.frames, 0, MAX_FRAMES) || !whole(message.waits, 0, message.frames)
+        || !whole(message.pinned, 0, message.frames) || typeof message.compact !== 'boolean') {
+      return drop('shape');
+    }
+    if (!barParts) {
+      barParts = makeBar();
+    }
+    document.body.classList.add('has-bar');
+    document.body.classList.toggle('compact', message.compact);
+    barParts.count.textContent = message.frames + (message.frames === 1 ? WORDS.frame : WORDS.frames);
+    barParts.waits.hidden = message.waits === 0;
+    barParts.waitsWords.textContent = message.waits + WORDS.waitsCount;
+    barParts.pinned.textContent = message.pinned ? WORDS.pinned + ' ' + message.pinned : WORDS.pinned;
+    scheduleLayout();
+    return true;
+  };
+
+  HANDLERS.desk = function (message) {
+    if (!onlyKeys(message, ['type', 'state']) || DESK_STATES.indexOf(message.state) < 0) {
+      return drop('shape');
+    }
+    var html = document.documentElement;
+    html.classList.remove('desk-in');
+    if (message.state === 'enter') {
+      void html.getBoundingClientRect();         // the fade and slide start again
+      html.classList.add('desk-in');
+    }
+    scheduleLayout();
+    return true;
+  };
+
+  HANDLERS.reveal = function (message) {
+    if (!onlyKeys(message, ['type', 'group']) || typeof message.group !== 'string' || !ID.test(message.group)) {
+      return drop('shape');
+    }
+    var group = groups.get(message.group);
+    if (!group) {
+      return drop('id');
+    }
+    root.scrollTo({top: Math.max(0, group.el.offsetTop - 6), behavior: K === 0 ? 'auto' : 'smooth'});
     return true;
   };
 
@@ -951,7 +1131,7 @@
   Object.defineProperty(window, 'board', {
     value: Object.freeze({
       apply: apply,
-      counts: function () { return Object.assign({frames: frames.size}, dropped); }
+      counts: function () { return Object.assign({frames: frames.size, groups: groups.size}, dropped); }
     }),
     writable: false, configurable: false, enumerable: false
   });

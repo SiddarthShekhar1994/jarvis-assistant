@@ -125,6 +125,7 @@ from PySide6.QtWidgets import (
 from . import (alive, approvals_view, brief_view, briefing_view, context_view, find_view, followups_view, live_view,
                meetings_view, memory_view, offer_view, plan_view, settings_view, standing_view, states_view,
                transcript_view, voice_fx)
+from . import desk_view
 from . import dock as dock_mod
 from . import holo, home, hud
 from .board import view as board_view
@@ -1074,6 +1075,15 @@ MOMENT_PLAN = "plan"                 # Home's plan moment (plan_view.PlanStage, 
 MOMENT_BRIEF = "brief"               # Home's brief moment (brief_view.BriefStage, HOLOGRAM_SPEC 16.5)
 DAY_VIEW_TITLE = "Day view"
 TRANSCRIPT_TITLE = "Transcript"
+BOARD_TITLE = "Board"                # the board as a drawer (the safety net of a frames area under 360 px)
+BOARD_SHORTCUT = "Ctrl+B"            # the new look: fold the board away and back (the header's Board button)
+
+
+def board_chip_text(count: int) -> str:
+    """Folded Home's chip that brings the board back: "9 on the board" (DESIGN-SPEC 2.4)."""
+    return f"{max(0, int(count))} on the board"
+
+
 # What the hero orb shows for the old activity states (spec 12.6).
 _ORB_BASE = {hud.ORB_SPEAKING: orb_mod.SPEAKING, hud.ORB_WORKING: orb_mod.THINKING,
              hud.ORB_LISTENING: orb_mod.LISTENING, hud.ORB_WAITING: orb_mod.WAITING}
@@ -1155,6 +1165,17 @@ class ReadingView(QWidget):
     The old transcript panel (``transcript_panel``: the briefing's transcript with its step chips and LIVE
     marker, ``text``) and the hidden STATUS values (``status_panel``) are kept for the app's state; neither is
     shown since round 2.
+
+    The new look's desk (part 5a; desk_ui.DeskController feeds it, desk_view draws it): while the board can be
+    (``set_board_available``: [look] board on) the header's Board button, Ctrl+B (``toggle_board``) and empty Home's
+    hint line (``set_board_hint``: "When I find something to show you ...", until the owner has seen the board three
+    times); once the board holds frames (``set_board_count``) Home shows ``desk()`` instead of its stage - the
+    conversation column (the ring's head, the turns from the Transcript's own entries, the chip row and the command
+    bar moved into it: the amber chip first) beside the board's one view (``set_board_view``), the ring flying to the
+    column head as it forms (``deskShown(True)``). Ctrl+B and the button fold it (Home's stage with "9 on the board",
+    ``board_chip``) and bring it back; a moment (the plan, the brief) takes the stage while it shows; under a 360 px
+    frames area the board is a drawer (``board_drawer``). ``board_count()`` is the HUD's "9 on the board";
+    ``open_card(action_id)``: Approvals at that card (the board's go_approvals).
     """
 
     playPause = Signal()
@@ -1194,6 +1215,11 @@ class ReadingView(QWidget):
     glanceChanged = Signal()     # Briefing ready, N need your OK, REC or the look changed (the desktop HUD's mirror)
     taskChipClicked = Signal()   # Home's chip of a task (agent_feed; only while [agent] is on)
     taskStopClicked = Signal()   # ... and its Stop
+    # The new look's desk (part 5a; desk_ui.DeskController feeds it): the desk formed (True) or Home went back to its
+    # stage (False); a turn's "4 frames on the board" (its entry id); the desk's layout changed (compact or not).
+    deskShown = Signal(bool)
+    boardTokenClicked = Signal(int)
+    deskLayoutChanged = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1244,6 +1270,13 @@ class ReadingView(QWidget):
         find.setAutoRepeat(False)
         find.activated.connect(self.open_find)
         self._shortcuts.append(find)
+        # The new look: Ctrl+B folds the board away and brings it back (only while the board can be).
+        self._board_shortcut = QShortcut(QKeySequence(BOARD_SHORTCUT), self)
+        self._board_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._board_shortcut.setAutoRepeat(False)
+        self._board_shortcut.setEnabled(False)
+        self._board_shortcut.activated.connect(self.toggle_board)
+        self._shortcuts.append(self._board_shortcut)
         self._build_layout()
         self._show_screen(SCREEN_HOME)
 
@@ -1452,6 +1485,23 @@ class ReadingView(QWidget):
         self.header.clockClicked.connect(self.open_day_view)
         self.header.findClicked.connect(self.open_find)
         self.header.undoClicked.connect(self.holdUndo)
+        self.header.boardClicked.connect(self.toggle_board)
+        # The new look's desk (part 5a): the board beside the conversation while it holds frames. Nothing of it is made
+        # until the board can be (set_board_available: [look] board on), and the desk itself at its first use.
+        self._board_on = False                    # the board can be (the header's button, Ctrl+B, the hint line)
+        self._board_count = 0                     # frames on the board
+        self._board_folded = False                # Ctrl+B folded it: Home's stage with "9 on the board"
+        self._board_hint = False                  # empty Home's hint line may show (seen fewer than three times)
+        self._board_view: QWidget | None = None   # the board's one view (desk_ui makes it), in the desk or the drawer
+        self._desk: desk_view.DeskPage | None = None
+        self._desk_shown = False
+        self._ring_flight: desk_view.RingFlight | None = None
+        self._ground_painter: Callable[..., Any] | None = None   # the window's ground under the desk's ring
+        self._turn_frames: Callable[[int], int] = lambda _entry: 0
+        self.board_drawer: home.Drawer | None = None
+        self.board_chip: holo.ActionChip | None = None   # folded Home's "9 on the board" (made at first use)
+        self.board_hint = desk_view.BoardHint()
+        self.board_hint.hide()
         self._find_actions = False   # an open offer's link in the Find list (the productivity bundle)
         self._hold_word = ""   # "Sent" / "Cancelled" while a Send's hidden hold runs
         self.stage = home.HomeStage()
@@ -1517,11 +1567,14 @@ class ReadingView(QWidget):
 
     def _build_home(self) -> QWidget:
         """Home: the stage, the YOU echo, the caption band and one quiet chip - or a moment in their place (the
-        plan, the brief) - then the command bar."""
+        plan, the brief) - then the command bar. The new look: the desk in its place while the board holds frames
+        (made at its first use: ``_home_switch`` shows one of the two)."""
         page = QWidget()
+        self._home_stage_page = page
         column = QVBoxLayout(page)
         column.setContentsMargins(holo.GUTTER_SIDE, 0, holo.GUTTER_SIDE, 12)
         column.setSpacing(6)
+        self._home_column = column
         self._home_rest = QWidget()
         rest = QVBoxLayout(self._home_rest)
         rest.setContentsMargins(0, 0, 0, 0)
@@ -1530,6 +1583,7 @@ class ReadingView(QWidget):
         rest.addWidget(self.echo, 0, Qt.AlignmentFlag.AlignHCenter)
         rest.addWidget(self.home_rec, 0, Qt.AlignmentFlag.AlignHCenter)
         rest.addWidget(self.captions)
+        rest.addWidget(self.board_hint)          # the new look: empty Home's one line (hidden: no room taken)
         self._chip_row = QWidget()
         chips = QHBoxLayout(self._chip_row)
         chips.setContentsMargins(0, 0, 0, 0)
@@ -1541,12 +1595,15 @@ class ReadingView(QWidget):
         chips.addStretch(1)
         self._chip_row.setFixedHeight(holo.ActionChip.HEIGHT + 2 * holo.ActionChip.MARGIN)
         rest.addWidget(self._chip_row)
+        self._rest_layout = rest
         self._home_pages = _PageSwitch()
         for widget in (self._home_rest, self.plan_stage, self.brief_stage):
             self._home_pages.addWidget(widget)
         column.addWidget(self._home_pages, 1)
         column.addWidget(self._command_holder)
-        return page
+        self._home_switch = _PageSwitch()
+        self._home_switch.addWidget(page)
+        return self._home_switch
 
     def _build_layout(self) -> None:
         self._build_center()
@@ -1604,6 +1661,7 @@ class ReadingView(QWidget):
         self.transcript_clear_button.clicked.connect(lambda: self.clearConversation.emit())
         self.transcript_drawer.add_head_button(self.transcript_clear_button)
         self.conversation.changed.connect(self._sync_transcript_clear)
+        self.conversation.changed.connect(self._sync_desk_turns)      # the desk's turns: the same entries
         self._sync_transcript_clear()
         self.day_drawer = home.Drawer(DAY_VIEW_TITLE, self._main)
         self._place_agenda(self.day_drawer.body_layout, hud.AGENDA_DAY)
@@ -1634,6 +1692,8 @@ class ReadingView(QWidget):
             return
         self.transcript_drawer.close_drawer()
         self.day_drawer.close_drawer()
+        if self.board_drawer is not None:
+            self.board_drawer.close_drawer()
         self.find_overlay.close_list()
         if index != SCREEN_HOME:
             self.stage.context.dismiss()        # the context tiles go when the owner leaves Home
@@ -1858,9 +1918,13 @@ class ReadingView(QWidget):
     def _sync_look(self) -> None:
         base, muted, offline = self.look()
         voice = self._talking and base == orb_mod.LISTENING
-        for ring in (self.hero, self.dock.mini_orb(), self.briefing_orb, self.plan_stage.orb):
-            ring.set_voice_listening(voice)          # before the look: the ring turns once, to the right pose
+        desk_ring = self._desk.head.orb if self._desk is not None else None
+        for ring in (self.hero, self.dock.mini_orb(), self.briefing_orb, self.plan_stage.orb, desk_ring):
+            if ring is not None:
+                ring.set_voice_listening(voice)      # before the look: the ring turns once, to the right pose
         self.hero.set_look(base, muted=muted, offline=offline)
+        if desk_ring is not None:
+            desk_ring.set_look(base, muted=muted, offline=offline)     # the desk's ring is Home's ring there
         self.dock.set_orb_look(base, muted=muted, offline=offline)
         # Briefing's compact orb: as the hero, but never amber (nothing there waits on a decision).
         self.briefing_orb.set_look(orb_mod.IDLE if base == orb_mod.NEEDS else base, muted=muted, offline=offline)
@@ -1883,6 +1947,9 @@ class ReadingView(QWidget):
         else:
             tone = home.TONE_HOLO
         self.header.set_state_word(word, tone)
+        if desk_ring is not None and self._desk is not None:
+            desk_ring.set_dim(states_view.QUIET_DIM if quiet else 1.0)
+            self._desk.head.set_state_word(word, amber=tone == home.TONE_AMBER)   # the compact head's word
         self.glanceChanged.emit()
 
     def state_word(self) -> str:
@@ -2166,6 +2233,8 @@ class ReadingView(QWidget):
         page = {MOMENT_PLAN: self.plan_stage, MOMENT_BRIEF: self.brief_stage}.get(moment, self._home_rest)
         self._home_pages.setCurrentWidget(page)
         self._sync_brief_cards()
+        if self._board_on:
+            self._sync_desk(fly=False)          # a moment takes Home's stage: the desk steps aside while it shows
 
     def _schedule_moment_sync(self) -> None:
         if not self._moment_sync:
@@ -2278,8 +2347,11 @@ class ReadingView(QWidget):
     def set_voice(self, timeline: voice_fx.VoiceTimeline | None, position: Callable[[], int] | None) -> None:
         """The utterance being said drives the hero's voice spikes (None: none, or not timed: the synthetic
         curve)."""
+        desk_ring = self._desk.head.orb if self._desk is not None else None
         if timeline is None or position is None or not (timeline.has_words or timeline.has_envelope):
             self.hero.set_voice(None)
+            if desk_ring is not None:
+                desk_ring.set_voice(None)
             return
 
         def level() -> float | None:
@@ -2290,6 +2362,8 @@ class ReadingView(QWidget):
             return voice_fx.level_at(timeline, ms) if ms >= 0 else None
 
         self.hero.set_voice(level)
+        if desk_ring is not None:
+            desk_ring.set_voice(level)          # the desk's ring speaks with the same voice
 
     # ---- Home's context tiles and cards flying to Approvals (part B of the motion prototype) ----------
 
@@ -2378,17 +2452,43 @@ class ReadingView(QWidget):
             self.echo.set_text("")            # handled: the echo goes with the last caption
         self._sync_echo()
         self._sync_chip()
+        self._sync_board_hint()
 
     def _sync_echo(self) -> None:
         self.echo.setVisible(bool(self.echo.text()))
+        self._sync_desk_live()
 
     def _home_chips(self) -> tuple[holo.ActionChip, ...]:
         return (self.answer_chip, self.briefing_chip, self.approvals_chip)
 
+    def _sync_desk_chips(self) -> None:
+        """The desk's chips row: the amber chip first, then the answer just given and Briefing ready, whatever the
+        caption does (the turns say what Jarvis says there); the compact column shows only the first."""
+        needs_ok = self._pending + self._desktop_waiting
+        due = ((self.approvals_chip, needs_ok > 0, needs_ok_chip(needs_ok)),
+               (self.answer_chip, bool(self._answer[0]), self._answer[0]),
+               (self.briefing_chip, self._new_briefing, self.briefing_chip.text()))
+        room = 1 if self.desk_compact() else len(due)
+        was_shown = not self.briefing_chip.isHidden()
+        for chip, wanted, text in due:
+            shown = wanted and room > 0
+            room -= 1 if shown else 0
+            if shown and chip.text() != text:
+                chip.setText(text)
+                chip.updateGeometry()
+            chip.setVisible(shown)
+        self.waiting_readout.setVisible(False)
+        self.voice_badge.setVisible(False)
+        if not self.briefing_chip.isHidden() and not was_shown:
+            self.briefing_chip.start_ping()
+
     def _sync_chip(self) -> None:
         """At most one quiet chip at rest and none while an offer's amber tile waits (one focal point): the
         answer just given (cyan: Plan ready / Brief ready), Briefing ready (cyan) before N need your OK
-        (amber); the Dock carries the last two as well."""
+        (amber); the Dock carries the last two as well. On the desk: _sync_desk_chips."""
+        if self._desk_shown:
+            self._sync_desk_chips()
+            return
         resting = self.captions.state() == home.RESTING
         offer = self._offers > 0
         answer = resting and not offer and bool(self._answer[0])
@@ -2473,6 +2573,328 @@ class ReadingView(QWidget):
             if not chip.isHidden():
                 return chip.text()
         return ""
+
+    # ---- the new look's desk (part 5a, DESIGN-SPEC 2; desk_ui.DeskController feeds it) -----------------------------
+
+    def set_board_available(self, available: bool) -> None:
+        """The board can be ([look] board on): the header's Board button, Ctrl+B, empty Home's hint line and the desk
+        once the board holds frames. Off: Home is exactly as it was."""
+        available = bool(available)
+        if available == self._board_on:
+            return
+        self._board_on = available
+        self.header.set_board_visible(available)
+        self._board_shortcut.setEnabled(available)
+        self._sync_desk(fly=False)
+
+    def board_available(self) -> bool:
+        return self._board_on
+
+    def set_board_hint(self, shown: bool) -> None:
+        """Empty Home's hint line may show (the owner has seen the board fewer than three times)."""
+        self._board_hint = bool(shown)
+        self._sync_board_hint()
+
+    def board_hint_shown(self) -> bool:
+        return not self.board_hint.isHidden()
+
+    def set_board_count(self, count: int) -> None:
+        """The frames on the board: the header's badge, the desk (it forms with the first one, unless folded), folded
+        Home's "9 on the board", the HUD's chip (glanceChanged)."""
+        count = max(0, int(count))
+        changed = count != self._board_count
+        self._board_count = count
+        self.header.set_board_count(count)
+        if count == 0:
+            self._board_folded = False          # nothing on the board: nothing folded away either
+        self._sync_desk()
+        if changed:
+            self.glanceChanged.emit()
+
+    def board_count(self) -> int:
+        """The frames on the board (0 while the board can't be): the HUD's "9 on the board"."""
+        return self._board_count if self._board_on else 0
+
+    def board_folded(self) -> bool:
+        return self._board_folded
+
+    def set_ground_painter(self, painter_fn: Callable[..., Any] | None) -> None:
+        """The window's ground, painted under the desk's ring (as under the hero)."""
+        self._ground_painter = painter_fn
+        if self._desk is not None and painter_fn is not None:
+            self._desk.head.orb.set_ground(painter_fn)
+
+    def set_turn_frames(self, frames_for: Callable[[int], int]) -> None:
+        """How many frames a turn (its entry id) has on the board now: its "4 frames on the board"."""
+        self._turn_frames = frames_for
+        self.refresh_turn_frames()
+
+    def refresh_turn_frames(self) -> None:
+        if self._desk is not None:
+            self._sync_desk_turns()
+
+    def desk(self) -> desk_view.DeskPage:
+        """The desk (made at its first use; Home shows it while the board holds frames)."""
+        if self._desk is None:
+            page = desk_view.DeskPage()
+            page.setAccessibleName("Conversation and board")
+            page.tokenClicked.connect(self.boardTokenClicked)
+            page.linkClicked.connect(lambda link_id: self.conversation.linkClicked.emit(link_id))
+            page.earlierClicked.connect(lambda: self.open_transcript())
+            page.geometryChanged.connect(self.deskLayoutChanged)
+            page.set_folded_dock(self.width() < DOCK_LABELS_FROM if self.width() > 0 else False)
+            if self._ground_painter is not None:
+                page.head.orb.set_ground(self._ground_painter)
+            self._home_switch.addWidget(page)
+            self._desk = page
+            self._sync_desk_turns()
+            self._sync_look()
+        return self._desk
+
+    def desk_page(self) -> desk_view.DeskPage | None:
+        """The desk if it was made (never makes it)."""
+        return self._desk
+
+    def desk_shown(self) -> bool:
+        """Home shows the desk now (its page is the current one)."""
+        return self._desk_shown
+
+    def desk_compact(self) -> bool:
+        """The desk's narrow column (the folded Dock's): one chip, the last exchange, the bar without its count."""
+        return self.width() > 0 and self.width() < DOCK_LABELS_FROM
+
+    def set_board_view(self, view: QWidget | None) -> None:
+        """The board's one view (desk_ui makes it once): in the desk's board column, or the drawer."""
+        self._board_view = view
+        self._place_board_view()
+
+    def board_view(self) -> QWidget | None:
+        return self._board_view
+
+    def _home_area(self) -> QSize:
+        size = self._screens.size()
+        return size if size.width() > 0 else QSize(READING_SIZE.width() - holo.DOCK_WIDTH_LABELLED - 12,
+                                                   READING_SIZE.height() - 12 - home.HEADER_HEIGHT)
+
+    def board_in_drawer(self) -> bool:
+        """The frames area would be under 360 px: the board opens as today's drawer instead (DESIGN-SPEC 2.3)."""
+        area = self._home_area()
+        return desk_view.desk_geometry(area.width(), area.height(), folded_dock=self.desk_compact()).drawer
+
+    def _board_drawer_widget(self) -> home.Drawer:
+        if self.board_drawer is None:
+            self.board_drawer = home.Drawer(BOARD_TITLE, self._main)
+        return self.board_drawer
+
+    def _place_board_view(self) -> None:
+        view = self._board_view
+        if view is None or not shiboken6.isValid(view):
+            return
+        if self.board_in_drawer():
+            drawer = self._board_drawer_widget()
+            if view.parentWidget() is not drawer:
+                if self._desk is not None and self._desk.board() is view:
+                    self._desk.set_board(None)
+                drawer.body_layout.addWidget(view, 1)
+                view.show()
+        else:
+            if self.board_drawer is not None and view.parentWidget() is self.board_drawer:
+                self.board_drawer.body_layout.removeWidget(view)
+                self.board_drawer.close_drawer()
+            self.desk().set_board(view)
+
+    def toggle_board(self) -> None:
+        """Ctrl+B and the header's Board button: on Home, the board folds away (Home's stage with "9 on the board")
+        and comes back; from another screen, Home with the board; the board as a drawer opens and closes it. Nothing
+        while the board is empty."""
+        if not self._board_on or self._board_count == 0:
+            return
+        if self.board_in_drawer():
+            drawer = self._board_drawer_widget()
+            self._place_board_view()
+            if drawer.is_open():
+                drawer.close_drawer()
+            else:
+                self.set_tab(SCREEN_HOME)
+                drawer.open_drawer(self.header.board_button)
+            return
+        if self._screen != SCREEN_HOME:
+            self._board_folded = False
+            self.set_tab(SCREEN_HOME)
+            self._sync_desk(fly=False)
+            return
+        self._board_folded = not self._board_folded
+        self._sync_desk()
+
+    def show_board(self, folded: bool = False) -> None:
+        """The board on Home, unfolded (``folded`` False; the HUD's "9 on the board" brings the window back to it)."""
+        self._board_folded = bool(folded) and self._board_count > 0
+        self._sync_desk(fly=False)
+
+    def _desk_wanted(self) -> bool:
+        return (self._board_on and self._board_count > 0 and not self._board_folded and not self._moment
+                and not self.board_in_drawer())
+
+    def _sync_desk(self, *, fly: bool = True) -> None:
+        wanted = self._desk_wanted()
+        if wanted != self._desk_shown:
+            self._show_desk(wanted, fly=fly)
+        self._sync_board_chip()
+        self._sync_board_hint()
+        self._sync_chip()
+
+    def _show_desk(self, shown: bool, *, fly: bool) -> None:
+        """Home's page: the desk (the command bar and the chip row move into its column; the ring flies from the stage
+        to the column head) or the stage again (they move back)."""
+        if shown:
+            desk = self.desk()
+            flight = fly and self._screen == SCREEN_HOME and self.stage.isVisible() and self.isVisible()
+            start = QRectF(QRect(self.hero.mapTo(self, QPoint(0, 0)), self.hero.size())) if flight else QRectF()
+            pixmap = self.hero.snapshot() if flight else None
+            desk.setGeometry(QRect(QPoint(0, 0), self._home_area()))     # Home's whole area (the screens')
+            self._desk_shown = True
+            self._move_home_parts(True)
+            self._home_switch.setCurrentWidget(desk)
+            desk.apply_geometry()
+            self._place_board_view()
+            self._sync_desk_turns()
+            self._sync_look()
+            if pixmap is not None:
+                self._fly_ring(pixmap, start)
+        else:
+            if self._ring_flight is not None:
+                self._ring_flight.stop(finish=True)
+            self._desk_shown = False
+            self._move_home_parts(False)
+            self._home_switch.setCurrentWidget(self._home_stage_page)
+        self.deskShown.emit(shown)
+
+    def _fly_ring(self, pixmap: QPixmap, start: QRectF) -> None:
+        """The ring flies from the stage to the column head (420 ms ease-out-expo; calm x1.6; off: it is there)."""
+        desk = self._desk
+        if desk is None:
+            return
+        orb = desk.head.orb
+        end = QRectF(QRect(orb.mapTo(self, QPoint(0, 0)), orb.size()))
+        if self._ring_flight is None:
+            self._ring_flight = desk_view.RingFlight(self)
+        orb.hide()
+        if not self._ring_flight.fly(pixmap, start, end, done=lambda: self._land_ring(orb)):
+            orb.show()
+
+    @staticmethod
+    def _land_ring(orb: QWidget) -> None:
+        if shiboken6.isValid(orb):
+            orb.show()
+
+    def ring_flight(self) -> desk_view.RingFlight | None:
+        return self._ring_flight
+
+    def _move_home_parts(self, desk: bool) -> None:
+        """The command bar and the chip row: into the desk's column (the bar its full width, the chips from its left
+        edge, the amber one first) and back where they were."""
+        bar, row = self.command_bar, self._chip_row
+        chips = row.layout()
+        if desk:
+            page = self.desk()
+            slot = page.ask_slot.layout()
+            if slot is None:
+                slot = QHBoxLayout(page.ask_slot)
+                slot.setContentsMargins(0, 0, 0, 0)
+            bar.setMaximumWidth(_QWIDGETSIZE_MAX)
+            slot.addWidget(bar)
+            page.ask_slot.setVisible(not self._command_holder.isHidden())
+            chip_slot = page.chip_slot.layout()
+            if chip_slot is None:
+                chip_slot = QHBoxLayout(page.chip_slot)
+                chip_slot.setContentsMargins(0, 0, 0, 0)
+            chip_slot.addWidget(row)
+            chips.removeWidget(self.approvals_chip)
+            chips.insertWidget(1, self.approvals_chip)          # the amber chip first (DESIGN-SPEC 2.1)
+            chips.setStretch(0, 0)                              # from the column's left edge
+        else:
+            holder = self._command_holder.layout()
+            bar.setMaximumWidth(holo.COMMAND_MAX_WIDTH + 2 * 4)
+            holder.insertWidget(1, bar, 1000)
+            self._rest_layout.addWidget(row)
+            chips.removeWidget(self.approvals_chip)
+            chips.insertWidget(chips.indexOf(self.briefing_chip) + 1, self.approvals_chip)
+            chips.setStretch(0, 1)
+        row.show()
+        bar.show()
+
+    def _sync_board_chip(self) -> None:
+        """Folded Home's "9 on the board" (and the board as a drawer's): it brings the board back."""
+        shown = self._board_on and self._board_count > 0 and not self._desk_shown and \
+            (self._board_folded or self.board_in_drawer())
+        if self.board_chip is None:
+            if not shown:
+                return
+            self.board_chip = holo.ActionChip("", holo.CHIP_CYAN, icon="board")
+            self.board_chip.clicked.connect(self._on_board_chip)
+            row = self._chip_row.layout()
+            row.insertWidget(row.count() - 1, self.board_chip)
+        if shown:
+            text = board_chip_text(self._board_count)
+            if self.board_chip.text() != text:
+                self.board_chip.setText(text)
+                self.board_chip.setAccessibleName(f"{text}: show the board")
+                self.board_chip.updateGeometry()
+        self.board_chip.setVisible(shown)
+
+    def _on_board_chip(self) -> None:
+        if self.board_in_drawer():
+            self.toggle_board()
+        else:
+            self.show_board(False)
+
+    def board_chip_words(self) -> str:
+        """Folded Home's "9 on the board" as it shows ("" when it does not)."""
+        return self.board_chip.text() if self.board_chip is not None and not self.board_chip.isHidden() else ""
+
+    def _sync_board_hint(self) -> None:
+        shown = (self._board_on and self._board_hint and self._board_count == 0 and not self._moment
+                 and self.captions.state() == home.RESTING)
+        if shown != (not self.board_hint.isHidden()):
+            self.board_hint.setVisible(shown)
+
+    def _sync_desk_turns(self) -> None:
+        """The desk's turns from the Transcript's own entries (the same data), and "Earlier · N turns"."""
+        desk = self._desk
+        if desk is None:
+            return
+        turns = []
+        for entry in self.conversation.entry_widgets():
+            role, stamp, text, _sub = entry.entry
+            link_text, link_id = entry.link()
+            turns.append(desk_view.Turn(entry.entry_id, role, stamp, text, entry.tone(), link_text, link_id))
+        desk.turns.set_turns(turns, self._turn_frames)
+        desk.head.set_earlier(desk.turns.earlier())
+
+    def _sync_desk_live(self) -> None:
+        """What Jarvis is saying now (the caption's line) as the desk's current turn until his turn comes."""
+        desk = self._desk
+        if desk is None:
+            return
+        state = self.captions.state()
+        desk.turns.set_live(self.captions.full_text() if state in (home.SPEAKING, home.HOLDING) else "")
+        desk.head.set_earlier(desk.turns.earlier())
+
+    def open_card(self, action_id: str) -> bool:
+        """Approvals at that card (the board's "Reply waits on Approvals": Ctrl+3's path); False when it is not there
+        (Approvals opens on its first waiting card)."""
+        self.set_tab(SCREEN_APPROVALS)
+        card = self.approvals.card(action_id) if action_id else None
+        if card is None:
+            return False
+        self.approvals_stage.select(action_id)
+        return True
+
+    def ring_level(self, level: float | None) -> None:
+        """The microphone's level on the ring the owner sees (Home's hero, and the desk's)."""
+        self.hero.set_level(level)
+        if self._desk is not None:
+            self._desk.head.orb.set_level(level)
 
     def _build_briefing(self) -> QWidget:
         """The Briefing screen (round 2, HOLOGRAM_SPEC 16.1): the stage with the compact orb, the ready view
@@ -2900,6 +3322,8 @@ class ReadingView(QWidget):
     def set_ask_available(self, available: bool) -> None:
         """Show Ask Jarvis's command bar on Home ([ask] enabled) or keep it out of the layout."""
         self._command_holder.setVisible(available)
+        if self._desk is not None:
+            self._desk.ask_slot.setVisible(bool(available) and self._desk_shown)
 
     def ask_available(self) -> bool:
         return not self._command_holder.isHidden()
@@ -3157,12 +3581,19 @@ class ReadingView(QWidget):
         self._apply_tier(event.size().width())
         self._fit_short(self._screens_height(event.size().height()))
         self._apply_highlight(scroll_to=False)   # line wrapping changed
+        if self._desk is not None:
+            self._desk.set_folded_dock(event.size().width() < DOCK_LABELS_FROM)
         QTimer.singleShot(0, self._place_drawers)
 
     def _place_drawers(self) -> None:
         if shiboken6.isValid(self):
             self.transcript_drawer.place()
             self.day_drawer.place()
+            if self.board_drawer is not None:
+                self.board_drawer.place()
+            if self._board_on and self._board_view is not None:
+                self._place_board_view()        # the desk's column, or the drawer under a 360 px frames area
+                self._sync_desk(fly=False)
 
     def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().showEvent(event)
@@ -3178,10 +3609,14 @@ class ReadingView(QWidget):
         self.startup.note_shown(self._hud_present)     # hidden for the desktop HUD: still present
 
     def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
-        if event.key() == Qt.Key.Key_Escape and (self.transcript_drawer.is_open() or self.day_drawer.is_open()):
+        board_open = self.board_drawer is not None and self.board_drawer.is_open()
+        if event.key() == Qt.Key.Key_Escape and (self.transcript_drawer.is_open() or self.day_drawer.is_open()
+                                                 or board_open):
             event.accept()
             self.transcript_drawer.close_drawer()
             self.day_drawer.close_drawer()
+            if self.board_drawer is not None:
+                self.board_drawer.close_drawer()
             return
         super().keyPressEvent(event)
 
@@ -3397,6 +3832,7 @@ class BriefingWindow(hud.HudWindowFrame):
         self.ground = holo.GroundCache()
         self.reading.hero.set_ground(orb_mod.ground_painter(self.ground))
         self.reading.briefing_orb.set_ground(orb_mod.ground_painter(self.ground))
+        self.reading.set_ground_painter(orb_mod.ground_painter(self.ground))     # the desk's ring (made at first use)
         self.reading.transition.set_ground(orb_mod.ground_painter(self.ground))
         self.visibilityChanged.connect(self.reading.sync_presence)   # minimised / restored: the start-up's clock
         holo_header = self.reading.header
@@ -5211,9 +5647,13 @@ class AppController(QObject):
                  desktop_launch: bool = False,
                  desktop_backend: Callable[[], Any] | None = None,
                  desktop_window_api: Any = None,
-                 agent_factory: Callable[..., Any] | None = None) -> None:
+                 agent_factory: Callable[..., Any] | None = None,
+                 board_factory: Callable[[Any], Any] | None = None) -> None:
         super().__init__()
         self.config = _with_picked_voice(config)   # Settings > Voice's pick (voice.json) wins over [voice] local_voice
+        # The new look's board (desk_ui; [look] board): ``board_factory(parent)`` makes its one view (None: the real
+        # board.view.BoardView - never on a test platform, where Home then stays as it was).
+        self._board_factory = board_factory
         self.client = client
         self._on_shutdown = on_shutdown   # e.g. an exit watchdog (the app passes one; tests do not)
         self._desktop_launch = bool(desktop_launch)   # --hud (the HUD key started Jarvis): onto the HUD once ready
@@ -8835,6 +9275,7 @@ class AppController(QObject):
         # A "web:" request is never given to a later Ask as the conversation (ISO-4), nor is its answer.
         self._ask_you_entry = self._you(text, context=kind != _live.TASK_WEB)
         self._ask_task_id = self.ask.task_id if self.ask is not None else 0
+        self._look_call("on_answer_started", self._ask_task_id, text)   # the new look: its group on the board
         self._mode_auto_opened = 0
         was_live = self.window.reading.current_tab() == hud.TAB_LIVE
         if not self._live_auto_open(kind, self._ask_task_id):
@@ -9121,6 +9562,7 @@ class AppController(QObject):
         elif outcome.kind not in ("empty", "busy"):
             self._activity(hud.TAG_STOP, "Ask: nothing was proposed", _short(outcome.message or outcome.kind))
         self._refresh_actions_ui()
+        self._look_call("on_ask_outcome", outcome, self._ask_task_id)    # the new look: its frames on the board
 
     # ---- the day plan (the productivity bundle) ----------------------------------------------
 
@@ -9175,6 +9617,7 @@ class AppController(QObject):
         elif outcome.kind not in ("empty", "busy"):
             self._activity(hud.TAG_STOP, "Plan: nothing was proposed", _short(outcome.message or outcome.kind))
         self._refresh_actions_ui()
+        self._look_call("on_ask_outcome", outcome, self._ask_task_id)    # the new look: the plan's day on the board
 
     def _converse_plan(self, outcome: Any) -> None:
         assistant = self.config.assistant
@@ -9553,7 +9996,7 @@ class AppController(QObject):
         controller = desktop_ui.DesktopController(
             self.config, self.window, overlay,
             chip_screens={hud_overlay.CHIP_BRIEFING: SCREEN_BRIEFING, hud_overlay.CHIP_APPROVALS: SCREEN_APPROVALS,
-                          hud_overlay.CHIP_REC: SCREEN_MEETINGS},
+                          hud_overlay.CHIP_REC: SCREEN_MEETINGS, hud_overlay.CHIP_BOARD: SCREEN_HOME},
             home_screen=SCREEN_HOME, may_enter=self._may_enter_hud, bring_forward=bring_forward_on_click,
             address=self.config.assistant.address, live=self.live,
             backend_factory=getattr(self, "_desktop_backend", None), consent_store=self._prefs_store,
@@ -14629,8 +15072,13 @@ class AppController(QObject):
             self._pump_voice()
 
     def _talk_level(self, level: float | None) -> None:
-        """The microphone's level on Home's orb (the one the owner sees)."""
-        hero = getattr(self.window.reading, "hero", None)
+        """The microphone's level on Home's orb (the one the owner sees: the hero, or the desk's ring)."""
+        reading = self.window.reading
+        ring_level = getattr(reading, "ring_level", None)
+        if callable(ring_level):
+            ring_level(level)
+            return
+        hero = getattr(reading, "hero", None)
         if hero is not None and hasattr(hero, "set_level"):
             hero.set_level(level)
 
@@ -14915,6 +15363,13 @@ class AppController(QObject):
         if self.productivity is not None:
             self.productivity.shutdown()   # its timer and the prod thread stop; nothing more is offered
         self._snapshots_call("shutdown")   # no page is opened any more; the hidden view goes
+        look = getattr(self, "look", None)
+        desk = getattr(look, "desk", None) if look is not None and shiboken6.isValid(look) else None
+        if desk is not None:
+            try:
+                desk.shutdown()            # the new look's board: its page, renderer and profile go now
+            except Exception as exc:  # noqa: BLE001 - the board never stops the quit
+                logger.warning("Board: not shut down cleanly (%s)", type(exc).__name__)
         self._close_live_window()
         if self._dialog is not None:
             self._dialog.reject()

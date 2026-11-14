@@ -16,8 +16,12 @@ the page shell plays the design's states and motion (lively, calm, off) for real
 thread and list, to-dos, picture, text with rows), built by board.frames, render with every word as text; the mail's
 text is whole and clamped by style; the waits chip asks for go_approvals and nothing else; the picture loads nothing but
 its data: JPEG and a click on it only focuses its frame; an update in place does not draw in again; the page refuses the
-bodies Python refuses; and a board that fell back still shows the frames as read-only tiles. Skipped when this PySide6
-has no QtWebEngine 6.8+.
+bodies Python refuses; and a board that fell back still shows the frames as read-only tiles. Part 5a's desk, in Jarvis's
+own frameless translucent window at 1x and 1.5x: the board in the desk's board column at its place, the bar's words, two
+answers' groups (newest on top, the older one quiet, the mail and its waiting reply as ONE frame first), the frames 15
+px into the view and 448 wide, a grab of the window showing the board's frames, the first frame in the page's layout
+(timed), reveal, a group leaving whole, Space in the page never playing the briefing, one renderer and its
+memory. Skipped when this PySide6 has no QtWebEngine 6.8+.
 """
 
 from __future__ import annotations
@@ -35,7 +39,7 @@ from briefing_reader.board import view
 
 PROBE = Path(__file__).with_name("board_probe.py")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CASES = ("lockdown", "control", "media", "keys", "fallback", "shell", "kinds")
+CASES = ("lockdown", "control", "media", "keys", "fallback", "shell", "kinds", "desk", "desk_x15")
 REPORTS: dict[str, dict] = {}
 FAILURES: dict[str, str] = {}
 WINDOW_KEYS = ["Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+6", "Ctrl+7", "Ctrl+8", "Ctrl+9", "Ctrl+,",
@@ -50,6 +54,9 @@ def _run(case: str) -> tuple[str, dict | None, str]:
                                                                           "QTWEBENGINE_CHROMIUM_FLAGS")}
     env.update(QT_QPA_PLATFORM="offscreen", JARVIS_DESKTOP_TEST_GUARD="1", PYTHONIOENCODING="utf-8")
     env["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(snapshots.OFFLINE_FLAGS)
+    env.pop("QT_SCALE_FACTOR", None)
+    if case.endswith("_x15"):
+        env["QT_SCALE_FACTOR"] = "1.5"           # the desk at 1.5x: the same logical layout, 1.5 device pixels a px
     try:
         # sys.executable is the interpreter itself, never the py launcher.
         done = subprocess.run([sys.executable, "-B", str(PROBE), case], cwd=PROJECT_ROOT, env=env, capture_output=True,
@@ -441,3 +448,52 @@ class FallbackTests(BoardProbeCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DeskTests(BoardProbeCase):
+    """Part 5a: the desk with the real engine in Jarvis's own window (tests/board_probe.py desk_case)."""
+
+    def check(self, case: str, ratio: float) -> dict:
+        report = self.report(case)
+        self.assertTrue(report["ready"])
+        self.assertTrue(all(report["applied"]))
+        self.assertTrue(report["desk_shown"])
+        self.assertTrue(report["board_in_desk"])                      # the one view, in the desk's board column
+        self.assertEqual(report["view_rect"][:3], [381, 12, 503])      # seam + 1, 12 down, 503 wide (1120 x 700)
+        page = report["page"]
+        self.assertEqual(page["bar"], "Board 5 FRAMES 1 WAITS All Pinned Clear")
+        self.assertEqual(page["bar_display"], "flex")
+        self.assertEqual([(group["time"], group["older"]) for group in page["groups"]],
+                         [("9:41 AM", False), ("9:20 AM", True)])       # the newest on top, the older one quiet
+        newest = page["groups"][0]
+        self.assertEqual(newest["waits"][0], True)                     # what waits first: the mail with its reply
+        self.assertEqual(sum(newest["waits"]), 1)
+        self.assertEqual(len(newest["frames"]), 4)                     # the mail and the reply are ONE frame
+        self.assertEqual(page["chip"], "Reply waits on Approvals CTRL 3")
+        # (at 1.5x the view's 503 px are 755 device pixels: a third of a CSS px more)
+        self.assertEqual((round(page["frame_left"]), round(page["frame_width"]), round(page["board_top"])),
+                         (15, 448, 44))
+        self.assertTrue(page["desk_in"])
+        grab = report["grab"]
+        self.assertEqual(grab["ratio"], ratio)
+        self.assertEqual(grab["color"], grab["tile_amber"])            # the grab shows the board's waiting frame
+        # The first frame reaches the page's layout (alone this takes some 20-60 ms; with every probe's Chromium
+        # starting side by side it can take a few hundred: measured, and kept well under a second here).
+        self.assertGreaterEqual(report["first_frame_layout_ms"], 0)
+        self.assertLess(report["first_frame_layout_ms"], 1500)
+        self.assertGreater(report["scroll_after_reveal"], 0)           # reveal scrolled to the older group
+        self.assertEqual(report["groups_after_remove"], 1)             # ... which then left whole
+        self.assertEqual(report["known_after_remove"], 4)
+        self.assertEqual(report["page_refused"], [False] * 9)          # the page refuses what Python refuses
+        self.assertEqual(report["groups_after_hostile"], 1)
+        self.assertTrue(report["space_focus_in_board"])
+        self.assertEqual(report["space_plays"], 0)                     # Space in the board never plays the briefing
+        self.assertEqual(report["renderers"], 1)                       # one renderer process for the board
+        self.assertGreater(report["memory_mb"]["working_set"], 0)
+        return report
+
+    def test_the_desk_at_1x(self) -> None:
+        self.check("desk", 1.0)
+
+    def test_the_desk_at_1_5x(self) -> None:
+        self.check("desk_x15", 1.5)

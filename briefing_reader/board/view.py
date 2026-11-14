@@ -14,7 +14,10 @@ its place when it can't be.
                           BoardFallback by itself and emits unavailable(reason): no web view and no renderer are left.
                           Fallen back, apply() still checks each message, and the frames the app sent (also those sent
                           before, kept as the page had them) show as read-only tiles (glance.GlanceTiles) under the
-                          fallback tile, which then says READ-ONLY TILES BELOW
+                          fallback tile, which then says READ-ONLY TILES BELOW. Part 5a: the groups (one answer each:
+                          their headers and order, the newest on top) and, once the app sent the bar's counts (the
+                          desk), the native bar "Board READ-ONLY 9 FRAMES" over the tile; the tiles then keep the
+                          frames' 448 px (no index strip)
     BoardBridge           the one object the page sees on its web channel: post(kind, payload), checked against
                           board.protocol (the kinds on the list, the frame ids the app sent); anything else dropped and
                           counted (a log line names the kind only when it is on the list, else "unknown")
@@ -63,11 +66,16 @@ QUEUE_CAP = 64                # messages kept while the page is not ready yet (t
 POSTS_PER_S = 40              # requests of the page a second, at most ...
 LAYOUTS_PER_S = 12            # ... layout ones among them (the page sends at most 10; a little slack for timing)
 PAD = 15                      # the view's inner pad (DESIGN-SPEC 2.1): the fallback tile keeps the frames' left edge
+STRIP = 40                    # the index strip and its gap at the frames' right (the desk; the fallback has no strip)
+BAR_HEIGHT = 32               # the board bar on the desk (DESIGN-SPEC 2.1: frames start 44 px down) ...
+BAR_ROOM = 50                 # ... and the room it takes over a board that can't start: the tile where the frames start
 TILES_GAP = 12                # between the fallback tile and the read-only tiles under it
 TILE_PICTURE_PIXELS = 4_000_000   # a read-only tile's picture bigger than this is never decoded (the app's are 960 wide)
 
 CANT_START = "The board can't start on this PC. Answers still show here as text."
 READ_ONLY_BELOW = "Read-only tiles below"     # badge role (caps), only with read-only tiles under the tile
+BAR_TITLE = "Board"
+READ_ONLY = "Read-only"                       # badge role (caps): the bar of a board that can't start
 
 # Why the board fell back (unavailable(reason)), besides snapshots.reason_kind's words.
 NO_SCHEME = "no_scheme"       # jarvis-board: was not registered before the QApplication
@@ -300,6 +308,72 @@ class BoardFallback(QWidget):
             painter.end()
 
 
+class BoardBar(QWidget):
+    """The board bar of a board that can't start (DESIGN-SPEC 3.6, ``home-cantstart``): "Board", a READ-ONLY badge and
+    "9 FRAMES" (left out in the compact column), painted natively in the page bar's place; nothing in it is a control."""
+
+    GAP = 12
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("boardBar")
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setFixedHeight(BAR_ROOM)                  # its words in the top BAR_HEIGHT px, as the page's bar
+        self._frames = 0
+        self._compact = False
+        self._sync_name()
+
+    def set_counts(self, frames: int, *, compact: bool = False) -> None:
+        self._frames, self._compact = max(0, int(frames)), bool(compact)
+        self._sync_name()
+        self.update()
+
+    def words(self) -> list[str]:
+        """What it says, left to right (as painted: the badges in caps)."""
+        shown = [BAR_TITLE, holo.role_text("badge", READ_ONLY)]
+        if not self._compact:
+            shown.append(holo.role_text("badge", self._count_words()))
+        return shown
+
+    def _count_words(self) -> str:
+        return f"{self._frames} frame" if self._frames == 1 else f"{self._frames} frames"
+
+    def _sync_name(self) -> None:
+        self.setAccessibleName(", ".join([BAR_TITLE, READ_ONLY, self._count_words()]))
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        from PySide6.QtGui import QFontMetricsF
+
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            mid = BAR_HEIGHT / 2
+            title = holo.font("button", 600)
+            title.setPixelSize(15)
+            painter.setFont(title)
+            painter.setPen(QColor(holo.INK_1))
+            width = QFontMetricsF(title).horizontalAdvance(BAR_TITLE)
+            painter.drawText(QRectF(0, 0, width + 2, BAR_HEIGHT),
+                             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), BAR_TITLE)
+            x = width + self.GAP
+            badge = holo.font("badge")
+            metrics = QFontMetricsF(badge)
+            painter.setFont(badge)
+            words = holo.role_text("badge", READ_ONLY)
+            box = QRectF(x, mid - 8, metrics.horizontalAdvance(words) + 12, 16)
+            painter.setPen(QPen(holo.LINE, 1.0))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(box.adjusted(0.5, 0.5, -0.5, -0.5), holo.RADIUS_BADGE, holo.RADIUS_BADGE)
+            painter.setPen(QColor(holo.INK_3))
+            painter.drawText(box, int(Qt.AlignmentFlag.AlignCenter), words)
+            if not self._compact:
+                count = holo.role_text("badge", self._count_words())
+                painter.drawText(QRectF(box.right() + self.GAP, 0, metrics.horizontalAdvance(count) + 4, BAR_HEIGHT),
+                                 int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), count)
+        finally:
+            painter.end()
+
+
 # --------------------------------------------------------------------------
 # The window's keys
 # --------------------------------------------------------------------------
@@ -404,6 +478,12 @@ class BoardView(QWidget):
         self._frames: dict[str, dict[str, Any]] = {}
         self._pictures: dict[str, str] = {}
         self._images: dict[str, tuple[str, QImage | None]] = {}
+        # Part 5a: the groups the app sent (id -> its last group message, newest last) and each frame's group; the bar's
+        # last counts (None until the desk formed: no bar on the page or over the read-only tiles before).
+        self._groups: dict[str, dict[str, Any]] = {}
+        self._frame_group: dict[str, str] = {}
+        self._bar: dict[str, Any] | None = None
+        self._bar_widget: BoardBar | None = None
         self._tiles: GlanceTiles | None = None
         self._queue: deque[str] = deque()
         self._motion = holo.motion_level()
@@ -478,6 +558,14 @@ class BoardView(QWidget):
         """The ids of the frames the app sent (the page's requests must name one of them)."""
         return frozenset(self._known)
 
+    def known_groups(self) -> frozenset[str]:
+        """The ids of the groups the app sent (part 5a)."""
+        return frozenset(self._groups)
+
+    def bar_widget(self) -> BoardBar | None:
+        """The native bar over the read-only tiles (fallen back, once the app sent the bar's counts)."""
+        return self._bar_widget
+
     def counts(self) -> dict[str, Any]:
         """Counts only: messages sent / refused, the page's requests (accepted / dropped), the requests the interceptor
         allowed and blocked by scheme, the files served and refused, the refusal hooks, the page's console messages and
@@ -499,7 +587,7 @@ class BoardView(QWidget):
             self._counts["dropped:unavailable"] += 1
             return False
         try:
-            checked = protocol.check_message(message, self._known)
+            checked = protocol.check_message(message, self._known, self._groups)
         except protocol.Refused as refused:
             self._counts[f"refused:{refused.reason}"] += 1
             self._log_once(f"refused:{refused.reason}", "Board: a message was refused (%s)", refused.reason)
@@ -507,7 +595,7 @@ class BoardView(QWidget):
         self._remember(checked)
         if self._phase == _FALLBACK:
             self._counts[f"tiles:{checked.type}"] += 1
-            if checked.type in ("frame", "remove", "clear", "picture"):
+            if checked.type in ("frame", "remove", "clear", "picture", "group", "remove_group", "bar"):
                 self._show_tiles()
             return True
         self._counts[f"sent:{checked.type}"] += 1
@@ -522,24 +610,65 @@ class BoardView(QWidget):
 
     def _remember(self, checked: protocol.Checked) -> None:
         """The known ids and the frames' mirror follow a message that passed (``checked.text`` is its clean JSON)."""
-        kind, frame_id = checked.type, checked.frame_id
+        kind, frame_id, group_id = checked.type, checked.frame_id, checked.group_id
         if kind == "frame":
             self._known.add(frame_id)
             self._frames[frame_id] = json.loads(checked.text)     # an update keeps its place
+            if group_id:
+                self._frame_group.setdefault(frame_id, group_id)
         elif kind == "remove":
-            self._known.discard(frame_id)
-            self._frames.pop(frame_id, None)
-            self._pictures.pop(frame_id, None)
+            self._forget(frame_id)
         elif kind == "clear":
             self._known.clear()
             self._frames.clear()
             self._pictures.clear()
+            self._groups.clear()
+            self._frame_group.clear()
         elif kind == "picture":
             self._pictures[frame_id] = json.loads(checked.text)["src"]
+        elif kind == "group":
+            self._groups[group_id] = json.loads(checked.text)    # a known group keeps its place (the newest last)
+        elif kind == "remove_group":
+            for member, owner in list(self._frame_group.items()):
+                if owner == group_id:
+                    self._forget(member)
+            self._groups.pop(group_id, None)
+        elif kind == "bar":
+            self._bar = json.loads(checked.text)
+
+    def _forget(self, frame_id: str) -> None:
+        self._known.discard(frame_id)
+        self._frames.pop(frame_id, None)
+        self._pictures.pop(frame_id, None)
+        self._frame_group.pop(frame_id, None)
+
+    def _tile_order(self) -> tuple[list[dict[str, Any]], dict[str, tuple[str, str, bool]]]:
+        """The frames as the board shows them: each group's (the newest group first, in its order, a frame not in it
+        yet after), then the frames of no group; and the header drawn above each group's first tile."""
+        shown: list[dict[str, Any]] = []
+        headers: dict[str, tuple[str, str, bool]] = {}
+        placed: set[str] = set()
+        for group_id, group in reversed(list(self._groups.items())):
+            members = [frame_id for frame_id in group.get("frames", []) if self._frame_group.get(frame_id) == group_id]
+            members += [frame_id for frame_id, owner in self._frame_group.items()
+                        if owner == group_id and frame_id not in members]
+            first = True
+            for frame_id in members:
+                frame = self._frames.get(frame_id)
+                if frame is None or frame.get("closed"):
+                    continue
+                if first:
+                    headers[frame_id] = (str(group.get("time", "")), str(group.get("topic", "")),
+                                         bool(group.get("older", False)))
+                    first = False
+                shown.append(frame)
+                placed.add(frame_id)
+        shown += [frame for frame_id, frame in self._frames.items() if frame_id not in placed]
+        return shown, headers
 
     def _show_tiles(self) -> None:
-        """The read-only tiles show the frames as they are now; the fallback tile says READ-ONLY TILES BELOW while a
-        frame shows."""
+        """The read-only tiles show the frames as they are now (with their groups' headers); the fallback tile says
+        READ-ONLY TILES BELOW while a frame shows, and the native bar counts them once the desk formed."""
         tiles = self._tiles
         if tiles is None or not _alive(tiles):
             return
@@ -555,9 +684,23 @@ class BoardView(QWidget):
             if cached[1] is not None:
                 images[frame_id] = cached[1]
         self._images = kept
-        tiles.set_frames(list(self._frames.values()), images)
+        shown, headers = self._tile_order()
+        tiles.set_frames(shown, images, headers=headers)
         if self._fallback is not None and _alive(self._fallback):
             self._fallback.set_tiles_below(bool(tiles.frames()))
+        self._sync_fallback_bar()
+
+    def _sync_fallback_bar(self) -> None:
+        """Fallen back on the desk (the app sent the bar's counts): the native bar over the tile, and the tiles in the
+        frames' place (the strip's room kept at the right, as on the page)."""
+        bar, box = self._bar_widget, self._fallback_box
+        if self._bar is None or bar is None or box is None or not (_alive(bar) and _alive(box)):
+            return
+        bar.set_counts(int(self._bar.get("frames", 0)), compact=bool(self._bar.get("compact", False)))
+        bar.show()
+        layout = box.layout()
+        if layout is not None:
+            layout.setContentsMargins(PAD, 0, STRIP, 0)
 
     def set_motion(self, level: str) -> bool:
         """The motion the page plays: "lively", "calm" (x1.6) or "off" (each moment's end state at once), as holo's
@@ -579,6 +722,8 @@ class BoardView(QWidget):
         self._frames.clear()
         self._pictures.clear()
         self._images.clear()
+        self._groups.clear()
+        self._frame_group.clear()
         self._teardown()
         if self._blocked:
             logger.info("Board: closed (requests blocked: %s)",
@@ -858,6 +1003,10 @@ class BoardView(QWidget):
         box_layout = QVBoxLayout(box)
         box_layout.setContentsMargins(PAD, 0, PAD, 0)
         box_layout.setSpacing(0)
+        # On the desk (the app sent the bar's counts) the bar says READ-ONLY over the tile (DESIGN-SPEC 3.6).
+        self._bar_widget = BoardBar(box)
+        self._bar_widget.hide()
+        box_layout.addWidget(self._bar_widget)
         self._fallback = BoardFallback(box)
         box_layout.addWidget(self._fallback)
         box_layout.addSpacing(TILES_GAP)
@@ -868,11 +1017,13 @@ class BoardView(QWidget):
         area.setFrameShape(QFrame.Shape.NoFrame)
         area.setWidgetResizable(True)
         area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)   # the wheel scrolls it, as the page
         area.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         area.viewport().setAutoFillBackground(False)
         area.setStyleSheet("QScrollArea#boardTiles { background: transparent; border: none; }")
         self._tiles = GlanceTiles(area)
         area.setWidget(self._tiles)
+        self._tiles.setAutoFillBackground(False)    # setWidget turned it on: the window's ground shows between tiles
         box_layout.addWidget(area, 1)
         self._fallback_box = box
         self._layout.addWidget(box)
@@ -928,6 +1079,6 @@ def keeps_space(widget: QWidget | None) -> bool:
     return False
 
 
-__all__ = ["BoardBridge", "BoardFallback", "BoardLayout", "BoardView", "CANT_START", "MAX_RESTARTS", "READY_TIMEOUT_MS",
-           "READ_ONLY_BELOW", "START_DELAY_MS", "TILE_PICTURE_PIXELS", "WINDOW_KEYS", "WindowKeysFilter", "is_window_key",
-           "keeps_space", "tile_picture"]
+__all__ = ["BAR_TITLE", "BoardBar", "BoardBridge", "BoardFallback", "BoardLayout", "BoardView", "CANT_START",
+           "MAX_RESTARTS", "READY_TIMEOUT_MS", "READ_ONLY", "READ_ONLY_BELOW", "START_DELAY_MS", "STRIP",
+           "TILE_PICTURE_PIXELS", "WINDOW_KEYS", "WindowKeysFilter", "is_window_key", "keeps_space", "tile_picture"]

@@ -32,6 +32,12 @@ Cases:
                picture; bodies Python would refuse, put into board.apply directly, are refused by the page too; at
                300 px no word is cut
 
+    desk       part 5a: the desk in Jarvis's own window (ui.BriefingWindow): the board in the desk's board column, two
+               answers' groups through board.feed (the mail and its waiting reply as one frame, first), the bar and
+               the desk's enter; what the page shows, a grab of the window (the frames are in it), the first frame's
+               time to the page's layout, reveal, a group leaving whole, Space in the page, the renderer's memory
+               (desk_x15: the same at QT_SCALE_FACTOR 1.5)
+
 Qt runs offscreen and Chromium's proxy is a dead address (snapshots.OFFLINE_FLAGS, as the board's engine always runs in a
 test): nothing can reach the network whatever the page does. No window is shown on the real screen.
 """
@@ -879,12 +885,200 @@ def main(case: str) -> dict[str, Any]:
                            "children_after": len(children())}
         report["seen"] = seen
         settle_end(report, refused, late, crashing)
+    elif case in ("desk", "desk_x15"):
+        report.update(desk_case(wait_until, pump, main_world, settle_end))
     else:
         report["error"] = f"unknown case {case!r}"
     report["webengine_flags_offline"] = all(flag in os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
                                             for flag in snapshots.OFFLINE_FLAGS)
     report["protocol_caps"] = [protocol.MESSAGE_CAP, protocol.PICTURE_CAP]
     qInstallMessageHandler(None)
+    return report
+
+
+def memory_mb(pids: list[int]) -> dict[str, float]:
+    """The private bytes and the working set of ``pids`` together, in MB (Windows; zeros elsewhere)."""
+    if sys.platform != "win32" or not pids:
+        return {"private": 0.0, "working_set": 0.0}
+    import ctypes
+    from ctypes import wintypes
+
+    class Counters(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD), ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t), ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t), ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t), ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t), ("PrivateUsage", ctypes.c_size_t)]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    psapi = ctypes.WinDLL("psapi")
+    psapi.GetProcessMemoryInfo.argtypes = (wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD)
+    private = working = 0
+    for pid in pids:
+        handle = kernel.OpenProcess(0x1000 | 0x0010, False, pid)   # query limited information, VM read
+        if not handle:
+            continue
+        try:
+            counters = Counters()
+            counters.cb = ctypes.sizeof(Counters)
+            if psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+                private += counters.PrivateUsage
+                working += counters.WorkingSetSize
+        finally:
+            kernel.CloseHandle(handle)
+    return {"private": round(private / 2 ** 20, 1), "working_set": round(working / 2 ** 20, 1)}
+
+
+_DESK_PAGE = r"""JSON.stringify((function () {
+    var root = document.getElementById('board'), bar = document.getElementById('bar');
+    var groups = Array.prototype.map.call(root.querySelectorAll('.group'), function (g) {
+      return {time: g.querySelector('.g-time').textContent, topic: g.querySelector('.g-topic').textContent,
+              older: g.classList.contains('older'),
+              frames: Array.prototype.map.call(g.querySelectorAll('.frame'), function (f) {
+                return f.querySelector('.f-title').textContent; }),
+              waits: Array.prototype.map.call(g.querySelectorAll('.frame'), function (f) {
+                return f.classList.contains('waits'); })};
+    });
+    var first = root.querySelector('.frame').getBoundingClientRect();
+    var chip = root.querySelector('.frame.waits .f-wait');
+    return {bar: bar ? bar.innerText.replace(/\s+/g, ' ').trim() : '', bar_display: bar ? getComputedStyle(bar).display : '',
+            groups: groups, frame_left: first.left, frame_top: first.top, frame_width: first.width,
+            board_top: root.getBoundingClientRect().top, desk_in: document.documentElement.classList.contains('desk-in'),
+            chip: chip ? chip.innerText.replace(/\s+/g, ' ').trim() : '', scroll_height: root.scrollHeight,
+            client_height: root.clientHeight};
+})())"""
+
+
+def desk_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> dict[str, Any]:
+    """Part 5a's desk with the real engine, in Jarvis's own window (ui.BriefingWindow, frameless and translucent):
+    the board made in the desk's board column, two answers' groups put up through board.feed (the mail thread and its
+    waiting reply as ONE frame, first), the bar, the desk's enter; then what the page shows (the bar's words, the
+    groups' headers and order, the frames' left edge), a grab of the window (the board's frames are in it), the first
+    frame's time to the page's layout, reveal and a group leaving whole, Space with the focus in the page, and the
+    renderer's memory."""
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtGui import QColor
+    from PySide6.QtTest import QTest
+
+    from briefing_reader import holo, ui
+    from briefing_reader.board import feed as feed_mod
+    from briefing_reader.board import view
+    from tests.snapshot_probe import children
+
+    report: dict[str, Any] = {}
+    window = ui.BriefingWindow(10, 30)
+    window.show_reading_view()
+    window.resize(1120, 700)
+    window.show()
+    reading = window.reading
+    reading.set_tab(ui.SCREEN_HOME)
+    pump(0.3)
+    own_before = memory_mb([os.getpid()])          # Jarvis's own process before the board's engine started
+    board = view.BoardView(reading, start_delay_ms=0)
+    layouts: list[tuple[float, list[str]]] = []
+    board.layoutChanged.connect(lambda layout: layouts.append((time.monotonic(), [place[0] for place in
+                                                                                 layout.places])))
+    reading.set_board_available(True)
+    reading.set_board_view(board)
+    board.start()
+    began = time.monotonic()
+    wait_until(board.is_ready, 40)
+    report["ready"] = board.is_ready()
+    report["ready_s"] = round(time.monotonic() - began, 2)
+    board.set_motion("off")
+    built = dict(kind_frames(tiny_jpeg_url(320, 180)))
+    feed = feed_mod.BoardFeed()
+
+    def put(answer: int, name: str, when: str, merge: str = "", approvals: str = "", rank: float = 0.0) -> list:
+        frame_id = feed.frame_id(answer, name, merge)
+        messages = [dict(message, id=frame_id) for message in built[name].messages]
+        return feed.put(answer, name, messages, when=when, merge=merge, approvals=approvals, rank=rank)
+
+    for message in put(1, "todos", "9:20 AM"):
+        board.apply(message)
+    newest: list = []
+    newest += put(2, "day", "9:41 AM", rank=0.1)
+    newest += put(2, "mail", "9:41 AM", merge="mail:work:t1", rank=0.5)
+    newest += put(2, "reply", "9:41 AM", merge="mail:work:t1", approvals="card-1", rank=0.5)
+    newest += put(2, "research", "9:41 AM", rank=0.9)
+    newest += put(2, "page", "9:41 AM", rank=0.95)
+    sent_at = time.monotonic()
+    first_id = next(message["id"] for message in newest if message.get("type") == "frame")
+    report["applied"] = [board.apply(message) for message in newest]
+    wait_until(lambda: any(at >= sent_at and first_id in ids for at, ids in layouts), 10)
+    seen_at = next((at for at, ids in layouts if at >= sent_at and first_id in ids), None)
+    report["first_frame_layout_ms"] = round((seen_at - sent_at) * 1000) if seen_at else -1
+    reading.set_board_count(feed.frames())
+    for message in feed.bar_again() + [{"type": "desk", "state": "enter"}]:
+        board.apply(message)
+    pump(1.5)
+    report["desk_shown"] = reading.desk_shown()
+    report["board_in_desk"] = board.parentWidget() is reading.desk_page()
+    report["view_rect"] = list(board.geometry().getRect())
+    report["page"] = json.loads(main_world(board, _DESK_PAGE))
+    # A grab of the window (as the screen wipe, the card flight and the switch to the HUD take it) shows the board.
+    image = window.grab().toImage()
+    ratio = image.devicePixelRatio()
+    origin = board.mapTo(window, QPoint(0, 0))
+    page = report["page"]
+    x = origin.x() + page["frame_left"] + 24
+    y = origin.y() + page["frame_top"] + 6
+    pixel = QColor(image.pixel(round(x * ratio), round(y * ratio)))
+    report["grab"] = {"ratio": ratio, "size": [image.width(), image.height()], "at": [round(x), round(y)],
+                      "color": pixel.name(), "tile_amber": QColor(holo.TILE_AMBER).name()}
+    # Reveal: the board scrolls to the older group; then that group leaves whole.
+    older_group = feed.group_for(1)
+    board.apply({"type": "reveal", "group": older_group})
+    pump(0.6)
+    report["scroll_after_reveal"] = main_world(board, "document.getElementById('board').scrollTop")
+    removed = feed._drop_group(feed._groups[older_group])     # noqa: SLF001 - the probe makes the room by hand
+    for message in removed:
+        board.apply(message)
+    pump(0.5)
+    report["groups_after_remove"] = main_world(board, "document.querySelectorAll('#board .group').length")
+    report["known_after_remove"] = len(board.known_ids())
+    # The page checks the new messages again: hostile ones put straight into board.apply change nothing.
+    known = sorted(board.known_ids())[0]
+    hostile = [
+        {"type": "group", "id": "g9", "time": "9:41 AM", "topic": "y" * 41, "frames": [], "older": False},
+        {"type": "group", "id": "<b>", "time": "9:41 AM", "topic": "y", "frames": [], "older": False},
+        {"type": "group", "id": "g9", "time": "9:41 AM", "topic": "y", "frames": ["nope"], "older": False},
+        {"type": "group", "id": "g9", "time": "9:41 AM", "topic": "y", "frames": [], "older": "yes"},
+        {"type": "bar", "frames": 3, "waits": 4, "pinned": 0, "compact": False},
+        {"type": "bar", "frames": 30, "waits": 0, "pinned": 0, "compact": False},
+        {"type": "desk", "state": "open"},
+        {"type": "reveal", "group": "g77"},
+        {"type": "frame", "id": known, "kind": "text", "title": "x", "meta": "", "body": {"text": "x"},
+         "status": "ok", "status_text": "", "status_meta": "", "waits": "", "changed": False, "pinned": False,
+         "closed": False, "group": "g77"},
+    ]
+    report["page_refused"] = json.loads(main_world(board, "JSON.stringify(%s.map(function (m) { "
+                                                          "return board.apply(JSON.stringify(m)); }))"
+                                                          % json.dumps(hostile)))
+    report["groups_after_hostile"] = main_world(board, "document.querySelectorAll('#board .group').length")
+    # Space with the focus in the page never plays the briefing (ui._keeps_space covers the board's view).
+    plays: list[int] = []
+    reading.playPause.connect(lambda: plays.append(1))
+    window.activateWindow()
+    board.web_view().setFocus(Qt.FocusReason.OtherFocusReason)
+    pump(0.3)
+    focus = window.focusWidget()
+    report["space_focus_in_board"] = focus is not None and view.keeps_space(focus)
+    if focus is not None:
+        QTest.keyClick(focus, Qt.Key.Key_Space)
+    pump(0.3)
+    report["space_plays"] = len(plays)
+    pids = children()
+    report["renderers"] = len(pids)
+    report["memory_mb"] = memory_mb(pids)
+    own_after = memory_mb([os.getpid()])
+    report["own_process_mb"] = {"private_before": own_before["private"], "private_after": own_after["private"]}
+    report["counts"] = {key: value for key, value in board.counts().items() if isinstance(value, int)}
+    window.hide()
+    settle_end(report, board)
     return report
 
 

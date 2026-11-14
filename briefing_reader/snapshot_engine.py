@@ -188,6 +188,12 @@ def prepare_application() -> None:
         logger.debug("Page snapshots: application attributes not set (%s)", type(exc).__name__)
 
 
+def on_test_platform() -> bool:
+    """Qt runs on a test platform (offscreen, minimal: TEST_PLATFORMS): no network page is ever opened there, and the
+    app makes no board of its own there (desk_ui.default_factory) - the web engine never starts in a test process."""
+    return _test_platform()
+
+
 def _test_platform() -> bool:
     try:
         return QGuiApplication.platformName().casefold() in TEST_PLATFORMS

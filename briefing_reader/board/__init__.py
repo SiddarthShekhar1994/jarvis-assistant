@@ -20,6 +20,16 @@ Part 4, the frames from what Jarvis already knows:
 * ``glance``: the glance painter (QPainter only): read-only tiles of those frames, for the board's fallback (GlanceTiles
   under its "can't start" tile) and later the second screen (private: mail text hidden).
 
-Nothing in the app makes a board yet (part 5 puts it on Home). Importing this package imports nothing of the web
-engine; only ``view`` starts it, and only through snapshot_engine.
+Part 5a, the board on Home:
+
+* ``feed``: what the board holds (Qt-free): one group per answer (its time and topic), the frames in each group in board
+  order (what waits on the owner first, then the order Jarvis speaks of them), a mail thread and the reply that waits on
+  it as one frame, the limits (24 frames, 8 groups: the oldest group with no pinned frame leaves whole), the bar's
+  counts; the messages that put it all on the page.
+* ``protocol`` gains the group, remove_group, bar, desk and reveal messages and a frame's group; the page draws the bar
+  ("Board", "9 FRAMES", "1 WAITS", All | Pinned and Clear drawn) and the groups' headers, and plays the desk's entrance.
+
+desk_ui.DeskController makes the one board (only while ``[look] board`` is on) and feeds it; desk_view and
+ui.ReadingView put it on Home beside the conversation. Importing this package imports nothing of the web engine; only
+``view`` starts it, and only through snapshot_engine.
 """
