@@ -655,6 +655,18 @@ def _build_client(args: argparse.Namespace, config: Any) -> tuple[Any, Any, str 
     return NotionClient("", session=session, notion_version=config.notion_version), config, None
 
 
+def _prepare_board() -> None:
+    """The board's own address scheme (jarvis-board:), which the web engine must know before the QApplication exists: on
+    every start, whatever the settings, since the board may be needed at any time. Never stops the app (without it the
+    board says it can't start)."""
+    try:
+        from .board.scheme import register_scheme
+
+        register_scheme()
+    except Exception as exc:  # noqa: BLE001 - Jarvis works without it
+        logger.info("Board: the scheme was not set up (%s)", type(exc).__name__)
+
+
 def _prepare_agent_window(config: Any) -> None:
     """While tasks are on: Jarvis's address scheme for a task's files, which the web engine must know before the
     QApplication exists. Off: nothing of it is imported. Never stops the app."""
@@ -680,8 +692,10 @@ def _run_app(args: argparse.Namespace, config: Any, name: str, run: str | None,
     from .snapshot_engine import prepare_application
 
     _set_app_user_model_id()
-    # Qt's attributes for the page snapshots' web engine: only before the QApplication exists.
+    # Qt's attributes for the page snapshots' web engine, and the web engine's custom schemes: only before the
+    # QApplication exists.
     prepare_application()
+    _prepare_board()
     _prepare_agent_window(config)
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName(APP_NAME)

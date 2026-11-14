@@ -10,11 +10,12 @@ Public API
 
 Tokens
     Colours (hex strings): ``VOID``, ``VOID_EDGE``, ``DOCK``, ``TILE``, ``TILE_FOCUS``, ``TILE_AMBER``,
-    ``TILE_OK``, ``TILE_ALERT``, ``RAISED``, ``FIELD``, ``PICTURE``, ``FOCUS``, ``HOLO`` (+ ``_HI``,
+    ``TILE_AMBER_LIT``, ``TILE_OK``, ``TILE_ALERT``, ``RAISED``, ``FIELD``, ``PICTURE``, ``FOCUS``, ``HOLO`` (+ ``_HI``,
     ``_LO``, ``_INK``), ``INK_1`` .. ``INK_4``, ``INK_KICKER``, ``AMBER`` (+ ``_HI``, ``_LO``, ``_INK``,
     ``_TX``, ``_TX2``), ``OK``, ``OK_INK``, ``ALERT`` (+ ``_HI``, ``_LO``, ``_TX``, ``_TX2``, ``_INK``),
     ``STEEL``. Translucent tokens (QColor): ``GRID``, ``SCAN``, ``SCAN_AMBER``, ``LINE_FAINT``,
-    ``LINE``, ``LINE_STRONG``, ``LINE_FOCUS``, ``LINE_INPUT``, ``AMBER_LINE``.
+    ``LINE``, ``LINE_STRONG``, ``LINE_FOCUS``, ``LINE_INPUT``, ``AMBER_LINE``; the board's ``FRAME_EDGE``, ``CUE``,
+    ``CUE_AMBER``. (The board's page gets all of them, written out as CSS by board.scheme.tokens_css.)
     ``alpha(color, a) -> QColor``; ``mix(a, b, t) -> QColor``.
     Spacing ``SPACE`` (2xs .. 6xl) and the named sizes (``DOCK_WIDTH``, ``HEADER_HEIGHT``, ...);
     radii ``RADIUS_*``.
@@ -104,6 +105,7 @@ DOCK = "#060A0E"
 TILE = "#091318"
 TILE_FOCUS = "#0A1A20"
 TILE_AMBER = "#141310"
+TILE_AMBER_LIT = "#18160F"     # the board: a lit frame that waits on the owner (DESIGN-SPEC 10)
 TILE_OK = "#080F11"
 TILE_ALERT = "#170F12"
 RAISED = "#0B141B"
@@ -164,6 +166,11 @@ LINE_STRONG = alpha(HOLO, 0.33)
 LINE_FOCUS = alpha(HOLO, 0.55)
 LINE_INPUT = alpha(HOLO, 0.50)
 AMBER_LINE = alpha(AMBER, 0.45)
+# The board (DESIGN-SPEC 10): a frame's edge (LINE would turn nine stacked frames into a grid of boxes, LINE_FAINT
+# vanishes on TILE), and the cue line in its frame's colour.
+FRAME_EDGE = alpha(HOLO, 0.14)
+CUE = alpha(HOLO_HI, 0.55)
+CUE_AMBER = alpha(AMBER_HI, 0.75)
 
 # --------------------------------------------------------------------------
 # Spacing and shape (spec 3, 4)
@@ -247,6 +254,8 @@ ROLES: dict[str, TypeRole] = {
     "dock_tag": TypeRole(_M, 9, 12, 500, 0.14, caps=True),        # the Dock's Desktop: its HUD tag
     "dock_key": TypeRole(_M, 9, 12, 500, 0.06),                   # ... the HUD key's keycaps under it
     "dock_hint": TypeRole(_M, 10, 14, 400, 0.0),                  # ... and "switches"
+    "frame_title": TypeRole(_D, 15, 20, 500, 0.01),               # a board frame's title (tile_title wraps too often)
+    "frame_time": TypeRole(_M, 12, 16, 500, 0.04, tabular=True),  # a board row's time ("10:00-10:30")
 }
 _FONT_MAKERS: dict[str, Callable[[int, int, float], QFont]] = {
     _D: hud.display_font, _B: hud.body_font, _M: hud.mono_font,
@@ -872,10 +881,14 @@ ICONS: dict[str, tuple[str, ...]] = {
     # The HUD's "Bring Jarvis back" (Switch.dc.html: a window with its title bar).
     "window": ("M5.5 4.5h13a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2v-11a2 2 0 0 1 2-2z", "M3.5 9h17",
                "M6.5 6.8h.01M9 6.8h.01"),
+    # The board (the new look): a frame's Pin and Open big.
+    "pin": ("M9.5 4h5", "M10.5 4v4.5l-3 3.5h9l-3-3.5V4", "M12 12v8"),
+    "expand": ("M14 4h6v6", "M10 20H4v-6", "M20 4l-6 6", "M4 20l6-6"),
 }
 FILLED_ICONS: dict[str, str] = {
     "play": "M8 5.5v13l10.5-6.5z",
     "play_lg": "M7.5 5.2v13.6L18.5 12z",
+    "diamond": "M12 4l8 8-8 8-8-8z",     # waits on the owner: a shape as well as a colour (the board, the chips)
 }
 
 

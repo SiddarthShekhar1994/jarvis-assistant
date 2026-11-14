@@ -4,6 +4,10 @@ checked source its answer cites, and takes a picture of its first screen, for th
 
     webengine_available()             PySide6 has QtWebEngine 6.8+ (checked without importing it)
     prepare_application()             Qt's attributes the web engine needs, set before QApplication
+    ensure_engine() -> str            the web engine ready for a page of Jarvis's own (the board): the same
+                                      gate and flags as a shot ("" or a reason); engine_classes() then gives
+                                      its classes, private_profile(parent) a fresh off-the-record profile (the
+                                      first starts Chromium), apply_web_settings(settings) the fixed settings
     PageCamera(parent, ...)           one page at a time on the GUI thread: shoot(url) -> finished(ShotResult)
     PageSnapshotter(parent, ...)      the LIVE side: request(step, url, task_id=) from any thread (a
                                       PENDING picture at once), the shots one at a time on the GUI
@@ -370,6 +374,75 @@ def warm_up(*, test_platform: bool = False) -> float:
     return seconds
 
 
+def ensure_engine() -> str:
+    """The web engine ready for a page of Jarvis's own (the board's), GUI thread only: "" when it may be used, else a
+    reason (snapshots.R_*). The same gate as a page's picture: the inherited settings are judged first (a sandbox turned
+    off or unsafe flags refuse it, before Chromium could start), then QtWebEngine is imported once with Chromium's flags,
+    the network gate (on a test platform the dead proxy) and the Software Qt Quick API set before anything of it runs.
+    Makes no profile, so Chromium itself starts only at private_profile(). Never raises."""
+    try:
+        if QCoreApplication.instance() is None:
+            return snapshots.R_ENGINE_FAILED
+        environ = _judged_environ()   # as inherited: never Jarvis's own merged flags
+        problem = snapshots.sandbox_problem(environ) or snapshots.engine_flags_problem(environ)
+        if problem:
+            return problem
+        return _start_engine()
+    except Exception as exc:  # noqa: BLE001 - "not ready" is the safe answer
+        logger.debug("Web engine: not ready (%s)", type(exc).__name__)
+        return snapshots.R_ENGINE_FAILED
+
+
+def engine_classes() -> Any:
+    """QtWebEngine's classes and Jarvis's subclasses of them (Interceptor, Page): only once ensure_engine() said ""."""
+    return _classes()
+
+
+def private_profile(parent: QObject | None = None) -> Any:
+    """A fresh off-the-record profile for a page of Jarvis's own, GUI thread only, once ensure_engine() said "": nothing
+    of it on disk (no HTTP cache at all, no cookie kept), every permission asked each time (and refused by the page's
+    owner), no spell check, no push service. The first profile of the process is what starts Chromium (a second or
+    more). None when the engine gave one that is not off the record (it is deleted)."""
+    classes = _classes()
+    first = not _ENGINE.started
+    began = time.monotonic()
+    profile = classes.QWebEngineProfile(parent)   # no storage name: off the record
+    if not profile.isOffTheRecord():
+        profile.deleteLater()
+        return None
+    if first:
+        _ENGINE.started = True
+        logger.info("Web engine: started in %.1f s", time.monotonic() - began)
+    kinds = classes.QWebEngineProfile
+    profile.setHttpCacheType(kinds.HttpCacheType.NoCache)
+    profile.setPersistentCookiesPolicy(kinds.PersistentCookiesPolicy.NoPersistentCookies)
+    if hasattr(profile, "setPersistentPermissionsPolicy"):
+        profile.setPersistentPermissionsPolicy(kinds.PersistentPermissionsPolicy.AskEveryTime)
+    profile.setSpellCheckEnabled(False)
+    if hasattr(profile, "setPushServiceEnabled"):
+        profile.setPushServiceEnabled(False)
+    return profile
+
+
+def apply_web_settings(settings: Any, *, local_storage: bool = True) -> None:
+    """The web settings every page Jarvis opens runs with (GUI thread, once ensure_engine() said ""): _SETTINGS_OFF off
+    and _SETTINGS_ON on (JavaScript among them), but local storage as ``local_storage``; addresses of a scheme the engine
+    does not know refused; a picture animates once at most."""
+    classes = _classes()
+    attribute = classes.QWebEngineSettings.WebAttribute
+    for names, value in ((_SETTINGS_OFF, False), (_SETTINGS_ON, True)):
+        for name in names:
+            item = getattr(attribute, name, None)
+            if item is not None:
+                settings.setAttribute(item, value)
+    item = getattr(attribute, "LocalStorageEnabled", None)
+    if item is not None:
+        settings.setAttribute(item, bool(local_storage))
+    policy = classes.QWebEngineSettings
+    settings.setUnknownUrlSchemePolicy(policy.UnknownUrlSchemePolicy.DisallowUnknownUrlSchemes)
+    settings.setImageAnimationPolicy(policy.ImageAnimationPolicy.AnimateOnce)
+
+
 def _quietly(step: Callable[[], Any]) -> None:
     """Run one teardown step; a failure (an object already gone) never stops the next one."""
     try:
@@ -732,16 +805,7 @@ class PageCamera(QObject):
         # A last net: the window's sandbox keeps every download from starting (see download_folder).
         profile.setDownloadPath(download_folder())
         profile.downloadRequested.connect(lambda download: self._refuse("downloads", download, "cancel"))
-        settings = profile.settings()
-        attribute = classes.QWebEngineSettings.WebAttribute
-        for names, value in ((_SETTINGS_OFF, False), (_SETTINGS_ON, True)):
-            for name in names:
-                item = getattr(attribute, name, None)
-                if item is not None:
-                    settings.setAttribute(item, value)
-        policy = classes.QWebEngineSettings
-        settings.setUnknownUrlSchemePolicy(policy.UnknownUrlSchemePolicy.DisallowUnknownUrlSchemes)
-        settings.setImageAnimationPolicy(policy.ImageAnimationPolicy.AnimateOnce)
+        apply_web_settings(profile.settings())
 
     def _connect(self, page: Any, shot: _Shot) -> None:
         page.loadStarted.connect(lambda: self._on_started(shot))

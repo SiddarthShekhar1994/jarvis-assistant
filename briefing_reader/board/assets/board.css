@@ -1,0 +1,261 @@
+/* The board's page (the new look, part 3): the frame chrome and its states (DESIGN-SPEC 3.2 and 3.4) and the motion of
+   section 5. Every colour, radius, easing, type role and glyph comes from tokens.css, written from holo at each request.
+   Each timing is multiplied by --k: lively 1, calm 1.6, off 0 (each moment's end state at once). No remote address, no
+   inline style anywhere: the page's own policy allows styles from jarvis-board: only. */
+
+:root {
+  --k: 1;
+  --pad: 15px;                                              /* the view's inner pad: a lit frame's brackets fit in it */
+  --wire: color-mix(in srgb, var(--tile) 30%, transparent); /* a frame's ground while it draws in */
+  --amber-wash: color-mix(in srgb, var(--amber) 10%, transparent);
+  --alert-wash: color-mix(in srgb, var(--alert) 8%, transparent);
+}
+:root.motion-calm { --k: 1.6; }
+:root.motion-off { --k: 0; }
+@media (prefers-reduced-motion: reduce) { :root { --k: 0; } }
+
+*, *::before, *::after { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; }
+body {
+  color: var(--ink-2);
+  font: 400 13px/20px var(--font-body);
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+::selection { background: var(--line-strong); color: var(--ink-1); }
+h2, p { margin: 0; }
+button {
+  margin: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit;
+  cursor: pointer; -webkit-tap-highlight-color: transparent;
+}
+button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+#board {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; gap: 12px;
+  padding: 12px var(--pad) 40px;                            /* the last frame can scroll clear of the end */
+  overflow-x: hidden; overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+#board::-webkit-scrollbar { display: none; }
+
+/* ---- glyphs (holo's stroke icons, 24 units, 1.6 stroke) ---- */
+.glyph {
+  flex: none; width: 16px; height: 16px;
+  fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round;
+}
+.glyph.filled { fill: currentColor; stroke: none; }
+
+/* ---- the frame (3.2) ---- */
+.frame {
+  container: frame / inline-size;
+  position: relative; flex: none;
+  padding: 11px 14px 14px;
+  background: var(--tile);
+  border: 1px solid var(--frame-edge);
+  border-radius: var(--radius-frame);
+  outline: none;
+  transition: background-color calc(160ms * var(--k)) var(--ease-out), border-color calc(160ms * var(--k)) var(--ease-out);
+}
+.frame:not(.lit):not(.waits):not(.failed):not(.arriving):hover { border-color: var(--line); }
+.frame:focus-visible, .frame:has(button:focus-visible) { outline: 2px solid var(--focus); outline-offset: 3px; }
+
+/* The title keeps at least 11em; a meta that does not fit beside it goes under it, never squeezing the title. */
+.f-head {
+  display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 8px; row-gap: 2px;
+  min-height: 24px; margin-bottom: 8px;
+}
+.f-glyph { align-self: flex-start; margin-top: 2px; color: var(--holo-lo); }
+.f-title { flex: 1 1 11em; min-width: 0; color: var(--ink-1); overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.f-meta {
+  flex: 0 1 auto; max-width: 100%; margin-left: auto; color: var(--ink-4);
+  text-align: right; overflow-wrap: anywhere; unicode-bidi: plaintext;
+}
+.f-pinned { width: 13px; height: 13px; align-self: center; color: var(--ink-3); display: none; }
+.frame.pinned .f-pinned { display: block; }
+.f-tag {
+  display: none; align-self: center; flex: none;
+  padding: 2px 6px; border: 1px solid var(--line-strong); border-radius: var(--radius-badge);
+  color: var(--holo-hi);
+}
+.frame.changed .f-tag { display: inline-block; animation: show calc(160ms * var(--k)) var(--ease-out) both; }
+
+/* Pin, Open big and Close take the meta's place while the frame has the focus. */
+.f-ctl { display: none; align-self: flex-start; gap: 2px; margin: -2px -6px -2px auto; }
+.frame:focus-within .f-ctl { display: flex; }
+.frame:focus-within .f-meta, .frame:focus-within .f-pinned { display: none; }
+.f-icon {
+  display: grid; place-items: center; width: 26px; height: 26px;
+  border: 1px solid transparent; border-radius: var(--radius-button-sm); color: var(--ink-2);
+  transition: color calc(120ms * var(--k)), background-color calc(120ms * var(--k)), border-color calc(120ms * var(--k));
+}
+.f-icon:first-child { border-color: var(--line); }
+.f-icon .glyph { width: 14px; height: 14px; }
+.f-icon:hover { color: var(--ink-1); background: var(--raised); border-color: var(--line-strong); }
+.f-icon:active { transform: translateY(1px); }
+.f-icon.on { color: var(--holo-hi); }
+
+.f-body { color: var(--ink-2); overflow-wrap: anywhere; }
+.f-text { white-space: pre-line; unicode-bidi: plaintext; }
+.f-pic {
+  display: block; width: 100%; height: auto; margin-top: 10px;
+  background: var(--picture); border: 1px solid var(--line-faint); border-radius: 4px;
+  filter: brightness(.8);
+  transition: filter calc(160ms * var(--k)) var(--ease-out);
+}
+.frame:focus-within .f-pic { filter: none; }
+
+/* the keys while it has the focus: one line, or two even halves under 380 px of content */
+.f-keys {
+  display: none; flex-wrap: wrap; row-gap: 4px;
+  margin-top: 12px; padding-top: 9px; border-top: 1px solid var(--line-faint); color: var(--ink-3);
+}
+.frame:focus-within .f-keys { display: flex; }
+.f-keys span { white-space: nowrap; }
+.f-keys .mid { padding: 0 .7em; }
+@container frame (max-width: 379px) {
+  .f-keys .mid { display: none; }
+  .f-keys span:not(.mid) { flex-basis: 100%; }
+}
+
+/* buttons with words: Try again, Bring back */
+.f-act {
+  display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 12px;
+  border: 1px solid var(--line); border-radius: var(--radius-button-sm); background: var(--raised);
+  color: var(--ink-1); font: 600 13px/16px var(--font-display); letter-spacing: .02em; white-space: nowrap;
+  transition: border-color calc(120ms * var(--k)), background-color calc(120ms * var(--k));
+}
+.f-act .glyph { width: 14px; height: 14px; }
+.f-act:hover { border-color: var(--line-strong); background: var(--tile-focus); }
+.f-act:active { transform: translateY(1px); }
+
+/* ---- waits on the owner: amber, a rounder corner, a diamond and words ---- */
+.frame.waits { background: var(--tile-amber); border-color: var(--amber-line); border-radius: var(--radius-amber); }
+.frame.waits .f-glyph { color: var(--amber); }
+.frame.waits .f-title { color: var(--amber-tx); }
+.frame.waits .f-meta, .frame.waits .f-body { color: var(--amber-tx2); }
+.f-wait {
+  display: none; align-items: center; gap: 8px; max-width: 100%; min-height: 30px;
+  margin-top: 10px; padding: 4px 8px 4px 11px;
+  border: 1px solid var(--amber); border-radius: 15px; background: var(--amber-wash);
+  color: var(--amber-tx); font: 500 13px/16px var(--font-body); text-align: left;
+  transition: background-color calc(120ms * var(--k)), box-shadow calc(120ms * var(--k));
+}
+.frame.waits .f-wait { display: inline-flex; }
+.f-wait:hover { background: color-mix(in srgb, var(--amber) 16%, transparent); }
+.f-wait .f-dia { width: 12px; height: 12px; color: var(--amber); }
+.f-wait .f-chev { width: 12px; height: 12px; color: var(--amber-tx2); }
+.f-wait .f-words { min-width: 0; overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.f-wait .f-key {
+  flex: none; padding: 1px 4px; border: 1px solid var(--amber-line); border-radius: var(--radius-badge);
+  color: var(--amber-tx2);
+}
+.frame.waits:focus-within .f-wait { box-shadow: 0 0 0 1px var(--amber-hi); }
+
+/* ---- failed: coral, a warning glyph, the words, Try again (re-reads that frame's source only) ---- */
+.frame.failed { background: var(--tile-alert); border-color: var(--alert-line); }
+.frame.failed .f-glyph { color: var(--alert); }
+.f-fail { display: flex; align-items: flex-start; gap: 10px; }
+.f-fail .glyph { margin-top: 2px; color: var(--alert); }
+.f-fail .f-words { color: var(--alert-tx2); unicode-bidi: plaintext; }
+.f-act.alert { margin-top: 12px; border-color: var(--alert-line); background: var(--alert-wash); color: var(--alert-tx2); }
+.f-act.alert:hover { border-color: var(--alert); }
+
+/* ---- empty: a dashed ring, the words, when it was checked ---- */
+.f-empty { display: flex; align-items: center; gap: 12px; padding: 2px 0; }
+.f-ring { flex: none; width: 28px; height: 28px; border: 1px dashed var(--line-strong); border-radius: 50%; }
+.f-empty .f-words { color: var(--ink-1); unicode-bidi: plaintext; }
+.f-checked { display: block; color: var(--ink-3); }
+
+/* ---- closed: a dashed 36 px row with Bring back (for 8 s) ---- */
+.f-closed {
+  display: none; align-items: center; gap: 10px; min-height: 36px; padding: 4px 6px 4px 14px;
+  border: 1px dashed var(--line); border-radius: var(--radius-frame); color: var(--ink-3);
+}
+.f-closed .glyph { width: 13px; height: 13px; color: var(--ink-4); }
+.f-closed .f-what { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.f-closed b { font-weight: 400; color: var(--ink-2); unicode-bidi: isolate; }
+.f-closed .f-act { height: 26px; padding: 0 10px; font-size: 12px; }
+.frame.closed { padding: 0; background: transparent; border-color: transparent; }
+.frame.closed > :not(.f-closed) { display: none; }
+.frame.closed > .f-closed { display: flex; }
+.frame.sizing { overflow: hidden; }
+
+/* ---- lit: brackets 6 px outside the corners in the frame's own colour (never cyan on amber) ---- */
+.frame.lit { background: var(--tile-focus); border-color: var(--line-strong); box-shadow: 0 10px 26px -12px rgba(0, 0, 0, .85); }
+.frame.waits.lit { background: var(--tile-amber-lit); border-color: var(--amber); }
+.fx-bracket {
+  position: absolute; width: 14px; height: 14px; opacity: 0; pointer-events: none;
+  border: 0 solid var(--holo-hi);
+}
+.fx-bracket.tl { left: -7px; top: -7px; border-top-width: var(--bracket); border-left-width: var(--bracket); --dx: -1; --dy: -1; }
+.fx-bracket.tr { right: -7px; top: -7px; border-top-width: var(--bracket); border-right-width: var(--bracket); --dx: 1; --dy: -1; }
+.fx-bracket.bl { left: -7px; bottom: -7px; border-bottom-width: var(--bracket); border-left-width: var(--bracket); --dx: -1; --dy: 1; }
+.fx-bracket.br { right: -7px; bottom: -7px; border-bottom-width: var(--bracket); border-right-width: var(--bracket); --dx: 1; --dy: 1; }
+.frame.waits .fx-bracket { border-color: var(--amber-hi); }
+.frame.lit .fx-bracket { opacity: 1; animation: bracket calc(200ms * var(--k)) var(--ease-out) both; }
+@keyframes bracket {
+  from { opacity: 0; transform: translate(calc(var(--dx) * 10px), calc(var(--dy) * 10px)); }
+}
+
+/* ---- arriving: the outline traces clockwise, corner ticks snap on, skeleton bars, then the content ---- */
+.fx-outline, .fx-light {
+  position: absolute; left: -1px; top: -1px; width: calc(100% + 2px); height: calc(100% + 2px);
+  overflow: visible; pointer-events: none; display: none;
+}
+.fx-outline rect, .fx-light rect {
+  x: .6px; y: .6px; width: calc(100% - 1.2px); height: calc(100% - 1.2px); rx: var(--radius-frame);
+  fill: none;
+}
+.frame.waits .fx-outline rect, .frame.waits .fx-light rect { rx: var(--radius-amber); }
+.fx-outline rect { stroke: var(--holo-hi); stroke-width: 1.2; stroke-dasharray: 100 100; }
+.fx-tick { position: absolute; width: 8px; height: 8px; opacity: 0; pointer-events: none; border: 0 solid var(--holo-hi); display: none; }
+.fx-tick.tl { left: -1px; top: -1px; border-top-width: 1.5px; border-left-width: 1.5px; }
+.fx-tick.tr { right: -1px; top: -1px; border-top-width: 1.5px; border-right-width: 1.5px; }
+.fx-tick.bl { left: -1px; bottom: -1px; border-bottom-width: 1.5px; border-left-width: 1.5px; }
+.fx-tick.br { right: -1px; bottom: -1px; border-bottom-width: 1.5px; border-right-width: 1.5px; }
+.fx-skeleton { position: absolute; left: 14px; right: 14px; top: 11px; display: none; pointer-events: none; }
+.fx-skeleton i { display: block; height: 8px; margin: 10px 0; border: 1px solid var(--line); border-radius: 2px; }
+.fx-skeleton i:first-child { width: 44%; height: 10px; margin: 5px 0 0 24px; border-color: var(--line-strong); }
+.fx-skeleton i:nth-child(3) { width: 72%; }
+
+.frame.arriving {
+  --at: calc(var(--i, 0) * 80ms * var(--k));                /* this frame's place in the stagger */
+  animation:
+    ground calc(160ms * var(--k)) var(--ease-out) calc(var(--at) + 300ms * var(--k)) both,
+    edge calc(200ms * var(--k)) linear calc(var(--at) + 600ms * var(--k)) both;
+}
+@keyframes ground { from { background-color: var(--wire); } }
+@keyframes edge { from { border-color: transparent; } }
+.frame.arriving .fx-outline { display: block; animation: relax calc(200ms * var(--k)) linear calc(var(--at) + 600ms * var(--k)) forwards; }
+.frame.arriving .fx-outline rect { animation: trace calc(260ms * var(--k)) var(--ease-out) var(--at) both; }
+@keyframes trace { from { stroke-dashoffset: 100; } to { stroke-dashoffset: 0; } }
+@keyframes relax { to { opacity: 0; } }
+.frame.arriving .fx-tick { display: block; animation: tick calc(540ms * var(--k)) linear calc(var(--at) + 260ms * var(--k)) forwards; }
+@keyframes tick { 0%, 63% { opacity: 1; } 100% { opacity: 0; } }
+.frame.arriving .fx-skeleton { display: block; animation: hide calc(160ms * var(--k)) var(--ease-out) calc(var(--at) + 300ms * var(--k)) both; }
+@keyframes hide { from { opacity: 1; } to { opacity: 0; } }
+.frame.arriving > .f-head, .frame.arriving > .f-body, .frame.arriving > .f-wait, .frame.arriving > .f-pic {
+  animation: rise calc(160ms * var(--k)) var(--ease-out) calc(var(--at) + 300ms * var(--k)) both;
+}
+@keyframes rise { from { opacity: 0; transform: translateY(4px); } }
+@keyframes show { from { opacity: 0; } }
+:root.motion-calm .frame.arriving > .f-head, :root.motion-calm .frame.arriving > .f-body,
+:root.motion-calm .frame.arriving > .f-wait, :root.motion-calm .frame.arriving > .f-pic { animation-name: show; }
+.frame.arriving:not(.waits):not(.failed) .f-glyph { color: var(--holo-hi); }
+.frame.waits .fx-outline rect { stroke: var(--amber-hi); }   /* a frame that waits traces in its own colour */
+.frame.waits .fx-tick { border-color: var(--amber-hi); }
+/* while another frame is lit, an arriving one traces in LINE_FOCUS: one thing stays bright */
+#board.has-lit .frame.arriving .fx-outline rect { stroke: var(--line-focus); }
+#board.has-lit .frame.arriving .fx-tick { border-color: var(--line-focus); }
+#board.has-lit .frame.arriving .f-glyph { color: var(--holo-lo); }
+
+/* ---- changed: one light runs once round the border, then CHANGED stays ---- */
+.frame.lap .fx-light { display: block; }
+.fx-light rect {
+  stroke: var(--holo-hi); stroke-width: 2; stroke-dasharray: 8 92;
+  filter: drop-shadow(0 0 4px var(--holo-hi));
+}
+.frame.lap .fx-light rect { animation: lap calc(900ms * var(--k)) linear both; }
+@keyframes lap { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -100; } }

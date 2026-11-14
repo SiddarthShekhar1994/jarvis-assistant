@@ -127,6 +127,7 @@ from . import (alive, approvals_view, brief_view, briefing_view, context_view, f
                transcript_view, voice_fx)
 from . import dock as dock_mod
 from . import holo, home, hud
+from .board import view as board_view
 from . import live as _live
 from . import orb as orb_mod
 from . import pictures as _pictures
@@ -639,7 +640,7 @@ def _keeps_space(widget: QWidget | None) -> bool:
     """Space belongs to this focus widget, not to the reading view's play / pause shortcut: a
     button (pressed, then clicked on release) or a text field such as Ask Jarvis's bar (it types a
     space). The read-only transcript is neither, so Space there still plays and pauses."""
-    if isinstance(widget, (QAbstractButton, QLineEdit, QPlainTextEdit)):
+    if isinstance(widget, (QAbstractButton, QLineEdit, QPlainTextEdit)) or board_view.keeps_space(widget):
         return True
     return isinstance(widget, QTextEdit) and not widget.isReadOnly()
 

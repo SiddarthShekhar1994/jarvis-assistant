@@ -1,0 +1,836 @@
+"""The board's host (the new look, part 3; PLAN section 3, DESIGN-SPEC sections 3, 5 and 8): ONE locked-down web view
+inside the main window, on the page snapshots' web engine, showing Jarvis's own page of frames, and the native tile in
+its place when it can't be.
+
+    BoardView(parent)     the board. start() (also on the first show) starts it START_DELAY_MS later, never on the
+                          window's first paint: Chromium's first start holds the GUI thread for a second or more. In:
+                          apply(message) (board.protocol.check_message: typed, size-capped, checked again by the page;
+                          queued until the page is ready), set_motion(level). Out: one typed signal per request the page
+                          made and Python accepted - ready, layoutChanged(BoardLayout), frameFocused(id),
+                          openRequested(id), closeRequested(id), pinRequested(id, on), bringBackRequested(id),
+                          retryRequested(id), approvalsRequested(id). When the web engine is missing (no QtWebEngine 6.8+,
+                          no scheme), refuses to start (a sandbox turned off, unsafe flags), the page does not say it is
+                          ready within READY_TIMEOUT_MS, or its renderer stops more than MAX_RESTARTS times, it shows
+                          BoardFallback by itself and emits unavailable(reason): no web view and no renderer are left
+    BoardBridge           the one object the page sees on its web channel: post(kind, payload), checked against
+                          board.protocol (the kinds on the list, the frame ids the app sent); anything else dropped and
+                          counted (a log line names the kind only when it is on the list, else "unknown")
+    BoardFallback         the native tile: "The board can't start on this PC. Answers still show here as text."
+    WindowKeysFilter      on the view's focus proxy (re-installed on every focus and when the renderer restarts): the
+                          window's keys (WINDOW_KEYS) still fire with the focus in the page
+    keeps_space(widget)   True inside the board: Space scrolls it, as in a text field, and never plays or pauses the
+                          briefing (ui._keeps_space)
+
+The lockdown, on top of the web engine's own (snapshot_engine.ensure_engine: Chromium's sandbox, every name resolving to
+nothing, its proxy at Jarvis's network gate or a dead address, audio muted, GPU off): a profile of its own, off the
+record (no cache, no cookie kept, nothing on disk); a request interceptor that lets only the board's own files through
+(jarvis-board://board/...: the page itself as the main frame only, and its styles, scripts, fonts and pictures) and the
+page's data: pictures, and blocks everything else, counted by scheme; the page's own content security policy (the <meta>
+in board.html); web settings from snapshot_engine's lists with local storage off; navigation only to the board when this
+view asks for it; no window, dialog, file picker, download, permission (every one denied), clipboard, context menu,
+drop or dev tools. The page's console text is counted, never kept or logged.
+
+Logging: kinds, counts, durations and reason words only; never a frame's words, a payload or an address.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+from collections import Counter, deque
+from collections.abc import Callable, Collection
+from dataclasses import dataclass
+from typing import Any
+
+from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QThread, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
+
+from .. import holo, hud, snapshot_engine, snapshots
+from . import protocol, scheme
+
+logger = logging.getLogger(__name__)
+
+START_DELAY_MS = 300          # after start() (the first show): the window paints before Chromium starts
+READY_TIMEOUT_MS = 10_000     # the page says it is ready within this, from its load, else the fallback
+MAX_RESTARTS = 2              # renderer stops the board loads the page again after, before it falls back
+QUEUE_CAP = 64                # messages kept while the page is not ready yet (the oldest go first)
+POSTS_PER_S = 40              # requests of the page a second, at most ...
+LAYOUTS_PER_S = 12            # ... layout ones among them (the page sends at most 10; a little slack for timing)
+PAD = 15                      # the view's inner pad (DESIGN-SPEC 2.1): the fallback tile keeps the frames' left edge
+
+CANT_START = "The board can't start on this PC. Answers still show here as text."
+READ_ONLY_BELOW = "Read-only tiles below"     # badge role (caps), only with read-only tiles under the tile
+
+# Why the board fell back (unavailable(reason)), besides snapshots.reason_kind's words.
+NO_SCHEME = "no_scheme"       # jarvis-board: was not registered before the QApplication
+NO_READY = "no_ready"         # the page did not say it was ready in time
+LOAD_FAILED = "load_failed"   # the page did not load
+CRASHED = "crashed"           # its renderer stopped more than MAX_RESTARTS times
+
+# The window's keys (the Dock's Ctrl+1 .. Ctrl+9 and Ctrl+, , Find Ctrl+K, Ask Ctrl+Space, mute Ctrl+M, the board's
+# Ctrl+B; Ctrl+8 is the Desktop switch): with the focus in the page they still go to the window.
+WINDOW_KEYS = (Qt.Key.Key_1, Qt.Key.Key_2, Qt.Key.Key_3, Qt.Key.Key_4, Qt.Key.Key_5, Qt.Key.Key_6, Qt.Key.Key_7,
+               Qt.Key.Key_8, Qt.Key.Key_9, Qt.Key.Key_Comma, Qt.Key.Key_K, Qt.Key.Key_Space, Qt.Key.Key_M, Qt.Key.Key_B)
+_WINDOW_KEY_CODES = frozenset(int(key.value) for key in WINDOW_KEYS)
+
+_IDLE, _WAITING, _LOADING, _READY, _FALLBACK, _SHUT = "idle", "waiting", "loading", "ready", "fallback", "shut"
+_OWN_REASONS = frozenset({NO_SCHEME, NO_READY, LOAD_FAILED, CRASHED})
+# Address schemes as a log line may name them (anything else is "other": a scheme is the page's choice of words).
+_SCHEME_WORDS = frozenset({"http", "https", "ws", "wss", "ftp", "file", "data", "blob", "about", "javascript",
+                           "filesystem", "chrome", "qrc", "jarvis-task", scheme.SCHEME})
+_REFUSALS = (("fileSystemAccessRequested", "reject"), ("desktopMediaRequested", "cancel"),
+             ("webAuthUxRequested", "cancel"), ("registerProtocolHandlerRequested", "reject"),
+             ("fullScreenRequested", "reject"), ("certificateError", "rejectCertificate"),
+             ("selectClientCertificate", "selectNone"))
+
+
+@dataclass(frozen=True)
+class BoardLayout:
+    """Where the frames are in the view (layoutChanged): (id, top, height) each, in px; ``scrolling`` while the board
+    scrolls (the cue line hides), then once more when it has stopped."""
+
+    places: tuple[tuple[str, int, int], ...]
+    scrolling: bool = False
+
+
+def is_window_key(key: Any, modifiers: Any) -> bool:
+    """True for Ctrl and one of WINDOW_KEYS (the keypad's digits too), nothing else held."""
+    try:
+        code = int(key.value) if hasattr(key, "value") else int(key)
+        held = Qt.KeyboardModifier(modifiers) & ~Qt.KeyboardModifier.KeypadModifier
+        return held == Qt.KeyboardModifier.ControlModifier and code in _WINDOW_KEY_CODES
+    except Exception:  # noqa: BLE001 - not a key this knows: not the window's
+        return False
+
+
+def _scheme_word(text: Any) -> str:
+    word = str(text or "").casefold()
+    return word if word in _SCHEME_WORDS else "other"
+
+
+def _reason_word(reason: str) -> str:
+    return reason if reason in _OWN_REASONS else snapshots.reason_kind(reason)
+
+
+def _alive(item: Any) -> bool:
+    try:
+        import shiboken6
+
+        return item is not None and bool(shiboken6.isValid(item))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _event_loop_running() -> bool:
+    try:
+        return QThread.currentThread().loopLevel() > 0
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _quietly(step: Callable[[], Any]) -> None:
+    try:
+        step()
+    except Exception:  # noqa: BLE001 - an object already gone never stops the next step
+        pass
+
+
+# --------------------------------------------------------------------------
+# The bridge: the page's one way back
+# --------------------------------------------------------------------------
+
+class BoardBridge(QObject):
+    """The one object the page sees on its web channel, as "bridge": one slot, post(kind, payload).
+
+    Each post is checked (board.protocol.check_request: a kind on the list, a small JSON payload of its fields, frame ids
+    the app sent - ``known()``) and handed to ``deliver`` as a protocol.Request; anything else is dropped and counted, as
+    are posts past POSTS_PER_S a second (LAYOUTS_PER_S for layout). The web channel offers every QObject's public slots,
+    deleteLater among them: a deleteLater the page asks for is refused (counted) until release(). Nothing else of
+    Jarvis's is on the channel: no property or signal of its own; ``counts`` and ``deliver`` are plain Python."""
+
+    def __init__(self, parent: QObject | None = None, *, known: Callable[[], Collection[str]] = frozenset,
+                 deliver: Callable[[protocol.Request], None] | None = None, counts: Counter[str] | None = None,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        super().__init__(parent)
+        self._known = known
+        self._deliver = deliver
+        self._clock = clock
+        self._counts: Counter[str] = counts if counts is not None else Counter()
+        self._posts: deque[float] = deque()
+        self._layouts: deque[float] = deque()
+        self._logged: set[tuple[str, str]] = set()
+        self._may_delete = False
+
+    def counts(self) -> dict[str, int]:
+        """accepted:<kind> / dropped:<kind or unknown> / why:<reason> / refused:delete (counts only)."""
+        return dict(self._counts)
+
+    def release(self) -> None:
+        """Jarvis's own teardown: from now on the bridge may be deleted later."""
+        self._may_delete = True
+
+    def event(self, event: QEvent) -> bool:  # noqa: D102 - Qt override
+        if event.type() == QEvent.Type.DeferredDelete and not self._may_delete:
+            self._counts["refused:delete"] += 1    # the page called bridge.deleteLater(): the bridge stays
+            return True
+        return super().event(event)
+
+    @Slot(str, str)
+    def post(self, kind: str, payload: str) -> None:
+        """A request of the page: checked, then delivered, or dropped and counted. Never raises."""
+        word = protocol.kind_word(kind)
+        try:
+            if not self._admit(kind):
+                self._drop(word, "rate")
+                return
+            request = protocol.check_request(kind, payload, self._known())
+        except protocol.Refused as refused:
+            self._drop(word, refused.reason)
+            return
+        except Exception as exc:  # noqa: BLE001 - a post never raises into the channel
+            self._drop(word, "error")
+            logger.debug("Board: a request was not read (%s)", type(exc).__name__)
+            return
+        self._counts[f"accepted:{request.kind}"] += 1
+        if self._deliver is not None:
+            try:
+                self._deliver(request)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Board: a request was not handled (%s)", type(exc).__name__)
+
+    def _admit(self, kind: Any) -> bool:
+        now = self._clock()
+        windows = [(self._posts, POSTS_PER_S)]
+        if kind == "layout":
+            windows.append((self._layouts, LAYOUTS_PER_S))
+        for window, cap in windows:
+            while window and now - window[0] >= 1.0:
+                window.popleft()
+            if len(window) >= cap:
+                return False
+        for window, _cap in windows:
+            window.append(now)
+        return True
+
+    def _drop(self, word: str, reason: str) -> None:
+        self._counts[f"dropped:{word}"] += 1
+        self._counts[f"why:{reason}"] += 1
+        if (word, reason) not in self._logged:   # once each: a page that keeps trying never floods the log
+            self._logged.add((word, reason))
+            logger.info("Board: a request of the page was dropped (%s, %s)", word, reason)
+
+
+# --------------------------------------------------------------------------
+# The fallback tile
+# --------------------------------------------------------------------------
+
+class BoardFallback(QWidget):
+    """The native tile in the board's place when its web view can't start (DESIGN-SPEC 3.6): a warning glyph and
+    CANT_START, and READ_ONLY_BELOW under it while read-only tiles show below (set_tiles_below; a later part draws
+    them). Plain text, painted from holo's tokens; never the focus."""
+
+    GLYPH = 18
+    PAD_X, PAD_Y, GAP = 14, 12, 12
+
+    def __init__(self, parent: QWidget | None = None, *, tiles_below: bool = False) -> None:
+        super().__init__(parent)
+        self.setObjectName("boardFallback")
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setAccessibleName(CANT_START)
+        self._words = hud.make_label(CANT_START, holo.font("body_sm"), holo.INK_1, wrap=True, name="boardCantStart")
+        self._below = hud.make_label(holo.role_text("badge", READ_ONLY_BELOW), holo.font("badge"), holo.INK_4,
+                                     name="boardReadOnlyBelow")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(self.PAD_X + self.GLYPH + self.GAP, self.PAD_Y, self.PAD_X, self.PAD_Y)
+        layout.setSpacing(4)
+        layout.addWidget(self._words)
+        layout.addWidget(self._below)
+        self._below.setVisible(bool(tiles_below))
+
+    def words(self) -> tuple[str, str]:
+        """(the sentence, the line under it or "" while it is hidden)."""
+        return self._words.text(), self._below.text() if not self._below.isHidden() else ""
+
+    def set_tiles_below(self, shown: bool) -> None:
+        self._below.setVisible(bool(shown))
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+            path = QPainterPath()
+            path.addRoundedRect(rect, holo.RADIUS_FRAME, holo.RADIUS_FRAME)
+            painter.fillPath(path, QColor(holo.RAISED))
+            painter.setPen(QPen(holo.LINE, 1.0))
+            painter.drawPath(path)
+            holo.paint_icon(painter, QRectF(self.PAD_X, self.PAD_Y + 1, self.GLYPH, self.GLYPH), "warning", holo.STEEL)
+        finally:
+            painter.end()
+
+
+# --------------------------------------------------------------------------
+# The window's keys
+# --------------------------------------------------------------------------
+
+class WindowKeysFilter(QObject):
+    """Installed on the board's view and its focus proxy: refuses ShortcutOverride for the window's keys (so their
+    shortcuts fire with the focus in the page, whatever Chromium would keep), and asks for the proxy to be checked when
+    the focus comes in or the view's children change (a renderer that restarts brings a new proxy)."""
+
+    def __init__(self, parent: QObject, check: Callable[[], None]) -> None:
+        super().__init__(parent)
+        self._check = check
+        self.view: QObject | None = None   # the view itself: the override goes on up to it too, counted once
+        self.refused = 0                   # window keys sent on to the window from the page
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt override
+        try:
+            kind = event.type()
+            if kind == QEvent.Type.ShortcutOverride:
+                if is_window_key(event.key(), event.modifiers()):
+                    event.ignore()                 # not the page's: the window's shortcut fires
+                    if watched is not self.view:
+                        self.refused += 1
+                    return True
+            elif kind in (QEvent.Type.FocusIn, QEvent.Type.ChildPolished):
+                self._check()
+            elif kind == QEvent.Type.ChildAdded:
+                QTimer.singleShot(0, self, self._check)   # the view sets its new proxy right after adding it
+        except Exception as exc:  # noqa: BLE001 - a filter never raises into Qt
+            logger.debug("Board: the key filter failed (%s)", type(exc).__name__)
+        return False
+
+
+# --------------------------------------------------------------------------
+# The board
+# --------------------------------------------------------------------------
+
+_PAGE_CLASS: list[Any] = []
+
+
+def _page_class() -> Any:
+    """The board's QWebEnginePage (made on first use, once the engine is ready): snapshot_engine's Page (no dialog, no
+    file picker) that navigates only where the view lets it, opens no window and counts its console messages."""
+    if not _PAGE_CLASS:
+        base = snapshot_engine.engine_classes().Page
+
+        class BoardPage(base):  # type: ignore[valid-type, misc]
+            """See _page_class."""
+
+            def __init__(self, profile: Any, parent: QObject, navigation: Callable[[QUrl, bool], bool],
+                         note: Callable[[str], None]) -> None:
+                super().__init__(profile, parent)
+                self._navigation = navigation
+                self._note = note
+
+            def acceptNavigationRequest(self, url: QUrl, _type: Any, is_main_frame: bool) -> bool:  # noqa: N802
+                try:
+                    return bool(self._navigation(url, bool(is_main_frame)))
+                except Exception:  # noqa: BLE001 - unsure: refused
+                    return False
+
+            def createWindow(self, _type: Any) -> Any:  # noqa: N802
+                _quietly(lambda: self._note("refused:window"))
+                return None
+
+            def javaScriptConsoleMessage(self, level: Any, *_text: Any) -> None:  # noqa: N802 - counted, never kept
+                word = str(getattr(level, "name", "") or "").replace("MessageLevel", "").casefold() or "message"
+                _quietly(lambda: self._note(f"console:{word}"))
+
+        _PAGE_CLASS.append(BoardPage)
+    return _PAGE_CLASS[0]
+
+
+class BoardView(QWidget):
+    """The board: one web view on Jarvis's own page, or BoardFallback (see the module doc). GUI thread only."""
+
+    ready = Signal()
+    layoutChanged = Signal(object)         # BoardLayout
+    frameFocused = Signal(str)
+    openRequested = Signal(str)
+    closeRequested = Signal(str)
+    pinRequested = Signal(str, bool)
+    bringBackRequested = Signal(str)
+    retryRequested = Signal(str)
+    approvalsRequested = Signal(str)
+    unavailable = Signal(str)              # the reason word (no_engine, sandbox, unsafe_flags, no_ready, ...)
+
+    def __init__(self, parent: QWidget | None = None, *, start_delay_ms: int = START_DELAY_MS,
+                 ready_timeout_ms: int = READY_TIMEOUT_MS, engine: Callable[[], str] | None = None,
+                 scheme_ready: Callable[[], bool] | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("board")
+        self._engine = engine or snapshot_engine.ensure_engine
+        self._scheme_ready = scheme_ready or scheme.scheme_ready
+        self._start_delay_ms = max(0, int(start_delay_ms))
+        self._ready_timeout_ms = max(1, int(ready_timeout_ms))
+        self._phase = _IDLE
+        self._reason = ""
+        self._known: set[str] = set()
+        self._queue: deque[str] = deque()
+        self._motion = holo.motion_level()
+        self._counts: Counter[str] = Counter()
+        self._requests: Counter[str] = Counter()
+        self._allowed: Counter[str] = Counter()
+        self._blocked: Counter[str] = Counter()
+        self._served: Counter[str] = Counter()
+        self._logged: set[str] = set()
+        self._restarts = 0
+        self._load_pending = False
+        self._began = 0.0
+        self._was_ready = False
+        self._types: dict[str, Any] = {}
+        self._main_world = 0
+        self._view: Any = None
+        self._page: Any = None
+        self._profile: Any = None
+        self._channel: Any = None
+        self._bridge: BoardBridge | None = None
+        self._interceptor: Any = None
+        self._handler: Any = None
+        self._proxy: Any = None
+        self._fallback: BoardFallback | None = None
+        self._fallback_box: QWidget | None = None
+        self._keys = WindowKeysFilter(self, self._check_proxy)
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(0)
+        self._start_timer = QTimer(self)
+        self._start_timer.setSingleShot(True)
+        self._start_timer.timeout.connect(self._begin)
+        self._ready_timer = QTimer(self)
+        self._ready_timer.setSingleShot(True)
+        self._ready_timer.timeout.connect(self._on_ready_timeout)
+        holo.motion_settings().changed.connect(self._on_reduced_motion)
+
+    def __repr__(self) -> str:
+        return f"BoardView(phase={self._phase!r}, frames={len(self._known)}, reason={self._reason!r})"
+
+    # ---- public --------------------------------------------------------------------------------------------------
+
+    def start(self) -> None:
+        """Start the board START_DELAY_MS from now (idempotent; the first show calls it too)."""
+        if self._phase == _IDLE:
+            self._phase = _WAITING
+            self._start_timer.start(self._start_delay_ms)
+
+    def is_ready(self) -> bool:
+        """The page is up and takes messages at once (before, they wait in a short queue)."""
+        return self._phase == _READY
+
+    def unavailable_reason(self) -> str:
+        """Why the board fell back to BoardFallback ("" while it can work)."""
+        return self._reason
+
+    def fallback(self) -> BoardFallback | None:
+        return self._fallback
+
+    def web_view(self) -> Any:
+        """The one QWebEngineView (None before it starts and after it fell back or shut down)."""
+        return self._view
+
+    def motion(self) -> str:
+        return self._motion
+
+    def known_ids(self) -> frozenset[str]:
+        """The ids of the frames the app sent (the page's requests must name one of them)."""
+        return frozenset(self._known)
+
+    def counts(self) -> dict[str, Any]:
+        """Counts only: messages sent / refused, the page's requests (accepted / dropped), the requests the interceptor
+        allowed and blocked by scheme, the files served and refused, the refusal hooks, the page's console messages and
+        the window's keys sent on."""
+        data: dict[str, Any] = dict(self._counts)
+        data.update(self._requests)
+        data["allowed"] = dict(self._allowed)
+        data["blocked"] = dict(self._blocked)
+        data["served"] = dict(self._served)
+        data["keys_sent_on"] = self._keys.refused
+        return data
+
+    def apply(self, message: Any) -> bool:
+        """Send ``message`` to the page (board.protocol.check_message; the page checks it again). False when it was
+        refused (counted, with the reason word in the log) or the board can't take it (fallen back, shut down). Before
+        the page is ready, messages wait (at most QUEUE_CAP)."""
+        if self._phase in (_FALLBACK, _SHUT):
+            self._counts["dropped:unavailable"] += 1
+            return False
+        try:
+            checked = protocol.check_message(message, self._known)
+        except protocol.Refused as refused:
+            self._counts[f"refused:{refused.reason}"] += 1
+            self._log_once(f"refused:{refused.reason}", "Board: a message was refused (%s)", refused.reason)
+            return False
+        if checked.type == "frame":
+            self._known.add(checked.frame_id)
+        elif checked.type == "remove":
+            self._known.discard(checked.frame_id)
+        elif checked.type == "clear":
+            self._known.clear()
+        self._counts[f"sent:{checked.type}"] += 1
+        if self._phase == _READY:
+            self._run(checked.text)
+        else:
+            if len(self._queue) >= QUEUE_CAP:
+                self._queue.popleft()
+                self._counts["dropped:queue"] += 1
+            self._queue.append(checked.text)
+        return True
+
+    def set_motion(self, level: str) -> bool:
+        """The motion the page plays: "lively", "calm" (x1.6) or "off" (each moment's end state at once), as holo's
+        ``[ui] motion`` with reduced motion (anything else is lively). Sent again whenever the page comes up."""
+        text = str(level or "").strip().casefold()
+        self._motion = text if text in protocol.MOTION_LEVELS else holo.MOTION_LIVELY
+        if self._phase == _READY:
+            self._run(protocol.check_message({"type": "motion", "level": self._motion}).text)
+        return self._phase not in (_FALLBACK, _SHUT)
+
+    def shutdown(self) -> None:
+        """Jarvis closes (also without an event loop): the page, its renderer, profile and channel go now."""
+        if self._phase == _SHUT:
+            return
+        self._phase = _SHUT
+        self._start_timer.stop()
+        self._ready_timer.stop()
+        self._queue.clear()
+        self._teardown()
+        if self._blocked:
+            logger.info("Board: closed (requests blocked: %s)",
+                        ", ".join(f"{word} {count}" for word, count in sorted(self._blocked.items())))
+
+    # ---- Qt ------------------------------------------------------------------------------------------------------
+
+    def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().showEvent(event)
+        self.start()
+
+    # ---- starting ------------------------------------------------------------------------------------------------
+
+    def _begin(self) -> None:
+        if self._phase != _WAITING:
+            return
+        if not self._scheme_ready():
+            self._fall_back(NO_SCHEME)
+            return
+        reason = self._engine()
+        if reason:
+            self._fall_back(reason)
+            return
+        try:
+            self._build()
+        except Exception as exc:  # noqa: BLE001 - the engine said yes but the page could not be made
+            logger.warning("Board: the page could not be set up (%s)", type(exc).__name__)
+            self._fall_back(snapshots.R_ENGINE_FAILED)
+            return
+        self._load()
+
+    def _build(self) -> None:
+        """The profile, page, view and channel (the engine is ready)."""
+        from PySide6.QtWebChannel import QWebChannel
+        from PySide6.QtWebEngineCore import QWebEngineScript, QWebEngineUrlRequestInfo
+
+        classes = snapshot_engine.engine_classes()
+        kinds = QWebEngineUrlRequestInfo.ResourceType
+        self._types = {
+            "main": frozenset(getattr(kinds, name) for name in ("ResourceTypeMainFrame",
+                                                                  "ResourceTypeNavigationPreloadMainFrame")
+                              if hasattr(kinds, name)),
+            "files": frozenset((kinds.ResourceTypeStylesheet, kinds.ResourceTypeScript, kinds.ResourceTypeFontResource,
+                                kinds.ResourceTypeImage)),
+            "image": kinds.ResourceTypeImage,
+        }
+        self._main_world = int(QWebEngineScript.ScriptWorldId.MainWorld.value)
+        profile = snapshot_engine.private_profile(None)
+        if profile is None:
+            raise RuntimeError("the profile is not off the record")
+        self._profile = profile
+        # Held here: Qt only points at the interceptor, and an unreferenced Python one would check nothing.
+        self._interceptor = classes.Interceptor(self._judge, profile)
+        profile.setUrlRequestInterceptor(self._interceptor)
+        self._handler = scheme.handler(profile)
+        self._served = self._handler.counts
+        profile.installUrlSchemeHandler(scheme.SCHEME_BYTES, self._handler)
+        # Nothing on the page downloads (no link, no navigation but the board's own): a download that started anyway
+        # is cancelled. No download folder is made: nothing of the board is ever on disk.
+        profile.downloadRequested.connect(lambda download: self._refuse("downloads", download, "cancel"))
+        snapshot_engine.apply_web_settings(profile.settings(), local_storage=False)
+        view = classes.QWebEngineView(self)
+        view.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+        view.setAcceptDrops(False)
+        view.setAccessibleName("Board")
+        page = _page_class()(profile, view, self._accept_navigation, self._count)
+        profile.setParent(page)        # the profile goes with its page, after it (Qt: never before)
+        page.setBackgroundColor(QColor(0, 0, 0, 0))   # the window's ground shows through between the frames
+        page.setAudioMuted(True)
+        self._connect(page, profile)
+        channel = QWebChannel(page)
+        bridge = BoardBridge(page, known=lambda: self._known, deliver=self._on_request, counts=self._requests)
+        channel.registerObject("bridge", bridge)
+        page.setWebChannel(channel, self._main_world)
+        view.setPage(page)
+        self._view, self._page, self._channel, self._bridge = view, page, channel, bridge
+        self._layout.addWidget(view)
+        self._keys.view = view
+        view.installEventFilter(self._keys)
+        app = QApplication.instance()
+        if app is not None:
+            app.focusChanged.connect(self._on_focus_changed)
+
+    def _connect(self, page: Any, profile: Any) -> None:
+        page.renderProcessTerminated.connect(self._on_renderer_gone)
+        page.loadFinished.connect(self._on_loaded)
+        if hasattr(page, "permissionRequested"):          # Qt 6.8+
+            page.permissionRequested.connect(lambda permission: self._refuse("permissions", permission, "deny"))
+        if hasattr(page, "featurePermissionRequested"):   # the older API, while it is there
+            page.featurePermissionRequested.connect(lambda origin, feature: self._deny_feature(page, origin, feature))
+        for signal_name, method in _REFUSALS:
+            signal = getattr(page, signal_name, None)
+            if signal is not None:
+                signal.connect(lambda request, name=signal_name, how=method: self._refuse(name, request, how))
+        # Sign-in prompts: the authenticator is left empty, so the request is refused.
+        page.authenticationRequired.connect(lambda *_args: self._count("refused:authentication"))
+        page.proxyAuthenticationRequired.connect(lambda *_args: self._count("refused:authentication"))
+        page.newWindowRequested.connect(lambda _request: self._count("refused:new_window"))
+
+    def _load(self) -> None:
+        self._phase = _LOADING
+        self._began = time.monotonic()
+        self._load_pending = True
+        self._ready_timer.start(self._ready_timeout_ms)
+        self._page.load(QUrl(scheme.BOARD_URL))
+
+    # ---- the page's hooks (GUI thread; never raise) ----------------------------------------------------------------
+
+    def _count(self, name: str) -> None:
+        self._counts[name] += 1
+
+    def _refuse(self, name: str, request: Any, method: str) -> None:
+        self._counts[f"refused:{name}"] += 1
+        _quietly(lambda: getattr(request, method)())
+
+    def _deny_feature(self, page: Any, origin: Any, feature: Any) -> None:
+        self._counts["refused:features"] += 1
+        _quietly(lambda: page.setFeaturePermission(origin, feature, type(page).PermissionPolicy.PermissionDeniedByUser))
+
+    def _judge(self, info: Any) -> bool:
+        """The interceptor: True blocks the request. Allowed: the board's own files in scheme.FILES (the page itself
+        only as the main frame; the others only as a style, script, font or picture) and the page's data: pictures.
+        Counted by scheme."""
+        try:
+            url = info.requestUrl()
+            word = _scheme_word(url.scheme())
+            kind = info.resourceType()
+            allowed = False
+            if not info.isDownload():
+                if word == scheme.SCHEME and url.host() == scheme.HOST:
+                    name = scheme.board_file(url)
+                    if kind in self._types["main"]:
+                        allowed = name == scheme.PAGE
+                    else:
+                        allowed = bool(name) and name != scheme.PAGE and kind in self._types["files"]
+                elif word == "data":
+                    allowed = kind == self._types["image"]
+            (self._allowed if allowed else self._blocked)[word] += 1
+            return not allowed
+        except Exception:  # noqa: BLE001 - unsure: blocked
+            self._blocked["other"] += 1
+            return True
+
+    def _accept_navigation(self, url: QUrl, main_frame: bool) -> bool:
+        """Only the board, as the main frame, when this view asked for it (its load, or the reload after the renderer
+        stopped): never the page's own navigation, not even to itself."""
+        if main_frame and self._load_pending and scheme.board_file(url) == scheme.PAGE:
+            self._load_pending = False
+            return True
+        self._counts["refused:navigation"] += 1
+        return False
+
+    def _on_loaded(self, ok: bool) -> None:
+        self._check_proxy()
+        if not ok and self._phase == _LOADING and not self._load_pending:
+            self._fall_back(LOAD_FAILED)
+
+    def _on_ready_timeout(self) -> None:
+        if self._phase == _LOADING:
+            self._fall_back(NO_READY)
+
+    def _on_renderer_gone(self, status: Any, _code: Any = 0) -> None:
+        if self._phase not in (_LOADING, _READY) or self._page is None:
+            return
+        word = str(getattr(status, "name", "") or "").replace("TerminationStatus", "").casefold() or "stopped"
+        self._counts["renderer_stopped"] += 1
+        self._restarts += 1
+        if self._restarts > MAX_RESTARTS:
+            self._fall_back(CRASHED)
+            return
+        logger.info("Board: the page's renderer stopped (%s); loading the board again (%d of %d)", word,
+                    self._restarts, MAX_RESTARTS)
+        self._phase = _LOADING
+        self._ready_timer.stop()
+        self._check_proxy()                          # and again once the new renderer brings its new proxy
+        QTimer.singleShot(0, self, self._reload)
+
+    def _reload(self) -> None:
+        if self._phase == _LOADING and self._page is not None and _alive(self._page):
+            self._load()
+            self._check_proxy()
+
+    # ---- the page's requests ---------------------------------------------------------------------------------------
+
+    def _on_request(self, request: protocol.Request) -> None:
+        if self._phase in (_FALLBACK, _SHUT):
+            self._counts["dropped:closed"] += 1      # a page on its way out (its deletion is deferred) asks nothing
+            return
+        kind = request.kind
+        if kind == "ready":
+            self._on_ready()
+        elif kind == "layout":
+            self.layoutChanged.emit(BoardLayout(request.places, request.scrolling))
+        elif kind == "focus":
+            self.frameFocused.emit(request.frame_id)
+        elif kind == "open":
+            self.openRequested.emit(request.frame_id)
+        elif kind == "close":
+            self.closeRequested.emit(request.frame_id)
+        elif kind == "pin":
+            self.pinRequested.emit(request.frame_id, request.on)
+        elif kind == "bring_back":
+            self.bringBackRequested.emit(request.frame_id)
+        elif kind == "retry":
+            self.retryRequested.emit(request.frame_id)
+        elif kind == "go_approvals":
+            self.approvalsRequested.emit(request.frame_id)
+
+    def _on_ready(self) -> None:
+        if self._phase != _LOADING or self._load_pending:
+            self._counts["dropped:ready_again"] += 1     # one ready per load of the page
+            return
+        self._ready_timer.stop()
+        took = int((time.monotonic() - self._began) * 1000)
+        again = self._was_ready
+        self._phase = _READY
+        self._was_ready = True
+        logger.info("Board: page ready in %d ms%s", took, " (after its renderer stopped)" if again else "")
+        self._run(protocol.check_message({"type": "motion", "level": self._motion}).text)
+        while self._queue:
+            self._run(self._queue.popleft())
+        self._check_proxy()
+        self.ready.emit()
+
+    def _run(self, text: str) -> None:
+        """One checked message into the page, in its main world (where board.js and the web channel are)."""
+        page = self._page
+        if page is None:
+            return
+        try:
+            page.runJavaScript(f"board.apply({json.dumps(text)});", self._main_world)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Board: a message was not delivered (%s)", type(exc).__name__)
+
+    def _on_reduced_motion(self, _reduced: bool) -> None:
+        self.set_motion(holo.motion_level())
+
+    # ---- keys ------------------------------------------------------------------------------------------------------
+
+    def _check_proxy(self) -> None:
+        """The view's focus proxy has the key filter (a renderer that restarts brings a new one): installed again each
+        time (Qt keeps one copy)."""
+        view = self._view
+        if view is None or not _alive(view):
+            return
+        try:
+            view.installEventFilter(self._keys)
+            proxy = view.focusProxy()
+            if proxy is not None and proxy is not self._proxy:
+                old, self._proxy = self._proxy, proxy
+                if _alive(old):
+                    old.removeEventFilter(self._keys)
+                self._counts["key_filter:proxies"] += 1
+            if proxy is not None:
+                proxy.installEventFilter(self._keys)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Board: the key filter was not installed (%s)", type(exc).__name__)
+
+    def _on_focus_changed(self, _old: Any, now: Any) -> None:
+        view = self._view
+        if view is not None and now is not None and _alive(view) and (now is view or view.isAncestorOf(now)):
+            self._check_proxy()
+
+    # ---- falling back, tearing down --------------------------------------------------------------------------------
+
+    def _fall_back(self, reason: str) -> None:
+        if self._phase in (_FALLBACK, _SHUT):
+            return
+        word = _reason_word(reason)
+        self._phase = _FALLBACK
+        self._reason = word
+        self._start_timer.stop()
+        self._ready_timer.stop()
+        self._queue.clear()
+        self._teardown()
+        box = QWidget(self)
+        box_layout = QVBoxLayout(box)
+        box_layout.setContentsMargins(PAD, 0, PAD, 0)
+        box_layout.setSpacing(0)
+        self._fallback = BoardFallback(box)
+        box_layout.addWidget(self._fallback)
+        box_layout.addStretch(1)
+        self._fallback_box = box
+        self._layout.addWidget(box)
+        box.show()
+        logger.info("Board: it can't start on this PC (%s)", word)
+        self.unavailable.emit(word)
+
+    def _teardown(self) -> None:
+        """No page, renderer, profile or channel is left (deleted now when no event loop runs any more)."""
+        view, page, bridge, proxy = self._view, self._page, self._bridge, self._proxy
+        self._view = self._page = self._profile = self._channel = self._bridge = None
+        self._interceptor = self._handler = self._proxy = None
+        self._keys.view = None
+        self._load_pending = False
+        app = QApplication.instance()
+        if app is not None and view is not None:
+            _quietly(lambda: app.focusChanged.disconnect(self._on_focus_changed))
+        if _alive(proxy):
+            _quietly(lambda: proxy.removeEventFilter(self._keys))
+        if _alive(bridge):
+            bridge.release()
+        if _alive(page):
+            _quietly(lambda: page.triggerAction(type(page).WebAction.Stop))
+        if _alive(view):
+            _quietly(lambda: view.removeEventFilter(self._keys))
+            self._layout.removeWidget(view)
+            view.hide()
+            if _event_loop_running():
+                view.deleteLater()        # its page with it, and the page's profile and channel after the page
+            else:
+                import shiboken6
+
+                shiboken6.delete(view)
+
+    def _log_once(self, key: str, text: str, *args: Any) -> None:
+        if key in self._logged:
+            logger.debug(text, *args)
+        else:
+            self._logged.add(key)
+            logger.info(text, *args)
+
+
+def keeps_space(widget: QWidget | None) -> bool:
+    """True for the board and anything inside it (its web view's focus proxy): Space there scrolls the board, as in a
+    text field, and never plays or pauses the briefing (ui._keeps_space)."""
+    hops = 0
+    while widget is not None and hops < 64:
+        if isinstance(widget, BoardView):
+            return True
+        widget = widget.parentWidget()
+        hops += 1
+    return False
+
+
+__all__ = ["BoardBridge", "BoardFallback", "BoardLayout", "BoardView", "CANT_START", "MAX_RESTARTS", "READY_TIMEOUT_MS",
+           "READ_ONLY_BELOW", "START_DELAY_MS", "WINDOW_KEYS", "WindowKeysFilter", "is_window_key", "keeps_space"]
