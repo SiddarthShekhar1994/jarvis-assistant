@@ -12,6 +12,8 @@ spoken line, and a standing Reply's check at click time.
         on_activation(message) {"cmd": "standing", "runs": [...]} from a background check: read again now, announce
         has_news() / announce()   --standing-show: anything to tell, and telling it
         on_screen_shown()      the Agents screen was seen: its Dock dot goes, the runs on it count as told
+        on_sign_in(alias, stage, problem, message)   the app's sign-in of an account moved on (ui: open in the
+                               browser, signed in, or not): a draft's row and setup card say so
         reply_wait(action)     True while a standing Reply's thread is being checked again (Send goes on by itself
                                when it passes; the card says why when it does not)
         shutdown()
@@ -22,6 +24,17 @@ The screen's answers
     agent, Edit: the cursor after them, nothing selected). The screen is built again whenever it comes up, so a
     sign-in made elsewhere shows at once. A card put away with Not now (consent, a tidy-up's sign-in) leaves a line
     whose link brings it back.
+
+Sign in <alias>
+    A draft's row and its setup card have Sign in <alias> for each account the job reads that is not signed in to
+    Jarvis (Turn on waits for it after the consent, and a rule's dry run reads that mail). The click starts that
+    account's own Google sign-in, the app's (AppController._start_sign_in: a card's Sign in and the Day view's Connect
+    start the same one; the owner signs in, in the browser, and answers the app's question about which Google account
+    it is). Meanwhile the button is off and the row and card say "Finish the sign-in in your browser..."; then, for
+    SCREEN_NOTE_FOR, whether it signed in (and what comes next: Turn on is ready, or the next step), was cancelled or
+    failed, with the app's own words. No new path to Google: it is the app's own sign-in, and what the screen says is
+    what the app heard from it (ui.AppController._on_account_connect calls on_sign_in). While a sign-in of one of its
+    accounts is open (again after the question's "No, use another account"), a draft's Turn on waits.
 
 Loading run files
     Files no older than keep_days. Reports and receipts show only for runs started after the last Clear; a cleared
@@ -70,6 +83,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 
 from . import holo, standing_setup
 from .actions import CALENDAR, REPLY, SOURCE_STANDING, STANDING_MODES, STATUS_DENIED, TODO, ProposedAction
+from .google_auth import PROBLEM_DENIED, logged_alias
 from .standing import cards as standing_cards
 from .standing import schedule
 from .standing import tidy as tidy_mod
@@ -79,8 +93,8 @@ from .standing.model import (KIND_AGENT, KIND_RULE, STATUS_DRAFT, STATUS_LIVE, S
 from .standing.store import (AppState, Definitions, RunFiles, RunRequests, StandingFiles, Usage, parse_stamp,
                              read_runner_state)
 from .standing.setup import SetupRefused, check_words
-from .standing_view import (LOOK_AMBER, LOOK_DANGER, LOOK_GHOST, LOOK_GO, ActivityRow, AgentsInfo, CardButton,
-                            JobRow, NoticeCard, ReportRow)
+from .standing_view import (LOOK_AMBER, LOOK_DANGER, LOOK_GHOST, LOOK_GO, SIGN_IN_TEXT, ActivityRow, AgentsInfo,
+                            CardButton, JobRow, NoticeCard, ReportRow)
 from .text_prep import format_time
 
 logger = logging.getLogger(__name__)
@@ -123,6 +137,15 @@ SETUP_FAILED_TEXT = "Jarvis couldn't set that up just now; try again."
 INSTALLER_TEXT = ("Background runs: run install-schedule.ps1 again (README, step 6). It adds the \"Briefing agents\" "
                   "task, which checks every 5 minutes, also while Jarvis is closed.")
 CONSENT_CARD, SETUP_CARD, START_CARD = "consent", "setup", "start"
+SIGN_IN_ACTION = "signin:"        # + the alias: the setup card's Sign in <alias>
+SIGN_IN_RUNNING = "Finish the sign-in in your browser..."
+SIGNED_IN_TEXT = "The {alias} account is signed in."
+TURN_ON_READY = "Turn on is ready."
+SIGN_IN_CANCELLED = "The {alias} account's sign-in was cancelled, or Google did not allow it"
+SIGN_IN_FAILED = "The {alias} account's sign-in did not finish"
+SIGN_IN_AGAIN = "Click Sign in {alias} to try again."
+SIGN_IN_BUSY = "An approval is on its way to Google: click Sign in {alias} again in a moment."
+SIGN_IN_UNKNOWN = "Jarvis has no {alias} account in config.toml; nothing changed."
 START_LINES = (
     "A rule watches new mail from one sender and does one thing with each match: a to-do, an event, a reply draft, "
     "or a star, label or archive.",
@@ -360,6 +383,16 @@ def _start_runner(origin: str = "now") -> bool:
     return bool(entry._start_detached(["--standing-run", "--origin", origin], executable=entry._windowless_python()))
 
 
+@dataclass(frozen=True)
+class SignInSaid:
+    """How an account's last sign-in went, as a draft's row and setup card say it (memory only)."""
+
+    signed: bool                   # it ended signed in (or it was signed in already)
+    text: str                      # else what to say (the app's own words: no address)
+    at: datetime                   # said for SCREEN_NOTE_FOR from then
+    seq: int = 0                   # the newest one of a job's accounts is said
+
+
 # ---------------------------------------------------------------------------------------------------------------
 # The controller
 # ---------------------------------------------------------------------------------------------------------------
@@ -421,6 +454,8 @@ class StandingController(QObject):
         self._tidy_later: set[str] = set()
         self._tidy_busy: set[str] = set()
         self._tidy_refused: dict[str, str] = {}               # receipt key -> why its Undo was refused (memory)
+        self._sign_in_said: dict[str, SignInSaid] = {}       # alias -> how its last sign-in went (memory)
+        self._said_seq = 0
         self._tidyUndone.connect(self._on_tidy_undone)
         self._tidySigned.connect(self._on_tidy_signed)
         self._replyChecked.connect(self._on_reply_checked)
@@ -430,6 +465,7 @@ class StandingController(QObject):
         stage.cardAction.connect(self._on_card)
         stage.dryRunRequested.connect(self.dry_run)
         stage.turnOnRequested.connect(self.turn_on)
+        stage.signInRequested.connect(self._on_row_sign_in)
         stage.runNowRequested.connect(self.run_now)
         stage.pauseRequested.connect(self.toggle_pause)
         stage.deleteRequested.connect(self.delete_job)
@@ -806,15 +842,18 @@ class StandingController(QObject):
             meta.append("Run now asked")
         live_or_paused = agent.status in (STATUS_LIVE, STATUS_PAUSED)
         detail = agent_detail(agent, hour24)
-        problem = self._turn_on_problem(agent) if agent.status == STATUS_DRAFT else ""
-        if agent.status == STATUS_DRAFT:
+        draft = agent.status == STATUS_DRAFT
+        problem = self._turn_on_problem(agent, edit=False) if draft else ""
+        if draft:
             meta.append("Not on yet")
-            detail = f"{detail}\n{problem}" if problem else detail
+            line = self._sign_in_line(agent, problem) or problem
+            detail = f"{detail}\n{line}" if line else detail
         return JobRow(agent.id, KIND_AGENT, agent.name, detail=detail,
                       meta=f" {DOT} ".join(meta), status=agent.status, status_text=STATUS_WORDS.get(agent.status, ""),
                       can_run=agent.status == STATUS_LIVE and consented and not paused_all,
                       can_pause=live_or_paused, paused=agent.status == STATUS_PAUSED,
-                      can_turn_on=agent.status == STATUS_DRAFT, turn_on_tip=problem, tooltip=agent.words)
+                      can_turn_on=draft, turn_on_tip=self._turn_on_tip(agent, problem), tooltip=agent.words,
+                      sign_ins=self._sign_in_buttons(agent) if draft else ())
 
     def _rule_row(self, rule: Rule, now: datetime, today: Any, hour24: bool) -> JobRow:
         meta = []
@@ -830,8 +869,17 @@ class StandingController(QObject):
         live_or_paused = rule.status in (STATUS_LIVE, STATUS_PAUSED) and self._busy != f"dry:{rule.id}"
         if rule.status == STATUS_DRAFT:
             meta.append("Try it with Dry run before it can go on")
-        problem = self._turn_on_problem(rule) if rule.status == STATUS_TRIED else ""
-        detail = f"{rule.sentence}\n{problem}" if problem else rule.sentence
+        not_on = rule.status in (STATUS_DRAFT, STATUS_TRIED)
+        problem = self._turn_on_problem(rule, edit=False) if not_on else ""
+        line = ""
+        if not_on:
+            # A draft's next step is its Dry run (its meta says so), which reads the account's mail: only a sign-in
+            # it waits for shows on its row; a tried rule's row says why Turn on waits.
+            missing = standing_setup.signed_out(rule, self._accounts())
+            own = (problem if rule.status == STATUS_TRIED else
+                   standing_setup.sign_in_first(missing, edit=False) if missing else "")
+            line = self._sign_in_line(rule, problem) or own
+        detail = f"{rule.sentence}\n{line}" if line else rule.sentence
         if rule.tidy.kind and not standing_setup.can_tidy(self.config, rule.account):
             # Its setup card said so; once it is on, the row says it (else "Stars what it matches" reads as done).
             detail += f"\nIts tidy-up waits until the {rule.account} account has the gmail_tidy feature in config.toml."
@@ -840,7 +888,8 @@ class StandingController(QObject):
                       status=rule.status, status_text=STATUS_WORDS.get(rule.status, ""), can_pause=live_or_paused,
                       paused=rule.status == STATUS_PAUSED, can_dry_run=not self._busy,
                       can_turn_on=rule.status == STATUS_TRIED and self._busy != f"dry:{rule.id}",
-                      turn_on_tip=problem, tooltip=rule.sentence)
+                      turn_on_tip=self._turn_on_tip(rule, problem) if rule.status == STATUS_TRIED else "",
+                      tooltip=rule.sentence, sign_ins=self._sign_in_buttons(rule) if not_on else ())
 
     def _activity(self, now: datetime, hour24: bool) -> tuple[list[ActivityRow], list[ReportRow]]:
         rows: list[ActivityRow] = []
@@ -995,18 +1044,131 @@ class StandingController(QObject):
             self.app_state.mark("withdrawn", ids, self._now())
         return ids
 
+    def _accounts(self) -> Mapping[str, Any]:
+        return getattr(self.host, "_google_accounts", None) or {}
+
     def _signed_in(self, alias: str) -> bool:
-        account = (getattr(self.host, "_google_accounts", None) or {}).get(alias)
+        return standing_setup.signed_in(self._accounts().get(alias))
+
+    def _turn_on_problem(self, job: Agent | Rule, *, edit: bool = True) -> str:
+        """Why Turn on can't go yet ("" when it can). A draft's row says it on itself, and its Turn on is off, as
+        the setup card's is (a click would change nothing on the screen). ``edit``: the setup card's words."""
+        return standing_setup.turn_on_problem(job, self.config, self._accounts(), self.app_state.consented(),
+                                              edit=edit)
+
+    # ---- Sign in <alias>: the app's own sign-in of one account ------------------------------------------------
+
+    def _signing(self, alias: str | None = None) -> bool:
+        """The app's browser sign-in (``alias``: that account's) is queued or open."""
         try:
-            return account is not None and bool(account.is_signed_in())
-        except Exception:  # noqa: BLE001 - unknown: not signed in
+            return bool(self.host._signing_in(alias))
+        except Exception:  # noqa: BLE001 - unknown: none
             return False
 
-    def _turn_on_problem(self, job: Agent | Rule) -> str:
-        """Why Turn on can't go yet ("" when it can). A draft's row says it on itself, and its Turn on is off, as
-        the setup card's is (a click would change nothing on the screen)."""
-        accounts = getattr(self.host, "_google_accounts", None) or {}
-        return standing_setup.turn_on_problem(job, self.config, accounts, self.app_state.consented())
+    def _signing_job(self, job: Agent | Rule) -> bool:
+        """A sign-in of an account ``job`` reads is open (after "No, use another account" too): Turn on waits."""
+        return any(self._signing(alias) for alias in job.accounts)
+
+    def _turn_on_tip(self, job: Agent | Rule, problem: str) -> str:
+        return problem or (SIGN_IN_RUNNING if self._signing_job(job) else "")
+
+    def _sign_in_buttons(self, job: Agent | Rule) -> tuple[tuple[str, bool], ...]:
+        """(alias, enabled) of each account ``job`` reads that is not signed in: all off while a sign-in is open (the
+        app opens one at a time)."""
+        busy = self._signing()
+        return tuple((alias, not busy) for alias in standing_setup.signed_out(job, self._accounts()))
+
+    def _sign_in_line(self, job: Agent | Rule, next_step: str, *, edit: bool = False) -> str:
+        """What a draft's row or setup card says of its accounts' sign-in ("" when nothing): one open in the browser
+        (its own, or another that keeps its Sign in off), else how the last one went (SCREEN_NOTE_FOR): signed in,
+        then ``next_step`` (Turn on's problem now, or Turn on is ready); cancelled or failed (said while that account
+        still waits for its sign-in)."""
+        missing = standing_setup.signed_out(job, self._accounts())
+        if self._signing_job(job) or (missing and self._signing()):
+            return SIGN_IN_RUNNING
+        now = self._now()
+        latest: tuple[str, SignInSaid] | None = None
+        for alias in job.accounts:
+            said = self._sign_in_said.get(alias)
+            if said is None or now - said.at > SCREEN_NOTE_FOR or (said.signed == (alias in missing)):
+                continue                                  # old, or no longer true
+            if latest is None or said.seq > latest[1].seq:
+                latest = (alias, said)
+        if latest is None:
+            return ""
+        alias, said = latest
+        if said.signed:
+            return f"{SIGNED_IN_TEXT.format(alias=alias)} {next_step or TURN_ON_READY}"
+        return said.text + (" Or Edit and name another account." if edit else "")
+
+    def _say_sign_in(self, alias: str, signed: bool, text: str = "") -> None:
+        self._said_seq += 1
+        self._sign_in_said[alias] = SignInSaid(signed, text, self._now(), self._said_seq)
+
+    def _on_row_sign_in(self, _job_id: str, alias: str) -> None:
+        self.sign_in(alias)
+
+    def sign_in(self, alias: str) -> None:
+        """Sign in <alias> (a draft's row or its setup card): that account's own Google sign-in, the app's
+        (AppController._start_sign_in, as a card's Sign in and the Day view's Connect); the owner signs in, in the
+        browser. Its row and card say "Finish the sign-in in your browser..." until on_sign_in hears how it went;
+        a click that can't start it says why there."""
+        host = self.host
+        if self._closed or getattr(host, "state", "") == _quitting_state():
+            return
+        self._sign_in_said.pop(alias, None)
+        if self._signed_in(alias) or self._signing():
+            self._show()                                  # signed in meanwhile, or a sign-in is open (they say so)
+            return
+        why = ""
+        if alias not in self._aliases():
+            why = SIGN_IN_UNKNOWN.format(alias=alias)
+        elif host._send_hold is not None or host._jobs:
+            why = SIGN_IN_BUSY.format(alias=alias)        # the worker does one thing at a time: a Send, an approval
+        elif alias not in (getattr(host, "_calendars", None) or {}) or host._start_calendar() is None:
+            from .executor import CALENDAR_SETUP_NOTE
+
+            why = f"{CALENDAR_SETUP_NOTE}; nothing changed."  # the app signs an account in through its calendar
+        if why:
+            self._say_sign_in(alias, False, why)
+            logger.info("Standing: the %s account's sign-in did not start", logged_alias(alias))
+            self._show()
+            return
+        logger.info("Standing: the %s account's sign-in, from the Agents screen", logged_alias(alias))
+        host._start_sign_in(alias)
+        self._show()
+
+    def on_sign_in(self, alias: str, stage: str, problem: str = "", message: str = "") -> None:
+        """The app's sign-in of ``alias`` moved on (ui.AppController._on_account_connect, whoever started it): open in
+        the browser, or over: signed in (or it was already), or not (cancelled, failed, the old sign-in kept). The
+        screen is built again: a draft's row and setup card say it (``message``: the app's own words, no address)."""
+        if self._closed:
+            return
+        from .ui import _CONNECT_KEPT, _CONNECT_READY, _CONNECT_SIGN_IN, _CONNECT_SIGNED_IN
+
+        try:
+            if stage == _CONNECT_SIGN_IN:
+                self._sign_in_said.pop(alias, None)     # a new try (again after "No, use another account")
+            elif stage in (_CONNECT_SIGNED_IN, _CONNECT_READY):
+                self._say_sign_in(alias, True)
+                dialog = getattr(self.host, "_account_dialog", None)
+                if dialog is not None and getattr(dialog, "alias", "") == alias:
+                    # The app asks which Google account it is: its answer is heard at once ("No, use another
+                    # account" opens the sign-in again, and Turn on waits for it).
+                    dialog.finished.connect(lambda _result=0: None if self._closed else self._show())
+            else:
+                if stage == _CONNECT_KEPT:
+                    text = f"{(message or SIGN_IN_FAILED.format(alias=alias)).rstrip('.')}."
+                else:
+                    why = (SIGN_IN_CANCELLED.format(alias=alias) if problem == PROBLEM_DENIED else
+                           message.rstrip(". ") or SIGN_IN_FAILED.format(alias=alias))
+                    text = f"{why}; nothing changed."
+                if not self._signed_in(alias):
+                    text += " " + SIGN_IN_AGAIN.format(alias=alias)
+                self._say_sign_in(alias, False, text)
+            self._show()
+        except Exception as exc:  # noqa: BLE001 - the screen keeps what it showed
+            logger.warning("Standing: a sign-in's end could not be shown (%s)", type(exc).__name__)
 
     def _cards_of(self, job_id: str) -> list[str]:
         waiting = self._waiting_ids()
@@ -1492,10 +1654,14 @@ class StandingController(QObject):
         job = self._jobs().get(job_id)
         if job is None or job.status not in (STATUS_DRAFT, STATUS_TRIED, STATUS_PAUSED):
             return
-        accounts = getattr(self.host, "_google_accounts", None) or {}
-        problem = standing_setup.turn_on_problem(job, self.config, accounts, self.app_state.consented())
+        accounts = self._accounts()
+        on_card = self._setup is not None and self._setup.job is not None and self._setup.job.id == job_id
+        problem = self._turn_on_problem(job, edit=on_card)
+        if not problem and self._signing_job(job):
+            self._show()                                  # its account's sign-in is open: the row and card say so
+            return
         if problem:
-            if self._setup is not None and self._setup.job is not None and self._setup.job.id == job_id:
+            if on_card:
                 self._setup = replace(self._setup, note=problem)
                 self._show()
             else:
@@ -1577,7 +1743,9 @@ class StandingController(QObject):
         if card_id != SETUP_CARD or self._setup is None:
             return
         job = self._setup.job
-        if action == "dry" and job is not None:
+        if action.startswith(SIGN_IN_ACTION) and job is not None:
+            self.sign_in(action[len(SIGN_IN_ACTION):])
+        elif action == "dry" and job is not None:
             self.dry_run(job.id)
         elif action == "on" and job is not None:
             self.turn_on(job.id)
@@ -1614,21 +1782,24 @@ class StandingController(QObject):
                                     (CardButton("edit", "Edit", LOOK_GO), CardButton("dismiss", "Dismiss", LOOK_GHOST)),
                                     tone=holo.TONE_STEEL))
             return cards
-        accounts = getattr(self.host, "_google_accounts", None) or {}
         lines = list(standing_setup.job_lines(job, self.config, self._hour24()))
         if draft.say:
             lines.append(f"Jarvis's note: {draft.say}")
         if draft.dry is not None:
             lines += list(standing_setup.dry_lines(job, draft.dry)) if isinstance(job, Rule) else []
         lines.append(standing_setup.PRIVACY_LINE)
-        problem = standing_setup.turn_on_problem(job, self.config, accounts, consented)
+        problem = self._turn_on_problem(job)              # the card's words: its Edit can name another account
         busy = draft.busy == "dry"
-        buttons = []
+        not_on = job.status in (STATUS_DRAFT, STATUS_TRIED)
+        # Sign in <alias> first: Turn on waits for it, and a rule's dry run reads that account's mail.
+        buttons = [CardButton(SIGN_IN_ACTION + alias, SIGN_IN_TEXT.format(alias=alias), LOOK_GO,
+                              enabled=enabled and not busy) for alias, enabled in self._sign_in_buttons(job)]
         if isinstance(job, Rule):
             buttons.append(CardButton("dry", "Dry run again" if job.dry_run is not None else "Dry run", LOOK_GO,
                                       enabled=not busy))
-        if job.status in (STATUS_DRAFT, STATUS_TRIED):
-            buttons.append(CardButton("on", "Turn on", LOOK_AMBER, enabled=not problem and not busy, tip=problem))
+        if not_on:
+            tip = self._turn_on_tip(job, problem)
+            buttons.append(CardButton("on", "Turn on", LOOK_AMBER, enabled=not tip and not busy, tip=tip))
             buttons += [CardButton("edit", "Edit", LOOK_GHOST, enabled=not busy),
                         CardButton("discard", "Discard", LOOK_DANGER, enabled=not busy)]
             kicker = ("New rule" if isinstance(job, Rule) else "New agent") + f" {DOT} check it first"
@@ -1638,11 +1809,13 @@ class StandingController(QObject):
             buttons.append(CardButton("dismiss", "Close", LOOK_GHOST, enabled=not busy))
             kicker = f"{'Rule' if isinstance(job, Rule) else 'Agent'} {DOT} {STATUS_WORDS.get(job.status, '').lower()}"
         said = draft.note
-        if (isinstance(job, Rule) and said == standing_setup.sign_in_first(job.account)
-                and self._signed_in(job.account)):
-            said = ""                                 # a dry run's "sign in first", done since: what comes next shows
-        note = ("Trying it on your recent mail..." if busy else said or
-                (problem if job.status in (STATUS_DRAFT, STATUS_TRIED) else ""))
+        if isinstance(job, Rule) and said == standing_setup.sign_in_first(job.account):
+            if self._signed_in(job.account):
+                said = ""                             # a dry run's "sign in first", done since: what comes next shows
+            elif not not_on:
+                said = standing_setup.sign_in_first(job.account, edit=False)   # a live rule's card has no Edit
+        signing = self._sign_in_line(job, problem if not_on else "Click Dry run again.", edit=not_on)
+        note = ("Trying it on your recent mail..." if busy else signing or said or (problem if not_on else ""))
         cards.append(NoticeCard(SETUP_CARD, kicker, job.name, tuple(lines), tuple(buttons), note=note))
         return cards
 
@@ -1862,3 +2035,9 @@ def _reading_state() -> str:
     from .ui import STATE_READING
 
     return STATE_READING
+
+
+def _quitting_state() -> str:
+    from .ui import STATE_QUITTING
+
+    return STATE_QUITTING

@@ -8327,6 +8327,11 @@ class AppController(QObject):
     def _on_account_connect(self, alias: str, stage: str, message: str, problem: str) -> None:
         if self.state == STATE_QUITTING or self._connect_alias != alias:
             return
+        self._account_connect_stage(alias, stage, message, problem)
+        if getattr(self, "standing", None) is not None:   # the Agents screen's Sign in <alias> hears how it went
+            self.standing.on_sign_in(alias, stage, problem, message)
+
+    def _account_connect_stage(self, alias: str, stage: str, message: str, problem: str) -> None:
         self._live_sign_in(alias, stage, message)
         personal = alias == DEFAULT_ACCOUNT
         if stage == _CONNECT_SIGN_IN:

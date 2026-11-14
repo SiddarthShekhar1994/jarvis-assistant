@@ -2929,7 +2929,12 @@ rules read the mail they watch, on their own", with what that means (see
 say yes nothing runs and Turn on waits. Turn on also needs each account the
 job reads mail from signed in, and records which Google account each one is:
 if that account name is later signed in as another Google account, the job's
-cards are not shown and its tidy-up stops.
+cards are not shown and its tidy-up stops. A draft's row and its setup card
+show **Sign in work** (the account's name) for each account that is not
+signed in to Jarvis yet (a rule's dry run reads that mail too, so it comes
+first): it opens that account's Google sign-in in your browser, the same one
+a card's **Sign in** opens, and the row and card say "Finish the sign-in in
+your browser..." until it is done, then whether it signed in or why not.
 
 **When they run.** A timed agent at its times on its days (by the local date
 and clock, so a daylight-saving night neither skips nor repeats a run; a time
@@ -5687,11 +5692,14 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
   couldn't save the agents and rules"). Put back a good copy (or use the newer
   version again) and Jarvis reads it within 30 seconds; deleting it removes
   every agent and rule.
-- **Turn on does nothing** (or is greyed out on the setup card): Jarvis says
-  why, in the button's tooltip or a short note: your yes on the consent card
-  first ("First say yes on the card above"), a rule's **Dry run** first, or
-  one of the job's accounts is not signed in yet (Turn on records which
-  Google account it is).
+- **Turn on does nothing** (or is greyed out): Jarvis says why, on the row
+  or setup card and in the button's tooltip: your yes on the consent card
+  first ("First say yes on the card above"), then each account the job reads
+  signed in ("Sign the work account in first: click Sign in work."; Turn on
+  records which Google account it is), then a rule's **Dry run**. **Sign in
+  work** opens that account's own sign-in; if it says the sign-in was
+  cancelled or did not finish, click it again (or **Edit** the draft and name
+  another account).
 - **How things stand, without the app**: `py -3.13 -m briefing_reader
   --standing-check` prints whether they are on, the consent and Pause all,
   each job's id, trigger, next run and runs today, the last check, a hold and

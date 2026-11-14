@@ -25,9 +25,9 @@ from briefing_reader.speech import KIND_NOTICE
 from briefing_reader.standing.model import STATUS_LIVE, STATUS_PAUSED
 from briefing_reader.standing.store import AppState, Definitions, RunRequests
 from tests.standing_fakes import (AGENT_ID, AGENT_NAME, PAT, REPORT, RULE_ID, RULE_NAME, SENTENCE, STANDING_ON,
-                                  SUBJECT, THREAD, ThreadReader, agent_data, card_receipt, consent, files_of,
-                                  own_message, pat_message, reply_record, rule_data, run_paths, save_jobs,
-                                  tell_receipt, thread_of, todo_record, write_run)
+                                  SUBJECT, THREAD, CalendarAccount, ThreadReader, agent_data, card_receipt, consent,
+                                  files_of, hold_sign_in, own_message, pat_message, reply_record, rule_data, run_paths,
+                                  save_jobs, tell_receipt, thread_of, todo_record, write_run)
 from tests.ui_fakes import NOW, AppHarness, fonts, settle, wait_for
 
 _app: QApplication | None = None
@@ -367,6 +367,56 @@ class ScreenTests(_Base):
                          [(standing_ui.RUN_LINES["nothing"], "Nothing new"),
                           (standing_ui.FIRST_LOOK_LINE, "Nothing new")])
         self.assertEqual(self.said(), [])                               # shown, never said
+
+
+class DraftSignInTests(_Base):
+    """The owner's state after a restart: consent given, personal signed in, work not, and a draft agent from
+    standing.json that reads both (no setup card: its row is where Turn on waits)."""
+
+    def prepare(self, config) -> None:
+        save_jobs(config, agents=[agent_data(status="draft", mail=[{"account": "personal", "query": f"from:{PAT}"},
+                                                                   {"account": "work", "query": f"from:{PAT}"}])])
+        consent(config)
+
+    def setUp(self) -> None:
+        super().setUp()
+        calendars = self.app.calendars
+        calendars["work"].signed_in = False
+        self.c._google_accounts = {"personal": CalendarAccount(calendars["personal"], "sub-personal-1"),
+                                   "work": CalendarAccount(calendars["work"], "sub-work-1")}
+        self.c.window.reading.set_tab(ui.SCREEN_AGENTS)
+        self.s.reload()
+        settle()
+
+    def test_sign_in_work_on_the_row_then_turn_on_then_run_now(self) -> None:
+        stage = self.c.window.reading.agents_stage
+        self.assertIsNone(stage.notice_card(standing_ui.SETUP_CARD))
+        row = stage.job_row(AGENT_ID)
+        self.assertEqual([button.text() for button in row.buttons()], ["Sign in work", "Turn on", "Delete"])
+        self.assertIn("Sign the work account in first: click Sign in work.", row.detail_label.text())
+        done = hold_sign_in(self.app.calendars["work"])
+        row.sign_in_button("work").click()
+        settle()
+        self.assertIn(standing_ui.SIGN_IN_RUNNING, stage.job_row(AGENT_ID).detail_label.text())
+        done.set()
+        self.assertTrue(wait_for(lambda: not self.c._signing_in(), 5.0))
+        settle()
+        row = stage.job_row(AGENT_ID)
+        self.assertIn("The work account is signed in. Turn on is ready.", row.detail_label.text())
+        row.turn_on_button.click()
+        settle()
+        row = stage.job_row(AGENT_ID)
+        self.assertEqual(row.badge.text(), "LIVE")
+        self.assertEqual(row.sign_in_buttons, [])
+        row.run_button.click()
+        settle()
+        self.assertEqual(RunRequests(files_of(self.app.config)).pending(), [AGENT_ID])
+        self.assertEqual(self.started, [True])
+
+    def test_a_live_agents_row_has_no_sign_in(self) -> None:
+        save_jobs(self.app.config, agents=[agent_data(mail=[{"account": "work", "query": f"from:{PAT}"}])])
+        self.s.reload()                                                 # live, with work signed out
+        self.assertEqual(self.c.window.reading.agents_stage.job_row(AGENT_ID).sign_in_buttons, [])   # drafts only
 
 
 class FallbackTests(_Base):

@@ -3,12 +3,15 @@
 "agent:" / "rule:" in the bar and an Ask's planner hand-off start ONE setup run on the owner's own words; what it made
 is a draft on the Agents screen's setup card (Dry run, Turn on, Edit, Discard). A rule goes on only after its dry run
 (Gmail's own count first: a filter that would read nearly everything stops before any Claude run). Turn on needs the
-one-time consent card's yes and records each account's Google account. "run <name>" is an agent's Run now. Qt runs
-offscreen; the setup and rule runs are fakes, nothing reaches Google or claude.exe, no process is started.
+one-time consent card's yes and records each account's Google account; an account not signed in gets its Sign in
+<alias> on the draft's row and setup card, which starts the app's own sign-in of that account (on the action worker,
+whose fake calendars never open a browser). "run <name>" is an agent's Run now. Qt runs offscreen; the setup and rule
+runs are fakes, nothing reaches Google or claude.exe, no process is started.
 """
 
 from __future__ import annotations
 
+import threading
 import unittest
 from datetime import timedelta
 from typing import Any
@@ -16,7 +19,7 @@ from typing import Any
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from briefing_reader import standing_ui, ui
+from briefing_reader import standing_setup, standing_ui, ui
 from briefing_reader.ask import cli
 from briefing_reader.ask.routes import ROUTE_STANDING, RouteFlags, route
 from briefing_reader.standing.engine import KIND_RULE, KIND_SETUP, StandingResult
@@ -24,9 +27,10 @@ from briefing_reader.standing.model import STATUS_DRAFT, STATUS_LIVE, STATUS_TRI
 from briefing_reader.standing.rules import Result, RuleAnswer
 from briefing_reader.standing.store import AppState, Definitions, RunRequests, Usage
 from tests.ask_fakes import plan_stream
-from tests.standing_fakes import AGENT_NAME, STANDING_ON, agent_data, consent, files_of, save_jobs
+from tests.standing_fakes import (AGENT_NAME, STANDING_ON, CalendarAccount, agent_data, consent, files_of,
+                                  hold_sign_in, save_jobs)
 from tests.test_standing_google import FakeReader, message
-from tests.ui_fakes import NOW, AppHarness, fonts, settle
+from tests.ui_fakes import NOW, AppHarness, fonts, settle, wait_for
 
 _app: QApplication | None = None
 
@@ -41,6 +45,9 @@ AGENT_ANSWER = {"kind": "agent", "say": "A morning agent.", "name": "Morning mai
                 "agent": {"trigger": {"kind": "time", "times": ["07:30"], "weekdays": []},
                           "mail": [{"account": "work", "query": "from:pat.example@example.org"}],
                           "proposes": ["todo"], "report": "every_run"}}
+BOTH_ANSWER = {**AGENT_ANSWER, "agent": {**AGENT_ANSWER["agent"],
+                                         "mail": [{"account": "personal", "query": "from:pat.example@example.org"},
+                                                  {"account": "work", "query": "from:pat.example@example.org"}]}}
 
 
 def setUpModule() -> None:
@@ -131,6 +138,7 @@ class RouteTests(unittest.TestCase):
 class SetupTests(_Base):
 
     def test_rule_in_the_bar_makes_a_draft_on_the_setup_card(self) -> None:
+        self.c._google_accounts = {"work": Account("sub-work-1")}      # signed in: what waits is its dry run
         self.engine.answers.append(RULE_ANSWER)
         self.type("rule: " + WORDS)
         (kind, model, prompt), = self.engine.runs
@@ -353,6 +361,31 @@ class DryRunAndTurnOnTests(_Base):
         self.assertTrue(row.turn_on_button.isEnabled())
         self.assertNotIn("Sign the work account in first", row.detail_label.text())
 
+    def test_a_draft_rule_signs_its_account_in_before_its_dry_run(self) -> None:
+        work = self.app.calendars["work"]
+        work.signed_in = False
+        self.c._google_accounts = {"work": CalendarAccount(work, "sub-work-1")}
+        self.s.reload()
+        card = self.card()
+        self.assertEqual(card.note_label.text(),
+                         "Sign the work account in first: click Sign in work. Or Edit and name another account.")
+        self.assertEqual([button.property("action") for button in card.buttons()],
+                         ["signin:work", "dry", "on", "edit", "discard"])
+        rule_id = Definitions(files_of(self.app.config)).load()[1][0].id
+        row = self.c.window.reading.agents_stage.job_row(rule_id)
+        self.assertIn("Sign the work account in first: click Sign in work.", row.detail_label.text())
+        self.assertEqual([button.text() for button in row.buttons()], ["Sign in work", "Dry run", "Delete"])
+        done = hold_sign_in(work)
+        row.sign_in_button("work").click()
+        settle()
+        done.set()
+        self.assertTrue(wait_for(lambda: not self.c._signing_in(), 5.0))
+        settle()
+        signed = "The work account is signed in. " + standing_setup.DRY_RUN_FIRST     # what comes next
+        self.assertEqual(self.card().note_label.text(), signed)
+        self.assertIn(signed, self.c.window.reading.agents_stage.job_row(rule_id).detail_label.text())
+        self.assertIn(("sign_in",), work.calls)
+
     def test_turn_on_records_the_google_account_and_goes_live(self) -> None:
         self.engine.answers.append(RuleAnswer({1: Result(False), 2: Result(True, {"amount": "$40.00"})}))
         self.card().button("dry").click()
@@ -365,6 +398,175 @@ class DryRunAndTurnOnTests(_Base):
         self.assertEqual((rule.status, rule.bindings), (STATUS_LIVE, (("work", "sub-work-1"),)))
         self.assertIsNone(self.card())
         self.assertEqual(self.c.window.reading.agents_stage.job_row(rule.id).badge.text(), "LIVE")
+
+
+class SignInWordsTests(unittest.TestCase):
+
+    def test_the_words_name_the_button_never_the_day_view(self) -> None:
+        self.assertEqual(standing_setup.sign_in_first("work"),
+                         "Sign the work account in first: click Sign in work. Or Edit and name another account.")
+        self.assertEqual(standing_setup.sign_in_first("work", edit=False),    # a row has no Edit
+                         "Sign the work account in first: click Sign in work.")
+        self.assertEqual(standing_setup.sign_in_first(["personal", "work"], edit=False),
+                         "Sign the personal and work accounts in first: click Sign in personal and Sign in work.")
+        for words in (standing_setup.sign_in_first("work"), standing_setup.sign_in_first("work", edit=False)):
+            self.assertNotIn("Day view", words)
+            self.assertNotIn("Connect", words)
+
+
+class SignInTests(_Base):
+    """The owner's state: consent given, personal signed in, work not; a draft agent reads both."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        calendars = self.app.calendars
+        calendars["work"].signed_in = False
+        self.c._google_accounts = {"personal": CalendarAccount(calendars["personal"], "sub-personal-1"),
+                                   "work": CalendarAccount(calendars["work"], "sub-work-1")}
+        self.engine.answers.append(BOTH_ANSWER)
+        self.type("agent: " + AGENT_WORDS)
+        self.agent_id = Definitions(files_of(self.app.config)).load()[0][0].id
+
+    def row(self) -> Any:
+        return self.c.window.reading.agents_stage.job_row(self.agent_id)
+
+    def end(self, done: threading.Event) -> None:
+        """The owner finishes (or leaves) the sign-in in the browser; the app hears how it went."""
+        done.set()
+        self.assertTrue(wait_for(lambda: not self.c._signing_in(), 5.0))
+        settle()
+
+    def test_only_the_account_not_signed_in_gets_a_sign_in_named_for_it(self) -> None:
+        row, card = self.row(), self.card()
+        self.assertEqual([button.text() for button in row.buttons()], ["Sign in work", "Turn on", "Delete"])
+        self.assertEqual([button.text() for button in card.buttons()], ["Sign in work", "Turn on", "Edit", "Discard"])
+        self.assertIn("Sign the work account in first: click Sign in work.", row.detail_label.text())
+        self.assertNotIn("Edit", row.detail_label.text())                      # a row has no Edit
+        self.assertEqual(card.note_label.text(),
+                         "Sign the work account in first: click Sign in work. Or Edit and name another account.")
+        for words in (row.detail_label.text(), card.note_label.text(), row.turn_on_button.toolTip()):
+            self.assertNotIn("Day view", words)
+        self.assertFalse(row.turn_on_button.isEnabled())
+        self.assertFalse(card.button("on").isEnabled())
+
+    def test_sign_in_starts_that_accounts_own_sign_in_then_turn_on_goes(self) -> None:
+        work, personal = self.app.calendars["work"], self.app.calendars["personal"]
+        done = hold_sign_in(work)
+        self.row().sign_in_button("work").click()
+        settle()
+        row, card = self.row(), self.card()
+        self.assertIn(standing_ui.SIGN_IN_RUNNING, row.detail_label.text())    # where it was clicked
+        self.assertEqual(card.note_label.text(), standing_ui.SIGN_IN_RUNNING)
+        self.assertFalse(row.sign_in_button("work").isEnabled())
+        self.assertFalse(card.button("signin:work").isEnabled())
+        self.end(done)
+        self.assertIn(("sign_in",), work.calls)                                # the app's own sign-in of work
+        self.assertNotIn(("sign_in",), personal.calls)
+        row, card = self.row(), self.card()
+        self.assertIsNone(row.sign_in_button("work"))
+        self.assertIn("The work account is signed in. Turn on is ready.", row.detail_label.text())
+        self.assertEqual(card.note_label.text(), "The work account is signed in. Turn on is ready.")
+        self.assertTrue(row.turn_on_button.isEnabled())
+        row.turn_on_button.click()
+        settle()
+        agent = Definitions(files_of(self.app.config)).load()[0][0]
+        self.assertEqual((agent.status, dict(agent.bindings)),
+                         (STATUS_LIVE, {"personal": "sub-personal-1", "work": "sub-work-1"}))
+
+    def test_a_cancelled_sign_in_says_so_and_turn_on_waits(self) -> None:
+        from briefing_reader.gcal import CalendarAuthError
+        from briefing_reader.google_auth import PROBLEM_DENIED
+
+        work = self.app.calendars["work"]
+        done = hold_sign_in(work, CalendarAuthError("Google sign-in for the work account was cancelled or access "
+                                                    "was denied", problem=PROBLEM_DENIED))
+        self.card().button("signin:work").click()                              # the setup card's, this time
+        settle()
+        self.assertEqual(self.card().note_label.text(), standing_ui.SIGN_IN_RUNNING)
+        self.end(done)
+        said = ("The work account's sign-in was cancelled, or Google did not allow it; nothing changed. Click Sign in "
+                "work to try again.")
+        row, card = self.row(), self.card()
+        self.assertIn(said, row.detail_label.text())
+        self.assertEqual(card.note_label.text(), said + " Or Edit and name another account.")
+        self.assertTrue(row.sign_in_button("work").isEnabled())                # it can be tried again
+        self.assertFalse(row.turn_on_button.isEnabled())
+        self.assertFalse(card.button("on").isEnabled())
+        self.app.clock.advance(3)                                               # later: what to do, again
+        self.s.reload()
+        self.assertIn("Sign the work account in first: click Sign in work.", self.row().detail_label.text())
+
+    def test_a_failed_sign_in_says_why_in_the_apps_words(self) -> None:
+        from briefing_reader.gcal import CalendarError
+
+        done = hold_sign_in(self.app.calendars["work"], CalendarError("Google sign-in failed (server_error)"))
+        self.row().sign_in_button("work").click()
+        settle()
+        self.end(done)
+        row = self.row()
+        self.assertIn("Google sign-in failed (server_error); nothing changed. Click Sign in work to try again.",
+                      row.detail_label.text())
+        self.assertFalse(row.turn_on_button.isEnabled())
+        self.assertEqual(Definitions(files_of(self.app.config)).load()[0][0].status, STATUS_DRAFT)
+
+    def test_the_first_sign_in_asks_which_google_account_it_is_as_everywhere(self) -> None:
+        work = self.app.calendars["work"]
+        asked = {"work": "me@example.edu"}
+        self.c._pending_account = lambda alias: asked.get(alias, "") if self.app.calendars[alias].signed_in else ""
+        self.c._executor.confirm_account = lambda alias, address: asked.pop(alias, None) is not None
+        done = hold_sign_in(work)
+        self.row().sign_in_button("work").click()
+        settle()
+        self.end(done)
+        dialog = self.c._account_dialog
+        self.assertTrue(dialog is not None and dialog.alias == "work")         # the app's own question
+        self.assertIn("The work account is signed in.", self.row().detail_label.text())
+        dialog.yes_button.click()
+        settle()
+        self.assertIsNone(self.c._account_dialog)
+        self.assertTrue(self.row().turn_on_button.isEnabled())
+
+    def test_no_use_another_account_opens_the_sign_in_again_and_turn_on_waits(self) -> None:
+        work = self.app.calendars["work"]
+        asked = {"work": "someone.else@example.org"}
+        self.c._pending_account = lambda alias: asked.get(alias, "") if self.app.calendars[alias].signed_in else ""
+        self.c._executor.confirm_account = lambda alias, address: asked.pop(alias, None) is not None
+        work.disconnect = lambda: setattr(work, "signed_in", False)            # "No": the app forgets it first
+        done = hold_sign_in(work)
+        self.row().sign_in_button("work").click()
+        settle()
+        self.end(done)
+        again = hold_sign_in(work)
+        self.c._account_dialog.no_button.click()                               # the wrong Google account
+        row = self.row()
+        self.assertIn(standing_ui.SIGN_IN_RUNNING, row.detail_label.text())    # at once: its sign-in opens again
+        self.assertFalse(row.turn_on_button.isEnabled())
+        settle()
+        self.assertFalse(self.row().turn_on_button.isEnabled())
+        asked["work"] = "me@example.edu"
+        self.end(again)
+        self.c._account_dialog.yes_button.click()
+        settle()
+        self.assertIn("The work account is signed in. Turn on is ready.", self.row().detail_label.text())
+        self.assertTrue(self.row().turn_on_button.isEnabled())
+
+    def test_one_sign_in_at_a_time(self) -> None:
+        personal, work = self.app.calendars["personal"], self.app.calendars["work"]
+        done = hold_sign_in(personal)
+        self.c.sign_in_for_mail("personal")                                     # "Allow personal mail" under the bar
+        settle()
+        row = self.row()
+        self.assertFalse(row.sign_in_button("work").isEnabled())               # one sign-in at a time ...
+        self.assertIn(standing_ui.SIGN_IN_RUNNING, row.detail_label.text())    # ... and the row says why
+        self.end(done)
+        self.assertTrue(self.row().sign_in_button("work").isEnabled())
+        self.assertNotIn(("sign_in",), work.calls)
+        self.c._jobs["card-1"] = "running"                                      # an approval on its way
+        self.row().sign_in_button("work").click()
+        settle()
+        self.assertIn(standing_ui.SIGN_IN_BUSY.format(alias="work"), self.row().detail_label.text())
+        self.assertIsNone(self.c._connect_alias)
+        del self.c._jobs["card-1"]
 
 
 class ConsentTests(_Base):

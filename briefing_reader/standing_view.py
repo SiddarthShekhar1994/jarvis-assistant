@@ -16,6 +16,8 @@ Public API
       ``deleteRequested``: the job id);
     - RULES: one row per rule with Dry run (``dryRunRequested``), Turn on (``turnOnRequested``), Pause / Resume and
       Delete;
+    - a draft's row (an agent's or a rule's) also has Sign in <alias> for each account it reads that is not signed in
+      (``signInRequested(job id, alias)``);
     - ACTIVITY: what the jobs did, newest first (the first ``shown`` rows, then "+N more"), each with Undo while it
       can be undone (``undoRequested(row key)``);
     - REPORTS: what the agents wrote, each under "Written by Claude from your mail", with Clear (``clearRequested()``).
@@ -52,6 +54,7 @@ RESUME_TEXT = "Resume"
 DELETE_TEXT = "Delete"
 DRY_RUN_TEXT = "Dry run"
 TURN_ON_TEXT = "Turn on"
+SIGN_IN_TEXT = "Sign in {alias}"
 UNDO_TEXT = "Undo"
 CLEAR_TEXT = "Clear"
 CLEAR_TIP = "Delete the reports and receipts kept on this PC (a card still waiting for your OK stays)"
@@ -92,6 +95,7 @@ class JobRow:
     turn_on_tip: str = ""        # why Turn on can't go yet (its button is off and says why), "" when it can
     can_delete: bool = True
     tooltip: str = ""
+    sign_ins: tuple[tuple[str, bool], ...] = ()   # (alias, enabled): Sign in <alias> for an account not signed in
 
 
 @dataclass(frozen=True)
@@ -226,17 +230,20 @@ def _buttons_row(buttons: Sequence[QWidget], *, left: int = 12) -> QHBoxLayout:
 
 
 class JobTile(_Tile):
-    """One agent's or rule's row: its name and status badge, what it does, a readout, and its buttons."""
+    """One agent's or rule's row: its name and status badge, what it does, a readout, and its buttons (a draft's
+    Sign in <alias> buttons after Run now's place, one per account not signed in)."""
 
     runNow = Signal(str)
     pause = Signal(str)
     delete = Signal(str)
     dryRun = Signal(str)
     turnOn = Signal(str)
+    signIn = Signal(str, str)        # job id, alias
 
     def __init__(self, info: JobRow, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._info = info
+        self.sign_in_buttons: list[holo.HoloButton] = []
         self.name_label = body_label("", "tile_title", holo.INK_1, wrap=False)
         self.name_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.badge = _Badge()
@@ -267,16 +274,40 @@ class JobTile(_Tile):
         layout.setSpacing(0)
         layout.addLayout(head)
         layout.addLayout(text)
-        layout.addLayout(_buttons_row((self.run_button, self.dry_run_button, self.turn_on_button, self.pause_button,
-                                       self.delete_button), left=16))
+        self._buttons_box = _buttons_row((self.run_button, self.dry_run_button, self.turn_on_button,
+                                          self.pause_button, self.delete_button), left=16)
+        layout.addLayout(self._buttons_box)
         self.set_info(info)
 
     def info(self) -> JobRow:
         return self._info
 
+    def _all_buttons(self) -> list[holo.HoloButton]:
+        return [self.run_button, *self.sign_in_buttons, self.dry_run_button, self.turn_on_button, self.pause_button,
+                self.delete_button]
+
     def buttons(self) -> list[holo.HoloButton]:
-        return [button for button in (self.run_button, self.dry_run_button, self.turn_on_button, self.pause_button,
-                                      self.delete_button) if not button.isHidden()]
+        return [button for button in self._all_buttons() if not button.isHidden()]
+
+    def sign_in_button(self, alias: str) -> holo.HoloButton | None:
+        return next((button for button in self.sign_in_buttons if button.property("alias") == alias), None)
+
+    def _sync_sign_ins(self, sign_ins: tuple[tuple[str, bool], ...]) -> None:
+        """One Sign in <alias> button per account not signed in (made again only when the accounts change)."""
+        if [button.property("alias") for button in self.sign_in_buttons] != [alias for alias, _on in sign_ins]:
+            for button in self.sign_in_buttons:
+                self._buttons_box.removeWidget(button)
+                button.hide()
+                button.deleteLater()
+            self.sign_in_buttons = []
+            for index, (alias, _on) in enumerate(sign_ins):
+                button = _button(SIGN_IN_TEXT.format(alias=alias), holo.GO)
+                button.setProperty("alias", alias)
+                button.clicked.connect(lambda _checked=False, which=alias: self.signIn.emit(self._info.job_id, which))
+                self._buttons_box.insertWidget(1 + index, button)   # after Run now's place, before Dry run
+                self.sign_in_buttons.append(button)
+        for button, (_alias, enabled) in zip(self.sign_in_buttons, sign_ins):
+            button.setEnabled(enabled)
 
     def set_info(self, info: JobRow) -> None:
         self._info = info
@@ -297,8 +328,8 @@ class JobTile(_Tile):
         self.pause_button.setVisible(info.can_pause)
         self.pause_button.setText(RESUME_TEXT if info.paused else PAUSE_TEXT)
         self.delete_button.setVisible(info.can_delete)
-        for button in (self.run_button, self.dry_run_button, self.turn_on_button, self.pause_button,
-                       self.delete_button):
+        self._sync_sign_ins(info.sign_ins)
+        for button in self._all_buttons():
             button.setAccessibleName(f"{button.text()}: {info.name}")
             button.updateGeometry()
         self.updateGeometry()
@@ -502,6 +533,7 @@ class AgentsStage(QScrollArea):
     deleteRequested = Signal(str)
     dryRunRequested = Signal(str)
     turnOnRequested = Signal(str)
+    signInRequested = Signal(str, str)     # a draft row's Sign in <alias>: job id, alias
     undoRequested = Signal(str)
     clearRequested = Signal()
     pauseAllRequested = Signal()
@@ -681,6 +713,7 @@ class AgentsStage(QScrollArea):
             row.delete.connect(self.deleteRequested)
             row.dryRun.connect(self.dryRunRequested)
             row.turnOn.connect(self.turnOnRequested)
+            row.signIn.connect(self.signInRequested)
         elif name == ACTIVITY_GROUP:
             row = ActivityTile(info)
             row.undo.connect(self.undoRequested)

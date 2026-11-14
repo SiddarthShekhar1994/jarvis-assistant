@@ -1,8 +1,10 @@
-"""Builders for the app-side standing tests: definitions, run files as the runner writes them, and a fake Gmail
-reader whose threads a test sets. Every name, address, id and text is invented."""
+"""Builders for the app-side standing tests: definitions, run files as the runner writes them, a fake Gmail reader
+whose threads a test sets, and an account's sign-in as the app holds it. Every name, address, id and text is
+invented."""
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -156,3 +158,36 @@ def own_message(gmail_id: str = "msg00000a2", *, at_ms: int = 1_791_000_100_000)
 
 def thread_of(*messages: dict[str, Any]) -> dict[str, Any]:
     return gmail_thread(THREAD, list(messages))
+
+
+class CalendarAccount:
+    """The app's Google account for an alias (google_auth.GoogleAccount's surface standing uses), signed in when the
+    alias's fake calendar (tests.ui_fakes.FakeCalendar) is: in the app the two share one sign-in."""
+
+    def __init__(self, calendar: Any, sub: str, email: str = OWN_WORK) -> None:
+        self.calendar, self.sub, self.email = calendar, sub, email
+
+    def is_signed_in(self, feature: str | None = None) -> bool:
+        return bool(self.calendar.signed_in)
+
+    def binding(self) -> Any:
+        return type("Binding", (), {"sub": self.sub, "email": self.email})() if self.calendar.signed_in else None
+
+
+def hold_sign_in(calendar: Any, error: Exception | None = None) -> threading.Event:
+    """``calendar``'s browser sign-in waits for the event (the owner in the browser), then signs in, or raises
+    ``error`` as gcal does (cancelled, failed). It runs on the app's action worker, as every sign-in does; no browser
+    opens."""
+    done = threading.Event()
+    sign_in = calendar.sign_in
+
+    def held() -> None:
+        done.wait(5)
+        if error is None:
+            sign_in()
+            return
+        calendar._note("sign_in")
+        raise error
+
+    calendar.sign_in = held
+    return done

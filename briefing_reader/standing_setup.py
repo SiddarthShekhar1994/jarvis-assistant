@@ -11,9 +11,12 @@ Turn on's checks, and the words of the setup and consent cards.
         asked of Gmail), then Gmail's own count (headers, free; a filter that would read nearly everything stops
         there, before any Claude run), then the newest matches read (one message each, scrubbed) and judged in one
         run, counted like any other. Nothing is proposed, starred, labelled or archived.
-    turn_on_problem(job, config, accounts, consented) -> str
-        why Turn on can't happen yet ("" when it can): consent, a rule's dry run, each account's Google account
-    sign_in_first(alias) -> str  what to do while that account is not signed in to Jarvis
+    turn_on_problem(job, config, accounts, consented, *, edit=True) -> str
+        why Turn on can't happen yet ("" when it can): consent, then each account the job reads signed in (a rule's
+        dry run reads that mail too), then a rule's dry run; ``edit``: the setup card's words (a row has no Edit)
+    signed_out(job, accounts) -> tuple     the accounts the job reads that are not signed in to Jarvis: each gets
+                                 its Sign in <alias> button on the job's row and setup card
+    sign_in_first(aliases, *, edit=True) -> str  what to do while those accounts are not signed in to Jarvis
     bindings_of(job, accounts) -> tuple    the (alias, Google account id) pairs Turn on records
     job_lines(job, config, hour24) / dry_lines(rule, outcome)    what a setup card says (plain text)
     CONSENT_*                    the one-time consent card's words
@@ -236,26 +239,46 @@ def bindings_of(job: Agent | Rule, accounts: Mapping[str, Any]) -> tuple[tuple[s
     return tuple(pairs)
 
 
-def turn_on_problem(job: Agent | Rule, config: Any, accounts: Mapping[str, Any], consented: bool) -> str:
+DRY_RUN_FIRST = "Try it first: Dry run shows what it would have done with your recent mail."
+
+
+def signed_in(account: Any) -> bool:
+    """The app's Google account for an alias has a usable sign-in (files only; unknown: not signed in)."""
+    try:
+        return account is not None and bool(account.is_signed_in())
+    except Exception:  # noqa: BLE001 - unknown: not signed in
+        return False
+
+
+def signed_out(job: Agent | Rule, accounts: Mapping[str, Any]) -> tuple[str, ...]:
+    """The accounts ``job`` reads that are not signed in to Jarvis, in its order (each one's Sign in button)."""
+    return tuple(alias for alias in job.accounts if not signed_in(accounts.get(alias)))
+
+
+def turn_on_problem(job: Agent | Rule, config: Any, accounts: Mapping[str, Any], consented: bool, *,
+                    edit: bool = True) -> str:
     if not consented:
         return "First say yes on the card above: it explains what agents read."
+    missing = signed_out(job, accounts)
+    if missing:                                   # before a rule's dry run, which reads that account's mail too
+        return sign_in_first(missing, edit=edit)
     if isinstance(job, Rule) and job.dry_run is None:
-        return "Try it first: Dry run shows what it would have done with your recent mail."
-    for alias in job.accounts:
-        account = accounts.get(alias)
-        try:
-            signed = account is not None and bool(account.is_signed_in())
-        except Exception:  # noqa: BLE001 - unknown: not signed in
-            signed = False
-        if not signed:
-            return sign_in_first(alias)
+        return DRY_RUN_FIRST
     return ""     # an older sign-in that names no Google account is let through: Turn on records what it can
 
 
-def sign_in_first(alias: str) -> str:
-    """What to do while ``alias`` is not signed in to Jarvis (Turn on's and a dry run's words)."""
-    return (f"Sign the {alias} account in first: on Home, click the clock at the top right for the Day view, then "
-            "Connect (or a card's Sign in). Or Edit and name another account.")
+def _joined(items: Sequence[str]) -> str:
+    return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+def sign_in_first(aliases: str | Sequence[str], *, edit: bool = True) -> str:
+    """What to do while ``aliases`` (one alias, or several) are not signed in to Jarvis: the Sign in <alias> button
+    beside these words (Turn on's and a dry run's words). ``edit``: the setup card's, whose Edit can name another
+    account; a row has no Edit."""
+    names = [aliases] if isinstance(aliases, str) else list(aliases)
+    buttons = _joined([f"Sign in {alias}" for alias in names])
+    which = f"the {names[0]} account" if len(names) == 1 else f"the {_joined(names)} accounts"
+    return f"Sign {which} in first: click {buttons}." + (" Or Edit and name another account." if edit else "")
 
 
 def _trigger(job: Agent, hour24: bool) -> str:
