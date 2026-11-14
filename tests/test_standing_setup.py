@@ -41,6 +41,7 @@ RULE_ANSWER = {"kind": "rule", "say": "A rule for Example Billing's invoices.", 
                         "fields": [{"name": "amount", "type": "money", "hint": "the amount due"}],
                         "action": {"kind": "todo", "title": "Pay {amount}"}}}
 AGENT_WORDS = "every morning at 7:30 tell me what pat.example@example.org sent"
+BOTH_WORDS = "every morning at 7:30 tell me what pat.example@example.org sent to my personal and work mail"
 AGENT_ANSWER = {"kind": "agent", "say": "A morning agent.", "name": "Morning mail",
                 "agent": {"trigger": {"kind": "time", "times": ["07:30"], "weekdays": []},
                           "mail": [{"account": "work", "query": "from:pat.example@example.org"}],
@@ -424,7 +425,7 @@ class SignInTests(_Base):
         self.c._google_accounts = {"personal": CalendarAccount(calendars["personal"], "sub-personal-1"),
                                    "work": CalendarAccount(calendars["work"], "sub-work-1")}
         self.engine.answers.append(BOTH_ANSWER)
-        self.type("agent: " + AGENT_WORDS)
+        self.type("agent: " + BOTH_WORDS)                      # names both accounts: work stays, signed out
         self.agent_id = Definitions(files_of(self.app.config)).load()[0][0].id
 
     def row(self) -> Any:
@@ -643,6 +644,27 @@ class HandOffTests(unittest.TestCase):
         self.assertNotIn("make a to-do for every invoice from billing", engine.runs[0][2])   # never the planner's
         argv = app.factory.runner.started[0].argv
         self.assertTrue(any("standing_job" in str(part) for part in argv))   # offered while [standing] is on
+
+
+class PreferSignedInTests(_Base):
+
+    def accounts(self) -> None:
+        signed_out = Account("sub-work-1")
+        signed_out.is_signed_in = lambda feature=None: False
+        self.c._google_accounts = {"personal": Account("sub-personal-1"), "work": signed_out}
+
+    def test_an_account_the_words_never_named_and_not_signed_in_is_left_out(self) -> None:
+        self.accounts()
+        self.engine.answers.append(BOTH_ANSWER)
+        self.type("agent: " + AGENT_WORDS)                         # names no account
+        agent = Definitions(files_of(self.app.config)).load()[0][0]
+        self.assertEqual(agent.accounts, ("personal",))
+
+    def test_a_rule_moves_to_the_one_signed_in_account(self) -> None:
+        self.accounts()
+        self.engine.answers.append(RULE_ANSWER)                      # its model picked work
+        self.type("rule: " + WORDS)
+        self.assertEqual(Definitions(files_of(self.app.config)).load()[1][0].account, "personal")
 
 
 if __name__ == "__main__":

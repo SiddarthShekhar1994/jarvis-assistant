@@ -27,6 +27,7 @@ Nothing of a sentence, a filter, a mail or an answer is logged: kinds, counts an
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -138,7 +139,8 @@ def _failure_words(kind: str) -> str:
 
 
 def run_setup(engine: Any, words: str, config: Any, usage: Any, *, now: datetime, time_zone_name: str,
-              labels: Callable[[str], Sequence[tuple[str, str]]] | None = None) -> SetupOutcome:
+              labels: Callable[[str], Sequence[tuple[str, str]]] | None = None,
+              accounts: Mapping[str, Any] | None = None) -> SetupOutcome:
     """One setup run on the owner's own sentence (see the module docstring). Runs on a worker thread."""
     try:
         words = setup.check_words(words)
@@ -167,6 +169,12 @@ def run_setup(engine: Any, words: str, config: Any, usage: Any, *, now: datetime
     # A new job's own cap is this PC's ([standing] agent_runs_per_day / rule_checks_per_day), never the model's.
     job = (replace(job, runs_per_day=settings.agent_runs_per_day) if isinstance(job, Agent)
            else replace(job, checks_per_day=settings.rule_checks_per_day))
+    if accounts:
+        preferred = prefer_signed_in(job, words, accounts, readable(config))
+        if isinstance(preferred, str):
+            logger.info("Standing: a setup named no account Jarvis can read now")
+            return SetupOutcome(say=say, refusal=preferred)
+        job = preferred
     logger.info("Standing: set up a draft %s %s", job.kind, job.id)
     return SetupOutcome(job=job, say=say)
 
@@ -248,6 +256,35 @@ def signed_in(account: Any) -> bool:
         return account is not None and bool(account.is_signed_in())
     except Exception:  # noqa: BLE001 - unknown: not signed in
         return False
+
+
+def named(alias: str, words: str) -> bool:
+    """The owner's own words name this account ("my work mail", "personal")."""
+    return re.search(rf"(?<![\w-]){re.escape(alias)}(?![\w-])", words, re.IGNORECASE) is not None
+
+
+def prefer_signed_in(job: Agent | Rule, words: str, accounts: Mapping[str, Any],
+                     can_read: Sequence[str]) -> Agent | Rule | str:
+    """Setup never picks an account the owner's words did not name and that is not signed in to Jarvis: an agent keeps
+    only its mail on signed-in (or named) accounts; a rule moves to the one signed-in account that reads mail. A named
+    account that is not signed in stays (its Sign in button is on the draft). A str: why nothing is left."""
+    def keep(alias: str) -> bool:
+        return named(alias, words) or signed_in(accounts.get(alias))
+
+    if isinstance(job, Agent):
+        mail = tuple(source for source in job.mail if keep(source.account))
+        if mail == job.mail:
+            return job
+        if not mail and (job.trigger.kind == "mail" or not (job.calendar_days or job.notes)):
+            return ("None of the accounts it would read is signed in to Jarvis. Say which account in your sentence "
+                    "(for example: my personal mail), or sign one in first.")
+        return replace(job, mail=mail)
+    if keep(job.account):
+        return job
+    ready = [alias for alias in can_read if signed_in(accounts.get(alias))]
+    if len(ready) == 1:
+        return replace(job, account=ready[0])
+    return "Say which account the rule watches (for example: my personal mail)."
 
 
 def signed_out(job: Agent | Rule, accounts: Mapping[str, Any]) -> tuple[str, ...]:

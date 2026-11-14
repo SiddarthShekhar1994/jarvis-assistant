@@ -1555,7 +1555,8 @@ class StandingController(QObject):
         def work() -> None:
             try:
                 outcome = standing_setup.run_setup(engine, words, self.config, self.usage, now=now,
-                                                   time_zone_name=now.tzname() or "", labels=self._labels)
+                                                   time_zone_name=now.tzname() or "", labels=self._labels,
+                                                   accounts=getattr(self.host, "_google_accounts", None) or {})
             except Exception as exc:  # noqa: BLE001 - the card says so; nothing was saved
                 logger.warning("Standing: a setup stopped (%s)", type(exc).__name__)
                 outcome = standing_setup.SetupOutcome(refusal=SETUP_FAILED_TEXT)
