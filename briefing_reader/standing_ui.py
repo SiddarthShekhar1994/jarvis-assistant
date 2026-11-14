@@ -768,9 +768,11 @@ class StandingController(QObject):
         if agent.id in self.requests.pending():
             meta.append("Run now asked")
         live_or_paused = agent.status in (STATUS_LIVE, STATUS_PAUSED)
+        detail = agent_detail(agent, hour24)
         if agent.status == STATUS_DRAFT:
             meta.append("Not on yet")
-        return JobRow(agent.id, KIND_AGENT, agent.name, detail=agent_detail(agent, hour24),
+            detail = self._why_not_on(agent, detail)
+        return JobRow(agent.id, KIND_AGENT, agent.name, detail=detail,
                       meta=f" {DOT} ".join(meta), status=agent.status, status_text=STATUS_WORDS.get(agent.status, ""),
                       can_run=agent.status == STATUS_LIVE and consented and not paused_all,
                       can_pause=live_or_paused, paused=agent.status == STATUS_PAUSED,
@@ -790,7 +792,8 @@ class StandingController(QObject):
         live_or_paused = rule.status in (STATUS_LIVE, STATUS_PAUSED) and self._busy != f"dry:{rule.id}"
         if rule.status == STATUS_DRAFT:
             meta.append("Try it with Dry run before it can go on")
-        return JobRow(rule.id, KIND_RULE, rule.name, detail=rule.sentence,
+        detail = self._why_not_on(rule, rule.sentence) if rule.status == STATUS_TRIED else rule.sentence
+        return JobRow(rule.id, KIND_RULE, rule.name, detail=detail,
                       meta=f" {DOT} ".join(part for part in meta if part),
                       status=rule.status, status_text=STATUS_WORDS.get(rule.status, ""), can_pause=live_or_paused,
                       paused=rule.status == STATUS_PAUSED, can_dry_run=not self._busy,
@@ -937,6 +940,12 @@ class StandingController(QObject):
         if ids:
             self.app_state.mark("withdrawn", ids, self._now())
         return ids
+
+    def _why_not_on(self, job: Agent | Rule, detail: str) -> str:
+        """A draft's row says on itself why Turn on can't go yet (its button's click would only say it elsewhere)."""
+        accounts = getattr(self.host, "_google_accounts", None) or {}
+        problem = standing_setup.turn_on_problem(job, self.config, accounts, self.app_state.consented())
+        return f"{detail}\n{problem}" if problem else detail
 
     def _cards_of(self, job_id: str) -> list[str]:
         waiting = self._waiting_ids()

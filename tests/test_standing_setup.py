@@ -67,6 +67,9 @@ class Account:
     def binding(self) -> Any:
         return type("Binding", (), {"sub": self.sub, "email": "me@example.edu"})()
 
+    def is_signed_in(self, feature: str | None = None) -> bool:
+        return True
+
 
 class _Base(unittest.TestCase):
     consented = True
@@ -242,6 +245,14 @@ class DryRunAndTurnOnTests(_Base):
         rule = Definitions(files_of(self.app.config)).load()[1][0]
         self.assertEqual(rule.status, "paused")                        # the dry run never undoes the pause
         self.assertEqual((rule.dry_run.judged, rule.bindings), (2, (("work", "sub-work-1"),)))
+
+    def test_a_row_says_why_it_cannot_go_on_yet(self) -> None:
+        self.engine.answers.append(RuleAnswer({1: Result(False), 2: Result(True, {"amount": "$40.00"})}))
+        self.card().button("dry").click()
+        settle()
+        rule_id = Definitions(files_of(self.app.config)).load()[1][0].id
+        row = self.c.window.reading.agents_stage.job_row(rule_id)
+        self.assertIn("Sign the work account in first", row.detail_label.text())
 
     def test_turn_on_records_the_google_account_and_goes_live(self) -> None:
         self.engine.answers.append(RuleAnswer({1: Result(False), 2: Result(True, {"amount": "$40.00"})}))

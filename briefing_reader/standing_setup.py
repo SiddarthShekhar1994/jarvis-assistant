@@ -228,12 +228,16 @@ def turn_on_problem(job: Agent | Rule, config: Any, accounts: Mapping[str, Any],
         return "First say yes on the card above: it explains what agents read."
     if isinstance(job, Rule) and job.dry_run is None:
         return "Try it first: Dry run shows what it would have done with your recent mail."
-    bound = dict(bindings_of(job, accounts))
     for alias in job.accounts:
-        if alias not in bound:
-            return (f"Sign the {alias} account in first (a card's Sign in, or Connect in the Day view): Jarvis "
-                    "records which Google account it is.")
-    return ""
+        account = accounts.get(alias)
+        try:
+            signed = account is not None and bool(account.is_signed_in())
+        except Exception:  # noqa: BLE001 - unknown: not signed in
+            signed = False
+        if not signed:
+            return (f"Sign the {alias} account in first: on Home, click the clock at the top right for the Day "
+                    "view, then Connect (or a card's Sign in). Or Edit and name another account.")
+    return ""     # an older sign-in that names no Google account is let through: Turn on records what it can
 
 
 def _trigger(job: Agent, hour24: bool) -> str:
