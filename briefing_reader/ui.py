@@ -1175,7 +1175,10 @@ class ReadingView(QWidget):
     column head as it forms (``deskShown(True)``). Ctrl+B and the button fold it (Home's stage with "9 on the board",
     ``board_chip``) and bring it back; a moment (the plan, the brief) takes the stage while it shows; under a 360 px
     frames area the board is a drawer (``board_drawer``). ``board_count()`` is the HUD's "9 on the board";
-    ``open_card(action_id)``: Approvals at that card (the board's go_approvals).
+    ``open_card(action_id)``: Approvals at that card (the board's go_approvals). Part 5b: F6 / Shift+F6
+    (``cycle_focus``) go round the desk - the ask bar, the conversation (``focus_conversation``), the board and its
+    index strip (``boardFocusRequested``: the page's own parts) - and Esc in the board or the conversation comes back to
+    the ask bar (``focus_ask_bar``).
     """
 
     playPause = Signal()
@@ -1220,6 +1223,9 @@ class ReadingView(QWidget):
     deskShown = Signal(bool)
     boardTokenClicked = Signal(int)
     deskLayoutChanged = Signal()
+    # Part 5b: F6's cycle reached the board - "board" / "strip" (into the page), "next" / "prev" (on from where the
+    # focus is in it); the desk controller hands it to the page (board.view.BoardView.focus_part).
+    boardFocusRequested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1277,6 +1283,18 @@ class ReadingView(QWidget):
         self._board_shortcut.setEnabled(False)
         self._board_shortcut.activated.connect(self.toggle_board)
         self._shortcuts.append(self._board_shortcut)
+        # F6 / Shift+F6 cycle the desk's parts: the ask bar, the conversation, the board and its index strip (part 5b,
+        # DESIGN-SPEC 3.6; only while the board can be, and only on the desk). The board's key filter lets them reach
+        # these from the page too.
+        self._cycle_shortcuts: list[QShortcut] = []
+        for sequence, forward in ((QKeySequence(Qt.Key.Key_F6), True),
+                                  (QKeySequence(Qt.KeyboardModifier.ShiftModifier | Qt.Key.Key_F6), False)):
+            cycle = QShortcut(sequence, self)
+            cycle.setContext(Qt.ShortcutContext.WindowShortcut)
+            cycle.setEnabled(False)
+            cycle.activated.connect(lambda forward=forward: self.cycle_focus(forward))
+            self._cycle_shortcuts.append(cycle)
+            self._shortcuts.append(cycle)
         self._build_layout()
         self._show_screen(SCREEN_HOME)
 
@@ -2585,6 +2603,8 @@ class ReadingView(QWidget):
         self._board_on = available
         self.header.set_board_visible(available)
         self._board_shortcut.setEnabled(available)
+        for cycle in self._cycle_shortcuts:
+            cycle.setEnabled(available)
         self._sync_desk(fly=False)
 
     def board_available(self) -> bool:
@@ -2642,6 +2662,7 @@ class ReadingView(QWidget):
             page.linkClicked.connect(lambda link_id: self.conversation.linkClicked.emit(link_id))
             page.earlierClicked.connect(lambda: self.open_transcript())
             page.geometryChanged.connect(self.deskLayoutChanged)
+            page.turns.escaped.connect(self.focus_ask_bar)
             page.set_folded_dock(self.width() < DOCK_LABELS_FROM if self.width() > 0 else False)
             if self._ground_painter is not None:
                 page.head.orb.set_ground(self._ground_painter)
@@ -2879,6 +2900,50 @@ class ReadingView(QWidget):
         state = self.captions.state()
         desk.turns.set_live(self.captions.full_text() if state in (home.SPEAKING, home.HOLDING) else "")
         desk.head.set_earlier(desk.turns.earlier())
+
+    def cycle_focus(self, forward: bool = True) -> None:
+        """F6 (Shift+F6 back) on the desk (part 5b, DESIGN-SPEC 3.6): the ask bar, the conversation, the board and its
+        index strip, round. The board's own parts are the page's: ``boardFocusRequested`` ("board" or "strip" into it;
+        "next" / "prev" on from where its focus is - past the strip it hands the focus back here). Nothing off the
+        desk."""
+        desk = self._desk
+        if self._screen != SCREEN_HOME or not self._desk_shown or desk is None:
+            return
+        focus = QApplication.focusWidget()
+
+        def within(widget: QWidget | None) -> bool:
+            return (focus is not None and widget is not None and shiboken6.isValid(widget)
+                    and (focus is widget or widget.isAncestorOf(focus)))
+
+        if within(self._board_view):
+            self.boardFocusRequested.emit("next" if forward else "prev")
+        elif within(desk.turns):
+            if forward:
+                self.boardFocusRequested.emit("board")
+            else:
+                self.focus_ask_bar()
+        elif within(self.command_bar):
+            if forward:
+                self.focus_conversation()
+            else:
+                self.boardFocusRequested.emit("strip")
+        elif forward:
+            self.focus_ask_bar()
+        else:
+            self.boardFocusRequested.emit("strip")
+
+    def focus_ask_bar(self) -> None:
+        """The keyboard focus on the ask bar (Esc in the board or the conversation; F6 past the board's strip); the
+        conversation when the bar is not there (Ask off)."""
+        if self.ask_available() and not self.command_bar.isHidden():
+            self.command_bar.focus_input()
+        else:
+            self.focus_conversation()
+
+    def focus_conversation(self) -> None:
+        """The keyboard focus on the desk's conversation (F6): the arrows scroll it, Tab goes on to its tokens."""
+        if self._desk is not None and self._desk_shown:
+            self._desk.turns.setFocus(Qt.FocusReason.ShortcutFocusReason)
 
     def open_card(self, action_id: str) -> bool:
         """Approvals at that card (the board's "Reply waits on Approvals": Ctrl+3's path); False when it is not there

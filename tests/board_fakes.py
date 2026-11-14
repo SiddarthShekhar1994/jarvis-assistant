@@ -7,7 +7,9 @@ board.view.BoardView whose page is a plain native widget.
         before ready, the signals, the fallback's read-only tiles, the window's keys, Space) - only its page is
         StandInPage: ``sent`` keeps every message the page would have run, and the page paints the bar and each
         frame as a box in board order, so a grab of the window shows the board where it is. ``ready=False``: it
-        never says ready (the queue holds); ``say_ready()`` then.
+        never says ready (the queue holds); ``say_ready()`` then. Part 5b: ``cleared_ids()``, ``parked_groups()``
+        and ``shown_order()`` read the page's state from what it was sent; ``request(kind, **payload)`` posts a page
+        request through the real bridge's checks (as board.js does).
     stand_in_factory(boards)      a board_factory for ui.AppController / AppHarness: each StandInBoard made goes in
                                   ``boards``
     fallback_factory(boards)      the board that can't start here: BoardView with an engine that says no (its
@@ -40,8 +42,8 @@ class StandInPage(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     def boxes(self) -> list[tuple[str, QRectF]]:
-        """(frame id, its box) in board order."""
-        order = self._board.board_order()
+        """(frame id, its box) in board order (what the page shows: not parked, not taken away by Clear)."""
+        order = self._board.shown_order()
         top = 44.0 if self._board.has_bar() else 12.0
         boxes = []
         for frame_id in order:
@@ -99,6 +101,18 @@ class StandInBoard(view.BoardView):
     def say_ready(self) -> None:
         self._on_ready()
 
+    def request(self, kind: str, **payload: Any) -> bool:
+        """The page's bridge.post(kind, payload): checked as the real bridge checks it (board.protocol), then handled
+        as BoardView handles it. False when the check refused it."""
+        from briefing_reader.board import protocol
+
+        try:
+            checked = protocol.check_request(kind, json.dumps(payload), self.known_ids())
+        except protocol.Refused:
+            return False
+        self._on_request(checked)
+        return True
+
     def _run(self, text: str) -> None:
         self.sent.append(json.loads(text))
         if self.page_widget is not None:
@@ -113,18 +127,37 @@ class StandInBoard(view.BoardView):
         return any(message.get("type") == "bar" for message in self.sent)
 
     def frames_sent(self) -> dict[str, dict[str, Any]]:
-        """Each frame id's last frame message (minus those removed with their group)."""
+        """Each frame id's last frame message (minus those removed, alone or with their group)."""
         frames: dict[str, dict[str, Any]] = {}
         gone_groups: set[str] = set()
         for message in self.sent:
             kind = message.get("type")
             if kind == "frame":
                 frames[message["id"]] = message
+            elif kind == "remove":
+                frames.pop(message["id"], None)
             elif kind == "remove_group":
                 gone_groups.add(message["id"])
             elif kind == "clear":
                 frames.clear()
         return {key: value for key, value in frames.items() if value.get("group") not in gone_groups}
+
+    def cleared_ids(self) -> list[str]:
+        """The frames the bar's Clear took away, as the page has them now (the last cleared message)."""
+        found = [message for message in self.sent if message.get("type") == "cleared"]
+        return list(found[-1]["frames"]) if found else []
+
+    def parked_groups(self) -> list[str]:
+        """The groups the page keeps out of sight under the pill (their last message said parked)."""
+        return [group_id for group_id, group in self.groups_sent().items() if group.get("parked")]
+
+    def shown_order(self) -> list[str]:
+        """The frames the page shows, in board order: not parked, not taken away by Clear."""
+        hidden = set(self.cleared_ids())
+        parked = set(self.parked_groups())
+        frames = self.frames_sent()
+        return [frame_id for frame_id in self.board_order()
+                if frame_id not in hidden and frames.get(frame_id, {}).get("group") not in parked]
 
     def groups_sent(self) -> dict[str, dict[str, Any]]:
         """Each group's last group message, the newest last (minus those removed)."""
@@ -132,8 +165,9 @@ class StandInBoard(view.BoardView):
         for message in self.sent:
             kind = message.get("type")
             if kind == "group":
-                groups[message["id"]] = message if message["id"] not in groups else {**groups[message["id"]],
-                                                                                      **message}
+                # Each group message is the whole group (a parked one says so; landed, it says nothing of it).
+                groups[message["id"]] = message if message["id"] not in groups else {
+                    **{key: value for key, value in groups[message["id"]].items() if key != "parked"}, **message}
             elif kind == "remove_group":
                 groups.pop(message["id"], None)
         return groups

@@ -27,6 +27,10 @@ In (app -> page): check_message(message, known, groups=()) -> Checked
                   row's sender and subject, a to-do's text) is the "+N MORE" row: only its meta shows.
                   "group" (part 5a, only when given): the group (one answer) the frame belongs to - a group the app sent
                   (``groups``); the page puts the frame in that group's place on the board.
+                  "fact" (part 5b, only when given; at most FACT_CAP): the one line a satellite row shows ("REPLY
+                  WAITS", "3 EVENTS · NEXT 10:00 AM"), made by the app from the frame's data (board.facts).
+                  "pinned" / "closed": the app's own flags (it is the source of truth: it sends them again whenever
+                  the page's own optimistic change and its decision differ).
         lit      {"id"}: the frame Jarvis is talking about ("" = none)
         remove   {"id"}; clear {}
         motion   {"level": lively / calm / off}
@@ -40,6 +44,15 @@ In (app -> page): check_message(message, known, groups=()) -> Checked
                  "compact" (the folded Dock's narrow column) drops the frames count
         desk     {"state": enter / leave}: the desk formed (the board fades and slides in) or folded
         reveal   {"group"}: the board scrolls to that group (a conversation turn's "4 frames on the board")
+      Part 5b, the board's ways (DESIGN-SPEC 3.1, 3.3, 3.5, 3.6):
+        group    + "parked" (only when given): the answer came while the owner was reading the board - the page keeps
+                 it out of sight with the pill "New answer above · Show" and its dashed entries on top of the index
+                 strip, and the scroll position holds; the same group without it lands (on top, the others older)
+        cleared  {"frames"}: the frames the bar's Clear took away (ids the app sent; out of sight, with the row "Board
+                 cleared · 8 FRAMES · Bring back"); [] none (the row goes)
+        focus_part {"part": board / strip / next / prev}: F6's cycle - the keyboard focus to the frames or the index
+                 strip; next / prev from where it is (past the strip the page asks for focus_out "ask", before the
+                 frames for focus_out "conversation")
     The ids of lit, remove and picture must be frames the app sent (``known``), and a group's those of groups it sent
     (``groups``); a new frame past MAX_FRAMES is refused.
 
@@ -48,6 +61,14 @@ Out (page -> app): check_request(kind, payload, known) -> Request
     kind's fields only; every frame id one the app sent (``known``):
         ready {"v"?} | layout {"frames": [{"id", "top", "height"}, ...], "scrolling"} | pin {"id", "on"}
         | focus, open, close, bring_back, retry, go_approvals {"id"}
+      Part 5b:
+        clear {}          the bar's Clear (the app takes every unpinned frame away, for CLEAR_S with Bring back)
+        restore {}        the cleared row's Bring back
+        show_new {}       the pill's Show: a parked answer lands now
+        reading {"pointer", "focus"}   the owner is at the board: the pointer over it, the focus in it (both bools);
+                          sent when either changes and on a wheel, a key or a press in the page (a sign of reading)
+        focus_out {"to": ask / conversation}   Esc, or F6 past the board: the keyboard focus to the ask bar or the
+                          conversation
     Anything else is refused. A log line may carry kind_word(kind) and the reason word, never the payload.
 """
 
@@ -68,11 +89,13 @@ PICTURE_PREFIX = "data:image/jpeg;base64,"
 PAYLOAD_CAP = 4096               # characters of a request's payload
 MAX_FRAMES = 24                  # frames on the board at once (DESIGN-SPEC 3.5)
 MAX_GROUPS = 8                   # groups (one answer each) on the board at once (DESIGN-SPEC 3.5)
+MAX_PINS = 6                     # pinned frames at most (DESIGN-SPEC 3.5; the app refuses a 7th)
 TOPIC_CAP = 40                   # a group's topic (DESIGN-SPEC 3.1)
 TIME_CAP = 16                    # a group's time ("9:41 AM", "13:05")
 ID_CAP = 40
 TITLE_CAP = 60                   # characters (DESIGN-SPEC 3.5: title 60, text 400)
 META_CAP = 40
+FACT_CAP = META_CAP              # a satellite's one fact: a meta's length (the page checks it as a meta)
 TEXT_CAP = 400
 WORDS_CAP = 160                  # what failed, or what is empty
 WAITS_CAP = 60
@@ -85,17 +108,21 @@ DAY_MINUTES = 24 * 60
 PLACE_LIMIT = 1_000_000          # px: a layout's top / height beyond this is not a place
 
 MESSAGE_TYPES = ("frame", "lit", "remove", "clear", "motion", "picture", "group", "remove_group", "bar", "desk",
-                 "reveal")
+                 "reveal", "cleared", "focus_part")
 STATUSES = ("ok", "failed", "empty")
 DESK_STATES = ("enter", "leave")
+FOCUS_PARTS = ("board", "strip", "next", "prev")      # focus_part (F6's cycle)
+FOCUS_OUT = ("ask", "conversation")                  # focus_out's "to"
 # A calendar row: past (dim), now (on now), next (the next event: its meta "IN 19 MIN"), free (a dashed gap), new (what
 # a card adds or moves to), struck (where it was, or what is cancelled), today (a week's row for today).
 CALENDAR_STATES = ("", "past", "now", "next", "free", "new", "struck", "today")
 SPAN_KINDS = ("busy", "next", "free")
 TODO_STATES = ("open", "waits", "done")
 MOTION_LEVELS = ("lively", "calm", "off")
-REQUEST_KINDS = ("ready", "layout", "focus", "open", "close", "pin", "bring_back", "retry", "go_approvals")
+REQUEST_KINDS = ("ready", "layout", "focus", "open", "close", "pin", "bring_back", "retry", "go_approvals",
+                 "clear", "restore", "show_new", "reading", "focus_out")
 _ID_KINDS = frozenset({"focus", "open", "close", "bring_back", "retry", "go_approvals"})
+_BARE_KINDS = frozenset({"clear", "restore", "show_new"})     # a payload of no field at all
 _ID = re.compile(r"[A-Za-z0-9_-]{1,%d}" % ID_CAP)
 _BASE64 = re.compile(r"[A-Za-z0-9+/]*={0,2}")
 _JPEG = b"\xff\xd8\xff"
@@ -137,13 +164,17 @@ class Checked:
 
 @dataclass(frozen=True)
 class Request:
-    """A request of the page that passed. ``places``: a layout's (id, top, height) per frame, in the view's px."""
+    """A request of the page that passed. ``places``: a layout's (id, top, height) per frame, in the view's px;
+    ``pointer`` / ``focused``: a reading request's flags; ``to``: where focus_out sends the keyboard focus."""
 
     kind: str
     frame_id: str = ""
     on: bool = False
     places: tuple[tuple[str, int, int], ...] = ()
     scrolling: bool = False
+    pointer: bool = False
+    focused: bool = False
+    to: str = ""
 
 
 def kind_word(kind: Any) -> str:
@@ -333,7 +364,7 @@ KINDS: dict[str, Callable[[Any], dict[str, Any]]] = {
 # --------------------------------------------------------------------------
 
 _FRAME_FIELDS = ("type", "id", "kind", "title", "meta", "body", "status", "status_text", "status_meta", "waits",
-                 "changed", "pinned", "closed", "group")
+                 "changed", "pinned", "closed", "fact", "group")
 
 
 def _frame(value: dict[str, Any], known: Collection[str], groups: Collection[str]) -> tuple[dict[str, Any], str, str]:
@@ -357,6 +388,8 @@ def _frame(value: dict[str, Any], known: Collection[str], groups: Collection[str
         "pinned": _flag(fields.get("pinned", False)),
         "closed": _flag(fields.get("closed", False)),
     }
+    if "fact" in fields:        # part 5b: a satellite's one fact (only when given)
+        clean["fact"] = _text(fields["fact"], FACT_CAP)
     group_id = ""
     if "group" in fields:       # part 5a: the answer it belongs to (only when given: a group the app sent)
         group_id = clean["group"] = _known_id(fields["group"], groups)
@@ -364,9 +397,9 @@ def _frame(value: dict[str, Any], known: Collection[str], groups: Collection[str
 
 
 def _group(value: dict[str, Any], known: Collection[str], groups: Collection[str]) -> tuple[dict[str, Any], str]:
-    """One answer's group: its header's time and topic, its frames in board order, and whether it is older than the
-    newest (its header in INK_4)."""
-    fields = _fields(value, ("type", "id", "time", "topic", "frames", "older"),
+    """One answer's group: its header's time and topic, its frames in board order, whether it is older than the
+    newest (its header in INK_4) and, when given, whether it is parked (part 5b: out of sight until it lands)."""
+    fields = _fields(value, ("type", "id", "time", "topic", "frames", "older", "parked"),
                      ("type", "id", "time", "topic", "frames"))
     group_id = _frame_id(fields["id"])
     if group_id not in groups and len(groups) >= MAX_GROUPS:
@@ -374,9 +407,21 @@ def _group(value: dict[str, Any], known: Collection[str], groups: Collection[str
     order = [_known_id(item, known) for item in _list(fields["frames"], MAX_FRAMES)]
     if len(set(order)) != len(order):
         raise Refused(R_ID)
-    return {"type": "group", "id": group_id, "time": _text(fields["time"], TIME_CAP),
-            "topic": _text(fields["topic"], TOPIC_CAP), "frames": order,
-            "older": _flag(fields.get("older", False))}, group_id
+    clean = {"type": "group", "id": group_id, "time": _text(fields["time"], TIME_CAP),
+             "topic": _text(fields["topic"], TOPIC_CAP), "frames": order,
+             "older": _flag(fields.get("older", False))}
+    if "parked" in fields:
+        clean["parked"] = _flag(fields["parked"])
+    return clean, group_id
+
+
+def _cleared(value: dict[str, Any], known: Collection[str]) -> dict[str, Any]:
+    """The frames the bar's Clear took away (out of sight while Bring back is offered): ids the app sent, each once."""
+    fields = _fields(value, ("type", "frames"), ("type", "frames"))
+    ids = [_known_id(item, known) for item in _list(fields["frames"], MAX_FRAMES)]
+    if len(set(ids)) != len(ids):
+        raise Refused(R_ID)
+    return {"type": "cleared", "frames": ids}
 
 
 def _bar(value: dict[str, Any]) -> dict[str, Any]:
@@ -432,6 +477,11 @@ def check_message(message: Any, known: Collection[str] = (), groups: Collection[
     elif kind == "desk":
         fields = _fields(message, ("type", "state"), ("type", "state"))
         clean = {"type": "desk", "state": _choice(fields["state"], DESK_STATES)}
+    elif kind == "cleared":
+        clean = _cleared(message, known)
+    elif kind == "focus_part":
+        fields = _fields(message, ("type", "part"), ("type", "part"))
+        clean = {"type": "focus_part", "part": _choice(fields["part"], FOCUS_PARTS)}
     elif kind == "picture":
         clean, frame_id = _picture(message, known)
         image = len(clean["src"])
@@ -506,6 +556,15 @@ def check_request(kind: Any, payload: Any, known: Collection[str]) -> Request:
     if kind == "pin":
         fields = _fields(value, ("id", "on"), ("id", "on"))
         return Request("pin", _known_id(fields["id"], known), on=_flag(fields["on"]))
+    if kind in _BARE_KINDS:
+        _fields(value, ())
+        return Request(kind)
+    if kind == "reading":
+        fields = _fields(value, ("pointer", "focus"), ("pointer", "focus"))
+        return Request("reading", pointer=_flag(fields["pointer"]), focused=_flag(fields["focus"]))
+    if kind == "focus_out":
+        fields = _fields(value, ("to",), ("to",))
+        return Request("focus_out", to=_choice(fields["to"], FOCUS_OUT))
     if kind not in _ID_KINDS:
         raise Refused(R_KIND)
     fields = _fields(value, ("id",), ("id",))

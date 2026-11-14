@@ -9,8 +9,15 @@ The board (board.view.BoardView, through ``factory(parent)``) is made once for t
 first Ask starts (typed or voice) or the first group arrives, whichever comes first: never at the app's start, never on
 its first paint (Chromium's first start holds the GUI thread for about a second). On a test platform (offscreen,
 minimal) there is no board unless a factory is given (``can_have_board``): the web engine never starts inside a test
-process. Its requests: ``go_approvals`` opens Approvals at that card (Ctrl+3's path); focus, open, close,
-pin, bring back, retry and layout are counted only (part 5b wires them).
+process. Its requests: ``go_approvals`` opens Approvals at that card (Ctrl+3's path) and does nothing else; part 5b's
+ways (DESIGN-SPEC 3.5, 3.6), the app the source of truth (board.feed decides, the page shows it at once and gets a
+frame's flags again when the app decided otherwise): pin (6 at most), close (the frame leaves CLOSE_S later unless
+brought back), Clear (every unpinned frame out of sight with Bring back for CLEAR_S, then gone; nothing left: the desk
+folds through ReadingView.set_board_count), restore (that Bring back), show_new and reading (parking: a group that comes
+while the owner reads the board - the pointer over it, the focus in it, a scroll or key in it within QUIET_S - parks
+under the pill "New answer above · Show" and lands after QUIET_S quiet seconds or on Show; only then do older groups
+fold), focus_out (Esc and F6 back to the ask bar or the conversation); F6 into the board (``focus_board``). Focus, open,
+retry and layout are counted only (part 5c gives open its work).
 
 What feeds it (board.feed.BoardFeed keeps the groups; board.frames builds the frames), one answer = one group (its time;
 its topic: Ask's coming ``topic`` field, else the first frame's title):
@@ -35,6 +42,7 @@ Logs: ids, kinds, counts, durations and statuses only - never a frame's words, a
 from __future__ import annotations
 
 import logging
+import math
 import re
 import time
 from collections import Counter
@@ -45,13 +53,15 @@ from types import SimpleNamespace
 from typing import Any
 
 import shiboken6
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, QTimer
 from PySide6.QtWidgets import QWidget
 
 from . import live as live_events
 from . import pictures
+from .board import feed as feed_mod
 from .board import frames as board_frames
-from .board.feed import BoardFeed, spoken_rank
+from .board import protocol as board_protocol
+from .board.feed import BoardFeed, ReadingWatch, spoken_rank
 from .text_prep import format_time
 
 logger = logging.getLogger(__name__)
@@ -143,13 +153,21 @@ class _Answer:
 class DeskController(QObject):
     """See the module doc."""
 
-    def __init__(self, host: Any, *, factory: Callable[[QWidget], Any] | None = None) -> None:
+    # How long a closed frame and a Clear offer Bring back, and how much quiet lands a parked answer (seconds; a probe
+    # may shorten them on the class before it makes the controller).
+    CLOSE_S = feed_mod.CLOSE_S
+    CLEAR_S = feed_mod.CLEAR_S
+    QUIET_S = feed_mod.QUIET_S
+
+    def __init__(self, host: Any, *, factory: Callable[[QWidget], Any] | None = None,
+                 clock: Callable[[], float] = time.monotonic) -> None:
         super().__init__(host if isinstance(host, QObject) else None)
         self.host = host
         self.reading = host.window.reading
-        self.feed = BoardFeed()
+        self.feed = BoardFeed(close_s=self.CLOSE_S, clear_s=self.CLEAR_S)
         self.board: Any = None
         self._factory = factory or default_factory
+        self._clock = clock
         self._made = False                  # the factory ran (once: one board for the window's life)
         self._answers: dict[int, _Answer] = {}
         self._current = 0
@@ -157,6 +175,13 @@ class DeskController(QObject):
         self._formed = False                # the desk formed in this session (the hint counts once)
         self._readies = 0
         self._started_at = 0.0
+        self._watch = ReadingWatch(self.QUIET_S)     # is the owner reading the board? (a new answer parks)
+        self._due_timer = QTimer(self)      # the next closed frame (or Clear) whose Bring back is over
+        self._due_timer.setSingleShot(True)
+        self._due_timer.timeout.connect(self._on_due)
+        self._land_timer = QTimer(self)     # a parked answer lands when the owner has been quiet QUIET_S
+        self._land_timer.setSingleShot(True)
+        self._land_timer.timeout.connect(self._schedule_landing)
         self.counts: Counter[str] = Counter()
         self.first_frame_ms: list[int] = []     # answer -> its first frame sent, ms (measured, not assumed)
         reading = self.reading
@@ -166,6 +191,7 @@ class DeskController(QObject):
         reading.deskShown.connect(self._on_desk_shown)
         reading.boardTokenClicked.connect(self._on_token)
         reading.deskLayoutChanged.connect(self._sync_compact)
+        reading.boardFocusRequested.connect(self.focus_board)
         feed = getattr(host, "_live_feed", None)
         if feed is not None:
             feed.attach(self)               # every LIVE change, on the GUI thread (apply)
@@ -202,10 +228,17 @@ class DeskController(QObject):
         view.ready.connect(self._on_ready)
         view.unavailable.connect(self._on_unavailable)
         view.approvalsRequested.connect(self._on_go_approvals)
-        for name in ("frameFocused", "openRequested", "closeRequested", "bringBackRequested", "retryRequested"):
+        for name in ("frameFocused", "openRequested", "retryRequested"):
             getattr(view, name).connect(lambda _frame_id, word=name: self._count_request(word))
-        view.pinRequested.connect(lambda _frame_id, _on: self._count_request("pinRequested"))
         view.layoutChanged.connect(lambda _layout: self._count_request("layoutChanged"))
+        view.pinRequested.connect(self._on_pin)
+        view.closeRequested.connect(self._on_close)
+        view.bringBackRequested.connect(self._on_bring_back)
+        view.clearRequested.connect(self._on_clear)
+        view.restoreRequested.connect(self._on_restore)
+        view.showNewRequested.connect(self._on_show_new)
+        view.readingChanged.connect(self._on_reading)
+        view.focusOutRequested.connect(self._on_focus_out)
         self.reading.set_board_view(view)
         self._started_at = time.monotonic()
         view.start()
@@ -213,7 +246,117 @@ class DeskController(QObject):
         return view
 
     def _count_request(self, word: str) -> None:
-        self.counts[f"request:{word}"] += 1      # part 5b gives these their work
+        self.counts[f"request:{word}"] += 1      # counts only (part 5c gives open its work)
+
+    # ---- the owner's own ways (part 5b, DESIGN-SPEC 3.5): the feed decides, the page gets what differs -------------
+
+    def _on_pin(self, frame_id: str, on: bool) -> None:
+        self._count_request("pinRequested")
+        before = self.feed.counts()["pins_refused"]
+        self._send(self.feed.pin(frame_id, on))
+        if self.feed.counts()["pins_refused"] > before:
+            logger.info("Board: a pin was refused (%d pinned at most)", board_protocol.MAX_PINS)
+
+    def _on_close(self, frame_id: str) -> None:
+        self._count_request("closeRequested")
+        self._send(self.feed.close(frame_id, self._clock()))
+        self._schedule_due()
+
+    def _on_bring_back(self, frame_id: str) -> None:
+        self._count_request("bringBackRequested")
+        self._send(self.feed.bring_back(frame_id))
+        self._schedule_due()
+
+    def _on_clear(self) -> None:
+        """The bar's Clear: every unpinned frame out of sight (Bring back for CLEAR_S); nothing left, the desk folds."""
+        self._count_request("clearRequested")
+        messages = self.feed.clear_unpinned(self._clock())
+        self._send(messages)
+        self._schedule_due()
+        logger.info("Board: cleared (%d frame(s) kept)", self.feed.frames())
+
+    def _on_restore(self) -> None:
+        self._count_request("restoreRequested")
+        self._send(self.feed.restore())
+        self._schedule_due()
+
+    def _schedule_due(self) -> None:
+        """The timer for the next closed frame (or Clear) whose Bring back is over."""
+        at = self.feed.next_due()
+        if at is None:
+            self._due_timer.stop()
+            return
+        self._due_timer.start(max(0, math.ceil((at - self._clock()) * 1000)) + 5)
+
+    def _on_due(self) -> None:
+        self._send(self.feed.due(self._clock()))
+        self._schedule_due()
+
+    # ---- parking: a new answer waits while the owner reads the board (DESIGN-SPEC 3.5 "Reading is safe") ----------
+
+    def _reading_now(self) -> bool:
+        """The owner reads the board: the desk shows (Home, unfolded, the window not minimised) and the page says the
+        pointer is over it, the focus in it, or there was a scroll or a key in it within QUIET_S."""
+        reading = self.reading
+        if not reading.desk_shown() or not reading.isVisible():
+            return False
+        window = reading.window()
+        if window is not None and window.isMinimized():
+            return False
+        return self._watch.reading(self._clock())
+
+    def _on_reading(self, pointer: bool, focus: bool) -> None:
+        self._watch.note(pointer, focus, self._clock())
+        self._schedule_landing()
+
+    def _schedule_landing(self) -> None:
+        """A parked answer lands as soon as the owner is no longer reading (after QUIET_S quiet seconds)."""
+        if not self.feed.parked_groups():
+            self._land_timer.stop()
+            return
+        if not self._reading_now():
+            self._land()
+            return
+        at = self._watch.quiet_at(self._clock())
+        if at is None:
+            self._land_timer.stop()              # the pointer or the focus is there: its leaving says so
+            return
+        self._land_timer.start(max(0, math.ceil((at - self._clock()) * 1000)) + 5)
+
+    def _land(self) -> None:
+        self._land_timer.stop()
+        messages = self.feed.land()
+        if messages:
+            logger.info("Board: a parked answer landed")
+            self._send(messages)
+
+    def _on_show_new(self) -> None:
+        """The pill's Show (or a parked answer's dashed entry): it lands now."""
+        self._count_request("showNewRequested")
+        self._land()
+
+    # ---- the keyboard (DESIGN-SPEC 3.6): F6 into the board, Esc and F6 out of it ------------------------------------
+
+    def focus_board(self, part: str) -> None:
+        """F6's cycle reached the board (ReadingView.boardFocusRequested): the page takes it, or - no page to (it can't
+        start, not ready yet) - the next part of the cycle does."""
+        board = self.board
+        if board is not None and shiboken6.isValid(board) and board.focus_part(part):
+            self.counts[f"focus:{part}"] += 1
+            return
+        if part in ("board", "next"):
+            self.reading.focus_ask_bar()
+        else:
+            self.reading.focus_conversation()
+
+    def _on_focus_out(self, to: str) -> None:
+        """Esc in the board (the ask bar), or F6 past its strip (the ask bar) or back before its frames (the
+        conversation)."""
+        self._count_request("focusOutRequested")
+        if to == "conversation":
+            self.reading.focus_conversation()
+        else:
+            self.reading.focus_ask_bar()
 
     def _on_ready(self) -> None:
         self._readies += 1
@@ -269,7 +412,9 @@ class DeskController(QObject):
                         logger.debug("Board: the hint count was not saved (%s)", type(exc).__name__)
                 self.reading.set_board_hint(self._hints_left())
         else:
+            self._watch.reset()                 # out of sight: nobody reads it (a parked answer lands)
             self._send([{"type": "desk", "state": "leave"}])
+            self._land()
 
     def _sync_compact(self) -> None:
         self._send(self.feed.set_compact(self.reading.desk_compact()))
@@ -281,6 +426,8 @@ class DeskController(QObject):
             return
         if not self.reading.desk_shown():
             self.reading.show_board(False)
+        if self.feed.is_parked(group):
+            self._land()                        # the owner asked for it: it lands, then the board goes to it
         self._send([{"type": "reveal", "group": group}])
 
     def _on_go_approvals(self, frame_id: str) -> None:
@@ -411,6 +558,11 @@ class DeskController(QObject):
         messages: list[dict[str, Any]] = []
         if self.ensure_board() is None:
             return
+        # The owner reads the board: a new answer parks under the pill (its group, when it is a new one), the scroll
+        # holds, and it lands after QUIET_S quiet seconds or on Show. Not reading: one parked before lands first.
+        park = self._reading_now()
+        if not park and self.feed.parked_groups():
+            self._land()
         for source, build, merge, approvals in entries:
             frame_id = self.feed.frame_id(answer.key, source, merge)
             try:
@@ -423,9 +575,11 @@ class DeskController(QObject):
             frame = built.messages[0]
             rank = spoken_rank(answer.say, self._rank_words(frame))
             messages += self.feed.put(answer.key, source, built.messages, when=answer.when, merge=merge,
-                                      approvals=approvals, rank=rank)
+                                      approvals=approvals, rank=rank, park=park)
             self.counts[f"frame:{frame.get('kind', '')}"] += 1
         self._send(messages)
+        if self.feed.parked_groups():
+            self._schedule_landing()
 
     @staticmethod
     def _rank_words(frame: dict[str, Any]) -> list[str]:
@@ -580,6 +734,8 @@ class DeskController(QObject):
 
     def shutdown(self) -> None:
         """Jarvis closes: the board's page, renderer and profile go now."""
+        self._due_timer.stop()
+        self._land_timer.stop()
         feed = getattr(self.host, "_live_feed", None)
         if feed is not None:
             try:

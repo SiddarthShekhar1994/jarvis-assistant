@@ -405,10 +405,11 @@ button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 #board.has-lit .frame.arriving .fx-tick { border-color: var(--line-focus); }
 #board.has-lit .frame.arriving .f-glyph { color: var(--holo-lo); }
 
-/* ---- the desk (part 5a, DESIGN-SPEC 2.1 and 3.1): the bar on top, the frames area under it, groups ---- */
-/* The bar: "Board", the counts, then All | Pinned and Clear (drawn; part 5b makes them work). With it the frames area
-   starts 44 px down and leaves the index strip's 28 px at the right, fades over its last 44 px and keeps the bottom
-   24 px gutter clear. Without a bar message (parts 3 and 4) the page is as it was. */
+/* ---- the desk (parts 5a and 5b, DESIGN-SPEC 2.1 and 3.1): the bar on top, the frames area under it, groups ---- */
+/* The bar: "Board", the counts, then All | Pinned (a filter) and Clear. With it the frames area starts 44 px down and
+   leaves the index strip's 28 px (and its 12 px gap) at the right, fades over its last 44 px (and, scrolled down, its
+   first 28 px) and keeps the bottom 24 px gutter for "N more below". Without a bar message (parts 3 and 4) the page is
+   as it was. */
 #bar {
   position: absolute; left: 0; right: 0; top: 0; height: 32px; z-index: 2;
   display: none; align-items: center; gap: 12px; padding: 0 40px 0 var(--pad);
@@ -424,17 +425,32 @@ body.compact .b-count { display: none; }
   flex: none; margin-left: auto; display: flex; height: 28px; overflow: hidden;
   border: 1px solid var(--line); border-radius: var(--radius-button-sm);
 }
-.b-seg button { padding: 0 10px; color: var(--ink-3); font: 500 12px/26px var(--font-body); white-space: nowrap; cursor: default; }
+.b-seg button {
+  padding: 0 10px; color: var(--ink-3); font: 500 12px/26px var(--font-body); white-space: nowrap;
+  transition: color calc(120ms * var(--k)), background-color calc(120ms * var(--k));
+}
+.b-seg button:hover:not(:disabled) { color: var(--ink-1); }
 .b-seg button.on { background: var(--tile-focus); color: var(--ink-1); }
+.b-seg button:disabled { cursor: default; color: var(--ink-4); }
 .b-seg button + button { border-left: 1px solid var(--line); }
+.b-seg button:focus-visible, :root.keys .b-seg button:focus { outline-offset: -2px; }   /* the control clips outside */
 .b-clear {
   flex: none; height: 28px; padding: 0 11px; border: 1px solid var(--line); border-radius: var(--radius-button-sm);
-  color: var(--ink-2); font: 600 12px/26px var(--font-display); letter-spacing: .02em; cursor: default;
+  color: var(--ink-2); font: 600 12px/26px var(--font-display); letter-spacing: .02em;
+  transition: color calc(120ms * var(--k)), border-color calc(120ms * var(--k));
 }
+.b-clear:hover:not(:disabled) { color: var(--ink-1); border-color: var(--line-strong); }
+.b-clear:active:not(:disabled) { transform: translateY(1px); }
+.b-clear:disabled { cursor: default; color: var(--ink-4); border-color: var(--line-faint); }
 body.has-bar #board {
   top: 44px; bottom: 24px; right: 28px; padding: 6px 12px 40px var(--pad);
   -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 44px), transparent 100%);
   mask-image: linear-gradient(to bottom, #000 calc(100% - 44px), transparent 100%);
+}
+/* scrolled down, the first 28 px fade as well: a half-scrolled frame never shows a cut line of text */
+body.has-bar #board.scrolled {
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 28px, #000 calc(100% - 44px), transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 28px, #000 calc(100% - 44px), transparent 100%);
 }
 
 /* a group: its time and topic over a LINE_FAINT rule (older groups in INK_4), then its frames */
@@ -448,6 +464,147 @@ body.has-bar #board {
 }
 .g-rule { flex: 1 1 24px; min-width: 24px; height: 1px; background: var(--line-faint); }
 .group.older .g-time, .group.older .g-topic { color: var(--ink-4); }
+/* a parked answer (it waits under the pill), a group with nothing in sight (a Clear, the Pinned filter), and the room
+   a group arriving makes for itself (220 ms; see board.js) */
+.group.parked, .group.hollow { display: none; }
+.group.making { height: 0; overflow: hidden; }
+.group.sizing { overflow: hidden; }
+.frame.away { display: none; }
+
+/* pairs (2.3): two small kinds side by side once the frames area is 500 px or more (board.js marks the pairs) */
+#board.pairs .g-frames {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 12px; row-gap: 12px; align-items: start;
+}
+#board.pairs .g-frames > .frame { grid-column: 1 / -1; }
+#board.pairs .g-frames > .frame.pair-a, #board.pairs .g-frames > .frame.pair-b { grid-column: auto; }
+
+/* ---- the satellite (3.3): an older answer's unpinned frame as one 48 px row - its glyph in a 30 px square, the
+   title (Chakra 14) and one fact (badge role); a click or Enter expands it in place ---- */
+.f-sat { display: none; }
+.frame.sat { padding: 0; }
+.frame.sat > :not(.f-sat) { display: none; }
+.frame.sat > .f-sat {
+  display: grid; grid-template-columns: 30px minmax(0, 1fr); grid-template-rows: auto auto; column-gap: 10px;
+  row-gap: 2px; align-items: center; align-content: center;
+  width: 100%; min-height: 46px; padding: 7px 12px 7px 9px; border-radius: inherit; text-align: left;
+}
+.s-glyph {
+  grid-row: 1 / 3; display: grid; place-items: center; width: 30px; height: 30px;
+  border: 1px solid var(--line); border-radius: var(--radius-button-sm); color: var(--holo-lo);
+}
+.s-glyph .glyph { width: 15px; height: 15px; }
+.s-title {
+  grid-column: 2; min-width: 0; color: var(--ink-1); font: 500 14px/18px var(--font-display); letter-spacing: .01em;
+  overflow-wrap: anywhere; unicode-bidi: plaintext;
+}
+.s-fact { grid-column: 2; display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--ink-3); }
+.s-fact .s-dia { display: none; width: 9px; height: 9px; color: var(--amber); }
+.s-words { min-width: 0; overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.frame.sat.waits .s-glyph { border-color: var(--amber-line); color: var(--amber); }
+.frame.sat.waits .s-title { color: var(--amber-tx); }
+.frame.sat.waits .s-fact { color: var(--amber); }
+.frame.sat.waits .s-fact .s-dia { display: block; }
+.frame.sat.failed .s-glyph { border-color: var(--alert-line); color: var(--alert); }
+.frame.sat.failed .s-fact { color: var(--alert-tx2); }
+.frame .f-sat:focus, .frame .f-sat:focus-visible, :root.keys .frame .f-sat:focus { outline: none; }   /* the frame's ring */
+
+/* ---- a 7th pin says why, in the meta's place, for 4 s ---- */
+.f-note { display: none; flex: 0 1 auto; max-width: 100%; margin-left: auto; color: var(--ink-2); text-align: right; overflow-wrap: anywhere; }
+.frame.waits .f-note { color: var(--amber-tx); }
+.frame.noted .f-note { display: block; }
+.frame.noted .f-meta, .frame.noted .f-pinned, .frame.noted .f-ctl, .frame.noted:focus-within .f-ctl { display: none; }
+.s-note { display: none; min-width: 0; overflow-wrap: anywhere; color: var(--ink-2); }   /* a folded frame: in its fact's place */
+.frame.noted .s-note { display: inline; }
+.frame.noted .s-words, .frame.sat.noted .s-fact .s-dia { display: none; }
+.frame.waits .s-note { color: var(--amber-tx); }
+
+/* a closed frame's Bring back is offered 8 s; the app then takes the frame away */
+.frame.closed.expired .f-closed .f-act { visibility: hidden; }
+
+/* ---- "Board cleared · 8 FRAMES · Bring back" (3.5): the board's first row for 8 s after Clear ---- */
+.cleared-row {
+  flex: none; display: none; align-items: center; gap: 10px; min-height: 40px; padding: 5px 6px 5px 14px;
+  border: 1px dashed var(--line-strong); border-radius: var(--radius-frame);
+  color: var(--ink-2); font: 400 13px/16px var(--font-body);
+}
+.cleared-row.shown { display: flex; animation: show calc(160ms * var(--k)) var(--ease-out) both; }
+.cleared-row > .glyph { width: 15px; height: 15px; color: var(--ink-3); }
+.cr-count { color: var(--ink-4); }
+.cleared-row .f-act { margin-left: auto; height: 28px; padding: 0 11px; font-size: 12px; }
+
+/* ---- the index strip (3.1): a 26 px glyph button per frame, 4 apart, a 12 px rule between groups; in view LINE_STRONG
+   with a LINE_FOCUS brace down its left; what waits AMBER_LINE with a 9 px diamond pip; an arriving one dashed ---- */
+#strip { position: absolute; top: 46px; bottom: 24px; right: 0; width: 40px; z-index: 2; display: none; }
+body.has-bar #strip { display: block; }
+.s-list {
+  position: absolute; inset: 0; display: flex; flex-direction: column; align-items: flex-end; gap: 4px;
+  padding: 4px 1px 12px 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none;
+}
+.s-list::-webkit-scrollbar { display: none; }
+.ix {
+  position: relative; flex: none; display: grid; place-items: center; width: 26px; height: 26px;
+  border: 1px solid var(--line-faint); border-radius: var(--radius-button-sm); color: var(--ink-4);
+  transition: color calc(120ms * var(--k)), border-color calc(120ms * var(--k)), background-color calc(120ms * var(--k));
+}
+.ix .glyph { width: 13px; height: 13px; }
+.ix:hover { color: var(--ink-2); border-color: var(--line-strong); }
+.ix.in { border-color: var(--line-strong); color: var(--holo-lo); background: color-mix(in srgb, var(--tile-focus) 60%, transparent); }
+.ix.wait { border-color: var(--amber-line); color: var(--amber); }
+.ix.arr { border-style: dashed; color: var(--holo-hi); }
+.ix.arr.wait { color: var(--amber); }
+.ix .glyph.ix-pip {
+  display: none; position: absolute; top: -4px; right: -1px; width: 9px; height: 9px;
+  color: var(--amber); stroke: var(--void); stroke-width: 1.6; paint-order: stroke;
+}
+.ix.wait .glyph.ix-pip { display: block; }
+.ix:focus-visible, :root.keys .ix:focus { outline: 2px solid var(--focus); outline-offset: -1px; }
+.ix-rule { flex: none; width: 12px; height: 1px; margin: 3px 7px 3px 0; background: var(--line); }
+.ix-brace {
+  position: absolute; left: 5px; top: 0; width: 4px; height: 0; display: none; pointer-events: none;
+  border: 1px solid var(--line-focus); border-right: 0; border-radius: 2px 0 0 2px;
+}
+.ix-brace.shown { display: block; }
+
+/* ---- "↓ 7 MORE BELOW" (3.1) in the bottom gutter, whenever a frame below is not fully in view ---- */
+#more {
+  position: absolute; left: var(--pad); bottom: 4px; z-index: 2; display: none; align-items: center; gap: 6px;
+  color: var(--ink-3); line-height: 14px; pointer-events: none; white-space: nowrap;
+}
+body.has-bar #more.shown { display: flex; }
+#more .more-chev { width: 13px; height: 13px; color: var(--holo); transform: rotate(90deg); }
+
+/* ---- parked (3.5): "New answer above · Show" floats under the bar while the owner reads; the scroll holds ---- */
+#pill {
+  position: absolute; left: var(--pad); right: 40px; top: 50px; z-index: 4;
+  display: none; justify-content: center; pointer-events: none;
+}
+body.has-bar #pill.shown { display: flex; animation: show calc(160ms * var(--k)) var(--ease-out) both; }
+.pill-btn {
+  pointer-events: auto; display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 6px 0 12px;
+  border: 1px solid var(--line-strong); border-radius: 15px;
+  background: color-mix(in srgb, var(--tile-focus) 96%, transparent); color: var(--ink-1);
+  font: 400 13px/16px var(--font-body); box-shadow: 0 8px 20px -8px rgba(0, 0, 0, .9);
+  transition: border-color calc(120ms * var(--k));
+}
+.pill-btn .glyph { width: 13px; height: 13px; color: var(--holo-hi); }
+.pill-show {
+  padding: 0 8px 0 10px; border-left: 1px solid var(--line); color: var(--holo-hi);
+  font: 600 12px/22px var(--font-display); letter-spacing: .02em;
+}
+.pill-btn:hover { border-color: var(--line-focus); }
+.pill-btn:hover .pill-show { color: var(--ink-1); }
+
+/* ---- the keyboard's own focus (3.6): as :focus-visible, also when the app moved it (F6) ---- */
+:root.keys .frame:focus, :root.keys .frame:has(button:focus) { outline: 2px solid var(--focus); outline-offset: 3px; }
+:root.keys button:focus { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* ---- inside a narrow frame (under 300 px: a paired one) the small kinds give way, never cut: the title keeps less
+   room before its meta goes under it, a to-do's state words take a little more. Part 6's small kinds add theirs here
+   (the timeline stacks, a maths step's name goes above its line, the chart's delta line and titles wrap). ---- */
+@container frame (max-width: 299px) {
+  .f-title { flex-basis: 6em; }
+  .td-row { column-gap: 8px; grid-template-columns: 16px minmax(0, 1fr) fit-content(45%); }
+}
 
 /* the desk forms: the board fades in and slides 24 px from the right (280 ms; calm x1.6; off at once) */
 :root.desk-in #board, :root.desk-in #bar { animation: desk-in calc(280ms * var(--k)) var(--ease-out) both; }

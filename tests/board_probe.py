@@ -37,6 +37,15 @@ Cases:
                the desk's enter; what the page shows, a grab of the window (the frames are in it), the first frame's
                time to the page's layout, reveal, a group leaving whole, Space in the page, the renderer's memory
                (desk_x15: the same at QT_SCALE_FACTOR 1.5)
+    ways       part 5b: the board's ways with the real page AND the app's own controller (desk_ui.DeskController in
+               a whole offscreen app, tests.ui_fakes.AppHarness; its 8 s made short): the index strip (board order,
+               the rules, the in-view brace, the waiting pip, a real click scrolling to its frame), "N more below" at
+               its 16 px edge, the fades, satellites (48 px, their facts, a click and Enter expanding), pin (real P;
+               a 7th says why for 4 s), close (real Delete; the row, Bring back, then gone), All | Pinned, Clear and
+               its Bring back (then gone, and the desk folding when nothing is left), parking (the focus in the page:
+               the pill, the dashed strip entry, the scroll holding; Show; quiet), the room a group makes (220 ms),
+               the keyboard (real F6, Shift+F6, the arrows, Home / End, Esc), pairs at 1232 x 640 (Left / Right), and
+               the new messages refused by the page when hostile
 
 Qt runs offscreen and Chromium's proxy is a dead address (snapshots.OFFLINE_FLAGS, as the board's engine always runs in a
 test): nothing can reach the network whatever the page does. No window is shown on the real screen.
@@ -887,6 +896,8 @@ def main(case: str) -> dict[str, Any]:
         settle_end(report, refused, late, crashing)
     elif case in ("desk", "desk_x15"):
         report.update(desk_case(wait_until, pump, main_world, settle_end))
+    elif case == "ways":
+        report.update(ways_case(wait_until, pump, main_world, settle_end))
     else:
         report["error"] = f"unknown case {case!r}"
     report["webengine_flags_offline"] = all(flag in os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
@@ -1079,6 +1090,427 @@ def desk_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> d
     report["counts"] = {key: value for key, value in board.counts().items() if isinstance(value, int)}
     window.hide()
     settle_end(report, board)
+    return report
+
+
+_WAYS_PAGE = r"""JSON.stringify((function () {
+  function words(node) { return node ? node.innerText.replace(/\s+/g, ' ').trim() : ''; }
+  function frameOf(node) { return node && node.closest ? node.closest('.frame') : null; }
+  var root = document.getElementById('board'), box = root.getBoundingClientRect();
+  var list = document.querySelector('#strip .s-list'), brace = list.querySelector('.ix-brace');
+  var strip = Array.prototype.filter.call(list.children, function (n) { return n !== brace; }).map(function (n) {
+    var pip = n.querySelector('.ix-pip');
+    return {cls: n.className, label: n.getAttribute('aria-label') || '', top: n.offsetTop, height: n.offsetHeight,
+            pip: pip ? getComputedStyle(pip).display : '', tab: n.tabIndex, border: getComputedStyle(n).borderTopStyle};
+  });
+  var frames = Array.prototype.map.call(root.querySelectorAll('.frame'), function (f) {
+    var r = f.getBoundingClientRect();
+    return {id: f.querySelector('.f-title').id.slice(6), cls: f.className, top: r.top, bottom: r.bottom,
+            height: r.height, left: r.left, width: r.width, shown: getComputedStyle(f).display !== 'none',
+            fact: f.querySelector('.s-words').textContent,
+            note: words([f.querySelector('.f-note'), f.querySelector('.s-note')].filter(function (n) {
+              return n.offsetParent !== null; })[0]),
+            closed: words(f.querySelector('.f-closed')), offsetTop: f.offsetTop};
+  });
+  var active = document.activeElement, row = document.querySelector('.cleared-row');
+  var style = getComputedStyle(root);
+  return {strip: strip, brace: brace.classList.contains('shown') ? {top: brace.offsetTop, height: brace.offsetHeight} : null,
+          frames: frames, more: document.getElementById('more').classList.contains('shown') ? words(document.getElementById('more')) : '',
+          box: {top: box.top, bottom: box.bottom, height: box.height}, scrollTop: root.scrollTop,
+          scrollHeight: root.scrollHeight, clientHeight: root.clientHeight, pairs: root.classList.contains('pairs'),
+          mask: style.webkitMaskImage || style.maskImage,
+          pill: getComputedStyle(document.getElementById('pill')).display, pillText: words(document.getElementById('pill')),
+          cleared: row.classList.contains('shown') ? words(row) : '',
+          active: active && active !== document.body ? active.className : '',
+          activeId: frameOf(active) ? frameOf(active).querySelector('.f-title').id.slice(6) : '',
+          activeIx: active && active.classList && active.classList.contains('ix') ? active.getAttribute('aria-label') : '',
+          groups: Array.prototype.map.call(root.querySelectorAll('.group'), function (g) {
+            return {cls: g.className, display: getComputedStyle(g).display, time: g.querySelector('.g-time').textContent}; }),
+          bar: words(document.getElementById('bar')), clearDisabled: document.querySelector('#bar .b-clear').disabled,
+          pinnedDisabled: document.querySelector('#bar .b-seg button + button').disabled,
+          counts: board.counts()};
+})())"""
+
+
+def ways_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> dict[str, Any]:
+    """Part 5b's board ways with the real page and the app's own controller (see the module doc)."""
+    from PySide6.QtCore import QEvent, QPoint, Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    from briefing_reader import desk_ui, holo, ui
+    from briefing_reader.board import view
+    from tests.ui_fakes import B_TODO, AppHarness
+
+    class Shim:
+        """What AppHarness asks of a test: addCleanup."""
+
+        def __init__(self) -> None:
+            self.cleanups: list = []
+
+        def addCleanup(self, fn: Any, *args: Any) -> None:  # noqa: N802 - unittest's name
+            self.cleanups.append((fn, args))
+
+        def close(self) -> None:
+            for fn, args in reversed(self.cleanups):
+                try:
+                    fn(*args)
+                except Exception:  # noqa: BLE001
+                    pass
+
+    report: dict[str, Any] = {}
+    desk_ui.DeskController.CLOSE_S = 1.5          # the 8 s made short here (the unit tests hold the 8 s)
+    desk_ui.DeskController.CLEAR_S = 1.5
+    desk_ui.DeskController.QUIET_S = 1.0
+    holo.set_motion_level("off")
+    boards: list = []
+
+    def factory(parent: Any) -> Any:
+        made = view.BoardView(parent, start_delay_ms=0)
+        boards.append(made)
+        return made
+
+    shim = Shim()
+    harness = AppHarness(shim, lines=(B_TODO,), board_factory=factory)
+    harness.reading(autoplay=False)
+    c = harness.c
+    window, reading = c.window, c.window.reading
+    window.resize(1120, 700)
+    reading.set_tab(ui.SCREEN_HOME)
+    window.show()
+    window.activateWindow()
+    pump(0.3)
+    desk = c.look.desk
+    built = dict(kind_frames(tiny_jpeg_url(320, 180)))
+
+    def answer(key: int, names: list[tuple[str, str]], settle: float = 0.4) -> list[str]:
+        """An answer shown on Home (the controller's own steps): (source, kind_frames name) each; its frame ids."""
+        c._you(f"Question {key}?")
+        desk.on_answer_started(key, f"Question {key}?")
+        c._jarvis(f"Answer {key}, sir.")
+        answered = desk._answers[key]
+        answered.done = True
+        answered.say = f"Answer {key}, sir."
+        desk.ensure_board()
+        park = desk._reading_now()
+        if not park and desk.feed.parked_groups():
+            desk._land()
+        messages: list = []
+        ids: list[str] = []
+        for rank, (source, name) in enumerate(names):
+            merge = "mail:work:t1" if name in ("mail", "reply") else ""
+            frame_id = desk.feed.frame_id(key, source, merge)
+            ids.append(frame_id)
+            messages += desk.feed.put(key, source, [dict(message, id=frame_id) for message in built[name].messages],
+                                      when=f"9:{key:02d} AM", merge=merge, approvals="card-1" if name == "reply" else "",
+                                      rank=float(rank), park=park)
+        desk._send(messages)
+        desk.feed.set_turn(key, desk._answer_entry())
+        desk._sync_counts()
+        if desk.feed.parked_groups():
+            desk._schedule_landing()
+        pump(settle)
+        return list(dict.fromkeys(ids))
+
+    oldest = answer(5, [("research", "research"), ("page", "page")])
+    middle = answer(20, [("todos", "todos"), ("followups", "followups"), ("search", "search")])
+    newest = answer(41, [("mail", "mail"), ("reply", "reply"), ("day", "day"), ("week", "week")])
+    board = boards[0]
+    wait_until(board.is_ready, 40)
+    pump(1.5)
+    report["ready"] = board.is_ready()
+    report["ids"] = {"oldest": oldest, "middle": middle, "newest": newest}
+    report["feed_order"] = desk.feed.frame_ids()
+    report["facts"] = {frame_id: desk.feed.frame_message(frame_id)["fact"] for frame_id in desk.feed.frame_ids()}
+
+    def page() -> dict:
+        return json.loads(main_world(board, _WAYS_PAGE))
+
+    def proxy() -> Any:
+        return board.web_view().focusProxy()
+
+    def rect(script: str) -> dict:
+        return json.loads(main_world(board, "JSON.stringify((function () { var r = (%s).getBoundingClientRect(); "
+                                            "return {left: r.left, top: r.top, width: r.width, height: r.height}; "
+                                            "})())" % script))
+
+    def click(box: dict) -> None:
+        QTest.mouseClick(proxy(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                         QPoint(int(box["left"] + box["width"] / 2), int(box["top"] + box["height"] / 2)))
+        pump(0.35)
+
+    def key(code: Any, modifiers: Any = Qt.KeyboardModifier.NoModifier) -> None:
+        target = QApplication.focusWidget() or window
+        QTest.keyClick(target, code, modifiers)
+        pump(0.3)
+
+    def frame_js(frame_id: str) -> str:
+        return f"document.getElementById('title-{frame_id}').closest('.frame')"
+
+    def scroll(top: int) -> None:
+        main_world(board, f"document.getElementById('board').scrollTop = {int(top)}; 1")
+        pump(0.25)
+
+    def pointer_leaves() -> None:
+        """The pointer leaves the board (real clicks put it over the page; offscreen it never moves away itself)."""
+        QApplication.sendEvent(proxy(), QEvent(QEvent.Type.Leave))
+        pump(0.3)
+
+    def nobody_reads() -> None:
+        """No sign of reading left at all (the quiet 8 s made zero)."""
+        pointer_leaves()
+        desk._watch.reset()
+
+    # ---- the strip, "N more below", the fades ------------------------------------------------------------------
+    report["first"] = page()
+    strip = [item for item in report["first"]["strip"] if "ix-rule" not in item["cls"]]
+    # A real click on a strip button far down scrolls the board to its frame.
+    target_index = len(strip) - 2
+    click(rect(f"document.querySelectorAll('#strip .ix')[{target_index}]"))
+    pump(0.3)
+    report["after_strip_click"] = page()
+    report["strip_click_index"] = target_index
+    # "N more below" at its 16 px edge: a frame whose bottom is 17 px above the end is fully in view (in the 44 px
+    # fade); 15 px above it, it is not.
+    scroll(0)
+    first = page()
+    edge_frame = next(item for item in first["frames"] if item["shown"] and item["bottom"] > first["box"]["bottom"])
+    base = edge_frame["offsetTop"] + edge_frame["height"] - first["box"]["height"]
+    scroll(base + 17)
+    report["edge_17"] = page()
+    scroll(base + 15)
+    report["edge_15"] = page()
+    report["edge_frame"] = edge_frame["id"]
+    scroll(100000)
+    report["at_end"] = page()
+    scroll(0)
+    report["at_top"] = page()
+
+    # ---- satellites -------------------------------------------------------------------------------------------------
+    report["sats"] = [item for item in page()["frames"] if " sat" in f" {item['cls']}"]
+    sat_click = middle[1]                                         # the follow-ups: a satellite
+    main_world(board, f"{frame_js(sat_click)}.scrollIntoView({{block: 'center'}}); 1")
+    pump(0.3)
+    click(rect(f"{frame_js(sat_click)}.querySelector('.f-sat')"))
+    report["sat_clicked"] = next(item for item in page()["frames"] if item["id"] == sat_click)
+    sat_enter = oldest[0]
+    main_world(board, f"{frame_js(sat_enter)}.querySelector('.f-sat').focus(); 1")
+    pump(0.2)
+    board.web_view().setFocus(Qt.FocusReason.OtherFocusReason)
+    wait_until(lambda: view.keeps_space(QApplication.focusWidget()), 5)
+    main_world(board, f"{frame_js(sat_enter)}.querySelector('.f-sat').focus(); 1")
+    pump(0.2)
+    key(Qt.Key.Key_Return)
+    report["sat_entered"] = next(item for item in page()["frames"] if item["id"] == sat_enter)
+
+    # ---- parking: the focus in the page (its own report), a new answer parks; Show; then quiet ----------------------
+    scroll(160)
+    main_world(board, f"{frame_js(newest[1])}.focus({{preventScroll: true}}); 1")
+    pump(0.4)
+    report["reading_focus"] = desk._watch.focus                  # the page said: the focus is in it
+    held = page()["scrollTop"]
+    parked_ids = answer(43, [("search", "search")])
+    report["parked"] = page()
+    report["parked_held"] = held
+    report["parked_groups"] = desk.feed.parked_groups()
+    click(rect("document.querySelector('#pill .pill-btn')"))
+    report["shown_new"] = page()
+    report["parked_after_show"] = desk.feed.parked_groups()
+    main_world(board, f"{frame_js(newest[0])}.focus({{preventScroll: true}}); 1")
+    pump(0.3)
+    answer(44, [("research", "research")])
+    report["parked_again"] = desk.feed.parked_groups()
+    pointer_leaves()                                             # the pointer goes, then the focus: quiet from now
+    report["reading_pointer_left"] = desk._watch.pointer
+    reading.focus_ask_bar()
+    pump(0.3)
+    report["reading_after_leaving"] = [desk._watch.focus, desk._watch.pointer]
+    report["landed_before_quiet"] = desk.feed.parked_groups()
+    pump(1.4)
+    report["landed_after_quiet"] = desk.feed.parked_groups()
+    # The room a new answer makes (lively motion: 220 ms; read while it runs).
+    nobody_reads()
+    board.set_motion("lively")
+    pump(0.2)
+    answer(45, [("week", "week")], settle=0.12)
+    report["room"] = json.loads(main_world(board, "JSON.stringify(Array.prototype.concat.apply([], Array.prototype.map."
+                                                  "call(document.querySelectorAll('#board .group'), function (g) { return "
+                                                  "g.getAnimations().map(function (a) { return a.effect.getTiming()"
+                                                  ".duration; }); })))"))
+    pump(1.2)
+    board.set_motion("off")
+    pump(0.2)
+    report["after_landings"] = page()
+
+    # ---- pin (real P), a 7th says why for 4 s ----------------------------------------------------------------------
+    board.web_view().setFocus(Qt.FocusReason.OtherFocusReason)
+    wait_until(lambda: view.keeps_space(QApplication.focusWidget()), 5)
+    order = [item["id"] for item in page()["frames"] if item["shown"] and "closed" not in item["cls"]]
+    pinned: list[str] = []
+    for frame_id in order[:7]:                                  # six pins, and a 7th tried on a folded frame
+        main_world(board, f"(function () {{ var f = {frame_js(frame_id)}; (f.classList.contains('sat') ? "
+                          "f.querySelector('.f-sat') : f).focus(); })(); 1")
+        pump(0.15)
+        key(Qt.Key.Key_P)
+        pinned.append(frame_id)
+    main_world(board, f"{frame_js(order[7])}.querySelector('.f-sat').click(); 1")   # a 7th tried on a full one
+    pump(0.3)
+    main_world(board, f"{frame_js(order[7])}.focus(); 1")
+    pump(0.15)
+    key(Qt.Key.Key_P)
+    report["pins"] = page()
+    report["pins_feed"] = desk.feed.pinned()
+    report["seventh"] = pinned[6]
+    report["seventh_full"] = order[7]
+    main_world(board, "document.activeElement.blur(); 1")
+    pump(4.3)
+    report["note_after_4s"] = next(item for item in page()["frames"] if item["id"] == pinned[6])
+    for frame_id in pinned[:5]:                                  # the sixth stays pinned (an older answer's)
+        main_world(board, f"{frame_js(frame_id)}.focus(); 1")
+        pump(0.1)
+        key(Qt.Key.Key_P)
+    report["pinned_left"] = [frame_id for frame_id in desk.feed.frame_ids() if desk.feed.flags(frame_id)["pinned"]]
+
+    # ---- close (real Delete), the row, then gone; Bring back -------------------------------------------------------
+    nobody_reads()
+    closable = next(item["id"] for item in page()["frames"]
+                    if item["shown"] and "pinned" not in item["cls"] and " sat" not in f" {item['cls']}")
+    main_world(board, f"{frame_js(closable)}.focus(); 1")
+    pump(0.15)
+    key(Qt.Key.Key_Delete)
+    report["closing"] = next(item for item in page()["frames"] if item["id"] == closable)
+    report["closing_flags"] = desk.feed.flags(closable)
+    report["closing_active"] = page()["active"]
+    pump(1.9)
+    report["closed_gone"] = [item["id"] for item in page()["frames"]].count(closable)
+    report["closed_gone_feed"] = desk.feed.flags(closable)
+    keep = next(item["id"] for item in page()["frames"] if item["shown"] and "pinned" not in item["cls"]
+                and " sat" not in f" {item['cls']}")
+    main_world(board, f"{frame_js(keep)}.focus(); 1")
+    pump(0.15)
+    key(Qt.Key.Key_Delete)
+    click(rect(f"{frame_js(keep)}.querySelector('.f-closed .f-act')"))
+    pump(1.9)
+    report["brought_back"] = next(item for item in page()["frames"] if item["id"] == keep)
+    report["brought_back_flags"] = desk.feed.flags(keep)
+
+    # ---- All | Pinned ----------------------------------------------------------------------------------------------------
+    click(rect("document.querySelector('#bar .b-seg button + button')"))
+    report["filter_pinned"] = page()
+    click(rect("document.querySelector('#bar .b-seg button')"))
+    report["filter_all"] = page()
+
+    # ---- the keyboard: real F6, Shift+F6, the arrows, Home / End, Esc ---------------------------------------------
+    nobody_reads()
+    scroll(0)
+    reading.focus_ask_bar()
+    pump(0.2)
+    keys: dict[str, Any] = {"start_ask": reading.command_bar.isAncestorOf(QApplication.focusWidget())}
+    key(Qt.Key.Key_F6)
+    keys["conversation"] = QApplication.focusWidget() is reading.desk_page().turns
+    key(Qt.Key.Key_F6)
+    keys["board_qt"] = view.keeps_space(QApplication.focusWidget())
+    keys["board"] = page()["activeId"]
+    key(Qt.Key.Key_Down)
+    keys["down"] = page()["activeId"]
+    key(Qt.Key.Key_Up)
+    keys["up"] = page()["activeId"]
+    key(Qt.Key.Key_End)
+    keys["end"] = page()["activeId"]
+    key(Qt.Key.Key_Home)
+    keys["home"] = page()["activeId"]
+    key(Qt.Key.Key_F6)
+    keys["strip"] = page()["activeIx"]
+    key(Qt.Key.Key_Down)
+    keys["strip_down"] = page()["activeIx"]
+    key(Qt.Key.Key_F6)
+    keys["back_to_ask"] = reading.command_bar.isAncestorOf(QApplication.focusWidget())
+    key(Qt.Key.Key_F6, Qt.KeyboardModifier.ShiftModifier)
+    keys["shift_strip"] = page()["activeIx"]
+    key(Qt.Key.Key_F6, Qt.KeyboardModifier.ShiftModifier)
+    keys["shift_board"] = page()["activeId"]
+    key(Qt.Key.Key_F6, Qt.KeyboardModifier.ShiftModifier)
+    keys["shift_conversation"] = QApplication.focusWidget() is reading.desk_page().turns
+    key(Qt.Key.Key_F6)
+    key(Qt.Key.Key_Escape)
+    keys["escape"] = reading.command_bar.isAncestorOf(QApplication.focusWidget())
+    keys["order"] = [item["id"] for item in page()["frames"] if item["shown"] and "closed" not in item["cls"]]
+    keys["cycle_keys_sent_on"] = board.counts().get("cycle_keys_sent_on", 0)
+    report["keys"] = keys
+
+    # ---- the new messages, hostile, straight into the page: refused, nothing changes -------------------------------
+    known = sorted(board.known_ids())[0]
+    hostile = [
+        {"type": "cleared", "frames": ["nope"]},
+        {"type": "cleared", "frames": [known, known]},
+        {"type": "cleared", "frames": known},
+        {"type": "cleared"},
+        {"type": "focus_part", "part": "address bar"},
+        {"type": "focus_part", "part": "board", "then": "x"},
+        {"type": "group", "id": "g1", "time": "9:41 AM", "topic": "x", "frames": [], "older": False, "parked": "yes"},
+        {"type": "frame", "id": known, "kind": "text", "title": "x", "meta": "", "body": {"text": "x"}, "status": "ok",
+         "status_text": "", "status_meta": "", "waits": "", "changed": False, "pinned": False, "closed": False,
+         "fact": "x" * 41},
+        {"type": "frame", "id": known, "kind": "text", "title": "x", "meta": "", "body": {"text": "x"}, "status": "ok",
+         "status_text": "", "status_meta": "", "waits": "", "changed": False, "pinned": False, "closed": False,
+         "fact": 3},
+    ]
+    before_hostile = page()
+    report["page_refused"] = json.loads(main_world(board, "JSON.stringify(%s.map(function (m) { "
+                                                          "return board.apply(JSON.stringify(m)); }))"
+                                                          % json.dumps(hostile)))
+    after_hostile = page()
+    report["hostile_changed_nothing"] = (
+        [item["cls"] for item in before_hostile["frames"]] == [item["cls"] for item in after_hostile["frames"]]
+        and before_hostile["cleared"] == after_hostile["cleared"])
+
+    # ---- Clear and its Bring back, then gone ----------------------------------------------------------------------
+    click(rect("document.querySelector('#bar .b-clear')"))
+    report["cleared"] = page()
+    report["cleared_count"] = reading.board_count()
+    report["cleared_desk"] = reading.desk_shown()
+    click(rect("document.querySelector('.cleared-row .f-act')"))
+    report["restored"] = page()
+    report["restored_count"] = reading.board_count()
+    click(rect("document.querySelector('#bar .b-clear')"))
+    pump(1.9)
+    report["clear_gone"] = page()
+    report["clear_gone_feed"] = desk.feed.frame_ids()
+
+    # ---- pairs at 1232 x 640: Left / Right within a pair ---------------------------------------------------------
+    window.resize(1232, 640)
+    pump(0.6)
+    nobody_reads()
+    pair = answer(50, [("todos-a", "todos"), ("todos-b", "todos")])
+    pump(0.5)
+    report["pairs_page"] = page()
+    report["pair_ids"] = pair
+    board.web_view().setFocus(Qt.FocusReason.OtherFocusReason)
+    wait_until(lambda: view.keeps_space(QApplication.focusWidget()), 5)
+    main_world(board, f"{frame_js(pair[0])}.focus(); 1")
+    pump(0.2)
+    key(Qt.Key.Key_Right)
+    report["pair_right"] = page()["activeId"]
+    key(Qt.Key.Key_Left)
+    report["pair_left"] = page()["activeId"]
+    key(Qt.Key.Key_Down)
+    report["pair_down"] = page()["activeId"]
+
+    # ---- nothing pinned, Clear: the desk folds back to the stage ----------------------------------------------------
+    for frame_id in [frame_id for frame_id in desk.feed.frame_ids() if desk.feed.flags(frame_id)["pinned"]]:
+        main_world(board, f"{frame_js(frame_id)}.focus(); 1")
+        pump(0.1)
+        key(Qt.Key.Key_P)
+    click(rect("document.querySelector('#bar .b-clear')"))
+    pump(0.4)
+    report["last_clear_desk"] = reading.desk_shown()
+    report["last_clear_stage"] = reading.stage.isVisible()
+    report["last_clear_count"] = reading.board_count()
+    report["desk_counts"] = {key_: value for key_, value in desk.counts.items() if isinstance(value, int)}
+    report["counts"] = {key_: value for key_, value in board.counts().items() if isinstance(value, int)}
+    window.hide()
+    settle_end(report, board)
+    shim.close()
     return report
 
 

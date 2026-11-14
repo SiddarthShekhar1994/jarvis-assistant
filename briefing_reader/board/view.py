@@ -17,13 +17,17 @@ its place when it can't be.
                           fallback tile, which then says READ-ONLY TILES BELOW. Part 5a: the groups (one answer each:
                           their headers and order, the newest on top) and, once the app sent the bar's counts (the
                           desk), the native bar "Board READ-ONLY 9 FRAMES" over the tile; the tiles then keep the
-                          frames' 448 px (no index strip)
+                          frames' 448 px (no index strip). Part 5b: clearRequested(), restoreRequested(),
+                          showNewRequested(), readingChanged(pointer, focus), focusOutRequested(to); focus_part(part)
+                          (F6: the keyboard focus to the page, then its frames or its index strip); the read-only tiles
+                          leave out a parked answer and what a Clear took away
     BoardBridge           the one object the page sees on its web channel: post(kind, payload), checked against
                           board.protocol (the kinds on the list, the frame ids the app sent); anything else dropped and
                           counted (a log line names the kind only when it is on the list, else "unknown")
     BoardFallback         the native tile: "The board can't start on this PC. Answers still show here as text."
     WindowKeysFilter      on the view's focus proxy (re-installed on every focus and when the renderer restarts): the
-                          window's keys (WINDOW_KEYS) still fire with the focus in the page
+                          window's keys (WINDOW_KEYS) and F6 / Shift+F6 (CYCLE_KEY: the desk's focus cycle) still fire
+                          with the focus in the page
     keeps_space(widget)   True inside the board: Space scrolls it, as in a text field, and never plays or pauses the
                           briefing (ui._keeps_space)
 
@@ -88,6 +92,9 @@ CRASHED = "crashed"           # its renderer stopped more than MAX_RESTARTS time
 WINDOW_KEYS = (Qt.Key.Key_1, Qt.Key.Key_2, Qt.Key.Key_3, Qt.Key.Key_4, Qt.Key.Key_5, Qt.Key.Key_6, Qt.Key.Key_7,
                Qt.Key.Key_8, Qt.Key.Key_9, Qt.Key.Key_Comma, Qt.Key.Key_K, Qt.Key.Key_Space, Qt.Key.Key_M, Qt.Key.Key_B)
 _WINDOW_KEY_CODES = frozenset(int(key.value) for key in WINDOW_KEYS)
+# F6 (and Shift+F6 back) cycles the desk's parts: the ask bar, the conversation, the board and its index strip
+# (DESIGN-SPEC 3.6). The window's shortcut takes it from the page too; the page is told where the focus goes.
+CYCLE_KEY = Qt.Key.Key_F6
 
 _IDLE, _WAITING, _LOADING, _READY, _FALLBACK, _SHUT = "idle", "waiting", "loading", "ready", "fallback", "shut"
 _OWN_REASONS = frozenset({NO_SCHEME, NO_READY, LOAD_FAILED, CRASHED})
@@ -116,6 +123,17 @@ def is_window_key(key: Any, modifiers: Any) -> bool:
         held = Qt.KeyboardModifier(modifiers) & ~Qt.KeyboardModifier.KeypadModifier
         return held == Qt.KeyboardModifier.ControlModifier and code in _WINDOW_KEY_CODES
     except Exception:  # noqa: BLE001 - not a key this knows: not the window's
+        return False
+
+
+def is_cycle_key(key: Any, modifiers: Any) -> bool:
+    """True for F6 alone or with Shift (the desk's focus cycle, forward and back), nothing else held."""
+    try:
+        code = int(key.value) if hasattr(key, "value") else int(key)
+        held = Qt.KeyboardModifier(modifiers) & ~Qt.KeyboardModifier.KeypadModifier
+        return code == int(CYCLE_KEY.value) and held in (Qt.KeyboardModifier.NoModifier,
+                                                         Qt.KeyboardModifier.ShiftModifier)
+    except Exception:  # noqa: BLE001 - not a key this knows
         return False
 
 
@@ -388,15 +406,20 @@ class WindowKeysFilter(QObject):
         self._check = check
         self.view: QObject | None = None   # the view itself: the override goes on up to it too, counted once
         self.refused = 0                   # window keys sent on to the window from the page
+        self.cycled = 0                    # F6 / Shift+F6 sent on to the window from the page
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt override
         try:
             kind = event.type()
             if kind == QEvent.Type.ShortcutOverride:
-                if is_window_key(event.key(), event.modifiers()):
+                window_key = is_window_key(event.key(), event.modifiers())
+                if window_key or is_cycle_key(event.key(), event.modifiers()):
                     event.ignore()                 # not the page's: the window's shortcut fires
                     if watched is not self.view:
-                        self.refused += 1
+                        if window_key:
+                            self.refused += 1
+                        else:
+                            self.cycled += 1
                     return True
             elif kind in (QEvent.Type.FocusIn, QEvent.Type.ChildPolished):
                 self._check()
@@ -459,6 +482,13 @@ class BoardView(QWidget):
     bringBackRequested = Signal(str)
     retryRequested = Signal(str)
     approvalsRequested = Signal(str)
+    # Part 5b: the bar's Clear, the cleared row's Bring back, the pill's Show, the owner at the board (the pointer over
+    # it, the focus in it), and the keyboard focus out of it (Esc, F6: "ask" / "conversation").
+    clearRequested = Signal()
+    restoreRequested = Signal()
+    showNewRequested = Signal()
+    readingChanged = Signal(bool, bool)
+    focusOutRequested = Signal(str)
     unavailable = Signal(str)              # the reason word (no_engine, sandbox, unsafe_flags, no_ready, ...)
 
     def __init__(self, parent: QWidget | None = None, *, start_delay_ms: int = START_DELAY_MS,
@@ -482,6 +512,7 @@ class BoardView(QWidget):
         # last counts (None until the desk formed: no bar on the page or over the read-only tiles before).
         self._groups: dict[str, dict[str, Any]] = {}
         self._frame_group: dict[str, str] = {}
+        self._cleared: frozenset[str] = frozenset()      # part 5b: what the bar's Clear took away (out of sight)
         self._bar: dict[str, Any] | None = None
         self._bar_widget: BoardBar | None = None
         self._tiles: GlanceTiles | None = None
@@ -576,6 +607,7 @@ class BoardView(QWidget):
         data["blocked"] = dict(self._blocked)
         data["served"] = dict(self._served)
         data["keys_sent_on"] = self._keys.refused
+        data["cycle_keys_sent_on"] = self._keys.cycled
         return data
 
     def apply(self, message: Any) -> bool:
@@ -595,7 +627,7 @@ class BoardView(QWidget):
         self._remember(checked)
         if self._phase == _FALLBACK:
             self._counts[f"tiles:{checked.type}"] += 1
-            if checked.type in ("frame", "remove", "clear", "picture", "group", "remove_group", "bar"):
+            if checked.type in ("frame", "remove", "clear", "picture", "group", "remove_group", "bar", "cleared"):
                 self._show_tiles()
             return True
         self._counts[f"sent:{checked.type}"] += 1
@@ -624,6 +656,9 @@ class BoardView(QWidget):
             self._pictures.clear()
             self._groups.clear()
             self._frame_group.clear()
+            self._cleared = frozenset()
+        elif kind == "cleared":
+            self._cleared = frozenset(json.loads(checked.text)["frames"])
         elif kind == "picture":
             self._pictures[frame_id] = json.loads(checked.text)["src"]
         elif kind == "group":
@@ -641,10 +676,13 @@ class BoardView(QWidget):
         self._frames.pop(frame_id, None)
         self._pictures.pop(frame_id, None)
         self._frame_group.pop(frame_id, None)
+        if frame_id in self._cleared:
+            self._cleared = self._cleared - {frame_id}
 
     def _tile_order(self) -> tuple[list[dict[str, Any]], dict[str, tuple[str, str, bool]]]:
         """The frames as the board shows them: each group's (the newest group first, in its order, a frame not in it
-        yet after), then the frames of no group; and the header drawn above each group's first tile."""
+        yet after; a parked group not yet), then the frames of no group; and the header drawn above each group's first
+        tile. Closed frames and what a Clear took away are left out."""
         shown: list[dict[str, Any]] = []
         headers: dict[str, tuple[str, str, bool]] = {}
         placed: set[str] = set()
@@ -652,10 +690,13 @@ class BoardView(QWidget):
             members = [frame_id for frame_id in group.get("frames", []) if self._frame_group.get(frame_id) == group_id]
             members += [frame_id for frame_id, owner in self._frame_group.items()
                         if owner == group_id and frame_id not in members]
+            if group.get("parked"):
+                placed.update(members)             # it lands later: not shown yet, nor among the frames of no group
+                continue
             first = True
             for frame_id in members:
                 frame = self._frames.get(frame_id)
-                if frame is None or frame.get("closed"):
+                if frame is None or frame.get("closed") or frame_id in self._cleared:
                     continue
                 if first:
                     headers[frame_id] = (str(group.get("time", "")), str(group.get("topic", "")),
@@ -663,7 +704,9 @@ class BoardView(QWidget):
                     first = False
                 shown.append(frame)
                 placed.add(frame_id)
-        shown += [frame for frame_id, frame in self._frames.items() if frame_id not in placed]
+            placed.update(members)                 # a group's own frames never show among the frames of no group
+        shown += [frame for frame_id, frame in self._frames.items()
+                  if frame_id not in placed and frame_id not in self._cleared]
         return shown, headers
 
     def _show_tiles(self) -> None:
@@ -701,6 +744,20 @@ class BoardView(QWidget):
         layout = box.layout()
         if layout is not None:
             layout.setContentsMargins(PAD, 0, STRIP, 0)
+
+    def focus_part(self, part: str) -> bool:
+        """F6's cycle (DESIGN-SPEC 3.6): the window's keyboard focus into the page, then to its frames or its index
+        strip, or on from where it is ("next" / "prev": protocol.FOCUS_PARTS). False when there is no page to take it
+        (not ready yet, fallen back, shut down): the caller sends the focus elsewhere."""
+        view = self._view
+        if self._phase != _READY or view is None or not _alive(view) or part not in protocol.FOCUS_PARTS:
+            return False
+        try:
+            view.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Board: the focus did not move (%s)", type(exc).__name__)
+            return False
+        return self.apply({"type": "focus_part", "part": part})
 
     def set_motion(self, level: str) -> bool:
         """The motion the page plays: "lively", "calm" (x1.6) or "off" (each moment's end state at once), as holo's
@@ -931,6 +988,16 @@ class BoardView(QWidget):
             self.retryRequested.emit(request.frame_id)
         elif kind == "go_approvals":
             self.approvalsRequested.emit(request.frame_id)
+        elif kind == "clear":
+            self.clearRequested.emit()
+        elif kind == "restore":
+            self.restoreRequested.emit()
+        elif kind == "show_new":
+            self.showNewRequested.emit()
+        elif kind == "reading":
+            self.readingChanged.emit(request.pointer, request.focused)
+        elif kind == "focus_out":
+            self.focusOutRequested.emit(request.to)
 
     def _on_ready(self) -> None:
         if self._phase != _LOADING or self._load_pending:
@@ -1080,5 +1147,6 @@ def keeps_space(widget: QWidget | None) -> bool:
 
 
 __all__ = ["BAR_TITLE", "BoardBar", "BoardBridge", "BoardFallback", "BoardLayout", "BoardView", "CANT_START",
-           "MAX_RESTARTS", "READY_TIMEOUT_MS", "READ_ONLY", "READ_ONLY_BELOW", "START_DELAY_MS", "STRIP",
-           "TILE_PICTURE_PIXELS", "WINDOW_KEYS", "WindowKeysFilter", "is_window_key", "keeps_space", "tile_picture"]
+           "CYCLE_KEY", "MAX_RESTARTS", "READY_TIMEOUT_MS", "READ_ONLY", "READ_ONLY_BELOW", "START_DELAY_MS", "STRIP",
+           "TILE_PICTURE_PIXELS", "WINDOW_KEYS", "WindowKeysFilter", "is_cycle_key", "is_window_key", "keeps_space",
+           "tile_picture"]

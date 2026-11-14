@@ -29,6 +29,16 @@ Part 5a, the board on Home:
 * ``protocol`` gains the group, remove_group, bar, desk and reveal messages and a frame's group; the page draws the bar
   ("Board", "9 FRAMES", "1 WAITS", All | Pinned and Clear drawn) and the groups' headers, and plays the desk's entrance.
 
+Part 5b, the board's ways:
+
+* ``feed`` is the source of truth for pins (6 at most), close and Bring back (the frame leaves 8 s later), Clear and its
+  Bring back (out of sight 8 s, then gone), and parking (an answer that comes while the owner reads waits under "New
+  answer above · Show" and lands after 8 quiet seconds; ``ReadingWatch`` is the reading rule); ``facts`` makes a
+  satellite's one fact from a frame's data.
+* ``protocol`` gains a frame's fact, a group's parked, the cleared and focus_part messages, and the clear, restore,
+  show_new, reading and focus_out requests; the page draws the index strip, "N more below", the fades, pairs,
+  satellites, the pill, the cleared row, and takes the keyboard (F6 reaches it through ``view``'s key filter).
+
 desk_ui.DeskController makes the one board (only while ``[look] board`` is on) and feeds it; desk_view and
 ui.ReadingView put it on Home beside the conversation. Importing this package imports nothing of the web engine; only
 ``view`` starts it, and only through snapshot_engine.

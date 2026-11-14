@@ -795,10 +795,13 @@ class DeskTurns(QScrollArea):
     """The turns (see the module doc). ``set_turns(turns, frames_for=...)`` from the Transcript's entries;
     ``set_live(text)`` what Jarvis is saying now, as the current turn until the answer's own turn comes;
     ``set_compact`` (the last exchange only). The newest turn is at the bottom; older ones scroll up under the
-    64 px top fade (the wheel scrolls them; the newest comes back into view with the next turn)."""
+    64 px top fade (the wheel scrolls them; the newest comes back into view with the next turn). Part 5b: F6 gives it
+    the keyboard focus (not Tab: Home's Tab order is as it was) - the arrows and Page Up / Down scroll it, Tab goes on to
+    its tokens and links, Esc back to the ask bar (``escaped``); the desk paints its focus ring."""
 
     tokenClicked = Signal(int)
     linkClicked = Signal(str)
+    escaped = Signal()
     SCROLL_HOLD_S = 4.0
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -946,6 +949,28 @@ class DeskTurns(QScrollArea):
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
         self._relayout()
+
+    def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        if event.key() == Qt.Key.Key_Escape:
+            event.accept()
+            self.escaped.emit()
+            return
+        if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_PageUp, Qt.Key.Key_PageDown):
+            self._on_user_scroll(0)              # the owner scrolls: the newest stays where it is a while
+        super().keyPressEvent(event)
+
+    def focusInEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().focusInEvent(event)
+        self._ring_changed()
+
+    def focusOutEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().focusOutEvent(event)
+        self._ring_changed()
+
+    def _ring_changed(self) -> None:
+        parent = self.parentWidget()
+        if parent is not None:
+            parent.update()
 
 
 # --------------------------------------------------------------------------
@@ -1187,9 +1212,11 @@ class DeskPage(QWidget):
         painter = QPainter(self)
         try:
             painter.fillRect(QRectF(self._geometry.seam), holo.LINE_FAINT)
+            if self.turns.hasFocus():            # F6 brought the keyboard here: the conversation's ring
+                holo.paint_focus_ring(painter, QRectF(self.turns.geometry()), holo.RADIUS_FRAME)
         finally:
             painter.end()
 
 
-__all__ = ["BoardHint", "DeskGeometry", "DeskPage", "DeskTurns", "FramesToken", "HINT_KEY", "HINT_TEXT", "RingFlight",
+__all__ =["BoardHint", "DeskGeometry", "DeskPage", "DeskTurns", "FramesToken", "HINT_KEY", "HINT_TEXT", "RingFlight",
            "RingHead", "TextBlock", "Turn", "TurnView", "desk_geometry", "earlier_text", "highlights", "token_text"]

@@ -1,9 +1,12 @@
-/* The board's page (the new look, parts 3, 4 and 5a): Jarvis's own code, no library. Every element is made with
+/* The board's page (the new look, parts 3, 4, 5a and 5b): Jarvis's own code, no library. Every element is made with
    createElement, every word is set with textContent and every listener with addEventListener: no markup is ever read,
    no address is ever opened. The app sends board.apply(<JSON text>), checked in Python first and checked here again;
    the page answers on its web channel with bridge.post(kind, <JSON text>), the short list Python accepts (ready, layout,
-   focus, open, close, pin, bring_back, retry, go_approvals). DESIGN-SPEC 3.1 (the bar and the groups), 3.2 (the
-   frame), 3.3 (the kinds), 3.4 (its states) and 5 (motion). */
+   focus, open, close, pin, bring_back, retry, go_approvals, clear, restore, show_new, reading, focus_out). DESIGN-SPEC
+   3.1 (the bar, the groups, the index strip, "N more below" and the fades), 3.2 (the frame), 3.3 (the kinds and the
+   satellite), 3.4 (its states), 3.5 (order, parking, pin, close, Clear), 3.6 (the keyboard) and 5 (motion). The app is
+   the source of truth: what the owner does shows here at once, the app decides and sends a frame's flags again when its
+   decision differs. */
 (function () {
   'use strict';
 
@@ -16,9 +19,10 @@
               ticks: 13, tick: 8, pill: 16, topic: 40, time: 16};
   var DAY_MINUTES = 1440;
   var FRAME_FIELDS = ['type', 'id', 'kind', 'title', 'meta', 'body', 'status', 'status_text', 'status_meta', 'waits',
-                      'changed', 'pinned', 'closed', 'group'];
+                      'changed', 'pinned', 'closed', 'fact', 'group'];
   var MAX_GROUPS = 8;
   var DESK_STATES = ['enter', 'leave'];
+  var FOCUS_PARTS = ['board', 'strip', 'next', 'prev'];
   var GROUP_FADE_MS = 160;                     // a group that leaves for room fades, then goes
   var STATUSES = ['ok', 'failed', 'empty'];
   var CALENDAR_STATES = ['', 'past', 'now', 'next', 'free', 'new', 'struck', 'today'];
@@ -26,12 +30,23 @@
   var TODO_STATES = ['open', 'waits', 'done'];
   var MOTIONS = {lively: 1, calm: 1.6, off: 0};
   var MAX_FRAMES = 24;
+  var MAX_PINS = 6;                            // a 7th pin says why in the frame's meta (board.protocol.MAX_PINS)
   var MAX_ANIMATED = 6;                        // frames of one arrival that draw in; the rest are there at once
   var STAGGER_MS = 80, DRAW_MS = 800, LAP_MS = 900, FADE_MS = 160, HEIGHT_MS = 200;
-  var CLOSED_MS = 8000;                        // a closed frame's row offers Bring back this long
+  var CLOSED_MS = 8000;                        // a closed frame's row offers Bring back this long (the app removes it)
+  var NOTE_MS = 4000;                          // the 7th pin's note stays this long
+  var ROOM_MS = 220;                           // a group arrives: room is made for it ...
+  var ROOM_WAIT_MS = 40;                       // ... once the frames that came with it are in
   var LAYOUT_MS = 100;                         // at most 10 layouts a second ...
   var SCROLL_END_MS = 150;                     // ... and one more this long after a scroll stops
+  var VIEW_MS = 16;                            // the strip, "N more below" and the fades follow a change this soon
+  var READING_MS = 1000;                       // a sign of reading (a wheel, a key, a press) at most once a second
   var BATCH_MS = 300, FONT_WAIT_MS = 1500;
+  // The frames area's own rules (DESIGN-SPEC 2.1, 2.3, 3.1): small kinds pair from a 500 px area; a frame is in view
+  // between 6 px from its top and 40 px from its end; one whose bottom edge is inside the last 16 px is not fully in
+  // view (it counts in "N more below").
+  var PAIRS_FROM = 500, IN_VIEW_TOP = 6, IN_VIEW_END = 40, EDGE = 16;
+  var SMALL_KINDS = ['todos', 'timeline', 'chart', 'maths'];
   var SVG = 'http://www.w3.org/2000/svg';
   var WORDS = {
     changed: 'Changed', tryAgain: 'Try again', bringBack: 'Bring back', closed: 'Closed: ',
@@ -39,11 +54,16 @@
     approvalsKey: 'Ctrl 3', pin: 'Pin', unpin: 'Unpin', openBig: 'Open big', close: 'Close',
     waits: 'Waits', done: 'Done', pictureOnly: 'Picture only', unread: 'Unread',
     board: 'Board', frame: ' frame', frames: ' frames', waitsCount: ' waits', all: 'All', pinned: 'Pinned',
-    clear: 'Clear', show: 'Show'
+    clear: 'Clear', show: 'Show', newAbove: 'New answer above', moreBelow: ' more below', boardCleared: 'Board cleared',
+    pinsFull: '6 pins at most · unpin one first', strip: 'Frames on the board', waitsOnYou: ', waits on you',
+    newAnswer: 'New answer, ', showMore: ', show it in full', clearAll: 'Clear: take away every unpinned frame',
+    bringBackCleared: 'Bring back the cleared frames', showNew: 'New answer above: show it'
   };
-  // Each kind's glyph (holo's icons, drawn by tokens.css).
+  // Each kind's glyph (holo's icons, drawn by tokens.css) and its name (the index strip's accessible names).
   var GLYPHS = {text: 'read-all', calendar: 'calendar', mail_thread: 'mail', mail_list: 'inbox', todos: 'todos',
                 picture: 'image'};
+  var KIND_WORDS = {text: 'Answer', calendar: 'Calendar', mail_thread: 'Mail', mail_list: 'Mail list',
+                    todos: 'To-dos', picture: 'Picture'};
 
   // The renderer table: one function per kind (DESIGN-SPEC 3.3). Each checks the frame's body as board.protocol does
   // (its keys, types, caps and lists) and throws on anything it can't show - the message is then dropped and nothing
@@ -260,7 +280,10 @@
   var frames = new Map();                      // id -> the frame's record (in arrival order)
   var groups = new Map();                      // id -> a group's record (its section, header and frames' order)
   var barParts = null;                         // the board bar's elements, made with the first bar message
+  var stripParts = null;                       // the index strip, "N more below" and the pill (the desk's)
+  var clearedRow = null;                       // "Board cleared · 8 FRAMES · Bring back" (the first row of the board)
   var records = new WeakMap();                 // element -> record
+  var sections = new WeakMap();                // a group's section -> its record
   var lit = '';
   var focused = '';
   var motion = 'lively';
@@ -268,6 +291,10 @@
   var easeOut = 'cubic-bezier(0.16, 1, 0.3, 1)';
   var batch = 0, batchTimer = 0;
   var layoutTimer = 0, lastLayout = 0, scrolling = false, scrollTimer = 0;
+  var viewTimer = 0;
+  var filter = 'all';                          // the bar's All | Pinned
+  var barPinned = 0;                           // the app's count of pinned frames (its bar message)
+  var reading = {pointer: false, focus: false, sentAt: 0, sent: ''};
   var dropped = Object.create(null);
 
   // ---- small helpers ------------------------------------------------------------------------------------------------
@@ -313,7 +340,7 @@
     }
     node.addEventListener('click', function (event) {
       event.stopPropagation();
-      press();
+      press(event);
     });
     return node;
   }
@@ -335,6 +362,11 @@
 
   function list(value, cap) {
     return Array.isArray(value) && value.length <= cap;
+  }
+
+  function knownIds(value, cap) {              // a list of frame ids the app sent, each once
+    return list(value, cap) && value.every(function (id) { return typeof id === 'string' && frames.has(id); })
+      && new Set(value).size === value.length;
   }
 
   function rowsOf(data, keys, check) {         // a body's rows, each with exactly its keys and checked; else throws
@@ -409,12 +441,34 @@
     animation.finished.then(done, done);
   }
 
+  function onDesk() {                          // the desk's board (the bar, the strip, parking): not parts 3 and 4's page
+    return document.body.classList.contains('has-bar');
+  }
+
+  function placeIn(parent, nodes) {           // ``parent`` holds exactly ``nodes`` in order; a node in place never moves
+    var cursor = parent.firstChild;
+    nodes.forEach(function (node) {
+      if (node === cursor) {
+        cursor = cursor.nextSibling;
+      } else {
+        parent.insertBefore(node, cursor);
+      }
+    });
+    while (cursor) {
+      var next = cursor.nextSibling;
+      parent.removeChild(cursor);
+      cursor = next;
+    }
+  }
+
   // ---- a frame ------------------------------------------------------------------------------------------------------
 
   function build(id) {
     var art = make('article', 'frame');
     var rec = {id: id, el: art, kind: '', data: null, pinned: false, closed: false, picture: null,
-               closedTimer: 0, drawTimer: 0, lapTimer: 0, group: ''};
+               closedTimer: 0, drawTimer: 0, lapTimer: 0, noteTimer: 0, group: '', fact: '', sat: false,
+               expanded: false, cleared: false, away: false, paired: '', partner: null, ix: null, ixGlyph: null,
+               ixKind: ''};
     records.set(art, rec);
     art.tabIndex = 0;
     art.setAttribute('aria-labelledby', 'title-' + id);
@@ -435,6 +489,8 @@
     rec.tag = make('span', 'f-tag t-badge', WORDS.changed);
     rec.pinMark = glyph('pin', 'f-pinned');
     rec.meta = make('span', 'f-meta t-badge');
+    rec.note = make('span', 'f-note t-badge');  // the 7th pin's "6 pins at most": in the meta's place for 4 s
+    rec.note.setAttribute('role', 'status');
     var controls = make('div', 'f-ctl');
     rec.pinButton = button('f-icon', WORDS.pin, function () { togglePin(rec); });
     rec.pinButton.appendChild(glyph('pin'));
@@ -443,7 +499,7 @@
     var closer = button('f-icon', WORDS.close, function () { close(rec); });
     closer.appendChild(glyph('close'));
     controls.append(rec.pinButton, openBig, closer);
-    head.append(rec.glyph, rec.heading, rec.tag, rec.pinMark, rec.meta, controls);
+    head.append(rec.glyph, rec.heading, rec.tag, rec.pinMark, rec.meta, rec.note, controls);
     art.appendChild(head);
 
     rec.body = make('div', 'f-body');
@@ -468,6 +524,22 @@
     rec.bringBack.textContent = WORDS.bringBack;
     closedRow.append(glyph('close'), rec.closedWhat, rec.bringBack);
     art.appendChild(closedRow);
+
+    // The satellite (DESIGN-SPEC 3.3): an older answer's unpinned frame as one 48 px row - its glyph in a 30 px
+    // square, its title and one fact - that a click or Enter expands in place.
+    rec.satButton = button('f-sat', '', function () { expand(rec); });
+    rec.satButton.tabIndex = -1;
+    rec.satButton.setAttribute('aria-expanded', 'false');
+    rec.satGlyphBox = make('span', 's-glyph');
+    rec.satGlyph = glyph('read-all');
+    rec.satGlyphBox.appendChild(rec.satGlyph);
+    rec.satTitle = make('span', 's-title');
+    rec.satFact = make('span', 's-fact t-badge');
+    rec.satFactWords = make('span', 's-words');
+    rec.satNote = make('span', 's-note');      // the 7th pin's note, in the fact's place while folded
+    rec.satFact.append(glyph('diamond', 's-dia', true), rec.satFactWords, rec.satNote);
+    rec.satButton.append(rec.satGlyphBox, rec.satTitle, rec.satFact);
+    art.appendChild(rec.satButton);
     updatePinned(rec, false);
     return rec;
   }
@@ -500,9 +572,13 @@
 
   function fill(rec, message, body) {
     if (rec.kind !== message.kind) {
-      var mark = glyph(GLYPHS[message.kind] || 'read-all', 'f-glyph');
+      var name = GLYPHS[message.kind] || 'read-all';
+      var mark = glyph(name, 'f-glyph');
       rec.glyph.replaceWith(mark);
       rec.glyph = mark;
+      var satMark = glyph(name);
+      rec.satGlyph.replaceWith(satMark);
+      rec.satGlyph = satMark;
       rec.kind = message.kind;
     }
     rec.heading.textContent = message.title;
@@ -515,8 +591,15 @@
     rec.el.classList.toggle('failed', message.status === 'failed');
     rec.el.classList.toggle('empty', message.status === 'empty');
     rec.closedWhat.replaceChildren(document.createTextNode(WORDS.closed), make('b', '', message.title));
+    rec.fact = message.fact === undefined ? '' : message.fact;
+    rec.satTitle.textContent = message.title;
+    rec.satFactWords.textContent = rec.fact;
+    rec.satButton.setAttribute('aria-label', message.title + (rec.fact ? ', ' + rec.fact : '') + WORDS.showMore);
     updatePinned(rec, message.pinned);
     rec.data = message;
+    if (rec.ix) {
+      labelIndex(rec);
+    }
   }
 
   function differs(before, now) {
@@ -533,6 +616,7 @@
       && words(message.waits, CAPS.waits) && STATUSES.indexOf(message.status) >= 0
       && typeof message.changed === 'boolean' && typeof message.pinned === 'boolean'
       && typeof message.closed === 'boolean'
+      && (message.fact === undefined || words(message.fact, CAPS.meta))     // a satellite's fact: a meta's length
       && (message.group === undefined || (typeof message.group === 'string' && groups.has(message.group)))
       && !!message.body && typeof message.body === 'object' && !Array.isArray(message.body);
   }
@@ -547,7 +631,10 @@
     var rule = make('i', 'g-rule');
     rule.setAttribute('aria-hidden', 'true');
     var group = {id: id, el: section, time: make('span', 'g-time t-badge'), topic: make('span', 'g-topic'),
-                 list: make('div', 'g-frames'), order: []};
+                 list: make('div', 'g-frames'), order: [], older: false, parked: false, seen: false,
+                 rule: make('i', 'ix-rule')};
+    group.rule.setAttribute('aria-hidden', 'true');
+    sections.set(section, group);
     head.append(group.time, group.topic, rule);
     section.append(head, group.list);
     return group;
@@ -579,11 +666,139 @@
     }
   }
 
-  function boardFrames() {                     // the frames in board order (every group's, top to bottom)
+  function groupOf(rec) {
+    return rec.group ? groups.get(rec.group) || null : null;
+  }
+
+  function parked(rec) {                       // its answer waits out of sight (the pill), the board as it was
+    var group = groupOf(rec);
+    return !!(group && group.parked);
+  }
+
+  function current(rec) {                      // a frame (or a group) the board still has
+    return !!rec && (rec.list ? groups.get(rec.id) === rec : frames.get(rec.id) === rec);
+  }
+
+  function boardFrames() {                     // the frames shown, in board order (every group's, top to bottom)
     return Array.prototype.filter.call(root.querySelectorAll('.frame'), function (node) {
       var rec = records.get(node);
-      return !!rec && !rec.closed && frames.get(rec.id) === rec;
+      return current(rec) && !rec.closed && !rec.away && !parked(rec);
+    }).map(function (node) { return records.get(node); });
+  }
+
+  function target(rec) {                       // what takes the keyboard focus for a frame (a satellite: its row)
+    return rec.sat ? rec.satButton : rec.el;
+  }
+
+  // ---- the board's arrangement: satellites, what is out of sight, pairs, the strip ---------------------------------
+
+  function refresh() {
+    if (!root) {
+      return;
+    }
+    var hadFocus = document.activeElement;
+    var heldBy = hadFocus && hadFocus.closest ? hadFocus.closest('.frame') : null;
+    frames.forEach(function (rec) {
+      var group = groupOf(rec);
+      rec.away = rec.cleared || (filter === 'pinned' && !rec.pinned);
+      rec.sat = !!group && group.older && !rec.pinned && !rec.expanded && !rec.closed;
+      rec.el.classList.toggle('away', rec.away);
+      rec.el.classList.toggle('sat', rec.sat);
+      rec.el.tabIndex = rec.sat || rec.closed ? -1 : 0;
+      rec.satButton.tabIndex = rec.sat ? 0 : -1;
     });
+    pairUp();
+    groups.forEach(function (group) {
+      var shown = !group.parked && Array.prototype.some.call(group.list.children, function (node) {
+        var rec = records.get(node);
+        return current(rec) && !rec.away;
+      });
+      group.el.classList.toggle('parked', group.parked);
+      group.el.classList.toggle('hollow', !group.parked && !shown);
+      if (shown && !group.seen) {
+        group.seen = true;
+        makeRoom(group);
+      }
+    });
+    var held = heldBy ? records.get(heldBy) : null;
+    if (current(held) && !held.away && !held.closed) {  // a frame that folded or unfolded keeps the focus
+      var want = target(held);
+      var active = document.activeElement;
+      if (active !== want && (active === held.el || active === held.satButton || held.sat)) {
+        want.focus({preventScroll: true});
+      }
+    }
+    syncBar();
+    syncCleared();
+    syncPill();
+    buildStrip();
+    scheduleView();
+    scheduleLayout();
+  }
+
+  function pairUp() {                          // two small kinds side by side from a 500 px frames area (2.3)
+    var wide = root.classList.contains('pairs');
+    frames.forEach(function (rec) {
+      rec.paired = '';
+      rec.partner = null;
+    });
+    groups.forEach(function (group) {
+      var waiting = null;
+      Array.prototype.forEach.call(group.list.children, function (node) {
+        var rec = records.get(node);
+        if (!current(rec) || rec.away) {
+          return;                              // out of sight: it neither pairs nor breaks a pair
+        }
+        var small = wide && SMALL_KINDS.indexOf(rec.kind) >= 0 && !rec.sat && !rec.closed;
+        if (small && waiting) {
+          waiting.paired = 'a';
+          rec.paired = 'b';
+          waiting.partner = rec;
+          rec.partner = waiting;
+          waiting = null;
+        } else {
+          waiting = small ? rec : null;
+        }
+      });
+    });
+    frames.forEach(function (rec) {
+      rec.el.classList.toggle('pair-a', rec.paired === 'a');
+      rec.el.classList.toggle('pair-b', rec.paired === 'b');
+    });
+  }
+
+  function measureWidth() {                    // the frames area's width: pairs from 500 px
+    if (!root) {
+      return;
+    }
+    var style = getComputedStyle(root);
+    var width = root.clientWidth - parseFloat(style.paddingLeft || '0') - parseFloat(style.paddingRight || '0');
+    var wide = width >= PAIRS_FROM;
+    if (wide !== root.classList.contains('pairs')) {
+      root.classList.toggle('pairs', wide);
+      refresh();
+    }
+  }
+
+  function makeRoom(group) {                   // a group arrives: room made for it, 220 ms expo-out (5)
+    if (K === 0 || !group.el.animate || !onDesk()) {
+      return;
+    }
+    var el = group.el;
+    el.classList.add('making');                // no room yet while the answer's frames come in: nothing jumps
+    setTimeout(function () {
+      var height = el.scrollHeight;
+      el.classList.remove('making');
+      if (!height || !el.isConnected) {
+        return;
+      }
+      el.classList.add('sizing');
+      after(el.animate([{height: '0px'}, {height: height + 'px'}], {duration: ROOM_MS * K, easing: easeOut}),
+            function () {
+              el.classList.remove('sizing');
+              scheduleView();
+            });
+    }, ROOM_WAIT_MS);
   }
 
   // ---- motion -------------------------------------------------------------------------------------------------------
@@ -610,6 +825,9 @@
     rec.drawTimer = setTimeout(function () {
       rec.el.classList.remove('arriving');
       rec.el.style.removeProperty('--i');
+      if (rec.ix) {
+        rec.ix.classList.remove('arr');
+      }
       scheduleLayout();
     }, (index * STAGGER_MS + DRAW_MS) * K + 50);
   }
@@ -631,7 +849,7 @@
     }, LAP_MS * K + 30);
   }
 
-  function resize(el, from, done) {            // close / bring back: fade 160 ms, height 200 ms
+  function resize(el, from, done) {            // close / bring back / expand: fade 160 ms, height 200 ms
     if (K === 0 || !el.animate) {
       if (done) {
         done();
@@ -644,6 +862,7 @@
     after(el.animate([{height: from + 'px'}, {height: to + 'px'}], {duration: HEIGHT_MS * K, easing: easeOut}),
           function () {
             el.classList.remove('sizing');
+            scheduleView();
             if (done) {
               done();
             }
@@ -660,9 +879,39 @@
     rec.pinButton.setAttribute('aria-pressed', rec.pinned ? 'true' : 'false');
   }
 
+  function pinnedCount() {
+    var count = 0;
+    frames.forEach(function (rec) {
+      count += rec.pinned ? 1 : 0;
+    });
+    return count;
+  }
+
+  function note(rec, text) {                  // a few words in the meta's place for NOTE_MS (the 7th pin's why)
+    clearTimeout(rec.noteTimer);
+    rec.note.textContent = text;
+    rec.satNote.textContent = text;
+    rec.el.classList.add('noted');
+    rec.noteTimer = setTimeout(function () {
+      rec.el.classList.remove('noted');
+      rec.note.textContent = '';
+      rec.satNote.textContent = '';
+    }, NOTE_MS);
+  }
+
   function togglePin(rec) {
+    if (!rec.pinned && pinnedCount() >= MAX_PINS) {
+      note(rec, WORDS.pinsFull);               // never a 7th: the frame says why, and stays as it is
+      return;
+    }
+    var from = rec.el.getBoundingClientRect().height;
+    var wasSat = rec.sat;
     updatePinned(rec, !rec.pinned);
     post('pin', {id: rec.id, on: rec.pinned});
+    refresh();
+    if (wasSat && !rec.sat) {
+      resize(rec.el, from);                    // a pinned satellite stays full
+    }
   }
 
   function setClosed(rec, closed, byOwner) {
@@ -672,19 +921,22 @@
     clearTimeout(rec.closedTimer);
     rec.closed = closed;
     el.classList.toggle('closed', closed);
-    el.tabIndex = closed ? -1 : 0;
+    el.classList.remove('expired');
     if (closed) {
-      rec.closedTimer = setTimeout(function () { forget(rec, true); }, CLOSED_MS);
+      // Bring back is offered CLOSED_MS; the app takes the frame away then (it is the source of truth).
+      rec.closedTimer = setTimeout(function () { el.classList.add('expired'); }, CLOSED_MS);
+    }
+    refresh();
+    if (closed) {
       if (hadFocus) {
         rec.bringBack.focus();
       }
     } else if (byOwner) {
-      el.focus();
+      target(rec).focus();
     }
     if (byOwner) {
       resize(el, from);
     }
-    scheduleLayout();
   }
 
   function close(rec) {
@@ -701,6 +953,17 @@
     }
   }
 
+  function expand(rec) {                       // a satellite unfolds in place (the focus goes with it)
+    if (!rec.sat) {
+      return;
+    }
+    var from = rec.el.getBoundingClientRect().height;
+    rec.expanded = true;
+    rec.satButton.setAttribute('aria-expanded', 'true');
+    refresh();
+    resize(rec.el, from);
+  }
+
   function release(rec) {                      // the frame is no longer the board's (its element may stay a moment)
     if (frames.get(rec.id) === rec) {
       frames.delete(rec.id);
@@ -708,6 +971,7 @@
     clearTimeout(rec.closedTimer);
     clearTimeout(rec.drawTimer);
     clearTimeout(rec.lapTimer);
+    clearTimeout(rec.noteTimer);
     if (lit === rec.id) {
       lit = '';
       root.classList.remove('has-lit');
@@ -720,9 +984,9 @@
   function forget(rec, animate) {              // the frame leaves the board
     release(rec);
     var el = rec.el;
-    if (!animate || K === 0 || !el.animate) {
+    if (!animate || K === 0 || !el.animate || rec.away || parked(rec)) {
       el.remove();
-      scheduleLayout();
+      refresh();
       return;
     }
     var height = el.getBoundingClientRect().height;
@@ -734,35 +998,96 @@
             after(el.animate([{height: height + 'px'}, gone], {duration: HEIGHT_MS * K, easing: easeOut, fill: 'forwards'}),
                   function () {
                     el.remove();
-                    scheduleLayout();
+                    refresh();
                   });
           });
+    refresh();
   }
+
+  // ---- the keyboard (DESIGN-SPEC 3.6) -----------------------------------------------------------------------------
+
+  function rows() {                            // the frames shown as rows: a pair is one row (Left / Right within it)
+    var found = [];
+    boardFrames().forEach(function (rec) {
+      var last = found[found.length - 1];
+      if (rec.paired === 'b' && last && last[0] === rec.partner) {
+        last.push(rec);
+      } else {
+        found.push([rec]);
+      }
+    });
+    return found;
+  }
+
+  function goTo(rec) {
+    if (!rec) {
+      return;
+    }
+    var node = target(rec);
+    node.focus({preventScroll: true});
+    node.scrollIntoView({block: 'nearest', behavior: K === 0 ? 'auto' : 'smooth'});
+  }
+
+  function move(rec, key) {
+    var all = rows();
+    var at = -1, column = 0;
+    all.forEach(function (row, index) {
+      var found = row.indexOf(rec);
+      if (found >= 0) {
+        at = index;
+        column = found;
+      }
+    });
+    if (at < 0) {
+      return;
+    }
+    var row = all[at];
+    if (key === 'ArrowLeft' || key === 'ArrowRight') {
+      goTo(row[column + (key === 'ArrowRight' ? 1 : -1)]);
+    } else if (key === 'Home' || key === 'End') {
+      var edge = key === 'Home' ? all[0] : all[all.length - 1];
+      goTo(edge && edge[0]);
+    } else {
+      var next = all[at + (key === 'ArrowDown' ? 1 : -1)];
+      goTo(next && next[Math.min(column, next.length - 1)]);
+    }
+  }
+
+  var MOVES = ['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Home', 'End'];
 
   function onKey(event) {
     if (event.ctrlKey || event.altKey || event.metaKey) {
       return;
     }
-    var rec = records.get(event.target);
-    if (!rec || rec.closed) {
+    document.documentElement.classList.add('keys');   // the keyboard's own focus shows (as :focus-visible)
+    signOfReading();
+    var key = event.key;
+    if (key === 'Escape') {
+      post('focus_out', {to: 'ask'});        // Esc: back to the ask bar (5c leaves open big first)
+      event.preventDefault();
       return;
     }
-    var key = event.key;
+    var node = event.target;
+    if (stripParts && stripParts.list.contains(node)) {
+      stripKey(event);
+      return;
+    }
+    var frameEl = node && node.closest ? node.closest('.frame') : null;
+    var rec = frameEl ? records.get(frameEl) : null;
+    if (!current(rec) || rec.closed || (node !== rec.el && node !== rec.satButton)) {
+      return;                                  // a control inside a frame keeps its own keys
+    }
     if (key === 'Enter') {
-      post('open', {id: rec.id});
+      if (node === rec.satButton) {
+        return;                                // a satellite's row is a button: Enter presses it (it expands)
+      }
+      post('open', {id: rec.id});              // part 5c opens it big
     } else if (key === 'p' || key === 'P') {
       togglePin(rec);
     } else if (key === 'Delete') {
       close(rec);
-    } else if (key === 'ArrowDown' || key === 'ArrowUp' || key === 'Home' || key === 'End') {
-      var list = boardFrames();
-      var at = list.indexOf(rec.el);
-      var next = key === 'Home' ? list[0] : key === 'End' ? list[list.length - 1]
-        : list[at + (key === 'ArrowDown' ? 1 : -1)];
-      if (next) {
-        next.focus();
-        next.scrollIntoView({block: 'nearest'});
-      }
+    } else if (MOVES.indexOf(key) >= 0) {
+      move(rec, key);
     } else {
       return;
     }
@@ -782,6 +1107,339 @@
     if (!root.contains(event.relatedTarget)) {
       focused = '';
     }
+  }
+
+  // ---- the owner at the board: the app parks a new answer while it is read (DESIGN-SPEC 3.5) ----------------------
+
+  function sendReading(sign) {
+    if (!onDesk()) {
+      return;
+    }
+    var now = Date.now();
+    var state = (reading.pointer ? 'p' : '-') + (reading.focus ? 'f' : '-');
+    if (state === reading.sent && (!sign || now - reading.sentAt < READING_MS)) {
+      return;
+    }
+    reading.sent = state;
+    reading.sentAt = now;
+    post('reading', {pointer: reading.pointer, focus: reading.focus});
+  }
+
+  function signOfReading() {
+    sendReading(true);
+  }
+
+  function pageFocused() {
+    return document.hasFocus() && !!document.activeElement && document.activeElement !== document.body;
+  }
+
+  function watchReading() {
+    var html = document.documentElement;
+    html.addEventListener('mouseenter', function () {
+      reading.pointer = true;
+      sendReading(true);
+    });
+    html.addEventListener('mouseleave', function () {
+      reading.pointer = false;
+      sendReading(true);
+    });
+    document.addEventListener('focusin', function () {
+      reading.focus = true;
+      sendReading(false);
+    });
+    document.addEventListener('focusout', function () {
+      setTimeout(function () {
+        reading.focus = pageFocused();
+        sendReading(false);
+      }, 0);
+    });
+    window.addEventListener('blur', function () {
+      reading.focus = false;
+      sendReading(false);
+    });
+    document.addEventListener('wheel', signOfReading, {passive: true, capture: true});
+    document.addEventListener('pointerdown', function () {
+      html.classList.remove('keys');           // a press: no keyboard focus ring until the next key
+      signOfReading();
+    }, {passive: true, capture: true});
+  }
+
+  // ---- the bar's All | Pinned and Clear, the cleared row, the pill ----------------------------------------------------
+
+  function setFilter(which) {
+    if (which === filter) {
+      return;
+    }
+    filter = which;
+    refresh();
+    root.scrollTo({top: 0});
+  }
+
+  function syncBar() {
+    if (!barParts) {
+      return;
+    }
+    var clearable = false;
+    frames.forEach(function (rec) {
+      clearable = clearable || (!rec.pinned && !rec.cleared && !parked(rec));
+    });
+    barParts.all.classList.toggle('on', filter === 'all');
+    barParts.all.setAttribute('aria-pressed', filter === 'all' ? 'true' : 'false');
+    barParts.pinned.classList.toggle('on', filter === 'pinned');
+    barParts.pinned.setAttribute('aria-pressed', filter === 'pinned' ? 'true' : 'false');
+    barParts.pinned.disabled = barPinned === 0 && filter !== 'pinned';
+    barParts.clear.disabled = !clearable;
+  }
+
+  function makeCleared() {                     // the board's first row: "Board cleared · 8 FRAMES · Bring back"
+    var row = make('div', 'cleared-row');
+    row.setAttribute('role', 'status');
+    var count = make('span', 'cr-count t-badge');
+    var back = button('f-act', WORDS.bringBackCleared, function () { post('restore', {}); });
+    back.textContent = WORDS.bringBack;
+    row.append(glyph('board'), make('span', 'cr-words', WORDS.boardCleared), count, back);
+    return {el: row, count: count, back: back};
+  }
+
+  function syncCleared() {
+    if (!clearedRow) {
+      return;
+    }
+    var count = 0;
+    frames.forEach(function (rec) {
+      count += rec.cleared ? 1 : 0;
+    });
+    clearedRow.count.textContent = count + (count === 1 ? WORDS.frame : WORDS.frames);
+    clearedRow.el.classList.toggle('shown', count > 0);
+  }
+
+  function syncPill() {
+    if (!stripParts) {
+      return;
+    }
+    var any = false;
+    groups.forEach(function (group) {
+      any = any || group.parked;
+    });
+    stripParts.pill.classList.toggle('shown', any && onDesk());
+  }
+
+  // ---- the index strip, "N more below" and the fades (DESIGN-SPEC 3.1) ----------------------------------------------
+
+  function makeStrip() {
+    var nav = make('nav', '');
+    nav.id = 'strip';
+    nav.setAttribute('aria-label', WORDS.strip);
+    var stripList = make('div', 's-list');
+    var brace = make('span', 'ix-brace');
+    brace.setAttribute('aria-hidden', 'true');
+    stripList.appendChild(brace);
+    nav.appendChild(stripList);
+    var moreBelow = make('div', 't-badge');
+    moreBelow.id = 'more';
+    moreBelow.setAttribute('aria-hidden', 'true');    // the strip says the same to a screen reader
+    var moreWords = make('span', '');
+    moreBelow.append(glyph('chevron', 'more-chev'), moreWords);
+    var pill = make('div', '');
+    pill.id = 'pill';
+    var pillButton = button('pill-btn', WORDS.showNew, function () { post('show_new', {}); });
+    pillButton.append(glyph('send-arrow'), make('span', 'pill-words', WORDS.newAbove),
+                      make('span', 'pill-show', WORDS.show));
+    pill.appendChild(pillButton);
+    document.body.append(nav, moreBelow, pill);
+    return {nav: nav, list: stripList, brace: brace, more: moreBelow, moreWords: moreWords, pill: pill,
+            pillButton: pillButton, roving: null};
+  }
+
+  function labelIndex(rec) {
+    var title = rec.data ? rec.data.title : '';
+    var name = (KIND_WORDS[rec.kind] || KIND_WORDS.text) + ': ' + title;
+    if (rec.data && rec.data.waits) {
+      name += WORDS.waitsOnYou;
+    }
+    rec.ix.setAttribute('aria-label', (parked(rec) ? WORDS.newAnswer : '') + name);
+    if (rec.ixKind !== rec.kind) {             // the kind's glyph (the diamond pip after it stays)
+      var fresh = glyph(GLYPHS[rec.kind] || 'read-all');
+      if (rec.ixGlyph) {
+        rec.ixGlyph.replaceWith(fresh);
+      } else {
+        rec.ix.insertBefore(fresh, rec.ix.firstChild);
+      }
+      rec.ixGlyph = fresh;
+      rec.ixKind = rec.kind;
+    }
+  }
+
+  function indexButton(rec) {
+    if (!rec.ix) {
+      rec.ix = button('ix', '', function (event) { onIndex(rec, event.detail === 0); });
+      rec.ix.tabIndex = -1;
+      rec.ix.appendChild(glyph('diamond', 'ix-pip', true));
+      labelIndex(rec);
+    }
+    return rec.ix;
+  }
+
+  function onIndex(rec, byKeys) {             // a click scrolls to that frame (the keyboard's Enter also focuses it)
+    if (!current(rec)) {
+      return;
+    }
+    if (parked(rec)) {
+      post('show_new', {});                    // the parked answer's dashed entry: Show
+      return;
+    }
+    root.scrollTo({top: Math.max(0, rec.el.offsetTop - IN_VIEW_TOP), behavior: K === 0 ? 'auto' : 'smooth'});
+    if (byKeys) {
+      target(rec).focus({preventScroll: true});
+    }
+  }
+
+  function buildStrip() {
+    if (!stripParts) {
+      return;
+    }
+    var nodes = [];
+    var waiting = [];
+    groups.forEach(function (group) {          // the parked answers' dashed entries on top, then a rule
+      if (group.parked) {
+        waiting.push(group);
+      }
+    });
+    waiting.reverse().forEach(function (group) {
+      Array.prototype.forEach.call(group.list.children, function (node) {
+        var rec = records.get(node);
+        if (current(rec)) {
+          var ix = indexButton(rec);
+          ix.className = 'ix arr parked' + (rec.data && rec.data.waits ? ' wait' : '');
+          labelIndex(rec);
+          nodes.push(ix);
+        }
+      });
+    });
+    if (nodes.length) {
+      nodes.push(waiting[0].rule);
+    }
+    var first = true;
+    Array.prototype.forEach.call(root.children, function (section) {
+      var group = sections.get(section);
+      if (!group || !current(group) || group.parked) {
+        return;
+      }
+      var members = [];
+      Array.prototype.forEach.call(group.list.children, function (node) {
+        var rec = records.get(node);
+        if (current(rec) && !rec.away && !rec.closed) {
+          var ix = indexButton(rec);
+          var keep = ix.classList.contains('in') ? ' in' : '';
+          ix.className = 'ix' + keep + (rec.data && rec.data.waits ? ' wait' : '')
+            + (rec.el.classList.contains('arriving') ? ' arr' : '');
+          labelIndex(rec);
+          members.push(ix);
+        }
+      });
+      if (!members.length) {
+        return;
+      }
+      if (!first) {
+        nodes.push(group.rule);
+      }
+      first = false;
+      nodes = nodes.concat(members);
+    });
+    nodes.push(stripParts.brace);
+    placeIn(stripParts.list, nodes);
+  }
+
+  function scheduleView() {
+    if (viewTimer) {
+      return;
+    }
+    viewTimer = setTimeout(updateView, VIEW_MS);
+  }
+
+  function updateView() {                      // what is in view: the strip's brace, "N more below", the top fade
+    clearTimeout(viewTimer);
+    viewTimer = 0;
+    if (!root || !stripParts) {
+      return;
+    }
+    var desk = onDesk();
+    root.classList.toggle('scrolled', root.scrollTop > 0);
+    var box = root.getBoundingClientRect();
+    var top = box.top + IN_VIEW_TOP, end = box.bottom - IN_VIEW_END, edge = box.bottom - EDGE;
+    var below = 0, first = null, last = null;
+    boardFrames().forEach(function (rec) {
+      var place = rec.el.getBoundingClientRect();
+      var seen = place.height > 0 && place.top < end && place.bottom > top;
+      if (rec.ix) {
+        rec.ix.classList.toggle('in', seen);
+        if (seen) {
+          first = first || rec.ix;
+          last = rec.ix;
+        }
+      }
+      if (place.height > 0 && place.bottom > edge) {
+        below += 1;                            // not fully in view (inside the last 16 px or past it)
+      }
+    });
+    stripParts.moreWords.textContent = below + WORDS.moreBelow;
+    stripParts.more.classList.toggle('shown', desk && below > 0);
+    var brace = stripParts.brace;
+    if (first && first.parentNode === stripParts.list) {
+      brace.style.setProperty('top', (first.offsetTop - 2) + 'px');
+      brace.style.setProperty('height', (last.offsetTop + last.offsetHeight - first.offsetTop + 4) + 'px');
+      brace.classList.add('shown');
+      var list = stripParts.list;              // the brace stays in sight when the strip itself scrolls
+      if (first.offsetTop - 4 < list.scrollTop) {
+        list.scrollTop = Math.max(0, first.offsetTop - 4);
+      } else if (last.offsetTop + last.offsetHeight + 4 > list.scrollTop + list.clientHeight) {
+        list.scrollTop = Math.min(first.offsetTop - 4, last.offsetTop + last.offsetHeight + 4 - list.clientHeight);
+      }
+    } else {
+      brace.classList.remove('shown');
+    }
+    rove(first);
+  }
+
+  function stripButtons() {
+    return Array.prototype.filter.call(stripParts.list.querySelectorAll('.ix'), function (node) {
+      return node.parentNode === stripParts.list;
+    });
+  }
+
+  function rove(preferred) {                   // one stop in the strip for Tab: the button in view (or the focused one)
+    var all = stripButtons();
+    var keep = all.indexOf(document.activeElement) >= 0 ? document.activeElement : null;
+    var stop = keep || (preferred && all.indexOf(preferred) >= 0 ? preferred : all[0]) || null;
+    all.forEach(function (node) {
+      node.tabIndex = node === stop ? 0 : -1;
+    });
+    stripParts.roving = stop;
+  }
+
+  function stripKey(event) {
+    var all = stripButtons();
+    var at = all.indexOf(event.target);
+    if (at < 0) {
+      return;
+    }
+    var key = event.key, next = null;
+    if (key === 'ArrowDown' || key === 'ArrowRight') {
+      next = all[Math.min(all.length - 1, at + 1)];
+    } else if (key === 'ArrowUp' || key === 'ArrowLeft') {
+      next = all[Math.max(0, at - 1)];
+    } else if (key === 'Home') {
+      next = all[0];
+    } else if (key === 'End') {
+      next = all[all.length - 1];
+    } else {
+      return;                                  // Enter and Space press the button: it shows its frame
+    }
+    event.preventDefault();
+    all.forEach(function (node) {
+      node.tabIndex = node === next ? 0 : -1;
+    });
+    next.focus();
   }
 
   // ---- where the frames are (for the cue line) ------------------------------------------------------------------------
@@ -811,6 +1469,7 @@
       scrolling = true;
       scheduleLayout();
     }
+    scheduleView();
     clearTimeout(scrollTimer);
     scrollTimer = setTimeout(function () {
       scrolling = false;
@@ -839,7 +1498,9 @@
     }
     fill(rec, message, body);
     if (!before) {
-      arrive(rec);
+      if (!parked(rec)) {
+        arrive(rec);                           // a parked answer's frames draw in when it lands
+      }
       rec.el.classList.toggle('changed', message.changed);
     } else if (message.changed && (!before.changed || differs(before, message))) {
       lap(rec);
@@ -852,7 +1513,7 @@
     if (lit === message.id) {
       rec.el.classList.add('lit');
     }
-    scheduleLayout();
+    refresh();
     return true;
   };
 
@@ -880,7 +1541,11 @@
     }
     var rec = frames.get(message.id);
     if (rec) {
+      var hadFocus = rec.el.contains(document.activeElement);
       forget(rec, true);
+      if (hadFocus) {
+        focusBoard();                          // the focus stays on the board (a closed frame's time was up)
+      }
     }
     return true;
   };
@@ -890,35 +1555,68 @@
       return drop('shape');
     }
     Array.from(frames.values()).forEach(function (rec) { forget(rec, false); });
-    groups.forEach(function (group) { group.el.remove(); });
+    groups.forEach(function (group) {
+      group.el.remove();
+      group.rule.remove();
+    });
     groups.clear();
     lit = '';
+    filter = 'all';
     root.classList.remove('has-lit');
+    refresh();
     return true;
   };
 
   HANDLERS.group = function (message) {
-    if (!onlyKeys(message, ['type', 'id', 'time', 'topic', 'frames', 'older']) || typeof message.id !== 'string'
+    if (!onlyKeys(message, ['type', 'id', 'time', 'topic', 'frames', 'older', 'parked']) || typeof message.id !== 'string'
         || !ID.test(message.id) || !words(message.time, CAPS.time) || !words(message.topic, CAPS.topic)
         || !list(message.frames, MAX_FRAMES) || typeof message.older !== 'boolean'
+        || (message.parked !== undefined && typeof message.parked !== 'boolean')
         || !message.frames.every(function (id) { return typeof id === 'string' && frames.has(id); })) {
       return drop('shape');
     }
     var group = groups.get(message.id);
+    var fresh = !group;
     if (!group) {
       if (groups.size >= MAX_GROUPS) {
         return drop('full');
       }
       group = makeGroup(message.id);
       groups.set(message.id, group);
-      root.insertBefore(group.el, root.firstChild);     // the newest group on top
+      root.insertBefore(group.el, clearedRow ? clearedRow.el.nextSibling : root.firstChild);   // the newest on top
     }
+    var wasParked = group.parked;
+    var parkedNow = message.parked === true;
     group.time.textContent = message.time;
     group.topic.textContent = message.topic;
     group.el.classList.toggle('older', message.older);
+    group.older = message.older;
+    group.parked = parkedNow;
     group.order = message.frames.slice();
     arrange(group);
-    scheduleLayout();
+    if ((fresh && !parkedNow) || (wasParked && !parkedNow)) {
+      // A new answer on top (or one that was parked lands): older ones fold again, expanded or not (3.5).
+      frames.forEach(function (rec) {
+        var owner = groupOf(rec);
+        if (owner && owner !== group) {
+          rec.expanded = false;
+          rec.satButton.setAttribute('aria-expanded', 'false');
+        }
+      });
+    }
+    if (wasParked && !parkedNow) {             // it lands: its frames draw in, the board shows it on top
+      group.seen = false;
+      group.order.forEach(function (id) {
+        var rec = frames.get(id);
+        if (rec && rec.group === group.id) {
+          arrive(rec);
+        }
+      });
+    }
+    if ((fresh && !parkedNow) || (wasParked && !parkedNow)) {
+      root.scrollTo({top: 0, behavior: K === 0 ? 'auto' : 'smooth'});   // nobody reads: the new answer on top
+    }
+    refresh();
     return true;
   };
 
@@ -931,25 +1629,30 @@
       return true;
     }
     groups.delete(message.id);
+    var hadFocus = group.el.contains(document.activeElement);
     Array.from(frames.values()).forEach(function (rec) {     // the whole group leaves, its frames with it
       if (rec.group === group.id) {
         release(rec);
       }
     });
+    group.rule.remove();
     var el = group.el;
     el.setAttribute('aria-hidden', 'true');
     el.classList.add('leaving');
-    if (K === 0 || !el.animate) {
+    if (K === 0 || !el.animate || group.parked || el.classList.contains('hollow')) {
       el.remove();
     } else {
       after(el.animate([{opacity: 1}, {opacity: 0}], {duration: GROUP_FADE_MS * K, easing: easeOut, fill: 'forwards'}),
-            function () { el.remove(); scheduleLayout(); });
+            function () { el.remove(); refresh(); });
     }
-    scheduleLayout();
+    refresh();
+    if (hadFocus) {
+      focusBoard();
+    }
     return true;
   };
 
-  function makeBar() {                         // "Board", the counts, and All | Pinned and Clear (5b makes them work)
+  function makeBar() {                         // "Board", the counts, All | Pinned (a filter) and Clear (3.1, 3.5)
     var bar = make('header', 'bar');
     bar.id = 'bar';
     var waits = make('span', 'b-waits t-badge');
@@ -957,19 +1660,17 @@
     waits.append(glyph('diamond', 'b-dia', true), waitsWords);
     var seg = make('div', 'b-seg');
     seg.setAttribute('role', 'group');
-    var all = make('button', 'on', WORDS.all);
-    var pinned = make('button', '', WORDS.pinned);
-    var clear = make('button', 'b-clear', WORDS.clear);
-    [all, pinned, clear].forEach(function (node) {   // drawn, not working yet: never the focus, never a click
-      node.type = 'button';
-      node.tabIndex = -1;
-      node.setAttribute('aria-disabled', 'true');
-    });
+    var all = button('on', '', function () { setFilter('all'); });
+    all.textContent = WORDS.all;
+    var pinned = button('', '', function () { setFilter('pinned'); });
+    pinned.textContent = WORDS.pinned;
+    var clear = button('b-clear', WORDS.clearAll, function () { post('clear', {}); });
+    clear.textContent = WORDS.clear;
     seg.append(all, pinned);
     var count = make('span', 'b-count t-badge');
     bar.append(make('span', 'b-title', WORDS.board), count, waits, seg, clear);
     document.body.insertBefore(bar, root);
-    return {bar: bar, count: count, waits: waits, waitsWords: waitsWords, pinned: pinned};
+    return {bar: bar, count: count, waits: waits, waitsWords: waitsWords, all: all, pinned: pinned, clear: clear};
   }
 
   HANDLERS.bar = function (message) {
@@ -987,7 +1688,12 @@
     barParts.waits.hidden = message.waits === 0;
     barParts.waitsWords.textContent = message.waits + WORDS.waitsCount;
     barParts.pinned.textContent = message.pinned ? WORDS.pinned + ' ' + message.pinned : WORDS.pinned;
-    scheduleLayout();
+    barPinned = message.pinned;
+    if (barPinned === 0 && filter === 'pinned') {
+      filter = 'all';                          // nothing pinned any more: the whole board again
+    }
+    measureWidth();
+    refresh();
     return true;
   };
 
@@ -1001,6 +1707,8 @@
       void html.getBoundingClientRect();         // the fade and slide start again
       html.classList.add('desk-in');
     }
+    measureWidth();
+    scheduleView();
     scheduleLayout();
     return true;
   };
@@ -1014,6 +1722,89 @@
       return drop('id');
     }
     root.scrollTo({top: Math.max(0, group.el.offsetTop - 6), behavior: K === 0 ? 'auto' : 'smooth'});
+    return true;
+  };
+
+  HANDLERS.cleared = function (message) {     // what the bar's Clear took away, out of sight; [] none
+    if (!onlyKeys(message, ['type', 'frames']) || !knownIds(message.frames, MAX_FRAMES)) {
+      return drop('shape');
+    }
+    var gone = new Set(message.frames);
+    var hadFocus = null;
+    frames.forEach(function (rec) {
+      if (gone.has(rec.id) && rec.el.contains(document.activeElement)) {
+        hadFocus = rec;
+      }
+      rec.cleared = gone.has(rec.id);
+    });
+    refresh();
+    if (hadFocus && clearedRow) {
+      clearedRow.back.focus();                 // the focus stays on the board: on Bring back
+    }
+    return true;
+  };
+
+  function focusBoard() {                      // the keyboard focus to the frame in view (else the first one)
+    var shown = boardFrames();
+    var box = root.getBoundingClientRect();
+    var pick = null;
+    shown.forEach(function (rec) {
+      var place = rec.el.getBoundingClientRect();
+      if (!pick && place.height > 0 && place.bottom > box.top + IN_VIEW_TOP && place.top < box.bottom - IN_VIEW_END) {
+        pick = rec;
+      }
+    });
+    pick = pick || shown[0] || null;
+    if (pick) {
+      target(pick).focus({preventScroll: true});
+      target(pick).scrollIntoView({block: 'nearest'});
+      return true;
+    }
+    if (clearedRow && clearedRow.el.classList.contains('shown')) {
+      clearedRow.back.focus();
+      return true;
+    }
+    if (stripParts && stripParts.pill.classList.contains('shown')) {
+      stripParts.pillButton.focus();
+      return true;
+    }
+    return false;
+  }
+
+  function focusStrip() {
+    if (!stripParts) {
+      return false;
+    }
+    updateView();
+    var stop = stripParts.roving;
+    if (!stop) {
+      return false;
+    }
+    stop.focus();
+    return true;
+  }
+
+  HANDLERS.focus_part = function (message) {   // F6's cycle: the app moved the window's focus into the page
+    if (!onlyKeys(message, ['type', 'part']) || FOCUS_PARTS.indexOf(message.part) < 0) {
+      return drop('shape');
+    }
+    document.documentElement.classList.add('keys');
+    var inStrip = !!stripParts && stripParts.nav.contains(document.activeElement);
+    var part = message.part;
+    if (part === 'next') {
+      part = inStrip ? 'ask' : 'strip';
+    } else if (part === 'prev') {
+      part = inStrip ? 'board' : 'conversation';
+    }
+    if (part === 'strip' && !focusStrip()) {
+      part = message.part === 'next' ? 'ask' : 'board';
+    }
+    if (part === 'board' && !focusBoard()) {
+      part = message.part === 'prev' ? 'conversation' : 'ask';
+    }
+    if (part === 'ask' || part === 'conversation') {
+      post('focus_out', {to: part});
+    }
     return true;
   };
 
@@ -1044,11 +1835,13 @@
     picture.decoding = 'async';
     picture.draggable = false;                 // a picture only: never dragged out, never a link
     picture.src = src;                         // a data: picture the app re-encoded; nothing else loads (img-src data:)
+    picture.addEventListener('load', scheduleView);
     if (rec.picture) {
       rec.picture.remove();
     }
     rec.picture = picture;                     // one picture per frame: a new one replaces it
     placePicture(rec);
+    scheduleView();
     scheduleLayout();
     return true;
   };
@@ -1117,12 +1910,20 @@
     if (!root) {
       return;
     }
-    root.addEventListener('keydown', onKey);
+    clearedRow = makeCleared();
+    root.appendChild(clearedRow.el);
+    stripParts = makeStrip();
+    document.addEventListener('keydown', onKey);
     root.addEventListener('focusin', onFocusIn);
     root.addEventListener('focusout', onFocusOut);
     root.addEventListener('scroll', onScroll, {passive: true});
     document.addEventListener('dragstart', function (event) { event.preventDefault(); });   // nothing leaves the page
-    window.addEventListener('resize', scheduleLayout);
+    window.addEventListener('resize', function () {
+      measureWidth();
+      scheduleView();
+      scheduleLayout();
+    });
+    watchReading();
     easeOut = token('--ease-out') || easeOut;
     setMotion(motion);
     connect();

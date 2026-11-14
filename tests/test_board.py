@@ -215,8 +215,10 @@ class RequestTests(unittest.TestCase):
         return caught.exception.reason
 
     def test_the_list_of_requests(self) -> None:
+        # Part 5b added the last five on purpose (tests/test_board_ways.py checks each of them and their hostile shapes).
         self.assertEqual(protocol.REQUEST_KINDS, ("ready", "layout", "focus", "open", "close", "pin", "bring_back",
-                                                  "retry", "go_approvals"))
+                                                  "retry", "go_approvals", "clear", "restore", "show_new", "reading",
+                                                  "focus_out"))
         for kind in ("focus", "open", "close", "bring_back", "retry", "go_approvals"):
             self.assertEqual(protocol.check_request(kind, '{"id":"f1"}', self.known), protocol.Request(kind, "f1"))
         self.assertEqual(protocol.check_request("pin", '{"id":"f2","on":true}', self.known),

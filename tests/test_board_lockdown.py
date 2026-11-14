@@ -21,7 +21,14 @@ own frameless translucent window at 1x and 1.5x: the board in the desk's board c
 answers' groups (newest on top, the older one quiet, the mail and its waiting reply as ONE frame first), the frames 15
 px into the view and 448 wide, a grab of the window showing the board's frames, the first frame in the page's layout
 (timed), reveal, a group leaving whole, Space in the page never playing the briefing, one renderer and its
-memory. Skipped when this PySide6 has no QtWebEngine 6.8+.
+memory. Part 5b's board ways, in the real page with the app's own controller and real clicks and keys: the index strip
+(one button per frame in board order, the rules, the in-view brace, the waiting pip, a click scrolling to its frame),
+"N more below" at its 16 px edge, the fades and the end pad, satellites (48 px, their facts, a click and Enter
+expanding), parking (the page's own reading report, the pill, the dashed strip entry, the scroll holding, Show, the
+quiet landing, the 220 ms room), pin and a 7th's note for 4 s, close and Bring back, All | Pinned, Clear and Bring back
+and the desk folding when nothing is left, the keyboard (F6 and Shift+F6 round, the arrows, Home / End, Esc), pairs at
+1232 x 640 with Left / Right, and the new messages refused by the page when hostile. Skipped when this PySide6 has no
+QtWebEngine 6.8+.
 """
 
 from __future__ import annotations
@@ -39,7 +46,7 @@ from briefing_reader.board import view
 
 PROBE = Path(__file__).with_name("board_probe.py")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CASES = ("lockdown", "control", "media", "keys", "fallback", "shell", "kinds", "desk", "desk_x15")
+CASES = ("lockdown", "control", "media", "keys", "fallback", "shell", "kinds", "desk", "desk_x15", "ways")
 REPORTS: dict[str, dict] = {}
 FAILURES: dict[str, str] = {}
 WINDOW_KEYS = ["Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+6", "Ctrl+7", "Ctrl+8", "Ctrl+9", "Ctrl+,",
@@ -497,3 +504,190 @@ class DeskTests(BoardProbeCase):
 
     def test_the_desk_at_1_5x(self) -> None:
         self.check("desk_x15", 1.5)
+
+
+def _classes(item: dict) -> list[str]:
+    return str(item.get("cls", "")).split()
+
+
+def _more(page: dict) -> int:
+    return int(page["more"].split()[0]) if page["more"] else 0
+
+
+class WaysTests(BoardProbeCase):
+    """Part 5b: the board's ways in the real page, with the app's own controller (tests/board_probe.py ways_case)."""
+
+    def ways(self) -> dict:
+        report = self.report("ways")
+        self.assertTrue(report["ready"])
+        return report
+
+    def test_the_index_strip(self) -> None:
+        report = self.ways()
+        first = report["first"]
+        buttons = [item for item in first["strip"] if "ix-rule" not in _classes(item)]
+        rules = [item for item in first["strip"] if "ix-rule" in _classes(item)]
+        frames = [item for item in first["frames"] if item["shown"]]
+        self.assertEqual(len(buttons), len(frames))                    # one 26 px glyph button per frame ...
+        self.assertEqual(len(rules), 2)                                # ... a rule between the three groups
+        self.assertEqual({item["height"] for item in buttons}, {26})
+        self.assertEqual(buttons[1]["top"] - buttons[0]["top"], 30)    # 4 apart
+        self.assertTrue(buttons[0]["label"].startswith("Mail: "))      # its kind and title: board order, waits first
+        self.assertTrue(buttons[0]["label"].endswith(", waits on you"))
+        self.assertEqual([item["pip"] for item in buttons], ["block"] + ["none"] * (len(buttons) - 1))
+        self.assertIn("wait", _classes(buttons[0]))
+        box = first["box"]
+        expected = [item["top"] < box["bottom"] - 40 and item["bottom"] > box["top"] + 6 for item in frames]
+        self.assertEqual(["in" in _classes(item) for item in buttons], expected)    # frames in view
+        seen = [item for item in buttons if "in" in _classes(item)]
+        self.assertEqual(first["brace"], {"top": seen[0]["top"] - 2,
+                                          "height": seen[-1]["top"] + seen[-1]["height"] - seen[0]["top"] + 4})
+        self.assertEqual(sum(1 for item in buttons if item["tab"] == 0), 1)          # one Tab stop
+        after = report["after_strip_click"]                                          # a real click on one far down
+        self.assertGreater(after["scrollTop"], 0)
+        clicked = [item for item in after["strip"] if "ix-rule" not in _classes(item)][report["strip_click_index"]]
+        self.assertIn("in", _classes(clicked))                          # ... scrolled the board to its frame
+
+    def test_n_more_below_at_its_16_px_edge_the_fades_and_the_end_pad(self) -> None:
+        report = self.ways()
+        edge17, edge15 = report["edge_17"], report["edge_15"]
+        frame17 = next(item for item in edge17["frames"] if item["id"] == report["edge_frame"])
+        frame15 = next(item for item in edge15["frames"] if item["id"] == report["edge_frame"])
+        self.assertAlmostEqual(edge17["box"]["bottom"] - frame17["bottom"], 17, delta=0.6)
+        self.assertAlmostEqual(edge15["box"]["bottom"] - frame15["bottom"], 15, delta=0.6)
+        self.assertEqual(_more(edge15), _more(edge17) + 1)            # inside the last 16 px: not fully in view
+        top = report["at_top"]
+        below = sum(1 for item in top["frames"] if item["shown"] and item["bottom"] > top["box"]["bottom"] - 16)
+        self.assertEqual(top["more"], f"{below} MORE BELOW")
+        self.assertEqual(report["at_end"]["more"], "")                # never silently clipped; nothing below: none
+        self.assertIn("44px", top["mask"])                             # the end fade
+        self.assertNotIn("28px", top["mask"])
+        self.assertIn("28px", edge17["mask"])                          # scrolled down: the top fade too
+        end = report["at_end"]
+        last = [item for item in end["frames"] if item["shown"]][-1]
+        self.assertAlmostEqual(end["box"]["bottom"] - last["bottom"], 40, delta=1)   # the 40 px end pad
+
+    def test_satellites(self) -> None:
+        report = self.ways()
+        older = report["ids"]["oldest"] + report["ids"]["middle"]
+        self.assertEqual(sorted(item["id"] for item in report["sats"]), sorted(older))   # older answers fold
+        for item in report["sats"]:
+            self.assertAlmostEqual(item["height"], 48, delta=0.5)       # a 48 px row
+            self.assertEqual(item["fact"], report["facts"][item["id"]])   # the app's own fact
+        self.assertTrue(all(report["facts"].values()))
+        for name in ("sat_clicked", "sat_entered"):                    # a real click, a real Enter: in place
+            self.assertNotIn("sat", _classes(report[name]), name)
+            self.assertGreater(report[name]["height"], 48, name)
+
+    def test_parking(self) -> None:
+        report = self.ways()
+        self.assertTrue(report["reading_focus"])                       # the page said the focus is in it
+        parked = report["parked"]
+        self.assertEqual(len(report["parked_groups"]), 1)
+        self.assertEqual((parked["pill"], parked["pillText"]), ("flex", "New answer above Show"))
+        self.assertEqual(parked["scrollTop"], report["parked_held"])   # the scroll position holds
+        self.assertIn("arr", _classes(parked["strip"][0]))             # its dashed entry on top ...
+        self.assertIn("parked", _classes(parked["strip"][0]))
+        self.assertIn("ix-rule", _classes(parked["strip"][1]))         # ... then a rule
+        self.assertEqual(parked["groups"][0]["display"], "none")       # out of sight until it lands
+        shown = report["shown_new"]                                    # Show: it lands on top
+        self.assertEqual((shown["pill"], shown["scrollTop"]), ("none", 0))
+        self.assertEqual({group["display"] for group in shown["groups"]}, {"flex"})
+        self.assertEqual(report["parked_after_show"], [])
+        self.assertEqual(len(report["parked_again"]), 1)
+        self.assertFalse(report["reading_pointer_left"])               # the page said the pointer left
+        self.assertEqual(report["reading_after_leaving"], [False, False])
+        self.assertEqual(report["landed_before_quiet"], report["parked_again"])
+        self.assertEqual(report["landed_after_quiet"], [])             # quiet: it landed by itself
+        self.assertEqual(report["room"], [220])                        # a group arrives: room made, 220 ms
+
+    def test_pin_and_a_seventh_s_note(self) -> None:
+        report = self.ways()
+        self.assertEqual(report["pins_feed"], 6)
+        for name in ("seventh", "seventh_full"):                       # folded and full: the why shows
+            seventh = next(item for item in report["pins"]["frames"] if item["id"] == report[name])
+            self.assertIn("noted", _classes(seventh), name)
+            self.assertNotIn("pinned", _classes(seventh), name)
+            self.assertEqual(seventh["note"], "6 PINS AT MOST · UNPIN ONE FIRST", name)
+        for item in report["pins"]["frames"]:
+            if "pinned" in _classes(item):
+                self.assertNotIn("sat", _classes(item))                # pinned frames stay full
+        self.assertNotIn("noted", _classes(report["note_after_4s"]))
+        self.assertEqual(report["note_after_4s"]["note"], "")
+        self.assertEqual(len(report["pinned_left"]), 1)
+
+    def test_close_and_bring_back(self) -> None:
+        report = self.ways()
+        closing = report["closing"]
+        self.assertIn("closed", _classes(closing))
+        self.assertTrue(closing["closed"].startswith("Closed: "))
+        self.assertTrue(closing["closed"].endswith("Bring back"))
+        self.assertTrue(report["closing_flags"]["closed"])             # the app knows
+        self.assertEqual(report["closing_active"], "f-act")            # the focus on Bring back
+        self.assertEqual(report["closed_gone"], 0)                     # then it left the board
+        self.assertEqual(report["closed_gone_feed"], {})
+        self.assertNotIn("closed", _classes(report["brought_back"]))
+        self.assertFalse(report["brought_back_flags"]["closed"])
+
+    def test_all_and_pinned(self) -> None:
+        report = self.ways()
+        shown = [item["id"] for item in report["filter_pinned"]["frames"] if item["shown"]]
+        self.assertEqual(shown, report["pinned_left"])
+        self.assertEqual(len(report["filter_pinned"]["strip"]), 1)
+        self.assertEqual(sum(1 for item in report["filter_all"]["frames"] if item["shown"]),
+                         len(report["filter_all"]["frames"]))
+
+    def test_clear_and_bring_back(self) -> None:
+        report = self.ways()
+        cleared = report["cleared"]
+        self.assertRegex(cleared["cleared"], r"^Board cleared \d+ FRAMES Bring back$")
+        self.assertEqual([item["id"] for item in cleared["frames"] if item["shown"]], report["pinned_left"])
+        self.assertTrue(cleared["clearDisabled"])                      # nothing more to clear
+        self.assertEqual((report["cleared_count"], report["cleared_desk"]), (1, True))
+        self.assertEqual(report["restored"]["cleared"], "")
+        self.assertEqual(report["restored_count"], len(report["restored"]["frames"]))
+        gone = report["clear_gone"]
+        self.assertEqual(gone["cleared"], "")
+        self.assertEqual([item["id"] for item in gone["frames"]], report["pinned_left"])
+        self.assertEqual(report["clear_gone_feed"], report["pinned_left"])
+        self.assertEqual((report["last_clear_desk"], report["last_clear_stage"], report["last_clear_count"]),
+                         (False, True, 0))                             # nothing left: Home's stage again
+
+    def test_the_keyboard(self) -> None:
+        keys = self.ways()["keys"]
+        order = keys["order"]
+        self.assertTrue(keys["start_ask"])
+        self.assertTrue(keys["conversation"])                          # F6: the conversation ...
+        self.assertTrue(keys["board_qt"])                              # ... the board ...
+        self.assertEqual(keys["board"], order[0])
+        self.assertEqual((keys["down"], keys["up"]), (order[1], order[0]))
+        self.assertEqual((keys["end"], keys["home"]), (order[-1], order[0]))
+        self.assertTrue(keys["strip"])                                 # ... the strip ...
+        self.assertTrue(keys["strip_down"])
+        self.assertNotEqual(keys["strip_down"], keys["strip"])
+        self.assertTrue(keys["back_to_ask"])                           # ... and round
+        self.assertTrue(keys["shift_strip"])                           # Shift+F6 back
+        self.assertEqual(keys["shift_board"], order[0])
+        self.assertTrue(keys["shift_conversation"])
+        self.assertTrue(keys["escape"])                                # Esc: the ask bar
+        self.assertGreaterEqual(keys["cycle_keys_sent_on"], 4)         # F6 went on to the window from the page
+
+    def test_pairs(self) -> None:
+        report = self.ways()
+        page = report["pairs_page"]
+        self.assertTrue(page["pairs"])                                 # a frames area of 519 px
+        first, second = (next(item for item in page["frames"] if item["id"] == frame_id)
+                         for frame_id in report["pair_ids"])
+        self.assertIn("pair-a", _classes(first))
+        self.assertIn("pair-b", _classes(second))
+        self.assertEqual(first["top"], second["top"])
+        self.assertGreater(second["left"], first["left"])
+        self.assertGreaterEqual(min(first["width"], second["width"]), 244)
+        left, right = report["pair_ids"]
+        self.assertEqual((report["pair_right"], report["pair_left"]), (right, left))   # Right, then Left again
+        self.assertNotIn(report["pair_down"], report["pair_ids"])      # Down leaves the pair's row
+
+    def test_the_new_messages_hostile_are_refused_by_the_page(self) -> None:
+        report = self.ways()
+        self.assertEqual(report["page_refused"], [False] * 9)
+        self.assertTrue(report["hostile_changed_nothing"])
