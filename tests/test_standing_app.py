@@ -320,8 +320,13 @@ class ScreenTests(_Base):
         save_jobs(self.app.config)
         self.s.reload()
         stage = self.c.window.reading.agents_stage
-        self.assertTrue(stage.agents_empty.isVisibleTo(stage))
-        self.assertIn("agent:", stage.agents_empty.text())
+        card = stage.notice_card(standing_ui.START_CARD)
+        self.assertIsNotNone(card)
+        self.assertTrue(any(line.startswith("For example - rule:") for line in card.line_texts()))
+        card.button("rule").click()
+        settle()
+        self.assertEqual(self.c.window.reading.current_tab(), ui.SCREEN_HOME)
+        self.assertEqual(self.c.window.reading.command_bar.raw_text(), "rule: ")
 
     def test_background_runs_off_says_what_to_do(self) -> None:
         self.assertTrue(any("install-schedule.ps1" in note for note in self.c.window.reading.agents_stage.notes()))

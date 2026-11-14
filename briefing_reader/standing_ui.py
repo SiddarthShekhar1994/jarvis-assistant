@@ -110,7 +110,16 @@ NEITHER_TEXT = ("That doesn't sound like something to do again and again. Ask it
                 "should happen.")
 SETUP_BUSY_TEXT = "Jarvis is already setting one up; a moment."
 SETUP_FAILED_TEXT = "Jarvis couldn't set that up just now; try again."
-CONSENT_CARD, SETUP_CARD = "consent", "setup"
+CONSENT_CARD, SETUP_CARD, START_CARD = "consent", "setup", "start"
+START_LINES = (
+    "A rule watches new mail from one sender and does one thing with each match: a to-do, an event, a reply draft, "
+    "or a star, label or archive.",
+    "An agent wakes at a time, every few hours or on new mail, reads only what you allow, and lines up cards for "
+    "your OK.",
+    "For example - rule: when billing@acme.com sends an invoice, make me a to-do to pay it",
+    "Or - agent: every weekday at 8, tell me what my professors sent and list their deadlines",
+    "Jarvis sets it up from your words for you to check, try and turn on.",
+)
 TIDY_CARD = "tidy:"               # + the alias: a tidy-up's own sign-in card
 UNDO_FILE = "standing_tidy_undo.jsonl"   # the app's Undo journal (the runner's is standing_tidy.jsonl)
 TIDY_DONE_WORDS = {"star": "Starred", "label": "Labelled", "archive": "Archived"}
@@ -675,7 +684,8 @@ class StandingController(QObject):
         activity, reports = self._activity(now, hour24)
         return AgentsInfo(meta=meta, notes=tuple(notes), paused_all=paused_all, cards=tuple(self._notice_cards()),
                           agents=tuple(jobs_rows), rules=tuple(rule_rows), activity=tuple(activity), reports=tuple(reports),
-                          empty_text=EMPTY_TEXT, can_clear=bool(reports or activity),
+                          empty_text="" if not (self.agents or self.rules) else EMPTY_TEXT,
+                          can_clear=bool(reports or activity),
                           can_pause_all=bool(self.agents or self.rules or paused_all))
 
     def _status(self, now: datetime, state: Mapping[str, Any], today: Any, paused_all: bool,
@@ -1436,6 +1446,15 @@ class StandingController(QObject):
             logger.info("Standing: draft %s %s discarded", job.kind, job.id)
         self.reload(announce=False)
 
+    def prefill(self, kind: str) -> None:
+        """New rule / New agent: Home, with "rule: " or "agent: " in the bar and the cursor after it."""
+        from .ui import SCREEN_HOME
+
+        reading = self.host.window.reading
+        reading.set_tab(SCREEN_HOME)
+        reading.command_bar.set_text(f"{kind}: ")
+        reading.command_bar.focus_input()
+
     def edit_setup(self) -> None:
         """Edit: the owner's sentence back in the bar ("agent: ..." / "rule: ..."), to reword and set up again; the
         draft goes."""
@@ -1449,6 +1468,9 @@ class StandingController(QObject):
         bar.focus_input()
 
     def _on_card(self, card_id: str, action: str) -> None:
+        if card_id == START_CARD and action in (KIND_RULE, KIND_AGENT):
+            self.prefill(action)
+            return
         if card_id.startswith(TIDY_CARD):
             alias = card_id[len(TIDY_CARD):]
             if action == "signin":
@@ -1482,6 +1504,10 @@ class StandingController(QObject):
     def _notice_cards(self) -> list[NoticeCard]:
         cards: list[NoticeCard] = []
         consented = self.app_state.consented()
+        if not self.agents and not self.rules and self._setup is None:
+            cards.append(NoticeCard(START_CARD, "Set one up", "Tell Jarvis what to keep an eye on", START_LINES,
+                                    (CardButton("rule", "New rule", LOOK_GO),
+                                     CardButton("agent", "New agent", LOOK_GHOST)), tone=holo.TONE_CYAN))
         if not consented and not self._consent_later and (self.agents or self.rules or self._setup is not None):
             cards.append(NoticeCard(CONSENT_CARD, standing_setup.CONSENT_KICKER, standing_setup.CONSENT_TITLE,
                                     standing_setup.consent_lines(self.settings),
