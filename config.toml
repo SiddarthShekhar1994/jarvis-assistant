@@ -464,3 +464,17 @@ quiet_from = "22:00"          # nothing is said, and a closed Jarvis is not open
 quiet_until = "08:00"         # ... until (what waited is told after)
 open_when_closed = true       # false: a check never opens Jarvis; what it found waits for your next open
 timeout_seconds = 120         # one standing run may take this many seconds (30..600)
+
+[look]
+# The new look. "sounds": "soft" (the default) plays a few quiet sounds made in
+# code (heard you, thinking, a card waits for your OK, done, failed, and the
+# board's frames landing); they never play while Jarvis is muted, in quiet hours,
+# in focus mode, while a meeting records, while the PC is locked, while Windows
+# says you're busy or a full-screen app runs, or over his voice. "off": none.
+# Settings > Look can also turn them off on this PC. "Hey Jarvis"'s chime keeps
+# its own rules. "board": false keeps Home as it was, with no board beside the
+# conversation. "second_screen": true shows Jarvis on a second monitor (also in
+# Settings > Look).
+sounds = "soft"
+board = true
+second_screen = false

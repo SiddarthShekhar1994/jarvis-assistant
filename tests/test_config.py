@@ -379,6 +379,7 @@ class ConfigFileTests(ProjectTestCase):
             "talk": {f.name for f in dataclasses.fields(config.TalkConfig)},
             "instant": {f.name for f in dataclasses.fields(config.InstantConfig)},
             "standing": {f.name for f in dataclasses.fields(config.StandingConfig)},
+            "look": {f.name for f in dataclasses.fields(config.LookConfig)},
         }
         self.assertEqual(set(doc), set(expected_keys))
         for table, keys in expected_keys.items():

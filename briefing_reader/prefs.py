@@ -12,8 +12,11 @@ was shown (R34); ``"followups_off": true`` while the follow-up list is turned of
 this PC (its section's "Turn off on this PC"); ``"desktop_turned_on": true`` once the
 owner clicked Turn on on the first-run "Jarvis on your desktop" card (Settings >
 Desktop's Turn off takes it away again), with ``"desktop_consent_version": 2`` once the
-card he turned on listed Phase 2's rows (none: Phase 1's card, version 1). Ids, numbers
-and booleans only: never any text (the LIVE view's steps are never saved).
+card he turned on listed Phase 2's rows (none: Phase 1's card, version 1); ``"look":
+{"sounds_off": true, "second_screen": true, "board_hints": 2}`` for the new look's switches
+on this PC (Settings > Look: the soft sounds turned off, Jarvis on the second screen) and
+how many times the empty board's one-line hint was shown. Ids, numbers and booleans
+only: never any text (the LIVE view's steps are never saved).
 
 The file is written atomically (temporary file + ``os.replace``); a missing,
 corrupt or unwritable file counts as the defaults and never stops the app
@@ -32,6 +35,7 @@ import os
 import re
 import tempfile
 import threading
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -39,6 +43,16 @@ logger = logging.getLogger(__name__)
 PREFS_FILE = "assistant.json"
 RECENT_GREETINGS_MAX = 5
 _GREETING_ID_RE = re.compile(r"[a-z][a-z0-9_-]{0,15}")
+BOARD_HINTS_MAX = 99            # the empty board's hint count is kept up to this
+
+
+@dataclass(frozen=True)
+class LookPrefs:
+    """The new look's switches on this PC (Settings > Look) and the empty board's hint count."""
+
+    sounds_off: bool = False      # the soft sounds are off on this PC (whatever [look] sounds says)
+    second_screen: bool = False   # Jarvis shows on the second monitor (with [look] second_screen as the default)
+    board_hints: int = 0          # times the empty Home's board hint line was shown (it stops after a few)
 
 
 class AssistantPrefs:
@@ -48,7 +62,7 @@ class AssistantPrefs:
         self.path = Path(path)
         self._lock = threading.Lock()
         (self._muted, self._recent, self._adopted, self._live_window, self._live_popped,
-         self._prod_hint, self._followups_off, self._desktop_on, self._desktop_version) = _load(self.path)
+         self._prod_hint, self._followups_off, self._desktop_on, self._desktop_version, self._look) = _load(self.path)
 
     @property
     def muted(self) -> bool:
@@ -149,6 +163,30 @@ class AssistantPrefs:
                 self._desktop_on, self._desktop_version = before    # never on unsaved
             return saved
 
+    @property
+    def look(self) -> LookPrefs:
+        """The new look's switches on this PC (``LookPrefs``)."""
+        with self._lock:
+            return self._look
+
+    def set_sounds_off(self, off: bool) -> bool:
+        """Settings > Look: the soft sounds off (True) or on again on this PC."""
+        with self._lock:
+            self._look = replace(self._look, sounds_off=bool(off))
+            return self._save_locked()
+
+    def set_second_screen(self, on: bool) -> bool:
+        """Settings > Look: Jarvis on the second monitor (True) or not, on this PC."""
+        with self._lock:
+            self._look = replace(self._look, second_screen=bool(on))
+            return self._save_locked()
+
+    def note_board_hint(self) -> bool:
+        """The empty board's hint line was shown once more (counted up to ``BOARD_HINTS_MAX``)."""
+        with self._lock:
+            self._look = replace(self._look, board_hints=min(BOARD_HINTS_MAX, self._look.board_hints + 1))
+            return self._save_locked()
+
     def remember_greeting(self, greeting_id: str) -> bool:
         """Add ``greeting_id`` as the most recent greeting (the oldest beyond 5 is forgotten)."""
         if not isinstance(greeting_id, str) or not _GREETING_ID_RE.fullmatch(greeting_id):
@@ -176,6 +214,15 @@ class AssistantPrefs:
             values["desktop_turned_on"] = True
             if self._desktop_version > 1:
                 values["desktop_consent_version"] = self._desktop_version
+        if self._look != LookPrefs():
+            look: dict[str, object] = {}
+            if self._look.sounds_off:
+                look["sounds_off"] = True
+            if self._look.second_screen:
+                look["second_screen"] = True
+            if self._look.board_hints:
+                look["board_hints"] = self._look.board_hints
+            values["look"] = look
         return _write_atomic(self.path, json.dumps(values, indent=2) + "\n")
 
 
@@ -196,8 +243,8 @@ def _live_rect(value: object) -> tuple[int, int, int, int] | None:
 
 
 
-_Loaded = tuple[bool, list[str], bool, tuple[int, int, int, int] | None, bool, bool, bool, bool, int]
-_DEFAULTS: _Loaded = (False, [], False, None, False, False, False, False, 0)
+_Loaded = tuple[bool, list[str], bool, tuple[int, int, int, int] | None, bool, bool, bool, bool, int, LookPrefs]
+_DEFAULTS: _Loaded = (False, [], False, None, False, False, False, False, 0, LookPrefs())
 _CONSENT_VERSIONS = range(1, 100)   # a stored card version outside this is none (Phase 1's card)
 
 
@@ -224,7 +271,18 @@ def _load(path: Path) -> _Loaded:
     return (muted, recent[-RECENT_GREETINGS_MAX:], data.get("answers_adopted") is True,
             _live_rect(window) if isinstance(window := data.get("live_window"), dict) else None,
             data.get("live_popped_out") is True, data.get("prod_hint_shown") is True,
-            data.get("followups_off") is True, data.get("desktop_turned_on") is True, _consent_version(data))
+            data.get("followups_off") is True, data.get("desktop_turned_on") is True, _consent_version(data),
+            _look(data.get("look")))
+
+
+def _look(raw: object) -> LookPrefs:
+    """The "look" table (booleans that are exactly true, a hint count 0-99); anything else is the default."""
+    if not isinstance(raw, dict):
+        return LookPrefs()
+    hints = raw.get("board_hints")
+    count = hints if isinstance(hints, int) and not isinstance(hints, bool) and 0 <= hints <= BOARD_HINTS_MAX else 0
+    return LookPrefs(sounds_off=raw.get("sounds_off") is True, second_screen=raw.get("second_screen") is True,
+                     board_hints=count)
 
 
 def _consent_version(data: dict) -> int:

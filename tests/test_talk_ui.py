@@ -402,7 +402,7 @@ class AppHookTests(unittest.TestCase):
 
     def test_the_orb_listens_then_understands_then_is_the_app_s_again(self) -> None:
         reading = SimpleNamespace(set_activity_state=mock.Mock(), set_talking=mock.Mock())
-        stub = SimpleNamespace(_update_reading_controls=mock.Mock(), _pump_voice=mock.Mock(),
+        stub = SimpleNamespace(_update_reading_controls=mock.Mock(), _pump_voice=mock.Mock(), _look_call=mock.Mock(),
                                window=SimpleNamespace(reading=reading))
         for state, look in ((talk_ui.LISTENING, (hud.ORB_LISTENING, "LISTENING")),
                             (talk_ui.UNDERSTANDING, (hud.ORB_WORKING, "UNDERSTANDING")), (talk_ui.IDLE, None)):

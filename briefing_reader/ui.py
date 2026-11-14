@@ -5298,6 +5298,7 @@ class AppController(QObject):
         self.window.set_speaker_available(bool(config.assistant.speak))
         self._sync_speaker()
         self._init_hologram()
+        self.look: Any = self._create_look()            # the new look: the soft sounds and Settings > Look
 
     def _init_hologram(self) -> None:
         """Round 1 of the hologram: the orbs stop while the session is locked (the existing probe,
@@ -6958,6 +6959,7 @@ class AppController(QObject):
         total = sum(1 for action in self._actions if action.decidable)
         self.window.prompt.set_pending(pending)
         self.window.reading.set_pending(pending, total)
+        self._look_call("on_pending", pending)          # the soft "waits on you" when a new card waits
         self._sync_mail_cards()
         self._update_service_chips()
         self._render_followups()   # a row whose reply card waits reads "draft waiting" (R31)
@@ -8004,6 +8006,7 @@ class AppController(QObject):
         if self.state == STATE_QUITTING:
             return
         self._jobs.pop(action_id, None)
+        self._look_call("on_action_result", status, error is not None)   # the soft "done" / "failed"
         running = self._running.pop(action_id, None)
         action = running[0] if running is not None else self._current(action_id)
         writes_running = running[1] if running is not None else bool(action is not None and action.carried)
@@ -8810,6 +8813,7 @@ class AppController(QObject):
         screen "tab" brings LIVE up (a "web:" request's WEB task as an Ask's), else Home comes up."""
         if self.state == STATE_QUITTING:
             return
+        self._look_call("on_ask_started")       # the soft "thinking" if nothing is said within 400 ms
         if self.ask is None or self.ask.running_mode != MODE_MEETING:
             self._end_say_stream()              # a new request: what the last answer was still saying goes
         self._ask_desktop = bool(self.ask is not None and self.ask.running_mode == MODE_DESKTOP)
@@ -8865,6 +8869,7 @@ class AppController(QObject):
         if self.state == STATE_QUITTING:
             return
         stream = self._say_stream
+        self._look_call("on_ask_answer")                 # words came: no thinking sound
         if stream is None or stream.seq != seq:
             stream = self._say_stream = _SayStream(seq)
             self._ack_timer.stop()                       # the first words are here: no acknowledgement
@@ -9046,6 +9051,7 @@ class AppController(QObject):
         gets one row of counts (never the request or the answer)."""
         if self.state == STATE_QUITTING:
             return
+        self._look_call("on_ask_answer")                 # the answer came: no thinking sound
         self._remember_ask_read(outcome)
         if getattr(outcome, "mode", "") == MODE_PLAN:
             self._offer_running = 0
@@ -12508,6 +12514,7 @@ class AppController(QObject):
         or finished (""; the briefing's own state and line come back)."""
         self._utterance = text or ""
         self._wake_call("refresh_holds")         # "Hey Jarvis" pauses while he speaks: he never wakes himself
+        self._look_call("on_speaking")           # the soft sounds never play over him
         if text:
             self._prod_call("on_speaking", text)   # an offer's sentence counts as spoken from now (R26)
         if self.state != STATE_READING:
@@ -14129,6 +14136,7 @@ class AppController(QObject):
         self._update_reading_controls()
 
     def _on_player_state(self, state: str) -> None:
+        self._look_call("on_speaking")           # the soft sounds never play over a briefing
         self._pump_voice()
         self._wake_call("refresh_holds")         # "Hey Jarvis" pauses while the briefing plays (any player, as it is
                                                  # replaced for each new briefing)
@@ -14471,6 +14479,26 @@ class AppController(QObject):
         self._on_wake_changed()
         return controller
 
+    def _create_look(self) -> Any:
+        """The new look's controller (look_ui): the soft sounds and Settings > Look; None if it could not start."""
+        try:
+            from . import look_ui
+
+            return look_ui.LookController(self)
+        except Exception as exc:  # noqa: BLE001 - the new look never stops the app
+            logger.warning("Look: not started (%s)", type(exc).__name__)
+            return None
+
+    def _look_call(self, name: str, *args: Any) -> Any:
+        look = getattr(self, "look", None)
+        if look is None:
+            return None
+        try:
+            return getattr(look, name)(*args)
+        except Exception as exc:  # noqa: BLE001 - the new look never stops the app
+            logger.warning("Look: %s failed (%s)", name, type(exc).__name__)
+            return None
+
     def _wake_call(self, name: str, *args: Any) -> Any:
         wake = getattr(self, "wake", None)
         if wake is None:
@@ -14510,6 +14538,7 @@ class AppController(QObject):
         """The soft chime as a talk "Hey Jarvis" started listens (when nothing was said yet: talk_ui)."""
         from .wake_ui import play_chime
 
+        self._look_call("on_wake_chime")          # the new look's "heard you" sound skips this one
         play_chime(self.config.data_dir)
 
     def _wake_tray_mark(self) -> str:
@@ -14582,6 +14611,7 @@ class AppController(QObject):
         setter = getattr(self.window.reading, "set_talking", None)
         if callable(setter):
             setter(state == talk_ui.LISTENING)
+        self._look_call("on_talk_state", state)       # the soft "heard you" as listening opens
         self._update_reading_controls()
         if state == talk_ui.IDLE:
             self._pump_voice()

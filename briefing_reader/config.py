@@ -91,6 +91,9 @@ MOTION_LIVELY = "lively"       # [ui] motion: screen changes wipe and assemble, 
 MOTION_CALM = "calm"           # slower, fewer effects (fades only)
 MOTION_OFF = "off"             # no entrance or transition effects
 MOTION_CHOICES = (MOTION_LIVELY, MOTION_CALM, MOTION_OFF)
+SOUNDS_SOFT = "soft"           # [look] sounds: Jarvis's soft sounds made in code (sounds.py)
+SOUNDS_OFF = "off"             # none of them ("Hey Jarvis"'s chime keeps its own rules)
+SOUNDS_CHOICES = (SOUNDS_SOFT, SOUNDS_OFF)
 # What an account may do (google_auth.FEATURE_SCOPES has the scopes of each): "calendar" answers
 # invitations and moves or cancels events; "gmail_send" sends the replies and emails you approve;
 # "gmail_read" lets Ask Jarvis read the Gmail threads your request is about (read only; never used
@@ -107,7 +110,7 @@ UNDO_SECONDS_RANGE = (3, 30)
 _MISSING = object()
 _KNOWN_TABLES = ("voice", "prompt", "polling", "sections", "notion", "calendar", "actions",
                  "accounts", "schedule", "hotkey", "agenda", "display", "ask", "research", "assistant", "live",
-                 "productivity", "ui", "meetings", "desktop", "agent", "talk", "instant", "standing")
+                 "productivity", "ui", "meetings", "desktop", "agent", "talk", "instant", "standing", "look")
 # Library loggers kept at WARNING, also under --debug. The Google sign-in libraries log the
 # authorization code, the access token and the refresh token at DEBUG (requests_oauthlib),
 # before Jarvis could register them for redaction, so they never get DEBUG here.
@@ -267,6 +270,18 @@ class UiConfig:
     "Show animations in Windows" off counts as off too). true / false are read as "lively" / "off"."""
 
     motion: str = MOTION_LIVELY
+
+
+@dataclass(frozen=True)
+class LookConfig:
+    """``[look]``: the new look's switches. ``sounds`` is "soft" (the few soft sounds made in code, silent whenever
+    quiet is wanted) or "off" (true / false read as "soft" / "off"); Settings > Look can also turn them off on this
+    PC. ``board`` false keeps Home as it was (no board beside the conversation). ``second_screen`` true shows Jarvis
+    on a second monitor (also Settings > Look)."""
+
+    sounds: str = SOUNDS_SOFT
+    board: bool = True
+    second_screen: bool = False
 
 
 # Ask Jarvis ([ask]): the planner is your own signed-in Claude Code CLI on your claude.ai plan.
@@ -603,6 +618,7 @@ class Config:
     talk: TalkConfig = field(default_factory=TalkConfig)
     instant: InstantConfig = field(default_factory=InstantConfig)
     standing: StandingConfig = field(default_factory=StandingConfig)
+    look: LookConfig = field(default_factory=LookConfig)
 
     @property
     def notion_url(self) -> str:
@@ -735,6 +751,7 @@ def load_config(project_root: Path | None = None, *,
         talk=_parse_talk(doc, environ, hotkey.combo, desktop.hud_key),
         instant=_parse_instant(doc, environ),
         standing=_parse_standing(doc, environ),
+        look=_parse_look(doc),
     )
 
 
@@ -1185,6 +1202,20 @@ def _parse_ui(doc: Mapping[str, Any]) -> UiConfig:
     if isinstance(raw, bool):
         return UiConfig(motion=MOTION_LIVELY if raw else MOTION_OFF)
     return UiConfig(motion=r.choice("motion", d.motion, MOTION_CHOICES))
+
+
+def _parse_look(doc: Mapping[str, Any]) -> LookConfig:
+    """``[look]``: ``sounds`` (any case; true -> "soft", false -> "off"), ``board`` and ``second_screen``
+    (booleans); anything else is the default."""
+    d = LookConfig()
+    r = _TableReader(doc, "look", _field_names(LookConfig))
+    raw = r._get("sounds")
+    if isinstance(raw, bool):
+        sounds = SOUNDS_SOFT if raw else SOUNDS_OFF
+    else:
+        sounds = r.choice("sounds", d.sounds, SOUNDS_CHOICES)
+    return LookConfig(sounds=sounds, board=r.boolean("board", d.board),
+                      second_screen=r.boolean("second_screen", d.second_screen))
 
 
 ASK_ENABLED_ENV = "JARVIS_ASK_ENABLED"
