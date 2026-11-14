@@ -32,6 +32,7 @@ from briefing_reader import config, hud, ui
 from briefing_reader.actions import parse_action_line
 from briefing_reader.config import load_config
 from briefing_reader.notion_client import FixtureSession, NotionClient
+from tests.ui_fakes import delete_now
 
 PDT = timezone(timedelta(hours=-7))
 NOW = datetime(2026, 10, 6, 9, 0, tzinfo=PDT)
@@ -257,6 +258,7 @@ class ControllerTests(unittest.TestCase):
         c.window.hide()
         c.window.deleteLater()
         settle()
+        delete_now(c)           # on this thread, never by a garbage collection on a later test's worker thread
 
     def prompt(self, **kwargs) -> ui.AppController:
         c = self.make(**kwargs)

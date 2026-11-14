@@ -348,10 +348,11 @@ class SettingsStageTests(unittest.TestCase):
         self.assertIsInstance(stage, settings_view.SettingsStage)
         self.assertEqual([key for key, _text in settings_view.GROUPS],
                          ["voice", "times", "ask", "accounts", "quiet", "live"])
-        # The six built-in groups, then the ones features add while they are on (instant answers are on by default).
+        # The six built-in groups, then the ones features add while they are on (instant answers and the new look's
+        # Settings > Look are on by default).
         self.assertEqual([button.text() for button in stage.group_buttons.values()],
                          ["Voice", "Briefing times", "Ask", "Accounts", "Quiet hours", "LIVE and privacy",
-                          "Instant answers"])
+                          "Instant answers", "Look"])
         config_path = Path(app.root) / "config.toml"
         before = config_path.read_bytes()
         self.reading.set_tab(ui.SCREEN_SETTINGS)

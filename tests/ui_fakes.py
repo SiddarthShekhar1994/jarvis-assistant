@@ -66,6 +66,19 @@ def settle(rounds: int = 3) -> None:
         QApplication.processEvents()
 
 
+def delete_now(obj: Any) -> None:
+    """Delete ``obj`` (a QObject, e.g. an AppController) now, on this - the GUI - thread. Left to Python's garbage
+    collector (a controller and its parts refer to each other), it could be deleted by a collection that happens to
+    run on a worker thread of a later test: an access violation or heap corruption there (AppHarness.close does the
+    same)."""
+    import shiboken6
+
+    if obj is None or not shiboken6.isValid(obj):
+        return
+    obj.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+
 def wait_for(predicate, timeout: float = 5.0) -> bool:
     import time
 

@@ -33,7 +33,8 @@ from briefing_reader.models import LAUNCH_OPEN, LAUNCH_READ, LAUNCH_SCHEDULED, B
 from briefing_reader.notion_client import FixtureSession, NotionClient, NotionError, PollResult, fetch_briefing
 from briefing_reader.prefs import PREFS_FILE, AssistantPrefs
 from briefing_reader.runstate import RunState
-from tests.ui_fakes import B_CALENDAR, B_TODO, FIXTURE, NOW, PDT, FakePlayer, RecordingVoice, page_fixture, settle
+from tests.ui_fakes import (B_CALENDAR, B_TODO, FIXTURE, NOW, PDT, FakePlayer, RecordingVoice, delete_now,
+                            page_fixture, settle)
 
 _app: QApplication | None = None
 SLOTS = {"AM": "10:12", "PM": "23:42"}
@@ -136,6 +137,7 @@ class Flow:
         c.window.hide()
         c.window.deleteLater()
         settle()
+        delete_now(c)           # on this thread, never by a garbage collection on a later test's worker thread
 
 
 class LaunchKindTests(unittest.TestCase):
@@ -169,6 +171,7 @@ class LaunchKindTests(unittest.TestCase):
             c = ui.AppController(dataclasses.replace(config, calendar=CalendarConfig(enabled=False)),
                                  NotionClient("", session=FixtureSession(FIXTURE)), expected_run=None,
                                  now_mode=False)
+        self.addCleanup(delete_now, c)          # after the window (cleanups run last-in, first-out)
         self.addCleanup(c.window.deleteLater)
         self.assertIsInstance(c.voice, ui.SilentVoice)
         self.assertFalse(c.voice.say("greeting", "Good morning, sir."))
