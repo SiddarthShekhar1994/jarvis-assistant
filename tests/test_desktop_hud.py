@@ -32,6 +32,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from briefing_reader import alive, desktop_ui, dock, find_view, holo, hud, hud_overlay, meetings as mt, meetings_view
 from briefing_reader import live as _live
+from briefing_reader import orb as orb_mod
 from briefing_reader import states_view, ui
 from briefing_reader.ask.planner import DISABLED_MESSAGE
 from briefing_reader.config import DesktopConfig
@@ -672,6 +673,20 @@ class ChipTests(HudApp):
         reading.set_recording("")                             # stopped while in the window
         self.enter()
         self.assertFalse(orb.is_recording())                  # the HUD opens with the window's look
+
+    def test_the_hud_ring_locks_only_for_the_voice(self) -> None:
+        self.make()
+        reading = self.reading
+        self.enter()
+        ring = self.hud().orb
+        reading.set_talking(True)                             # the talk key or "Hey Jarvis": level and locked
+        self.assertEqual((ring.state(), ring.ring_look()), (orb_mod.LISTENING, orb_mod.LISTENING))
+        reading.set_talking(False)
+        reading._on_typing(True)                              # typing in the window: it only leans
+        self.assertEqual((ring.state(), ring.ring_look()), (orb_mod.LISTENING, orb_mod.TYPING))
+        reading._on_typing(False)
+        self.assertNotEqual(ring.state(), orb_mod.LISTENING)
+        self.assertEqual(ring.ring_look(), orb_mod.ring_look(*reading.look()))   # back to the window's own look
 
 
 class ReentryTests(HudApp):

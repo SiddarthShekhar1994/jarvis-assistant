@@ -309,6 +309,7 @@ class HomeWindowTests(unittest.TestCase):
         QTest.keyClicks(reading.command_bar.input, "what's on")
         settle()
         self.assertEqual(reading.hero.state(), orb.LISTENING)
+        self.assertEqual(reading.hero.ring_look(), orb.TYPING)       # typing leans the ring; only the voice locks it
         self.assertEqual(reading.state_word(), "LISTENING")
         self.assertTrue(reading.command_bar.field.is_listening())
         self.assertEqual(reading.command_bar.send_button.look(), "ready")
@@ -323,6 +324,29 @@ class HomeWindowTests(unittest.TestCase):
         reading.set_activity_state(hud.ORB_STANDBY, False)
         settle()
         self.assertEqual(reading.hero.state(), orb.NEEDS)
+
+    def test_only_the_voice_brings_every_ring_level(self) -> None:
+        reading = self.reading
+        rings = (reading.hero, reading.dock.mini_orb(), reading.briefing_orb, reading.plan_stage.orb)
+        reading.set_talking(True)                                     # the talk key or "Hey Jarvis"
+        self.assertTrue(reading.voice_listening())
+        self.assertEqual(reading.state_word(), "LISTENING")
+        for ring in rings:
+            self.assertEqual((ring.state(), ring.voice_listening(), ring.ring_look()),
+                             (orb.LISTENING, True, orb.LISTENING), ring)   # level and locked
+        reading.set_talking(False)
+        self.assertFalse(reading.voice_listening())
+        self.assertEqual(reading.hero.ring_look(), orb.IDLE)
+        reading._on_typing(True)                                      # typing is LISTENING too, but only leans
+        for ring in rings:
+            self.assertEqual((ring.state(), ring.voice_listening(), ring.ring_look()),
+                             (orb.LISTENING, False, orb.TYPING), ring)
+        self.assertEqual(reading.state_word(), "LISTENING")
+        reading.set_talking(True)                                     # the voice wins over the keys
+        self.assertEqual(reading.hero.ring_look(), orb.LISTENING)
+        reading.set_talking(False)
+        reading._on_typing(False)
+        self.assertEqual(reading.hero.ring_look(), orb.IDLE)
 
     def test_the_orb_moves_only_on_home_and_stops_when_minimized(self) -> None:
         reading = self.reading

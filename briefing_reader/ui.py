@@ -1849,8 +1849,16 @@ class ReadingView(QWidget):
                 base = orb_mod.IDLE
         return base, self._muted_look, self._offline_voice
 
+    def voice_listening(self) -> bool:
+        """LISTENING is the owner's voice (the talk key or "Hey Jarvis"), not typing: the ring comes level and locks
+        (typing only leans it)."""
+        return self._talking and self.look()[0] == orb_mod.LISTENING
+
     def _sync_look(self) -> None:
         base, muted, offline = self.look()
+        voice = self._talking and base == orb_mod.LISTENING
+        for ring in (self.hero, self.dock.mini_orb(), self.briefing_orb, self.plan_stage.orb):
+            ring.set_voice_listening(voice)          # before the look: the ring turns once, to the right pose
         self.hero.set_look(base, muted=muted, offline=offline)
         self.dock.set_orb_look(base, muted=muted, offline=offline)
         # Briefing's compact orb: as the hero, but never amber (nothing there waits on a decision).
