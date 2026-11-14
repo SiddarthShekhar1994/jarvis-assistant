@@ -12,7 +12,9 @@
         5. Each due job, until the deadline: the caps (every job together, the job's own, a rule's checks a day),
            its sources read by Jarvis (the matched messages, scrubbed; an agent's calendar days and notes), one run,
            what it made (cards checked and never proposed twice, receipts), one run file. A job with nothing new
-           makes no Claude run and no file. A rule's mail mark moves only after its run went through.
+           makes no Claude run and no file; only a Run now with nothing to read leaves a file that says so ("nothing",
+           "first" when its first look only set the start; "signed_out" when its mail couldn't be read), still with
+           no Claude run. A rule's mail mark moves only after its run went through.
            A rule's tidy-up (star, its label, archive: only the matched message) happens for each "yes" that passes
            every gate (``_tidy``): the rule's own holds (orders in the batch, a yes rate far above the dry run's, a
            failed DMARC check, the owner's own or sent mail, starred or important mail for an archive), then Pause
@@ -468,13 +470,16 @@ class _Check:
             return
         found: dict[str, Batch] = {}
         refs: list[Any] = []
+        unread = first = False
         for source in agent.mail:
             if due_kind == TRIGGER_MAIL and not self.mail_due(agent.id, source.account):
                 continue
             if not self.bound(agent, source.account):
+                unread = True
                 continue
             batch = self.batch(agent.id, source.account, source.query, self.cfg.max_mail_per_run)
             if batch is None or batch.baseline:
+                unread, first = unread or batch is None, first or (batch is not None and batch.baseline)
                 continue
             found[source.account] = batch
             refs.extend(batch.refs)
@@ -484,6 +489,12 @@ class _Check:
         notes = list(self.deps.notes()) if agent.notes else []
         if not refs and not events and not notes:
             entry["last_run"] = stamp(self.now)
+            if forced:
+                # Run now with nothing to read: still no Claude run, but the owner's click gets its answer on the
+                # Agents screen (its mail couldn't be read, its first look only set the start, or no new mail).
+                self.write(agent, trigger=TRIGGER_MANUAL, status=RUN_SIGNED_OUT if unread else RUN_NOTHING,
+                           started=self.now, problem="first" if first and not unread else "",
+                           counts={"mails": 0})
             return
         if self.held():
             self.state.checked(self.origin, RUN_HELD, self.now)

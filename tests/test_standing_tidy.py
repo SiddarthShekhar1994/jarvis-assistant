@@ -26,7 +26,7 @@ from briefing_reader.config import AskConfig, StandingConfig
 from briefing_reader.standing import model, runner, tidy
 from briefing_reader.standing.store import (AppState, Definitions, RunFiles, RunnerState, StandingFiles, Usage,
                                             stamp)
-from tests.standing_fakes import GMID, STANDING_ON, consent, files_of, rule_data, save_jobs, write_run
+from tests.standing_fakes import GMID, RULE_ID, STANDING_ON, consent, files_of, rule_data, save_jobs, write_run
 from tests.test_standing_google import message
 from tests.test_standing_model import RULE
 from tests.test_standing_runner import T0, Engine, Reader
@@ -422,6 +422,7 @@ class AppUndoTests(unittest.TestCase):
         self.assertFalse(AppState(files_of(self.app.config)).is_undone(self.tidy_row().info().key))
         self.assertEqual(self.tidy_row().info().state_text, "Changed since")
         self.assertFalse(self.tidy_row().info().can_undo)
+        self.assertIn(standing_ui.UNDO_PROBLEMS["changed"], self.c.window.reading.agents_stage.notes())   # said here
 
     def test_reading_the_mail_since_does_not_block_the_undo(self) -> None:
         write_run(self.app.config, receipts=[self.receipt()])
@@ -448,7 +449,7 @@ class AppUndoTests(unittest.TestCase):
 
 class TidySignInTests(unittest.TestCase):
 
-    def test_a_tidy_rule_asks_for_its_own_sign_in_and_keeps_the_yes(self) -> None:
+    def harness(self) -> tuple[Any, FakeGoogle]:
         import dataclasses
 
         from briefing_reader.config import AccountConfig
@@ -468,6 +469,35 @@ class TidySignInTests(unittest.TestCase):
         s.tidy_accounts = lambda: {"work": google}
         app.reading(autoplay=False)
         s.reload()
+        return app, google
+
+    def test_without_gmail_tidy_the_rules_row_says_its_tidy_up_waits(self) -> None:
+        def prepare(config) -> None:
+            save_jobs(config, rules=[rule_data(tidy={"kind": "star"})])
+            consent(config)
+
+        app = AppHarness(self, config_extra=STANDING_ON, prepare=prepare)      # no account has gmail_tidy
+        app.reading(autoplay=False)
+        app.c.standing.reload()
+        detail = app.c.window.reading.agents_stage.job_row(RULE_ID).detail_label.text()
+        self.assertIn("Its tidy-up waits until the work account has the gmail_tidy feature in config.toml.", detail)
+
+    def test_not_now_puts_the_card_away_and_a_line_brings_it_back(self) -> None:
+        app, _google = self.harness()
+        stage = app.c.window.reading.agents_stage
+        self.assertNotIn("gmail_tidy", stage.job_row(RULE_ID).detail_label.text())      # it has it here
+        stage.notice_card(standing_ui.TIDY_CARD + "work").button("later").click()
+        settle()
+        self.assertIsNone(stage.notice_card(standing_ui.TIDY_CARD + "work"))
+        line = ("Your rules' tidy-up on the work account waits for its own sign-in.", "Show the card",
+                standing_ui.TIDY_LINK + "work")
+        self.assertIn(line, stage.agents_info().notes)
+        stage.linkClicked.emit(standing_ui.TIDY_LINK + "work")
+        settle()
+        self.assertIsNotNone(stage.notice_card(standing_ui.TIDY_CARD + "work"))
+
+    def test_a_tidy_rule_asks_for_its_own_sign_in_and_keeps_the_yes(self) -> None:
+        app, google = self.harness()
         stage = app.c.window.reading.agents_stage
         card = stage.notice_card(standing_ui.TIDY_CARD + "work")
         self.assertIsNotNone(card)

@@ -13,6 +13,7 @@ import unittest
 from datetime import timedelta
 from typing import Any
 
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from briefing_reader import standing_ui, ui
@@ -101,6 +102,12 @@ class _Base(unittest.TestCase):
         bar.submit()
         settle()
 
+    def activate(self) -> None:
+        """The window is the active one, as when the owner clicks in it (a field focused then may select all)."""
+        self.c.window.activateWindow()
+        settle()
+        self.assertTrue(self.c.window.isActiveWindow())
+
 
 class RouteTests(unittest.TestCase):
 
@@ -143,6 +150,26 @@ class SetupTests(_Base):
         self.assertEqual(self.c.window.reading.current_tab(), ui.SCREEN_AGENTS)
         self.assertEqual(Usage(files_of(self.app.config), clock=lambda: NOW).peek().runs, 1)   # counted
 
+    def test_an_agents_card_says_it_reads_only_new_mail(self) -> None:
+        self.engine.answers.append(AGENT_ANSWER)
+        self.type("agent: " + AGENT_WORDS)
+        self.assertIn("New mail only: it reads mail that comes after you turn it on, each mail once",
+                      self.card().line_texts())
+
+    def test_a_sentence_typed_while_one_is_set_up_comes_back_to_the_bar(self) -> None:
+        pending: list = []
+        self.s.thread_runner = pending.append
+        self.engine.answers.append(RULE_ANSWER)
+        self.type("rule: " + WORDS)
+        self.c.window.reading.set_tab(ui.SCREEN_HOME)
+        self.type("agent: " + AGENT_WORDS)                              # while the first setup still runs
+        bar = self.c.window.reading.command_bar
+        self.assertEqual(bar.text(), "agent: " + AGENT_WORDS)           # not lost: back in the bar
+        self.assertEqual(bar.status(), standing_ui.SETUP_BUSY_TEXT)     # and said where it was typed
+        pending.pop()()
+        settle()
+        self.assertEqual([kind for kind, _m, _p in self.engine.runs], [KIND_SETUP])
+
     def test_a_sentence_that_is_no_standing_job_says_so(self) -> None:
         self.engine.answers.append({"kind": "neither", "say": "That is a one-off."})
         self.type("rule: what is the weather like today in town")
@@ -172,12 +199,30 @@ class SetupTests(_Base):
         self.assertIsNotNone(result.failure)
         self.assertFalse(result.started)
 
+    def test_new_rule_leaves_the_cursor_after_rule_so_typing_goes_after_it(self) -> None:
+        reading = self.c.window.reading
+        reading.set_tab(ui.SCREEN_AGENTS)
+        self.activate()
+        reading.agents_stage.notice_card(standing_ui.START_CARD).button("rule").click()
+        settle()
+        bar = reading.command_bar
+        self.assertEqual(reading.current_tab(), ui.SCREEN_HOME)
+        self.assertTrue(bar.input.hasFocus())
+        self.assertEqual((bar.input.selectedText(), bar.input.cursorPosition()), ("", len("rule: ")))
+        QTest.keyClicks(bar.input, "when billing")                    # never replaces "rule: "
+        self.assertEqual(bar.text(), "rule: when billing")
+
     def test_edit_puts_the_words_back_and_discard_drops_the_draft(self) -> None:
         self.engine.answers.append(RULE_ANSWER)
         self.type("rule: " + WORDS)
+        self.activate()
         self.card().button("edit").click()
         settle()
-        self.assertEqual(self.c.window.reading.command_bar.text(), "rule: " + WORDS)
+        reading = self.c.window.reading
+        bar = reading.command_bar
+        self.assertEqual(bar.text(), "rule: " + WORDS)
+        self.assertEqual(reading.current_tab(), ui.SCREEN_HOME)            # the bar is on Home, not on Agents
+        self.assertEqual((bar.input.selectedText(), bar.input.cursorPosition()), ("", len("rule: " + WORDS)))
         self.assertEqual(Definitions(files_of(self.app.config)).load(), ([], []))
         self.engine.answers.append(AGENT_ANSWER)
         self.type("agent: " + AGENT_WORDS)
@@ -246,6 +291,52 @@ class DryRunAndTurnOnTests(_Base):
         self.assertEqual(rule.status, "paused")                        # the dry run never undoes the pause
         self.assertEqual((rule.dry_run.judged, rule.bindings), (2, (("work", "sub-work-1"),)))
 
+    def test_a_dry_run_on_an_account_not_signed_in_says_to_sign_it_in(self) -> None:
+        self.reader.available = lambda: ("signedout", "Not signed in to the work account")
+        self.card().button("dry").click()
+        settle()
+        self.assertEqual([kind for kind, _m, _p in self.engine.runs], [KIND_SETUP])   # no Claude run
+        self.assertEqual(self.reader.queries, [])                                   # and no Gmail call
+        self.assertIn("Sign the work account in first", self.card().note_label.text())   # not "try again"
+        self.c._google_accounts = {"work": Account("sub-work-1")}      # signed in since, from the Day view
+        self.s.reload()
+        self.assertNotIn("Sign the work account in first", self.card().note_label.text())   # never stale
+        self.assertIn("Dry run", self.card().note_label.text())                            # what comes next
+
+    def test_a_sign_in_made_elsewhere_shows_when_the_agents_screen_comes_up(self) -> None:
+        self.engine.answers.append(RuleAnswer({1: Result(False), 2: Result(True, {"amount": "$40.00"})}))
+        self.card().button("dry").click()
+        settle()
+        self.assertFalse(self.card().button("on").isEnabled())          # the work account is not signed in
+        reading = self.c.window.reading
+        reading.set_tab(ui.SCREEN_HOME)
+        self.c._google_accounts = {"work": Account("sub-work-1")}      # signed in from the Day view meanwhile
+        reading.set_tab(ui.SCREEN_AGENTS)
+        settle()
+        self.assertTrue(self.card().button("on").isEnabled())           # at once, not at the next folder check
+
+    def test_a_live_rules_dry_run_card_offers_close_not_edit_or_discard(self) -> None:
+        self.engine.answers += [RuleAnswer({1: Result(False), 2: Result(True, {"amount": "$40.00"})}),
+                                RuleAnswer({1: Result(False), 2: Result(True, {"amount": "$40.00"})})]
+        self.card().button("dry").click()
+        settle()
+        self.c._google_accounts = {"work": Account("sub-work-1")}
+        self.s.reload()
+        self.card().button("on").click()
+        settle()
+        rule_id = Definitions(files_of(self.app.config)).load()[1][0].id
+        self.c.window.reading.agents_stage.job_row(rule_id).dry_run_button.click()      # the live rule's own
+        settle()
+        card = self.card()
+        self.assertEqual([button.property("action") for button in card.buttons()], ["dry", "dismiss"])
+        self.assertIn("RULE", card.kicker_label.text().upper())
+        self.assertNotIn("NEW RULE", card.kicker_label.text().upper())                  # it is on already
+        card.button("dismiss").click()                                                  # Close
+        settle()
+        self.assertIsNone(self.card())
+        self.assertEqual([(rule.id, rule.status) for rule in Definitions(files_of(self.app.config)).load()[1]],
+                         [(rule_id, STATUS_LIVE)])                                      # one rule, still on
+
     def test_a_row_says_why_it_cannot_go_on_yet(self) -> None:
         self.engine.answers.append(RuleAnswer({1: Result(False), 2: Result(True, {"amount": "$40.00"})}))
         self.card().button("dry").click()
@@ -253,6 +344,14 @@ class DryRunAndTurnOnTests(_Base):
         rule_id = Definitions(files_of(self.app.config)).load()[1][0].id
         row = self.c.window.reading.agents_stage.job_row(rule_id)
         self.assertIn("Sign the work account in first", row.detail_label.text())
+        self.assertFalse(row.turn_on_button.isHidden())
+        self.assertFalse(row.turn_on_button.isEnabled())                # off, as the setup card's, until it can go
+        self.assertIn("Sign the work account in first", row.turn_on_button.toolTip())
+        self.c._google_accounts = {"work": Account("sub-work-1")}
+        self.s.reload()
+        row = self.c.window.reading.agents_stage.job_row(rule_id)
+        self.assertTrue(row.turn_on_button.isEnabled())
+        self.assertNotIn("Sign the work account in first", row.detail_label.text())
 
     def test_turn_on_records_the_google_account_and_goes_live(self) -> None:
         self.engine.answers.append(RuleAnswer({1: Result(False), 2: Result(True, {"amount": "$40.00"})}))
@@ -282,6 +381,14 @@ class ConsentTests(_Base):
         self.s.reload()
         self.assertFalse(self.card().button("on").isEnabled())
         self.assertIn("say yes", self.card().note_label.text())
+        stage.notice_card(standing_ui.CONSENT_CARD).button("later").click()        # Not now: the card goes ...
+        settle()
+        self.assertIsNone(stage.notice_card(standing_ui.CONSENT_CARD))
+        line = ("Nothing runs until you say yes on the card that explains what agents read.", "Show the card",
+                standing_ui.CONSENT_LINK)
+        self.assertIn(line, stage.agents_info().notes)                              # ... and the line brings it back
+        stage.linkClicked.emit(standing_ui.CONSENT_LINK)
+        settle()
         stage.notice_card(standing_ui.CONSENT_CARD).button("yes").click()
         settle()
         self.assertTrue(AppState(files_of(self.app.config)).consented())

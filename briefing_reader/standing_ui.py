@@ -16,6 +16,13 @@ spoken line, and a standing Reply's check at click time.
                                when it passes; the card says why when it does not)
         shutdown()
 
+The screen's answers
+    A click on the Agents screen is answered on it: a line under the status line (_note: the app's own note shows
+    only on the Briefing screen), the row's or card's own words, or the bar on Home where words go (New rule, New
+    agent, Edit: the cursor after them, nothing selected). The screen is built again whenever it comes up, so a
+    sign-in made elsewhere shows at once. A card put away with Not now (consent, a tidy-up's sign-in) leaves a line
+    whose link brings it back.
+
 Loading run files
     Files no older than keep_days. Reports and receipts show only for runs started after the last Clear; a cleared
     run holding a card still waiting keeps that card (and its file) until the card is decided. Each card goes through
@@ -62,7 +69,7 @@ from typing import Any
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from . import holo, standing_setup
-from .actions import CALENDAR, REPLY, SOURCE_STANDING, STANDING_MODES, TODO, ProposedAction
+from .actions import CALENDAR, REPLY, SOURCE_STANDING, STANDING_MODES, STATUS_DENIED, TODO, ProposedAction
 from .standing import cards as standing_cards
 from .standing import schedule
 from .standing import tidy as tidy_mod
@@ -87,10 +94,13 @@ FRESH_CHECK = timedelta(minutes=15)  # a background check this recent: backgroun
 REPLY_OK_FOR_S = 120.0            # a passed Reply check holds this long
 REPLY_RESUME_S = 30.0             # Send goes on by itself only this soon after its click
 DELETE_UNDO = timedelta(minutes=10)
+SCREEN_NOTE_FOR = timedelta(minutes=2)   # the answer to a click on the Agents screen stays on it this long
 VIEW_LINK = "standing:view"       # the conversation entry's "View agents" (ui handles the link)
 VIEW_TEXT = "View agents"
 UNDO_DELETE_LINK = "standing:undo-delete"
 INSTALLER_LINK = "standing:installer"
+CONSENT_LINK = "standing:consent"     # the consent card back after its Not now
+TIDY_LINK = "standing:tidy:"          # + the alias: a tidy-up's sign-in card back after its Not now
 ANNOUNCE_KEY = "standing:"        # + the run id: the spoken line's key (KIND_NOTICE)
 
 # What the screen says.
@@ -110,6 +120,8 @@ NEITHER_TEXT = ("That doesn't sound like something to do again and again. Ask it
                 "should happen.")
 SETUP_BUSY_TEXT = "Jarvis is already setting one up; a moment."
 SETUP_FAILED_TEXT = "Jarvis couldn't set that up just now; try again."
+INSTALLER_TEXT = ("Background runs: run install-schedule.ps1 again (README, step 6). It adds the \"Briefing agents\" "
+                  "task, which checks every 5 minutes, also while Jarvis is closed.")
 CONSENT_CARD, SETUP_CARD, START_CARD = "consent", "setup", "start"
 START_LINES = (
     "A rule watches new mail from one sender and does one thing with each match: a to-do, an event, a reply draft, "
@@ -158,9 +170,13 @@ RUN_LINES = {   # a run that made nothing to show as a receipt: its activity lin
     "capped": "Reached its runs for today; it waits until tomorrow.",
     "missed": "Missed a run while the PC was off or asleep.",
     "failed": "Couldn't finish a run.",
-    "signed_out": "Couldn't read its account in the background.",
+    "signed_out": "Run now: its mail account couldn't be read, so it didn't run.",
     "held": "Held: your Claude plan's limit.",
+    "nothing": "Run now: no new mail since its last look, so nothing to report.",
 }
+FIRST_LOOK_LINE = ("Run now: its first look at your mail. It reads only mail that comes from now on, so there was "
+                   "nothing to report yet.")
+_RUN_BADGES = {"nothing": "Nothing new", "signed_out": "Not read"}
 _HOLD_WHY = {"limit": "your Claude plan's limit", "overage": "extra usage would pay for it",
              "warning": "Claude Code said you are near your limit"}
 _CARD_WORDS = {TODO: "To-do", CALENDAR: "Event", REPLY: "Reply draft"}
@@ -381,6 +397,7 @@ class StandingController(QObject):
         self._held: list[str] = []                          # run ids whose line waits (shown already)
         self._shown_runs: set[str] = set()                  # run ids whose entry is in the conversation
         self._deleted: dict[str, tuple[Agent | Rule, tuple[str, ...], datetime]] = {}   # job id -> its Undo
+        self._screen_note: tuple[str, datetime] | None = None   # the answer to the last click on the screen
         self._reply_ok: dict[str, float] = {}               # card id -> monotonic time its check passed
         self._reply_checking: dict[str, tuple[int, float]] = {}   # card id -> (sequence, monotonic click time)
         self._reply_seq = 0
@@ -420,6 +437,7 @@ class StandingController(QObject):
         stage.clearRequested.connect(self.clear_reports)
         stage.pauseAllRequested.connect(self.toggle_pause_all)
         stage.linkClicked.connect(self._on_link)
+        host.window.reading.tabChanged.connect(self._on_tab)
         host.window.reading.set_agents_available(True)
 
     # ---- the host's parts -------------------------------------------------------------------------------------
@@ -495,6 +513,14 @@ class StandingController(QObject):
         if self._files_signature() != self._signature:
             self.reload(announce=True)
         elif self._on_screen():
+            self._show()
+
+    def _on_tab(self, index: int) -> None:
+        """The Agents screen comes up: built again now, so what changed elsewhere meanwhile (an account signed in
+        from the Day view, the time) shows at once, not at the next folder check."""
+        from .ui import SCREEN_AGENTS
+
+        if index == SCREEN_AGENTS and not self._closed:
             self._show()
 
     def _on_screen(self) -> bool:
@@ -693,6 +719,11 @@ class StandingController(QObject):
         dot = f" {DOT} "
         parts: list[str] = []
         notes: list[tuple[str, str, str]] = []
+        if self._screen_note is not None:
+            if now - self._screen_note[1] <= SCREEN_NOTE_FOR:
+                notes.append((self._screen_note[0], "", ""))
+            else:
+                self._screen_note = None
         if paused_all:
             parts.append("Paused")
         check = state.get("check") if isinstance(state.get("check"), Mapping) else {}
@@ -729,7 +760,13 @@ class StandingController(QObject):
             else:
                 del self._deleted[job_id]
         if not consented and (self.agents or self.rules):
-            notes.append(("Nothing runs until you say yes on the card that explains what agents read.", "", ""))
+            # After the card's Not now the card is gone for now: the line brings it back.
+            notes.append(("Nothing runs until you say yes on the card that explains what agents read.",
+                          *(("Show the card", CONSENT_LINK) if self._consent_later else ("", ""))))
+        if consented and self._tidy_later:
+            for alias in sorted(self._tidy_later & set(self._tidy_wanted(later=True))):
+                notes.append((f"Your rules' tidy-up on the {alias} account waits for its own sign-in.",
+                              "Show the card", TIDY_LINK + alias))
         return dot.join(parts), notes
 
     def _next_run(self, now: datetime, state: Mapping[str, Any]) -> datetime | None:
@@ -769,14 +806,15 @@ class StandingController(QObject):
             meta.append("Run now asked")
         live_or_paused = agent.status in (STATUS_LIVE, STATUS_PAUSED)
         detail = agent_detail(agent, hour24)
+        problem = self._turn_on_problem(agent) if agent.status == STATUS_DRAFT else ""
         if agent.status == STATUS_DRAFT:
             meta.append("Not on yet")
-            detail = self._why_not_on(agent, detail)
+            detail = f"{detail}\n{problem}" if problem else detail
         return JobRow(agent.id, KIND_AGENT, agent.name, detail=detail,
                       meta=f" {DOT} ".join(meta), status=agent.status, status_text=STATUS_WORDS.get(agent.status, ""),
                       can_run=agent.status == STATUS_LIVE and consented and not paused_all,
                       can_pause=live_or_paused, paused=agent.status == STATUS_PAUSED,
-                      can_turn_on=agent.status == STATUS_DRAFT, tooltip=agent.words)
+                      can_turn_on=agent.status == STATUS_DRAFT, turn_on_tip=problem, tooltip=agent.words)
 
     def _rule_row(self, rule: Rule, now: datetime, today: Any, hour24: bool) -> JobRow:
         meta = []
@@ -792,13 +830,17 @@ class StandingController(QObject):
         live_or_paused = rule.status in (STATUS_LIVE, STATUS_PAUSED) and self._busy != f"dry:{rule.id}"
         if rule.status == STATUS_DRAFT:
             meta.append("Try it with Dry run before it can go on")
-        detail = self._why_not_on(rule, rule.sentence) if rule.status == STATUS_TRIED else rule.sentence
+        problem = self._turn_on_problem(rule) if rule.status == STATUS_TRIED else ""
+        detail = f"{rule.sentence}\n{problem}" if problem else rule.sentence
+        if rule.tidy.kind and not standing_setup.can_tidy(self.config, rule.account):
+            # Its setup card said so; once it is on, the row says it (else "Stars what it matches" reads as done).
+            detail += f"\nIts tidy-up waits until the {rule.account} account has the gmail_tidy feature in config.toml."
         return JobRow(rule.id, KIND_RULE, rule.name, detail=detail,
                       meta=f" {DOT} ".join(part for part in meta if part),
                       status=rule.status, status_text=STATUS_WORDS.get(rule.status, ""), can_pause=live_or_paused,
                       paused=rule.status == STATUS_PAUSED, can_dry_run=not self._busy,
                       can_turn_on=rule.status == STATUS_TRIED and self._busy != f"dry:{rule.id}",
-                      tooltip=rule.sentence)
+                      turn_on_tip=problem, tooltip=rule.sentence)
 
     def _activity(self, now: datetime, hour24: bool) -> tuple[list[ActivityRow], list[ReportRow]]:
         rows: list[ActivityRow] = []
@@ -813,8 +855,10 @@ class StandingController(QObject):
             if run.report and not self._cleared(run):
                 reports.append(ReportRow(run.id, when, name, run.report, run.summary))
             if not run.receipts and run.status in RUN_LINES:
-                rows.append(ActivityRow(f"{run.id}:run", when, name, RUN_LINES[run.status],
-                                        state_text=run.status.replace("_", " ").upper(),
+                first = run.status == "nothing" and run.problem == "first"
+                line = FIRST_LOOK_LINE if first else RUN_LINES[run.status]
+                rows.append(ActivityRow(f"{run.id}:run", when, name, line,
+                                        state_text=_RUN_BADGES.get(run.status, run.status.replace("_", " ").upper()),
                                         tone=holo.TONE_ALERT if run.status in ("failed", "signed_out")
                                         else holo.TONE_STEEL))
                 continue
@@ -917,6 +961,8 @@ class StandingController(QObject):
             if undone or self.app_state.is_withdrawn(card_id):
                 return ActivityRow(key, when, name, text, detail, "Withdrawn", holo.TONE_STEEL)
             if store.is_decided(card_id):
+                if (store.get(card_id) or {}).get("status") == STATUS_DENIED:
+                    return ActivityRow(key, when, name, text, detail, "Denied", holo.TONE_STEEL)   # not "Decided"
                 return ActivityRow(key, when, name, text, detail, "Decided", holo.TONE_OK)
             return ActivityRow(key, when, name, text, detail, "Gone", holo.TONE_STEEL)
         values = receipt.get("values") if isinstance(receipt.get("values"), Mapping) else {}
@@ -929,9 +975,17 @@ class StandingController(QObject):
 
     # ---- the owner's clicks on the screen -------------------------------------------------------------------------
 
+    def _note(self, text: str) -> None:
+        """The answer to a click on the Agents screen, shown on it under the status line for SCREEN_NOTE_FOR (the
+        app's own note shows only on the Briefing screen); away from it, the app's note as well."""
+        self._screen_note = (text, self._now())
+        self._show()
+        if not self._on_screen():
+            self.host._flash_note(text)
+
     def _save(self, agents: Sequence[Agent], rules: Sequence[Rule]) -> bool:
         if not self.definitions.save(agents, rules):
-            self.host._flash_note("Jarvis couldn't save the agents and rules (standing.json); nothing changed.")
+            self._note("Jarvis couldn't save the agents and rules (standing.json); nothing changed.")
             return False
         return True
 
@@ -941,11 +995,18 @@ class StandingController(QObject):
             self.app_state.mark("withdrawn", ids, self._now())
         return ids
 
-    def _why_not_on(self, job: Agent | Rule, detail: str) -> str:
-        """A draft's row says on itself why Turn on can't go yet (its button's click would only say it elsewhere)."""
+    def _signed_in(self, alias: str) -> bool:
+        account = (getattr(self.host, "_google_accounts", None) or {}).get(alias)
+        try:
+            return account is not None and bool(account.is_signed_in())
+        except Exception:  # noqa: BLE001 - unknown: not signed in
+            return False
+
+    def _turn_on_problem(self, job: Agent | Rule) -> str:
+        """Why Turn on can't go yet ("" when it can). A draft's row says it on itself, and its Turn on is off, as
+        the setup card's is (a click would change nothing on the screen)."""
         accounts = getattr(self.host, "_google_accounts", None) or {}
-        problem = standing_setup.turn_on_problem(job, self.config, accounts, self.app_state.consented())
-        return f"{detail}\n{problem}" if problem else detail
+        return standing_setup.turn_on_problem(job, self.config, accounts, self.app_state.consented())
 
     def _cards_of(self, job_id: str) -> list[str]:
         waiting = self._waiting_ids()
@@ -964,7 +1025,7 @@ class StandingController(QObject):
         if not self.app_state.consented():
             return "First say yes on the Agents screen's card that explains what agents read."
         if not self.requests.ask(job_id, self._now()):
-            self.host._flash_note("Jarvis couldn't ask for that run; try again.")
+            self._note("Jarvis couldn't ask for that run; try again.")
             return "Jarvis couldn't ask for that run; try again."
         started = self.start_runner()
         logger.info("Standing: Run now for %s (%s)", job_id, "a check started" if started else "the next check takes it")
@@ -1031,7 +1092,7 @@ class StandingController(QObject):
     def toggle_pause_all(self) -> None:
         paused = not self.app_state.paused_all
         if not self.app_state.set_paused_all(paused):
-            self.host._flash_note("Jarvis couldn't save that (standing_app.json); nothing changed.")
+            self._note("Jarvis couldn't save that (standing_app.json); nothing changed.")
             return
         logger.info("Standing: Pause all %s", "on" if paused else "off")
         self.reload(announce=False)
@@ -1068,7 +1129,7 @@ class StandingController(QObject):
         that card is decided; its report and receipts no longer show)."""
         now = self._now()
         if not self.app_state.clear_runs(now):
-            self.host._flash_note("Jarvis couldn't clear them (standing_app.json); nothing changed.")
+            self._note("Jarvis couldn't clear them (standing_app.json); nothing changed.")
             return
         pending = self._pending_ids()
         kept = 0
@@ -1089,8 +1150,13 @@ class StandingController(QObject):
         if link_id == UNDO_DELETE_LINK or link_id.startswith(UNDO_DELETE_LINK + ":"):
             self.undo_delete(link_id.partition(":undo-delete:")[2] if ":undo-delete:" in link_id else "")
         elif link_id == INSTALLER_LINK:
-            self.host._flash_note("Background runs: run install-schedule.ps1 again (README, step 6). It adds the "
-                                  "\"Briefing agents\" task, which checks every 5 minutes.")
+            self._note(INSTALLER_TEXT)
+        elif link_id == CONSENT_LINK:
+            self._consent_later = False
+            self._show()
+        elif link_id.startswith(TIDY_LINK):
+            self._tidy_later.discard(link_id[len(TIDY_LINK):])
+            self._show()
 
     # ---- tidy-up: its Undo and its own sign-in --------------------------------------------------------------------
 
@@ -1132,11 +1198,11 @@ class StandingController(QObject):
             change = tidy_mod.Change(tuple(str(item) for item in list(made.get("add") or ())),
                                      tuple(str(item) for item in list(made.get("remove") or ()))).reverse()
         except TypeError:
-            self.host._flash_note(UNDO_PROBLEMS["changed"])
+            self._note(UNDO_PROBLEMS["changed"])
             return
         client = self.tidy_for(alias)
         if client is None:
-            self.host._flash_note(UNDO_PROBLEMS["signed_out"])
+            self._note(UNDO_PROBLEMS["signed_out"])
             return
         self._tidy_busy.add(key)
         self._show()
@@ -1171,7 +1237,7 @@ class StandingController(QObject):
         if self._closed:
             return
         if problem:
-            self.host._flash_note(UNDO_PROBLEMS.get(problem, UNDO_PROBLEMS["failed"]))
+            self._note(UNDO_PROBLEMS.get(problem, UNDO_PROBLEMS["failed"]))
             if problem in ("changed", "too_old"):
                 self._tidy_refused[key] = problem          # not offered again: it is not Jarvis's change any more
         else:
@@ -1179,12 +1245,13 @@ class StandingController(QObject):
             logger.info("Standing: a tidy-up was undone")
         self.reload(announce=False)
 
-    def _tidy_wanted(self) -> list[str]:
-        """Accounts a rule of the owner's would tidy whose tidy-up sign-in (or its yes) is still missing."""
+    def _tidy_wanted(self, *, later: bool = False) -> list[str]:
+        """Accounts a rule of the owner's would tidy whose tidy-up sign-in (or its yes) is still missing (``later``:
+        also those whose card the owner put away with Not now)."""
         wanted: list[str] = []
         for rule in self.rules:
             alias = rule.account
-            if not rule.tidy.kind or alias in wanted or alias in self._tidy_later:
+            if not rule.tidy.kind or alias in wanted or (alias in self._tidy_later and not later):
                 continue
             if not standing_setup.can_tidy(self.config, alias):
                 continue                                  # the setup card says how to add the feature
@@ -1209,11 +1276,11 @@ class StandingController(QObject):
         except Exception:  # noqa: BLE001 - unknown: not bound
             bound = False
         if not bound:
-            self.host._flash_note(f"Sign the {alias} account in first (a card's Sign in, or Connect in the Day view); "
-                                  "the tidy-up's sign-in must be the same Google account.")
+            self._note(f"Sign the {alias} account in first (a card's Sign in, or Connect in the Day view); "
+                       "the tidy-up's sign-in must be the same Google account.")
             return
         if not self.app_state.set_tidy_consent(alias, True, self._now()):
-            self.host._flash_note("Jarvis couldn't save that (standing_app.json); nothing changed.")
+            self._note("Jarvis couldn't save that (standing_app.json); nothing changed.")
             return
         self._tidy_busy.add(alias)
         self._show()
@@ -1238,10 +1305,10 @@ class StandingController(QObject):
         if self._closed:
             return
         if problem == "identity":
-            self.host._flash_note(f"That was another Google account than the {alias} account's: sign in for tidy-up "
-                                  "with the same one. Nothing was kept.")
+            self._note(f"That was another Google account than the {alias} account's: sign in for tidy-up "
+                       "with the same one. Nothing was kept.")
         elif problem:
-            self.host._flash_note("The tidy-up sign-in did not finish; nothing was changed. Try again from the card.")
+            self._note("The tidy-up sign-in did not finish; nothing was changed. Try again from the card.")
         self.reload(announce=False)
 
     def _tidy_cards(self) -> list[NoticeCard]:
@@ -1277,7 +1344,7 @@ class StandingController(QObject):
         agent = next((item for item in self.agents if item.status == STATUS_LIVE
                       and item.name.casefold() == " ".join(name.split()).casefold()), None)
         if agent is None:
-            self.host._flash_note("No agent of that name is on.")
+            self.host._jarvis("No agent of that name is on.", tone=_warn_tone(), context=False)
             return
         problem = self.run_now(agent.id)
         if problem:
@@ -1302,7 +1369,10 @@ class StandingController(QObject):
         if self._closed:
             return
         if self._busy:
-            self.host._flash_note(SETUP_BUSY_TEXT)
+            # Typed in the bar (or an Ask's hand-off): said there, and the sentence the bar took goes back into it.
+            bar = self.host.window.reading.command_bar
+            bar.give_back(bar.last_request())
+            bar.set_status(SETUP_BUSY_TEXT, _warn_tone())
             return
         try:
             words = check_words(words)
@@ -1367,7 +1437,7 @@ class StandingController(QObject):
         if rule is None or self._closed:
             return
         if self._busy:
-            self.host._flash_note(SETUP_BUSY_TEXT)
+            self._note(SETUP_BUSY_TEXT)
             return
         self._work_seq += 1
         seq = self._work_seq
@@ -1429,7 +1499,7 @@ class StandingController(QObject):
                 self._setup = replace(self._setup, note=problem)
                 self._show()
             else:
-                self.host._flash_note(problem)
+                self._note(problem)
             return
         try:
             on = with_status(replace(job, bindings=standing_setup.bindings_of(job, accounts)), STATUS_LIVE)
@@ -1455,26 +1525,32 @@ class StandingController(QObject):
             logger.info("Standing: draft %s %s discarded", job.kind, job.id)
         self.reload(announce=False)
 
-    def prefill(self, kind: str) -> None:
-        """New rule / New agent: Home, with "rule: " or "agent: " in the bar and the cursor after it."""
+    def _to_bar(self, text: str) -> None:
+        """Home, with ``text`` in the bar and the cursor at its end, nothing selected (the Agents screen has no bar;
+        and a field focused this way would select its whole text, so the owner's typing would replace "rule: ")."""
         from .ui import SCREEN_HOME
 
         reading = self.host.window.reading
         reading.set_tab(SCREEN_HOME)
-        reading.command_bar.set_text(f"{kind}: ")
-        reading.command_bar.focus_input()
+        bar = reading.command_bar
+        bar.set_text(text)
+        bar.focus_input()
+        bar.input.deselect()
+        bar.input.end(False)
+
+    def prefill(self, kind: str) -> None:
+        """New rule / New agent: Home, with "rule: " or "agent: " in the bar and the cursor after it."""
+        self._to_bar(f"{kind}: ")
 
     def edit_setup(self) -> None:
-        """Edit: the owner's sentence back in the bar ("agent: ..." / "rule: ..."), to reword and set up again; the
-        draft goes."""
+        """Edit: Home, with the owner's sentence back in the bar ("agent: ..." / "rule: ...") and the cursor at its
+        end, to reword and set up again; the draft goes."""
         draft = self._setup
         if draft is None:
             return
         kind = draft.kind or (draft.job.kind if draft.job is not None else KIND_AGENT)
         self.discard_setup()
-        bar = self.host.window.reading.command_bar
-        bar.set_text(f"{kind}: {draft.words}")
-        bar.focus_input()
+        self._to_bar(f"{kind}: {draft.words}")
 
     def _on_card(self, card_id: str, action: str) -> None:
         if card_id == START_CARD and action in (KIND_RULE, KIND_AGENT):
@@ -1493,7 +1569,7 @@ class StandingController(QObject):
                 if self.app_state.set_consent(True, self._now()):
                     logger.info("Standing: the owner said yes to the consent card")
                 else:
-                    self.host._flash_note("Jarvis couldn't save that (standing_app.json); nothing changed.")
+                    self._note("Jarvis couldn't save that (standing_app.json); nothing changed.")
             elif action == "later":
                 self._consent_later = True
             self.reload(announce=False)
@@ -1553,10 +1629,19 @@ class StandingController(QObject):
                                       enabled=not busy))
         if job.status in (STATUS_DRAFT, STATUS_TRIED):
             buttons.append(CardButton("on", "Turn on", LOOK_AMBER, enabled=not problem and not busy, tip=problem))
-        buttons += [CardButton("edit", "Edit", LOOK_GHOST, enabled=not busy),
-                    CardButton("discard", "Discard", LOOK_DANGER, enabled=not busy)]
-        kicker = ("New rule" if isinstance(job, Rule) else "New agent") + f" {DOT} check it first"
-        note = ("Trying it on your recent mail..." if busy else draft.note or
+            buttons += [CardButton("edit", "Edit", LOOK_GHOST, enabled=not busy),
+                        CardButton("discard", "Discard", LOOK_DANGER, enabled=not busy)]
+            kicker = ("New rule" if isinstance(job, Rule) else "New agent") + f" {DOT} check it first"
+        else:
+            # A live or paused rule's own Dry run: its card only shows the try. Edit would set up a second rule beside
+            # it, and Discard would read as deleting it; Close puts the card away (the rule stays as it is).
+            buttons.append(CardButton("dismiss", "Close", LOOK_GHOST, enabled=not busy))
+            kicker = f"{'Rule' if isinstance(job, Rule) else 'Agent'} {DOT} {STATUS_WORDS.get(job.status, '').lower()}"
+        said = draft.note
+        if (isinstance(job, Rule) and said == standing_setup.sign_in_first(job.account)
+                and self._signed_in(job.account)):
+            said = ""                                 # a dry run's "sign in first", done since: what comes next shows
+        note = ("Trying it on your recent mail..." if busy else said or
                 (problem if job.status in (STATUS_DRAFT, STATUS_TRIED) else ""))
         cards.append(NoticeCard(SETUP_CARD, kicker, job.name, tuple(lines), tuple(buttons), note=note))
         return cards

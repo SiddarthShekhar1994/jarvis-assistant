@@ -7,11 +7,13 @@ Turn on's checks, and the words of the setup and consent cards.
         one setup run (KIND_SETUP: the owner's sentence alone, no mail), counted like any standing run, and Jarvis's
         own check of what it made (standing.setup.definition): a draft agent or rule, "neither", or why not
     run_dry(engine, rule, reader, config, usage, *, now, time_zone_name, own) -> DryOutcome
-        the rule's dry run over the last 30 days: Gmail's own count first (headers, free; a filter that would read
-        nearly everything stops there, before any Claude run), then the newest matches read (one message each,
-        scrubbed) and judged in one run, counted like any other. Nothing is proposed, starred, labelled or archived.
+        the rule's dry run over the last 30 days: an account not signed in says so first (sign_in_first, nothing
+        asked of Gmail), then Gmail's own count (headers, free; a filter that would read nearly everything stops
+        there, before any Claude run), then the newest matches read (one message each, scrubbed) and judged in one
+        run, counted like any other. Nothing is proposed, starred, labelled or archived.
     turn_on_problem(job, config, accounts, consented) -> str
         why Turn on can't happen yet ("" when it can): consent, a rule's dry run, each account's Google account
+    sign_in_first(alias) -> str  what to do while that account is not signed in to Jarvis
     bindings_of(job, accounts) -> tuple    the (alias, Google account id) pairs Turn on records
     job_lines(job, config, hour24) / dry_lines(rule, outcome)    what a setup card says (plain text)
     CONSENT_*                    the one-time consent card's words
@@ -27,6 +29,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 
+from .google_auth import PROBLEM_EXPIRED, PROBLEM_SIGNED_OUT
 from .standing import dryrun, rules, setup
 from .standing.engine import KIND_RULE, KIND_SETUP, StandingEngine
 from .standing.model import (ACTION_EVENT, ACTION_REPLY, ACTION_TELL, ACTION_TODO, PROPOSE_CALENDAR,
@@ -38,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 APP_WORK_FOLDER = "standing-app"      # the app's setup and dry runs (the background check's is standing-run)
 SETUP_JOB = "setup"                   # how setup runs are counted in standing_usage.json
+_SIGNED_OUT = (PROBLEM_SIGNED_OUT, PROBLEM_EXPIRED)   # a reader's problems a sign-in is what helps
 SETUP_RUNS_PER_DAY = 20
 RULE_RUNS_PER_DAY = 48                # as standing.runner's backstop
 TIDY_FEATURE = "gmail_tidy"
@@ -171,6 +175,15 @@ def run_dry(engine: Any, rule: Rule, reader: Any, config: Any, usage: Any, *, no
     if reader is None:
         return DryOutcome(refusal=f"Jarvis can't read the {rule.account} account's mail here: sign it in first.")
     try:
+        problem, why = reader.available() if callable(getattr(reader, "available", None)) else ("", "")
+    except Exception:  # noqa: BLE001 - unknown: the count below says what it finds
+        problem, why = "", ""
+    if problem in _SIGNED_OUT:                       # "try again" would only fail again: say what to do
+        return DryOutcome(refusal=sign_in_first(rule.account))
+    if problem:
+        return DryOutcome(refusal=f"{str(why).rstrip('.')}." if why else
+                          f"Jarvis can't read the {rule.account} account's mail here.")
+    try:
         preview = dryrun.estimate(rule, reader, now=now, batch=settings.rule_batch)
     except Exception as exc:  # noqa: BLE001 - signed out or offline: nothing ran
         logger.info("Standing: a dry run's count failed (%s)", type(exc).__name__)
@@ -235,9 +248,14 @@ def turn_on_problem(job: Agent | Rule, config: Any, accounts: Mapping[str, Any],
         except Exception:  # noqa: BLE001 - unknown: not signed in
             signed = False
         if not signed:
-            return (f"Sign the {alias} account in first: on Home, click the clock at the top right for the Day "
-                    "view, then Connect (or a card's Sign in). Or Edit and name another account.")
+            return sign_in_first(alias)
     return ""     # an older sign-in that names no Google account is let through: Turn on records what it can
+
+
+def sign_in_first(alias: str) -> str:
+    """What to do while ``alias`` is not signed in to Jarvis (Turn on's and a dry run's words)."""
+    return (f"Sign the {alias} account in first: on Home, click the clock at the top right for the Day view, then "
+            "Connect (or a card's Sign in). Or Edit and name another account.")
 
 
 def _trigger(job: Agent, hour24: bool) -> str:
@@ -256,6 +274,8 @@ def job_lines(job: Agent | Rule, config: Any, hour24: bool = False) -> tuple[str
         if job.notes:
             reads.append("your notes")
         lines.append("Reads: " + "; ".join(reads))
+        if job.mail:
+            lines.append("New mail only: it reads mail that comes after you turn it on, each mail once")
         kinds = {PROPOSE_TODO: "to-dos", PROPOSE_CALENDAR: "events", PROPOSE_REPLY: "reply drafts"}
         offers = [kinds[kind] for kind in job.proposes if kind in kinds]
         if offers:

@@ -137,7 +137,7 @@ class CheckTests(unittest.TestCase):
         self.assertEqual((record["status"], record["counts"]["mails"], len(record["cards"])), ("ok", 2, 1))
         self.assertEqual(record["cards"][0]["kind"], "todo")
         self.assertEqual([receipt["kind"] for receipt in record["receipts"]], ["card"])
-        today = Usage(self.files).today()
+        today = Usage(self.files, clock=lambda: self.now).today()   # the check's day, never the real one
         self.assertEqual((today.runs, today.checks_of(RULE["id"])), (1, 2))
         self.assertEqual(self.started, [True])                          # Jarvis was closed: started quietly
         self.assertEqual(result.told, result.runs)
@@ -249,6 +249,29 @@ class CheckTests(unittest.TestCase):
         self.check()
         self.assertEqual(RunFiles.read(RunFiles(self.files).paths()[-1])["status"], "missed")
         del result
+
+    def test_run_now_with_nothing_to_read_leaves_a_line_and_no_run(self) -> None:
+        agent = model.agent_from(dict(AGENT, mail=[{"account": "personal", "query": "from:billing@acme.example"}],
+                                      calendar_days=0, bindings=[]))
+        Definitions(self.files).save([agent], [])
+        requests = RunRequests(self.files)
+        requests.ask(agent.id)
+        self.check()                                                    # its first look only sets the start
+        self.later()
+        requests.ask(agent.id)
+        self.check()                                                    # no new mail since
+        self.later()
+        self.reader.available = lambda: ("signedout", "Not signed in to the personal account")
+        requests.ask(agent.id)
+        self.check()                                                    # its mail can't be read
+        records = [RunFiles.read(path) for path in RunFiles(self.files).paths()]
+        self.assertEqual([(record["status"], record.get("problem", ""), record["trigger"]) for record in records],
+                         [("nothing", "first", "manual"), ("nothing", "", "manual"), ("signed_out", "", "manual")])
+        self.assertFalse(any(record.get("needs_owner") for record in records))   # shown on the screen, never told
+        self.assertEqual(self.engine.prompts, [])                       # and never a Claude run
+        self.later()
+        self.check()                                                    # no Run now: nothing new makes no file
+        self.assertEqual(len(RunFiles(self.files).paths()), 3)
 
     def test_the_deadline_stops_starting_jobs(self) -> None:
         self.check()

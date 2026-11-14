@@ -2942,7 +2942,8 @@ Gmail's ids and headers only, no Claude run); and an agent when you click
 **Run now**, or type "run" and its name ("run Morning check"). A job sees only
 mail that came after it was turned on (its first check sets the start). A run
 happens only when there is something to read: a mail job with no new mail
-makes no Claude run and no file. When a run fails, its mail is checked again
+makes no Claude run and no file (a **Run now** with nothing to read says so
+in ACTIVITY, still with no run). When a run fails, its mail is checked again
 next time, and nothing is ever proposed twice.
 
 **The Agents screen** (the Dock, **Ctrl+9**; a cyan dot while a run has

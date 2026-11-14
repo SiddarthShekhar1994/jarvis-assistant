@@ -89,6 +89,7 @@ class JobRow:
     paused: bool = False         # Pause reads Resume
     can_dry_run: bool = False
     can_turn_on: bool = False
+    turn_on_tip: str = ""        # why Turn on can't go yet (its button is off and says why), "" when it can
     can_delete: bool = True
     tooltip: str = ""
 
@@ -291,6 +292,8 @@ class JobTile(_Tile):
         self.run_button.setVisible(info.can_run)
         self.dry_run_button.setVisible(info.can_dry_run)
         self.turn_on_button.setVisible(info.can_turn_on)
+        self.turn_on_button.setEnabled(not info.turn_on_tip)
+        self.turn_on_button.setToolTip(hud.plain_tooltip(info.turn_on_tip))
         self.pause_button.setVisible(info.can_pause)
         self.pause_button.setText(RESUME_TEXT if info.paused else PAUSE_TEXT)
         self.delete_button.setVisible(info.can_delete)

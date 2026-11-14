@@ -289,6 +289,15 @@ class ScreenTests(_Base):
         self.assertTrue(state.is_undone(f"{run_id}:{card_receipt(todo)['id']}"))
         self.assertEqual(self.c.window.reading.agents_stage.activity_rows()[0].info().state_text, "Withdrawn")
 
+    def test_a_denied_cards_receipt_says_denied(self) -> None:
+        todo = todo_record()
+        write_run(self.app.config, run_cards=[todo], receipts=[card_receipt(todo)])
+        self.s.reload()
+        self.app.store.set(todo["id"], STATUS_DENIED, kind="todo", account="work")
+        self.s.reload()
+        row, = self.c.window.reading.agents_stage.activity_rows()
+        self.assertEqual(row.info().state_text, "Denied")                # not "Decided", as an approved one says
+
     def test_a_run_that_could_not_run_says_so(self) -> None:
         write_run(self.app.config, status="capped", needs_owner=False, problem="runs")
         self.s.reload()
@@ -333,6 +342,31 @@ class ScreenTests(_Base):
         meta = self.c.window.reading.agents_stage.agents_meta.text().upper()
         self.assertIn("BACKGROUND RUNS OFF", meta)
         self.assertIn("0 OF 30 RUNS TODAY", meta)
+
+    def test_hows_answer_shows_on_the_agents_screen_for_a_while(self) -> None:
+        reading = self.c.window.reading
+        reading.set_tab(ui.SCREEN_AGENTS)
+        settle()
+        stage = reading.agents_stage
+        self.assertTrue(any(link == standing_ui.INSTALLER_LINK for _text, _link, link in stage.agents_info().notes))
+        stage.linkClicked.emit(standing_ui.INSTALLER_LINK)              # the note's How
+        settle()
+        self.assertIn(standing_ui.INSTALLER_TEXT, stage.notes())        # here: the app's own note shows elsewhere
+        self.app.clock.advance(3)
+        self.s.reload()
+        self.assertNotIn(standing_ui.INSTALLER_TEXT, stage.notes())
+
+    def test_a_run_now_with_nothing_to_read_says_so(self) -> None:
+        write_run(self.app.config, job_kind="agent", job_id=AGENT_ID, job_name=AGENT_NAME, status="nothing",
+                  needs_owner=False, problem="first", started=NOW - timedelta(minutes=10))
+        write_run(self.app.config, job_kind="agent", job_id=AGENT_ID, job_name=AGENT_NAME, status="nothing",
+                  needs_owner=False, started=NOW - timedelta(minutes=5))
+        self.s.reload()
+        rows = self.c.window.reading.agents_stage.activity_rows()
+        self.assertEqual([(row.info().text, row.info().state_text) for row in rows],
+                         [(standing_ui.RUN_LINES["nothing"], "Nothing new"),
+                          (standing_ui.FIRST_LOOK_LINE, "Nothing new")])
+        self.assertEqual(self.said(), [])                               # shown, never said
 
 
 class FallbackTests(_Base):
