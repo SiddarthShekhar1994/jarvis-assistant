@@ -54,6 +54,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from ..board import ask_frames
 from .cli import OutputTooLong, Process, Runner, holds_stdin, stream_message
 
 logger = logging.getLogger(__name__)
@@ -223,6 +224,9 @@ class Plan:
     remember: tuple[str, ...] = ()  # a suggested note (only when the run was allowed to suggest one)
     agent: AgentRequest | None = None   # agent_task (only when the run was allowed to ask for it)
     standing: str = ""                  # standing_job's kind, "agent" | "rule" (acted on only when it was offered)
+    # The new look, part 6: the answer's "topic" and "frames" as board.ask_frames checked them (an AskFrames; a frame
+    # that fails is dropped there, never the plan). Shown on the board, never logged but as counts.
+    frames: Any = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -510,7 +514,8 @@ def _plan_from(data: Any, *, allow_search: bool, allow_web: bool = False, fallba
     kept = tuple(line.strip() for line in lines if line.strip())
     wanted = data.get("standing_job")
     standing = wanted["kind"] if isinstance(wanted, dict) and wanted.get("kind") in ("agent", "rule") else ""
-    return Plan(say, question, kept, search, fallback, web, remember, agent, standing)
+    # Part 6: the topic and the typed frames, checked strictly; a frame that fails is dropped, never the plan.
+    return Plan(say, question, kept, search, fallback, web, remember, agent, standing, ask_frames.check_answer(data))
 
 
 def _fallback_plan(text: str, *, allow_search: bool, allow_web: bool = False,

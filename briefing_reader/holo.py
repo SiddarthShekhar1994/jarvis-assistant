@@ -897,11 +897,20 @@ ICONS: dict[str, tuple[str, ...]] = {
     # The board (part 5a): a panel beside a column - the header's Board button, "9 on the board", a turn's frames.
     "board": ("M5.5 5h13a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z", "M10 5v14",
               "M13 9.5h4.5M13 13h4.5"),
+    # Part 6, Ask's typed frames (the design's own glyphs): a chart's bars on their axis, a table's grid, a timeline's
+    # dates on a line, and maths' sigma.
+    "chart": ("M4 5v15h16", "M7.5 9h6M7.5 13h10M7.5 17h4"),
+    "table": ("M5 5h14a1.5 1.5 0 0 1 1.5 1.5v11a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5v-11A1.5 1.5 0 0 1 5 5z",
+              "M3.5 9.5h17M9.5 5v14M3.5 14.2h17"),
+    "timeline": ("M3 12h18", "M4 12a2 2 0 1 0 4 0a2 2 0 1 0-4 0z", "M11 12a2 2 0 1 0 4 0a2 2 0 1 0-4 0z",
+                 "M17.8 12a1.2 1.2 0 1 0 2.4 0a1.2 1.2 0 1 0-2.4 0z"),
+    "maths": ("M17 5H7l6 7-6 7h10",),
 }
 FILLED_ICONS: dict[str, str] = {
     "play": "M8 5.5v13l10.5-6.5z",
     "play_lg": "M7.5 5.2v13.6L18.5 12z",
     "diamond": "M12 4l8 8-8 8-8-8z",     # waits on the owner: a shape as well as a colour (the board, the chips)
+    "delta": "M12 6l6 11H6z",            # part 6: a changed figure's delta line ("+500 Software · was 2.9k on Friday")
 }
 
 

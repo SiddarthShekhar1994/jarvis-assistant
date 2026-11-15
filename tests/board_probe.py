@@ -74,6 +74,14 @@ Cases:
                nothing), then a staying frame has it, never <body>; lively and off
     reduced    part 5c fixes, round 5: the page's own reduced motion (Chromium told reduced motion, as this PC's "Show
                animations" off would tell it): lively plays as off (K and --k 0)
+    typed      part 6, Ask's typed frames: a model's answer (invented) with markup, scripts, javascript: and http:
+               addresses and bidi characters in every string, through board.ask_frames and board.protocol into the
+               real page - every element in a frame's body one the renderers make, no attribute there from data, no
+               request, no script run; its words whole as text; the page's own refusals of hostile bodies put into
+               board.apply directly (Infinity, depth 7, 65 nodes, an unknown op ...); maths' elements made from the
+               tree (a fraction, a power, a root) and the page's reading of plain expressions; at 448, 300 and 270 px
+               no word cut (the timeline in a row from 300 px, one node a row under it; maths' step names over their
+               lines); opened big, a table's rows and a timeline's six nodes using the room
 
 Qt runs offscreen and Chromium's proxy is a dead address (snapshots.OFFLINE_FLAGS, as the board's engine always runs in a
 test): nothing can reach the network whatever the page does. No window is shown on the real screen. Chromium's
@@ -963,6 +971,8 @@ def main(case: str) -> dict[str, Any]:
         report.update(big_case(wait_until, pump, main_world, settle_end))
     elif case == "expiry":
         report.update(expiry_case(wait_until, pump, main_world, settle_end))
+    elif case == "typed":
+        report.update(typed_case(make, wait_until, pump, main_world, settle_end))
     elif case == "reduced":
         # The page's own reduced motion, Chromium told reduced motion (REDUCED_MOTION): lively plays as off.
         host, board = make()
@@ -3106,6 +3116,227 @@ def expiry_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) ->
     settle_end(report, board)
     shim.close()
     return report
+
+
+# --------------------------------------------------------------------------
+# Part 6: Ask's typed frames in the real page
+# --------------------------------------------------------------------------
+
+# Words a model might write, in every string of its frames (each within its field's cap).
+TYPED_WORDS = {"script": "<script>window.pwned=2</script>", "img": "<img src=x onerror=window.pwned=3>",
+               "js": "javascript:window.pwned=4", "http": "http://example.com/x.png", "bidi": "‮Events⁦"}
+# The plain expressions whose reading the page and board.ask_frames.maths_text must agree on (no power, fraction or
+# root: those the page lays out, so their words are not one line).
+PLAIN_EXPRESSIONS = [
+    ["=", ["+", ["*", 2, "x"], ["*", -8, "x"], 6], 0], ["*", 2, ["+", "x", 1]], ["-", "a", ["+", "b", "c"]],
+    ["-", ["+", "a", "b"]], ["*", "x", "y"], ["*", "rate", "time"], ["*", 2, -3], ["/", ["*", 6, "x"], ["*", 2, "x"]],
+    ["=", "x", ["or", 1, 2]], ["+", "a", ["-", ["-", "b"]]], ["*", ["()", ["-", "x", 1]], ["()", ["-", "x", 3]]],
+    ["or", ["=", "x", 1], ["=", "x", 3]], ["+", -2, "a", ["-", ["*", 4, "x"]]], ["*", 2, ["*", 3, "x"]],
+    ["-", ["-", "x"]], ["=", 1234567.5, ["*", 3, 411522.5]],
+]
+_TYPED_PAGE = r"""JSON.stringify((function (markers) {
+  var tags = ['ARTICLE', 'DIV', 'SPAN', 'P', 'H2', 'B', 'I', 'TABLE', 'THEAD', 'TBODY', 'TR', 'TH', 'TD', 'BUTTON',
+              'svg', 'path', 'rect'];
+  var names = ['class', 'scope', 'aria-hidden', 'style', 'viewBox', 'focusable'];
+  var styleOk = /^(\s*--(x0|xw|n|today):\s*[0-9a-z.%() +\-\/]*;)*\s*$/;
+  var found = {};
+  document.querySelectorAll('#board .frame').forEach(function (f) {
+    var id = f.querySelector('.f-title').id.slice(6);
+    var badTags = [], badAttributes = [], dataAttributes = [];
+    f.querySelectorAll('*').forEach(function (el) {
+      if (tags.indexOf(el.tagName) < 0) { badTags.push(el.tagName); }
+    });
+    f.querySelectorAll('.f-body, .f-body *').forEach(function (el) {
+      Array.prototype.forEach.call(el.attributes, function (a) {
+        if (names.indexOf(a.name) < 0 || (a.name === 'style' && (!styleOk.test(a.value) || /url|\/\//i.test(a.value)))) {
+          badAttributes.push(a.name + '=' + a.value.slice(0, 40));
+        }
+        markers.forEach(function (m) { if (a.value.indexOf(m) >= 0) { dataAttributes.push(a.name); } });
+      });
+    });
+    found[id] = {kind: f.className, text: f.querySelector('.f-body').textContent, title: f.querySelector('.f-title').textContent,
+                 badTags: badTags, badAttributes: badAttributes, dataAttributes: dataAttributes,
+                 lines: Array.prototype.map.call(f.querySelectorAll('.mx-e'), function (el) { return el.textContent; })};
+  });
+  var parts = function (sel) {
+    return Array.prototype.map.call(document.querySelectorAll(sel), function (el) { return el.textContent; });
+  };
+  return {frames: found, scripts: document.scripts.length, pwned: typeof window.pwned,
+          links: document.querySelectorAll('#board a, #board img, #board iframe, #board script, #board style').length,
+          fracTop: parts('#board .mx-frac > .mx-top'), fracBottom: parts('#board .mx-frac > .mx-bot'),
+          sup: parts('#board .mx-sup'), rad: parts('#board .mx-rad'), idx: parts('#board .mx-idx'),
+          answers: parts('#board .mx-ans'), hot: parts('#board tr.hot td'), zeros: parts('#board td.z').length,
+          ghost: document.querySelectorAll('#board .ch-was').length, hotBars: document.querySelectorAll('#board .ch-fl.hot').length,
+          delta: parts('#board .delta .delta-lead'), states: parts('#board .tl-state'), today: parts('#board .tl-today')};
+})(__MARKERS__))"""
+_TYPED_LAYOUT = r"""JSON.stringify((function () {
+  var words = Array.from(document.querySelectorAll('#board .frame span, #board .frame p, #board .frame b, ' +
+                                                   '#board .frame h2, #board .frame th, #board .frame td'));
+  var root = document.getElementById('board');
+  var tl = document.querySelector('#board .tline'), mx = document.querySelector('#board .mx');
+  var today = document.querySelector('#board .tl-today');
+  return {frameWidth: Math.round(document.querySelector('#board .frame').getBoundingClientRect().width),
+          cut: words.filter(function (el) { return el.scrollWidth > el.clientWidth + 1; }).map(function (el) { return el.className || el.tagName; }),
+          words: words.length, pageCut: root.scrollWidth > root.clientWidth,
+          timelineColumns: getComputedStyle(tl).gridTemplateColumns,
+          nodeTops: Array.prototype.map.call(tl.querySelectorAll('.tl-n'), function (n) {
+            return Math.round(n.getBoundingClientRect().top); }),
+          todayPosition: getComputedStyle(today).position,
+          mathsColumns: getComputedStyle(mx).gridTemplateColumns};
+})())"""
+_TYPED_BIG = r"""JSON.stringify((function () {
+  var card = document.querySelector('.big-card');
+  if (!card) { return null; }
+  var cell = card.querySelector('td'), tl = card.querySelector('.tline');
+  return {rows: card.querySelectorAll('tbody tr').length, cellFont: cell ? getComputedStyle(cell).fontSize : '',
+          timelineColumns: tl ? getComputedStyle(tl).gridTemplateColumns : '',
+          nodeTops: tl ? Array.prototype.map.call(tl.querySelectorAll('.tl-n'), function (n) {
+            return Math.round(n.getBoundingClientRect().top); }) : [],
+          box: (function (r) { return [Math.round(r.width), Math.round(r.height)]; })(card.getBoundingClientRect()),
+          state: board.counts().big};
+})())"""
+
+
+def typed_answer() -> dict[str, Any]:
+    """A model's answer (invented): a table, a chart and a timeline with hostile words in every string."""
+    words = TYPED_WORDS
+    return {"topic": "<b>Dana</b>'s numbers", "frames": [
+        {"kind": "table", "title": words["script"], "unit": "<i>USD</i>",
+         "columns": ["Line", "<u>Fri</u>", "Today", "Change"],
+         "rows": [[words["js"], 1200, 1200, 0], ["Software", 2900, 3400, "+500"], [words["bidi"], 2100, 2100, 0],
+                  [words["http"], 800, 800, 0]],
+         "changed": 1, "change": "+500 <b>Software</b> · was 2.9k", "source": "<a href=\"x\">From Dana's mail</a>"},
+        {"kind": "chart", "title": "Q4 " + words["img"], "unit": "USD",
+         "bars": [{"label": "Travel", "value": 1200}, {"label": words["http"], "value": 3400},
+                  {"label": "<b>Events</b>", "value": 2100}, {"label": "Hardware", "value": -800}],
+         "changed": 1, "was": 2900, "change": "+500 " + words["js"]},
+        {"kind": "timeline", "title": "LING " + words["img"],
+         "nodes": [{"when": "Mon", "words": words["js"], "state": "done"},
+                   {"when": "<i>Wed</i>", "words": "Full draft", "state": "next"},
+                   {"when": "Thu 11:59 PM", "words": words["bidi"], "state": "due"}], "today": 1},
+        {"kind": "maths", "title": "the fourth: left out"}]}
+
+
+def typed_case(make: Any, wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> dict[str, Any]:
+    from briefing_reader.board import ask_frames, protocol
+
+    report: dict[str, Any] = {}
+    host, board = make()
+    host.resize(478, 900)
+    board.setGeometry(0, 0, 478, 900)                      # a 448 px frame (the page's own 15 px pads)
+    host.show()
+    wait_until(board.is_ready, 40)
+    report["ready"] = board.is_ready()
+    board.set_motion("off")
+    found = ask_frames.check_answer(typed_answer())
+    report["dropped"] = dict(found.dropped)
+    maths = ask_frames.check_frame({"kind": "maths", "title": "Solve 2x² − 8x + 6 = 0 " + TYPED_WORDS["script"],
+                                    "steps": [{"name": "Divide by 2", "expr": ["=", ["+", ["pow", "x", 2],
+                                                                                         ["*", -4, "x"], 3], 0]},
+                                              {"name": TYPED_WORDS["img"][:24], "expr": ["root", ["frac", 1, 3], 3]}],
+                                    "answer": {"name": "So", "expr": ["or", ["=", "x", 1], ["=", "x", 3]]}})
+    plain = [ask_frames.check_frame({"kind": "maths", "title": f"Plain {index}",
+                                     "steps": [{"expr": expression} for expression in PLAIN_EXPRESSIONS[at:at + 8]],
+                                     "answer": {"expr": 0}}) for index, at in enumerate((0, 8))]
+    six = ask_frames.check_frame({"kind": "timeline", "title": "Six steps",
+                                  "nodes": [{"when": f"Day {n}", "words": f"Step {n}", "state": "done" if n < 2 else
+                                             "next" if n == 2 else ""} for n in range(6)], "today": 2})
+    typed = [*found.frames, maths, *plain, six]
+    report["typed_kinds"] = [frame.kind if not isinstance(frame, str) else frame for frame in typed]
+    messages = [ask_frames.build(frame, frame_id=f"t{index}").messages[0] for index, frame in enumerate(typed)]
+    before = board.counts()
+    report["applied"] = [board.apply(message) for message in messages]
+    pump(1.2)
+    after = board.counts()
+    report["requests"] = {"allowed_before": before["allowed"], "allowed_after": after["allowed"],
+                          "blocked_before": before["blocked"], "blocked_after": after["blocked"]}
+    markers = ["pwned", "javascript", "http", "<", "example.com", "onerror", "Dana", "Software", "Events"]
+    report["page"] = json.loads(main_world(board, _TYPED_PAGE.replace("__MARKERS__", json.dumps(markers))))
+    report["sent"] = {message["id"]: {"kind": message["kind"], "title": message["title"],
+                                      "words": [word for word in shown_typed(message["body"])]}
+                      for message in messages}
+    report["plain_expected"] = [ask_frames.maths_text(step["expr"]) for frame in plain for step in frame.body["steps"]]
+    # The page's own refusals: bodies put into board.apply directly (never past Python's checks in the app).
+    base = {"type": "frame", "title": "x", "meta": "", "status": "ok", "status_text": "", "status_meta": "",
+            "waits": "", "changed": False, "pinned": False, "closed": False}
+    good = {message["kind"]: message["body"] for message in messages}
+    deep_tree: Any = ["name", "x"]
+    for _ in range(6):
+        deep_tree = ["-", deep_tree]
+    nine = ["+", *([["num", "1"]] * 8)]
+    bad_texts = [
+        json.dumps(dict(base, id="bad1", kind="table", body=dict(good["table"], rows=[["a", "b"]]))),
+        json.dumps(dict(base, id="bad2", kind="table", body=dict(good["table"], html="<b>x</b>"))),
+        json.dumps(dict(base, id="bad3", kind="table", body=dict(good["table"], changed=True))),
+        json.dumps(dict(base, id="bad4", kind="chart", body=dict(good["chart"], changed=-1))),   # a ghost, no bar
+        json.dumps(dict(base, id="bad5", kind="chart", body=dict(good["chart"], bars=[
+            {"label": "a", "value": 1, "text": "<b>1</b>"}], changed=-1, was=None))),
+        json.dumps(dict(base, id="bad6", kind="chart", body=dict(good["chart"], bars=[
+            {"label": "a", "value": 7, "text": "1"}], changed=-1, was=None))).replace(": 7,", ": 1e309,"),
+        json.dumps(dict(base, id="bad7", kind="chart", body=dict(good["chart"], bars=[
+            {"label": "a", "value": "1", "text": "1"}], changed=-1, was=None))),
+        json.dumps(dict(base, id="bad8", kind="timeline", body=dict(good["timeline"], today=9))),
+        json.dumps(dict(base, id="bad9", kind="timeline", body=dict(good["timeline"], nodes=[
+            {"when": "", "words": "x", "state": "late"}], today=-1))),
+        json.dumps(dict(base, id="bad10", kind="maths", body=dict(good["maths"], answer={"name": "", "expr": deep_tree}))),
+        json.dumps(dict(base, id="bad11", kind="maths", body=dict(good["maths"], steps=[{"name": "", "expr": nine}] * 7,
+                                                                  answer={"name": "", "expr": ["-", ["num", "1"]]}))),
+        json.dumps(dict(base, id="bad12", kind="maths", body=dict(good["maths"], answer={
+            "name": "", "expr": ["script", ["num", "1"]]}))),
+        json.dumps(dict(base, id="bad13", kind="maths", body=dict(good["maths"], answer={
+            "name": "", "expr": ["name", "<img>"]}))),
+        json.dumps(dict(base, id="bad14", kind="maths", body=dict(good["maths"], answer={
+            "name": "", "expr": ["num", "1e5"]}))),
+        json.dumps(dict(base, id="bad15", kind="maths", body=dict(good["maths"], answer={
+            "name": "", "expr": ["__proto__", ["num", "1"], ["num", "2"]]}))),
+    ]
+    report["page_refuses"] = [main_world(board, f"board.apply({json.dumps(text)})") for text in bad_texts]
+    report["bad_frames"] = main_world(board, "document.querySelectorAll('[id^=\"title-bad\"]').length")
+    report["python_refuses"] = []
+    for text in bad_texts:
+        try:
+            protocol.check_message(json.loads(text))
+            report["python_refuses"].append(False)
+        except protocol.Refused:
+            report["python_refuses"].append(True)
+    # The widths: a 448, a 300 and a 270 px frame.
+    report["layout"] = {}
+    for frame_width in (448, 300, 270):
+        board.setGeometry(0, 0, frame_width + 30, 900)
+        pump(0.8)
+        report["layout"][str(frame_width)] = json.loads(main_world(board, _TYPED_LAYOUT))
+    # Open big: the view wide (as the app sets it), the board in its own box at its right.
+    board.setGeometry(0, 0, 1000, 700)
+    pump(0.5)
+    report["big"] = {}
+    for name, frame_id in (("table", "t0"), ("timeline", f"t{len(typed) - 1}")):
+        board.apply({"type": "big", "state": "open", "id": frame_id, "x": 522, "y": 0, "w": 478, "h": 700})
+        wait_until(lambda: main_world(board, "board.counts().big") == "open", 5)
+        pump(0.6)
+        report["big"][name] = json.loads(main_world(board, _TYPED_BIG) or "null")
+        board.apply({"type": "big", "state": "close", "id": ""})
+        pump(0.6)
+    after_all = board.counts()
+    report["requests"]["allowed_end"] = after_all["allowed"]
+    report["requests"]["blocked_end"] = after_all["blocked"]
+    settle_end(report, board)
+    return report
+
+
+def shown_typed(body: Any) -> list[str]:
+    """The words of a typed frame's body the page shows in it as they are (a maths tree's words apart; a unit is the
+    frame's meta, in its header)."""
+    found: list[str] = []
+    if isinstance(body, dict):
+        for key, value in body.items():
+            if key not in ("expr", "state", "text", "value", "was", "changed", "today", "unit"):
+                found += shown_typed(value)
+    elif isinstance(body, list):
+        for value in body:
+            found += shown_typed(value)
+    elif isinstance(body, str) and body:
+        found.append(body)
+    return found
 
 
 if __name__ == "__main__":

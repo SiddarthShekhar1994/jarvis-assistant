@@ -321,6 +321,32 @@ class MatchTests(unittest.TestCase):
         self.assertEqual(lit.frame_words(BUDGET), {"q4", "budget", "by", "line", "sheets", "example", "edu"})
         self.assertEqual(lit.frame_words("not a frame"), frozenset())
 
+    def test_part_6_s_kinds_own_words(self) -> None:
+        """Ask's typed frames: a table's title and column words, a chart's title and bar labels, a timeline's title
+        and node words, maths' title alone (never a cell, a value, a when or an expression)."""
+        table = {"kind": "table", "title": "Budget lines", "body": {
+            "columns": ["Line", "Friday", "Today"], "rows": [["Travel", "1,200", "1,300"]], "unit": "USD",
+            "changed": 0, "change": "+100 Travel", "source": "From Dana's mail"}}
+        chart = {"kind": "chart", "title": "Q4 spend", "body": {
+            "bars": [{"label": "Software", "value": 3400, "text": "3.4k"}, {"label": "Hardware", "value": 800,
+                                                                           "text": "0.8k"}],
+            "unit": "", "changed": -1, "was": None, "change": ""}}
+        timeline = {"kind": "timeline", "title": "LING essay", "body": {
+            "nodes": [{"when": "Mon", "words": "Outline", "state": "done"}, {"when": "Thursday", "words": "Essay",
+                                                                            "state": "due"}], "today": 1}}
+        maths = {"kind": "maths", "title": "Solve for x", "body": {
+            "steps": [{"name": "Factor", "expr": ["name", "quartic"]}], "answer": {"name": "", "expr": ["num", "3"]}}}
+        self.assertEqual(lit.frame_words(table), {"budget", "lines", "line", "friday", "today"})
+        self.assertEqual(lit.frame_words(chart), {"q4", "spend", "software", "hardware"})
+        self.assertEqual(lit.frame_words(timeline), {"ling", "essay", "outline"})
+        self.assertEqual(lit.frame_words(maths), {"solve", "for", "x"})
+        frames = {"t": table, "c": chart, "l": timeline, "m": maths}
+        self.assertEqual(lit.match("Software went up by five hundred.", frames), "c")
+        self.assertEqual(lit.match("The outline is done.", frames), "l")
+        self.assertEqual(lit.match("Friday's lines are in.", frames), "t")
+        self.assertEqual(lit.match("Solve it with the quadratic.", frames), "m")
+        self.assertEqual(lit.match("Travel went up.", frames), "")             # a cell's words never light it
+
     def test_nothing_here_is_qt(self) -> None:
         self.assertNotIn("PySide6", Path(lit.__file__).read_text(encoding="utf-8"))
 

@@ -53,8 +53,17 @@ CHANGED = "Changed"
 MORE = "+{count} MORE"
 ELLIPSIS = "…"
 GLYPHS = {"text": "read_all", "calendar": "calendar", "mail_thread": "mail", "mail_list": "inbox", "todos": "todos",
-          "picture": "image"}
+          "picture": "image", "table": "table", "chart": "chart", "timeline": "timeline", "maths": "maths"}
+TODAY_WORD = "Today"                                           # part 6: a timeline's TODAY marker (badge role: caps)
+STATE_WORDS = {"done": "Done", "next": "Next", "due": "Due"}   # ... and its nodes' states
+ROW_NODES = 4                    # a timeline lines its nodes up in a row with at most this many ...
+ROW_NODE = 86                    # ... each with at least this much room (px, at the type's scale: 3 in a 448 px tile
+                                 # and in the second screen's 384 px ones); else one node per row
+ROW_FROM = 300                   # maths: a step's name goes over its line under this much content (the page's rule)
 _MORE_RE = re.compile(r"\+(\d+) MORE", re.IGNORECASE)
+_ZERO_RE = re.compile(r"[+\-−]?[$€£]?0+(?:[.,]0+)?%?")       # a table cell that says none (the page's)
+_FIGURE_RE = re.compile(r"[+\-−]?[$€£]?[0-9]")                 # a delta line that starts with its figure
+_PLAIN_NUMBER_RE = re.compile(r"[$€£]?[0-9][0-9,]*(?:\.[0-9]+)?[%kKMB]?")   # "2,900", "$3.4k" (no sign)
 
 # Type: (family, px, line height, weight, tracking em, caps) - holo's roles, and the few the board's style sets itself.
 _TYPE: dict[str, tuple[str, float, float, int, float, bool]] = {
@@ -71,6 +80,17 @@ _TYPE: dict[str, tuple[str, float, float, int, float, bool]] = {
     "pill": (hud.MONO_FAMILY, 10, 16, 600, 0.06, False),          # the now pill
     "chip": (hud.BODY_FAMILY, 13, 16, 500, 0.0, False),           # the waits chip's words
     "kbd": (hud.MONO_FAMILY, 10, 12, 500, 0.08, True),            # its CTRL 3
+    # Part 6, Ask's typed frames (the page's own sizes):
+    "label": (hud.MONO_FAMILY, 11, 14, 500, 0.20, True),          # label role: a table's headers
+    "cell": (hud.BODY_FAMILY, 12.5, 18, 400, 0.0, False),         # a table's cells
+    "cell_strong": (hud.BODY_FAMILY, 12.5, 18, 600, 0.0, False),  # ... the changed row's change
+    "value": (hud.MONO_FAMILY, 11, 14, 500, 0.0, False),          # a chart's values
+    "delta": (hud.BODY_FAMILY, 12, 17, 400, 0.0, False),          # a delta line ...
+    "delta_strong": (hud.BODY_FAMILY, 12, 17, 600, 0.0, False),   # ... and its figure
+    "step": (hud.MONO_FAMILY, 10, 12, 500, 0.0, False),           # a maths step's number
+    "expr": (hud.BODY_FAMILY, 15, 22, 400, 0.02, False),          # a maths line
+    "expr_strong": (hud.BODY_FAMILY, 15, 22, 600, 0.02, False),   # ... the answer
+    "headline": (hud.DISPLAY_FAMILY, 32, 38, 500, 0.0, False),    # the second screen's headline: a change, an answer
 }
 
 
@@ -308,7 +328,8 @@ class _Builder:
         kind = str(self.frame.get("kind", ""))
         data = self.frame.get("body") or {}
         kinds = {"text": self.text, "calendar": self.calendar, "mail_thread": self.mail_thread,
-                 "mail_list": self.mail_list, "todos": self.todos, "picture": self.picture_body}
+                 "mail_list": self.mail_list, "todos": self.todos, "picture": self.picture_body,
+                 "table": self.table, "chart": self.chart, "timeline": self.timeline, "maths": self.maths}
         blocks = kinds.get(kind, self.text)(data)
         if self.waits:
             blocks.append(self.waits_chip())
@@ -647,6 +668,366 @@ class _Builder:
         blocks.append(_Block(bottom, ops))
         return blocks
 
+    # ---- part 6, Ask's typed frames ------------------------------------------------------------------------------------
+
+    def delta(self, words: str, top: float) -> _Block:
+        """A changed figure's delta line: the delta glyph, its figure first in HOLO_HI 600, then the rest (INK_3)."""
+        t = self.t
+        indent = self.px(17)
+        glyph = Op("glyph", QRectF(self.left, top + self.px(3), self.px(11), self.px(11)), _color(holo.HOLO_HI),
+                   name="delta")
+        head, _space, rest = words.partition(" ")
+        ops = [glyph]
+        if _FIGURE_RE.match(head):
+            lead = _text_op(head, "delta_strong", self.left + indent, top, self.inner - indent, holo.HOLO_HI, t)
+            ops.append(lead)
+            x = lead.rect.right() + t.width("delta", " ")
+            parts = rest.split(" ") if rest else []
+            fit = 0                                   # the words that go on after the figure, on its line ...
+            while fit < len(parts) and t.width("delta", " ".join(parts[:fit + 1])) <= self.right - x:
+                fit += 1
+            if fit:
+                ops.append(_text_op(" ".join(parts[:fit]), "delta", x, top, self.right - x, holo.INK_3, t))
+            if fit < len(parts):                      # ... and the rest under them, from the indent
+                ops.append(_text_op(" ".join(parts[fit:]), "delta", self.left + indent, lead.rect.bottom(),
+                                    self.inner - indent, holo.INK_3, t))
+        else:
+            ops.append(_text_op(words, "delta", self.left + indent, top, self.inner - indent, holo.INK_3, t))
+        return _Block(max(op.rect.bottom() for op in ops), ops)
+
+    def table(self, data: Mapping[str, Any]) -> list[_Block]:
+        columns = [str(word) for word in data.get("columns") or []]
+        rows = [[str(cell) for cell in row] for row in data.get("rows") or [] if isinstance(row, list)]
+        changed = int(data.get("changed", -1)) if isinstance(data.get("changed"), int) else -1
+        if self.private and 0 <= changed < len(rows):
+            headline = self.table_headline(rows[changed], str(data.get("change", "")))
+            if headline:
+                return headline
+        t = self.t
+        count = len(columns)
+        if not count:
+            return []
+        naturals = []
+        for index in range(count):
+            widths = [t.width("label", columns[index])]
+            widths += [t.width("cell_strong" if number == changed else "cell", row[index] if index < len(row) else "")
+                       for number, row in enumerate(rows)]
+            naturals.append(max(widths) + self.px(1))
+        # Each column as wide as its widest words, the first taking what is left; when they do not fit, a narrower gap,
+        # then every column cut to its share (its words then wrap at spaces, never cut).
+        gap = self.px(10)
+        if sum(naturals) + gap * (count - 1) > self.inner:
+            gap = self.px(6)
+        room = self.inner - gap * (count - 1)
+        if sum(naturals) <= room:
+            widths = [room - sum(naturals[1:]), *naturals[1:]]
+        else:
+            widths = [room * natural / sum(naturals) for natural in naturals]
+        xs = [self.left]
+        for width in widths[:-1]:
+            xs.append(xs[-1] + width + gap)
+        blocks: list[_Block] = []
+        heads = [_text_op(word, "label", x, 0.0, width, holo.INK_4, t, align="left" if index == 0 else "right")
+                 for index, (word, x, width) in enumerate(zip(columns, xs, widths))]
+        blocks.append(_Block(max(op.rect.bottom() for op in heads) + self.px(6), heads))
+        for number, row in enumerate(rows):
+            hot = number == changed
+            inset = self.px(6) if hot else 0.0
+            ops: list[Op] = []
+            cells: list[Op] = []
+            for index, (x, width) in enumerate(zip(xs, widths)):
+                cell = row[index] if index < len(row) else ""
+                last = index == count - 1
+                kind = "cell_strong" if hot and last else "cell"
+                color = (holo.HOLO_HI if hot and last else holo.INK_1 if hot else
+                         holo.INK_4 if _ZERO_RE.fullmatch(cell) else holo.INK_2)
+                left = x + (inset if index == 0 else 0.0)
+                room_here = width - (inset if index in (0, count - 1) else 0.0)
+                cells.append(_text_op(cell, kind, left, self.px(4), max(1.0, room_here), color, t,
+                                      align="left" if index == 0 else "right"))
+            bottom = max(op.rect.bottom() for op in cells) + self.px(4)
+            if hot:
+                ops.append(Op("box", QRectF(self.left, 0.0, self.inner, bottom), None, fill=_color(holo.HOLO, 0.08)))
+            ops.append(self.rule(0.0))
+            ops += cells
+            blocks.append(_Block(bottom, ops, row=True))
+        change = str(data.get("change", ""))
+        if 0 <= changed < len(rows) and change:
+            blocks.append(self.delta(change, self.px(10)))
+        source = str(data.get("source", ""))
+        if source:
+            line = _text_op(source, "badge", self.left, self.px(10), self.inner, holo.INK_4, t)
+            blocks.append(_Block(line.rect.bottom(), [line]))
+        return blocks
+
+    def table_headline(self, row: list[str], change: str) -> list[_Block]:
+        """The second screen's table: the changed row's first words, then what it was and is now, large ("2,900 →
+        3,400", the new figure in HOLO_HI), then its change; [] when the row has no two plain figures to say so."""
+        figures = [cell for cell in row[1:] if _PLAIN_NUMBER_RE.fullmatch(cell)]
+        if len(figures) < 2:
+            return []
+        t = self.t
+        blocks: list[_Block] = []
+        if row[0]:
+            label = _text_op(row[0], "body", self.left, 0.0, self.inner, holo.INK_2, t)
+            blocks.append(_Block(label.rect.bottom() + self.px(6), [label]))
+        before, after = figures[-2], figures[-1]
+        arrow = self.px(22)
+        width = t.width("headline", before) + arrow + t.width("headline", after)
+        old = _text_op(before, "headline", self.left, 0.0, self.inner, holo.INK_1, t)
+        if width <= self.inner:
+            x = old.rect.right()
+            mark = Op("glyph", QRectF(x + self.px(3), (t.line("headline") - self.px(14)) / 2, self.px(14), self.px(14)),
+                      _color(holo.INK_3), name="chevron")
+            new = _text_op(after, "headline", x + arrow, 0.0, self.right - x - arrow, holo.HOLO_HI, t)
+            blocks.append(_Block(max(old.rect.bottom(), new.rect.bottom()), [old, mark, new]))
+        else:
+            new = _text_op(after, "headline", self.left, old.rect.bottom(), self.inner, holo.HOLO_HI, t)
+            blocks.append(_Block(new.rect.bottom(), [old, new]))
+        if change:
+            blocks.append(self.delta(change, self.px(8)))
+        return blocks
+
+    def chart(self, data: Mapping[str, Any]) -> list[_Block]:
+        t = self.t
+        bars = [bar for bar in data.get("bars") or [] if isinstance(bar, Mapping)
+                and type(bar.get("value")) in (int, float)]
+        if not bars:
+            return []
+        changed = data.get("changed", -1) if isinstance(data.get("changed"), int) else -1
+        was = data.get("was") if type(data.get("was")) in (int, float) and changed >= 0 else None
+        values = [float(bar["value"]) for bar in bars] + ([float(was)] if was is not None else [])
+        low, high = min(0.0, *values), max(0.0, *values)
+        span = (high - low) or 1.0
+        gap = self.px(10)
+        label_w = min(self.inner * 0.4, max(t.width("small", str(bar.get("label", ""))) for bar in bars) + self.px(1))
+        value_w = max(t.width("value", str(bar.get("text", ""))) for bar in bars) + self.px(1)
+        track_x = self.left + label_w + gap
+        track_w = max(self.px(32), self.right - value_w - gap - track_x)
+        blocks: list[_Block] = []
+        for index, bar in enumerate(bars):
+            top = 0.0 if index == 0 else self.px(8)
+            label = _text_op(str(bar.get("label", "")), "small", self.left, top, label_w, holo.INK_2, t)
+            value = _text_op(str(bar.get("text", "")), "value", self.right - value_w, top + self.px(1), value_w,
+                             holo.INK_1, t, align="right")
+            middle = top + max(label.rect.height(), t.line("value")) / 2
+            track = QRectF(track_x, middle - self.px(5.5), track_w, self.px(11))
+
+            def x_of(number: float) -> float:
+                return track.left() + track.width() * (number - low) / span
+
+            start, end = sorted((x_of(0.0), x_of(float(bar["value"]))))
+            hot = index == changed
+            ops: list[Op] = [Op("box", track, None, fill=_color(holo.HOLO, 0.06), radius=self.px(2)), label, value]
+            if end - start > 0.25:
+                ops.append(Op("box", QRectF(start, track.top(), end - start, track.height()), None,
+                              fill=_color(holo.HOLO) if hot else _color(holo.HOLO_LO, 0.6), radius=self.px(2)))
+            if hot and was is not None:
+                ghost = x_of(float(was))
+                ops.append(Op("vrule", QRectF(ghost, track.top() - self.px(4), 0.0, track.height() + self.px(8)),
+                              _color(holo.INK_2), dashed=True, radius=1.5 * self.s))
+            blocks.append(_Block(max(label.rect.bottom(), value.rect.bottom(), track.bottom()), ops, row=True))
+        change = str(data.get("change", ""))
+        if changed >= 0 and change:
+            blocks.append(self.delta(change, self.px(10)))
+        return blocks
+
+    def timeline(self, data: Mapping[str, Any]) -> list[_Block]:
+        nodes = [node for node in data.get("nodes") or [] if isinstance(node, Mapping)]
+        if not nodes:
+            return []
+        today = data.get("today", -1) if isinstance(data.get("today"), int) else -1
+        if len(nodes) <= ROW_NODES and self.inner / len(nodes) >= self.px(ROW_NODE):
+            return [self.timeline_row(nodes, today)]
+        return self.timeline_rows(nodes, today)
+
+    def dot(self, x: float, y: float, state: str) -> list[Op]:
+        """A timeline node's dot (18 px) centred on (x, y): DONE a mint disc with its check, NEXT a cyan ring with a
+        glow, any other an INK_3 ring."""
+        size = self.px(18)
+        rect = QRectF(x - size / 2, y - size / 2, size, size)
+        if state == "done":
+            return [Op("box", rect, None, fill=_color(holo.OK), radius=size / 2),
+                    Op("glyph", rect.adjusted(self.px(3.5), self.px(3.5), -self.px(3.5), -self.px(3.5)),
+                       _color(holo.OK_INK), name="check")]
+        ring = _color(holo.HOLO) if state == "next" else _color(holo.INK_3)
+        ops = [Op("box", rect.adjusted(-self.px(3), -self.px(3), self.px(3), self.px(3)), None,
+                  fill=_color(holo.HOLO, 0.15), radius=size / 2 + self.px(3))] if state == "next" else []
+        return ops + [Op("box", rect.adjusted(self.px(0.75), self.px(0.75), -self.px(0.75), -self.px(0.75)), ring,
+                         fill=_color(holo.TILE), radius=size / 2)]
+
+    def _state_color(self, state: str) -> str:
+        return holo.OK if state == "done" else holo.HOLO_HI if state == "next" else holo.INK_4
+
+    def timeline_row(self, nodes: list[Mapping[str, Any]], today: int) -> _Block:
+        """Up to four nodes in a row: the rail, the dots, under each its when, words and state; TODAY a HOLO_HI line
+        with its word."""
+        t = self.t
+        count = len(nodes)
+        top = self.px(18)                      # room for TODAY's word over the rail
+        y = top + self.px(9)
+        column = self.inner / count
+        centres = [self.left + self.px(9) if index == 0 else self.right - self.px(9) if index == count - 1
+                   else self.left + column * (index + 0.5) for index in range(count)]
+        ops: list[Op] = [Op("box", QRectF(self.left + self.px(9), y - self.px(0.75), max(0.0, self.inner - self.px(18)),
+                                         self.px(1.5)), None, fill=_color(holo.LINE))]
+        marker = -1.0
+        if today >= 0:
+            marker = (self.left if today == 0 else self.right if today >= count
+                      else (centres[today - 1] + centres[today]) / 2)
+            if marker > self.left + self.px(9):
+                ops.append(Op("box", QRectF(self.left + self.px(9), y - self.px(0.75), marker - self.left - self.px(9),
+                                            self.px(1.5)), None, fill=_color(holo.HOLO_LO)))
+        bottom = y + self.px(9)
+        for index, (node, x) in enumerate(zip(nodes, centres)):
+            state = str(node.get("state", ""))
+            ops += self.dot(x, y, state)
+            align = "left" if index == 0 else "right" if index == count - 1 else "center"
+            line_y = y + self.px(9) + self.px(7)
+            for words, kind, color in ((str(node.get("when", "")), "badge", holo.INK_3),
+                                       (str(node.get("words", "")), "caption",
+                                        holo.INK_3 if state == "done" else holo.INK_1),
+                                       (STATE_WORDS.get(state, ""), "badge", self._state_color(state))):
+                if not words:
+                    continue
+                op = self._aligned(words, kind, x, line_y, column - self.px(6), align, color)
+                ops.append(op)
+                line_y = op.rect.bottom() + self.px(2)
+            bottom = max(bottom, line_y)
+        if today >= 0:
+            ops.append(Op("vrule", QRectF(marker, top - self.px(12), 0.0, self.px(30)), _color(holo.HOLO_HI),
+                          radius=1.5 * self.s))
+            word_w = t.width("badge", TODAY_WORD)
+            word_x = marker + self.px(5) if marker + self.px(5) + word_w <= self.right else marker - self.px(6) - word_w
+            ops.append(_text_op(TODAY_WORD, "badge", word_x, top - self.px(13), word_w + 0.5, holo.HOLO_HI, t))
+        return _Block(bottom, ops)
+
+    def _aligned(self, words: str, kind: str, x: float, y: float, width: float, align: str, color: Any) -> Op:
+        """Words at a node: from its dot's left (the first), to its dot's right (the last), centred on it (the
+        others); wrapped at spaces within ``width``."""
+        if align == "left":
+            return _text_op(words, kind, x - self.px(9), y, width, color, self.t)
+        if align == "right":
+            return _text_op(words, kind, x + self.px(9) - width, y, width, color, self.t, align="right")
+        op = _text_op(words, kind, 0.0, y, width, color, self.t)
+        op.rect = QRectF(x - op.rect.width() / 2, op.rect.top(), op.rect.width(), op.rect.height())
+        return op
+
+    def timeline_rows(self, nodes: list[Mapping[str, Any]], today: int) -> list[_Block]:
+        """One node per row (a narrow tile, or more than four): the dot, its when over its words, its state at the
+        right; TODAY a row of its own; the rail down the dots."""
+        t = self.t
+        blocks: list[_Block] = []
+        count = len(nodes)
+        state_w = max((t.width("badge", STATE_WORDS.get(str(node.get("state", "")), "")) for node in nodes),
+                      default=0.0)
+        x = self.left + self.px(18 + 10)
+        for index, node in enumerate(nodes):
+            if index == today:
+                blocks.append(self.today_row(first=not blocks, rail=0 < index < count))
+            state = str(node.get("state", ""))
+            top = 0.0 if not blocks else self.px(8)
+            words_w = self.right - x - (state_w + self.px(10) if state_w else 0.0)
+            texts: list[Op] = []
+            y = top
+            for words, kind, color in ((str(node.get("when", "")), "badge", holo.INK_3),
+                                       (str(node.get("words", "")), "caption",
+                                        holo.INK_3 if state == "done" else holo.INK_1)):
+                if words:
+                    op = _text_op(words, kind, x, y, words_w, color, t)
+                    texts.append(op)
+                    y = op.rect.bottom()
+            height = max(y - top, self.px(18))
+            middle = top + height / 2
+            ops: list[Op] = []
+            rail_top = middle if index == 0 else 0.0           # the rail runs from the first dot to the last
+            rail_bottom = middle if index == count - 1 else top + height
+            if count > 1 and rail_bottom > rail_top:
+                ops.append(Op("box", QRectF(self.left + self.px(8.25), rail_top, self.px(1.5), rail_bottom - rail_top),
+                              None, fill=_color(holo.LINE)))
+            ops += self.dot(self.left + self.px(9), middle, state) + texts
+            word = STATE_WORDS.get(state, "")
+            if word:
+                ops.append(_text_op(word, "badge", self.right - state_w, middle - t.line("badge") / 2, state_w,
+                                    self._state_color(state), t, align="right"))
+            blocks.append(_Block(top + height, ops, row=True))
+        if today >= count:
+            blocks.append(self.today_row(first=False, rail=False))
+        return blocks
+
+    def today_row(self, *, first: bool, rail: bool) -> _Block:
+        """TODAY as a row of its own: a short HOLO_HI line and its word (the rail through it when it stands between
+        two nodes)."""
+        t = self.t
+        top = 0.0 if first else self.px(8)
+        height = t.line("badge")
+        ops: list[Op] = []
+        if rail:
+            ops.append(Op("box", QRectF(self.left + self.px(8.25), 0.0, self.px(1.5), top + height), None,
+                          fill=_color(holo.LINE)))
+        ops.append(Op("box", QRectF(self.left, top + height / 2 - self.px(0.75), self.px(18), self.px(1.5)), None,
+                      fill=_color(holo.HOLO_HI)))
+        ops.append(_text_op(TODAY_WORD, "badge", self.left + self.px(28), top, self.inner - self.px(28), holo.HOLO_HI,
+                            t))
+        return _Block(top + height, ops)
+
+    def maths(self, data: Mapping[str, Any]) -> list[_Block]:
+        from .ask_frames import maths_text, working_line
+
+        steps = [step for step in data.get("steps") or [] if isinstance(step, Mapping)]
+        answer = data.get("answer") if isinstance(data.get("answer"), Mapping) else {}
+        if self.private:                          # the second screen: the answer large, the working in one line
+            t = self.t
+            big = _text_op(maths_text(answer.get("expr")), "headline", self.left, 0.0, self.inner, holo.HOLO_HI, t)
+            blocks = [_Block(big.rect.bottom(), [big])]
+            line = working_line(data)
+            if line:
+                said = _text_op(line, "body", self.left, self.px(8), self.inner, holo.HOLO_LO, t)
+                blocks.append(_Block(said.rect.bottom(), [said]))
+            return blocks
+        narrow = self.width - self.px(2 * PAD_SIDE + 2) < self.px(ROW_FROM)     # the page's content box (and border)
+        number_w = self.t.width("step", str(len(steps) + 1)) + self.px(1)
+        name_w = 0.0 if narrow else min(self.inner * 0.35, max((self.t.width("badge", str(step.get("name", "")))
+                                                                for step in [*steps, answer]), default=0.0))
+        blocks: list[_Block] = []
+        for index, step in enumerate([*steps, answer]):
+            blocks.append(self.maths_row(index + 1, step, maths_text(step.get("expr")), number_w, name_w, narrow,
+                                         answer=index == len(steps), first=index == 0))
+        return blocks
+
+    def maths_row(self, number: int, step: Mapping[str, Any], line: str, number_w: float, name_w: float, narrow: bool,
+                  *, answer: bool, first: bool) -> _Block:
+        """One numbered step: its number, its name (above its line when narrow) and its line; the answer boxed in
+        HOLO_HI."""
+        t = self.t
+        top = 0.0 if first else self.px(7)
+        gap = self.px(10)
+        name = str(step.get("name", ""))
+        ops: list[Op] = []
+        x = self.left + number_w + gap
+        y = top
+        if name and narrow:
+            label = _text_op(name, "badge", x, y, self.right - x, holo.INK_3, t)
+            ops.append(label)
+            y = label.rect.bottom() + self.px(3)
+        elif name_w:
+            ops.append(_text_op(name, "badge", x, y + (t.line("expr") - t.line("badge")) / 2, name_w, holo.INK_3, t))
+        if name_w and not narrow:
+            x += name_w + gap
+        if answer:                                # the page's box: 2 px over and under its words, 8 px either side
+            pad = self.px(8)
+            words = _text_op(line, "expr_strong", x, y + self.px(2), self.right - x - pad, holo.HOLO_HI, t)
+            box = QRectF(x - pad, y, words.rect.width() + 2 * pad, words.rect.height() + self.px(4))
+            ops.append(Op("box", box, _color(holo.LINE_STRONG), fill=_color(holo.HOLO, 0.09), radius=self.px(4)))
+            bottom = box.bottom()
+        else:
+            words = _text_op(line, "expr", x, y, self.right - x, holo.INK_1, t)
+            bottom = words.rect.bottom()
+        ops.append(words)
+        number_y = top if name and narrow else y + (t.line("expr") - t.line("step")) / 2
+        ops.append(_text_op(str(number), "step", self.left, number_y, number_w, holo.INK_4, t))
+        return _Block(bottom + (self.px(5) if narrow else 0.0), ops, row=not answer)
+
     def waits_chip(self) -> _Block:
         t = self.t
         words = str(self.frame.get("waits", ""))
@@ -836,6 +1217,12 @@ def _paint_op(painter: QPainter, op: Op, types: _Type) -> None:
     elif op.kind == "rule":
         painter.setPen(QPen(op.color or _color(holo.LINE_FAINT), 1.0))
         painter.drawLine(QPointF(rect.left(), rect.top() + 0.5), QPointF(rect.right(), rect.top() + 0.5))
+    elif op.kind == "vrule":                       # part 6: a chart's ghost tick (dashed), a timeline's TODAY or rail
+        pen = QPen(op.color or _color(holo.INK_2), max(1.0, op.radius or 1.0))
+        if op.dashed:
+            pen.setStyle(Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.drawLine(QPointF(rect.left(), rect.top()), QPointF(rect.left(), rect.bottom()))
     elif op.kind == "hairline":
         gradient = QLinearGradient(rect.left(), 0.0, rect.right(), 0.0)
         gradient.setColorAt(0.0, op.color or QColor(holo.HOLO_HI))

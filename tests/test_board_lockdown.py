@@ -55,8 +55,14 @@ answer that made the room, parked while the owner read, lands once quiet), livel
 end with the page's expiry before the app's removal keeps the keyboard in the closed frame (no reading or focus report,
 no scroll, its keys doing nothing), then a staying frame has it after remove_group and after remove, never <body>,
 lively and off; and every probe's page plays the probe's own motion level whatever this PC's "Show animations" says
-(Chromium told no reduced motion), with one probe told reduced motion showing the page's own rule still holds. Skipped
-when this PySide6 has no QtWebEngine 6.8+.
+(Chromium told no reduced motion), with one probe told reduced motion showing the page's own rule still holds. Part
+6, Ask's typed frames: a model's answer with markup, scripts, javascript: and http: addresses and bidi characters in
+every string, through board.ask_frames and board.protocol into the real page - only elements its renderers make,
+no attribute from data in a frame's body, no request, no script run, its words whole as text; the page refusing what
+Python refuses (Infinity, depth 7, 65 nodes, an unknown op ...); maths' elements made from the tree and the page's
+reading of plain expressions the same as Python's; no word cut at 448, 300 and 270 px (the timeline in a row from a
+300 px content width, one node a row under it; maths' step names over their lines); opened big, a table's rows and a
+timeline's six nodes using the room. Skipped when this PySide6 has no QtWebEngine 6.8+.
 """
 
 from __future__ import annotations
@@ -75,7 +81,7 @@ from briefing_reader.board import view
 PROBE = Path(__file__).with_name("board_probe.py")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CASES = ("lockdown", "control", "media", "keys", "fallback", "shell", "kinds", "desk", "desk_x15", "ways", "lit", "big",
-         "big_x15", "expiry", "reduced")
+         "big_x15", "expiry", "reduced", "typed")
 # Round 5: what each probe's engine is told of reduced motion (tests/board_probe.py NO_REDUCED_MOTION, REDUCED_MOTION).
 NO_REDUCED_MOTION = "--force-prefers-no-reduced-motion"
 REDUCED_MOTION = "--force-prefers-reduced-motion"
@@ -1245,3 +1251,85 @@ class ExpiryTests(BoardProbeCase):
                     self.assertEqual(row["group_left"], route == "group_last")  # remove_group, else remove
                     self.assertTrue(row["staying"], row["after"])               # then a staying frame has it
                     self.assertTrue(row["has_focus"])
+
+
+class TypedFramesTests(BoardProbeCase):
+    """Part 6: Ask's typed frames in the real page (tests/board_probe.py "typed")."""
+
+    def test_the_model_s_frames_show_their_words_and_make_nothing_else(self) -> None:
+        report = self.report("typed")
+        self.assertTrue(report["ready"])
+        self.assertEqual(report["dropped"], {"too_many": 1})                   # the fourth of one answer
+        self.assertEqual(report["applied"], [True] * 7)
+        page = report["page"]
+        self.assertEqual(page["pwned"], "undefined")                            # no script of theirs ran
+        self.assertEqual(page["links"], 0)                                      # no link, picture, frame, script
+        self.assertEqual(page["scripts"], 2)                                    # board.js and qwebchannel.js only
+        for frame_id, sent in report["sent"].items():
+            with self.subTest(frame=frame_id, kind=sent["kind"]):
+                shown = page["frames"][frame_id]
+                self.assertEqual(shown["badTags"], [])                          # only elements the renderers make
+                self.assertEqual(shown["badAttributes"], [])                    # class, scope, aria-hidden, style
+                self.assertEqual(shown["dataAttributes"], [])                   # nothing of the data in any of them
+                self.assertEqual(shown["title"], sent["title"])
+                for words in sent["words"]:
+                    self.assertIn(words, shown["text"])                         # whole, as text
+        self.assertIn("<script>window.pwned=2</script>", report["sent"]["t0"]["title"])
+        self.assertIn("<U+202E>Events<U+2066>", page["frames"]["t0"]["text"])  # bidi shown, never obeyed
+
+    def test_no_request_at_all(self) -> None:
+        requests = self.report("typed")["requests"]
+        self.assertEqual(requests["allowed_after"], requests["allowed_before"])
+        self.assertEqual(requests["allowed_end"], requests["allowed_before"])
+        self.assertEqual((requests["blocked_after"], requests["blocked_end"]), ({}, {}))
+
+    def test_the_page_refuses_what_python_refuses(self) -> None:
+        report = self.report("typed")
+        self.assertEqual(report["python_refuses"], [True] * 15)
+        self.assertEqual(report["page_refuses"], [False] * 15)
+        self.assertEqual(report["bad_frames"], 0)
+
+    def test_maths_is_made_from_the_tree_and_reads_as_python_says(self) -> None:
+        report = self.report("typed")
+        page = report["page"]
+        self.assertEqual((page["fracTop"], page["fracBottom"], page["sup"], page["idx"], page["rad"]),
+                         (["1"], ["3"], ["2"], ["3"], ["13"]))                  # the cube root of 1/3, and x squared
+        self.assertEqual(page["answers"], ["x = 1 or x = 3", "0", "0"])
+        lines = page["frames"]["t4"]["lines"] + page["frames"]["t5"]["lines"]
+        self.assertEqual(lines[:8] + lines[9:17], report["plain_expected"])     # the answers' "0" apart
+
+    def test_each_kind_s_own_marks(self) -> None:
+        page = self.report("typed")["page"]
+        self.assertEqual(page["hot"], ["Software", "2,900", "3,400", "+500"])   # the changed row, banded
+        self.assertEqual(page["zeros"], 3)                                      # its zeros in INK_4
+        self.assertEqual((page["ghost"], page["hotBars"]), (1, 1))              # the changed bar and its ghost tick
+        self.assertEqual(page["delta"], ["+500", "+500"])                       # the delta lines' figures
+        self.assertEqual(page["states"], ["Done", "Next", "Due", "Done", "Done", "Next", "", "", ""])
+        self.assertEqual(page["today"], ["Today", "Today"])
+
+    def test_no_word_cut_and_the_narrow_layouts(self) -> None:
+        layout = self.report("typed")["layout"]
+        for width in ("448", "300", "270"):
+            with self.subTest(width=width):
+                shown = layout[width]
+                self.assertEqual(shown["frameWidth"], int(width))
+                self.assertEqual(shown["cut"], [])
+                self.assertFalse(shown["pageCut"])
+        wide = layout["448"]
+        self.assertEqual(len(wide["timelineColumns"].split()), 3)              # in a row ...
+        self.assertEqual(len(set(wide["nodeTops"])), 1)
+        self.assertEqual(wide["todayPosition"], "absolute")                    # ... TODAY a line across it
+        self.assertEqual(len(wide["mathsColumns"].split()), 3)
+        for width in ("300", "270"):                                           # a 300 px frame: 270 of content
+            narrow = layout[width]
+            self.assertEqual(len(narrow["timelineColumns"].split()), 1)       # one node a row ...
+            self.assertEqual(narrow["nodeTops"], sorted(set(narrow["nodeTops"])))
+            self.assertEqual(narrow["todayPosition"], "static")                # ... TODAY a row of its own
+            self.assertEqual(len(narrow["mathsColumns"].split()), 2)           # a step's name over its line
+
+    def test_opened_big_they_use_the_room(self) -> None:
+        big = self.report("typed")["big"]
+        self.assertEqual((big["table"]["state"], big["table"]["box"]), ("open", [1000, 700]))
+        self.assertEqual((big["table"]["rows"], big["table"]["cellFont"]), (4, "15px"))
+        self.assertEqual(len(big["timeline"]["timelineColumns"].split()), 6)  # six nodes, in one row
+        self.assertEqual(len(set(big["timeline"]["nodeTops"])), 1)

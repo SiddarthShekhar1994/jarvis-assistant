@@ -984,6 +984,10 @@ class AskOutcome:
     # wrote; the app starts the setup (standing_ui). The words are never logged.
     standing_job: str = ""
     standing_words: str = field(default="", repr=False)
+    # The new look, part 6: the answer's topic (the board group's header words; "" none) and its typed frames
+    # (board.ask_frames.AskFrame: table, chart, timeline, maths), checked strictly. Shown, never logged but as counts.
+    topic: str = field(default="", repr=False)
+    frames: tuple[Any, ...] = field(default=(), repr=False, compare=False)
 
     def summary(self) -> str:
         """For the log: kinds and counts only."""
@@ -1023,6 +1027,21 @@ class AskOutcome:
 
 def _seconds(value: float | None) -> str:
     return "-" if value is None else f"{value:.2f} s"
+
+
+def _typed_frames(found: Any, who: str = "Ask") -> tuple[str, tuple[Any, ...]]:
+    """(the topic, the typed frames) board.ask_frames kept of an answer (``found``: its AskFrames; None when the run
+    was read without them), and one log line when the answer gave a topic or frames: counts, kinds and reason words
+    only - never a title, a cell, a word or a number of the model's."""
+    if found is None or not getattr(found, "given", False):
+        return "", ()
+    frames = tuple(found.frames)
+    reasons = ", ".join(f"{reason} {count}" for reason, count in found.dropped)
+    topic = "given" if found.topic else "dropped" if found.topic_dropped else "none"
+    logger.info("%s: %d frame(s) to show (%s), %d dropped%s, topic %s", who, len(frames),
+                ", ".join(frame.kind for frame in frames) or "none", found.dropped_count(),
+                f" ({reasons})" if reasons else "", topic)
+    return found.topic, frames
 
 
 @dataclass
@@ -2521,9 +2540,10 @@ class AskPlanner:
             logger.info("Research: %d source(s) shown, %d left out, %d suggestion card(s), %d dropped",
                         len(found.sources), len(found.left_out), len(found.suggested), len(found.dropped))
             message = "; ".join([*notes, *research_notes(found)])
+            topic, frames = _typed_frames(answer.frames, "Research")
             return AskOutcome(True, "ok", message, say=found.answer, cards=cards,
                               refused=sum(1 for card in cards if card.error), runs=runs, init=init, stats=stats,
-                              mail=mail, research=found)
+                              mail=mail, research=found, topic=topic, frames=frames)
         finally:
             if web_steps is not None:
                 web_steps.finished()   # no more page pictures for this research
@@ -2648,10 +2668,11 @@ class AskPlanner:
             message_parts.append(f"{cards.dropped} more proposal(s) were left out")
         if plan.via_fallback:
             message_parts.append("(read from the planner's plain text)")
+        topic, frames = _typed_frames(plan.frames)
         return AskOutcome(True, "ok", "; ".join(message_parts), say=plan.say, question=plan.question,
                           cards=cards.cards, dropped=cards.dropped, refused=cards.refused, runs=runs, init=init,
                           stats=stats, mail=mail, search=search, search_account=search_account,
-                          suggestion=suggested[0])
+                          suggestion=suggested[0], topic=topic, frames=frames)
 
     # ---- dry run ------------------------------------------------------------------------------
 

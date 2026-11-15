@@ -24,25 +24,26 @@ SAY = "Right. I'll compare them and write a table."
 TASK_PLAN = {"say": SAY, "question": "", "lines": [], "agent_task": {"goal": MODEL_GOAL, "why": "several steps"}}
 DESKTOP_TASK = {"say": "Words about LING essay.", "steps": [], "agent_task": {"goal": MODEL_GOAL, "why": "several steps"}}
 PLAIN = {"say": "It's at two.", "question": "", "lines": []}
-# As on the branch without the agent (undo-from-bin-fix, 233febd): sha256 of each file, byte for byte. Off, these reach
-# Claude Code exactly as they would there.
-OFF_FILES = {cli.PROMPT_FILE: "414ae0a32c0a75e0bf0d3e7de8f0511b7d7862531755cf83bc6e0b19c678aae3",
+# sha256 of each file, byte for byte: as on the branch without the agent (undo-from-bin-fix, 233febd), but for the new
+# look's part 6 (2026-11-15), which gave the planner's prompt its FRAMES section and its schema the optional "topic" and
+# "frames" (tests/test_ask_frames.py holds their words and fields). Off, not a word of the agent reaches them.
+OFF_FILES = {cli.PROMPT_FILE: "5c572c4ff8f83702b50631ed8a28421bcb14f21d3869cf64630ea9d30b2aec45",
              cli.DESKTOP_PROMPT_FILE: "1f599172c03bf2f631b984cbaa58947a4a3873d8fdfedbde022074ca9f541521",
-             cli.SCHEMA_FILE: "70a7c8842f3d3c339d824bebc3dcedf30f84946c69e1e6a0cb6a1a7f259f20b4",
+             cli.SCHEMA_FILE: "28f3b095e032fdeb53fe777ec499ad728aa6b6bfaf8dd9f290b142b7710d2555",
              cli.DESKTOP_SCHEMA_FILE: "a7f840a4251b93d04fb0b5f2c6e9131c52e43c6528421b3e098c71caa8890b84"}
-# schema_text() and mode_schema_text("desktop") off: (length, sha256), as on that branch.
-OFF_SCHEMAS = {(False, False): (927, "f9935a6fa5705643e92e1265ac0ee5cfc2584ebcbbc60c64f126d9436187c467"),
-               (False, True): (1614, "af94ec50b76b53ad1273886a76e0bed84e87d1b3d103cb20e63f23376769f3ae"),
-               (True, False): (1423, "dcad9d43c86bf0ae741bc3a0c6a2c1e0115239cc334789689fbf5a1c92b5cbb6"),
-               (True, True): (2110, "f4ad0fa87f26eaf0290ef85fe047f505967fcbf045bca064a30b6074917d045b")}
+# schema_text() and mode_schema_text("desktop") off: (length, sha256) - part 6's "topic" and "frames" in the first.
+OFF_SCHEMAS = {(False, False): (3163, "bc7bd3a652675ef5945304173c0776cfe3f5b584a101e78496b292bda682e2c2"),
+               (False, True): (3850, "ef566b8dc26e2b2fb59541d2e44e7a5ad264638743204b384afd217db59b8345"),
+               (True, False): (3659, "632605d47b0b9d0ffc74aacebee2fa5b60cb2d5beee0a676b785519c28623ff8"),
+               (True, True): (4346, "0e93397ac5a7932de7b06c3768f6b8c59d719c956538634b76b1859bee6490b2")}
 OFF_DESKTOP_SCHEMA = (2276, "6d485a1f2ab170678b9283be41e7fe69edc75d6bb6e168c70029fc4d63d1070c")
-# On: only here do they change.
-ON_SCHEMAS = {(False, False): (1394, "246ba12b23f8140b5aa1ea7f09527bd4858265a061d359110c5d81efe3db1f18"),
-              (False, True): (2081, "89f3b91344ffe1180388fc89b5b8000e49dcd6efd5e231dd0428e4359044e1ae"),
-              (True, False): (1890, "5d5c6d76cd329cc5b3f91371537b019b7ccaf95cb6c688983b8ff3188e76623d"),
-              (True, True): (2577, "fbca4a1497a9e44e942961e65fa98eaedaccb254d2544f921017007c7c92ce5e")}
+# On: only here do they change (the planner's: part 6's too).
+ON_SCHEMAS = {(False, False): (3630, "301260d97a2364ec81b886221c619fcfc5c87228b8c47b428603de2d4db8bc68"),
+              (False, True): (4317, "4193424a793bc1729e38559708a8d8129276446dfc3f8e700487c21d91bcb6ea"),
+              (True, False): (4126, "385cb6976d21360e301c6ad83f120023da2cbc2a911424acf4587232986a63ef"),
+              (True, True): (4813, "effac6e138f5b3c71572dec64625aebd7ce2c12431d2b02d8b20530c892657c0")}
 ON_DESKTOP_SCHEMA = (2743, "f9e3f8f1e7462fc1e8cd2efbed0944bbc138c22f340690c2fc6cab51c289c682")
-ON_PROMPTS = {cli.PROMPT_FILE_AGENT: "4297492fcbac2087256f990a81c9b146218db649241d7d72f4c99589f2b80765",
+ON_PROMPTS = {cli.PROMPT_FILE_AGENT: "bdd1b10ccc0c71f18a0c1d4d4a14a055b5f33d715c882f20d28c0e6082920b5f",
               cli.DESKTOP_PROMPT_FILE_AGENT: "5fe066bb75bc6b46a9247ab2e7ba9ecd0ef11dd8f7f42e51a54d2c491109911f"}
 
 

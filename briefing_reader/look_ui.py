@@ -9,6 +9,7 @@ never lets it stop the app. Its hooks:
 - ``on_ask_started()`` / ``on_ask_answer()``: THINKING when nothing was said 400 ms after a request went in (and the
   board starts with the first Ask);
 - ``on_answer_started(task_id, text)`` / ``on_ask_outcome(outcome, task_id)``: an answer's group on the board;
+- ``on_instant_answer(reply, words)``: part 6, an instant sum's working as a maths frame on the board (when it has one);
 - ``on_pending(count)``: WAITS when the number of cards waiting for the owner goes up (never at the first count);
 - ``on_action_result(status, failed)``: DONE when an approved card's action finished, FAILED when it failed;
 - ``on_speaking()``: Jarvis's voice or a briefing started or stopped (part 5c: his utterance goes on to the desk, whose
@@ -273,6 +274,11 @@ class LookController(QObject):
         """A finished answer: its frames go up on the board as one group."""
         if self.desk is not None:
             self.desk.on_ask_outcome(outcome, task_id)
+
+    def on_instant_answer(self, reply: Any, words: str) -> None:
+        """Part 6: Jarvis's own instant answer; a sum's working, when it has one, goes up as a maths frame."""
+        if self.desk is not None:
+            self.desk.on_instant_answer(reply, words)
 
     def on_ask_answer(self) -> None:
         self._answered = True

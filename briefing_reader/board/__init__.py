@@ -39,6 +39,16 @@ Part 5b, the board's ways:
   show_new, reading and focus_out requests; the page draws the index strip, "N more below", the fades, pairs,
   satellites, the pill, the cleared row, and takes the keyboard (F6 reaches it through ``view``'s key filter).
 
+Part 6, Ask's typed frames:
+
+* ``ask_frames`` (Qt-free): an Ask's or a web research's optional "topic" and "frames" checked strictly (a table, a
+  chart, a timeline, maths: types, caps, finite numbers, the allowed maths ops, depth and nodes), every string cleaned
+  with live's cleaner; a frame that fails is dropped with a reason word, never the answer. A frame's message, its key
+  (its kind and title), a number's words and an expression's plain words.
+* ``protocol`` gains the four kinds' bodies; the page renders each with createElement and textContent only (maths from
+  its checked tree); ``glance`` paints them (private: a table's headline, maths' answer); ``facts``, ``lit`` and
+  ``feed`` know them.
+
 desk_ui.DeskController makes the one board (only while ``[look] board`` is on) and feeds it; desk_view and
 ui.ReadingView put it on Home beside the conversation. Importing this package imports nothing of the web engine; only
 ``view`` starts it, and only through snapshot_engine.

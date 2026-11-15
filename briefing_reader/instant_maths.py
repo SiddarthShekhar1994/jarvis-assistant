@@ -21,6 +21,13 @@ speed, area, time (seconds to weeks: months and years have no one length) and da
 decimal; KiB, MiB, GiB, TiB binary). "ounces" are weight ("fl oz" is volume) and "pounds" are weight (a currency
 question is ask.instant_net's). An amount in one unit and a unit of another kind is refused.
 
+The working (the new look, part 6): an exact sum whose working has a step between the sum as read and its result gets
+``Calc.working``, that working as a maths frame in the form Ask's model writes one (board.ask_frames checks it as it
+checks the model's): the sum as read, then each step - every operation whose arguments are numbers by then worked out,
+one layer at a time, exactly (a fraction that does not end stays a fraction) - and the result. A percentage reads as a
+fraction of 100 ("15% of 80" is 15/100 × 80). No working when there is no step in between ("12 × 7"), when a step would
+need a rounded number, or past WORKING_STEPS.
+
 Public API
 ==========
 ``spoken_numbers(text)``; ``calculate(text) -> Calc | None``; ``percent(text) -> Calc | None``;
@@ -32,10 +39,10 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import ROUND_HALF_EVEN, Context, Decimal
 from fractions import Fraction
-from typing import Union
+from typing import Any, Union
 
 Number = Union[Fraction, float]
 
@@ -60,6 +67,8 @@ class Calc:
     exact: bool = True
     zero_division: bool = False
     spoken: str = ""         # the result rounded for speech ("0.333"); "" = ``value``
+    # Part 6: the working as a maths frame (see the module doc); None when it has none.
+    working: Any = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -455,7 +464,8 @@ def calculate(text: str) -> Calc | None:
         except ZeroDivisionError:
             return Calc(shown, "", exact=True, zero_division=True)
         result, exact = format_number(value.value)
-        return Calc(shown, result, exact, spoken=spoken_number(value.value))
+        working = _working(lambda: _TreeParser(tokens).whole(), shown) if exact else None
+        return Calc(shown, result, exact, spoken=spoken_number(value.value), working=working)
     except MathRefused:
         return None
 
@@ -521,8 +531,220 @@ def percent(text: str) -> Calc | None:
         except MathRefused:
             return None
         suffix = "%" if kind in ("share", "share_rev") else ""
-        return Calc(shown, result + suffix, exact, spoken=spoken_number(value) + (" percent" if suffix else ""))
+        tree = _PERCENT_TREES.get(kind)
+        working = _working(lambda: tree(first, second), shown) if tree is not None and exact else None
+        return Calc(shown, result + suffix, exact, spoken=spoken_number(value) + (" percent" if suffix else ""),
+                    working=working)
     return None
+
+
+# --------------------------------------------------------------------------
+# The working (part 6): see the module doc
+# --------------------------------------------------------------------------
+
+WORKING_STEPS = 8            # lines of working at most (the sum as read, and each step after it)
+WORKING_LIMIT = 10 ** 15     # a number in the working is under this (the board's own limit)
+WORKING_TITLE = 60           # the frame's title (the sum as read) at most
+_SHOWN_POWER = re.compile(r"\s*\^\s*(\d{1,3})(?![\d.,])")
+_SUPERSCRIPTS = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+# A percentage said in words, as the sum it is: what goes up or down by it, what is taken off, a tip.
+_PERCENT_TREES = {
+    "up": lambda first, second: ["*", first, ["()", ["+", Fraction(1), ["frac", second, Fraction(100)]]]],
+    "down": lambda first, second: ["*", first, ["()", ["-", Fraction(1), ["frac", second, Fraction(100)]]]],
+    "off": lambda first, second: ["*", second, ["()", ["-", Fraction(1), ["frac", first, Fraction(100)]]]],
+    "tip": lambda first, second: ["*", ["frac", first, Fraction(100)], second],
+}
+
+
+class _NoWorking(Exception):
+    """No working to show: a step that would need a rounded number, a division by zero, a number too large."""
+
+
+class _TreeParser:
+    """_Parser's grammar, building the sum's tree (board.ask_frames' form) instead of its value: a number is a
+    Fraction, an operation [op, argument, ...]; a run of "+" or "×" is one operation; "of" is "×"; a percentage is a
+    fraction of 100."""
+
+    def __init__(self, tokens: list[object]) -> None:
+        self.tokens = tokens
+        self.index = 0
+
+    def peek(self) -> object:
+        return self.tokens[self.index] if self.index < len(self.tokens) else None
+
+    def take(self) -> object:
+        token = self.tokens[self.index]
+        self.index += 1
+        return token
+
+    def whole(self) -> Any:
+        node = self.expr()
+        if self.index != len(self.tokens):
+            raise MathRefused("left over")
+        return node
+
+    @staticmethod
+    def _join(op: str, left: Any, right: Any) -> list[Any]:
+        if op in ("+", "*") and isinstance(left, list) and left[0] == op:
+            return [*left, right]
+        return [op, left, right]
+
+    def expr(self) -> Any:
+        left = self.term()
+        while self.peek() in ("+", "-"):
+            op = str(self.take())
+            left = self._join(op, left, self.term())
+        return left
+
+    def term(self) -> Any:
+        left = self.unary()
+        while self.peek() in ("*", "/", "of"):
+            op = self.take()
+            left = self._join("*" if op in ("*", "of") else "/", left, self.unary())
+        return left
+
+    def unary(self) -> Any:
+        if self.peek() == "-":
+            self.take()
+            inner = self.unary()
+            return -inner if isinstance(inner, Fraction) else ["-", inner]   # "-5" is a number, not a step
+        if self.peek() == "+":
+            self.take()
+            return self.unary()
+        return self.power()
+
+    def power(self) -> Any:
+        base = self.postfix()
+        if self.peek() == "^":
+            self.take()
+            return ["pow", base, self.unary()]
+        return base
+
+    def postfix(self) -> Any:
+        node = self.atom()
+        while self.peek() == "%":
+            self.take()
+            node = ["frac", node, Fraction(100)]
+        return node
+
+    def atom(self) -> Any:
+        token = self.peek()
+        if token == "(":
+            self.take()
+            inner = self.expr()
+            if self.peek() != ")":
+                raise MathRefused("no closing bracket")
+            self.take()
+            return ["()", inner]
+        if token == "√":
+            self.take()
+            return ["root", self.postfix()]
+        if isinstance(token, Fraction):
+            self.take()
+            return token
+        raise MathRefused("not a sum")
+
+
+def _number_now(node: Any) -> Fraction | None:
+    """A number, or brackets round one; else None."""
+    if isinstance(node, Fraction):
+        return node
+    if isinstance(node, list) and node[0] == "()" and isinstance(node[1], Fraction):
+        return node[1]
+    return None
+
+
+def _work_out(op: str, values: list[Fraction]) -> Fraction:
+    """One operation on exact numbers; _NoWorking when its result would not be exact (a root or a power that is not
+    whole) or there is none (a division by zero)."""
+    try:
+        if op == "+":
+            return sum(values, Fraction(0))
+        if op == "-":
+            return -values[0] if len(values) == 1 else values[0] - values[1]
+        if op == "*":
+            found = Fraction(1)
+            for value in values:
+                found *= value
+            return found
+        if op in ("/", "frac"):
+            if values[1] == 0:
+                raise _NoWorking
+            return values[0] / values[1]
+        if op == "pow":
+            if values[1].denominator != 1:
+                raise _NoWorking
+            found = _power(values[0], values[1])
+        elif op == "root":
+            found = _root(values[0])
+        else:
+            return values[0]
+    except (MathRefused, ZeroDivisionError, OverflowError) as exc:
+        raise _NoWorking from exc
+    if not isinstance(found, Fraction):
+        raise _NoWorking
+    return found
+
+
+def _step_once(node: Any) -> Any:
+    """One step of the working: every operation whose arguments are all numbers now is worked out (brackets round a
+    number go); the others get their own arguments' step."""
+    if isinstance(node, Fraction):
+        return node
+    op, args = node[0], node[1:]
+    if op == "()":
+        inner = _step_once(args[0]) if not isinstance(args[0], Fraction) else args[0]
+        return inner if isinstance(inner, Fraction) else ["()", inner]
+    values = [_number_now(arg) for arg in args]
+    if all(value is not None for value in values):
+        found = _work_out(op, values)
+        if abs(found) >= WORKING_LIMIT:
+            raise _NoWorking
+        return found
+    stepped = [op, *(_step_once(arg) for arg in args)]
+    if op == "-" and len(args) == 1 and isinstance(stepped[1], Fraction):
+        return -stepped[1]                      # a negated number is a number, not a step of its own
+    return stepped
+
+
+def _as_frame(node: Any) -> Any:
+    """A working's node in the model's own form: a whole number as an int, a decimal that ends within 10 digits as a
+    float, any other fraction as ["frac", top, bottom] (its minus outside)."""
+    if isinstance(node, list):
+        return [node[0], *(_as_frame(arg) for arg in node[1:])]
+    if abs(node.numerator) >= WORKING_LIMIT or node.denominator >= WORKING_LIMIT:
+        raise _NoWorking
+    if node.denominator == 1:
+        return int(node)
+    if _terminating(node.denominator):
+        shown = Decimal(node.numerator) / Decimal(node.denominator)
+        if len(shown.normalize().as_tuple().digits) <= 10:
+            return float(shown)
+    fraction = ["frac", abs(node.numerator), node.denominator]
+    return ["-", fraction] if node < 0 else fraction
+
+
+def _working(parse: Any, shown: str) -> dict[str, Any] | None:
+    """The working of a sum (``parse()`` gives its tree) as a maths frame (see the module doc); None when it has
+    none."""
+    try:
+        node = parse()
+        lines = [_as_frame(node)]
+        while not isinstance(node, Fraction):
+            node = _step_once(node)
+            if not isinstance(node, Fraction) and _as_frame(node) != lines[-1]:
+                lines.append(_as_frame(node))
+            if len(lines) > WORKING_STEPS:
+                return None
+        if len(lines) < 2:
+            return None                         # nothing between the sum as read and its result
+        title = _SHOWN_POWER.sub(lambda found: found.group(1).translate(_SUPERSCRIPTS), " ".join(shown.split()))
+        if len(title) > WORKING_TITLE:
+            title = title[:WORKING_TITLE - 1].rstrip() + "…"
+        return {"kind": "maths", "title": title, "steps": [{"name": "", "expr": line} for line in lines],
+                "answer": {"name": "", "expr": _as_frame(node)}}
+    except (_NoWorking, MathRefused, ZeroDivisionError, RecursionError, ArithmeticError):
+        return None
 
 
 # --------------------------------------------------------------------------

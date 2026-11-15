@@ -111,7 +111,8 @@ class MessageTests(unittest.TestCase):
         self.assertEqual(self.refused(frame(changed="yes")), protocol.R_SHAPE)
         self.assertEqual(self.refused(frame(changed=1)), protocol.R_SHAPE)        # a bool, not a number
         self.assertEqual(self.refused(frame(status="lost")), protocol.R_FIELD)
-        self.assertEqual(self.refused(frame(kind="chart")), protocol.R_KIND)       # part 6's kinds are not here yet
+        self.assertEqual(self.refused(frame(kind="graph")), protocol.R_KIND)       # no kind of the board's
+        self.assertEqual(self.refused(frame(kind="chart")), protocol.R_FIELD)      # part 6's: a text body is no chart's
         self.assertEqual(self.refused(frame(kind="Calendar")), protocol.R_KIND)
         self.assertEqual(self.refused(frame(kind=["text"])), protocol.R_KIND)
         self.assertEqual(self.refused({"type": "script"}), protocol.R_TYPE)

@@ -54,6 +54,23 @@
   var OUTLINE_MS = 260, CUE_FADE_MS = 400, MIN_SEEN = 4, DOT_GAP = 6;
   var SCALE_MS = 260, UNSCALE_MS = 220, BIG_LIMIT = 100000;
   var LANDED_STEPS = ['outline', 'done'];
+  // Part 6, Ask's typed frames (board.protocol's caps; board.ask_frames made each one from the model's own, checked):
+  // a table 6 x 12, a chart's 8 bars, a timeline's 8 nodes, maths' 8 steps and its tree (6 levels, 64 nodes a frame).
+  var TABLE = {columns: 6, rows: 12, column: 24, cell: 40, unit: 12, change: 80, source: 60};
+  var CHART = {bars: 8, label: 24, text: 24};
+  var TIMELINE = {nodes: 8, when: 24, words: 40};
+  var MATHS = {steps: 8, name: 24, depth: 6, nodes: 64, text: 24};
+  var NUMBER_LIMIT = 1e15;                     // a number on the board is under this (and finite)
+  var NODE_STATES = ['done', 'next', 'due', ''];
+  var MATHS_OPS = Object.create(null);         // an op and how many arguments it takes (never a prototype's key)
+  [['+', 2, 8], ['-', 1, 2], ['*', 2, 8], ['/', 2, 2], ['=', 2, 4], ['frac', 2, 2], ['pow', 2, 2], ['root', 1, 2],
+   ['()', 1, 1], ['or', 2, 4]].forEach(function (op) { MATHS_OPS[op[0]] = [op[1], op[2]]; });
+  var MINUS = '−';
+  var NUMBER_TEXT = /^−?(?:0|[1-9][0-9]{0,2}(?:,[0-9]{3})*)(?:\.[0-9]+)?$/;      // "3,400", "0.25", "−4"
+  var VALUE_TEXT = /^−?(?:0|[1-9][0-9]{0,2}(?:,[0-9]{3})*)(?:\.[0-9]+)?[kMBT]?$/;   // ... and "3.4k"
+  var MATHS_NAME = /^[A-Za-zΑ-ΡΣ-Ωα-ω]{1,12}$/;
+  var ZERO = /^[+\-−]?[$€£]?0+(?:[.,]0+)?%?$/;   // a cell that says none: INK_4
+  var FIGURE = /^[+\-−]?[$€£]?[0-9]/;             // a delta line that starts with its figure ("+500")
   var SVG = 'http://www.w3.org/2000/svg';
   var WORDS = {
     changed: 'Changed', tryAgain: 'Try again', bringBack: 'Bring back', closed: 'Closed: ',
@@ -65,13 +82,15 @@
     pinsFull: '6 pins at most · unpin one first', strip: 'Frames on the board', waitsOnYou: ', waits on you',
     newAnswer: 'New answer, ', showMore: ', show it in full', clearAll: 'Clear: take away every unpinned frame',
     bringBackCleared: 'Bring back the cleared frames', showNew: 'New answer above: show it',
-    openBigMeta: 'Open big', backToBoard: 'Esc back to the board'
+    openBigMeta: 'Open big', backToBoard: 'Esc back to the board', today: 'Today'
   };
+  var STATE_WORDS = {done: 'Done', next: 'Next', due: 'Due'};   // a timeline node's state, its non-colour cue
   // Each kind's glyph (holo's icons, drawn by tokens.css) and its name (the index strip's accessible names).
   var GLYPHS = {text: 'read-all', calendar: 'calendar', mail_thread: 'mail', mail_list: 'inbox', todos: 'todos',
-                picture: 'image'};
+                picture: 'image', table: 'table', chart: 'chart', timeline: 'timeline', maths: 'maths'};
   var KIND_WORDS = {text: 'Answer', calendar: 'Calendar', mail_thread: 'Mail', mail_list: 'Mail list',
-                    todos: 'To-dos', picture: 'Picture'};
+                    todos: 'To-dos', picture: 'Picture', table: 'Table', chart: 'Chart', timeline: 'Timeline',
+                    maths: 'Maths'};
 
   // The renderer table: one function per kind (DESIGN-SPEC 3.3). Each checks the frame's body as board.protocol does
   // (its keys, types, caps and lists) and throws on anything it can't show - the message is then dropped and nothing
@@ -282,6 +301,158 @@
     body.append(make('div', 'pic-slot'), caption);   // its JPEG comes in its own picture message, into the slot
   };
 
+  // ---- part 6, Ask's typed frames (DESIGN-SPEC 3.3): each body exactly its keys, every list 1 to its cap, every number
+  // finite and in the board's range, never a boolean; words as text and numbers' words made by the app ----------------
+
+  // A table: Mono caps headers, tabular cells (a zero in INK_4), the changed row banded with its change bright, the
+  // change's delta line and a source footer. Full width: never paired.
+  KINDS.table = function (body, frame) {
+    var data = frame.body;
+    if (!exactKeys(data, ['columns', 'rows', 'unit', 'changed', 'change', 'source'])
+        || !some(data.columns, TABLE.columns) || !some(data.rows, TABLE.rows)
+        || !data.columns.every(function (word) { return words(word, TABLE.column); })
+        || !data.rows.every(function (row) {
+          return Array.isArray(row) && row.length === data.columns.length
+            && row.every(function (cell) { return words(cell, TABLE.cell); });
+        })
+        || !whole(data.changed, -1, data.rows.length - 1) || !words(data.unit, TABLE.unit)
+        || !words(data.change, TABLE.change) || !words(data.source, TABLE.source)) {
+      throw new TypeError('table');
+    }
+    var table = make('table', 'tb');
+    var heads = make('tr');
+    data.columns.forEach(function (word) {
+      var cell = make('th', '', word);
+      cell.scope = 'col';
+      heads.appendChild(cell);
+    });
+    var top = make('thead');
+    top.appendChild(heads);
+    var rows = make('tbody');
+    data.rows.forEach(function (row, index) {
+      var line = make('tr', index === data.changed ? 'hot' : '');
+      row.forEach(function (cell) {
+        line.appendChild(make('td', ZERO.test(cell) ? 'z' : '', cell));
+      });
+      rows.appendChild(line);
+    });
+    table.append(top, rows);
+    body.appendChild(table);
+    if (data.changed >= 0 && data.change) {
+      body.appendChild(deltaLine(data.change));
+    }
+    if (data.source) {
+      body.appendChild(make('p', 'tb-src t-badge', data.source));
+    }
+  };
+
+  // A chart: bars from zero (labels and values in words, the values in Mono), the changed bar bright with a dashed
+  // ghost tick at its old value, and its delta line ("+500 Software · was 2.9k on Friday"). Small: pairs.
+  KINDS.chart = function (body, frame) {
+    var data = frame.body;
+    if (!exactKeys(data, ['bars', 'unit', 'changed', 'was', 'change']) || !some(data.bars, CHART.bars)
+        || !data.bars.every(function (bar) {
+          return exactKeys(bar, ['label', 'value', 'text']) && words(bar.label, CHART.label) && boardNumber(bar.value)
+            && words(bar.text, CHART.text) && VALUE_TEXT.test(bar.text);
+        })
+        || !whole(data.changed, -1, data.bars.length - 1) || !words(data.unit, TABLE.unit)
+        || !words(data.change, TABLE.change)
+        || !(data.was === null || (boardNumber(data.was) && data.changed >= 0))) {
+      throw new TypeError('chart');
+    }
+    var values = data.bars.map(function (bar) { return bar.value; });
+    if (data.was !== null) {
+      values.push(data.was);
+    }
+    var low = Math.min(0, Math.min.apply(null, values)), high = Math.max(0, Math.max.apply(null, values));
+    var span = high - low || 1;
+    var at = function (value) { return (value - low) / span; };
+    var grid = make('div', 'ch-bars');
+    data.bars.forEach(function (bar, index) {
+      var track = make('div', 'ch-tr');
+      track.setAttribute('aria-hidden', 'true');
+      var fill = make('i', 'ch-fl' + (index === data.changed ? ' hot' : '') + (bar.value < 0 ? ' neg' : ''));
+      reach(fill, Math.min(at(0), at(bar.value)), Math.abs(at(bar.value) - at(0)));
+      track.appendChild(fill);
+      if (index === data.changed && data.was !== null) {
+        var ghost = make('i', 'ch-was');
+        reach(ghost, at(data.was), 0);
+        track.appendChild(ghost);
+      }
+      grid.append(make('span', 'ch-l', bar.label), track, make('span', 'ch-v', bar.text));
+    });
+    body.appendChild(grid);
+    if (data.changed >= 0 && data.change) {
+      body.appendChild(deltaLine(data.change));
+    }
+  };
+
+  // A timeline: nodes with their words - DONE a mint check, NEXT a cyan ring, DUE - and a TODAY marker. In a row of
+  // its own up to four nodes from a 300 px frame (opened big, any number); otherwise one node per row, TODAY its own
+  // row. Small: pairs.
+  KINDS.timeline = function (body, frame) {
+    var data = frame.body;
+    if (!exactKeys(data, ['nodes', 'today']) || !some(data.nodes, TIMELINE.nodes)
+        || !data.nodes.every(function (node) {
+          return exactKeys(node, ['when', 'words', 'state']) && words(node.when, TIMELINE.when)
+            && words(node.words, TIMELINE.words) && NODE_STATES.indexOf(node.state) >= 0;
+        })
+        || !whole(data.today, -1, data.nodes.length)) {
+      throw new TypeError('timeline');
+    }
+    var count = data.nodes.length;
+    var line = make('div', 'tline' + (count <= 4 ? ' few' : ''));   // (never "tl": a frame's corner)
+    line.style.setProperty('--n', String(count));
+    var rail = make('i', 'tl-rail');
+    rail.setAttribute('aria-hidden', 'true');
+    line.appendChild(rail);
+    var today = null;
+    if (data.today >= 0) {
+      line.style.setProperty('--today', todayAt(data.today, count));
+      var past = make('i', 'tl-past');
+      past.setAttribute('aria-hidden', 'true');
+      line.appendChild(past);
+      today = make('div', 'tl-today' + (data.today * 2 > count ? ' right' : ''));
+      today.appendChild(make('span', 't-badge', WORDS.today));
+    }
+    data.nodes.forEach(function (node, index) {
+      if (today && index === data.today) {
+        line.appendChild(today);
+      }
+      var item = make('div', 'tl-n' + (index === 0 ? ' first' : '') + (index === count - 1 ? ' last' : '')
+                       + (node.state ? ' ' + node.state : ''));
+      var dot = make('i', 'tl-o');
+      if (node.state === 'done') {
+        dot.appendChild(glyph('check', 'tl-mark'));
+      }
+      item.append(dot, make('span', 'tl-when t-badge', node.when), make('span', 'tl-words', node.words),
+                  make('span', 'tl-state t-badge', node.state ? STATE_WORDS[node.state] : ''));
+      line.appendChild(item);
+    });
+    if (today && data.today === count) {
+      line.appendChild(today);
+    }
+    body.appendChild(line);
+  };
+
+  // Maths: numbered steps - a name, then its line - and the answer boxed in HOLO_HI. Every element of an expression is
+  // made here from the checked tree (createElement and textContent only): never markup, never TeX. Under 300 px a step's
+  // name goes above its line. Small: pairs.
+  KINDS.maths = function (body, frame) {
+    var data = frame.body;
+    var budget = {left: MATHS.nodes};
+    if (!exactKeys(data, ['steps', 'answer']) || !some(data.steps, MATHS.steps)
+        || !data.steps.every(function (step) { return mathsStep(step, budget); }) || !mathsStep(data.answer, budget)) {
+      throw new TypeError('maths');
+    }
+    var grid = make('div', 'mx');
+    data.steps.forEach(function (step, index) {
+      mathsRow(grid, index + 1, step, false);
+    });
+    mathsRow(grid, data.steps.length + 1, data.answer, true);
+    body.appendChild(grid);
+  };
+
   var root = null;
   var bridge = null;
   var readySent = false;
@@ -412,6 +583,264 @@
     rule.setAttribute('aria-hidden', 'true');
     line.append(make('span', 'cal-pill', text), rule);
     return line;
+  }
+
+  // ---- part 6's helpers --------------------------------------------------------------------------------------------
+
+  function exactKeys(value, keys) {            // an object with exactly ``keys``, each present
+    return onlyKeys(value, keys) && keys.every(function (key) { return key in value; });
+  }
+
+  function some(value, cap) {                  // a list of 1 to ``cap`` items
+    return list(value, cap) && value.length > 0;
+  }
+
+  function boardNumber(value) {                // a finite number in the board's range (never a boolean, never words)
+    return typeof value === 'number' && isFinite(value) && Math.abs(value) < NUMBER_LIMIT;
+  }
+
+  function reach(node, from, width) {          // a chart's fill or ghost tick, in fractions of its track
+    node.style.setProperty('--x0', (Math.max(0, Math.min(1, from)) * 100).toFixed(3) + '%');
+    node.style.setProperty('--xw', (Math.max(0, Math.min(1, width)) * 100).toFixed(3) + '%');
+  }
+
+  function dotAt(index, count) {               // a timeline node's dot in a row: the first and last at the ends
+    if (index <= 0) {
+      return '9px';
+    }
+    if (index >= count - 1) {
+      return 'calc(100% - 9px)';
+    }
+    return ((index + 0.5) / count * 100).toFixed(3) + '%';
+  }
+
+  function todayAt(today, count) {             // TODAY before node ``today``: half way from the node before it
+    if (today <= 0) {
+      return '0px';
+    }
+    if (today >= count) {
+      return '100%';
+    }
+    return 'calc((' + dotAt(today - 1, count) + ' + ' + dotAt(today, count) + ') / 2)';
+  }
+
+  function deltaLine(text) {                   // a changed figure's words: the delta glyph, its figure first and bright
+    var line = make('p', 'delta');
+    line.appendChild(glyph('delta', 'delta-mark', true));
+    var space = text.indexOf(' ');
+    var lead = space > 0 ? text.slice(0, space) : text;
+    if (FIGURE.test(lead)) {
+      line.append(make('b', 'delta-lead', lead), document.createTextNode(space > 0 ? text.slice(space) : ''));
+    } else {
+      line.appendChild(document.createTextNode(text));
+    }
+    return line;
+  }
+
+  function mathsTree(node, depth, budget) {    // a checked expression (as board.protocol checks it)
+    if (depth > MATHS.depth || (budget.left -= 1) < 0 || !Array.isArray(node) || !node.length
+        || typeof node[0] !== 'string') {
+      return false;
+    }
+    var head = node[0];
+    if (head === 'num') {
+      return node.length === 2 && words(node[1], MATHS.text) && NUMBER_TEXT.test(node[1]);
+    }
+    if (head === 'name') {
+      return node.length === 2 && typeof node[1] === 'string' && MATHS_NAME.test(node[1]);
+    }
+    var arity = MATHS_OPS[head];
+    if (!arity || node.length - 1 < arity[0] || node.length - 1 > arity[1]) {
+      return false;
+    }
+    for (var index = 1; index < node.length; index += 1) {
+      if (!mathsTree(node[index], depth + 1, budget)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function mathsStep(step, budget) {
+    return exactKeys(step, ['name', 'expr']) && words(step.name, MATHS.name) && mathsTree(step.expr, 1, budget);
+  }
+
+  function mathsRow(grid, number, step, answer) {
+    var line = make('div', 'mx-e');
+    var expression = mathsNode(step.expr);
+    if (answer) {
+      var box = make('span', 'mx-ans');
+      box.appendChild(expression);
+      line.appendChild(box);
+    } else {
+      line.appendChild(expression);
+    }
+    grid.append(make('span', 'mx-i', String(number)), make('span', 'mx-k t-badge', step.name), line);
+  }
+
+  // How an expression reads (board.ask_frames.maths_text says the same in plain words): what binds tighter, where
+  // brackets go, and when two factors stand side by side with no sign ("4x", "(x − 1)(x − 3)", "2√3").
+  var PREC = {or: 0, '=': 1, '+': 2, '*': 3, '/': 3, pow: 5};
+
+  function negative(node) {                    // a negation, a negative number, or a product that starts with one
+    if (node[0] === '-') {
+      return node.length === 2;
+    }
+    if (node[0] === 'num') {
+      return node[1].charAt(0) === MINUS;
+    }
+    return node[0] === '*' && negative(node[1]);
+  }
+
+  function positive(node) {                    // a negative node without its sign
+    if (node[0] === 'num') {
+      return ['num', node[1].slice(1)];
+    }
+    if (node[0] === '*') {
+      return ['*', positive(node[1])].concat(node.slice(2));
+    }
+    return node[1];
+  }
+
+  function prec(node) {
+    if (node[0] === 'num') {
+      return negative(node) ? 4 : 6;
+    }
+    if (node[0] === '-') {
+      return node.length === 2 ? 4 : 2;
+    }
+    return node[0] in PREC ? PREC[node[0]] : 6;
+  }
+
+  function atom(node) {
+    return node[0] === 'name' || node[0] === '()' || (node[0] === 'num' && !negative(node));
+  }
+
+  function factorBracketed(node, index) {
+    return prec(node) <= 2 || (index > 0 && negative(node));
+  }
+
+  function negationBracketed(node) {
+    return prec(node) <= 2 || negative(node);
+  }
+
+  function starts(node, bracketed) {           // what a factor shows first
+    if (bracketed || node[0] === '()') {
+      return 'open';
+    }
+    switch (node[0]) {
+      case 'num': return negative(node) ? 'minus' : 'digit';
+      case 'name': return node[1].length === 1 ? 'letter' : 'word';
+      case 'root': return node.length === 3 ? 'index' : 'root';
+      case 'pow': return starts(node[1], !atom(node[1]));
+      case '*': return starts(node[1], factorBracketed(node[1], 0));
+      case '-': return 'minus';
+      default: return node[0];
+    }
+  }
+
+  function ends(node, bracketed) {             // what a factor shows last
+    if (bracketed || node[0] === '()') {
+      return 'close';
+    }
+    switch (node[0]) {
+      case 'num': return 'digit';
+      case 'name': return node[1].length === 1 ? 'letter' : 'word';
+      case 'pow': return 'sup';
+      case '*': return ends(node[node.length - 1], factorBracketed(node[node.length - 1], node.length - 2));
+      case '-': return node.length === 2 ? ends(node[1], negationBracketed(node[1])) : '-';
+      default: return node[0];
+    }
+  }
+
+  function joined(left, right) {
+    return ['letter', 'open', 'root'].indexOf(right) >= 0 && ['digit', 'letter', 'close', 'sup'].indexOf(left) >= 0;
+  }
+
+  function mathsSign(text) {
+    return make('span', 'mx-op', text);
+  }
+
+  function mathsGroup(node, bracketed) {       // a node, in brackets when it must be
+    var built = mathsNode(node);
+    if (!bracketed) {
+      return built;
+    }
+    var group = make('span', 'mx-g');
+    group.append(make('span', 'mx-b', '('), built, make('span', 'mx-b', ')'));
+    return group;
+  }
+
+  function mathsNode(node) {                   // an expression's elements, from the checked tree only
+    var head = node[0], args = node.slice(1), box;
+    if (head === 'num') {
+      return make('span', 'mx-n', node[1]);
+    }
+    if (head === 'name') {
+      return make('span', 'mx-v', node[1]);
+    }
+    if (head === '()') {
+      return mathsGroup(args[0], true);
+    }
+    box = make('span', 'mx-x');
+    if (head === 'or' || head === '=') {
+      args.forEach(function (arg, index) {
+        if (index) {
+          box.appendChild(mathsSign(head === 'or' ? ' or ' : ' = '));
+        }
+        box.appendChild(mathsGroup(arg, prec(arg) <= (head === 'or' ? 0 : 1)));
+      });
+    } else if (head === '+') {
+      box.appendChild(mathsGroup(args[0], prec(args[0]) <= 1));
+      args.slice(1).forEach(function (arg) {
+        if (negative(arg)) {
+          var shown = positive(arg);
+          box.append(mathsSign(' ' + MINUS + ' '), mathsGroup(shown, arg[0] === '-' && negationBracketed(shown)));
+        } else {
+          box.append(mathsSign(' + '), mathsGroup(arg, prec(arg) <= 1));
+        }
+      });
+    } else if (head === '-' && args.length === 1) {
+      box.append(mathsSign(MINUS), mathsGroup(args[0], negationBracketed(args[0])));
+    } else if (head === '-') {
+      box.append(mathsGroup(args[0], prec(args[0]) <= 1), mathsSign(' ' + MINUS + ' '),
+                 mathsGroup(args[1], negationBracketed(args[1])));
+    } else if (head === '*') {
+      args.forEach(function (arg, index) {
+        var bracketed = factorBracketed(arg, index);
+        if (index) {
+          var before = args[index - 1];
+          if (!joined(ends(before, factorBracketed(before, index - 1)), starts(arg, bracketed))) {
+            box.appendChild(mathsSign(' × '));
+          }
+        }
+        box.appendChild(mathsGroup(arg, bracketed));
+      });
+    } else if (head === '/') {
+      box.append(mathsGroup(args[0], prec(args[0]) <= 2), mathsSign(' ÷ '),
+                 mathsGroup(args[1], prec(args[1]) <= 3 || negative(args[1])));
+    } else if (head === 'frac') {
+      box = make('span', 'mx-frac');
+      var over = make('span', 'mx-top'), under = make('span', 'mx-bot');
+      over.appendChild(mathsNode(args[0]));
+      under.appendChild(mathsNode(args[1]));
+      box.append(over, under);
+    } else if (head === 'pow') {
+      var power = make('span', 'mx-sup');
+      power.appendChild(mathsNode(args[1]));
+      box.append(mathsGroup(args[0], !atom(args[0])), power);
+    } else {                                   // root: its index (when it has one), the sign, the radicand under its bar
+      box = make('span', 'mx-root');
+      if (args.length === 2) {
+        var index = make('span', 'mx-idx');
+        index.appendChild(mathsNode(args[1]));
+        box.appendChild(index);
+      }
+      var radicand = make('span', 'mx-rad');
+      radicand.appendChild(mathsNode(args[0]));
+      box.append(make('span', 'mx-sign', '√'), radicand);
+    }
+    return box;
   }
 
   function placePicture(rec) {                // a picture frame's slot (above its caption), else after the body

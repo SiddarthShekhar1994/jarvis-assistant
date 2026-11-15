@@ -479,12 +479,13 @@ class ResearchCliTests(unittest.TestCase):
         self.assertLess(prompt.index("WEB RESEARCH"), prompt.index("EXAMPLE (invented)"))
 
     # schema_text() (length, sha256) for (allow_search, allow_web): as at 3b598ee but for the words of say's description
-    # (up to four sentences, facts from the context) and, with the web on, weather and SAY_WITH_WEB; the memory build adds
-    # "remember" only when asked, so these change only when schema.json is meant to.
-    SCHEMA_GOLDEN = {(False, False): (927, "f9935a6fa5705643e92e1265ac0ee5cfc2584ebcbbc60c64f126d9436187c467"),
-                     (False, True): (1614, "af94ec50b76b53ad1273886a76e0bed84e87d1b3d103cb20e63f23376769f3ae"),
-                     (True, False): (1423, "dcad9d43c86bf0ae741bc3a0c6a2c1e0115239cc334789689fbf5a1c92b5cbb6"),
-                     (True, True): (2110, "f4ad0fa87f26eaf0290ef85fe047f505967fcbf045bca064a30b6074917d045b")}
+    # (up to four sentences, facts from the context) and, with the web on, weather and SAY_WITH_WEB, and for the new
+    # look's part 6 (2026-11-15): the optional "topic" and "frames" after the other properties (tests/test_ask_frames.py);
+    # the memory build adds "remember" only when asked, so these change only when schema.json is meant to.
+    SCHEMA_GOLDEN = {(False, False): (3163, "bc7bd3a652675ef5945304173c0776cfe3f5b584a101e78496b292bda682e2c2"),
+                     (False, True): (3850, "ef566b8dc26e2b2fb59541d2e44e7a5ad264638743204b384afd217db59b8345"),
+                     (True, False): (3659, "632605d47b0b9d0ffc74aacebee2fa5b60cb2d5beee0a676b785519c28623ff8"),
+                     (True, True): (4346, "0e93397ac5a7932de7b06c3768f6b8c59d719c956538634b76b1859bee6490b2")}
 
     def test_say_is_told_of_the_web_only_when_the_web_is_there(self) -> None:
         for allow_search in (False, True):

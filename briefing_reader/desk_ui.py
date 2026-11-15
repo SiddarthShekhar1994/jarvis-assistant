@@ -30,7 +30,7 @@ after its last frame), a changed light (CHANGED), open big and back (OPEN_BIG / 
 screen; SoundBoard's gate and LookController's quiet rules hold them otherwise.
 
 What feeds it (board.feed.BoardFeed keeps the groups; board.frames builds the frames), one answer = one group (its time;
-its topic: Ask's coming ``topic`` field, else the first frame's title):
+its topic: Ask's ``topic`` field, part 6, else the first frame's title):
 
 - a LIVE step's picture of the answer's task once ready (``apply``: the app's LIVE feed hands every change here) - a
   mail thread Jarvis read, a web search, a page picture (also one that comes ready after the answer), a day plan's
@@ -38,7 +38,9 @@ its topic: Ask's coming ``topic`` field, else the first frame's title):
 - the answer (``on_ask_outcome``): a web research's answer with its sources, the cards that wait on Approvals - a Reply
   or Email as the mail it sends (a reply and the thread it answers are ONE frame: the mail as read with the reply's
   amber chip, whose go_approvals opens the reply's card), a calendar card's change on its day -, the to-dos the
-  answer proposes or speaks of, and the follow-ups it speaks of.
+  answer proposes or speaks of, and the follow-ups it speaks of;
+- part 6: the answer's typed frames (``outcome.frames``: a table, a chart, a timeline, maths, as board.ask_frames
+  checked them), each keyed by its kind and title; and an instant maths answer's working (``on_instant_answer``).
 
 In a group a frame that waits on the owner comes first, then the order Jarvis speaks of them (board.feed.spoken_rank).
 Limits: 24 frames and 8 groups (the oldest group without a pinned frame leaves whole). Frames last for the session and
@@ -69,6 +71,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 from . import holo, hud
 from . import live as live_events
 from . import pictures
+from .board import ask_frames
 from .board import feed as feed_mod
 from .board import frames as board_frames
 from .board import protocol as board_protocol
@@ -102,6 +105,10 @@ _KIND_WORDS = {
     "todos": ("to-do", "todo", "due", "deadline", "list", "task"),
     "text": ("found", "search", "source", "according"),
     "picture": ("page", "picture", "site", "website"),
+    "table": ("table", "rows", "lines", "columns"),                         # part 6's typed frames
+    "chart": ("chart", "bars", "compare", "most", "least"),
+    "timeline": ("timeline", "first", "then", "next", "due by"),
+    "maths": ("works out", "comes to", "equals", "answer", "solve"),
 }
 
 
@@ -185,6 +192,7 @@ class _Answer:
     done: bool = False
     say: str = ""
     plan: str = ""                  # a day plan's answer: the part it plans ("day", "morning" ...; its day pictures' key)
+    topic: str = ""                 # part 6: Ask's topic, the group's header words ("" - its first frame's title)
 
     def __repr__(self) -> str:      # ids and counts only
         return f"_Answer(key={self.key}, pending={len(self.pending)}, done={self.done})"
@@ -681,6 +689,7 @@ class DeskController(QObject):
         if not getattr(outcome, "ok", False):
             return
         answer.say = str(getattr(outcome, "say", "") or "")
+        answer.topic = str(getattr(outcome, "topic", "") or "")     # part 6: the group's header words
         words = f"{answer.request} {answer.say}"
         planned = getattr(outcome, "mode", "") == "plan"      # a day plan: its own day picture shows its blocks
         if planned:
@@ -691,6 +700,7 @@ class DeskController(QObject):
         if not planned:
             entries += self._calendar_entries(answer, outcome, words)
         entries += self._research_entries(outcome)
+        entries += self._frame_entries(outcome)
         if not planned:
             entries += self._card_entries(outcome)
         entries += self._todo_entries(outcome, words)
@@ -736,8 +746,8 @@ class DeskController(QObject):
                 continue
             frame = built.messages[0]
             rank = spoken_rank(answer.say, self._rank_words(frame))
-            messages += self.feed.put(answer.key, source, built.messages, when=answer.when, merge=merge,
-                                      approvals=approvals, rank=rank, park=park, key=key,
+            messages += self.feed.put(answer.key, source, built.messages, when=answer.when, topic=answer.topic,
+                                      merge=merge, approvals=approvals, rank=rank, park=park, key=key,
                                       not_ready=bool(getattr(built, "not_ready", False)))   # a LIVE picture's own state
             self.counts[f"frame:{frame.get('kind', '')}"] += 1
         self._send(messages)
@@ -803,6 +813,42 @@ class DeskController(QObject):
             return built
 
         return [("research", research, "", "")]
+
+    @staticmethod
+    def _frame_entries(outcome: Any) -> list[tuple[Any, ...]]:
+        """Part 6: the answer's typed frames (a table, a chart, a timeline, maths: board.ask_frames checked them), each
+        with its source key - its kind and its title folded ("table:budget lines") - so a later answer with the same
+        frame builds it again in its place (changed only when what it says differs)."""
+        entries: list[tuple[Any, ...]] = []
+        for index, frame in enumerate(getattr(outcome, "frames", ()) or ()):
+            if isinstance(frame, ask_frames.AskFrame):
+                entries.append((f"ask:{index}",
+                                lambda frame_id, frame=frame: ask_frames.build(frame, frame_id=frame_id), "", "",
+                                frame.key))
+        return entries
+
+    def on_instant_answer(self, reply: Any, words: str) -> None:
+        """Part 6: Jarvis's own instant answer (instant.InstantReply). A sum whose working has a step between the sum as
+        read and its result (instant_maths) gets a maths frame of that working, checked by board.ask_frames as Ask's
+        frames are, in an answer's group of its own (its turn's "1 frame on the board"). Anything else puts nothing up.
+        The log says a reason word only."""
+        working = getattr(reply, "working", None)
+        if not working:
+            return
+        frame = ask_frames.check_frame(working)
+        if isinstance(frame, str):
+            logger.info("Board: an instant working was not shown (%s)", frame)
+            return
+        self._synthetic -= 1
+        answer = _Answer(self._synthetic, str(words or ""), format_time(self._now(), hour24=self._hour24()), done=True,
+                         say=str(getattr(reply, "speech", "") or ""))
+        self._answers[answer.key] = answer
+        while len(self._answers) > ANSWERS_KEPT:
+            self._answers.pop(next(iter(self._answers)))
+        self._put(answer, [("instant", lambda frame_id: ask_frames.build(frame, frame_id=frame_id), "", "",
+                            frame.key)])
+        self.feed.set_turn(answer.key, self._answer_entry())
+        self._sync_counts()
 
     def _card_entries(self, outcome: Any) -> list[tuple[Any, ...]]:
         """The answer's cards that wait on Approvals: a Reply or Email as the mail it sends (a reply merges with the

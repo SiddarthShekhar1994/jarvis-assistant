@@ -23,6 +23,18 @@ In (app -> page): check_message(message, known, groups=()) -> Checked
                     mail_list    {"rows": [{"sender", "time", "subject", "meta", "unread"}]}
                     todos        {"rows": [{"text", "meta", "state" open / waits / done}]}
                     picture      {"caption"}                      (its JPEG comes in its own picture message)
+                  Part 6, Ask's typed frames (board.ask_frames; every key present, every list 1 to its cap, every
+                  number finite and under NUMBER_LIMIT, never a boolean):
+                    table        {"columns" (1-6), "rows" (1-12, each as many cells as columns: words), "unit",
+                                  "changed" (a row, -1 none), "change", "source"}
+                    chart        {"bars" (1-8: {"label", "value", "text" (its words: "3.4k")}), "unit", "changed" (a bar,
+                                  -1 none), "was" (its old value, null none), "change" (the delta line)}
+                    timeline     {"nodes" (1-8: {"when", "words", "state" NODE_STATES}), "today" (-1 none, 0 to the
+                                  number of nodes: the TODAY marker stands before that node)}
+                    maths        {"steps" (1-8: {"name", "expr"}), "answer" ({"name", "expr"})}: an expression is
+                                  ["num", words], ["name", 1-12 letters] or [op, expression, ...] (MATHS_OPS), at most
+                                  MATHS_DEPTH levels and MATHS_NODES nodes in the frame - built by the page with
+                                  createElement from this tree, never from markup
                   A row whose main words are empty (a text row's lead and text, a calendar row's time and title, a mail
                   row's sender and subject, a to-do's text) is the "+N MORE" row: only its meta shows.
                   "group" (part 5a, only when given): the group (one answer) the frame belongs to - a group the app sent
@@ -92,6 +104,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import math
 import re
 from collections.abc import Callable, Collection
 from dataclasses import dataclass
@@ -122,6 +135,32 @@ PILL_CAP = 16                    # the calendar's now pill ("9:41")
 DAY_MINUTES = 24 * 60
 PLACE_LIMIT = 1_000_000          # px: a layout's top / height beyond this is not a place
 BIG_LIMIT = 100_000              # px: the board's box in the wide view (open big) is at most this
+# Part 6, Ask's typed frames (DESIGN-SPEC 3.3; 3.5: a table 6 x 12). board.ask_frames checks the model's own fields
+# against the same caps first.
+TABLE_COLUMNS_CAP = 6
+TABLE_ROWS_CAP = 12
+COLUMN_CAP = 24                  # a table's header words
+CELL_CAP = 40
+UNIT_CAP = 12                    # a table's or a chart's unit ("USD"): its meta
+CHANGE_CAP = 80                  # a changed row's or bar's words: the delta line ("+500 Software · was 2.9k on Friday")
+SOURCE_CAP = 60                  # a table's source footer
+BARS_CAP = 8
+LABEL_CAP = 24
+NUMBER_TEXT_CAP = 24             # a number's words ("1,234,567.5", "3.4k")
+NODES_CAP = 8
+WHEN_CAP = 24
+NODE_WORDS_CAP = 40
+NODE_STATES = ("done", "next", "due", "")
+STEPS_CAP = 8
+STEP_NAME_CAP = 24
+NAME_LETTERS = 12                # a maths name: 1 to 12 letters
+MATHS_DEPTH = 6                  # levels in one expression
+MATHS_NODES = 64                 # nodes in one frame's expressions
+NUMBER_LIMIT = 10 ** 15          # a number on the board: under this (and finite)
+# A maths op and how many arguments it takes: + and × 2 to 8, − 1 (negation) or 2, ÷ / frac / power 2, a root 1 or 2
+# (the radicand, then its index), brackets 1, = and "or" 2 to 4.
+MATHS_OPS = {"+": (2, 8), "-": (1, 2), "*": (2, 8), "/": (2, 2), "=": (2, 4), "frac": (2, 2), "pow": (2, 2),
+             "root": (1, 2), "()": (1, 1), "or": (2, 4)}
 
 MESSAGE_TYPES = ("frame", "lit", "remove", "clear", "motion", "picture", "group", "remove_group", "bar", "desk",
                  "reveal", "cleared", "focus_part", "backdrop", "big")
@@ -145,6 +184,10 @@ _BARE_KINDS = frozenset({"clear", "restore", "show_new"})     # a payload of no 
 _ID = re.compile(r"[A-Za-z0-9_-]{1,%d}" % ID_CAP)
 _BASE64 = re.compile(r"[A-Za-z0-9+/]*={0,2}")
 _JPEG = b"\xff\xd8\xff"
+# A number's words as board.ask_frames writes them ("3,400", "0.25", "−4"; a chart's value also "3.4k") and a maths name.
+_NUMBER_TEXT = re.compile(r"−?(?:0|[1-9][0-9]{0,2}(?:,[0-9]{3})*)(?:\.[0-9]+)?")
+_VALUE_TEXT = re.compile(r"−?(?:0|[1-9][0-9]{0,2}(?:,[0-9]{3})*)(?:\.[0-9]+)?[kMBT]?")
+_MATHS_NAME = re.compile(r"[A-Za-zΑ-ΡΣ-Ωα-ω]{1,%d}" % NAME_LETTERS)
 
 # Reason words (a log line may carry them; never a value).
 R_SHAPE = "shape"                # not a dict / not the right type of field
@@ -374,9 +417,126 @@ def _picture_body(body: Any) -> dict[str, Any]:
     return {"caption": _text(fields.get("caption", ""), TITLE_CAP)}
 
 
+# Part 6, Ask's typed frames (board.ask_frames builds them from the model's own, already checked): every key present,
+# every list non-empty and within its cap, every number finite and within the board's range, never a boolean.
+
+def _some(value: Any, cap: int) -> list[Any]:
+    found = _list(value, cap)
+    if not found:
+        raise Refused(R_SHAPE)
+    return found
+
+
+def _value(value: Any) -> int | float:
+    """A finite number of the board's range (an int is compared as it is: a huge one is never made a float)."""
+    if type(value) is int:
+        if -NUMBER_LIMIT < value < NUMBER_LIMIT:
+            return value
+    elif type(value) is float and math.isfinite(value) and abs(value) < NUMBER_LIMIT:
+        return value
+    raise Refused(R_SHAPE)
+
+
+def _pattern(value: Any, cap: int, pattern: re.Pattern[str]) -> str:
+    text = _text(value, cap)
+    if not pattern.fullmatch(text):
+        raise Refused(R_SHAPE)
+    return text
+
+
+def _table_body(body: Any) -> dict[str, Any]:
+    """A table: Mono caps headers, rows of cells (every row as many as there are headers: words, a number's words
+    included), the changed row (-1 none) and its words, a unit (the meta) and a source footer. Never paired."""
+    keys = ("columns", "rows", "unit", "changed", "change", "source")
+    fields = _fields(body, keys, keys)
+    columns = [_text(item, COLUMN_CAP) for item in _some(fields["columns"], TABLE_COLUMNS_CAP)]
+    rows = []
+    for row in _some(fields["rows"], TABLE_ROWS_CAP):
+        cells = [_text(cell, CELL_CAP) for cell in _list(row, TABLE_COLUMNS_CAP)]
+        if len(cells) != len(columns):
+            raise Refused(R_SHAPE)
+        rows.append(cells)
+    return {"columns": columns, "rows": rows, "unit": _text(fields["unit"], UNIT_CAP),
+            "changed": _number(fields["changed"], -1, len(rows) - 1), "change": _text(fields["change"], CHANGE_CAP),
+            "source": _text(fields["source"], SOURCE_CAP)}
+
+
+def _chart_bar(value: Any) -> dict[str, Any]:
+    fields = _fields(value, ("label", "value", "text"), ("label", "value", "text"))
+    return {"label": _text(fields["label"], LABEL_CAP), "value": _value(fields["value"]),
+            "text": _pattern(fields["text"], NUMBER_TEXT_CAP, _VALUE_TEXT)}
+
+
+def _chart_body(body: Any) -> dict[str, Any]:
+    """Bars (a label, a value and its words), the changed bar (-1 none) with its old value (the ghost tick; null none)
+    and its delta line, and a unit (the meta)."""
+    keys = ("bars", "unit", "changed", "was", "change")
+    fields = _fields(body, keys, keys)
+    bars = [_chart_bar(item) for item in _some(fields["bars"], BARS_CAP)]
+    changed = _number(fields["changed"], -1, len(bars) - 1)
+    was = fields["was"]
+    if was is not None:
+        was = _value(was)
+        if changed < 0:
+            raise Refused(R_SHAPE)
+    return {"bars": bars, "unit": _text(fields["unit"], UNIT_CAP), "changed": changed, "was": was,
+            "change": _text(fields["change"], CHANGE_CAP)}
+
+
+def _node(value: Any) -> dict[str, Any]:
+    fields = _fields(value, ("when", "words", "state"), ("when", "words", "state"))
+    return {"when": _text(fields["when"], WHEN_CAP), "words": _text(fields["words"], NODE_WORDS_CAP),
+            "state": _choice(fields["state"], NODE_STATES)}
+
+
+def _timeline_body(body: Any) -> dict[str, Any]:
+    """Nodes (when, words, and done / next / due / "" - the state's word is its non-colour cue) and where the TODAY
+    marker stands: before that node, 0 to the number of nodes (-1 none)."""
+    fields = _fields(body, ("nodes", "today"), ("nodes", "today"))
+    nodes = [_node(item) for item in _some(fields["nodes"], NODES_CAP)]
+    return {"nodes": nodes, "today": _number(fields["today"], -1, len(nodes))}
+
+
+def _expr(value: Any, depth: int, budget: list[int]) -> list[Any]:
+    """One checked maths expression: ["num", words], ["name", letters] or [op, expression, ...] (MATHS_OPS and their
+    arguments); at most MATHS_DEPTH levels, and the frame's MATHS_NODES nodes counted in ``budget``."""
+    if depth > MATHS_DEPTH:
+        raise Refused(R_SHAPE)
+    budget[0] -= 1
+    if budget[0] < 0:
+        raise Refused(R_TOO_LONG)
+    if type(value) is not list or not value or type(value[0]) is not str:
+        raise Refused(R_SHAPE)
+    head = value[0]
+    if head in ("num", "name"):
+        if len(value) != 2:
+            raise Refused(R_SHAPE)
+        if head == "num":
+            return ["num", _pattern(value[1], NUMBER_TEXT_CAP, _NUMBER_TEXT)]
+        return ["name", _pattern(value[1], NAME_LETTERS, _MATHS_NAME)]
+    arity = MATHS_OPS.get(head)
+    if arity is None or not arity[0] <= len(value) - 1 <= arity[1]:
+        raise Refused(R_SHAPE)
+    return [head, *(_expr(item, depth + 1, budget) for item in value[1:])]
+
+
+def _step(value: Any, budget: list[int]) -> dict[str, Any]:
+    fields = _fields(value, ("name", "expr"), ("name", "expr"))
+    return {"name": _text(fields["name"], STEP_NAME_CAP), "expr": _expr(fields["expr"], 1, budget)}
+
+
+def _maths_body(body: Any) -> dict[str, Any]:
+    """Numbered steps (a name and an expression) and the answer (boxed): expressions from the restricted tree only."""
+    fields = _fields(body, ("steps", "answer"), ("steps", "answer"))
+    budget = [MATHS_NODES]
+    steps = [_step(item, budget) for item in _some(fields["steps"], STEPS_CAP)]
+    return {"steps": steps, "answer": _step(fields["answer"], budget)}
+
+
 KINDS: dict[str, Callable[[Any], dict[str, Any]]] = {
     "text": _text_body, "calendar": _calendar_body, "mail_thread": _mail_thread_body, "mail_list": _mail_list_body,
     "todos": _todos_body, "picture": _picture_body,
+    "table": _table_body, "chart": _chart_body, "timeline": _timeline_body, "maths": _maths_body,
 }
 
 

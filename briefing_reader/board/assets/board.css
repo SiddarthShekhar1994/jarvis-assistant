@@ -260,6 +260,124 @@ button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .pic-host { flex: 1 1 auto; min-width: 0; color: var(--ink-2); font: 400 12.5px/16px var(--font-body); overflow-wrap: anywhere; }
 .pic-only { flex: none; color: var(--ink-4); }
 
+/* ---- part 6, Ask's typed frames (3.3) ---- */
+/* the delta line (a changed figure's words, a chart's or a table's): the delta glyph, its figure first and bright */
+.delta {
+  margin: 10px 0 0; padding-left: 17px; text-indent: -17px;
+  color: var(--ink-3); font: 400 12px/17px var(--font-body); overflow-wrap: anywhere; unicode-bidi: plaintext;
+}
+.delta .delta-mark { width: 11px; height: 11px; margin-right: 6px; vertical-align: -1px; color: var(--holo-hi); }
+.delta-lead { color: var(--holo-hi); font: 600 12px/16px var(--font-body); }
+
+/* table: Mono caps headers, tabular cells (a zero in INK_4), the changed row banded cyan at 0.08 with its change in
+   HOLO_HI 600, a source footer; full width, never paired */
+.tb { width: 100%; border-collapse: collapse; }
+.tb th {
+  padding: 0 0 6px 10px; color: var(--ink-4); text-align: right; vertical-align: bottom;
+  font: 500 11px/14px var(--font-mono); letter-spacing: .2em; text-transform: uppercase; overflow-wrap: anywhere;
+}
+.tb td {
+  padding: 4px 0 4px 10px; border-top: 1px solid var(--line-faint); color: var(--ink-2); text-align: right;
+  font: 400 12.5px/18px var(--font-body); font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+}
+.tb th:first-child, .tb td:first-child { padding-left: 0; text-align: left; }
+.tb td.z { color: var(--ink-4); }
+.tb tr.hot td { background: color-mix(in srgb, var(--holo) 8%, transparent); color: var(--ink-1); }
+.tb tr.hot td:first-child { padding-left: 6px; }
+.tb tr.hot td:last-child { padding-right: 6px; font-weight: 600; color: var(--holo-hi); }
+.tb-src { margin: 10px 0 0; color: var(--ink-4); letter-spacing: .14em; overflow-wrap: anywhere; }
+
+/* chart: bars from zero with their values in Mono; the changed bar HOLO with a dashed ghost tick at its old value */
+.ch-bars {
+  display: grid; grid-template-columns: fit-content(40%) minmax(48px, 1fr) auto; gap: 8px 10px; align-items: center;
+}
+.ch-l { min-width: 0; color: var(--ink-2); font: 400 12px/16px var(--font-body); overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.ch-tr { position: relative; height: 11px; border-radius: 2px; background: color-mix(in srgb, var(--holo) 6%, transparent); }
+.ch-fl {
+  position: absolute; top: 0; bottom: 0; left: var(--x0); width: var(--xw); border-radius: 2px;
+  background: color-mix(in srgb, var(--holo-lo) 60%, transparent); transform-origin: 0 50%;
+}
+.ch-fl.neg { transform-origin: 100% 50%; }
+.ch-fl.hot { background: var(--holo); }
+.ch-was { position: absolute; top: -4px; bottom: -4px; left: var(--x0); width: 0; border-left: 1.5px dashed var(--ink-2); }
+.ch-v {
+  color: var(--ink-1); text-align: right; white-space: nowrap;
+  font: 500 11px/14px var(--font-mono); font-variant-numeric: tabular-nums;
+}
+/* the bars grow (320 ms cubic-out from 300 ms of the draw-in; calm x1.6; off at once) */
+.frame.arriving .ch-fl { animation: bar-grow calc(320ms * var(--k)) cubic-bezier(.33, 1, .68, 1) calc(var(--at) + 300ms * var(--k)) both; }
+@keyframes bar-grow { from { transform: scaleX(0); } }
+
+/* timeline: nodes with their words - DONE a mint check, NEXT a cyan ring, DUE - and a TODAY marker. One node per row
+   (TODAY a row of its own: also under 300 px, see the block below), in a row of their own from a 300 px frame */
+.tline { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); row-gap: 8px; margin: 2px 0 0; }
+.tl-rail { position: absolute; left: 8.25px; top: 10px; bottom: 10px; width: 1.5px; background: var(--line); }
+.tl-past { display: none; }
+.tl-n { position: relative; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; column-gap: 10px; align-items: center; }
+.tl-o {
+  grid-row: 1 / 3; display: grid; place-items: center; width: 18px; height: 18px;
+  border: 1.5px solid var(--ink-3); border-radius: 50%; background: var(--tile);
+}
+.frame.lit .tl-o, .big-card .tl-o { background: var(--tile-focus); }
+.tl-when { grid-column: 2; grid-row: 1; color: var(--ink-3); overflow-wrap: anywhere; }
+.tl-words {
+  grid-column: 2; grid-row: 2; min-width: 0; color: var(--ink-1);
+  font: 400 12.5px/16px var(--font-body); overflow-wrap: anywhere; unicode-bidi: plaintext;
+}
+.tl-state { grid-column: 3; grid-row: 1 / 3; color: var(--ink-4); }
+.tl-n.done .tl-o { border-color: var(--ok); background: var(--ok); color: var(--ok-ink); }
+.tl-n.done .tl-mark { width: 11px; height: 11px; stroke-width: 2.6; }
+.tl-n.next .tl-o { border-color: var(--holo); box-shadow: 0 0 0 3px color-mix(in srgb, var(--holo) 15%, transparent); }
+.tl-n.done .tl-words { color: var(--ink-3); }
+.tl-n.done .tl-state { color: var(--ok); }
+.tl-n.next .tl-state { color: var(--holo-hi); }
+.tl-today { display: flex; align-items: center; gap: 10px; height: 12px; color: var(--holo-hi); }
+.tl-today::before { content: ''; flex: none; width: 18px; height: 1.5px; background: var(--holo-hi); }
+@container frame (min-width: 300px) {
+  :is(.tline.few, .big-card .tline) { grid-template-columns: repeat(var(--n), minmax(0, 1fr)); row-gap: 0; margin: 18px 0 2px; }
+  :is(.tline.few, .big-card .tline) .tl-rail { left: 9px; right: 9px; top: 8.25px; bottom: auto; width: auto; height: 1.5px; }
+  :is(.tline.few, .big-card .tline) .tl-past {
+    display: block; position: absolute; left: 9px; top: 8.25px; height: 1.5px;
+    width: max(0px, calc(var(--today) - 9px)); background: var(--holo-lo);
+  }
+  :is(.tline.few, .big-card .tline) .tl-n { display: flex; flex-direction: column; align-items: center; min-width: 0; text-align: center; }
+  :is(.tline.few, .big-card .tline) .tl-n.first { align-items: flex-start; text-align: left; }
+  :is(.tline.few, .big-card .tline) .tl-n.last:not(.first) { align-items: flex-end; text-align: right; }
+  :is(.tline.few, .big-card .tline) .tl-when { margin-top: 7px; }
+  :is(.tline.few, .big-card .tline) .tl-words, :is(.tline.few, .big-card .tline) .tl-state { margin-top: 2px; }
+  :is(.tline.few, .big-card .tline) .tl-today {
+    position: absolute; left: var(--today); top: -14px; height: 32px; width: 0; gap: 0; z-index: 2;
+    border-left: 1.5px solid var(--holo-hi);
+  }
+  :is(.tline.few, .big-card .tline) .tl-today::before { display: none; }
+  :is(.tline.few, .big-card .tline) .tl-today span { position: absolute; left: 5px; top: -1px; white-space: nowrap; }
+  :is(.tline.few, .big-card .tline) .tl-today.right span { left: auto; right: 6px; }
+}
+
+/* maths: numbered steps (a name, then its line), the answer boxed in HOLO_HI; every element made by the page from
+   the checked tree (a fraction stacked, a power raised, a root under its bar) */
+.mx { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 7px 10px; align-items: baseline; }
+.mx-i { color: var(--ink-4); font: 500 10px/12px var(--font-mono); font-variant-numeric: tabular-nums; }
+.mx-k { color: var(--ink-3); white-space: nowrap; }
+.mx-e {
+  min-width: 0; color: var(--ink-1); font: 400 15px/22px var(--font-body); letter-spacing: .02em;
+  overflow-wrap: anywhere; unicode-bidi: isolate;
+}
+.mx-sup { display: inline-block; margin-left: 1px; font-size: 10px; line-height: 1; vertical-align: 6px; }
+.mx-frac {
+  display: inline-flex; flex-direction: column; align-items: center; margin: 0 2px; vertical-align: middle;
+  font-size: 12.5px; line-height: 15px; white-space: nowrap;
+}
+.mx-top { padding: 0 2px 1px; }
+.mx-bot { align-self: stretch; padding: 1px 2px 0; border-top: 1px solid currentColor; text-align: center; }
+.mx-root { display: inline-flex; align-items: flex-end; white-space: nowrap; }
+.mx-idx { align-self: flex-start; margin-right: -4px; font-size: 9px; line-height: 10px; }
+.mx-rad { padding: 1px 1px 0 2px; border-top: 1px solid currentColor; }
+.mx-ans {
+  display: inline-block; margin-left: -8px; padding: 2px 8px; border: 1px solid var(--line-strong); border-radius: 4px;
+  background: color-mix(in srgb, var(--holo) 9%, transparent); color: var(--holo-hi); font-weight: 600;
+}
+
 /* the keys while it has the focus: one line, or two even halves under 380 px of content */
 .f-keys {
   display: none; flex-wrap: wrap; row-gap: 4px;
@@ -631,11 +749,16 @@ body.has-bar #pill.shown.arriving { animation: show calc(160ms * var(--k)) var(-
 :root.keys button:focus { outline: 2px solid var(--focus); outline-offset: 2px; }
 
 /* ---- inside a narrow frame (under 300 px: a paired one) the small kinds give way, never cut: the title keeps less
-   room before its meta goes under it, a to-do's state words take a little more. Part 6's small kinds add theirs here
-   (the timeline stacks, a maths step's name goes above its line, the chart's delta line and titles wrap). ---- */
+   room before its meta goes under it, a to-do's state words take a little more. Part 6's small kinds: a maths step's
+   name goes above its line, the chart's labels take a little more (its delta line and titles wrap), and the timeline
+   stays one node per row with TODAY its own row (it lines its nodes up in a row only from 300 px, above). ---- */
 @container frame (max-width: 299px) {
   .f-title { flex-basis: 6em; }
   .td-row { column-gap: 8px; grid-template-columns: 16px minmax(0, 1fr) fit-content(45%); }
+  .mx { grid-template-columns: auto minmax(0, 1fr); gap: 3px 10px; }
+  .mx-k { grid-column: 2; white-space: normal; overflow-wrap: anywhere; }
+  .mx-e { grid-column: 2; margin-bottom: 5px; }
+  .ch-bars { grid-template-columns: fit-content(45%) minmax(32px, 1fr) auto; column-gap: 8px; }
 }
 
 /* the desk forms: the board fades in and slides 24 px from the right (280 ms; calm x1.6; off at once). Once it is over the
@@ -685,6 +808,21 @@ body.dim #backdrop { filter: brightness(.2); transition-duration: calc(260ms * v
 }
 .big-card .pic-cap { flex: none; }
 .big-card > .f-wait { flex: none; align-self: flex-start; }
+/* part 6's kinds opened big use the room: a table's rows and cells, a chart's bars, a timeline's nodes (all in one row),
+   maths' lines */
+.big-card .tb th { padding-bottom: 10px; font-size: 12px; line-height: 16px; }
+.big-card .tb td { padding-top: 8px; padding-bottom: 8px; font-size: 15px; line-height: 22px; }
+.big-card .delta, .big-card .delta-lead { font-size: 14px; line-height: 20px; }
+.big-card .ch-bars { gap: 16px 16px; }
+.big-card .ch-l { font-size: 15px; line-height: 20px; }
+.big-card .ch-tr { height: 18px; }
+.big-card .ch-v { font-size: 14px; line-height: 18px; }
+.big-card .tl-words { font-size: 15px; line-height: 20px; }
+.big-card .mx { gap: 14px 16px; }
+.big-card .mx-e { font-size: 24px; line-height: 34px; }
+.big-card .mx-sup { font-size: 15px; vertical-align: 10px; }
+.big-card .mx-frac { font-size: 19px; line-height: 23px; }
+.big-card .mx-idx { font-size: 13px; line-height: 14px; }
 .f-back {
   flex: none; margin-top: 14px; padding: 12px 0 14px; border-top: 1px solid var(--line-faint);
   color: var(--holo); text-align: center;

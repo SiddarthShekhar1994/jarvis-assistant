@@ -12333,6 +12333,7 @@ class AppController(QObject):
         self._you(words)
         sub = f"{reply.source} {DOT} {ms / 1000:.1f} s" if reply.source else f"on this PC {DOT} {ms} ms"
         self._jarvis(reply.text, sub=sub)
+        self._look_call("on_instant_answer", reply, words)   # the new look: a sum's working as a maths frame
         if self.ask is not None:
             brief = getattr(reply, "brief", "")          # round 2: a calendar's day has a one-line form for the bar
             self.ask.show_note(brief or reply.text, hud_text=brief or reply.speech)

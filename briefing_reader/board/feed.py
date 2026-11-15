@@ -121,13 +121,33 @@ def _own_words(meta: Any) -> str:
                      if part.strip() and not _CLOCK_WORDS.fullmatch(part.strip()))
 
 
+# Part 6: words of a timeline's node that are the clock's, never its own ("today", "tomorrow", "in 3 days", "2 h ago").
+_RELATIVE_WORDS = re.compile(
+    r"\b(?:today|tonight|tomorrow|yesterday|now|this (?:morning|afternoon|evening|week|month)|(?:next|last) "
+    r"(?:week|month)|in \d+ ?(?:min|mins|minutes?|h|hrs?|hours?|d|days?|weeks?)|\d+ ?(?:min|mins|minutes?|h|hrs?|"
+    r"hours?|d|days?|weeks?) ago)\b", re.IGNORECASE)
+
+
+def _no_clock(words: Any) -> str:
+    """A model's words without the clock's own ones (a later answer that says "Tomorrow" of the same day is the same)."""
+    return " ".join(_RELATIVE_WORDS.sub(" ", str(words or "")).split()).casefold()
+
+
+def _items(body: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    found = body.get(key)
+    return [item for item in found if isinstance(item, dict)] if isinstance(found, list) else []
+
+
 def substance(frame: dict[str, Any]) -> str:
     """What a frame says, as one string to compare (part 5c's "changed"): its kind, title, status, its header's own
     counts (_header_counts: a week's "23 events") and its body's own data - never the clock's: a day's events (time,
     title and their own words and counts - a week's "3 events", the "+2 MORE" row; not its now line, its "IN 19 MIN" or
     its free gaps), a mail's sender, text and own time (not the day shown before it once it is not today's), a mail
     list's senders, subjects and what waits (not their ages), to-dos' words and states and the "+2 MORE" row's count
-    (not their due words); the other kinds' bodies as they are. Never raises."""
+    (not their due words); part 6's typed frames: a table's columns and cells and which row changed (not its change's
+    words or its source), a chart's bars and which changed from what (not its delta line), a timeline's nodes - their
+    words and states without the clock's own words ("today", "tomorrow", "in 3 days"), never where TODAY stands - and
+    maths' steps and answer; the other kinds' bodies as they are. Never raises."""
     try:
         kind = str(frame.get("kind", ""))
         body = frame.get("body") if isinstance(frame.get("body"), dict) else {}
@@ -144,6 +164,16 @@ def substance(frame: dict[str, Any]) -> str:
             stable = [[row.get("text", ""), row.get("state", ""),
                        row.get("meta", "") if _MORE.fullmatch(str(row.get("meta", "") or "")) else ""]
                       for row in rows]
+        elif kind == "table":                      # part 6: its columns and cells, which row changed, its unit
+            stable = [body.get("columns"), body.get("rows"), body.get("changed"), body.get("unit")]
+        elif kind == "chart":                      # its bars (labels and values), which changed and from what, its unit
+            stable = [[[bar.get("label"), bar.get("value")] for bar in _items(body, "bars")], body.get("changed"),
+                      body.get("was"), body.get("unit")]
+        elif kind == "timeline":                   # its nodes' own words and states (never "today", nor where TODAY is)
+            stable = [[_no_clock(node.get("when")), _no_clock(node.get("words")), node.get("state")]
+                      for node in _items(body, "nodes")]
+        elif kind == "maths":                      # its steps and its answer
+            stable = [body.get("steps"), body.get("answer")]
         else:
             stable = body
         return json.dumps([kind, frame.get("title", ""), frame.get("status", "ok"), frame.get("status_text", ""),

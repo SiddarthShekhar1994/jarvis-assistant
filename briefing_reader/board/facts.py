@@ -9,7 +9,9 @@ and pure: no file, no log, no clock; nothing here raises for odd data.
 What each frame says, first match wins: a failed one "Couldn't load"; an empty one its own words ("Nothing unread,
 sir."); one that waits on the owner what waits ("Reply waits"); then its kind's own count and next thing - a day "3
 events · next 10:00 AM", a mail "Dana Whitfield · 8:12 AM", a mail list "3 unread · newest 7:02 AM", to-dos "4 items · 1
-waits", a page picture "Page picture · 9:05 AM", any other its meta. A changed one starts with "Changed".
+waits", a page picture "Page picture · 9:05 AM"; part 6's typed frames a table "4 rows · 1 changed", a chart its change
+("+500 Software") or its tallest bar ("Top: Software 3.4k"), a timeline what is next ("Next: Essay Thursday") or due,
+maths its answer ("= 3,400", "x = 1 or x = 3"); any other its meta. A changed one starts with "Changed".
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ DOT = " · "
 FAILED = "Couldn't load"
 CHANGED = "Changed"
 PAGE_PICTURE = "Page picture"
+TOP, NEXT, DUE = "Top:", "Next", "Due"           # part 6: a chart's tallest bar, a timeline's next or due node
 _APPROVALS = " on Approvals"
 _MERIDIEMS = ("AM", "PM")
 
@@ -142,8 +145,54 @@ def _picture(frame: Mapping[str, Any], body: Mapping[str, Any]) -> str:
     return f"{PAGE_PICTURE}{DOT}{meta}" if meta else PAGE_PICTURE
 
 
+def _list(body: Mapping[str, Any], key: str) -> list[Mapping[str, Any]]:
+    items = body.get(key)
+    return [item for item in items if isinstance(item, Mapping)] if isinstance(items, list) else []
+
+
+def _table(frame: Mapping[str, Any], body: Mapping[str, Any]) -> str:
+    """"4 rows · 1 changed"."""
+    rows = body.get("rows") if isinstance(body.get("rows"), list) else []
+    words = _plural(len(rows), "row")
+    changed = body.get("changed")
+    return f"{words}{DOT}1 changed" if isinstance(changed, int) and 0 <= changed < len(rows) else words
+
+
+def _chart(frame: Mapping[str, Any], body: Mapping[str, Any]) -> str:
+    """A changed bar's delta line up to its first " · " ("+500 Software"); else the tallest bar ("Top: Software
+    3.4k")."""
+    change = _words(body.get("change"))
+    if change and isinstance(body.get("changed"), int) and body["changed"] >= 0:
+        return change.split(DOT)[0].strip()
+    bars = [bar for bar in _list(body, "bars") if type(bar.get("value")) in (int, float)]
+    if not bars:
+        return _words(frame.get("meta"))
+    top = max(bars, key=lambda bar: bar["value"])
+    return " ".join(part for part in (TOP, _words(top.get("label")), _words(top.get("text"))) if part)
+
+
+def _timeline(frame: Mapping[str, Any], body: Mapping[str, Any]) -> str:
+    """What is next ("Next: Essay Thursday"), else what is due, else how many dates."""
+    nodes = _list(body, "nodes")
+    for state, word in (("next", NEXT), ("due", DUE)):
+        node = next((node for node in nodes if node.get("state") == state), None)
+        if node is not None:
+            said = " ".join(part for part in (_words(node.get("words")), _words(node.get("when"))) if part)
+            return f"{word}: {said}" if said else word
+    return _plural(len(nodes), "date")
+
+
+def _maths(frame: Mapping[str, Any], body: Mapping[str, Any]) -> str:
+    """The answer: "= 3,400", or an equation as it is ("x = 1 or x = 3")."""
+    from .ask_frames import answer_fact
+
+    answer = body.get("answer")
+    found = answer_fact(answer.get("expr")) if isinstance(answer, Mapping) else ""
+    return found or _words(frame.get("meta"))
+
+
 _KINDS = {"calendar": _calendar, "mail_thread": _mail_thread, "mail_list": _mail_list, "todos": _todos,
-          "picture": _picture}
+          "picture": _picture, "table": _table, "chart": _chart, "timeline": _timeline, "maths": _maths}
 
 
 def fact_of(frame: Any) -> str:

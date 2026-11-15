@@ -25,7 +25,9 @@ sentence: it never guesses.
     sentence_at(spans, offset) -> int              the index of the sentence holding ``offset`` (-1 none)
     tokens(text) -> list[(word, start, end)]       the words of ``text`` (letters and digits; casefolded), with their
                                                    places in it
-    frame_words(frame) -> frozenset[str]           a frame message's own words (see above)
+    frame_words(frame) -> frozenset[str]           a frame message's own words (see above; part 6's typed frames: a
+                                                   table's title and column words, a chart's title and bar labels,
+                                                   a timeline's title and node words, maths' title)
     distinctive(frames) -> dict[id, frozenset[str]]   each frame's words no other frame shares (4+ letters, not common)
     match(sentence, frames) -> str                 the id of the frame the sentence is about ("" none)
     locate(sentence, text, after=0) -> int         where ``sentence`` ends in ``text`` (the conversation's current
@@ -222,7 +224,8 @@ def spoken_offset(text: Any, words: Iterable[tuple[int, int, str]] = (), duratio
 
 def frame_words(frame: Any) -> frozenset[str]:
     """A frame message's own words: its title, a mail's sender, a mail list's senders and subjects, a day's event
-    titles (not its free gaps), to-dos' words, a page picture's host and a text frame's hosts (its rows' metas)."""
+    titles (not its free gaps), to-dos' words, a page picture's host and a text frame's hosts (its rows' metas); part 6:
+    a table's column words, a chart's bar labels and a timeline's node words (a maths frame: its title alone)."""
     if not isinstance(frame, Mapping):
         return frozenset()
     found: list[str] = _words(frame.get("title", ""))
@@ -248,6 +251,15 @@ def frame_words(frame: Any) -> frozenset[str]:
     elif kind == "text":
         for row in rows:
             found += _words(row.get("meta", ""))
+    elif kind == "table":                          # part 6: a table's column words ...
+        columns = body.get("columns")
+        for word in columns if isinstance(columns, list) else []:
+            found += _words(word)
+    elif kind in ("chart", "timeline"):            # ... a chart's bar labels, a timeline's node words (maths: its title)
+        items = body.get("bars" if kind == "chart" else "nodes")
+        for item in items if isinstance(items, list) else []:
+            if isinstance(item, Mapping):
+                found += _words(item.get("label" if kind == "chart" else "words", ""))
     return frozenset(found)
 
 
