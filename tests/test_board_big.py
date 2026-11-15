@@ -16,7 +16,8 @@ skipping the covered conversation; no words in the logs. Part 5c fixes: the page
 the Dock's and the header's own opacity effects; a resize's backdrop counted; the shut grace's own timer; no eased dim
 left behind as an animation. Round 2: the still's check of the view's own pixels at its left edge (desk_big.view_shows:
 clear, opaque, two rows crossed, never the window under it); with no web view the page's "laid" lifts the still, and
-end_now leaves nothing of it running.
+end_now leaves nothing of it running. Round 3: a judged still's beat, time limit and render hook stopped by its lift,
+end_now, _finish and shutdown; a view that still shows the other step's frame judged only from this step's own start.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ import logging
 import unittest
 from unittest import mock
 
-from PySide6.QtCore import QCoreApplication, QEvent, QObject, QRect, Qt, QVariantAnimation
+from PySide6.QtCore import SIGNAL, QCoreApplication, QEvent, QObject, QRect, Qt, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import QApplication, QGraphicsOpacityEffect, QWidget
 
@@ -165,6 +166,15 @@ class ViewShowsTests(unittest.TestCase):
         self.addCleanup(tiny.deleteLater)
         tiny.resize(1, 4)                                                      # no edge to read
         self.assertFalse(desk_big.view_shows(tiny, wide=True))
+
+
+class _Renders(QObject):
+    """A stand-in for the board view's Qt Quick window: its afterRendering, and how many slots it reaches."""
+
+    afterRendering = Signal()  # noqa: N815 - Qt's name
+
+    def hooked(self) -> int:
+        return self.receivers(SIGNAL("afterRendering()"))
 
 
 class BigApp(unittest.TestCase):
@@ -342,23 +352,164 @@ class OpenTests(BigApp):
         self.make()
         page_id = self.answer()[0]
         desk, big = self.reading.desk_page(), self.desk.big
-        with mock.patch.object(desk_big.BigController, "_veil", lambda self_, page, rect: page.veil.show_still(
-                QPixmap(4, 4), rect) or True):
+        # Round 3 (stale-big 2): the cap is started here as the real _veil starts it (it was not, so its stop went
+        # untested).
+        def veil(self_, page, rect) -> bool:
+            page.veil.show_still(QPixmap(4, 4), rect)
+            self_._veil_timer.start(desk_big.VEIL_MS)                         # noqa: SLF001
+            return True
+
+        with mock.patch.object(desk_big.BigController, "_veil", veil):
             self.open(page_id)
             self.assertTrue(desk.veil.shown())
+            self.assertTrue(big._veil_timer.isActive())                       # noqa: SLF001
             self.assertFalse(big.still_judged())                              # nothing to judge it by
             self.board().request("big", step="laid")
             settle()
             self.assertFalse(desk.veil.shown())
+            self.assertFalse(big._veil_timer.isActive())                      # noqa: SLF001 - its cap went with it
             self.board().request("big", step="back")
             self.board().request("big", step="shut")
             settle()
             self.assertTrue(desk.veil.shown())                                # the close's still ...
-            self.open(page_id)                                                # (its "laid" never came: VEIL_MS)
+            self.open(page_id)                                                # (its "laid" never came)
+            self.assertTrue(big._veil_timer.isActive())                       # noqa: SLF001
             self.desk.big.end_now()
             self.assertFalse(desk.veil.shown())                               # ... and gone at once with end_now
             self.assertFalse(big._veil_timer.isActive())                      # noqa: SLF001
             self.assertFalse(big._edge_timer.isActive())                      # noqa: SLF001
+
+    def test_a_judged_still_s_beat_cap_and_render_hook_stop_however_it_goes(self) -> None:
+        # Part 5c fixes, round 3 (stale-big 2): the test above never ran the beat or the render hook (its stand-in has
+        # no web view), so a lift, end_now, _finish or shutdown that left them running went unseen. Here the still is
+        # judged: the real _veil (its still and its cap), a _watch that starts the beat and hooks a render signal as the
+        # real one hooks the view's Qt Quick window, and a view that does not show the new layout until told.
+        self.make()
+        page_id = self.answer()[0]
+        desk, big = self.reading.desk_page(), self.desk.big
+        renders = _Renders()
+        self.addCleanup(renders.deleteLater)
+        shows = [False]
+
+        def watch(self_) -> bool:
+            if self_._watched is not renders:                                 # noqa: SLF001
+                self_._unhook()                                               # noqa: SLF001
+                renders.afterRendering.connect(self_._check_view, Qt.ConnectionType.QueuedConnection)   # noqa: SLF001
+                self_._watched = renders                                      # noqa: SLF001
+            self_._edge_timer.start()                                         # noqa: SLF001
+            return True
+
+        def running() -> tuple[bool, bool, bool, int]:
+            return (big._veil_timer.isActive(), big._edge_timer.isActive(),  # noqa: SLF001
+                    big._watched is not None, renders.hooked())               # noqa: SLF001
+
+        def held() -> None:                                                   # a still up, judged, everything running
+            self.assertTrue(desk.veil.shown())
+            self.assertTrue(big.still_judged())
+            self.assertEqual(running(), (True, True, True, 1))
+
+        gone = (False, False, False, 0)
+        with mock.patch.object(desk_big.BigController, "_watch", watch), \
+                mock.patch.object(desk_big.BigController, "_web_view", lambda self_: desk), \
+                mock.patch.object(desk_big, "view_shows", lambda _view, *, wide: shows[0]):
+            self.open(page_id)                                                # 1. the open's still lifts
+            held()
+            shows[0] = True
+            renders.afterRendering.emit()
+            settle()
+            self.assertFalse(desk.veil.shown())
+            self.assertEqual(running(), gone)
+            shows[0] = False                                                  # 2. the close's still lifts
+            self.board().request("big", step="back")
+            self.board().request("big", step="shut")
+            settle()
+            held()
+            shows[0] = True
+            renders.afterRendering.emit()
+            settle()
+            self.assertFalse(desk.veil.shown())
+            self.assertEqual(running(), gone)
+            for end in ("end_now", "finish", "shutdown"):                     # 3. ended while the open's still is up
+                with self.subTest(end=end):
+                    shows[0] = False
+                    self.open(page_id)
+                    held()
+                    if end == "end_now":
+                        big.end_now()
+                    elif end == "finish":
+                        big._finish(animate=False)                            # noqa: SLF001
+                    else:
+                        big.shutdown()
+                    self.assertEqual(running(), gone)
+                    settle()
+                    self.assertEqual(running(), gone)                         # (nothing starts it again)
+
+    def test_a_view_still_on_the_other_step_s_frame_is_judged_only_from_this_step_s_start(self) -> None:
+        # Part 5c fixes, round 3 (stale-big 0): the check was armed at once, so an open asked while the close's still
+        # was up lifted on the old wide frame Qt still showed (and a close asked while the open's still was up, on the
+        # narrow one). The view's left edge as Qt shows it: "wide" (the backdrop) or "clear" (the board's pad).
+        self.make()
+        page_id = self.answer()[0]
+        desk, big = self.reading.desk_page(), self.desk.big
+        renders = _Renders()
+        self.addCleanup(renders.deleteLater)
+        edge = ["clear"]
+
+        def watch(self_) -> bool:
+            if self_._watched is not renders:                                 # noqa: SLF001
+                self_._unhook()                                               # noqa: SLF001
+                renders.afterRendering.connect(self_._check_view, Qt.ConnectionType.QueuedConnection)   # noqa: SLF001
+                self_._watched = renders                                      # noqa: SLF001
+            self_._edge_timer.start()                                         # noqa: SLF001
+            return True
+
+        def render(now: str) -> None:                                         # Qt shows a frame with this left edge
+            edge[0] = now
+            renders.afterRendering.emit()
+            settle()
+
+        with mock.patch.object(desk_big.BigController, "_watch", watch), \
+                mock.patch.object(desk_big.BigController, "_web_view", lambda self_: desk), \
+                mock.patch.object(desk_big, "view_shows", lambda _view, *, wide: edge[0] == ("wide" if wide else
+                                                                                               "clear")):
+            self.open(page_id)                                                # a normal open: armed at once
+            render("wide")
+            self.assertFalse(desk.veil.shown())
+            self.assertEqual((big.counts["shown:open"], big.counts["armed:open"]), (1, 0))
+            self.board().request("big", step="back")                          # a normal close: armed at once ...
+            self.board().request("big", step="shut")
+            settle()
+            self.assertTrue(desk.veil.shown())
+            self.open(page_id)                                                # ... but Enter came before Qt showed the
+            render("wide")                                                    # narrow layout: the old wide frame never
+            self.assertTrue(desk.veil.shown())                                # lifts the open's still
+            render("clear")                                                   # the page's own start (narrow) ...
+            self.assertTrue(desk.veil.shown())
+            self.assertEqual(big.counts["armed:open"], 1)
+            render("wide")                                                    # ... then its wide layout: now it goes
+            self.assertFalse(desk.veil.shown())
+            self.assertEqual(big.counts["shown:open"], 2)
+            self.board().request("big", step="back")                          # a normal close, armed at once
+            self.board().request("big", step="shut")
+            settle()
+            render("clear")
+            self.assertFalse(desk.veil.shown())
+            self.assertEqual((big.counts["shown:close"], big.counts["armed:close"]), (1, 0))
+            self.open(page_id)                                                # an open whose still is up (Qt still
+            self.assertTrue(desk.veil.shown())                                # shows the narrow frame) ...
+            self.board().request("big", step="back")                          # ... closed at once (motion off)
+            self.board().request("big", step="shut")
+            settle()
+            self.assertTrue(desk.veil.shown())
+            render("clear")                                                   # the old narrow frame never lifts it
+            self.assertTrue(desk.veil.shown())
+            render("wide")                                                    # the wide frame in flight, then
+            self.assertTrue(desk.veil.shown())
+            render("clear")                                                   # the board at its own size again
+            self.assertFalse(desk.veil.shown())
+            self.assertEqual((big.counts["shown:close"], big.counts["armed:close"]), (2, 1))
+            self.assertNotIn("veil_late:open", big.counts)
+            self.assertNotIn("veil_late:close", big.counts)
 
     def test_a_laid_answers_only_the_step_the_still_waits_for(self) -> None:
         # Part 5c fixes: any "laid" lifted the still, also one for a step already over.

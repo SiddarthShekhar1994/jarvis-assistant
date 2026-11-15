@@ -57,7 +57,11 @@ Cases:
     big        part 5c's open big in Jarvis's own window with the app's controller: a real double click opens it (the
                geometry set once, the backdrop the only new picture, the frame's scale from its rectangle to the
                whole view, the native dim), a resize to 900 x 600 keeps it spanning both columns, real Esc reverses
-               it (the scale-down, then the geometry set back once, then the dim lifts); big_x15 at 1.5x
+               it (the scale-down, then the geometry set back once, then the dim lifts); big_x15 at 1.5x. Part 5c
+               fixes, round 3: the quick routes (a step asked while the view still holds the other step's frame) read
+               as each still lifts and for 150 ms after; the dims' light at each render against the big frame's own
+               progress; what the still's check leaves running after each way it ends; the keyboard when the big
+               frame's group leaves for room while it fills the view
 
 Qt runs offscreen and Chromium's proxy is a dead address (snapshots.OFFLINE_FLAGS, as the board's engine always runs in a
 test): nothing can reach the network whatever the page does. No window is shown on the real screen.
@@ -1039,9 +1043,22 @@ def desk_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> d
     seen_at = next((at for at, ids in layouts if at >= sent_at and first_id in ids), None)
     report["first_frame_layout_ms"] = round((seen_at - sent_at) * 1000) if seen_at else -1
     reading.set_board_count(feed.frames())
+    # Part 5c fixes, round 3: the desk's entrance runs lively (with motion off there is none: the desk at once) and is
+    # dropped once it is over - what starts and ends on the board and the bar is kept.
+    board.set_motion("lively")
+    main_world(board, r"""(function () {
+      window.__entrance = [];
+      ['animationstart', 'animationend'].forEach(function (kind) {
+        document.addEventListener(kind, function (event) {
+          if (event.animationName === 'desk-in') { window.__entrance.push(kind.slice(9) + ':' + event.target.id); }
+        }, true);
+      });
+      return 1; })()""")
     for message in feed.bar_again() + [{"type": "desk", "state": "enter"}]:
         board.apply(message)
     pump(1.5)
+    board.set_motion("off")
+    report["entrance"] = json.loads(main_world(board, "JSON.stringify(window.__entrance)"))
     report["desk_shown"] = reading.desk_shown()
     report["board_in_desk"] = board.parentWidget() is reading.desk_page()
     report["view_rect"] = list(board.geometry().getRect())
@@ -2012,6 +2029,120 @@ _LAYOUT_MARK = r"""(function () {
   return 1;
 })()"""
 
+# Part 5c fixes, round 3 (stale-big 0): a second test-only mark beside it whose colour changes with each change of the
+# page's layout (wide <-> its own size), so one wide entry is told from the next: a still lifted on the other step's
+# frame, or a later frame of the other layout, shows another entry than the page's last.
+_ENTRY_COLOURS = ["#203080", "#208030", "#802030", "#808020", "#208080", "#802080", "#c0c0c0", "#604020"]
+_ENTRY_MARK = r"""(function () {
+  if (document.getElementById('probe-entry-mark')) { return 2; }
+  var mark = document.createElement('div');
+  mark.id = 'probe-entry-mark';
+  mark.style.position = 'fixed'; mark.style.right = '8px'; mark.style.bottom = '0px';
+  mark.style.width = '8px'; mark.style.height = '8px'; mark.style.zIndex = '2147483647';
+  mark.style.pointerEvents = 'none';
+  var palette = PALETTE, wide = document.body.classList.contains('wide'), entries = 0;
+  function paint() {
+    var now = document.body.classList.contains('wide');
+    if (now !== wide) { wide = now; entries += 1; }
+    mark.style.background = palette[entries % palette.length];
+  }
+  new MutationObserver(paint).observe(document.body, {attributes: true, attributeFilter: ['class']});
+  paint();
+  document.documentElement.appendChild(mark);
+  window.__entries = function () { return entries; };
+  return 1;
+})()""".replace("PALETTE", json.dumps(_ENTRY_COLOURS))
+
+# Part 5c fixes, round 3 (item 7): test-only CSSOM rules - the big card's border magenta (its rectangle is found in the
+# view's own pixels; nothing else changes), and the card hidden (the page under it at full light, then dimmed).
+_MAGENTA_CARD = r"""(function () {
+  var sheet = document.styleSheets[0];
+  sheet.insertRule('.frame.big-card { border-color: #ff00ff !important; }', sheet.cssRules.length);
+  return 1;
+})()"""
+_HIDE_CARD = r"""(function () {
+  var sheet = document.styleSheets[0];
+  window.__hideCard = sheet.insertRule('#big .big-card { visibility: hidden !important; }', sheet.cssRules.length);
+  document.body.classList.remove('dim');
+  return 1;
+})()"""
+_SHOW_CARD = "document.styleSheets[0].deleteRule(window.__hideCard); 1"
+# What is left of an entrance on the elements open big dims (part 5c fixes, round 3: an animation left on them, even one
+# that is over, keeps their dim from easing with the growth).
+_ENTRANCE_LEFT = r"""JSON.stringify((function () {
+  function left(id) { var n = document.getElementById(id); return n ? n.getAnimations().length : -1; }
+  var pill = document.getElementById('pill');
+  return {board: left('board'), bar: left('bar'), pill: left('pill'), desk_in: document.documentElement.classList.contains('desk-in'),
+          pill_shown: !!pill && pill.classList.contains('shown'), pill_arriving: !!pill && pill.classList.contains('arriving')};
+})())"""
+_GROUND_LIGHT = 0.2126 * 5 + 0.7152 * 8 + 0.0722 * 12      # holo.VOID: what the window shows under the translucent view
+
+
+def _view_pixels(view: Any, area: Any = None) -> Any:
+    """The board view's own pixels, as desk_big.view_shows reads them (QWidget.render with its children into a clear
+    image, never a window grab): the whole view, or ``area`` (logical px) drawn from the image's origin."""
+    from PySide6.QtCore import QPoint, QRect, Qt
+    from PySide6.QtGui import QImage, QRegion
+    from PySide6.QtWidgets import QWidget
+
+    area = area or QRect(0, 0, view.width(), view.height())
+    ratio = view.devicePixelRatioF() or 1.0
+    image = QImage(max(1, round(area.width() * ratio)), max(1, round(area.height() * ratio)),
+                   QImage.Format.Format_ARGB32_Premultiplied)
+    image.setDevicePixelRatio(ratio)
+    image.fill(Qt.GlobalColor.transparent)
+    view.render(image, QPoint(), QRegion(area), QWidget.RenderFlag.DrawChildren)
+    return image
+
+
+def _view_marks(view: Any) -> list[str]:
+    """[the layout mark, the entry mark] in the view's own pixels (its bottom-right corner)."""
+    from PySide6.QtCore import QRect
+
+    image = _view_pixels(view, QRect(view.width() - 16, view.height() - 8, 16, 8))
+    ratio = image.devicePixelRatio() or 1.0
+    return [image.pixelColor(int(12 * ratio), int(4 * ratio)).name(), image.pixelColor(int(4 * ratio), int(4 * ratio)).name()]
+
+
+class _Light:
+    """A kept image of the view's own pixels: a patch's mean light as the window shows it (over its ground), and the
+    big card's rectangle (the bounding box of its magenta border), in logical px."""
+
+    def __init__(self, image: Any) -> None:
+        self.ratio = image.devicePixelRatio() or 1.0
+        self.w, self.h = image.width(), image.height()
+        self.stride = image.bytesPerLine()
+        self.data = bytes(image.constBits())
+
+    def _px(self, x: int, y: int) -> tuple[int, int, int, int]:
+        at = y * self.stride + x * 4                         # ARGB32 premultiplied, little endian: B G R A
+        return self.data[at + 2], self.data[at + 1], self.data[at], self.data[at + 3]
+
+    def light(self, rect: tuple[float, float, float, float]) -> float:
+        x0, y0, x1, y1 = (round(value * self.ratio) for value in rect)
+        total = count = 0
+        for y in range(max(0, y0), min(self.h, y1), 2):
+            for x in range(max(0, x0), min(self.w, x1), 2):
+                r, g, b, a = self._px(x, y)
+                total += 0.2126 * r + 0.7152 * g + 0.0722 * b + (255 - a) / 255 * _GROUND_LIGHT
+                count += 1
+        return total / count if count else 0.0
+
+    def _magenta(self, x: int, y: int) -> bool:
+        r, g, b, _a = self._px(x, y)
+        return r >= 24 and b >= 24 and g * 2 < r and g * 2 < b and abs(r - b) < 32
+
+    def card(self, center: tuple[float, float]) -> list[int] | None:
+        """The card's rectangle from lines through ``center`` (inside the card all through its growth: it grows from
+        its frame's rectangle, whose centre this is, to the whole view)."""
+        cx, cy = round(center[0] * self.ratio), round(center[1] * self.ratio)
+        xs = [x for y in (cy - 6, cy, cy + 6) if 0 <= y < self.h for x in range(self.w) if self._magenta(x, y)]
+        ys = [y for x in (cx - 6, cx, cx + 6) if 0 <= x < self.w for y in range(self.h) if self._magenta(x, y)]
+        if len(xs) < 2 or len(ys) < 2:
+            return None
+        return [round(min(xs) / self.ratio), round(min(ys) / self.ratio), round((max(xs) + 1) / self.ratio),
+                round((max(ys) + 1) / self.ratio)]
+
 
 def big_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> dict[str, Any]:
     """Part 5c's open big in Jarvis's own window with the app's controller (see the module doc)."""
@@ -2066,6 +2197,21 @@ def big_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> di
 
     report["blocked_before"] = dict(board.counts().get("blocked", {}))
     report["view_before"] = list(board.geometry().getRect())
+    # Part 5c fixes, round 3 (stale-big 2): what the still's check leaves running - its beat, its time limit, its link
+    # to the view's renders (the view's Qt Quick window's afterRendering, counted against the window's own receivers).
+    from PySide6.QtCore import SIGNAL
+    from PySide6.QtQuickWidgets import QQuickWidget
+
+    view_proxy = board.web_view().focusProxy()
+    quick = view_proxy.quickWindow() if isinstance(view_proxy, QQuickWidget) else None
+    report["quick_window"] = quick is not None
+    hooked_before = quick.receivers(SIGNAL("afterRendering()")) if quick is not None else 0
+
+    def stops() -> list[Any]:
+        big = desk.big
+        hooked = quick.receivers(SIGNAL("afterRendering()")) - hooked_before if quick is not None else -1
+        return [big._edge_timer.isActive(), big._veil_timer.isActive(), big._watched is None, hooked]  # noqa: SLF001
+
     main_world(board, _HELD_HOOK)                            # part 5c fixes, round 2: the big frame held as it is added
     geometry = reading.desk_page().geometry_now()
     report["big_rect"] = list(geometry.big.getRect())
@@ -2097,6 +2243,7 @@ def big_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> di
     report["opened_at"] = round(opened_at, 3)
     report["open_steps"] = list(opening)                    # part 5c fixes: the page's own "laid" at the open
     report["held_at_add"] = json.loads(main_world(board, "JSON.stringify(window.__held[0] || null)"))
+    report["stops_open_lift"] = stops()                     # part 5c fixes, round 3: nothing left after the lift
     # ---- part 5c fixes: the big frame's picture follows its frame's; Tab stays in the big frame, the board inert ----
     other = tiny_jpeg_url(240, 160)                          # (a size of its own: its data: URL is its own length)
     report["card_picture_before"] = page()["cardPicture"]
@@ -2150,6 +2297,7 @@ def big_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> di
     shut_at = time.monotonic()
     pump(0.6)
     report["closed"] = page()
+    report["stops_close_lift"] = stops()                    # part 5c fixes, round 3: nothing left after the close
     report["closed_view"] = list(board.geometry().getRect())
     report["closed_rect"] = list(reading.desk_page().geometry_now().view.getRect())
     report["closed_dim"] = round(reading.chrome_dim(), 3)
@@ -2212,12 +2360,29 @@ def big_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> di
     board.bigStep.connect(steps.append)
     board.openRequested.connect(lambda _frame_id: steps.append("open"))
     main_world(board, _STEP_HOOKS % json.dumps(page_id))
+    # Part 5c fixes, round 3: a quick route (a step asked while the view may still hold the other step's frame) runs
+    # with the still's real cap - its in-between frame may never show, and then the cap lifts it (veil_late, by design)
+    # - and its late lifts are counted apart from the other steps'.
+    quick_lates: dict[str, int] = {}
+
+    class QuickRoute:
+        def __enter__(self) -> None:
+            self.before = {key_: value for key_, value in desk.big.counts.items() if key_.startswith("veil_late")}
+            desk_big.VEIL_MS = 400
+
+        def __exit__(self, *_exc: Any) -> None:
+            desk_big.VEIL_MS = 5000
+            for key_, value in desk.big.counts.items():
+                if key_.startswith("veil_late") and value != self.before.get(key_, 0):
+                    quick_lates[key_] = quick_lates.get(key_, 0) + value - self.before.get(key_, 0)
+
     # (1) motion off: Esc as the open's "laid" is made ready (two frames before it would be sent) - it never comes
     steps.clear()
-    main_world(board, "window.__hook = 'esc-at-open'; 1")
-    desk._on_open(page_id)                                   # as the page's request
-    wait_until(lambda: not desk.big.state() and steps.count("laid") >= 1, 5)
-    pump(0.5)
+    with QuickRoute():
+        main_world(board, "window.__hook = 'esc-at-open'; 1")
+        desk._on_open(page_id)                               # as the page's request
+        wait_until(lambda: not desk.big.state() and steps.count("laid") >= 1, 5)
+        pump(0.5)
     report["esc_at_open_steps"] = list(steps)
     report["esc_at_open_veil"] = reading.desk_page().veil.shown()
     # (2) motion off: Enter on a frame as the close's "laid" is made ready - only the new open's "laid" comes
@@ -2225,12 +2390,13 @@ def big_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> di
     wait_until(lambda: page()["card"] is not None, 5)
     pump(0.4)
     steps.clear()
-    main_world(board, "window.__hook = 'enter-at-close'; 1")
-    board.web_view().setFocus(Qt.FocusReason.OtherFocusReason)
-    pump(0.2)
-    QTest.keyClick(board.web_view().focusProxy(), Qt.Key.Key_Escape)
-    wait_until(lambda: "open" in steps and desk.big.state() == "open" and page()["card"] is not None, 5)
-    pump(0.6)
+    with QuickRoute():
+        main_world(board, "window.__hook = 'enter-at-close'; 1")
+        board.web_view().setFocus(Qt.FocusReason.OtherFocusReason)
+        pump(0.2)
+        QTest.keyClick(board.web_view().focusProxy(), Qt.Key.Key_Escape)
+        wait_until(lambda: "open" in steps and desk.big.state() == "open" and page()["card"] is not None, 5)
+        pump(0.6)
     report["enter_at_close_steps"] = list(steps)
     report["enter_at_close_veil"] = reading.desk_page().veil.shown()
     report["enter_at_close_state"] = desk.big.state()
@@ -2244,10 +2410,11 @@ def big_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> di
     main_world(board, f"document.getElementById('title-{page_id}').closest('.frame').focus(); 1")
     pump(0.1)
     steps.clear()
-    main_world(board, "window.__hook = 'esc-at-grow'; 1")
-    desk._on_open(page_id)
-    wait_until(lambda: not desk.big.state() and steps.count("laid") >= 1, 5)
-    pump(0.5)
+    with QuickRoute():
+        main_world(board, "window.__hook = 'esc-at-grow'; 1")
+        desk._on_open(page_id)
+        wait_until(lambda: not desk.big.state() and steps.count("laid") >= 1, 5)
+        pump(0.5)
     report["esc_at_grow_steps"] = list(steps)
     report["esc_at_grow_page"] = page()
     # ---- part 5c fixes, round 2: the still lifts only once Qt shows the view laid out at its new size. The page's
@@ -2301,12 +2468,13 @@ def big_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> di
     pump(0.4)
     ignored = desk.big.counts.get("laid:ignored", 0)
     steps.clear()
-    main_world(board, "window.__hook = 'enter-at-shut'; 1")
-    board.web_view().setFocus(Qt.FocusReason.OtherFocusReason)
-    pump(0.2)
-    QTest.keyClick(board.web_view().focusProxy(), Qt.Key.Key_Escape)
-    wait_until(lambda: "open" in steps and desk.big.state() == "open" and page()["card"] is not None, 5)
-    pump(0.8)
+    with QuickRoute():
+        main_world(board, "window.__hook = 'enter-at-shut'; 1")
+        board.web_view().setFocus(Qt.FocusReason.OtherFocusReason)
+        pump(0.2)
+        QTest.keyClick(board.web_view().focusProxy(), Qt.Key.Key_Escape)
+        wait_until(lambda: "open" in steps and desk.big.state() == "open" and page()["card"] is not None, 5)
+        pump(0.8)
     report["enter_at_shut_steps"] = list(steps)
     report["enter_at_shut_veil"] = veil.shown()
     report["enter_at_shut_state"] = desk.big.state()
@@ -2329,6 +2497,194 @@ def big_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> di
     del veil.clear
     report["back_steps"] = list(steps)
     report["back_marks"] = list(marks)
+    # ---- part 5c fixes, round 3 (stale-big 0): a step asked while the view still holds the other step's frame - Enter
+    # after the close's "shut", Enter as the close's "laid" is made ready, Esc as the big frame is added; lively and off.
+    # The still lifts on this step's own layout and the page's last entry (both marks read from the window as the still
+    # is cleared), and no frame of the other layout follows it (the view's own marks at each of its renders, 150 ms).
+    # Quick routes: the still's real cap lifts a step whose in-between frame never shows (counted veil_late) ---------
+    main_world(board, _ENTRY_MARK)
+    pump(0.2)
+    lifts: list[list[Any]] = []
+    sampled: list[list[Any]] = []
+    sampling = [False]
+
+    def lift_and_look() -> None:
+        shown = veil.shown()
+        type(veil).clear(veil)
+        if shown:
+            corner = reading.desk_page().mapTo(window, board.geometry().bottomRight() - QPoint(4, 4))
+            lifts.append([desk.big.state() or "closed",
+                          window.grab(QRect(corner, QSize(1, 1))).toImage().pixelColor(0, 0).name(),
+                          window.grab(QRect(corner - QPoint(8, 0), QSize(1, 1))).toImage().pixelColor(0, 0).name(),
+                          time.monotonic()])
+
+    def sample() -> None:                                    # each render of the view: its marks as Qt has them
+        if sampling[0]:
+            sampled.append([time.monotonic()] + _view_marks(board.web_view()))
+
+    if quick is not None:
+        quick.afterRendering.connect(sample, Qt.ConnectionType.QueuedConnection)
+    routes: dict[str, Any] = {}
+    routing = QuickRoute()
+    routing.__enter__()
+    for route in ("enter-at-shut", "enter-at-close", "esc-at-grow"):
+        for motion in ("lively", "off"):
+            holo.set_motion_level(motion)
+            board.set_motion(motion)
+            pump(0.2)
+            if route == "esc-at-grow":                       # from the board, the frame focused
+                main_world(board, f"document.getElementById('title-{page_id}').closest('.frame').focus(); 1")
+                pump(0.1)
+            else:                                            # from the frame open big
+                desk._on_open(page_id)
+                wait_until(lambda: desk.big.state() == "open" and not veil.shown() and page()["card"] is not None, 5)
+                pump(0.5)
+            counts_before = dict(desk.big.counts)
+            lifts.clear()
+            sampled.clear()
+            steps.clear()
+            veil.clear = lift_and_look
+            sampling[0] = True
+            main_world(board, "window.__hook = '%s'; 1" % route)
+            if route == "esc-at-grow":
+                desk._on_open(page_id)                       # (its Esc comes as the big frame is added)
+                wait_until(lambda: "shut" in steps and not desk.big.state() and not veil.shown(), 5)
+            else:
+                board.web_view().setFocus(Qt.FocusReason.OtherFocusReason)
+                pump(0.1)
+                QTest.keyClick(board.web_view().focusProxy(), Qt.Key.Key_Escape)
+                wait_until(lambda: "open" in steps and desk.big.state() == "open" and not veil.shown(), 5)
+            pump(0.4)
+            sampling[0] = False
+            del veil.clear
+            entries = main_world(board, "window.__entries()")
+            last = lifts[-1][3] if lifts else time.monotonic()
+            routes[f"{route}:{motion}"] = {
+                "steps": list(steps), "state": desk.big.state() or "closed",
+                "lifts": [lift[:3] for lift in lifts],
+                "after": [marks_[1:] for marks_ in sampled if last < marks_[0] <= last + 0.15],
+                "entry": _ENTRY_COLOURS[int(entries or 0) % len(_ENTRY_COLOURS)],
+                "counts": {key_: value - counts_before.get(key_, 0) for key_, value in desk.big.counts.items()
+                           if value != counts_before.get(key_, 0) and key_.startswith(("veil_late", "armed", "shown"))}}
+            if desk.big.state():                             # back to the board
+                board.web_view().setFocus(Qt.FocusReason.OtherFocusReason)
+                pump(0.1)
+                QTest.keyClick(board.web_view().focusProxy(), Qt.Key.Key_Escape)
+            wait_until(lambda: not desk.big.state() and not veil.shown(), 5)
+            pump(0.5)
+    routing.__exit__(None, None, None)
+    if quick is not None:
+        quick.afterRendering.disconnect(sample)
+    report["routes"] = routes
+    # ---- part 5c fixes, round 3 (item 7): the dims move with the frame at open big and back. Nothing of the desk's or
+    # the pill's entrance is left on what open big dims (an animation left there, even one over, kept their dim from
+    # easing with the growth); then, lively, the view's own pixels at each of its renders: the light of the backdrop,
+    # the board under the big frame's first rectangle and the bar, as a share of the way from full light to the dim's
+    # end (both read with the card hidden, test-only), against the big frame's own progress (its border magenta,
+    # test-only, found in the same pixels) ---------------------------------------------------------------------------
+    window.resize(1120, 700)
+    pump(0.8)
+    holo.set_motion_level("lively")
+    board.set_motion("lively")
+    pump(0.2)
+    board.apply({"type": "desk", "state": "enter"})
+    pump(0.7)
+    report["entrance_after_desk_in"] = json.loads(main_world(board, _ENTRANCE_LEFT))
+    board.apply({"type": "group", "id": "g99", "time": "9:59 AM", "topic": "Parked", "frames": [], "older": False,
+                 "parked": True})
+    pump(0.5)
+    report["entrance_after_pill"] = json.loads(main_world(board, _ENTRANCE_LEFT))
+    board.apply({"type": "remove_group", "id": "g99"})
+    pump(0.4)
+
+    def measure_dims(frame_id: str) -> None:               # (run at the end: a small frame on top, pinned ones under it)
+        view = board.web_view()
+        main_world(board, _MAGENTA_CARD)
+        holo.set_motion_level("off")
+        board.set_motion("off")
+        pump(0.3)
+        geometry = reading.desk_page().geometry_now()
+        bx, by = geometry.view.x() - geometry.big.x(), geometry.view.y() - geometry.big.y()
+        wide_w, wide_h, own_w = geometry.big.width(), geometry.big.height(), geometry.view.width()
+        box = frame_box(frame_id)                            # the big frame's first rectangle, in the wide view
+        first = (bx + box["left"], by + box["top"], bx + box["left"] + box["width"], by + box["top"] + box["height"])
+        center = ((first[0] + first[2]) / 2, (first[1] + first[3]) / 2)
+        # Patches clear of the big frame (and its shadow) until it is 60 % grown: the backdrop left of it, the board
+        # under it, and the bar over it (that one only while the frame is still small).
+        patches = {"backdrop": (8, 8, max(12, int(first[0] * 0.4 - 24)), wide_h - 8),
+                   "board": (bx + 15, min(wide_h - 24, int(first[3] + 0.6 * (wide_h - first[3]) + 24)),
+                             bx + own_w - 44, wide_h - 8),
+                   "bar": (bx + 15, by + 4, bx + int(own_w * 0.6), by + 28)}
+        desk._on_open(frame_id)
+        wait_until(lambda: desk.big.state() == "open" and not veil.shown() and page()["card"] is not None, 5)
+        pump(0.4)
+        main_world(board, _HIDE_CARD)
+        pump(0.4)
+        full = _Light(_view_pixels(view))
+        main_world(board, "document.body.classList.add('dim'); 1")
+        pump(0.4)
+        dimmed = _Light(_view_pixels(view))
+        main_world(board, _SHOW_CARD)
+        pump(0.2)
+        desk.big.close()
+        wait_until(lambda: not desk.big.state() and not veil.shown(), 5)
+        pump(0.4)
+        refs = {name: [round(full.light(rect), 2), round(dimmed.light(rect), 2)] for name, rect in patches.items()}
+        kept: list[Any] = []
+        keeping = [False]
+
+        def keep() -> None:
+            if keeping[0]:
+                kept.append(_view_pixels(view))
+
+        if quick is not None:
+            quick.afterRendering.connect(keep, Qt.ConnectionType.QueuedConnection)
+        samples: list[list[Any]] = []
+        renders_seen: list[list[Any]] = []
+        from_w = first[2] - first[0]
+        for motion in ("lively", "calm"):                    # (calm: the same frames, more of them in the motion)
+            holo.set_motion_level(motion)
+            board.set_motion(motion)
+            pump(0.3)
+            for step in ("open", "close"):
+                kept.clear()
+                keeping[0] = True
+                if step == "open":
+                    desk._on_open(frame_id)
+                    wait_until(lambda: desk.big.state() == "open" and not veil.shown(), 5)
+                else:
+                    desk.big.close()
+                    wait_until(lambda: not desk.big.state() and not veil.shown(), 5)
+                pump(0.6)
+                keeping[0] = False
+                for render, image in enumerate(kept):
+                    light = _Light(image)
+                    card = light.card(center) if abs(light.w / light.ratio - wide_w) <= 2 else None
+                    renders_seen.append([motion, step, render, round(light.w / light.ratio), card])
+                    if not card or card[2] - card[0] < from_w - 4:
+                        continue                             # (no big frame: not there yet, faded, or the view narrow)
+                    growth = ((card[2] - card[0]) - from_w) / (wide_w - from_w)
+                    for name, (x0, y0, x1, y1) in patches.items():
+                        if not (card[2] + 24 <= x0 or card[0] - 24 >= x1 or card[3] + 24 <= y0 or card[1] - 24 >= y1):
+                            continue                         # (under the big frame or its shadow)
+                        lit_full, lit_dim = refs[name]
+                        samples.append([motion, step, render, name,
+                                        round((lit_full - light.light((x0, y0, x1, y1))) / (lit_full - lit_dim), 3),
+                                        round(growth, 3)])
+                kept.clear()
+        if quick is not None:
+            quick.afterRendering.disconnect(keep)
+        report["dims_patches"] = refs
+        report["dims_samples"] = samples
+        report["dims_renders"] = renders_seen
+        report["dims_first"] = [round(value) for value in first]
+
+    # ---- part 5c fixes, round 3 (stale-big 2): end_now while a still is up leaves nothing of it running -------------
+    desk._on_open(page_id)
+    report["stops_before_end_now"] = [veil.shown(), desk.big.still_judged()] + stops()
+    desk.big.end_now()
+    report["stops_end_now"] = stops()
+    pump(0.6)
     # ---- part 5c fixes, round 2: the big frame's group leaves for room (a full board, a new answer) while it is big:
     # the focus goes to the board, never to <body> --------------------------------------------------------------------
     holo.set_motion_level("lively")
@@ -2362,8 +2718,81 @@ def big_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> di
     report["room_empty_active"] = page()["active"]
     report["room_empty_ids"] = [newest[0], last[0]]
     report["room_empty_board"] = desk.feed.frame_ids()
+    # ---- part 5c fixes, round 3 (stale-big 1): the big frame's group fills the board's view (its frames whole, the big
+    # frame the first of its three) and leaves for room while it is big - the oldest group the board may drop, since
+    # every older one holds a pinned frame (P on each, the page's own key): the keyboard goes to another group's frame,
+    # never to a sibling leaving with it (and from there to <body>); lively and off -----------------------------------
+    in_view = r"""JSON.stringify((function () {                 // the frames in view, as the page's focusBoard tells it
+      var box = document.getElementById('board').getBoundingClientRect();
+      return Array.prototype.filter.call(document.querySelectorAll('#board .frame'), function (f) {
+        var r = f.getBoundingClientRect(); return r.height > 0 && r.bottom > box.top + 6 && r.top < box.bottom - 40;
+      }).map(function (f) { return f.querySelector('.f-title').id.slice(6); }); })())"""
+    press_p = ("(function (n) { n.dispatchEvent(new KeyboardEvent('keydown', {key: 'p', bubbles: true})); return 1; })"
+               "(document.getElementById('title-%s').closest('.frame'))")
+    main_world(board, r"""(function () {                     // every place the keyboard goes (a frame by its id)
+      window.__trail = [];
+      document.addEventListener('focusin', function (event) {
+        var n = event.target, f = n.closest ? n.closest('.frame') : null;
+        window.__trail.push(n.closest && n.closest('#big') ? 'card' : f && f.querySelector('.f-title')
+          ? f.querySelector('.f-title').id.slice(6) : n.tagName.toLowerCase());
+      }, true);
+      return 1; })()""")
+    for index, motion in enumerate(("lively", "off")):
+        holo.set_motion_level(motion)
+        board.set_motion(motion)
+        pump(0.2)
+        desk.feed.max_groups = 8
+        for frame_id in desk.feed.frame_ids():               # every older group stays: a pinned frame each
+            if not desk.feed.flags(frame_id).get("pinned"):
+                main_world(board, press_p % frame_id)
+                pump(0.3)
+        pinned = [frame_id for frame_id in desk.feed.frame_ids() if desk.feed.flags(frame_id).get("pinned")]
+        desk._watch.reset()
+        three = _put_answer(c, desk, built, 61 + 2 * index, [("page", "page"), ("day", "day"), ("mail", "mail")])
+        pump(1.0)
+        first_in_view = json.loads(main_world(board, in_view))
+        desk._on_open(three[0])
+        wait_until(lambda: desk.big.state() == "open" and not veil.shown(), 5)
+        pump(0.6)
+        before = page()["active"]
+        desk.feed.max_groups = len(desk.feed.groups())       # full: the next answer makes room (the big frame's group)
+        desk._watch.reset()
+        main_world(board, "window.__trail = []; 1")
+        newest_ = _put_answer(c, desk, built, 62 + 2 * index, [(f"todos-s{index}", "todos")],
+                              keys={f"todos-s{index}": ""})
+        wait_until(lambda: not desk.big.state() and not veil.shown(), 5)
+        pump(0.6)
+        report[f"room_view_{motion}"] = {
+            "group": three, "pinned": pinned, "first_in_view": first_in_view, "before": before,
+            "active": page()["active"], "left": [frame_id not in desk.feed.frame_ids() for frame_id in three],
+            "board": desk.feed.frame_ids(), "newest": newest_[0],
+            "trail": json.loads(main_world(board, "JSON.stringify(window.__trail)"))}   # (never a leaving sibling)
+    # ... and a group leaving while the page's focus is on <body> (a click beside the frames): the board takes it
+    board.web_view().setFocus(Qt.FocusReason.OtherFocusReason)
+    pump(0.2)
+    main_world(board, "document.activeElement && document.activeElement.blur(); 1")
+    pump(0.2)
+    body_before = [page()["active"], main_world(board, "document.hasFocus()")]
+    desk.feed.max_groups = len(desk.feed.groups())
+    leaving = desk.feed.group_order(desk.feed.groups()[0])  # (the newest group: every older one holds a pinned frame)
+    desk._watch.reset()
+    _put_answer(c, desk, built, 65, [("todos-t", "todos")], keys={"todos-t": ""})
+    pump(0.8)
+    report["room_body"] = {"before": body_before, "active": page()["active"], "board": desk.feed.frame_ids(),
+                           "left": [frame_id not in desk.feed.frame_ids() for frame_id in leaving]}
+    measure_dims(desk.feed.frame_ids()[0])                  # (item 7: the newest group's to-do list, pinned ones under)
     report["desk_counts"] = {key_: value for key_, value in desk.counts.items() if isinstance(value, int)}
     report["big_counts_end"] = dict(desk.big.counts)
+    report["veil_late_quick"] = quick_lates
+    report["veil_late_outside_routes"] = {key_: value - quick_lates.get(key_, 0) for key_, value in
+                                          desk.big.counts.items() if key_.startswith("veil_late")}
+    # ---- part 5c fixes, round 3 (stale-big 2): shutdown while a still is up leaves nothing of it running ------------
+    desk._on_open(desk.feed.frame_ids()[0])
+    report["stops_before_shutdown"] = [veil.shown(), desk.big.still_judged()] + stops()
+    desk.big.shutdown()
+    report["stops_shutdown"] = stops()
+    desk.big.end_now()
+    pump(0.4)
     board.removeEventFilter(moves)
     window.hide()
     settle_end(report, board)

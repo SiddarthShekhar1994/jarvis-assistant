@@ -608,7 +608,9 @@ body.has-bar #more.shown { display: flex; }
   position: absolute; left: var(--pad); right: 40px; top: 50px; z-index: 4;
   display: none; justify-content: center; pointer-events: none;
 }
-body.has-bar #pill.shown { display: flex; animation: show calc(160ms * var(--k)) var(--ease-out) both; }
+body.has-bar #pill.shown { display: flex; }
+/* its fade in: while it arrives only (board.js drops "arriving" once it is over, as it drops the desk's entrance) */
+body.has-bar #pill.shown.arriving { animation: show calc(160ms * var(--k)) var(--ease-out) both; }
 .pill-btn {
   pointer-events: auto; display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 6px 0 12px;
   border: 1px solid var(--line-strong); border-radius: 15px;
@@ -636,7 +638,11 @@ body.has-bar #pill.shown { display: flex; animation: show calc(160ms * var(--k))
   .td-row { column-gap: 8px; grid-template-columns: 16px minmax(0, 1fr) fit-content(45%); }
 }
 
-/* the desk forms: the board fades in and slides 24 px from the right (280 ms; calm x1.6; off at once) */
+/* the desk forms: the board fades in and slides 24 px from the right (280 ms; calm x1.6; off at once). Once it is over the
+   page drops desk-in (board.js entranceOver; part 5c fixes, round 3): an animation left on the board or the bar, even
+   one that is over, outranks open big's dim on their opacity - kept, the dim jumped to 20 % there at the open and back
+   at the close (filled), or eased a frame behind the frame's growth (not filled), while the backdrop's and the strip's
+   eased with it. */
 :root.desk-in #board, :root.desk-in #bar { animation: desk-in calc(280ms * var(--k)) var(--ease-out) both; }
 @keyframes desk-in { from { opacity: 0; transform: translateX(24px); } }
 

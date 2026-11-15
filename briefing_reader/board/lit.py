@@ -12,7 +12,8 @@ sentence: it never guesses.
                                                    before a number, after another short form - "a.m.", "etc.", "Inc." -
                                                    unless an upper-case letter follows (never a dash, "&", a number or
                                                    a word in lower case), nor after "a.m." / "p.m." before a weekday or
-                                                   a month; not inside "2.9k" or "8:12")
+                                                   a month - a dash or a bracket glued before a short form never hides
+                                                   it; a "?" or "!" always ends one; not inside "2.9k" or "8:12")
     spoken_offset(text, words, duration_ms, position_ms) -> int
                                                    how far into ``text`` the voice is (a character offset), from its
                                                    timeline: the word being said (``words``: (start_ms, end_ms, word)
@@ -56,8 +57,13 @@ _WORD = re.compile(r"[^\W_]+")
 # break; "Dr." and "e.g." are never an end, "No." is not one before a number ("No. 5"), and the other short forms end
 # one only before a capital ("Dana's reply says no. The study group ...", "... from Acme Inc. The study group ...") -
 # never before a word in lower case, a number, a dash or "&" ("at 8 a.m. today", "Acme Inc. - the client"), and "a.m."
-# / "p.m." not before a weekday or a month ("at 9 a.m. Tuesday").
+# / "p.m." not before a weekday or a month ("at 9 a.m. Tuesday"). These short-form rules are for an end made of full
+# stops only: one that holds "?" or "!" always ends its sentence ("... by 9 a.m.? Tuesday's ..."). The short form is the
+# run of letters, digits and dots right before the stop, so a dash, slash or bracket glued before it never hides it
+# ("a slot—e.g. Tuesday", "him—Dr. Ruiz").
 _END = re.compile(r"[.!?…]+[\"'’”)\]]*(?=\s|$)|\n+")
+_CLOSING = "\"'’”)]"
+_SHORT_FORM = re.compile(r"(?:[^\W_]|\.)+$")
 _TITLES = frozenset({"mr", "mrs", "ms", "dr", "sr", "jr", "prof"})
 _NEVER_ENDS = _TITLES | {"e.g", "i.e"}
 _BEFORE_NUMBER = frozenset({"no"})
@@ -133,9 +139,10 @@ def sentence_spans(text: Any) -> list[tuple[int, int]]:
     start = 0
     for found in _END.finditer(source):
         end = found.end()
-        if found.group(0)[:1] == ".":
-            before = source[start:found.start()].split()
-            last = before[-1].casefold().lstrip(_OPENING).rstrip(".") if before else ""
+        mark = found.group(0).rstrip(_CLOSING)
+        if mark[:1] == "." and not mark.strip("."):    # full stops only: "?" or "!" always ends it
+            word = _SHORT_FORM.search(source, start, found.start())
+            last = word.group(0).casefold().rstrip(".") if word else ""
             if _no_end(last, source, end):
                 continue
         piece = source[start:end]

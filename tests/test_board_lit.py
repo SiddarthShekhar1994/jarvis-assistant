@@ -13,7 +13,8 @@ frame's anchor, never over the view; hidden while the board scrolls and back wit
 calm and off), the ring's halved glow and its paint budget; no words in the logs. Part 5c fixes: a short form's full
 stop ending its sentence before a capital, a word said otherwise never found inside another, open big dropping the
 native part at once, the HUD's ring and the Dock's painted 36 px ring following the lit state, and the sentences already
-said reading in INK_3 in the current turn (eased when lively, back on each way the speech ends).
+said reading in INK_3 in the current turn (eased when lively, back on each way the speech ends). Round 3: a "?" or "!"
+after a short form always ends its sentence, and a short form glued to a dash or a bracket is still one.
 """
 
 from __future__ import annotations
@@ -160,6 +161,35 @@ class SentenceTests(unittest.TestCase):
                                 ("Fly to St. Louis on Friday.", ["Fly to St.", "Louis on Friday."])):   # (St.: decided)
             with self.subTest(text=text):
                 self.assertEqual([text[a:b] for a, b in lit.sentence_spans(text)], sentences)
+
+    def test_a_question_or_an_exclamation_after_a_short_form_always_ends_its_sentence(self) -> None:
+        # Part 5c fixes, round 3 (lit-read 0): round 2's day-and-month rule took ".?" and ".!" after "a.m" / "p.m" for a
+        # full stop, so the question and the next sentence were one ("9 a.m.? Tuesday's ...": the mail stayed lit).
+        for text, sentences in (
+                ("Shall I answer Dana by 9 a.m.? Tuesday's study group can wait.",
+                 ["Shall I answer Dana by 9 a.m.?", "Tuesday's study group can wait."]),
+                ("Was it 3 p.m.! May was busy.", ["Was it 3 p.m.!", "May was busy."]),
+                ("Is it Acme Inc.? the client says so.", ["Is it Acme Inc.?", "the client says so."]),
+                ("Ask Dr.? Ruiz knows.", ["Ask Dr.?", "Ruiz knows."])):
+            with self.subTest(text=text):
+                self.assertEqual([text[a:b] for a, b in lit.sentence_spans(text)], sentences)
+        said = "Shall I answer Dana by 9 a.m.? Tuesday's study group can wait."
+        self.assertEqual([lit.match(said[a:b], {"f1": MAIL, "f2": DAY}) for a, b in lit.sentence_spans(said)],
+                         ["f1", "f2"])                                  # the mail, then the calendar
+
+    def test_a_short_form_glued_to_a_dash_or_a_bracket_is_still_one(self) -> None:
+        # Part 5c fixes, round 3 (lit-read 1): the word before a stop was the whole token after the last space, so a dash
+        # glued before "e.g." or "Dr." hid them and the sentence ended there.
+        for text in ("Pick a slot—e.g. Tuesday at 10—and tell Dana.",
+                     "Call him—Dr. Ruiz—today.",
+                     "Pick a slot/i.e. Tuesday, and tell Dana.",
+                     "Ask the lab [Dr. Ruiz] first.",
+                     "Meet at 8—a.m. today, sir."):
+            with self.subTest(text=text):
+                self.assertEqual([text[a:b] for a, b in lit.sentence_spans(text)], [text])
+        text = "Lunch is at noon—sharp. The study group moved."              # a word that is no short form still ends it
+        self.assertEqual([text[a:b] for a, b in lit.sentence_spans(text)],
+                         ["Lunch is at noon—sharp.", "The study group moved."])
 
     def test_each_sentence_is_found_after_the_one_before_it(self) -> None:
         # Part 5c fixes, round 2 (lit-read 0): each sentence was looked for from the turn's start, so one that repeats

@@ -44,8 +44,12 @@ the exact moment the steps cross); the backdrop opaque and dimmed as a picture. 
 the window shows the page laid out at its new size (a layout mark read the moment it is cleared, lively and off, open
 and close), the big frame held as it is added, a "laid" too early never lifting it, a close's "laid" never answering
 an open asked after its shut, and the focus going back to the board however big ends (Tab in, its group leaving for
-room); the hostile list with an item only each of the page's checks catches. Skipped when this PySide6 has no
-QtWebEngine 6.8+.
+room); the hostile list with an item only each of the page's checks catches. Round 3: a step asked while the view still
+holds the other step's frame (Enter after the close's shut or as its "laid" is made ready, Esc as the big frame is
+added; lively and off) lifting on its own layout and the page's last entry, with no frame of the other layout after
+it; the still's beat, time limit and render hook all stopped after each lift, end_now and shutdown; the keyboard never
+handed to a sibling leaving with the big frame's group; the dims moving together with the big frame's own progress,
+nothing of the desk's or the pill's entrance left on what they dim. Skipped when this PySide6 has no QtWebEngine 6.8+.
 """
 
 from __future__ import annotations
@@ -498,7 +502,10 @@ class DeskTests(BoardProbeCase):
         # (at 1.5x the view's 503 px are 755 device pixels: a third of a CSS px more)
         self.assertEqual((round(page["frame_left"]), round(page["frame_width"]), round(page["board_top"])),
                          (15, 448, 44))
-        self.assertTrue(page["desk_in"])
+        # Round 3 (changed on purpose): the desk's entrance runs on the board and the bar, then is dropped - its class
+        # used to stay for the session, and the animation left on them kept open big's dim from easing (it jumped).
+        self.assertEqual(sorted(report["entrance"]), ["end:bar", "end:board", "start:bar", "start:board"])
+        self.assertFalse(page["desk_in"])
         grab = report["grab"]
         self.assertEqual(grab["ratio"], ratio)
         self.assertEqual(grab["color"], grab["tile_amber"])            # the grab shows the board's waiting frame
@@ -986,8 +993,9 @@ class BigTests(BoardProbeCase):
                 for motion in ("lively", "off"):
                     self.assertEqual(report[f"lift_marks_{motion}"], [["open", "#ff00ff"], ["closed", "#00ffff"]],
                                      motion)
-                self.assertNotIn("veil_late:open", report["big_counts_end"])
-                self.assertNotIn("veil_late:close", report["big_counts_end"])
+                # Round 3 (changed on purpose): the quick routes below run with the real cap, which lifts a still whose
+                # in-between frame never shows (veil_late, by design); none of the other steps here ever needs it.
+                self.assertEqual(sum(report["veil_late_outside_routes"].values()), 0)
                 # Added held: unseen and untouched, nothing dimmed yet, and it has the focus.
                 self.assertEqual(report["held_at_add"], ["0", "none", False, True])
                 self.assertTrue(report["stray_laid_veil"])                    # a "laid" too early never lifts it
@@ -995,6 +1003,86 @@ class BigTests(BoardProbeCase):
                 # the scale-down runs (it is seen), then the close's once the board is its own size again.
                 self.assertEqual(report["back_steps"], ["back", "shut", "laid"])
                 self.assertEqual(report["back_marks"], [["closing", "#ff00ff"], ["closed", "#00ffff"]])
+
+    def test_a_step_asked_while_the_view_holds_the_other_step_s_frame_lifts_on_its_own_layout(self) -> None:
+        # Part 5c fixes, round 3 (stale-big 0): the check was armed at once, so an open asked right after the close's
+        # "shut" (or as its "laid" was made ready) lifted on the old wide frame Qt still showed, and a close asked as the
+        # big frame was added lifted on the old narrow one - then the in-between frames showed. Each still is read as it
+        # is cleared (the layout mark, and the entry mark that tells one wide entry from the next) and every render of
+        # the view for 150 ms after it.
+        for case in ("big", "big_x15"):
+            report = self.check(case)
+            for name, route in report["routes"].items():
+                with self.subTest(case=case, route=name):
+                    want = "closed" if name.startswith("esc-at-grow") else "open"
+                    layout = "#ff00ff" if want == "open" else "#00ffff"
+                    self.assertEqual(route["state"], want, route)
+                    self.assertTrue(route["lifts"], route)
+                    for state, mark, _entry in route["lifts"]:            # each still on its own step's layout ...
+                        self.assertEqual(mark, "#ff00ff" if state in ("open", "closing") else "#00ffff", route)
+                    self.assertEqual(route["lifts"][-1], [want, layout, route["entry"]], route)   # ... the page's last
+                    for marks in route["after"]:                          # and no frame of another layout after it
+                        self.assertEqual(marks, [layout, route["entry"]], route)
+
+    def test_the_still_s_beat_cap_and_render_hook_stop_however_it_goes(self) -> None:
+        # Part 5c fixes, round 3 (stale-big 2): with the real view - after each lift, after end_now and shutdown while a
+        # still is up - no beat, no time limit, no Qt Quick window watched and no slot left on its afterRendering.
+        for case in ("big", "big_x15"):
+            with self.subTest(case=case):
+                report = self.check(case)
+                self.assertTrue(report["quick_window"])
+                gone = [False, False, True, 0]
+                for name in ("stops_open_lift", "stops_close_lift", "stops_end_now", "stops_shutdown"):
+                    self.assertEqual(report[name], gone, name)
+                for name in ("stops_before_end_now", "stops_before_shutdown"):   # (a still up, judged, all of it on)
+                    self.assertEqual(report[name], [True, True, True, True, False, 1], name)
+
+    def test_the_dims_move_together_with_the_frame_at_open_big_and_back(self) -> None:
+        # Part 5c fixes, round 3 (item 7): the desk's entrance animation (filled) still held the board's and the bar's
+        # opacity, so their dim jumped to 20 % at the open (fully dim under the big frame's first frame) and back at the
+        # close, while the backdrop and the strip eased with the frame. The view's own pixels at each render: each
+        # patch's dim (0 full light, 1 the dim's end) against the big frame's own progress, lively and calm.
+        for case in ("big", "big_x15"):
+            with self.subTest(case=case):
+                report = self.check(case)
+                desk_in, pill = report["entrance_after_desk_in"], report["entrance_after_pill"]
+                self.assertEqual((desk_in["board"], desk_in["bar"], desk_in["desk_in"]), (0, 0, False))
+                self.assertEqual((pill["pill_shown"], pill["pill"], pill["pill_arriving"]), (True, 0, False))
+                for name, (lit_full, lit_dim) in report["dims_patches"].items():
+                    self.assertGreater(lit_full - lit_dim, 3, name)       # each patch has light to lose
+                samples = report["dims_samples"]
+                for step in ("open", "close"):                            # both patches seen, in some motion
+                    self.assertTrue(any({"backdrop", "board"} <= {sample[3] for sample in samples
+                                                                   if sample[:2] == [motion, step]}
+                                        for motion in ("lively", "calm")), (step, samples))
+                frames: dict[tuple, list[float]] = {}
+                for motion, step, render, name, dim, growth in samples:
+                    self.assertLessEqual(abs(dim - growth), 0.1, (motion, step, render, name, dim, growth))
+                    frames.setdefault((motion, step, render), []).append(dim)
+                for key, dims in frames.items():                          # and together in each frame
+                    self.assertLessEqual(max(dims) - min(dims), 0.1, (key, dims))
+
+    def test_the_keyboard_never_goes_to_a_sibling_leaving_with_the_big_frame(self) -> None:
+        # Part 5c fixes, round 3 (stale-big 1): the big frame's group (its frames filling the board's view, the big frame
+        # the first of three) left for room; ending big handed the keyboard to the next frame in view - a sibling that
+        # was leaving too - and it fell to <body>.
+        for case in ("big", "big_x15"):
+            report = self.check(case)
+            for motion in ("lively", "off"):
+                with self.subTest(case=case, motion=motion):
+                    room = report[f"room_view_{motion}"]
+                    self.assertEqual(room["first_in_view"][:2], room["group"][:2])   # the big frame, then its sibling
+                    self.assertEqual(room["before"], "card")
+                    self.assertEqual(room["left"], [True, True, True])            # its whole group left for room
+                    self.assertIn(room["active"], ["frame:" + frame_id for frame_id in room["board"]])
+                    for sibling in room["group"][1:]:                             # never handed to a leaving one
+                        self.assertNotIn(sibling, room["trail"])
+            with self.subTest(case=case, focus="body"):
+                # ... and with the page's focus on <body> as a group leaves (a click beside the frames): the board's.
+                body = report["room_body"]
+                self.assertEqual(body["before"], ["body", True])
+                self.assertTrue(body["left"] and all(body["left"]))
+                self.assertIn(body["active"], ["frame:" + frame_id for frame_id in body["board"]])
 
     def test_a_close_s_laid_never_answers_an_open_asked_after_its_shut(self) -> None:
         # Part 5c fixes, round 2 (open-big 0): Enter between the page's "shut" and its narrow resize - the close's "laid"

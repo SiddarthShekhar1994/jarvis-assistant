@@ -9,9 +9,12 @@ can't leave the board's view and an animated view geometry re-rasters Chromium o
    of the window (desk_view.Veil) stands over that place until the board's view itself shows the page laid out at the
    new size - its own pixels (view_shows), checked after each of its renders, on each of the page's ``big`` "laid" and
    on a 16 ms beat - or VEIL_MS: Qt keeps showing the view's old frame at its new size for a while after the page is
-   laid out. With no web view (a stand-in page) or no backdrop sent, the page's "laid" lifts it. Nothing jumps. The
-   Dock and the header dim to 20 % natively; the cue line's native part goes at once, and the covered conversation
-   takes no focus and no click (desk_view.DeskPage.set_big) until it is back.
+   laid out. A step asked while the view still holds the other step's frame (an open right after a close's "shut", a
+   close while the open's still is up: the view already shows this step's end before its geometry is set) is judged
+   only from a render of its own start on, so that old frame never lifts it (counted "armed:<step>"; the cap when that
+   render never comes). With no web view (a stand-in page) or no backdrop sent, the page's "laid" lifts it. Nothing
+   jumps. The Dock and the header dim to 20 % natively; the cue line's native part goes at once, and the covered
+   conversation takes no focus and no click (desk_view.DeskPage.set_big) until it is back.
 2. **The scale, in the page.** The frame grows from its rectangle to the whole view (260 ms expo-out, transform and
    opacity only) while the backdrop and the other frames dim to 20 % - held, unseen, until then, so the view never
    shows it at its full size first; its footer says "ESC BACK TO THE BOARD" and "OPEN BIG" joins its meta.
@@ -131,6 +134,8 @@ class BigController(QObject):
                                              # view), "close" (the board back at its size) or "" (none: one is ignored)
         self._still = ""                     # the step the still stands for while it is up ("open", "close")
         self._judged = False                 # it goes by the view's own pixels (view_shows), else by the page's "laid"
+        self._armed = True                   # the view's check counts: False while the view may still show the other
+                                             # step's frame - until a render shows this step's own start
         self._backdrop_sent = False          # the page has a backdrop (what tells the wide layout from the old frame)
         self._watched: Any = None            # the view's Qt Quick window whose renders the check follows
         self._veil_timer = QTimer(self)
@@ -245,10 +250,15 @@ class BigController(QObject):
     def _hold(self, step: str, page: Any, rect: QRect) -> None:
         """``step`` (open, close) begins: the page's "laid" for it is to come, and a still stands over ``rect`` until
         the view shows the page laid out at its new size - judged by the view's own pixels when it can be (a web view,
-        a backdrop sent), else lifted by that "laid"."""
+        a backdrop sent), else lifted by that "laid". Called before the geometry is set: a view that already shows
+        this step's end (it still holds the other step's frame - an open asked right after a close's "shut", a close
+        while the open's still is up) is armed only once a render shows this step's own start (the opposite edge), so
+        that old frame never lifts the still; a normal step is armed at once."""
         self._laid_for = step
         self._edge_timer.stop()
         self._still, self._judged = "", False
+        view = self._web_view() if self._backdrop_sent else None
+        self._armed = view is None or not view_shows(view, wide=step == "open")
         if self._veil(page, rect):
             self._still = step
             self._judged = self._backdrop_sent and self._watch()
@@ -296,7 +306,9 @@ class BigController(QObject):
 
     def _check_view(self) -> None:
         """The still goes once the board's view itself shows the page laid out at its new size: wide for the open (the
-        backdrop at its left edge), its own size for the close (the board's pad clear there) - view_shows."""
+        backdrop at its left edge), its own size for the close (the board's pad clear there) - view_shows. Not armed
+        yet (the view showed this step's end before its geometry was set: the other step's frame), it first waits for
+        a render of this step's own start."""
         if not self._judged:
             return
         page = self._page()
@@ -304,7 +316,13 @@ class BigController(QObject):
         if page is None or view is None or not page.veil.shown():
             self._lift_veil()                            # nothing to judge any more: nothing left running
             return
-        if view_shows(view, wide=self._still == "open"):
+        wide = self._still == "open"
+        if not self._armed:
+            if view_shows(view, wide=not wide):          # this step's own start: from here a pass counts
+                self._armed = True
+                self.counts[f"armed:{self._still}"] += 1
+            return
+        if view_shows(view, wide=wide):
             self.counts[f"shown:{self._still}"] += 1
             self._lift_veil()
 
@@ -320,7 +338,7 @@ class BigController(QObject):
         self._veil_timer.stop()
         self._edge_timer.stop()
         self._unhook()
-        self._still, self._judged = "", False
+        self._still, self._judged, self._armed = "", False, True
         page = self._page()
         if page is not None:
             page.veil.clear()
@@ -437,7 +455,7 @@ class BigController(QObject):
         self._shut_timer.stop()
         self._edge_timer.stop()
         self._unhook()
-        self._still, self._judged = "", False
+        self._still, self._judged, self._armed = "", False, True
 
 
 __all__ = ["BigController", "CLOSE_MS", "DIM", "EDGE_CLEAR", "EDGE_NEED", "EDGE_OPAQUE", "EDGE_POLL_MS", "EDGE_ROWS",

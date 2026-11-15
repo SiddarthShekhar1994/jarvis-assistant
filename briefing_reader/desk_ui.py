@@ -857,7 +857,8 @@ class DeskController(QObject):
 
     def _todo_entries(self, outcome: Any, words: str) -> list[tuple[Any, ...]]:
         """The to-dos the answer proposes or speaks of: the to-do cards (waiting on the owner's OK, done, open) and
-        the deadlines as Jarvis shows them."""
+        the deadlines as Jarvis shows them. With none left, a to-do list still on the board is built again empty (its
+        last item left its sources: a rule paused, the cards' cap, a briefing update) - never a new empty frame."""
         from . import actions
 
         proposed = [card for card in getattr(outcome, "cards", ()) if getattr(card, "kind", "") == actions.TODO]
@@ -874,13 +875,15 @@ class DeskController(QObject):
             if record:
                 statuses[action.id] = str(record.get("status", ""))
         deadlines = list(getattr(host, "_merged_deadlines", ()) or ())
-        if not todos and not deadlines:
+        if not todos and not deadlines and not self.feed.holds("todos"):
             return []
         return [("todos", lambda frame_id: board_frames.from_todos(todos, deadlines, frame_id=frame_id, now=self._now(),
                                                                    statuses=statuses), "", "", "todos")]
 
     def _followup_entries(self, words: str) -> list[tuple[Any, ...]]:
-        """The follow-ups, when the answer speaks of them (the productivity bundle's list, waiting first)."""
+        """The follow-ups, when the answer speaks of them (the productivity bundle's list, waiting first). With none
+        left, a follow-ups list still on the board is built again empty (a scan dropped its rows, a row was hidden) -
+        never a new empty frame."""
         controller = getattr(self.host, "productivity", None)
         if controller is None or not about_followups(words):
             return []
@@ -889,7 +892,7 @@ class DeskController(QObject):
         except Exception as exc:  # noqa: BLE001
             logger.debug("Board: the follow-ups were not read (%s)", type(exc).__name__)
             return []
-        if not rows:
+        if not rows and not self.feed.holds("followups"):
             return []
         now = self._now()
         return [("followups", lambda frame_id: board_frames.from_followups(rows, frame_id=frame_id, now=now), "", "",

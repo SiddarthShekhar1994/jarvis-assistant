@@ -50,6 +50,9 @@ raises for odd data.
                                                    left on the board: the desk stays for it)
         take_changed() -> list[str]                the frames sent again with "changed" since the last call
         set_compact(compact) -> list[dict]         the bar without its frames count (the folded Dock's column)
+        holds(key) -> bool                         a frame built from ``key`` is on the board (not closed, not cleared):
+                                                   the desk builds it again for a later answer about it even when its
+                                                   source has emptied ("todos", "followups": their own empty state)
         set_turn(answer, entry_id)                 the conversation turn that put the answer's frames up
         turn_frames(entry_id) -> (group id, count) its group and how many of its frames are on the board now (cleared
                                                    ones are not; ("", 0): none - its token goes)
@@ -260,6 +263,11 @@ class BoardFeed:
             if frame.key == key and not frame.closed and not frame.cleared:
                 return frame.id
         return None
+
+    def holds(self, key: str) -> bool:
+        """A frame built from ``key`` is on the board (not closed, not taken away by a Clear): a later answer about it
+        builds it again, also with nothing left in its source (its own empty state)."""
+        return bool(key) and self._keyed(str(key)) is not None
 
     # ---- reading ---------------------------------------------------------------------------------------------------
 

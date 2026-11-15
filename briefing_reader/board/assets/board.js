@@ -709,10 +709,10 @@
     return !!rec && (rec.list ? groups.get(rec.id) === rec : frames.get(rec.id) === rec);
   }
 
-  function boardFrames() {                     // the frames shown, in board order (every group's, top to bottom)
-    return Array.prototype.filter.call(root.querySelectorAll('.frame'), function (node) {
-      var rec = records.get(node);
-      return current(rec) && !rec.closed && !rec.away && !parked(rec);
+  function boardFrames() {                     // the frames shown, in board order (every group's, top to bottom); never
+    return Array.prototype.filter.call(root.querySelectorAll('.frame'), function (node) {   // one whose group has
+      var rec = records.get(node);                                                         // left (its frames go next)
+      return current(rec) && !rec.closed && !rec.away && !parked(rec) && !(rec.group && !groups.has(rec.group));
     }).map(function (node) { return records.get(node); });
   }
 
@@ -1298,7 +1298,22 @@
     groups.forEach(function (group) {
       any = any || group.parked;
     });
-    stripParts.pill.classList.toggle('shown', any && onDesk());
+    var pill = stripParts.pill, shown = any && onDesk();
+    if (shown && !pill.classList.contains('shown') && K > 0) {
+      pill.classList.add('arriving');          // its fade in, dropped once over (entranceOver)
+    }
+    pill.classList.toggle('shown', shown);
+    if (!shown) {
+      pill.classList.remove('arriving');
+    }
+  }
+
+  function entranceOver(event) {               // the desk's or the pill's entrance is over: it is dropped, since an
+    if (event.animationName === 'desk-in') {   // animation left on the board, the bar or the pill - even one over -
+      document.documentElement.classList.remove('desk-in');   // outranks open big's dim on their opacity: the dim
+    } else if (event.animationName === 'show' && stripParts && event.target === stripParts.pill) {   // jumped there,
+      stripParts.pill.classList.remove('arriving');            // or eased a frame behind the frame's growth
+    }
   }
 
   // ---- the index strip, "N more below" and the fades (DESIGN-SPEC 3.1) ----------------------------------------------
@@ -1804,9 +1819,10 @@
             function () { el.remove(); refresh(); });
     }
     refresh();
-    if (hadFocus) {
-      focusBoard();
-    }
+    var active = document.activeElement;       // the keyboard never stays with the group leaving, nor on <body>
+    if (hadFocus || el.contains(active) || ((!active || active === document.body) && document.hasFocus())) {
+      focusOwed = !focusBoard();               // (where its big frame's end may have left it; nothing on the board
+    }                                          // just now: the next frame shown takes it)
     return true;
   };
 
@@ -1861,8 +1877,8 @@
     }
     var html = document.documentElement;
     html.classList.remove('desk-in');
-    if (message.state === 'enter') {
-      void html.getBoundingClientRect();         // the fade and slide start again
+    if (message.state === 'enter' && K > 0) {    // (motion off: there at once, no entrance to drop)
+      void html.getBoundingClientRect();         // the fade and slide start again (dropped once over: entranceOver)
       html.classList.add('desk-in');
     }
     measureWidth();
@@ -2393,6 +2409,7 @@
     root.addEventListener('focusin', onFocusIn);
     root.addEventListener('focusout', onFocusOut);
     root.addEventListener('scroll', onScroll, {passive: true});
+    document.addEventListener('animationend', entranceOver);
     document.addEventListener('dragstart', function (event) { event.preventDefault(); });   // nothing leaves the page
     window.addEventListener('resize', function () {
       placeBig();                              // first: the board keeps its own box in a wide view (open big)

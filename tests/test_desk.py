@@ -9,7 +9,9 @@ the desk forming with the first group (the ring's flight, the bar, desk: enter) 
 button; folded Home's "9 on the board"; empty Home unchanged with its hint line (counted once a session, gone after
 three); the turns (labels, the current turn's marks, bubbles, tokens, the last exchange and Earlier when compact);
 each feed (LIVE pictures, research, cards, to-dos, follow-ups) in its group's order; go_approvals; the HUD's chip; the
-fallback desk; Space in the board; a grab of the window showing the board at 1x and 1.5x; no words in the logs.
+fallback desk; Space in the board; a grab of the window showing the board at 1x and 1.5x; no words in the logs. Part 5c
+fixes, round 3: a to-do or follow-ups list on the board whose last item left its sources is sent empty (CHANGED) by a
+later answer about it, and no new empty frame appears when none is on the board.
 """
 
 from __future__ import annotations
@@ -717,6 +719,63 @@ class FeedTests(DeskApp):
             self.answer("Who am I waiting on?", self.outcome(say="You're waiting on Ana."))
         kinds = [frame["kind"] for frame in self.board().frames_sent().values()]
         self.assertEqual(kinds, ["mail_list"])
+
+    def test_an_emptied_to_do_list_reaches_the_board(self) -> None:
+        # Part 5c fixes, round 3 (feed-lockdown 0): the last to-do left its sources without a decision (a rule paused,
+        # the cards' cap, a briefing update) and no deadline was left, so the desk built nothing - the list on the board
+        # kept "WAITS" and "1 · 1 waits" while Jarvis said it was empty.
+        self.make(lines=(), size=(1120, 700))
+        todo = parse_action_line(TODO_LINE)
+        self.c._set_actions([todo])                                        # it waits on Approvals
+        self.c._merged_deadlines = []
+        self.answer("What's on my list?", self.outcome(say="One to-do waits for your OK, sir.", cards=(todo,)))
+        (frame,) = [frame for frame in self.board().frames_sent().values() if frame["kind"] == "todos"]
+        self.assertEqual((frame["meta"], [row["state"] for row in frame["body"]["rows"]]), ("1 · 1 waits", ["waits"]))
+        self.c._set_actions([])                                            # it left its sources undecided
+        sent = len(self.board().of_type("frame"))
+        self.answer("What's on my list now?", self.outcome(say="Your list is empty, sir."))
+        again = self.board().of_type("frame")[sent:]
+        self.assertEqual([(message["id"], message["status"], message["changed"]) for message in again],
+                         [(frame["id"], "empty", True)])                   # the same frame: empty now, CHANGED
+        self.assertEqual(again[0]["status_text"], board_frames.TODOS_EMPTY)
+        self.assertEqual(len(self.board().groups_sent()), 1)              # no new frame, no new group
+
+    def test_an_emptied_follow_ups_list_reaches_the_board(self) -> None:
+        # Part 5c fixes, round 3 (feed-lockdown 0): the scan replaced the rows (the person replied) or the row was hidden.
+        self.make(productivity=True)
+        from briefing_reader import persona
+        from briefing_reader.followups import WAITING, FollowupItem
+
+        item = FollowupItem("r1", "k", WAITING, "work", thread_id="t", last_gmail_id="g", who="Prof. Ana Ruiz",
+                            subject="Lab section moved to Thursday", since=datetime(2026, 10, 3, 8, tzinfo=PDT))
+        with mock.patch.object(self.c.productivity, "followups", return_value=SimpleNamespace(rows=(item,))):
+            self.answer("Who am I waiting on?", self.outcome(say="You're waiting on Ana."))
+        (frame,) = self.board().frames_sent().values()
+        sent = len(self.board().of_type("frame"))
+        with mock.patch.object(self.c.productivity, "followups", return_value=SimpleNamespace(rows=())):
+            self.answer("Am I still waiting on anyone?", self.outcome(say="Nobody, sir."))
+        again = self.board().of_type("frame")[sent:]
+        self.assertEqual([(message["id"], message["status"], message["changed"]) for message in again],
+                         [(frame["id"], "empty", True)])
+        self.assertEqual(again[0]["status_text"], persona.FOLLOWUPS_EMPTY)
+
+    def test_with_no_such_list_on_the_board_no_empty_frame_appears(self) -> None:
+        self.make(lines=(), productivity=True)
+        self.c._set_actions([])
+        self.c._merged_deadlines = []
+        with mock.patch.object(self.c.productivity, "followups", return_value=SimpleNamespace(rows=())):
+            self.answer("What's on my list? Who am I waiting on?", self.outcome(say="Nothing, sir."))
+        self.assertEqual([board.of_type("frame") for board in self.boards], [[]] * len(self.boards))   # no frame
+        todo = parse_action_line(TODO_LINE)                               # a list that the owner closed ...
+        self.c._set_actions([todo])
+        self.answer("What's on my list?", self.outcome(say="One to-do, sir.", cards=(todo,)))
+        (frame,) = self.board().frames_sent().values()
+        self.board().request("close", id=frame["id"])
+        settle()
+        self.c._set_actions([])
+        sent = len(self.board().of_type("frame"))
+        self.answer("What's on my list now?", self.outcome(say="Your list is empty, sir."))
+        self.assertEqual(self.board().of_type("frame")[sent:], [])        # ... is not built again: nothing sent
 
     def test_limits_the_oldest_group_leaves_whole(self) -> None:
         self.make()
