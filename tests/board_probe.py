@@ -61,7 +61,10 @@ Cases:
                fixes, round 3: the quick routes (a step asked while the view still holds the other step's frame) read
                as each still lifts and for 150 ms after; the dims' light at each render against the big frame's own
                progress; what the still's check leaves running after each way it ends; the keyboard when the big
-               frame's group leaves for room while it fills the view
+               frame's group leaves for room while it fills the view. Round 4: a group leaving for room after the
+               owner's real click on a group's head left the focus on <body> (the board scrolled into an older
+               group; the answer parked): the focus, the scroll and the page's reading report as they were, and the
+               parked answer landing once quiet; lively and off
 
 Qt runs offscreen and Chromium's proxy is a dead address (snapshots.OFFLINE_FLAGS, as the board's engine always runs in a
 test): nothing can reach the network whatever the page does. No window is shown on the real screen.
@@ -2767,19 +2770,96 @@ def big_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> di
             "active": page()["active"], "left": [frame_id not in desk.feed.frame_ids() for frame_id in three],
             "board": desk.feed.frame_ids(), "newest": newest_[0],
             "trail": json.loads(main_world(board, "JSON.stringify(window.__trail)"))}   # (never a leaving sibling)
-    # ... and a group leaving while the page's focus is on <body> (a click beside the frames): the board takes it
-    board.web_view().setFocus(Qt.FocusReason.OtherFocusReason)
+    # ---- part 5c fixes, round 4 (stale-big 0): a group leaves for room while the page's focus is on <body> because the
+    # owner clicked beside the frames (a real click on a group's head): it stays there - no frame takes it, nothing
+    # scrolls, the page says nothing of reading focus - so the answer that made the room, parked while the owner reads,
+    # still lands once it is quiet. The board is scrolled into an older group, the frame the board would pick (its
+    # focusBoard) cut at its top; lively and off ---------------------------------------------------------------------
+    room_look = r"""JSON.stringify((function (refId, victim) {
+      var root = document.getElementById('board'), box = root.getBoundingClientRect();
+      var ref = document.getElementById('title-' + refId), place = ref && ref.closest('.frame').getBoundingClientRect();
+      var pick = Array.prototype.filter.call(root.querySelectorAll('.frame'), function (f) {   // focusBoard's own pick
+        var r = f.getBoundingClientRect();
+        return r.height > 0 && r.bottom > box.top + 6 && r.top < box.bottom - 40; })[0];
+      var head = Array.prototype.filter.call(root.querySelectorAll('.g-head'), function (h) {  // a staying group's head
+        var r = h.getBoundingClientRect();
+        return h.id !== 'group-' + victim && r.height > 0 && r.top >= box.top + 4 && r.bottom <= box.bottom - 44; })[0];
+      var r = head && head.getBoundingClientRect();
+      return {scrollTop: root.scrollTop, refTop: place ? place.top - box.top : null,
+              refHeight: place ? place.height : 0, pick: pick ? pick.querySelector('.f-title').id.slice(6) : '',
+              victimShown: !!document.getElementById('group-' + victim),
+              head: r ? {left: r.left, top: r.top, width: r.width, height: r.height} : null};
+    })(%s, %s))"""
+    cut_at_top = ("(function (id) { var root = document.getElementById('board'), box = root.getBoundingClientRect();"
+                  " var r = document.getElementById('title-' + id).closest('.frame').getBoundingClientRect();"
+                  " root.scrollTop += r.top - box.top + 20; return root.scrollTop; })(%s)")
+    reading_posts: list[list[bool]] = []
+    board.readingChanged.connect(lambda pointer, focus: reading_posts.append([pointer, focus]))
+    report["room_body"] = {}
+    for index, motion in enumerate(("lively", "off")):
+        holo.set_motion_level(motion)
+        board.set_motion(motion)
+        pump(0.2)
+        desk.feed.max_groups = 8
+        for step in range(3):                                # three answers of three frames each: the board scrolls
+            desk._watch.reset()
+            _put_answer(c, desk, built, 70 + 10 * index + step, [("page", "page"), ("day", "day"), ("mail", "mail")],
+                        keys={"mail": ""})
+            pump(0.8)
+        groups_now = desk.feed.groups()                      # (newest first)
+        desk.feed.max_groups = len(groups_now)               # full: the next answer makes room
+        victim = next(group_id for group_id in reversed(groups_now)   # the oldest group with nothing pinned
+                      if not any(desk.feed.flags(frame_id).get("pinned")
+                                 for frame_id in desk.feed.group_order(group_id)))
+        ref = desk.feed.group_order(groups_now[1])[0]        # the next group's first frame (a satellite) ...
+        main_world(board, cut_at_top % json.dumps(ref))      # ... 20 px of it above the board's top
+        pump(0.4)
+        look = json.loads(main_world(board, room_look % (json.dumps(ref), json.dumps(victim))))
+        board.web_view().setFocus(Qt.FocusReason.OtherFocusReason)
+        pump(0.2)
+        head = look["head"]
+        if head:                                             # the owner's click beside the frames: on a group's head
+            QTest.mouseClick(board.web_view().focusProxy(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                             QPoint(int(head["left"] + head["width"] / 2), int(head["top"] + head["height"] / 2)))
+        pump(0.4)
+        before = json.loads(main_world(board, room_look % (json.dumps(ref), json.dumps(victim))))
+        body_before = [page()["active"], main_world(board, "document.hasFocus()")]
+        posts_from = len(reading_posts)
+        _put_answer(c, desk, built, 79 + 10 * index, [(f"todos-r{index}", "todos")], keys={f"todos-r{index}": ""})
+        parked = desk.feed.parked_groups()
+        pump(0.8)
+        after = json.loads(main_world(board, room_look % (json.dumps(ref), json.dumps(victim))))
+        active = page()["active"]
+        posts = reading_posts[posts_from:]
+        # Quiet from here: the pointer goes (offscreen it never moves away itself), and the quiet time (made short) is
+        # up.
+        QApplication.sendEvent(board.web_view().focusProxy(), QEvent(QEvent.Type.Leave))
+        pump(0.3)
+        quiet_s, desk._watch.quiet_s = desk._watch.quiet_s, 0.2
+        pump(0.4)
+        desk._schedule_landing()
+        pump(0.4)
+        landed = [group_id for group_id in parked
+                  if not desk.feed.is_parked(group_id) and group_id in desk.feed.groups()]
+        desk._watch.quiet_s = quiet_s
+        report["room_body"][motion] = {
+            "head": bool(head), "before": body_before, "pick_before": before["pick"], "ref": ref,
+            "ref_top_before": before["refTop"], "ref_height": before["refHeight"], "scroll_before": before["scrollTop"],
+            "victim": victim, "victim_left": victim not in desk.feed.groups(), "victim_shown": after["victimShown"],
+            "parked": parked, "active": active, "scroll": after["scrollTop"], "ref_top": after["refTop"],
+            "posts": posts, "landed": landed}
+        pump(0.4)
+    # The board as it was before the round-4 case (the newest group's lone to-do list, the pinned ones under, the
+    # board at its top): every other group leaves for this answer's room.
+    holo.set_motion_level("off")
+    board.set_motion("off")
     pump(0.2)
-    main_world(board, "document.activeElement && document.activeElement.blur(); 1")
-    pump(0.2)
-    body_before = [page()["active"], main_world(board, "document.hasFocus()")]
-    desk.feed.max_groups = len(desk.feed.groups())
-    leaving = desk.feed.group_order(desk.feed.groups()[0])  # (the newest group: every older one holds a pinned frame)
+    desk.feed.max_groups = 3
     desk._watch.reset()
     _put_answer(c, desk, built, 65, [("todos-t", "todos")], keys={"todos-t": ""})
     pump(0.8)
-    report["room_body"] = {"before": body_before, "active": page()["active"], "board": desk.feed.frame_ids(),
-                           "left": [frame_id not in desk.feed.frame_ids() for frame_id in leaving]}
+    report["room_body_after"] = [desk.feed.frame_ids(), [desk.feed.flags(frame_id).get("pinned")
+                                                         for frame_id in desk.feed.frame_ids()]]
     measure_dims(desk.feed.frame_ids()[0])                  # (item 7: the newest group's to-do list, pinned ones under)
     report["desk_counts"] = {key_: value for key_, value in desk.counts.items() if isinstance(value, int)}
     report["big_counts_end"] = dict(desk.big.counts)

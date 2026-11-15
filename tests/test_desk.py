@@ -11,11 +11,15 @@ three); the turns (labels, the current turn's marks, bubbles, tokens, the last e
 each feed (LIVE pictures, research, cards, to-dos, follow-ups) in its group's order; go_approvals; the HUD's chip; the
 fallback desk; Space in the board; a grab of the window showing the board at 1x and 1.5x; no words in the logs. Part 5c
 fixes, round 3: a to-do or follow-ups list on the board whose last item left its sources is sent empty (CHANGED) by a
-later answer about it, and no new empty frame appears when none is on the board.
+later answer about it, and no new empty frame appears when none is on the board. Round 4: the follow-ups only from a
+list known to be empty (scanned, no scan running, no account's note, not off on this PC - never "Nothing waits on you"
+from a list nobody read), and an emptied list whose group left for the same answer's room never comes back as a new
+frame (at the 8 groups, and at the 24 frames without pushing out a second group).
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -742,28 +746,82 @@ class FeedTests(DeskApp):
 
     def test_an_emptied_follow_ups_list_reaches_the_board(self) -> None:
         # Part 5c fixes, round 3 (feed-lockdown 0): the scan replaced the rows (the person replied) or the row was hidden.
+        # Round 4 (changed on purpose): the views are the controller's own (followups.make_view), scanned - a stand-in
+        # with its rows only was never a list known to be empty.
         self.make(productivity=True)
-        from briefing_reader import persona
-        from briefing_reader.followups import WAITING, FollowupItem
+        from briefing_reader import followups, persona
 
-        item = FollowupItem("r1", "k", WAITING, "work", thread_id="t", last_gmail_id="g", who="Prof. Ana Ruiz",
-                            subject="Lab section moved to Thursday", since=datetime(2026, 10, 3, 8, tzinfo=PDT))
-        with mock.patch.object(self.c.productivity, "followups", return_value=SimpleNamespace(rows=(item,))):
+        now = self.c._now()
+        with mock.patch.object(self.c.productivity, "followups",
+                               return_value=followups.make_view([self.waiting_row()], scanned_at=now)):
             self.answer("Who am I waiting on?", self.outcome(say="You're waiting on Ana."))
         (frame,) = self.board().frames_sent().values()
         sent = len(self.board().of_type("frame"))
-        with mock.patch.object(self.c.productivity, "followups", return_value=SimpleNamespace(rows=())):
+        with mock.patch.object(self.c.productivity, "followups", return_value=followups.make_view([], scanned_at=now)):
             self.answer("Am I still waiting on anyone?", self.outcome(say="Nobody, sir."))
         again = self.board().of_type("frame")[sent:]
         self.assertEqual([(message["id"], message["status"], message["changed"]) for message in again],
                          [(frame["id"], "empty", True)])
         self.assertEqual(again[0]["status_text"], persona.FOLLOWUPS_EMPTY)
 
+    @staticmethod
+    def waiting_row():
+        from briefing_reader.followups import WAITING, FollowupItem
+
+        return FollowupItem("r1", "k", WAITING, "work", thread_id="t", last_gmail_id="g", who="Prof. Ana Ruiz",
+                            subject="Lab section moved to Thursday", since=datetime(2026, 10, 3, 8, tzinfo=PDT))
+
+    def test_a_follow_ups_list_nobody_read_never_says_nothing_waits(self) -> None:
+        # Part 5c fixes, round 4 (feed 0): an empty follow-ups list reached the board whenever its frame was there -
+        # also while the list was off on this PC, an account could not be read or a scan ran: "Nothing waits on you"
+        # (CHANGED, its sound) where the app's own panel shows the off line or the sign-in line. Only a list known to be
+        # empty by the app's own rule (scanned, no scan running, no note, not off) says so.
+        self.make(productivity=True)
+        from briefing_reader import followups, persona
+
+        controller, now = self.c.productivity, self.c._now()
+        scanned = followups.make_view([self.waiting_row()], scanned_at=now)
+
+        def ask(view, words: str = "Am I still waiting on anyone?") -> list:
+            """A follow-ups answer while the controller's list is ``view`` (None: its own): the frames it sent."""
+            sent = len(self.board().of_type("frame")) if self.boards else 0
+            listed = (mock.patch.object(controller, "followups", return_value=view) if view is not None
+                      else contextlib.nullcontext())
+            with listed:
+                self.answer(words, self.outcome(say="Let me look, sir."))
+            return self.board().of_type("frame")[sent:]
+
+        ask(scanned, "Who am I waiting on?")
+        (frame,) = self.board().frames_sent().values()
+        self.assertEqual(frame["meta"], persona.followups_meta(1, 0))
+        for name, view in (("off on this PC", followups.make_view([], scanned_at=now, off=True)),
+                           ("an account's note", followups.make_view([], notes=[("work", "identity")], scanned_at=now)),
+                           ("a scan running", followups.make_view([], scanning=True)),
+                           ("a scan running again", followups.make_view([], scanned_at=now, scanning=True)),
+                           ("not scanned since it was turned on", followups.make_view([]))):
+            with self.subTest(view=name):
+                ask(scanned)                                               # (its row, whatever a case before did)
+                self.assertEqual(ask(view), [])                            # the frame keeps what it says
+        ask(scanned)
+        controller.set_off(True)                                           # the owner's own switch, as the menu has it
+        self.assertTrue(controller.followups().off)
+        self.assertEqual(ask(None, "Do I owe anyone a reply?"), [])
+        self.assertEqual(self.desk().feed.take_changed(), [])              # nothing was ever marked CHANGED
+        again = ask(followups.make_view([], scanned_at=now))               # a scan that really lists nobody
+        self.assertEqual([(message["id"], message["status"], message["changed"]) for message in again],
+                         [(frame["id"], "empty", True)])
+        self.assertEqual(again[0]["status_text"], persona.FOLLOWUPS_EMPTY)
+
     def test_with_no_such_list_on_the_board_no_empty_frame_appears(self) -> None:
+        # Round 4 (changed on purpose): the follow-ups view is a scanned one that lists nothing (known to be empty), so
+        # only the board not holding the list keeps the empty frame away.
         self.make(lines=(), productivity=True)
+        from briefing_reader import followups
+
         self.c._set_actions([])
         self.c._merged_deadlines = []
-        with mock.patch.object(self.c.productivity, "followups", return_value=SimpleNamespace(rows=())):
+        with mock.patch.object(self.c.productivity, "followups",
+                               return_value=followups.make_view([], scanned_at=self.c._now())):
             self.answer("What's on my list? Who am I waiting on?", self.outcome(say="Nothing, sir."))
         self.assertEqual([board.of_type("frame") for board in self.boards], [[]] * len(self.boards))   # no frame
         todo = parse_action_line(TODO_LINE)                               # a list that the owner closed ...
@@ -776,6 +834,75 @@ class FeedTests(DeskApp):
         sent = len(self.board().of_type("frame"))
         self.answer("What's on my list now?", self.outcome(say="Your list is empty, sir."))
         self.assertEqual(self.board().of_type("frame")[sent:], [])        # ... is not built again: nothing sent
+
+    def research_answer(self, index: int, words: str = "", *, three: bool = False) -> None:
+        """A web answer: its research frame, and with ``three`` a web search and a page on its way too (three new
+        frames, each its own); ``words``: what else the owner asked."""
+        task = None
+        if three:
+            task = self.live_task()
+            task.step(live.WEB_SEARCH, "Searched the web").picture(pictures.search_picture(
+                f"question {index}", [(f"Result {index}", f"https://r{index}.example.org/")]))
+            task.step(live.WEB_FETCH, "Read a page").picture(pictures.page_pending(f"https://p{index}.example.org/s"))
+        report = ResearchReport(f"Answer {index} [1].", sources=(WebSource(1, "S", "https://a.example.org",
+                                                                           "a.example.org"),))
+        self.answer(f"web: question {index}{words}", self.outcome(research=report, say=f"Answer {index}, sir."),
+                    task=task)
+
+    def check_room(self, first, emptied, words: str, kind: str, key: str) -> None:
+        """The board at its caps with the list (frames of ``kind``, built from ``key``) alone in the oldest group,
+        nothing pinned: at the 8 groups (one frame each), then - a fresh app - at the 24 frames too (three in each later
+        group). The list's last item leaves (``emptied``); an answer whose earlier new frames make room by taking the
+        list's group, and that speaks of the list (``words``), puts no new empty list up, and only the oldest group
+        leaves for it."""
+        for cap, three in (("8 groups", False), ("24 frames", True)):
+            with self.subTest(cap=cap):
+                first()
+                (frame,) = [frame for frame in self.board().frames_sent().values() if frame["kind"] == kind]
+                for index in range(7):
+                    self.research_answer(index, three=three)
+                feed = self.desk().feed
+                self.assertEqual((len(feed.groups()), feed.frames()), (8, 22 if three else 8))
+                self.assertEqual(feed.groups()[-1], frame["group"])        # the list's group is the oldest
+                emptied()
+                removed = len(self.board().of_type("remove_group"))
+                self.research_answer(9, words, three=three)
+                self.assertEqual([message["id"] for message in self.board().of_type("remove_group")[removed:]],
+                                 [frame["group"]])                         # only the oldest group left
+                self.assertEqual([frame_ for frame_ in self.board().frames_sent().values() if frame_["kind"] == kind],
+                                 [])                                        # no new empty list
+                self.assertFalse(feed.holds(key))
+                self.assertEqual((len(feed.groups()), feed.frames()), (8, 24 if three else 8))
+
+    def test_an_emptied_to_do_list_whose_group_left_for_the_answer_s_room_never_comes_back_new(self) -> None:
+        # Part 5c fixes, round 4 (feed 1): the desk checked that the board holds the list before the answer's earlier
+        # frames made room; an earlier new frame took the list's group, and the empty list came back as a NEW frame
+        # ("No to-dos or deadlines.") - at the 24 frames it pushed a second group out for it.
+        def first() -> None:
+            self.make(lines=())
+            todo = parse_action_line(TODO_LINE)
+            self.c._set_actions([todo])
+            self.c._merged_deadlines = []
+            self.answer("What's on my list?", self.outcome(say="One to-do waits for your OK, sir.", cards=(todo,)))
+
+        self.check_room(first, lambda: self.c._set_actions([]), " and is anything due?", "todos", "todos")
+
+    def test_an_emptied_follow_ups_list_whose_group_left_for_the_answer_s_room_never_comes_back_new(self) -> None:
+        # Part 5c fixes, round 4 (feed 1): the same for the follow-ups ("Nothing waits on you" as a new frame).
+        from briefing_reader import followups
+
+        def first() -> None:
+            self.make(productivity=True)
+            self.scan = followups.make_view([self.waiting_row()], scanned_at=self.c._now())
+            listed = mock.patch.object(self.c.productivity, "followups", side_effect=lambda: self.scan)
+            listed.start()
+            self.addCleanup(listed.stop)
+            self.answer("Who am I waiting on?", self.outcome(say="You're waiting on Ana."))
+
+        def emptied() -> None:                                             # a scan that lists nobody now
+            self.scan = followups.make_view([], scanned_at=self.c._now())
+
+        self.check_room(first, emptied, " and am I waiting on anyone?", "mail_list", "followups")
 
     def test_limits_the_oldest_group_leaves_whole(self) -> None:
         self.make()

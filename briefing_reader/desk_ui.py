@@ -858,7 +858,10 @@ class DeskController(QObject):
     def _todo_entries(self, outcome: Any, words: str) -> list[tuple[Any, ...]]:
         """The to-dos the answer proposes or speaks of: the to-do cards (waiting on the owner's OK, done, open) and
         the deadlines as Jarvis shows them. With none left, a to-do list still on the board is built again empty (its
-        last item left its sources: a rule paused, the cards' cap, a briefing update) - never a new empty frame."""
+        last item left its sources: a rule paused, the cards' cap, a briefing update) - never a new empty frame, also
+        when an earlier frame of the same answer made room by taking the list's group (checked again as it is built).
+        The app's own DEADLINES and Approvals say "none" the same way whether or not the briefing or the calendar was
+        read, so an empty list here is the app's own "none" too."""
         from . import actions
 
         proposed = [card for card in getattr(outcome, "cards", ()) if getattr(card, "kind", "") == actions.TODO]
@@ -877,26 +880,42 @@ class DeskController(QObject):
         deadlines = list(getattr(host, "_merged_deadlines", ()) or ())
         if not todos and not deadlines and not self.feed.holds("todos"):
             return []
-        return [("todos", lambda frame_id: board_frames.from_todos(todos, deadlines, frame_id=frame_id, now=self._now(),
-                                                                   statuses=statuses), "", "", "todos")]
+
+        def build(frame_id: str) -> Any:
+            if not todos and not deadlines and not self.feed.holds("todos"):
+                return board_frames.Built()      # its frame left for this answer's room: no new empty one
+            return board_frames.from_todos(todos, deadlines, frame_id=frame_id, now=self._now(), statuses=statuses)
+
+        return [("todos", build, "", "", "todos")]
 
     def _followup_entries(self, words: str) -> list[tuple[Any, ...]]:
         """The follow-ups, when the answer speaks of them (the productivity bundle's list, waiting first). With none
         left, a follow-ups list still on the board is built again empty (a scan dropped its rows, a row was hidden) -
-        never a new empty frame."""
+        only when the list is known to be empty by the app's own rule (a scan ran and none runs now, no account's note,
+        not turned off on this PC: never "Nothing waits on you" from a list nobody read), and never as a new empty
+        frame, also when an earlier frame of the same answer made room by taking the list's group (checked again as it
+        is built)."""
         controller = getattr(self.host, "productivity", None)
         if controller is None or not about_followups(words):
             return []
         try:
-            rows = list(controller.followups().rows)
+            view = controller.followups()
+            rows = list(view.rows)
+            known_empty = (getattr(view, "scanned_at", None) is not None and not getattr(view, "scanning", False)
+                           and not getattr(view, "notes", ()) and not getattr(view, "off", False))
         except Exception as exc:  # noqa: BLE001
             logger.debug("Board: the follow-ups were not read (%s)", type(exc).__name__)
             return []
-        if not rows and not self.feed.holds("followups"):
+        if not rows and (not known_empty or not self.feed.holds("followups")):
             return []
         now = self._now()
-        return [("followups", lambda frame_id: board_frames.from_followups(rows, frame_id=frame_id, now=now), "", "",
-                 "followups")]
+
+        def build(frame_id: str) -> Any:
+            if not rows and not self.feed.holds("followups"):
+                return board_frames.Built()      # its frame left for this answer's room: no new empty one
+            return board_frames.from_followups(rows, frame_id=frame_id, now=now)
+
+        return [("followups", build, "", "", "followups")]
 
     # ---- teardown --------------------------------------------------------------------------------------------------
 

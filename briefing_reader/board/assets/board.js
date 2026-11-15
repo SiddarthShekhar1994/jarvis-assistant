@@ -1802,7 +1802,8 @@
       return true;
     }
     groups.delete(message.id);
-    var hadFocus = group.el.contains(document.activeElement);
+    var before = document.activeElement;       // where the keyboard was (given back below only if this took it)
+    var hadFocus = group.el.contains(before);
     Array.from(frames.values()).forEach(function (rec) {     // the whole group leaves, its frames with it
       if (rec.group === group.id) {
         release(rec);
@@ -1819,10 +1820,15 @@
             function () { el.remove(); refresh(); });
     }
     refresh();
-    var active = document.activeElement;       // the keyboard never stays with the group leaving, nor on <body>
-    if (hadFocus || el.contains(active) || ((!active || active === document.body) && document.hasFocus())) {
-      focusOwed = !focusBoard();               // (where its big frame's end may have left it; nothing on the board
-    }                                          // just now: the next frame shown takes it)
+    // The keyboard never stays with the group leaving, nor on <body> where this left it (its big frame's end dropped
+    // it there); a <body> focus the owner made (a click beside the frames) stays as it is - nothing moves, nothing
+    // scrolls. Never while the board is inert: big's own end gives the keyboard back (focusBack). Nothing on the board
+    // just now: the next frame shown takes it.
+    var active = document.activeElement;
+    var dropped = (!active || active === document.body) && !!before && before !== document.body;
+    if (!root.inert && (hadFocus || el.contains(active) || (dropped && document.hasFocus()))) {
+      focusOwed = !focusBoard();
+    }
     return true;
   };
 

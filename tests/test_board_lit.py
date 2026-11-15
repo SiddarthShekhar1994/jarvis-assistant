@@ -14,7 +14,8 @@ calm and off), the ring's halved glow and its paint budget; no words in the logs
 stop ending its sentence before a capital, a word said otherwise never found inside another, open big dropping the
 native part at once, the HUD's ring and the Dock's painted 36 px ring following the lit state, and the sentences already
 said reading in INK_3 in the current turn (eased when lively, back on each way the speech ends). Round 3: a "?" or "!"
-after a short form always ends its sentence, and a short form glued to a dash or a bracket is still one.
+after a short form always ends its sentence, and a short form glued to a dash or a bracket is still one. Round 4: an
+ellipsis, a closing quote or a bracket after a short form's full stop changes nothing (only a "?" or "!" ends it there).
 """
 
 from __future__ import annotations
@@ -176,6 +177,29 @@ class SentenceTests(unittest.TestCase):
         said = "Shall I answer Dana by 9 a.m.? Tuesday's study group can wait."
         self.assertEqual([lit.match(said[a:b], {"f1": MAIL, "f2": DAY}) for a, b in lit.sentence_spans(said)],
                          ["f1", "f2"])                                  # the mail, then the calendar
+
+    def test_an_ellipsis_after_a_short_form_s_full_stop_changes_nothing(self) -> None:
+        # Part 5c fixes, round 4 (lit-read 0): round 3 kept the short-form rules for an end made of full stops only, so
+        # ".…" (a full stop, then the ellipsis character) always ended the sentence - "Ask Dr.… Ruiz" split after
+        # "Dr.…", where the same text with three dots stays one. Only a "?" or "!" takes an end out of the rules.
+        for text in ("Ask Dr.… Ruiz knows.", "Pens, paper, etc.… and more.", "Ask Dr... Ruiz knows."):
+            with self.subTest(text=text):
+                self.assertEqual([text[a:b] for a, b in lit.sentence_spans(text)], [text])
+        text = "I see.… Then we go."                                         # a plain word before the stop: it ends
+        self.assertEqual([text[a:b] for a, b in lit.sentence_spans(text)], ["I see.…", "Then we go."])
+        for text, sentences in (("Ask Dr.? Ruiz knows.", ["Ask Dr.?", "Ruiz knows."]),   # round 3's: still two
+                                ("Was it 3 p.m.! May was busy.", ["Was it 3 p.m.!", "May was busy."])):
+            with self.subTest(text=text):
+                self.assertEqual([text[a:b] for a, b in lit.sentence_spans(text)], sentences)
+
+    def test_a_quote_or_a_bracket_after_a_short_form_s_full_stop_changes_nothing(self) -> None:
+        # Part 5c fixes, round 4 (lit-read 1): nothing pinned the closing quotes and brackets after a short form's full
+        # stop - an end such as '."' or '.)' must still go through the short-form rules.
+        for text in ('He said "Dr." Ruiz knows.', "Pick a slot (e.g.) Tuesday."):
+            with self.subTest(text=text):
+                self.assertEqual([text[a:b] for a, b in lit.sentence_spans(text)], [text])
+        text = 'Is it 9 a.m.?" Tuesday is clear.'                            # a "?" before the quote: it ends
+        self.assertEqual([text[a:b] for a, b in lit.sentence_spans(text)], ['Is it 9 a.m.?"', "Tuesday is clear."])
 
     def test_a_short_form_glued_to_a_dash_or_a_bracket_is_still_one(self) -> None:
         # Part 5c fixes, round 3 (lit-read 1): the word before a stop was the whole token after the last space, so a dash

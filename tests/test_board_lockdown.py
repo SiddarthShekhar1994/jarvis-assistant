@@ -49,7 +49,10 @@ holds the other step's frame (Enter after the close's shut or as its "laid" is m
 added; lively and off) lifting on its own layout and the page's last entry, with no frame of the other layout after
 it; the still's beat, time limit and render hook all stopped after each lift, end_now and shutdown; the keyboard never
 handed to a sibling leaving with the big frame's group; the dims moving together with the big frame's own progress,
-nothing of the desk's or the pill's entrance left on what they dim. Skipped when this PySide6 has no QtWebEngine 6.8+.
+nothing of the desk's or the pill's entrance left on what they dim. Round 4: a group leaving for room while the owner's
+click left the page's focus on <body> leaves it there and the board's scroll as it was (no reading focus said; the
+answer that made the room, parked while the owner read, lands once quiet), lively and off. Skipped when this PySide6 has
+no QtWebEngine 6.8+.
 """
 
 from __future__ import annotations
@@ -1077,12 +1080,34 @@ class BigTests(BoardProbeCase):
                     self.assertIn(room["active"], ["frame:" + frame_id for frame_id in room["board"]])
                     for sibling in room["group"][1:]:                             # never handed to a leaving one
                         self.assertNotIn(sibling, room["trail"])
-            with self.subTest(case=case, focus="body"):
-                # ... and with the page's focus on <body> as a group leaves (a click beside the frames): the board's.
-                body = report["room_body"]
-                self.assertEqual(body["before"], ["body", True])
-                self.assertTrue(body["left"] and all(body["left"]))
-                self.assertIn(body["active"], ["frame:" + frame_id for frame_id in body["board"]])
+
+    def test_a_group_leaving_for_room_leaves_the_owner_s_body_focus_and_the_scroll_as_they_are(self) -> None:
+        # Part 5c fixes, round 4 (stale-big 0): round 3's re-check after a group left gave the keyboard to the board
+        # whenever the page's focus was on <body> - also a <body> focus the owner made by clicking beside the frames:
+        # the frame in view took it and was scrolled whole into view, the page said the focus was in the board, and the
+        # answer that made the room, parked while the owner read, never landed once quiet (DESIGN-SPEC 3.5). Round 3's
+        # own case (changed on purpose): the owner's click now stays on <body>.
+        for case in ("big", "big_x15"):
+            report = self.check(case)
+            for motion in ("lively", "off"):
+                with self.subTest(case=case, motion=motion):
+                    body = report["room_body"][motion]
+                    self.assertTrue(body["head"], body)                           # a real click on a group's head ...
+                    self.assertEqual(body["before"], ["body", True], body)         # ... left the focus on <body>
+                    self.assertEqual(body["pick_before"], body["ref"], body)       # the frame the board would pick ...
+                    self.assertLess(body["ref_top_before"], -10, body)             # ... cut at its top
+                    self.assertGreater(body["ref_top_before"] + body["ref_height"], 6, body)
+                    self.assertEqual(len(body["parked"]), 1, body)                # the owner reads: the answer parks
+                    self.assertTrue(body["victim_left"], body)                    # its room: a whole group left
+                    self.assertFalse(body["victim_shown"], body)
+                    self.assertEqual(body["active"], "body", body)                # the focus stays where it was,
+                    self.assertEqual(body["scroll"], body["scroll_before"], body)  # nothing scrolls,
+                    self.assertAlmostEqual(body["ref_top"], body["ref_top_before"], delta=0.5, msg=body)
+                    self.assertNotIn(True, [focus for _pointer, focus in body["posts"]], body)   # no reading focus,
+                    self.assertEqual(body["landed"], body["parked"], body)        # and it lands once quiet
+            with self.subTest(case=case, board="after"):                          # (the board as before the case:
+                _frames, pinned = report["room_body_after"]                       # the lone to-do list, pinned ones
+                self.assertEqual(pinned, [False, True, True])                     # under it)
 
     def test_a_close_s_laid_never_answers_an_open_asked_after_its_shut(self) -> None:
         # Part 5c fixes, round 2 (open-big 0): Enter between the page's "shut" and its narrow resize - the close's "laid"
