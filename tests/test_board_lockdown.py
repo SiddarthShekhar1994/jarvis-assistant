@@ -51,8 +51,12 @@ it; the still's beat, time limit and render hook all stopped after each lift, en
 handed to a sibling leaving with the big frame's group; the dims moving together with the big frame's own progress,
 nothing of the desk's or the pill's entrance left on what they dim. Round 4: a group leaving for room while the owner's
 click left the page's focus on <body> leaves it there and the board's scroll as it was (no reading focus said; the
-answer that made the room, parked while the owner read, lands once quiet), lively and off. Skipped when this PySide6 has
-no QtWebEngine 6.8+.
+answer that made the room, parked while the owner read, lands once quiet), lively and off. Round 5: a closed frame's own
+end with the page's expiry before the app's removal keeps the keyboard in the closed frame (no reading or focus report,
+no scroll, its keys doing nothing), then a staying frame has it after remove_group and after remove, never <body>,
+lively and off; and every probe's page plays the probe's own motion level whatever this PC's "Show animations" says
+(Chromium told no reduced motion), with one probe told reduced motion showing the page's own rule still holds. Skipped
+when this PySide6 has no QtWebEngine 6.8+.
 """
 
 from __future__ import annotations
@@ -71,7 +75,13 @@ from briefing_reader.board import view
 PROBE = Path(__file__).with_name("board_probe.py")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CASES = ("lockdown", "control", "media", "keys", "fallback", "shell", "kinds", "desk", "desk_x15", "ways", "lit", "big",
-         "big_x15")
+         "big_x15", "expiry", "reduced")
+# Round 5: what each probe's engine is told of reduced motion (tests/board_probe.py NO_REDUCED_MOTION, REDUCED_MOTION).
+NO_REDUCED_MOTION = "--force-prefers-no-reduced-motion"
+REDUCED_MOTION = "--force-prefers-reduced-motion"
+# Round 5: the media probe's engine lists Chromium's stand-in devices (tests/board_probe.py FAKE_MEDIA_DEVICES), written
+# out here so a dropped or misspelled switch fails the test whatever devices this PC has plugged in.
+FAKE_MEDIA_DEVICES = "--use-fake-device-for-media-stream"
 REPORTS: dict[str, dict] = {}
 FAILURES: dict[str, str] = {}
 WINDOW_KEYS = ["Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+6", "Ctrl+7", "Ctrl+8", "Ctrl+9", "Ctrl+,",
@@ -130,6 +140,11 @@ class BoardProbeCase(unittest.TestCase):
         self.assertEqual(report["platform"], "offscreen")
         self.assertTrue(report["registered"], "jarvis-board: is registered before the QApplication")
         self.assertTrue(report["webengine_flags_offline"], "Chromium runs with the dead proxy in tests")
+        # Round 5: the page plays the probe's own motion level whatever this PC's "Show animations" says - the switch
+        # among Jarvis's own flags in the probe's engine, while the inherited value the app judges stays accepted.
+        self.assertEqual(report["motion_flag"], REDUCED_MOTION if case == "reduced" else NO_REDUCED_MOTION)
+        self.assertTrue(report["motion_flag_in_engine"])
+        self.assertEqual(report["inherited_flags_judged"], "")
         self.assertFalse(report["profile_warning"], "the profile always goes after its page")
         if case != "media":
             self.assertEqual(report["children_end"], 0, "no Chromium process is left")
@@ -262,7 +277,10 @@ class ControlTests(BoardProbeCase):
 
 class MediaTests(BoardProbeCase):
     def test_the_microphone_and_camera_are_refused_and_no_renderer_is_left(self) -> None:
+        # Round 5: the probe's engine lists Chromium's stand-in devices, never this PC's: with its microphone unplugged
+        # Chromium said NotFoundError before asking for any permission, and the refusal below was never counted.
         report = self.report("media")
+        self.assertIn(FAKE_MEDIA_DEVICES, report["engine_flags"])
         self.assertTrue(report["ready"])
         self.assertTrue(report["media"].startswith("rejected "), report["media"])
         self.assertGreaterEqual(report["counts"]["refused:permissions"], 1)
@@ -317,6 +335,22 @@ class ShellTests(BoardProbeCase):
         self.assertEqual(report["lively"], {"classes": ["frame", "arriving"], "trace": "0.26s", "ticks_at": "0.26s",
                                             "content": "rise"})
         self.assertEqual(report["lively_after"], {"classes": ["frame"], "opacity": "1"})
+
+    def test_the_page_plays_the_probe_s_own_level_whatever_this_pc_s_setting(self) -> None:
+        # Round 5: Chromium's reduced motion follows Windows' "Show animations"; the probe's engine is told no reduced
+        # motion, so lively is lively here even with that setting off.
+        look = self.report("shell")["lively_look"]
+        self.assertEqual((look["reduce"], look["k"], look["level"]), (False, "1", ["motion-lively"]))
+        self.assertIn("arriving", look["classes"])
+
+    def test_the_page_s_own_reduced_motion_plays_lively_as_off(self) -> None:
+        # Round 5: the one probe whose engine is told reduced motion (as that Windows setting off tells it): the page's
+        # own rule still holds - K 0 (no draw-in) and board.css's --k 0, at lively.
+        report = self.report("reduced")
+        self.assertTrue(report["ready"])
+        look = report["lively"]
+        self.assertEqual((look["reduce"], look["k"], look["level"]), (True, "0", ["motion-lively"]))
+        self.assertEqual((look["classes"], look["trace"]), (["frame"], "0s"))
 
     def test_calm_is_slower_by_1_6_without_the_rise(self) -> None:
         self.assertEqual(self.report("shell")["calm"], {"classes": ["frame", "arriving"], "trace": "0.416s",
@@ -1176,3 +1210,38 @@ class BigTests(BoardProbeCase):
                 self.assertEqual(report["esc_at_grow_steps"], ["back", "shut", "laid"])   # none from a growth
                 self.assertIsNone(report["esc_at_grow_page"]["card"])
                 self.assertEqual(report["esc_at_grow_page"]["active"], "frame:" + report["page_id"])
+
+
+class ExpiryTests(BoardProbeCase):
+    """Part 5c fixes, round 5 (focus 0): a closed frame's own end with the app's controller (tests/board_probe.py
+    expiry_case), the page's expiry before the app's removal."""
+
+    def test_a_closed_frame_s_own_end_keeps_the_keyboard_on_the_board(self) -> None:
+        # The owner closed a frame from the keyboard (its Bring back has the focus). The page's own expiry hid that
+        # Bring back before the app's removal came, and the keyboard fell to <body>: remove_group (the group's last
+        # frame) and remove (not its last) then had nothing to give back, and the board's keys were dead.
+        report = self.report("expiry")
+        self.assertTrue(report["ready"])
+        for motion in ("lively", "off"):
+            for route in ("group_last", "not_last"):
+                with self.subTest(motion=motion, route=route):
+                    row = report["expiry"][motion][route]
+                    frame = row["frame"]
+                    self.assertTrue(row["closed"])
+                    self.assertEqual(row["after_delete"], f"bring_back:{frame}")
+                    self.assertTrue(row["marked_before_expiry"])                # (the window's marks came first)
+                    self.assertEqual(row["expired"], frame)                     # the page's own expiry ...
+                    self.assertTrue(row["expired_first"])                       # ... while the app still had it
+                    self.assertEqual(row["at_expiry"], f"frame:{frame}")        # the keyboard stays in the frame ...
+                    self.assertEqual(row["reading_posts"], [])                  # ... with no reading report,
+                    self.assertEqual(row["focus_posts"], [])                    # no focus report,
+                    self.assertIn(row["cut"][0], ("bottom", "top"))             # (its row cut 10 px by the view's
+                    self.assertGreaterEqual(row["cut"][1], 9)                   # edge: a focus that scrolls shows)
+                    self.assertEqual(row["scroll_at_expiry"], row["scroll_before"])   # and no scroll
+                    self.assertTrue(row["keys_in_window"])
+                    self.assertEqual(row["keys_asked"], [])                     # Enter, P, Delete there: nothing
+                    self.assertEqual(row["after_keys"], f"frame:{frame}")
+                    self.assertTrue(row["left"])
+                    self.assertEqual(row["group_left"], route == "group_last")  # remove_group, else remove
+                    self.assertTrue(row["staying"], row["after"])               # then a staying frame has it
+                    self.assertTrue(row["has_focus"])

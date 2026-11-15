@@ -984,8 +984,16 @@
     el.classList.toggle('closed', closed);
     el.classList.remove('expired');
     if (closed) {
-      // Bring back is offered CLOSED_MS; the app takes the frame away then (it is the source of truth).
-      rec.closedTimer = setTimeout(function () { el.classList.add('expired'); }, CLOSED_MS);
+      // Bring back is offered CLOSED_MS; the app takes the frame away then (it is the source of truth). The keyboard on
+      // its Bring back moves to the frame itself first (the same frame: no focus or reading report, no scroll): hidden,
+      // the button would drop it to <body>, and the app's remove (which hands a leaving frame's keyboard to a staying
+      // one) comes a few ms later.
+      rec.closedTimer = setTimeout(function () {
+        if (el.contains(document.activeElement)) {
+          el.focus({preventScroll: true});
+        }
+        el.classList.add('expired');
+      }, CLOSED_MS);
     }
     refresh();
     if (closed) {

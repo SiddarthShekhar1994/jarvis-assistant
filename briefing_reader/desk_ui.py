@@ -859,7 +859,8 @@ class DeskController(QObject):
         """The to-dos the answer proposes or speaks of: the to-do cards (waiting on the owner's OK, done, open) and
         the deadlines as Jarvis shows them. With none left, a to-do list still on the board is built again empty (its
         last item left its sources: a rule paused, the cards' cap, a briefing update) - never a new empty frame, also
-        when an earlier frame of the same answer made room by taking the list's group (checked again as it is built).
+        when an earlier frame of the same answer made room by taking the list's group, or when what is left is only
+        to-dos the owner dismissed (they stay among the cards, but are no rows): decided on the list as it is built.
         The app's own DEADLINES and Approvals say "none" the same way whether or not the briefing or the calendar was
         read, so an empty list here is the app's own "none" too."""
         from . import actions
@@ -882,9 +883,10 @@ class DeskController(QObject):
             return []
 
         def build(frame_id: str) -> Any:
-            if not todos and not deadlines and not self.feed.holds("todos"):
-                return board_frames.Built()      # its frame left for this answer's room: no new empty one
-            return board_frames.from_todos(todos, deadlines, frame_id=frame_id, now=self._now(), statuses=statuses)
+            built = board_frames.from_todos(todos, deadlines, frame_id=frame_id, now=self._now(), statuses=statuses)
+            if (built.frame or {}).get("status") == "empty" and not self.feed.holds("todos"):
+                return board_frames.Built()      # empty, and its frame is not on the board (or left for this answer's
+            return built                         # room): no new empty one
 
         return [("todos", build, "", "", "todos")]
 

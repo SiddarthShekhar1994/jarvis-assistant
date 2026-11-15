@@ -14,7 +14,9 @@ fixes, round 3: a to-do or follow-ups list on the board whose last item left its
 later answer about it, and no new empty frame appears when none is on the board. Round 4: the follow-ups only from a
 list known to be empty (scanned, no scan running, no account's note, not off on this PC - never "Nothing waits on you"
 from a list nobody read), and an emptied list whose group left for the same answer's room never comes back as a new
-frame (at the 8 groups, and at the 24 frames without pushing out a second group).
+frame (at the 8 groups, and at the 24 frames without pushing out a second group). Round 5: the same for a to-do list
+emptied by the owner's Dismiss (the card stays among the cards), which also puts up no empty frame when none is on the
+board and is still sent empty in place when its frame is there; nothing marked CHANGED read on the feed's own count.
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ from PySide6.QtWidgets import QApplication
 
 from briefing_reader import desk_ui, desk_view, holo, hud, hud_overlay, live, pictures, prefs, ui
 from briefing_reader import orb as orb_mod
-from briefing_reader.actions import parse_action_line
+from briefing_reader.actions import STATUS_DENIED, parse_action_line
 from briefing_reader.ask.mail import MailMessage, MailPerson, MailThread
 from briefing_reader.ask.research_validate import ResearchReport, WebSource
 from briefing_reader.board import frames as board_frames
@@ -610,10 +612,13 @@ class FeedTests(DeskApp):
         self.plan_answer("morning", 10)
         first = dict(self.board().frames_sent())
         self.assertEqual(len(first), 2)                                   # the day as read, and the morning's plan
+        changed = feed.counts()["changed"]
         self.plan_answer("afternoon", 15)
         frames = self.board().frames_sent()
         self.assertEqual(len(frames), 3)                                  # the afternoon's plan: a frame of its own
-        self.assertEqual(feed.take_changed(), [])                         # the day read the same: nothing changed
+        # The day read the same: nothing was rebuilt CHANGED. The feed's own count, since every send empties
+        # take_changed(), which therefore read [] whatever happened.
+        self.assertEqual(feed.counts()["changed"], changed)
         self.assertFalse(any(frame["changed"] for frame in frames.values()))
         for frame_id, frame in first.items():
             self.assertEqual(frames[frame_id]["body"], frame["body"])     # the morning's frames as they were
@@ -794,6 +799,7 @@ class FeedTests(DeskApp):
         ask(scanned, "Who am I waiting on?")
         (frame,) = self.board().frames_sent().values()
         self.assertEqual(frame["meta"], persona.followups_meta(1, 0))
+        changed = self.desk().feed.counts()["changed"]                     # (cumulative: never emptied)
         for name, view in (("off on this PC", followups.make_view([], scanned_at=now, off=True)),
                            ("an account's note", followups.make_view([], notes=[("work", "identity")], scanned_at=now)),
                            ("a scan running", followups.make_view([], scanning=True)),
@@ -805,8 +811,11 @@ class FeedTests(DeskApp):
         ask(scanned)
         controller.set_off(True)                                           # the owner's own switch, as the menu has it
         self.assertTrue(controller.followups().off)
-        self.assertEqual(ask(None, "Do I owe anyone a reply?"), [])
-        self.assertEqual(self.desk().feed.take_changed(), [])              # nothing was ever marked CHANGED
+        sent = ask(None, "Do I owe anyone a reply?")
+        # Round 5 (feed-lit 1): nothing was marked CHANGED in any of these answers, read on the feed's own count (its
+        # take_changed() list is emptied by the same answer that marks it, so it always read []).
+        self.assertEqual(self.desk().feed.counts()["changed"], changed)
+        self.assertEqual(sent, [])
         again = ask(followups.make_view([], scanned_at=now))               # a scan that really lists nobody
         self.assertEqual([(message["id"], message["status"], message["changed"]) for message in again],
                          [(frame["id"], "empty", True)])
@@ -886,6 +895,52 @@ class FeedTests(DeskApp):
             self.answer("What's on my list?", self.outcome(say="One to-do waits for your OK, sir.", cards=(todo,)))
 
         self.check_room(first, lambda: self.c._set_actions([]), " and is anything due?", "todos", "todos")
+
+    def one_to_do(self, *, on_board: bool) -> None:
+        """A fresh app whose one to-do waits on Approvals (no deadline); ``on_board``: an answer put its list up."""
+        self.make(lines=())
+        self.todo = parse_action_line(TODO_LINE)
+        self.c._set_actions([self.todo])
+        self.c._merged_deadlines = []
+        if on_board:
+            self.answer("What's on my list?", self.outcome(say="One to-do waits for your OK, sir.", cards=(self.todo,)))
+
+    def dismiss(self) -> None:
+        """The owner's Dismiss on the to-do's card (ui.deny_action): its status stored, the card kept among the rest."""
+        self.c.deny_action(self.todo.id)
+        self.assertEqual(self.c._store.get(self.todo.id)["status"], STATUS_DENIED)
+        self.assertIn(self.todo.id, [action.id for action in self.c._actions])
+
+    def test_a_list_emptied_by_a_dismiss_whose_group_left_for_the_answer_s_room_never_comes_back_new(self) -> None:
+        # Part 5c fixes, round 5 (feed-lit 0): a dismissed to-do stays among the cards (Dismiss stores its status only),
+        # so the list's inputs were not empty while the list built was; after its group left for an earlier frame's
+        # room, the empty list came back as a NEW frame (at the 24 frames pushing out a second group for it).
+        self.check_room(lambda: self.one_to_do(on_board=True), self.dismiss, " and is anything due?", "todos", "todos")
+
+    def test_a_list_of_dismissed_to_dos_only_puts_no_frame_up(self) -> None:
+        # Part 5c fixes, round 5 (feed-lit 0): with no to-dos frame on the board, a list whose one to-do the owner
+        # dismissed put up a new empty "No to-dos or deadlines." frame.
+        self.one_to_do(on_board=False)
+        self.research_answer(1)                                           # the board is up, with no to-dos frame
+        self.dismiss()
+        sent = len(self.board().sent)
+        self.answer("What's on my list?", self.outcome(say="Your list is empty, sir."))
+        self.assertEqual(self.board().sent[sent:], [])                    # nothing sent
+        self.assertFalse(self.desk().feed.holds("todos"))
+
+    def test_a_to_do_list_on_the_board_emptied_by_a_dismiss_is_sent_empty_in_place(self) -> None:
+        # Round 5: the rule decides on the list as built, so a list ON the board whose one to-do was dismissed is still
+        # sent again empty, in its place (CHANGED), as when the to-do left its sources.
+        self.one_to_do(on_board=True)
+        (frame,) = [frame for frame in self.board().frames_sent().values() if frame["kind"] == "todos"]
+        self.dismiss()
+        sent = len(self.board().of_type("frame"))
+        self.answer("What's on my list now?", self.outcome(say="Your list is empty, sir."))
+        again = self.board().of_type("frame")[sent:]
+        self.assertEqual([(message["id"], message["status"], message["changed"]) for message in again],
+                         [(frame["id"], "empty", True)])
+        self.assertEqual(again[0]["status_text"], board_frames.TODOS_EMPTY)
+        self.assertEqual(len(self.board().groups_sent()), 1)
 
     def test_an_emptied_follow_ups_list_whose_group_left_for_the_answer_s_room_never_comes_back_new(self) -> None:
         # Part 5c fixes, round 4 (feed 1): the same for the follow-ups ("Nothing waits on you" as a new frame).

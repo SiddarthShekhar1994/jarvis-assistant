@@ -15,7 +15,9 @@ Cases:
                without the <meta>): the engine's own rules and the request interceptor still let nothing out
     media      the microphone and camera (getUserMedia): refused. A case of its own because Chromium starts its video
                capture service (a utility process) to list the devices BEFORE it asks for the permission, and keeps
-               it until the engine ends: what is left after the board closes is that service only, never a renderer
+               it until the engine ends: what is left after the board closes is that service only, never a renderer.
+               Round 5: the devices are Chromium's own stand-ins (FAKE_MEDIA_DEVICES), so the permission is asked
+               whatever this PC has plugged in, and its real microphone and camera are never even listed
     keys       the window's keys and Space with the focus in the page, in a window that keeps Space as Jarvis's does
                (ui._keeps_space); then the renderer is killed, the board comes back on its own, and the keys again
     fallback   inherited unsafe flags (Chromium never starts), a page that is not ready in time, and a renderer that
@@ -65,9 +67,21 @@ Cases:
                owner's real click on a group's head left the focus on <body> (the board scrolled into an older
                group; the answer parked): the focus, the scroll and the page's reading report as they were, and the
                parked answer landing once quiet; lively and off
+    expiry     part 5c fixes, round 5: a closed frame's own end with the app's controller, the page's expiry first (its
+               8 s made short once) and the app's removal later (CLOSE_S made longer): real Delete on a group's last
+               frame (remove_group) and on one that is not (remove), the row cut by the view's edge; the keyboard stays
+               in the closed frame at the expiry (no reading or focus report, no scroll; Enter, P and Delete there do
+               nothing), then a staying frame has it, never <body>; lively and off
+    reduced    part 5c fixes, round 5: the page's own reduced motion (Chromium told reduced motion, as this PC's "Show
+               animations" off would tell it): lively plays as off (K and --k 0)
 
 Qt runs offscreen and Chromium's proxy is a dead address (snapshots.OFFLINE_FLAGS, as the board's engine always runs in a
-test): nothing can reach the network whatever the page does. No window is shown on the real screen.
+test): nothing can reach the network whatever the page does. No window is shown on the real screen. Chromium's
+prefers-reduced-motion follows Windows' "Show animations" setting, and the board page then plays every level as off: so
+the probe's engine is told no reduced motion (NO_REDUCED_MOTION; the "reduced" case REDUCED_MOTION), and the page plays
+the probe's own level (lively, calm, off) whatever this PC's setting. It goes in among Jarvis's own flags in this
+process only (snapshots.CHROMIUM_FLAGS, as tests/snapshot_probe.py does for its control): the inherited value the app
+judges (snapshots.engine_flags_problem) stays the dead proxy alone, and what the shipped app accepts is unchanged.
 """
 
 from __future__ import annotations
@@ -94,6 +108,23 @@ HOSTILE = {
     "status_text": "<img src=http://example.com/fail.png onerror=window.pwned=6>",
 }
 CONTROL_TEXT = "\u202eevil\u2066 \x00\x07 tab\tend \u200b"
+# Part 5c fixes, round 5: what the probe's engine is told of reduced motion (see the module doc).
+NO_REDUCED_MOTION = "--force-prefers-no-reduced-motion"
+REDUCED_MOTION = "--force-prefers-reduced-motion"
+# ... and, in the media case, Chromium's own stand-in camera and microphone instead of this PC's (the same way in):
+# Chromium asks for the permission only once it found a device of each kind asked for, so with this PC's microphone
+# unplugged it refused with NotFoundError before asking anything, and the board's refusal never came to be shown.
+FAKE_MEDIA_DEVICES = "--use-fake-device-for-media-stream"
+# The page's own word on its motion: the media query board.js reads, board.css's --k, and one frame's draw-in.
+MOTION_LOOK = r"""JSON.stringify((function (id) {
+  var frame = document.getElementById('title-' + id).closest('.frame');
+  return {reduce: matchMedia('(prefers-reduced-motion: reduce)').matches,
+          k: getComputedStyle(document.documentElement).getPropertyValue('--k').trim(),
+          level: document.documentElement.className.split(' ').filter(function (c) {
+            return c.indexOf('motion-') === 0; }),
+          classes: Array.from(frame.classList),
+          trace: getComputedStyle(frame.querySelector('.fx-outline rect')).animationDuration};
+})(%s))"""
 
 # Script in the page's own main world: every way out it could try. Each result goes to window.__probe.results.
 ATTEMPTS = r"""
@@ -372,6 +403,12 @@ _STATES = ("past", "now", "next", "free", "new", "struck", "today")
 def main(case: str) -> dict[str, Any]:
     from briefing_reader import snapshot_engine, snapshots
 
+    # Round 5: the page plays the probe's own motion level whatever this PC's "Show animations" says (see the module
+    # doc) - read by chromium_flags at the engine's start, among Jarvis's own flags; the inherited value stays as it is.
+    motion_flag = REDUCED_MOTION if case == "reduced" else NO_REDUCED_MOTION
+    snapshots.CHROMIUM_FLAGS = (*snapshots.CHROMIUM_FLAGS, motion_flag)
+    if case == "media":
+        snapshots.CHROMIUM_FLAGS = (*snapshots.CHROMIUM_FLAGS, FAKE_MEDIA_DEVICES)
     os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(snapshots.OFFLINE_FLAGS)
     snapshot_engine.prepare_application()
     from briefing_reader.board import scheme
@@ -564,6 +601,7 @@ def main(case: str) -> dict[str, Any]:
         report["lively"] = {"classes": classes("m1"), "trace": styled("m1", ".fx-outline rect", "animationDuration"),
                             "ticks_at": styled("m1", ".fx-tick", "animationDelay"),
                             "content": styled("m1", ".f-head", "animationName")}
+        report["lively_look"] = json.loads(main_world(board, MOTION_LOOK % json.dumps("m1")))   # round 5
         pump(1.2)
         report["lively_after"] = {"classes": classes("m1"), "opacity": styled("m1", ".f-head", "opacity")}
         board.set_motion("calm")
@@ -800,6 +838,8 @@ def main(case: str) -> dict[str, Any]:
         report["media"] = main_world(board, "window.__media")
         report["kinds_while_open"] = process_kinds(children())
         report["counts"] = board.counts()
+        # The switches the engine started with, so the test can see the stand-in devices' switch in them.
+        report["engine_flags"] = snapshots.flag_tokens(os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", ""))
         board.shutdown()
         pump(0.3)
         wait_until(lambda: not any("renderer" in kind for kind in process_kinds(children())), 15)
@@ -921,10 +961,27 @@ def main(case: str) -> dict[str, Any]:
         report.update(lit_case(wait_until, pump, main_world, settle_end))
     elif case in ("big", "big_x15"):
         report.update(big_case(wait_until, pump, main_world, settle_end))
+    elif case == "expiry":
+        report.update(expiry_case(wait_until, pump, main_world, settle_end))
+    elif case == "reduced":
+        # The page's own reduced motion, Chromium told reduced motion (REDUCED_MOTION): lively plays as off.
+        host, board = make()
+        host.show()
+        wait_until(board.is_ready, 40)
+        report["ready"] = board.is_ready()
+        board.set_motion("lively")
+        board.apply({"type": "frame", "id": "m1", "kind": "text", "title": "Frame m1", "meta": "Now",
+                     "body": {"text": "A few words of text."}})
+        report["lively"] = json.loads(main_world(board, MOTION_LOOK % json.dumps("m1")))
+        settle_end(report, board)
     else:
         report["error"] = f"unknown case {case!r}"
     report["webengine_flags_offline"] = all(flag in os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
                                             for flag in snapshots.OFFLINE_FLAGS)
+    report["motion_flag"] = motion_flag
+    report["motion_flag_in_engine"] = motion_flag in snapshots.flag_tokens(os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS",
+                                                                                          ""))
+    report["inherited_flags_judged"] = snapshots.engine_flags_problem(snapshot_engine._judged_environ())  # noqa: SLF001
     report["protocol_caps"] = [protocol.MESSAGE_CAP, protocol.PICTURE_CAP]
     qInstallMessageHandler(None)
     return report
@@ -2874,6 +2931,177 @@ def big_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> di
     desk.big.end_now()
     pump(0.4)
     board.removeEventFilter(moves)
+    window.hide()
+    settle_end(report, board)
+    shim.close()
+    return report
+
+
+# Part 5c fixes, round 5 (focus 0): the page's CLOSED_MS (8000 ms: a closed frame's row offers Bring back this long)
+# made short once when asked (window.__expiryMs), so its own expiry comes well before the app's removal - the order the
+# owner meets whenever the app's timer is a few ms later than the page's; every other timer keeps its time. Where the
+# keyboard goes (a frame by its id: the frame itself, its Bring back, or inside it) and, after the expiry's style
+# update, where it is and the board's scroll.
+_EXPIRY_HOOKS = r"""(function () {
+  var later = window.setTimeout;
+  window.__expiryMs = 0;
+  window.setTimeout = function (fn, ms) {
+    var rest = Array.prototype.slice.call(arguments, 2);
+    if (window.__expiryMs && ms === 8000) {
+      ms = window.__expiryMs;
+      window.__expiryMs = 0;
+    }
+    return later.apply(window, [fn, ms].concat(rest));
+  };
+  function name(node) {
+    if (!node) { return 'none'; }
+    if (node === document.body) { return 'body'; }
+    var frame = node.closest ? node.closest('.frame') : null, title = frame && frame.querySelector('.f-title');
+    if (!title) { return node.tagName ? node.tagName.toLowerCase() : 'none'; }
+    var id = title.id.slice(6);
+    return node === frame ? 'frame:' + id : node.closest('.f-closed') ? 'bring_back:' + id : 'in:' + id;
+  }
+  window.__name = name;
+  var seen = window.__seen = {trail: [], expired: '', atExpiry: '', scrollAtExpiry: -1};
+  document.addEventListener('focusin', function (e) { seen.trail.push('in ' + name(e.target)); }, true);
+  document.addEventListener('focusout', function (e) {
+    seen.trail.push('out ' + name(e.target) + ' > ' + name(e.relatedTarget));
+  }, true);
+  new MutationObserver(function (records) {
+    records.forEach(function (record) {
+      var frame = record.target;
+      if (frame.classList.contains('frame') && frame.classList.contains('expired')
+          && (' ' + (record.oldValue || '') + ' ').indexOf(' expired ') < 0) {
+        seen.expired = frame.querySelector('.f-title').id.slice(6);
+        later(function () {                     // after the style update that drops a hidden button's focus
+          void document.body.offsetHeight;
+          later(function () {
+            seen.atExpiry = name(document.activeElement);
+            seen.scrollAtExpiry = document.getElementById('board').scrollTop;
+          }, 60);
+        }, 120);
+      }
+    });
+  }).observe(document.getElementById('board'), {subtree: true, attributes: true, attributeFilter: ['class'],
+                                                 attributeOldValue: true});
+  return 1;
+})()"""
+# The closed row cut 10 px by the view's bottom edge (else by its top edge): a focus that scrolls would show (Chromium
+# scrolls a row cut so to its closest edge on focus(), never with preventScroll). Its side and how much is cut.
+_CUT_ROW = r"""JSON.stringify((function (id) {
+  var root = document.getElementById('board'), box = root.getBoundingClientRect();
+  var frame = document.getElementById('title-' + id).closest('.frame'), r = frame.getBoundingClientRect();
+  var most = root.scrollHeight - root.clientHeight, side = '';
+  var down = root.scrollTop + (r.bottom - box.bottom) - 10, up = root.scrollTop + (r.top - box.top) + 10;
+  if (down >= 0 && down <= most) { root.scrollTop = down; side = 'bottom'; }
+  else if (up >= 0 && up <= most) { root.scrollTop = up; side = 'top'; }
+  var now = frame.getBoundingClientRect();
+  return [side, Math.round(side === 'top' ? box.top - now.top : now.bottom - box.bottom)];
+})(%s))"""
+
+
+def expiry_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> dict[str, Any]:
+    """Part 5c fixes, round 5 (focus 0): a closed frame's own end, the page's expiry before the app's removal (see the
+    module doc)."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    from briefing_reader import desk_ui, holo
+    from briefing_reader.board import view
+
+    report: dict[str, Any] = {}
+    desk_ui.DeskController.CLOSE_S = 4.5          # the app's removal 4.5 s after the Delete; the page's expiry at 1.5 s
+    holo.set_motion_level("off")
+    shim = _Shim()
+    harness, c, boards, desk = _app_case(shim, wait_until, pump, (1120, 700))
+    window = c.window
+    built = dict(kind_frames(tiny_jpeg_url(320, 180)))
+    asked: list[list[str]] = []
+    reading_posts: list[list[bool]] = []
+    focus_posts: list[str] = []
+
+    def answer(key: int, names: list[tuple[str, str]]) -> list[str]:
+        desk._watch.reset()                      # (nobody reads: never parked)
+        ids = _put_answer(c, desk, built, key, names, keys={source: "" for source, _name in names})
+        pump(0.8)
+        return ids
+
+    def frame_js(frame_id: str) -> str:
+        return f"document.getElementById('title-{frame_id}').closest('.frame')"
+
+    def active() -> str:
+        return str(main_world(board, "window.__name(document.activeElement)"))
+
+    def close_one(frame_id: str, route: str) -> dict[str, Any]:
+        """Real Delete on ``frame_id`` (its own key target: a satellite's row, else the frame), then its row cut by the
+        view's edge; the page's expiry; Enter, P and Delete on it; the app's removal."""
+        board.web_view().setFocus(Qt.FocusReason.OtherFocusReason)
+        wait_until(lambda: view.keeps_space(QApplication.focusWidget()), 5)
+        main_world(board, f"(function () {{ var f = {frame_js(frame_id)}; (f.classList.contains('sat') ? "
+                          "f.querySelector('.f-sat') : f).focus(); })(); 1")
+        pump(0.2)
+        main_world(board, "window.__seen.trail = []; window.__seen.expired = ''; window.__seen.atExpiry = ''; "
+                          "window.__expiryMs = 1500; 1")
+        QTest.keyClick(QApplication.focusWidget(), Qt.Key.Key_Delete)
+        pump(0.3)
+        row: dict[str, Any] = {"route": route, "frame": frame_id, "group": desk.feed.group_of(frame_id),
+                               "after_delete": active(), "closed": bool(desk.feed.flags(frame_id).get("closed"))}
+        reading_from, focus_from = len(reading_posts), len(focus_posts)
+        row["cut"] = json.loads(main_world(board, _CUT_ROW % json.dumps(frame_id)))
+        pump(0.1)
+        row["scroll_before"] = main_world(board, "document.getElementById('board').scrollTop")
+        row["marked_before_expiry"] = main_world(board, "window.__seen.expired") == ""
+        wait_until(lambda: main_world(board, "window.__seen.atExpiry") != "", 6)
+        seen = json.loads(main_world(board, "JSON.stringify(window.__seen)"))
+        row.update(expired=seen["expired"], at_expiry=seen["atExpiry"], scroll_at_expiry=seen["scrollAtExpiry"],
+                   expired_first=frame_id in desk.feed.frame_ids() and bool(desk.feed.flags(frame_id).get("closed")),
+                   reading_posts=reading_posts[reading_from:], focus_posts=focus_posts[focus_from:])
+        asked_from = len(asked)                  # the board's own keys there: nothing
+        for code in (Qt.Key.Key_Return, Qt.Key.Key_P, Qt.Key.Key_Delete):
+            QTest.keyClick(QApplication.focusWidget(), code)
+            pump(0.1)
+        row["keys_asked"] = asked[asked_from:]
+        row["after_keys"] = active()
+        row["keys_in_window"] = frame_id in desk.feed.frame_ids() and bool(desk.feed.flags(frame_id).get("closed"))
+        wait_until(lambda: frame_id not in desk.feed.frame_ids(), 8)
+        pump(0.6)
+        row["left"] = frame_id not in desk.feed.frame_ids()
+        row["group_left"] = row["group"] not in desk.feed.groups()
+        row["after"] = active()
+        row["staying"] = row["after"].startswith("frame:") and row["after"][6:] in desk.feed.frame_ids()
+        row["has_focus"] = main_world(board, "document.hasFocus()")
+        row["trail"] = json.loads(main_world(board, "JSON.stringify(window.__seen.trail)"))
+        return row
+
+    board = None
+    report["expiry"] = {}
+    for index, motion in enumerate(("lively", "off")):
+        holo.set_motion_level(motion)
+        key = 80 + 10 * index
+        older = answer(key, [(f"research-{index}", "research"), (f"search-{index}", "search"),
+                             (f"followups-{index}", "followups")])
+        lone = answer(key + 1, [(f"todos-{index}", "todos")])
+        newest = answer(key + 2, [(f"page-{index}", "page"), (f"day-{index}", "day"), (f"mail-{index}", "mail")])
+        if board is None:
+            board = boards[0]
+            wait_until(board.is_ready, 40)
+            pump(1.0)
+            report["ready"] = board.is_ready()
+            main_world(board, _EXPIRY_HOOKS)
+            for name in ("openRequested", "closeRequested", "bringBackRequested"):
+                getattr(board, name).connect(lambda frame_id, n=name: asked.append([n, frame_id]))
+            board.pinRequested.connect(lambda frame_id, on: asked.append(["pinRequested", frame_id, on]))
+            board.readingChanged.connect(lambda pointer, focus: reading_posts.append([pointer, focus]))
+            board.frameFocused.connect(focus_posts.append)
+        board.set_motion(motion)
+        pump(0.3)
+        report["expiry"][motion] = {
+            "older": older, "board": desk.feed.frame_ids(),
+            "group_last": close_one(lone[0], "group_last"),       # the group's last frame: remove_group
+            "not_last": close_one(newest[-1], "not_last"),        # one of three: remove
+        }
+    report["desk_counts"] = {key_: value for key_, value in desk.counts.items() if isinstance(value, int)}
     window.hide()
     settle_end(report, board)
     shim.close()
