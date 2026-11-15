@@ -820,6 +820,9 @@ class BoardView(QWidget):
 
     def _build(self) -> None:
         """The profile, page, view and channel (the engine is ready)."""
+        # First, before the view's focus proxy is ever wrapped: PySide6 then hands it out as the QQuickWidget it is (else
+        # as a plain QWidget), so open big's still can follow its renders (desk_big.BigController._watch).
+        from PySide6 import QtQuickWidgets  # noqa: F401
         from PySide6.QtWebChannel import QWebChannel
         from PySide6.QtWebEngineCore import QWebEngineScript, QWebEngineUrlRequestInfo
 

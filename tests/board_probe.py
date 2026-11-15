@@ -1837,8 +1837,19 @@ def lit_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> di
         {"type": "big", "state": "open", "id": known, **box, "w": protocol.BIG_LIMIT + 1},
         {"type": "big", "state": "open", "id": "<b>", **box},
         {"type": "big", "state": "close", "id": "", "x": 0},
-        {"type": "big", "state": "half"},
+        {"type": "big", "state": "half", "id": ""},                  # (an id: only the state check refuses it)
+        # Part 5c fixes, round 2: an item only each of the page's other checks refuses (lockdown 0) - a big open wrong
+        # only in h, one key too many, a well-formed id the page has no frame for; a close with a bad id; a lit with one.
+        {"type": "big", "state": "open", "id": known, **box, "h": 0},
+        {"type": "big", "state": "open", "id": known, **box, "z": 1},
+        {"type": "big", "state": "open", "id": "f999", **box},
+        {"type": "big", "state": "close", "id": 5},
+        {"type": "big", "state": "close", "id": "<b>"},
+        {"type": "lit", "id": "<b>"},
+        {"type": "lit", "id": 5},
     ]
+    report["hostile_unknown_absent"] = ("f999" not in desk.feed.frame_ids()
+                                        and main_world(board, "!document.getElementById('title-f999')"))
     report["hostile_known"] = main_world(board, f"!!document.getElementById('title-{known}')")
     before = json.loads(main_world(board, "JSON.stringify(board.counts())"))
     report["page_refused"] = json.loads(main_world(board, "JSON.stringify(%s.map(function (m) { "
@@ -1928,8 +1939,8 @@ _BIG_PAGE = r"""JSON.stringify((function () {
 
 # Part 5c fixes: hooks that press a key at the exact moment open big's steps cross (the page's own handlers take the key
 # as a real one): "esc-at-open" (as the open's "laid" is made ready, the view wide), "enter-at-close" (as the close's
-# "laid" is made ready, the view narrow again: Enter on the frame) and "esc-at-grow" (the big frame just added, its
-# backdrop not yet decoded).
+# "laid" is made ready, the view narrow again: Enter on the frame), "esc-at-grow" (the big frame just added, its
+# backdrop not yet decoded) and, round 2, "enter-at-shut" (Enter after "shut", before the page lays out narrow).
 _STEP_HOOKS = r"""(function (frameId) {
   var raf = window.requestAnimationFrame.bind(window);
   window.__hook = '';
@@ -1951,8 +1962,55 @@ _STEP_HOOKS = r"""(function (frameId) {
       document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
     }
   }).observe(document.body, {childList: true});
+  // Part 5c fixes, round 2: "enter-at-shut" - Enter on the frame after the page posted "shut", as the app's narrow view
+  // reaches it: in the page's own handling of that resize, just before its board is its own size again (the page drops
+  // its "wide" class first).
+  var toggle = DOMTokenList.prototype.toggle;
+  DOMTokenList.prototype.toggle = function (name, force) {
+    if (window.__hook === 'enter-at-shut' && name === 'wide' && force === false && this === document.body.classList
+        && this.contains('wide')) {
+      window.__hook = '';
+      document.getElementById('title-' + frameId).closest('.frame').dispatchEvent(
+        new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));
+    }
+    return toggle.apply(this, arguments);
+  };
   return 1;
 })(%s)"""
+
+# Part 5c fixes, round 2: how the big frame is when it is added (its layer's opacity and pointer events, the board's dim,
+# whether it has the focus): held until its growth starts, never the big frame at full size first.
+_HELD_HOOK = r"""(function () {
+  window.__held = [];
+  new MutationObserver(function (records) {
+    records.forEach(function (record) {
+      Array.prototype.forEach.call(record.addedNodes, function (node) {
+        if (node.id === 'big') {
+          var style = getComputedStyle(node), card = node.querySelector('.big-card');
+          window.__held.push([style.opacity, style.pointerEvents, document.body.classList.contains('dim'),
+                              !!card && document.activeElement === card]);
+        }
+      });
+    });
+  }).observe(document.body, {childList: true});
+  return 1;
+})()"""
+
+# Part 5c fixes, round 2: a test-only layout mark in the view's bottom-right corner, magenta while the page is laid out
+# wide (open big) and cyan at its own size; a MutationObserver repaints it before the next frame, so every frame Qt can
+# show carries the layout it was made for. (CSSOM: the page's policy allows it; no style sheet, no markup.)
+_LAYOUT_MARK = r"""(function () {
+  var mark = document.createElement('div');
+  mark.id = 'probe-layout-mark';
+  mark.style.position = 'fixed'; mark.style.right = '0px'; mark.style.bottom = '0px';
+  mark.style.width = '8px'; mark.style.height = '8px'; mark.style.zIndex = '2147483647';
+  mark.style.pointerEvents = 'none';
+  function paint() { mark.style.background = document.body.classList.contains('wide') ? '#ff00ff' : '#00ffff'; }
+  new MutationObserver(paint).observe(document.body, {attributes: true, attributeFilter: ['class']});
+  paint();
+  document.documentElement.appendChild(mark);
+  return 1;
+})()"""
 
 
 def big_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> dict[str, Any]:
@@ -2008,6 +2066,7 @@ def big_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> di
 
     report["blocked_before"] = dict(board.counts().get("blocked", {}))
     report["view_before"] = list(board.geometry().getRect())
+    main_world(board, _HELD_HOOK)                            # part 5c fixes, round 2: the big frame held as it is added
     geometry = reading.desk_page().geometry_now()
     report["big_rect"] = list(geometry.big.getRect())
     report["view_rect"] = list(geometry.view.getRect())
@@ -2037,6 +2096,7 @@ def big_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> di
     report["big_counts"] = dict(desk.big.counts)
     report["opened_at"] = round(opened_at, 3)
     report["open_steps"] = list(opening)                    # part 5c fixes: the page's own "laid" at the open
+    report["held_at_add"] = json.loads(main_world(board, "JSON.stringify(window.__held[0] || null)"))
     # ---- part 5c fixes: the big frame's picture follows its frame's; Tab stays in the big frame, the board inert ----
     other = tiny_jpeg_url(240, 160)                          # (a size of its own: its data: URL is its own length)
     report["card_picture_before"] = page()["cardPicture"]
@@ -2056,6 +2116,13 @@ def big_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> di
     report["tab_trail"] = trail
     report["inert_open"] = page()["inert"]
     report["big_after_tabs"] = desk.big.state()
+    # Part 5c fixes, round 2: the keyboard comes into the view by Tab while big (QtWebEngine then moves the page's
+    # focus to its first stop): it lands on the big frame, and Esc later gives it back to the frame (never <body>).
+    reading.focus_ask_bar()
+    pump(0.2)
+    board.web_view().setFocus(Qt.FocusReason.TabFocusReason)
+    pump(0.3)
+    report["tab_in_active"] = page()["active"]
     # ---- a resize while big (1232 x 640, the Dock still labelled): it keeps spanning both columns, set once ----------
     moves.events.clear()
     window.resize(1232, 640)
@@ -2183,6 +2250,118 @@ def big_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> di
     pump(0.5)
     report["esc_at_grow_steps"] = list(steps)
     report["esc_at_grow_page"] = page()
+    # ---- part 5c fixes, round 2: the still lifts only once Qt shows the view laid out at its new size. The page's
+    # layout mark (magenta wide, cyan at its own size) is read from the window the moment the still is cleared ---------
+    from PySide6.QtCore import QRect, QSize
+
+    main_world(board, _LAYOUT_MARK)
+    pump(0.2)
+    veil = reading.desk_page().veil
+    marks: list[list[str]] = []
+
+    def clear_and_look() -> None:
+        shown = veil.shown()
+        type(veil).clear(veil)
+        if shown:
+            corner = reading.desk_page().mapTo(window, board.geometry().bottomRight() - QPoint(4, 4))
+            marks.append([desk.big.state() or "closed",
+                          window.grab(QRect(corner, QSize(1, 1))).toImage().pixelColor(0, 0).name()])
+
+    veil.clear = clear_and_look
+    for motion in ("lively", "off"):
+        holo.set_motion_level(motion)
+        board.set_motion(motion)
+        pump(0.3)
+        marks.clear()
+        desk._on_open(page_id)
+        wait_until(lambda: desk.big.state() == "open" and not veil.shown(), 5)
+        pump(0.6)
+        desk.big.close()
+        wait_until(lambda: not desk.big.state() and not veil.shown(), 5)
+        pump(0.4)
+        report[f"lift_marks_{motion}"] = list(marks)
+    del veil.clear
+    # A "laid" that comes before Qt shows the wide layout (as one meant for another step would): the view's own check
+    # keeps the still up.
+    desk._on_open(page_id)
+    desk.big.on_step("laid")
+    report["stray_laid_veil"] = veil.shown()
+    wait_until(lambda: desk.big.state() == "open" and not veil.shown(), 5)
+    pump(0.6)
+    desk.big.close()
+    wait_until(lambda: not desk.big.state() and not veil.shown(), 5)
+    pump(0.4)
+    # (4) motion off: Enter on the frame after the page's "shut", just before it handles the narrow resize - the close's
+    # "laid" is never sent for the open asked after it (only that open's own "laid" comes)
+    holo.set_motion_level("off")
+    board.set_motion("off")
+    pump(0.2)
+    desk._on_open(page_id)
+    wait_until(lambda: page()["card"] is not None and not veil.shown(), 5)
+    pump(0.4)
+    ignored = desk.big.counts.get("laid:ignored", 0)
+    steps.clear()
+    main_world(board, "window.__hook = 'enter-at-shut'; 1")
+    board.web_view().setFocus(Qt.FocusReason.OtherFocusReason)
+    pump(0.2)
+    QTest.keyClick(board.web_view().focusProxy(), Qt.Key.Key_Escape)
+    wait_until(lambda: "open" in steps and desk.big.state() == "open" and page()["card"] is not None, 5)
+    pump(0.8)
+    report["enter_at_shut_steps"] = list(steps)
+    report["enter_at_shut_veil"] = veil.shown()
+    report["enter_at_shut_state"] = desk.big.state()
+    report["enter_at_shut_ignored"] = desk.big.counts.get("laid:ignored", 0) - ignored
+    QTest.keyClick(board.web_view().focusProxy(), Qt.Key.Key_Escape)
+    wait_until(lambda: not desk.big.state() and not veil.shown(), 5)
+    pump(0.5)
+    # (5) lively: Esc as the open's "laid" is made ready (its growth just started, the still still up): the open's
+    # still goes once Qt shows the wide layout, during the scale-down (so it is seen), then the close's
+    holo.set_motion_level("lively")
+    board.set_motion("lively")
+    pump(0.2)
+    veil.clear = clear_and_look
+    marks.clear()
+    steps.clear()
+    main_world(board, "window.__hook = 'esc-at-open'; 1")
+    desk._on_open(page_id)
+    wait_until(lambda: not desk.big.state() and steps.count("laid") >= 1 and not veil.shown(), 5)
+    pump(0.5)
+    del veil.clear
+    report["back_steps"] = list(steps)
+    report["back_marks"] = list(marks)
+    # ---- part 5c fixes, round 2: the big frame's group leaves for room (a full board, a new answer) while it is big:
+    # the focus goes to the board, never to <body> --------------------------------------------------------------------
+    holo.set_motion_level("lively")
+    board.set_motion("lively")
+    desk._watch.reset()
+    other = _put_answer(c, desk, built, 52, [("todos-b", "todos")], keys={"todos-b": ""})
+    pump(1.0)
+    desk._on_open(page_id)
+    wait_until(lambda: desk.big.state() == "open" and not veil.shown(), 5)
+    pump(0.6)
+    report["room_before_active"] = page()["active"]
+    desk.feed.max_groups = 2                                 # the board is full: the oldest group leaves for the next
+    desk._watch.reset()
+    newest = _put_answer(c, desk, built, 53, [("todos-c", "todos")], keys={"todos-c": ""})
+    wait_until(lambda: not desk.big.state() and not veil.shown(), 5)
+    pump(0.6)
+    report["room_active"] = page()["active"]
+    report["room_ids"] = [other[0], newest[0]]
+    report["room_left"] = page_id not in desk.feed.frame_ids()
+    # ... and with nothing else on the board just then (both groups leave for the next answer, the big frame's last):
+    # the next frame shown takes the keyboard
+    desk._on_open(newest[0])
+    wait_until(lambda: desk.big.state() == "open" and not veil.shown(), 5)
+    pump(0.6)
+    report["room_empty_before_active"] = page()["active"]
+    desk.feed.max_groups = 1
+    desk._watch.reset()
+    last = _put_answer(c, desk, built, 54, [("todos-d", "todos")], keys={"todos-d": ""})
+    wait_until(lambda: not desk.big.state() and not veil.shown(), 5)
+    pump(0.6)
+    report["room_empty_active"] = page()["active"]
+    report["room_empty_ids"] = [newest[0], last[0]]
+    report["room_empty_board"] = desk.feed.frame_ids()
     report["desk_counts"] = {key_: value for key_, value in desk.counts.items() if isinstance(value, int)}
     report["big_counts_end"] = dict(desk.big.counts)
     board.removeEventFilter(moves)

@@ -8,9 +8,11 @@ other frame on the board has it. When no frame is named that way, or two are nam
 sentence: it never guesses.
 
     sentence_spans(text) -> list[(start, end)]     the sentences of ``text`` (ends after . ! ? or a line break; never
-                                                   after a title - "Dr.", "Mr." -, after "No." before a number, or
-                                                   after another short form - "a.m.", "etc.", "Inc." - before a word in
-                                                   lower case or a number; not inside "2.9k" or "8:12")
+                                                   after a title - "Dr.", "Mr." -, "e.g." or "i.e.", after "No."
+                                                   before a number, after another short form - "a.m.", "etc.", "Inc." -
+                                                   unless an upper-case letter follows (never a dash, "&", a number or
+                                                   a word in lower case), nor after "a.m." / "p.m." before a weekday or
+                                                   a month; not inside "2.9k" or "8:12")
     spoken_offset(text, words, duration_ms, position_ms) -> int
                                                    how far into ``text`` the voice is (a character offset), from its
                                                    timeline: the word being said (``words``: (start_ms, end_ms, word)
@@ -30,6 +32,13 @@ sentence: it never guesses.
     locate_start(sentence, text, after=0) -> int   where ``sentence`` begins in ``text`` (its first word), when it is
                                                    there whole; -1 when it is not (the turn's words before the sentence
                                                    being said read dimmer while he says it)
+    sentence_places(utterance, text) -> list[(start, end)]
+                                                   where each sentence of ``utterance`` (sentence_spans) is in ``text``,
+                                                   in order: its first word and just past its end (as locate_start and
+                                                   locate say), (-1, -1) for one not there. When ``text`` holds the
+                                                   utterance word for word, each sentence's own place in it; else each
+                                                   is looked for after the one before it, so a sentence that repeats
+                                                   earlier words ("That's all.") is never found back where they were
 """
 
 from __future__ import annotations
@@ -44,14 +53,23 @@ TAIL_MIN = 3                      # ... and never by fewer than this
 
 _WORD = re.compile(r"[^\W_]+")
 # A sentence ends after . ! ? or … (and the quotes or brackets that close it) before a space or the end, or at a line
-# break; "Dr." is never an end, "No." is not one before a number ("No. 5"), and the other short forms are not ends
-# before a word in lower case or a number ("at 8 a.m. today", "Acme Inc. shipped it") - before a capital they are
-# ("Dana's reply says no. The study group ...", "... from Acme Inc. The study group ...").
+# break; "Dr." and "e.g." are never an end, "No." is not one before a number ("No. 5"), and the other short forms end
+# one only before a capital ("Dana's reply says no. The study group ...", "... from Acme Inc. The study group ...") -
+# never before a word in lower case, a number, a dash or "&" ("at 8 a.m. today", "Acme Inc. - the client"), and "a.m."
+# / "p.m." not before a weekday or a month ("at 9 a.m. Tuesday").
 _END = re.compile(r"[.!?…]+[\"'’”)\]]*(?=\s|$)|\n+")
 _TITLES = frozenset({"mr", "mrs", "ms", "dr", "sr", "jr", "prof"})
+_NEVER_ENDS = _TITLES | {"e.g", "i.e"}
 _BEFORE_NUMBER = frozenset({"no"})
-_ABBREVIATIONS = frozenset({"st", "vs", "etc", "e.g", "i.e", "a.m", "p.m", "approx", "dept", "inc", "ltd", "co"})
+_ABBREVIATIONS = frozenset({"st", "vs", "etc", "a.m", "p.m", "approx", "dept", "inc", "ltd", "co"})
+_CLOCK = frozenset({"a.m", "p.m"})
+_DAYS_AND_MONTHS = frozenset("""
+monday tuesday wednesday thursday friday saturday sunday mon tue tues wed thu thur thurs fri sat sun
+january february march april may june july august september october november december
+jan feb mar apr jun jul aug sep sept oct nov dec
+""".split())
 _OPENING = "\"'‘’“”([{"
+_PAST_END = ".!?…,;:\"'’”)]"          # what locate passes after a sentence's last word: its end punctuation
 # Common words a title can hold that never tell one frame from another (4 letters or more; shorter ones never count).
 COMMON = frozenset("""
 about above after again against also among another anything around away back been before being below best between
@@ -88,15 +106,23 @@ def _next_char(source: str, at: int) -> str:
     return ""
 
 
+def _next_word(source: str, at: int) -> str:
+    """The word after ``at``, casefolded ("" at the end); asked only once a letter is known to come next."""
+    found = _WORD.search(source, at)
+    return found.group(0).casefold() if found else ""
+
+
 def _no_end(word: str, source: str, at: int) -> bool:
     """A full stop after ``word`` does not end its sentence (see _END's note); ``at``: just past the stop."""
-    if word in _TITLES:
+    if word in _NEVER_ENDS:
         return True
     following = _next_char(source, at)
     if word in _BEFORE_NUMBER:
         return following.isdigit()
     if word in _ABBREVIATIONS:
-        return following.isdigit() or following.islower()
+        if not following.isupper():
+            return True                        # only a capital starts the next sentence after a short form
+        return word in _CLOCK and _next_word(source, at) in _DAYS_AND_MONTHS
     return False
 
 
@@ -109,7 +135,7 @@ def sentence_spans(text: Any) -> list[tuple[int, int]]:
         end = found.end()
         if found.group(0)[:1] == ".":
             before = source[start:found.start()].split()
-            last = before[-1].casefold().rstrip(".") if before else ""
+            last = before[-1].casefold().lstrip(_OPENING).rstrip(".") if before else ""
             if _no_end(last, source, end):
                 continue
         piece = source[start:end]
@@ -274,8 +300,12 @@ def locate(sentence: Any, text: Any, after: int = 0) -> int:
         if len(hits) != 1:
             return -1
         last = hits[0] + len(tail) - 1
-    end = found[last][2]
-    while end < len(source) and source[end] in ".!?…,;:\"'’”)]":
+    return _past_end(source, found[last][2])
+
+
+def _past_end(source: str, end: int) -> int:
+    """Just past a sentence's last word at ``end`` and the end punctuation right after it."""
+    while end < len(source) and source[end] in _PAST_END:
         end += 1
     return end
 
@@ -295,5 +325,34 @@ def locate_start(sentence: Any, text: Any, after: int = 0) -> int:
     return found[at][1] if at >= 0 else -1
 
 
+def sentence_places(utterance: Any, text: Any) -> list[tuple[int, int]]:
+    """See the module doc: one (start, end) per sentence of ``utterance``, in order."""
+    said = str(utterance or "")
+    source = str(text or "")
+    spans = sentence_spans(said)
+    if not spans or not source:
+        return [(-1, -1)] * len(spans)
+    mine = tokens(said)
+    theirs = tokens(source)
+    at = _find([word for word, _start, _end in theirs], [word for word, _start, _end in mine], 0) if mine else -1
+    places: list[tuple[int, int]] = []
+    if at >= 0:                                    # word for word: each sentence where its own words are
+        for first, last in spans:
+            inside = [index for index, (_word, start, end) in enumerate(mine) if first <= start and end <= last]
+            if inside:
+                places.append((theirs[at + inside[0]][1], _past_end(source, theirs[at + inside[-1]][2])))
+            else:
+                places.append((-1, -1))
+        return places
+    after = 0                                      # said otherwise: each one after the one before it
+    for first, last in spans:
+        sentence = said[first:last]
+        place = (locate_start(sentence, source, after), locate(sentence, source, after))
+        places.append(place)
+        if place[1] >= 0:
+            after = place[1]
+    return places
+
+
 __all__ = ["COMMON", "MIN_LETTERS", "distinctive", "frame_words", "locate", "locate_start", "match", "sentence_at",
-           "sentence_spans", "spoken_offset", "tokens"]
+           "sentence_places", "sentence_spans", "spoken_offset", "tokens"]

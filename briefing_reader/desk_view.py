@@ -51,6 +51,7 @@ from typing import Any
 import shiboken6
 from PySide6.QtCore import QEasingCurve, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import (
+    QBrush,
     QColor,
     QFont,
     QFontMetricsF,
@@ -209,9 +210,30 @@ def highlights(text: str) -> list[tuple[int, int, str]]:
     return sorted(marks)
 
 
+def _units_of(text: str) -> list[int] | None:
+    """Each place of ``text`` (0 .. len) as Qt counts it - in UTF-16 code units, where a character outside the BMP (an
+    emoji) is two -; None when every place is its own (no such character in it)."""
+    if not text or max(text) <= "￿":
+        return None
+    places, at = [0], 0
+    for char in text:
+        at += 2 if ord(char) > 0xFFFF else 1
+        places.append(at)
+    return places
+
+
+def _unit(places: list[int] | None, index: int) -> int:
+    """Character place ``index`` of a paragraph as Qt's place in it (_units_of)."""
+    if places is None:
+        return index
+    return places[max(0, min(int(index), len(places) - 1))]
+
+
 class TextBlock:
     """Plain text laid out at a width (QTextLayout per paragraph, wrapped at words - inside a word only when it is
-    longer than the line), ``line`` px a line; ``marks`` colour ranges of it. Measures and paints; never clips."""
+    longer than the line), ``line`` px a line; ``marks`` colour ranges of it. Measures and paints; never clips. Every
+    place it is given or gives (marks, overlays, point_at) is a character place of ``text`` (Python's); Qt's own (UTF-16
+    units) only inside."""
 
     def __init__(self, text: str, font: QFont, line: float, marks: Sequence[tuple[int, int, str]] = ()) -> None:
         self.text = str(text or "")
@@ -221,6 +243,7 @@ class TextBlock:
         self._width = -1.0
         self._layouts: list[tuple[QTextLayout, int]] = []
         self._starts: list[int] = []     # each paragraph's first character in ``text``
+        self._units: list[list[int] | None] = []   # each paragraph's places as Qt counts them (None: the same)
         self.lines = 0
         self.natural = 0.0           # the widest line laid out
 
@@ -232,6 +255,7 @@ class TextBlock:
         self._width = width
         self._layouts = []
         self._starts = []
+        self._units = []
         self.lines = 0
         self.natural = 0.0
         offset = 0
@@ -241,12 +265,14 @@ class TextBlock:
         for paragraph in self.text.split("\n"):
             layout = QTextLayout(paragraph, self.font)
             layout.setTextOption(option)
+            units = _units_of(paragraph)
             ranges = []
             for start, length, color in self.marks:
                 lo, hi = max(start, offset), min(start + length, offset + len(paragraph))
                 if hi > lo:
                     item = QTextLayout.FormatRange()
-                    item.start, item.length = lo - offset, hi - lo
+                    begin = _unit(units, lo - offset)
+                    item.start, item.length = begin, _unit(units, hi - offset) - begin
                     char = QTextCharFormat()
                     char.setForeground(QColor(color))
                     item.format = char
@@ -269,6 +295,7 @@ class TextBlock:
                 count = 1
             self._layouts.append((layout, count))
             self._starts.append(offset)
+            self._units.append(units)
             self.lines += count
             offset += len(paragraph) + 1
         return self.lines * self.line
@@ -286,14 +313,15 @@ class TextBlock:
                 index = position
         layout, _count = self._layouts[index]
         local = min(max(0, offset - self._starts[index]), len(layout.text()))
-        line = layout.lineForTextPosition(local)
-        if not line.isValid() or (local > 0 and local == line.textStart() and line.lineNumber() > 0):
+        place = _unit(self._units[index], local)          # Qt's own place in the paragraph (an emoji is two)
+        line = layout.lineForTextPosition(place)
+        if not line.isValid() or (place > 0 and place == line.textStart() and line.lineNumber() > 0):
             # the place right after a line's last word is the next line's start: it belongs to the line before
             number = line.lineNumber() - 1 if line.isValid() else layout.lineCount() - 1
             if number < 0:
                 return None
             line = layout.lineAt(number)
-        found = line.cursorToX(local)
+        found = line.cursorToX(place)
         x = float(found[0] if isinstance(found, tuple) else found)
         if line_end:
             x = max(x, float(line.x() + line.naturalTextWidth()))
@@ -309,16 +337,22 @@ class TextBlock:
         try:
             painter.setFont(self.font)
             painter.setPen(QColor(color))
-            for (layout, _count), first in zip(self._layouts, self._starts):
+            for (layout, _count), first, units in zip(self._layouts, self._starts, self._units):
                 ranges = []
                 last = first + len(layout.text())
                 for start, length, ink in overlay:
                     lo, hi = max(start, first), min(start + length, last)
                     if hi > lo:
                         item = QTextLayout.FormatRange()
-                        item.start, item.length = lo - first, hi - lo
+                        begin = _unit(units, lo - first)
+                        item.start, item.length = begin, _unit(units, hi - first) - begin
                         char = QTextCharFormat()
                         char.setForeground(QColor(ink))
+                        # A clear ground on each: QTextLayout.draw skips a selection that sets only a foreground when it
+                        # touches one drawn before it (each one's area rounded out to whole pixels: runs that meet
+                        # between two pixels do), so an ease's runs would keep their old colours; with a ground (here
+                        # one that paints nothing) every one is drawn.
+                        char.setBackground(QBrush(QColor(0, 0, 0, 0)))
                         item.format = char
                         ranges.append(item)
                 if ranges:

@@ -64,7 +64,7 @@ from typing import Any
 
 import shiboken6
 from PySide6.QtCore import QObject, QTimer
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QApplication, QWidget
 
 from . import holo, hud
 from . import live as live_events
@@ -483,12 +483,23 @@ class DeskController(QObject):
             logger.info("Board: ready %d ms after it started", int((time.monotonic() - self._started_at) * 1000))
             return
         # The page came back after its renderer stopped: it holds nothing - the board as it is, again (open big ends
-        # at once: the page lost it; the lit frame is sent again with the cue).
+        # at once: the page lost it; the lit frame is sent again with the cue). Part 5c fixes, round 2: a big frame that
+        # had the keyboard gives it to the board (its frame in view), never to the new page's <body>.
+        keys_here = bool(self.big.state()) and self._keys_in_board()
         self.big.end_now()
         self.cue.reset_page()
         self._send(self.feed.resend())
         if self.reading.desk_shown():
             self._send([{"type": "desk", "state": "enter"}])
+        if keys_here:
+            self.focus_board("board")
+
+    def _keys_in_board(self) -> bool:
+        """The window's keyboard focus is in the board's view."""
+        board = self.board
+        focus = QApplication.focusWidget()
+        return board is not None and shiboken6.isValid(board) and focus is not None \
+            and (focus is board or board.isAncestorOf(focus))
 
     def _on_unavailable(self, reason: str) -> None:
         self.counts[f"fallback:{reason}"] += 1
@@ -726,7 +737,8 @@ class DeskController(QObject):
             frame = built.messages[0]
             rank = spoken_rank(answer.say, self._rank_words(frame))
             messages += self.feed.put(answer.key, source, built.messages, when=answer.when, merge=merge,
-                                      approvals=approvals, rank=rank, park=park, key=key)
+                                      approvals=approvals, rank=rank, park=park, key=key,
+                                      not_ready=bool(getattr(built, "not_ready", False)))   # a LIVE picture's own state
             self.counts[f"frame:{frame.get('kind', '')}"] += 1
         self._send(messages)
         if self.feed.parked_groups():

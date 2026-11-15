@@ -141,6 +141,45 @@ class SentenceTests(unittest.TestCase):
         self.assertEqual([lit.match(said[a:b], {"f1": MAIL, "f2": DAY}) for a, b in lit.sentence_spans(said)],
                          ["f1", "f2"])                                  # the mail first, then the calendar
 
+    def test_e_g_i_e_and_a_short_form_before_a_symbol_or_a_day_never_end_a_sentence(self) -> None:
+        # Part 5c fixes, round 2 (lit-read 2): round 1's rule ended a sentence after any short form before anything but
+        # a lower-case word or a number - "e.g. Dana", "9 a.m. Tuesday", "Inc. - the client" were split in two.
+        for text in ("Ask someone, e.g. Dana, to check the budget numbers.",
+                     "Send it to the team, i.e. Dana and Priya.",
+                     "Pick a slot (e.g. Tuesday at 10) and tell Dana.",
+                     "Your call is at 9 a.m. Tuesday with Dana.",
+                     "The review moved to 3 p.m. Nov 18, sir.",
+                     "Acme Inc. — the client — sent the budget.",
+                     "Acme Inc. - the client - sent the budget.",
+                     "It came from Acme Inc. & Co. last night.",
+                     "Pens, paper etc. — all on your list."):
+            with self.subTest(text=text):
+                self.assertEqual([text[a:b] for a, b in lit.sentence_spans(text)], [text])
+        for text, sentences in (("It came at 9 a.m. Dana sent it.", ["It came at 9 a.m.", "Dana sent it."]),
+                                ("Meet at 8 a.m. The bus leaves at nine.", ["Meet at 8 a.m.", "The bus leaves at nine."]),
+                                ("Fly to St. Louis on Friday.", ["Fly to St.", "Louis on Friday."])):   # (St.: decided)
+            with self.subTest(text=text):
+                self.assertEqual([text[a:b] for a, b in lit.sentence_spans(text)], sentences)
+
+    def test_each_sentence_is_found_after_the_one_before_it(self) -> None:
+        # Part 5c fixes, round 2 (lit-read 0): each sentence was looked for from the turn's start, so one that repeats
+        # earlier words ("That's all.") was found inside the first sentence.
+        said = "That's all I found in your mail, sir. The calendar is clear after 3. That's all."
+        spans = lit.sentence_spans(said)
+        self.assertEqual(lit.sentence_places(said, said), spans)            # word for word: its own spans
+        self.assertEqual(lit.sentence_places(said, "Earlier: " + said), [(a + 9, b + 9) for a, b in spans])
+        short = "That's all. That's all I found, sir."                       # the turn holds it after words of its own
+        before = "Earlier I said that's all. "
+        self.assertEqual(lit.sentence_places(short, before + short.replace(", sir", " — sir")),
+                         [(len(before), len(before) + 11), (len(before) + 12, len(before) + len(short) + 1)])
+        turn = said.replace("after 3", "after three")                       # said otherwise: found in order
+        places = lit.sentence_places(said, turn)
+        self.assertEqual(places[0], (0, turn.index(" The")))
+        self.assertEqual(places[1], (-1, -1))                               # not there as said
+        self.assertEqual(places[2], (turn.rindex("That's all."), len(turn)))   # after the first, never inside it
+        self.assertEqual(lit.sentence_places("", turn), [])
+        self.assertEqual(lit.sentence_places(said, ""), [(-1, -1)] * 3)
+
     def test_a_word_said_otherwise_is_never_found_inside_another(self) -> None:
         # Part 5c fixes: the voice's "eight" for "8" was found inside "eighteen", a sentence too far on.
         text = "Your call with Dana is at 8. The study group has eighteen people."
@@ -508,6 +547,23 @@ class CueLineTests(LitApp):
         at_end = view.mapTo(self.reading.desk_page(), view.text_point(end))
         self.assertGreaterEqual(path.start.x(), at_end.x())              # never across the next sentence's words
 
+    def test_it_starts_beside_the_sentence_being_said_never_an_earlier_one_with_its_words(self) -> None:
+        # Part 5c fixes, round 2 (lit-read 0): the sentence's end was looked for from the turn's start, so a sentence
+        # that repeats an earlier one's words drew the line from that earlier one.
+        self.make()
+        said = "Dana sent the budget numbers, sir. The calendar is clear after 3. Dana sent the budget numbers."
+        ids = self.answer(1, said, [("mail", MAIL, "mail:work:t1"), ("day", DAY, "day:2026-11-17")])
+        self.layout([(ids[0], 56, 160), (ids[1], 228, 240)])
+        self.speak(said, 2)
+        self.assertEqual(self.desk.cue.lit(), ids[0])
+        desk = self.reading.desk_page()
+        view = desk.turns.current_view()
+        end = view.mapTo(desk, view.text_point(len(said), line_end=True))  # beside the last sentence's end
+        path = self.desk.cue.path()
+        self.assertIsNotNone(path)
+        self.assertAlmostEqual(path.start.y(), end.y(), delta=0.5)
+        self.assertAlmostEqual(path.start.x(), end.x(), delta=0.5)
+
     def test_the_anchor(self) -> None:
         self.assertEqual(desk_cue.anchor(56, 160, 626), (56 + 216) // 2)    # the frame's top clipped to 44 px
         self.assertEqual(desk_cue.anchor(100, 100, 626), 150)
@@ -695,16 +751,30 @@ class ReadTests(LitApp):
     @staticmethod
     def brightest(view: desk_view.TurnView, offset: int) -> int:
         """The brightest pixel (r + g + b) of the letter at ``offset`` of the turn's words, as painted."""
+        color = ReadTests.ink(view, offset)
+        return color.red() + color.green() + color.blue()
+
+    @staticmethod
+    def ink(view: desk_view.TurnView, offset: int) -> QColor:
+        """The brightest pixel of the letter at ``offset`` of the turn's words, as painted: its ink."""
         image = on_void(view)
         ratio = image.devicePixelRatio()
         left, right = view.text_point(offset), view.text_point(offset + 1)
-        best = 0
+        best, found = -1, QColor(holo.VOID)
         for x in range(int(left.x() * ratio), int(right.x() * ratio) + 1):
             for y in range(int((left.y() - 7) * ratio), int((left.y() + 7) * ratio) + 1):
                 if 0 <= x < image.width() and 0 <= y < image.height():
                     color = image.pixelColor(x, y)
-                    best = max(best, color.red() + color.green() + color.blue())
-        return best
+                    if color.red() + color.green() + color.blue() > best:
+                        best, found = color.red() + color.green() + color.blue(), color
+        return found
+
+    def hold(self, view: desk_view.TurnView, progress: float) -> None:
+        """Its ease stopped ``progress`` of the way (a paint mid-ease)."""
+        self.assertTrue(view.read_easing())
+        view._read_anim.stop()                                              # noqa: SLF001
+        view._read_p = progress                                             # noqa: SLF001
+        view.update()
 
     def test_the_sentences_already_said_read_in_ink_3(self) -> None:
         self.make()
@@ -809,6 +879,133 @@ class ReadTests(LitApp):
         settle()
         self.assertIsNone(harness.c.window.reading.desk_page())
         harness.c._on_voice_speaking("")
+
+    # ---- part 5c fixes, round 2 ---------------------------------------------------------------------------------------
+
+    def test_a_sentence_that_repeats_earlier_words_is_found_in_its_own_place(self) -> None:
+        # lit-read 0: "That's all." was looked for from the turn's start and found inside the first sentence, so every
+        # word already said went back to its own colours as he said it.
+        said = "That's all I found in your mail, sir. The calendar is clear after 3. That's all."
+        for turn in (said, said.replace("after 3", "after three")):        # word for word, and said otherwise
+            with self.subTest(turn=turn):
+                self.make()
+                self.answer(1, turn, [("mail", MAIL, "mail:work:t1")])
+                self.speak(said, 1)
+                view = self.current()
+                self.assertEqual(view.turn.text, turn)
+                self.at(2)
+                self.assertEqual(view.read_end(), turn.rindex("That's all."))   # the last one, never the first
+                self.assertEqual(view.read_overlay(), [(0, turn.rindex("That's all."), QColor(holo.INK_3))])
+
+    @staticmethod
+    def painted(block: desk_view.TextBlock, overlay: list, origin: QPointF) -> QImage:
+        """``block`` painted as TurnView paints it (TextBlock.paint, its overlay), at ``origin``, over the VOID."""
+        image = QImage(int(block._width) + 4, int(block.lines * block.line) + 4,   # noqa: SLF001
+                       QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(QColor(holo.VOID))
+        painter = QPainter(image)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            block.paint(painter, origin, holo.INK_1, overlay)
+        finally:
+            painter.end()
+        return image
+
+    @staticmethod
+    def ink_in(image: QImage, block: desk_view.TextBlock, offset: int, origin: QPointF) -> QColor:
+        left, right = block.point_at(offset), block.point_at(offset + 1)
+        best, found = -1, QColor(holo.VOID)
+        for x in range(int(left.x() + origin.x()), int(right.x() + origin.x()) + 1):
+            for y in range(int(left.y() + origin.y() - 7), int(left.y() + origin.y() + 7) + 1):
+                if 0 <= x < image.width() and 0 <= y < image.height():
+                    color = image.pixelColor(x, y)
+                    if color.red() + color.green() + color.blue() > best:
+                        best, found = color.red() + color.green() + color.blue(), color
+        return found
+
+    def test_the_ease_is_what_is_painted(self) -> None:
+        # lit-read 1: QTextLayout.draw skips a selection that sets only a foreground when it touches one drawn before
+        # it (each one's region rounded out to whole pixels), so most of the just-said sentence snapped to INK_3 at the
+        # ease's end instead of easing, and the times and the waiting phrase snapped back after the speech. Runs meet
+        # between two pixels with fractional glyph advances (DirectWrite, 1.5x): painted here where they do (a
+        # fractional origin; at 1x offscreen the advances are whole pixels), and as the turn paints itself.
+        self.make()
+        self.demo()
+        dana, both, reply = SAY.index("Dana"), SAY.index("and a"), SAY.index("reply")
+        holo.set_motion_level(holo.MOTION_LIVELY)
+        self.speak(SAY, 1)
+        view = self.current()
+        block = view.block()
+        origin = QPointF(0.37, 0.0)
+
+        def colours() -> dict[int, QColor]:
+            image = self.painted(block, view.read_overlay(), origin)
+            return {offset: self.ink_in(image, block, offset, origin) for offset in (dana, both, reply)}
+
+        def between(value: int, one: int, other: int) -> bool:
+            low, high = min(one, other), max(one, other)
+            margin = (high - low) / 5
+            return high - low > 40 and low + margin < value < high - margin
+
+        own = colours()                                                     # being said: its own colours
+        self.at(2)
+        self.hold(view, 0.5)
+        half, widget = colours(), self.brightest(view, dana)
+        view._on_read_done()                                                # noqa: SLF001 - the ease at its end
+        read = colours()
+        for offset in (dana, both):                                        # INK_1 to INK_3: their brightness
+            with self.subTest(offset=offset):
+                self.assertTrue(between(sum(half[offset].getRgb()[:3]), sum(own[offset].getRgb()[:3]),
+                                        sum(read[offset].getRgb()[:3])), (own[offset], half[offset], read[offset]))
+        self.assertTrue(between(half[reply].blue(), own[reply].blue(), read[reply].blue()))   # AMBER_HI to INK_3
+        self.assertTrue(between(widget, sum(own[dana].getRgb()[:3]), sum(read[dana].getRgb()[:3])))   # the turn too
+        self.c._on_voice_speaking("")                                      # the speech ends: it eases back ...
+        settle()
+        self.hold(view, 0.5)
+        back = colours()
+        for offset in (dana, both):
+            with self.subTest(offset=offset, back=True):
+                self.assertTrue(between(sum(back[offset].getRgb()[:3]), sum(own[offset].getRgb()[:3]),
+                                        sum(read[offset].getRgb()[:3])), (own[offset], back[offset], read[offset]))
+        self.assertTrue(between(back[reply].blue(), own[reply].blue(), read[reply].blue()),
+                        (own[reply], back[reply], read[reply]))             # ... a blend too
+
+    def test_after_two_emoji_the_said_words_and_the_marks_are_where_they_should_be(self) -> None:
+        # lit-read 3: Python's places (characters) went into Qt as they were, where Qt counts UTF-16 units (an emoji is
+        # two), so after two emoji the dimming stopped two places short (the full stop before "Dana" stayed bright),
+        # the times' colour fell two places early and a place's point (the cue line's start) was two places off.
+        from PySide6.QtGui import QTextLayout, QTextOption
+
+        said = 'Two mails came in: "\U0001F389 Launch day" and "\U0001F680 Q4 plan". Dana sent the numbers at 8:12.'
+        self.make()
+        self.answer(1, said, [("mail", MAIL, "mail:work:t1")])
+        self.speak(said, 0)
+        view = self.current()
+        stop, dana, two = said.index('". Dana') + 1, said.index("Dana"), said.index("8:12") + 3
+        unread = self.brightest(view, stop)                                 # the first sentence being said
+        self.at(1)
+        self.assertEqual(view.read_end(), dana)
+        block = view.block()
+        layout = QTextLayout(said, block.font)                              # Qt's own layout of the same words ...
+        option = QTextOption()
+        option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        layout.setTextOption(option)
+        layout.beginLayout()
+        while True:
+            line = layout.createLine()
+            if not line.isValid():
+                break
+            line.setLineWidth(block._width)                                 # noqa: SLF001 - its laid-out width
+        layout.endLayout()
+        for offset in (stop, dana, two):
+            with self.subTest(offset=offset):
+                units = len(said[:offset].encode("utf-16-le")) // 2         # ... in its own units
+                found = layout.lineForTextPosition(units).cursorToX(units)
+                x = float(found[0] if isinstance(found, tuple) else found)
+                self.assertAlmostEqual(view.text_point(offset).x(), x, delta=0.5)
+        self.assertLess(self.brightest(view, stop) + 60, unread)           # the full stop said: INK_3
+        cyan = self.ink(view, two)                                          # the time's last digit: HOLO_HI
+        self.assertLess(cyan.red() + 60, cyan.green(), cyan)
 
 
 class HudRingTests(HudApp):

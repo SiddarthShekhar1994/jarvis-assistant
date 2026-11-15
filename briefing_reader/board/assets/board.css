@@ -658,6 +658,9 @@ body.dim #board, body.dim #bar, body.dim #strip, body.dim #more, body.dim #pill 
 #backdrop { transition: filter calc(220ms * var(--k)) var(--ease-out); }
 body.dim #backdrop { filter: brightness(.2); transition-duration: calc(260ms * var(--k)); }
 #big { position: fixed; inset: 0; z-index: 20; }
+/* Held until its growth starts (board.js grow / start): there and focused, but unseen and untouched, so the view never
+   shows the big frame at its full size before it grows from its rectangle. */
+#big.held { opacity: 0; pointer-events: none; }
 .big-scrim { position: absolute; inset: 0; }
 .frame.big-card {
   position: absolute; inset: 0; display: flex; flex-direction: column; padding: 18px 22px 0;

@@ -314,6 +314,13 @@ class PageTests(unittest.TestCase):
         self.assertEqual(failed["body"], {"caption": "city-hack.example.org"})
         pending = frame_of(frames.from_picture(pictures.page_pending(self.URL), frame_id="p5", now=NOW))
         self.assertEqual((pending["status"], pending["status_text"]), ("empty", pictures.NOTE_OPENING))
+        # Part 5c fixes, round 2: the builder says the frame stands for a picture not ready (the board keeps a good one
+        # meanwhile); a ready one, and a builder's own final state, never say so.
+        self.assertTrue(frames.from_picture(pictures.page_pending(self.URL), frame_id="p5", now=NOW).not_ready)
+        self.assertTrue(frames.from_picture(pictures.page_unavailable(self.URL, "x"), frame_id="p4", now=NOW).not_ready)
+        ready = pictures.page_ready(self.URL, image=tiny_jpeg(), width=48, height=30)
+        self.assertFalse(frames.from_picture(ready, frame_id="p8", now=NOW).not_ready)
+        self.assertFalse(frames.from_todos([], [], frame_id="t9", now=NOW).not_ready)
         dropped = pictures.page_ready(self.URL, image=tiny_jpeg(), width=48, height=30).dropped(live.PICTURE_TOO_BIG)
         frame = frame_of(frames.from_picture(dropped, frame_id="p6", now=NOW))
         self.assertEqual((frame["status"], frame["status_text"]),

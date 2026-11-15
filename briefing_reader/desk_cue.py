@@ -19,7 +19,9 @@ the last 15 px, from the view's left edge to the frame, from the frame's own pla
 
 Part 5c fixes: the same sentence (never a timer of its own) also dims the words already said - in the conversation's
 current turn, every sentence before the one being said reads in INK_3 (desk_view.DeskTurns.set_read) while the desk is
-seen; when the speech ends, is stopped or muted, the turn eases back to its own colours.
+seen; when the speech ends, is stopped or muted, the turn eases back to its own colours. Where the sentence being said
+is in the turn's words (where the said words end, and where the cue line starts) comes from one place: each sentence
+found in order, after the one before it, or where the turn holds his words word for word (``placed``).
 
 The page gets ``{"type": "lit", "id", "cue"}``: the brackets, its TILE_FOCUS / TILE_AMBER_LIT ground and, when "cue",
 its stub (drawn in after the native part's 200 ms; at once when the cue comes back for the same frame). The lit frame
@@ -75,6 +77,8 @@ class CueController(QObject):
         self._scrolling = False
         self._read_entry: Any = None                    # the turn whose words said so far are dimmed (its entry id)
         self._watched: Any = None                       # the turns whose rebuilds it follows
+        self._located: list[tuple[int, int]] = []       # where each sentence of what he says is in the current turn's
+        self._located_in: str | None = None             # words (board.lit.sentence_places), kept for those words
         self._timer = QTimer(self)
         self._timer.setInterval(TICK_MS)
         self._timer.timeout.connect(self._tick)
@@ -89,6 +93,7 @@ class CueController(QObject):
         self._text = text
         self._spans = lit_mod.sentence_spans(text)
         self._index = -1
+        self._located_in = None
         self._dirty = True
         if text:
             self._timer.start()
@@ -279,18 +284,27 @@ class CueController(QObject):
         if self._text and self._index >= 0 and self.desk.on_screen():
             self._mark_read()
 
+    def placed(self, text: str) -> list[tuple[int, int]]:
+        """Where each sentence of what he says is in ``text`` (the current turn's words): in order, each after the one
+        before it, or where the turn holds his words word for word (board.lit.sentence_places) - so one that repeats
+        earlier words ("That's all.") is found in its own place. Kept while the voice moves on; found again when the
+        turn's words change."""
+        if text != self._located_in:
+            self._located_in = text
+            self._located = lit_mod.sentence_places(self._text, text)
+        return self._located
+
     def read_end(self, text: str) -> int:
         """Where the sentence being said begins in ``text`` (the current turn's words): everything before it is said;
         -1 when it is not known there (the turn stays as it is)."""
-        sentence = self.sentence()
-        if not sentence:
+        if not self.sentence():
             return -1
-        start = lit_mod.locate_start(sentence, text)
+        places = self.placed(text)
+        start = places[self._index][0] if self._index < len(places) else -1
         if start >= 0:
             return start
-        if self._index > 0:                               # said otherwise: just past the sentence before it
-            first, last = self._spans[self._index - 1]
-            end = lit_mod.locate(self._text[first:last], text)
+        if 0 < self._index <= len(places):                # said otherwise: just past the sentence before it
+            end = places[self._index - 1][1]
             if end >= 0:
                 while end < len(text) and text[end].isspace():
                     end += 1
@@ -339,10 +353,10 @@ class CueController(QObject):
             return None
         turns = desk.turns
         view = turns.current_view()
-        sentence = self.sentence()
-        if view is None or not sentence:
+        if view is None or not self.sentence():
             return None
-        end = lit_mod.locate(sentence, view.turn.text)
+        places = self.placed(view.turn.text)                # the same place the said words end at
+        end = places[self._index][1] if self._index < len(places) else -1
         point = view.text_point(end, line_end=True) if end >= 0 else None   # never across the next sentence's words
         if point is None:
             return None

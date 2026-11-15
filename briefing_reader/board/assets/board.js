@@ -295,10 +295,13 @@
   var lit = '';
   var litCue = false;                          // the app draws the cue line's native part to the lit frame
   var stub = null;                             // the cue line's last 15 px: {el, id}
-  var big = null;                              // open big: {id, rec, card, state: wait / open / closing / shut, box}
+  var big = null;                              // open big: {id, rec, card, state: wait / open / closing / shut, box, turn}
   var bigTurn = 0;                             // bumped by each open asked, each step back and each "laid" made ready:
-                                               // a "laid" is sent only while its own step is the latest
+                                               // a "laid" is sent only while its own step is the latest (a close's
+                                               // only when no open was asked since its "shut": big.turn)
   var bigLayer = null;                         // the big frame's layer over the whole view
+  var focusOwed = false;                       // big ended with the keyboard and nothing on the board could take it:
+                                               // the next frame shown does (refresh), never <body>
   var backdrop = null;                         // the conversation column as the app painted it
   var focused = '';
   var motion = 'lively';
@@ -759,6 +762,14 @@
     syncCleared();
     syncPill();
     buildStrip();
+    if (focusOwed) {                           // the keyboard owed to the board since big ended with nothing on it
+      var owed = document.activeElement;
+      if (owed && owed !== document.body) {
+        focusOwed = false;                     // it went somewhere meanwhile
+      } else if (document.hasFocus()) {
+        focusOwed = !focusBoard();
+      }
+    }
     scheduleView();
     scheduleLayout();
   }
@@ -2093,6 +2104,22 @@
     });
   }
 
+  function bigHasFocus() {                     // the keyboard is the big frame's: in its layer, or on nothing while the
+    var active = document.activeElement;       // page has it (a click beside it took it there)
+    return (!!bigLayer && !!active && bigLayer.contains(active))
+      || (document.hasFocus() && (!active || active === document.body));
+  }
+
+  function focusBack(rec) {                    // big is over: the keyboard goes back to its frame while the board still
+    var node = current(rec) && !rec.away && !parked(rec) ? target(rec) : null;     // has it, else to the board (its
+    if (node) {                                                                      // frame in view): never <body>
+      node.focus({preventScroll: true});
+    }
+    if (!node || document.activeElement !== node) {
+      focusOwed = !focusBoard();               // (nothing on the board just now: the next frame shown takes it)
+    }
+  }
+
   function cardTab(back) {                     // Tab in open big: the big frame, then its own controls, round
     if (!big || !big.card) {
       return;
@@ -2119,9 +2146,12 @@
       big.state = 'open';
       grow();
     } else if (big && big.state === 'shut' && !wide) {
+      var asked = big.turn !== bigTurn;        // an open asked since its "shut": that open's own "laid" answers the app
       big = null;                              // the app set the geometry back: the board is its own again, measured
       measureWidth();                          // at its real width (it re-flows only when that changed meanwhile)
-      laidOut();
+      if (!asked) {
+        laidOut();                             // (this close's "laid" only ever answers this close)
+      }
     }
     placeStub();
   }
@@ -2180,7 +2210,7 @@
       bigLayer.appendChild(scrim);
     }
     var card = make('article', 'frame big-card');
-    card.tabIndex = -1;
+    card.tabIndex = 0;                         // a stop of its own: a Tab into the view lands on it (never on <body>)
     card.setAttribute('aria-labelledby', 'big-title');
     card.addEventListener('mousedown', function (event) {
       if (event.detail > 1) {
@@ -2195,9 +2225,12 @@
     fillCard(card, rec);
     big.card = card;
     var mine = big;
+    // Held until it grows (part 5c fixes, round 2): there, unseen and untouched, nothing dimmed yet - every frame the
+    // app's view can show before its growth starts is the board as it was, never the big frame at its full size. On the
+    // layer: fillCard rewrites the card's own class.
+    bigLayer.classList.add('held');
     bigLayer.appendChild(card);
     document.body.appendChild(bigLayer);
-    document.body.classList.add('dim');        // the backdrop and the other frames go to 20 %
     underBig(true);
     card.focus({preventScroll: true});         // the focus goes with it (the frame under it is inert now)
     var from = rec.el.getBoundingClientRect();
@@ -2205,6 +2238,8 @@
       if (big !== mine || mine.state !== 'open' || mine.card !== card) {
         return;                                // gone back (or another frame big) before its picture was ready
       }
+      bigLayer.classList.remove('held');       // it grows from here, and the backdrop and the other frames go to 20 %
+      document.body.classList.add('dim');      // with it
       laidOut();
       card.focus({preventScroll: true});
       if (K === 0 || !card.animate || from.width < 1 || from.height < 1) {
@@ -2233,7 +2268,8 @@
       post('big', {step: 'back'});
     }
     document.body.classList.remove('dim');
-    var hadFocus = !!card && card.contains(document.activeElement);
+    var hadFocus = bigHasFocus();
+    var held = !!bigLayer && bigLayer.classList.contains('held');
     var done = function () {
       if (big !== mine) {
         return;
@@ -2247,16 +2283,17 @@
       underBig(false);
       mine.card = null;
       mine.state = 'shut';
-      if (hadFocus && current(rec)) {
-        target(rec).focus({preventScroll: true});
+      if (hadFocus) {
+        focusBack(rec);
       }
       post('big', {step: 'shut'});
+      mine.turn = bigTurn;                     // an open asked after this: the board's "laid" is that open's (placeBig)
       if (!isWide()) {
         placeBig();                            // the view was never wide (or is narrow again already)
       }
     };
-    if (!card || K === 0 || !card.animate || !current(rec) || rec.away || rec.closed) {
-      done();
+    if (!card || K === 0 || !card.animate || !current(rec) || rec.away || rec.closed || held) {
+      done();                                  // (held: it never grew, so it goes at once)
       return;
     }
     var to = rec.el.getBoundingClientRect();

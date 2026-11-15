@@ -278,6 +278,44 @@ class DeskSoundTests(unittest.TestCase):
         self.answer(4, [("budget-fourth", frame_data("Budget lines", "Software 3,600."), "sheet:q4")])
         self.assertEqual(self.calls, [])                                    # the same words: nothing at all
 
+    def test_the_builders_say_what_a_board_frame_keeps(self) -> None:
+        # Part 5c fixes, round 2 (feed-sounds 0), through the desk: a page read again whose picture is on its way keeps
+        # the good one on the board; an emptied to-do list is sent as it is now.
+        from datetime import datetime
+
+        from briefing_reader import pictures
+        from briefing_reader.board import frames as board_frames
+
+        self.make()
+        now = datetime(2026, 11, 17, 9, 41)
+        url = "https://city-hack.example.org/schedule"
+
+        def put(key: int, entries: list[tuple]) -> None:
+            desk = self.desk
+            self.c._you(f"Question {key}?")
+            desk.on_answer_started(key, f"Question {key}?")
+            self.c._jarvis(f"Answer {key}, sir.")
+            answer = desk._answers[key]
+            answer.done, answer.say = True, f"Answer {key}, sir."
+            desk._put(answer, entries)
+            settle(3)
+
+        good = {"kind": "picture", "title": "City Hack schedule", "meta": "9:05 AM", "body": {"caption": "x.org"}}
+        put(1, [("step:1", lambda fid: Built(({**good, "type": "frame", "id": fid},), 0), "", "", "page:" + url)])
+        page_id = self.board().of_type("frame")[-1]["id"]
+        sent = len(self.board().of_type("frame"))
+        put(2, [("step:9", lambda fid: board_frames.from_picture(pictures.page_pending(url), frame_id=fid, now=now),
+                 "", "", "page:" + url)])
+        self.assertEqual(len(self.board().of_type("frame")), sent)              # on its way: nothing over the good one
+        self.assertEqual(self.desk.feed.frame_message(page_id).get("status", "ok"), "ok")
+        waits = {"kind": "todos", "title": "To-dos", "meta": "1 · 1 waits", "body": {"rows": [
+            {"text": "Buy milk", "meta": "", "state": "waits"}]}}
+        put(3, [("todos", lambda fid: Built(({**waits, "type": "frame", "id": fid},), 0), "", "", "todos")])
+        todos_id = self.board().of_type("frame")[-1]["id"]
+        put(4, [("todos", lambda fid: board_frames.from_todos([], [], frame_id=fid, now=now), "", "", "todos")])
+        last = self.board().of_type("frame")[-1]
+        self.assertEqual((last["id"], last["status"], last["changed"]), (todos_id, "empty", True))
+
     def test_open_big_and_back(self) -> None:
         self.make()
         ids = self.answer(1, [("a", frame_data("A"), "")])
@@ -406,7 +444,8 @@ class ChangedFeedTests(unittest.TestCase):
     # ---- part 5c fixes ------------------------------------------------------------------------------------------------
 
     def put_page(self, answer: int, source: str, status: str = "ok", src: str = "") -> list[dict]:
-        """A page picture's frame of ``answer`` (its key: the page's address), with its picture when ``src``."""
+        """A page picture's frame of ``answer`` (its key: the page's address), with its picture when ``src``; a status
+        other than "ok" is the LIVE picture on its way or failed, as board.frames.from_picture says (``not_ready``)."""
         frame_id = self.feed.frame_id(answer, source, "", PAGE_KEY)
         data = {"kind": "picture", "title": "City Hack schedule", "meta": f"9:0{answer} AM",
                 "body": {"caption": "city-hack.example.org"}, "status": status,
@@ -414,7 +453,8 @@ class ChangedFeedTests(unittest.TestCase):
         messages = [{"type": "frame", "id": frame_id, **data}]
         if src:
             messages.append({"type": "picture", "id": frame_id, "src": src})
-        return self.page.apply(self.feed.put(answer, source, messages, when="9:41 AM", key=PAGE_KEY))
+        return self.page.apply(self.feed.put(answer, source, messages, when="9:41 AM", key=PAGE_KEY,
+                                             not_ready=status != "ok"))
 
     def test_a_page_read_again_keeps_its_picture_until_the_new_one_is_ready(self) -> None:
         # Part 5c fixes: a later answer's re-read of the page hid the good picture behind "Opening the page..." (or
@@ -480,6 +520,58 @@ class ChangedFeedTests(unittest.TestCase):
         later["body"]["rows"][0]["meta"] = "DUE TOMORROW"
         self.assertEqual(substance(due), substance(later))                     # due words are the clock's
         self.assertEqual(substance(DAY_920), substance(DAY_941))               # so are "now" and "in 19 min"
+
+    # ---- part 5c fixes, round 2 -----------------------------------------------------------------------------------
+
+    def test_an_emptied_list_reaches_the_board(self) -> None:
+        # feed-sounds 0: round 1's keep-the-good-picture rule held back every build that was not "ok", so the to-dos'
+        # own final state - "No to-dos or deadlines." - never reached the board: it kept "Buy milk" WAITS.
+        from datetime import datetime
+
+        from briefing_reader.board import frames as board_frames
+
+        waits = {"kind": "todos", "title": "To-dos", "meta": "1 · 1 waits", "body": {"rows": [
+            {"text": "Buy milk", "meta": "", "state": "waits"}]}}
+        put(self.feed, self.page, 1, "todos", waits, key="todos")
+        frame_id = self.feed.frame_ids()[0]
+        built = board_frames.from_todos([], [], frame_id=self.feed.frame_id(2, "todos", "", "todos"),
+                                        now=datetime(2026, 11, 17, 9, 41))
+        self.assertFalse(built.not_ready)                                     # the builder's own final state
+        sent = self.page.apply(self.feed.put(2, "todos", list(built.messages), when="9:41 AM", key="todos",
+                                             not_ready=built.not_ready))
+        self.assertEqual([(message["type"], message["id"], message["status"], message["changed"]) for message in sent],
+                         [("frame", frame_id, "empty", True)])                # seen as it was: CHANGED
+        self.assertEqual(self.feed.take_changed(), [frame_id])
+        self.assertEqual(self.feed.frame_message(frame_id)["status_text"], board_frames.TODOS_EMPTY)
+
+    def test_a_frame_s_own_count_in_its_header_is_its_substance(self) -> None:
+        # feed-sounds 2: a week's header counts every event Jarvis read (yesterday to two weeks on), its rows only the
+        # seven days from today - one more event past them changed only "23 EVENTS", and nothing was sent. So do the
+        # to-dos' "9 · 1 waits" and the follow-ups' "3 waiting · 1 owed" for rows past "+N MORE".
+        rows = [{"time": f"Day {day}", "title": "Standup", "meta": "1 event", "state": ""} for day in range(7)]
+        week = {"kind": "calendar", "title": "This week", "meta": "23 events", "body": {
+            "first": 0, "last": 0, "now_min": -1, "ticks": [], "spans": [], "now": "", "rows": rows}}
+        busier = json.loads(json.dumps(week))
+        busier["meta"] = "24 events"
+        self.assertNotEqual(substance(week), substance(busier))
+        put(self.feed, self.page, 1, "calendar:week", week, key="week:2026-11-14")
+        sent = put(self.feed, self.page, 2, "calendar:week", busier, key="week:2026-11-14")
+        self.assertEqual([(message["type"], message["meta"], message["changed"]) for message in sent],
+                         [("frame", "24 events", True)])
+        todos = {"kind": "todos", "title": "To-dos", "meta": "9 · 1 waits", "body": {"rows": [
+            {"text": f"Item {index}", "meta": "", "state": "open"} for index in range(7)] + [
+            {"text": "", "meta": "+2 MORE", "state": "open"}]}}
+        waiting = json.loads(json.dumps(todos))
+        waiting["meta"] = "9 · 2 waits"                                       # one behind "+2 MORE" waits now
+        self.assertNotEqual(substance(todos), substance(waiting))
+        followups = {"kind": "mail_list", "title": "Follow-ups", "meta": "3 waiting · 1 owed", "body": {"rows": []}}
+        self.assertNotEqual(substance(followups), substance({**followups, "meta": "4 waiting · 1 owed"}))
+        day = {"kind": "calendar", "title": "Today", "meta": "Tue Nov 17 · 3 events", "body": {"rows": []}}
+        self.assertEqual(substance(day), substance({**day, "meta": "Tue Nov 17 · 3 events"}))
+        self.assertNotEqual(substance(day), substance({**day, "meta": "Tue Nov 17 · 4 events"}))
+        mail = {"kind": "mail_thread", "title": "Re: Budget numbers", "meta": "Work · 2:41 PM",
+                "body": {"sender": "Dana Whitfield", "time": "2:41 PM", "text": "Here."}}
+        self.assertEqual(substance(mail), substance({**mail, "meta": "Work · Fri Nov 13 2026, 2:41 PM"}))   # a time
 
     def test_a_mail_read_again_the_next_day_says_the_same(self) -> None:
         # Part 5c fixes: the day shown before a mail's time once it is not today's made an unchanged thread CHANGED.

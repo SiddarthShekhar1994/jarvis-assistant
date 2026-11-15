@@ -15,7 +15,7 @@ raises for odd data; only a frame id that is not one raises ValueError (the call
         re-encoded; when even that does not fit, no picture message, the frame says so and ``refused`` counts it);
         KIND_SEARCH -> text (the query as the title, the results as rows: title and host). A picture that is not ready
         -> the frame in its failed (unavailable: the page offers Try again) or empty (on its way, not kept) state, with
-        the picture's own note.
+        the picture's own note, and Built's ``not_ready`` set.
     from_research(answer, *, frame_id, title="")
         a web research answer (ask.research.ResearchAnswer): the answer as text, its sources as rows (title and host,
         never a link)
@@ -87,10 +87,14 @@ _NON_WORD_RE = re.compile(r"[\W_]+")
 @dataclass(frozen=True, repr=False)
 class Built:
     """What a builder made: ``messages`` for BoardView.apply in order (the frame first, then its picture when it has
-    one), and ``refused``: pictures left out (too big for the board even re-encoded). repr: kinds and counts only."""
+    one), and ``refused``: pictures left out (too big for the board even re-encoded). ``not_ready`` (part 5c fixes,
+    round 2): the frame stands for a LIVE picture that is not ready - on its way, failed or not kept - never a
+    builder's own final state (an empty to-do list says "empty" and is ready): a board frame that shows a good one
+    keeps it meanwhile (board.feed). repr: kinds and counts only."""
 
     messages: tuple[dict[str, Any], ...] = ()
     refused: int = 0
+    not_ready: bool = False
 
     @property
     def frame(self) -> dict[str, Any] | None:
@@ -234,7 +238,7 @@ def from_picture(picture: Any, *, frame_id: str, now: datetime, hour24: bool = F
         return Built()
     state = getattr(picture, "state", "")
     if state != live.PICTURE_READY or _data_of(picture) is None:
-        return Built((_not_ready(picture, kind, frame_id, title),))
+        return Built((_not_ready(picture, kind, frame_id, title),), not_ready=True)
     builder = {pictures.KIND_EMAIL: _mail, pictures.KIND_OUTGOING: _mail, pictures.KIND_DAY: _day,
                pictures.KIND_WEEK: _week, pictures.KIND_SEARCH: _search}.get(picture.kind)
     if builder is not None:

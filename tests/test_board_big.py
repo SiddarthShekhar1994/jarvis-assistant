@@ -14,7 +14,9 @@ page told the new box); open big ending at once off Home and going back when its
 skipping the covered conversation; no words in the logs. Part 5c fixes: the page told before its view is wide; a
 "laid" taken only for the step the still waits for; the covered conversation out of the Tab chain and back as it was;
 the Dock's and the header's own opacity effects; a resize's backdrop counted; the shut grace's own timer; no eased dim
-left behind as an animation.
+left behind as an animation. Round 2: the still's check of the view's own pixels at its left edge (desk_big.view_shows:
+clear, opaque, two rows crossed, never the window under it); with no web view the page's "laid" lifts the still, and
+end_now leaves nothing of it running.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ import unittest
 from unittest import mock
 
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, QRect, Qt, QVariantAnimation
-from PySide6.QtGui import QColor, QImage, QPixmap
+from PySide6.QtGui import QColor, QImage, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import QApplication, QGraphicsOpacityEffect, QWidget
 
 from briefing_reader import desk_big, desk_view, holo, ui
@@ -108,6 +110,61 @@ class BackdropTests(unittest.TestCase):
         self.assertLessEqual(len(src), protocol.PICTURE_CAP)
         self.assertEqual(protocol.jpeg_src(src), src)
         self.assertEqual(protocol.check_message({"type": "backdrop", "src": src}).type, "backdrop")
+
+
+# --------------------------------------------------------------------------
+# The still's check: the board view's own pixels at its left edge (part 5c fixes, round 2)
+# --------------------------------------------------------------------------
+
+class _Edge(QWidget):
+    """A view's left edge as a page lays it out: nothing there (the board's pad), the backdrop there (opaque), or the pad
+    with two of its eight rows crossed (a cue stub, a lit bracket's shadow)."""
+
+    def __init__(self, fill: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.fill = fill
+        self.resize(320, 400)
+
+    def paintEvent(self, _event) -> None:  # noqa: N802 - Qt override
+        if self.fill == "clear":
+            return
+        painter = QPainter(self)
+        try:
+            if self.fill == "opaque":
+                painter.fillRect(QRect(0, 0, 15, self.height()), QColor(holo.VOID))
+            else:
+                band = self.height() // 8
+                for row in (2, 5):
+                    painter.fillRect(QRect(0, row * band, 15, band), QColor(holo.CUE))
+        finally:
+            painter.end()
+
+
+class ViewShowsTests(unittest.TestCase):
+    def test_the_view_s_own_pixels_at_its_left_edge(self) -> None:
+        for fill, wide, own in (("clear", False, True), ("opaque", True, False), ("bands", False, True)):
+            with self.subTest(fill=fill):
+                view = _Edge(fill)
+                self.addCleanup(view.deleteLater)
+                self.assertEqual(desk_big.view_shows(view, wide=True), wide)    # open big: the backdrop there
+                self.assertEqual(desk_big.view_shows(view, wide=False), own)    # back: the board's pad clear there
+
+    def test_never_the_window_under_it(self) -> None:
+        # The translucent view lies over the window's ground and the column's widgets: what is under it never counts.
+        window = QWidget()
+        self.addCleanup(window.deleteLater)
+        window.setAutoFillBackground(True)
+        palette = window.palette()
+        palette.setColor(QPalette.ColorRole.Window, QColor(holo.VOID))
+        window.setPalette(palette)
+        window.resize(400, 400)
+        view = _Edge("clear", window)
+        self.assertTrue(desk_big.view_shows(view, wide=False))
+        self.assertFalse(desk_big.view_shows(view, wide=True))
+        tiny = _Edge("opaque")
+        self.addCleanup(tiny.deleteLater)
+        tiny.resize(1, 4)                                                      # no edge to read
+        self.assertFalse(desk_big.view_shows(tiny, wide=True))
 
 
 class BigApp(unittest.TestCase):
@@ -279,6 +336,30 @@ class OpenTests(BigApp):
         self.assertEqual(at_send, [geometry.view])                            # still its column when told
         self.assertEqual(board.geometry(), geometry.big)                      # then wide, once
 
+    def test_with_no_web_view_the_page_s_laid_lifts_the_still_and_end_now_leaves_nothing_running(self) -> None:
+        # Part 5c fixes, round 2: the stand-in page has no web view to read, so the page's "laid" lifts the still as
+        # before; ended at once, nothing of the still is left (its check, its beat, its time limit).
+        self.make()
+        page_id = self.answer()[0]
+        desk, big = self.reading.desk_page(), self.desk.big
+        with mock.patch.object(desk_big.BigController, "_veil", lambda self_, page, rect: page.veil.show_still(
+                QPixmap(4, 4), rect) or True):
+            self.open(page_id)
+            self.assertTrue(desk.veil.shown())
+            self.assertFalse(big.still_judged())                              # nothing to judge it by
+            self.board().request("big", step="laid")
+            settle()
+            self.assertFalse(desk.veil.shown())
+            self.board().request("big", step="back")
+            self.board().request("big", step="shut")
+            settle()
+            self.assertTrue(desk.veil.shown())                                # the close's still ...
+            self.open(page_id)                                                # (its "laid" never came: VEIL_MS)
+            self.desk.big.end_now()
+            self.assertFalse(desk.veil.shown())                               # ... and gone at once with end_now
+            self.assertFalse(big._veil_timer.isActive())                      # noqa: SLF001
+            self.assertFalse(big._edge_timer.isActive())                      # noqa: SLF001
+
     def test_a_laid_answers_only_the_step_the_still_waits_for(self) -> None:
         # Part 5c fixes: any "laid" lifted the still, also one for a step already over.
         self.make()
@@ -371,6 +452,31 @@ class OpenTests(BigApp):
             self.assertTrue(wait_for(lambda: reading.chrome_dim() == 1.0, 2.0))
         settle()
         self.assertEqual(animations(), baseline)                              # ... and none kept
+
+    def test_a_page_that_comes_back_while_big_gives_the_keyboard_to_the_board(self) -> None:
+        # Part 5c fixes, round 2 (open-big 1): the page that came back after its renderer stopped had nothing focused,
+        # so a big frame that had the keyboard left it on the new page's <body>.
+        from briefing_reader.board import view as view_mod
+
+        for keys_in_board in (True, False):
+            with self.subTest(keys_in_board=keys_in_board):
+                self.make()
+                page_id = self.answer()[0]
+                self.window.activateWindow()
+                QApplication.setActiveWindow(self.window)
+                self.open(page_id)
+                if keys_in_board:
+                    self.board().page_widget.setFocus()                       # the keyboard in the page (big)
+                else:
+                    self.reading.focus_ask_bar()                              # ... or in the ask bar
+                settle()
+                board = self.board()
+                board._phase = view_mod._LOADING                             # noqa: SLF001 - its page loaded again ...
+                board.say_ready()                                             # ... and ready, holding nothing
+                settle()
+                self.assertEqual(self.desk.big.state(), "")
+                focus = [message for message in board.sent if message.get("type") == "focus_part"]
+                self.assertEqual(focus[-1:], [{"type": "focus_part", "part": "board"}] if keys_in_board else [])
 
     def test_it_ends_at_once_off_home(self) -> None:
         self.make()

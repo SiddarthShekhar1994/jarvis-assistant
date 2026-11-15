@@ -40,8 +40,12 @@ layout following a frame's height animation and a picture's load; the hostile me
 frame they name, with a control and the reasons dropped; the page's own "laid" at the open (the still's limit at 5 s);
 real Tab and Shift+Tab staying in the big frame, the board under it inert and keeping its layout (none for the wide
 view, the real width's after); the big frame's new picture; a "laid" only for the step still going on (keys pressed at
-the exact moment the steps cross); the backdrop opaque and dimmed as a picture. Skipped when this
-PySide6 has no QtWebEngine 6.8+.
+the exact moment the steps cross); the backdrop opaque and dimmed as a picture. Round 2: the still lifting only once
+the window shows the page laid out at its new size (a layout mark read the moment it is cleared, lively and off, open
+and close), the big frame held as it is added, a "laid" too early never lifting it, a close's "laid" never answering
+an open asked after its shut, and the focus going back to the board however big ends (Tab in, its group leaving for
+room); the hostile list with an item only each of the page's checks catches. Skipped when this PySide6 has no
+QtWebEngine 6.8+.
 """
 
 from __future__ import annotations
@@ -838,11 +842,15 @@ class LitTests(BoardProbeCase):
     def test_the_new_messages_hostile_are_refused_by_the_page(self) -> None:
         # Part 5c fixes: sent while the page holds the frame they name (it used to run on an empty board, where any big
         # open was dropped as an unknown id), with a control that the page takes, and the reasons each was dropped for.
+        # Round 2 (lockdown 0): an item only each remaining check refuses (a big open wrong only in h, a key too many, a
+        # well-formed id the page lacks; a close in the wrong state or with a bad id; a lit with a bad id), so taking
+        # any one of the page's checks out lets one through.
         report = self.lit()
-        self.assertTrue(report["hostile_known"])                       # the frame named is on the page
-        self.assertEqual(report["page_refused"], [False] * 17)
+        self.assertTrue(report["hostile_known"])                       # the frame named is on the page ...
+        self.assertTrue(report["hostile_unknown_absent"])              # ... and "f999" is not
+        self.assertEqual(report["page_refused"], [False] * 24)
         self.assertEqual(report["big_after_hostile"], "")
-        self.assertEqual(report["hostile_drops"], {"shape": 12, "picture": 5, "id": 0, "size": 0})
+        self.assertEqual(report["hostile_drops"], {"shape": 18, "picture": 5, "id": 1, "size": 0})
         self.assertEqual(report["control"], [True, True])               # a good open (then close) is taken
         self.assertEqual(report["big_after_control"], "")
 
@@ -953,7 +961,8 @@ class BigTests(BoardProbeCase):
 
     def test_the_page_says_laid_at_the_open_and_the_still_goes_with_it(self) -> None:
         # Part 5c fixes: the open's "laid" was never checked (the still's time limit lifted it all the same); here the
-        # limit is 5 s, so only the page's own "laid" can lift it.
+        # limit is 5 s, so only the page's "laid" and the view's own check can lift it. Round 2 (changed on purpose):
+        # "laid" now usually comes before Qt shows the new layout, so the still goes by the view's own check.
         for case in ("big", "big_x15"):
             with self.subTest(case=case):
                 report = self.check(case)
@@ -961,10 +970,59 @@ class BigTests(BoardProbeCase):
                 laid = [step for step in steps if step[0] == "laid"]
                 self.assertTrue(laid, steps)
                 self.assertNotIn("back", [step[0] for step in steps])         # before any Esc
-                self.assertFalse(laid[0][2])                                  # the still gone with it ...
+                self.assertGreaterEqual(report["big_counts"].get("shown:open", 0), 1)   # the view's own check ...
                 self.assertLess(laid[0][1] - report["opened_at"], 5.0)        # ... well before its time limit
                 self.assertNotIn("laid:ignored", report["big_counts"])
                 self.assertFalse(report["veil_after"])
+
+    def test_the_still_lifts_only_once_qt_shows_the_new_layout(self) -> None:
+        # Part 5c fixes, round 2: the still went with the page's "laid" while Qt still showed the view's old frame at its
+        # new size for 30-100 ms (open: the narrow board over the conversation; close: the wide frame's left part), and
+        # the big frame could show at full size before its growth started. The window is read the moment the still is
+        # cleared: the page's own layout mark must be there, magenta wide, cyan at its own size.
+        for case in ("big", "big_x15"):
+            with self.subTest(case=case):
+                report = self.check(case)
+                for motion in ("lively", "off"):
+                    self.assertEqual(report[f"lift_marks_{motion}"], [["open", "#ff00ff"], ["closed", "#00ffff"]],
+                                     motion)
+                self.assertNotIn("veil_late:open", report["big_counts_end"])
+                self.assertNotIn("veil_late:close", report["big_counts_end"])
+                # Added held: unseen and untouched, nothing dimmed yet, and it has the focus.
+                self.assertEqual(report["held_at_add"], ["0", "none", False, True])
+                self.assertTrue(report["stray_laid_veil"])                    # a "laid" too early never lifts it
+                # Esc as the frame starts growing (lively): the open's still goes once Qt shows the wide layout, while
+                # the scale-down runs (it is seen), then the close's once the board is its own size again.
+                self.assertEqual(report["back_steps"], ["back", "shut", "laid"])
+                self.assertEqual(report["back_marks"], [["closing", "#ff00ff"], ["closed", "#00ffff"]])
+
+    def test_a_close_s_laid_never_answers_an_open_asked_after_its_shut(self) -> None:
+        # Part 5c fixes, round 2 (open-big 0): Enter between the page's "shut" and its narrow resize - the close's "laid"
+        # lifted the new open's still before the page was laid out wide.
+        for case in ("big", "big_x15"):
+            with self.subTest(case=case):
+                report = self.check(case)
+                steps = report["enter_at_shut_steps"]
+                self.assertEqual(steps[:3], ["back", "shut", "open"], steps)
+                self.assertEqual(steps[3:].count("laid"), 1, steps)           # the open's own, nothing else
+                self.assertEqual(report["enter_at_shut_ignored"], 0)
+                self.assertEqual(report["enter_at_shut_state"], "open")
+                self.assertFalse(report["enter_at_shut_veil"])
+
+    def test_the_focus_goes_back_to_the_board_however_big_ends(self) -> None:
+        # Part 5c fixes, round 2 (open-big 1): a Tab into the view while big left the page's focus on <body> (Esc then
+        # gave it to nothing), and so did the big frame's group leaving for room.
+        for case in ("big", "big_x15"):
+            with self.subTest(case=case):
+                report = self.check(case)
+                self.assertEqual(report["tab_in_active"], "card")              # Tab in: the big frame
+                self.assertEqual(report["closed"]["active"], "frame:" + report["page_id"])   # Esc: back to it
+                self.assertEqual(report["room_before_active"], "card")
+                self.assertTrue(report["room_left"])                           # its group left for room ...
+                self.assertEqual(report["room_active"], "frame:" + report["room_ids"][0])   # ... the board has it
+                self.assertEqual(report["room_empty_before_active"], "card")
+                self.assertEqual(report["room_empty_board"], report["room_empty_ids"][1:])   # nothing else was left:
+                self.assertEqual(report["room_empty_active"], "frame:" + report["room_empty_ids"][1])   # the next one
 
     def test_the_board_under_the_big_frame_takes_no_key_and_keeps_its_layout(self) -> None:
         # Part 5c fixes: Tab left the big frame for the hidden board (its strip, a frame's Close); and the board under
