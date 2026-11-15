@@ -2688,12 +2688,13 @@ class ReadingView(QWidget):
     def set_chrome_dim(self, level: float, ms: int = 0) -> None:
         """Open big's native dim (part 5c, DESIGN-SPEC 3.5): the Dock and the header at ``level`` of their strength
         (0.2 while big, 1.0 back), eased over ``ms`` (expo-out; 0: at once). At 1.0 the effects go."""
-        from PySide6.QtCore import QVariantAnimation
+        from PySide6.QtCore import QAbstractAnimation, QVariantAnimation
         from PySide6.QtWidgets import QGraphicsOpacityEffect
 
         level = max(0.0, min(1.0, float(level)))
         if self._chrome_anim is not None:
-            self._chrome_anim.stop()
+            if shiboken6.isValid(self._chrome_anim):
+                self._chrome_anim.stop()                 # (deleted when stopped: none is left behind)
             self._chrome_anim = None
         if level >= 1.0 and not self._chrome_effects:
             self._chrome_dim = 1.0
@@ -2732,7 +2733,7 @@ class ReadingView(QWidget):
         animation.valueChanged.connect(apply)
         animation.finished.connect(finish)
         self._chrome_anim = animation
-        animation.start()
+        animation.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
 
     def chrome_dim(self) -> float:
         """The Dock and the header's strength now (1.0: not dimmed)."""

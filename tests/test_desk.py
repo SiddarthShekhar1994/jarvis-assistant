@@ -563,11 +563,57 @@ class TurnTests(DeskApp):
         self.assertEqual(turns.live_text(), "")                           # his turn came: it stands for it
         self.assertNotEqual(turns.views()[-1].turn.entry_id, -1)
 
+    def test_an_older_answer_starting_the_same_never_hides_what_he_says_now(self) -> None:
+        # Part 5c fixes: Jarvis's newest turn counted as "already there" even when it came before the owner's question.
+        self.make()
+        DeskFormsTests.put_demo(self)
+        turns = self.reading.desk_page().turns
+        self.c._jarvis("Good morning, sir. Three meetings today.")
+        self.c._you("And tomorrow?")
+        turns.set_live("Good morning, sir.")                              # the new answer's first words, streamed
+        self.assertEqual(turns.views()[-1].turn.entry_id, -1)             # under the owner's newest question
+        self.assertIs(turns.current_view(), turns.views()[-1])
+
 
 class FeedTests(DeskApp):
     def live_task(self):
         task = self.c.live.task(live.TASK_ASK, "Ask")
         return task
+
+    def plan_answer(self, part: str, block_hour: int) -> int:
+        """A day plan's answer for ``part`` of today: its LIVE day read and its plan (one proposed block)."""
+        now = self.c._now()
+        day = now.date()
+        events = {"work": [EventBrief("e1", "primary", "Study group", start=now.replace(hour=13, minute=0),
+                                      end=now.replace(hour=14, minute=0))]}
+        block = SimpleNamespace(start=now.replace(hour=block_hour, minute=0, second=0, microsecond=0, tzinfo=None),
+                                end=now.replace(hour=block_hour, minute=45, second=0, microsecond=0, tzinfo=None),
+                                title=f"Essay outline ({part})")
+        task = self.live_task()
+        task.step(live.CALENDAR_READ, "Read the day").picture(pictures.plan_picture(events, (), day=day, now=now))
+        task.step(live.CALENDAR_READ, "Checking the blocks").picture(pictures.plan_picture(events, (block,), day=day,
+                                                                                            now=now))
+        return self.answer(f"Plan my {part}", self.outcome(say=f"Here is your {part}, sir.", mode="plan",
+                                                           window=SimpleNamespace(part=part)), task=task)
+
+    def test_a_day_plan_s_pictures_are_keyed_by_what_they_are(self) -> None:
+        # Part 5c fixes: every day picture had the key plan:<day>:plan - an afternoon's plan replaced the morning's
+        # frame (CHANGED), and one answer's day read and plan were one frame.
+        self.make()
+        feed = self.desk().feed
+        self.plan_answer("morning", 10)
+        first = dict(self.board().frames_sent())
+        self.assertEqual(len(first), 2)                                   # the day as read, and the morning's plan
+        self.plan_answer("afternoon", 15)
+        frames = self.board().frames_sent()
+        self.assertEqual(len(frames), 3)                                  # the afternoon's plan: a frame of its own
+        self.assertEqual(feed.take_changed(), [])                         # the day read the same: nothing changed
+        self.assertFalse(any(frame["changed"] for frame in frames.values()))
+        for frame_id, frame in first.items():
+            self.assertEqual(frames[frame_id]["body"], frame["body"])     # the morning's frames as they were
+        day = pictures.plan_picture({}, (), day=self.c._now().date(), now=self.c._now())
+        self.assertEqual(desk_ui.picture_key(day), "")                    # not in a plan's answer: no key
+        self.assertTrue(desk_ui.picture_key(day, plan="morning").endswith(":read"))
 
     def test_pictures_research_cards_and_todos_in_their_group_s_order(self) -> None:
         self.make()

@@ -25,8 +25,11 @@ raises for odd data.
             frame that waits on the owner comes first, then the frames in the order Jarvis speaks of them (``rank``,
             then their arrival). A frame built again from its ``key`` by a later answer stays in its own place: when
             what it says differs (``substance``: its own data, not the clock's) it is sent again with "changed" (the
-            page's one light, then CHANGED stays; take_changed() lists it once); when it says the same, nothing at
-            all is sent (a waiting reply's newer card still becomes what its chip opens)
+            page's one light, then CHANGED stays; take_changed() lists it once) - only when the owner has seen it
+            (landed, not closed, not cleared: else it is only brought up to date); when it says the same, nothing at
+            all is sent (a waiting reply's newer card still becomes what its chip opens; a newer picture of the same
+            page is shown, quietly). A frame that shows what it says keeps it while its new build is on its way or
+            failed: it changes only when the new one is ready
         land() -> list[dict]                       the parked groups land (on top); every other group is then older,
                                                    so its unpinned frames fold to satellites on the page
         pin(frame_id, on) / close(frame_id, now) / bring_back(frame_id) -> list[dict]
@@ -68,6 +71,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections.abc import Hashable, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -85,22 +89,43 @@ def _same(message: dict[str, Any]) -> str:
     return json.dumps(message, sort_keys=True, ensure_ascii=True)
 
 
+_DOT = " · "                                       # board.frames.DOT: between a meta's words
+_CLOCK_WORDS = re.compile(r"(?:now|in \d+ min)", re.IGNORECASE)   # a calendar row's words that are the clock's
+_MORE = re.compile(r"\+\d+ MORE")                  # board.frames.MORE: the count of the rows that did not fit
+_MAIL_DAY = re.compile(r"^.*\b\d{4},\s*")          # a mail's day before its clock ("Fri Nov 13 2026, "): shown only
+                                                   # once the mail is not today's
+
+
+def _own_words(meta: Any) -> str:
+    """A calendar row's meta without the clock's own words ("now", "in 19 min"): its counts ("3 events", "+2 MORE")
+    and the event's own words stay."""
+    return _DOT.join(part for part in str(meta or "").split(_DOT)
+                     if part.strip() and not _CLOCK_WORDS.fullmatch(part.strip()))
+
+
 def substance(frame: dict[str, Any]) -> str:
     """What a frame says, as one string to compare (part 5c's "changed"): its kind, title, status and its body's own
-    data - never the clock's: a day's events (time and title; not its now line, its "IN 19 MIN" or its free gaps), a
-    mail list's senders, subjects and what waits (not their ages), to-dos' words and states (not their due words); the
-    other kinds' bodies as they are. Never raises."""
+    data - never the clock's: a day's events (time, title and their own words and counts - a week's "3 events", the
+    "+2 MORE" row; not its now line, its "IN 19 MIN" or its free gaps), a mail's sender, text and own time (not the day
+    shown before it once it is not today's), a mail list's senders, subjects and what waits (not their ages), to-dos'
+    words and states and the "+2 MORE" row's count (not their due words); the other kinds' bodies as they are. Never
+    raises."""
     try:
         kind = str(frame.get("kind", ""))
         body = frame.get("body") if isinstance(frame.get("body"), dict) else {}
         rows = body.get("rows") if isinstance(body.get("rows"), list) else []
         rows = [row for row in rows if isinstance(row, dict)]
         if kind == "calendar":
-            stable: Any = [[row.get("time", ""), row.get("title", "")] for row in rows if row.get("state") != "free"]
+            stable: Any = [[row.get("time", ""), row.get("title", ""), _own_words(row.get("meta", ""))]
+                           for row in rows if row.get("state") != "free"]
+        elif kind == "mail_thread":
+            stable = [body.get("sender", ""), _MAIL_DAY.sub("", str(body.get("time", "") or "")), body.get("text", "")]
         elif kind == "mail_list":
             stable = [[row.get("sender", ""), row.get("subject", ""), row.get("meta", "")] for row in rows]
         elif kind == "todos":
-            stable = [[row.get("text", ""), row.get("state", "")] for row in rows]
+            stable = [[row.get("text", ""), row.get("state", ""),
+                       row.get("meta", "") if _MORE.fullmatch(str(row.get("meta", "") or "")) else ""]
+                      for row in rows]
         else:
             stable = body
         return json.dumps([kind, frame.get("title", ""), frame.get("status", "ok"), frame.get("status_text", ""),
@@ -398,24 +423,35 @@ class BoardFeed:
         out += self._bar_if_changed()
         return out
 
+    def _seen(self, frame: _Frame) -> bool:
+        """The owner has the frame in sight as the board shows it: its group landed, not closed, not taken by a Clear."""
+        group = self._groups.get(frame.group)
+        return group is not None and not group.parked and not frame.closed and not frame.cleared
+
     def _rebuild(self, frame: _Frame, source: str, message: dict[str, Any], picture: dict[str, Any] | None,
                  approvals: str) -> list[dict[str, Any]]:
         """A frame on the board built again from its key by another answer (see the module doc): in its own place;
-        "changed" when what it says differs, nothing at all when it says the same."""
-        before = frame.shown()[0]
+        "changed" when what it says differs and the owner has seen it as it was (never for a frame parked, closed or
+        taken by a Clear: it is only brought up to date), nothing at all when it says the same. A frame that shows
+        what it says keeps showing it while the new one is on its way or failed (never "Opening..." or "failed" over
+        a good one); the same words with a newer picture (a page captured again) are shown, quietly."""
+        before, before_picture, _approvals = frame.shown()
+        if message.get("status", "ok") != "ok" and before.get("status", "ok") == "ok" and not message.get("waits"):
+            return []                              # the good one stays until the new one is ready
         old = frame.parts.get(source)
         self._seq += 1
         frame.parts[source] = _Part(source, message, picture, str(approvals or ""), self._seq)
-        after = frame.shown()[0]
+        after, after_picture, _approvals = frame.shown()
         if message.get("waits"):
             pass                                   # a waiting reply's newer card: what its chip opens (no figure)
         elif substance(after) == substance(before):
-            if old is None:                        # the same words again: nothing changes
-                del frame.parts[source]
-            else:
-                frame.parts[source] = old
-            return []
-        elif before.get("status", "ok") == "ok" and after.get("status", "ok") == "ok":
+            if (after_picture or {}).get("src") == (before_picture or {}).get("src"):
+                if old is None:                    # the same words again: nothing changes
+                    del frame.parts[source]
+                else:
+                    frame.parts[source] = old
+                return []
+        elif before.get("status", "ok") == "ok" and after.get("status", "ok") == "ok" and self._seen(frame):
             frame.changed = True
             self._just_changed.append(frame.id)
             self._counts["changed"] += 1

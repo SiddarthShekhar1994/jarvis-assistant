@@ -764,6 +764,43 @@ class OwnerWaysTests(WaysApp):
         self.assertEqual(self.reading.board_count(), 2)
         self.assertTrue(self.reading.desk_shown())
 
+    def test_bring_back_after_a_clear_never_folds_the_desk_in_between(self) -> None:
+        # Part 5c fixes: the hold was let go before the count came back, so the desk folded (desk leave, the ring's
+        # flight, the page's fade) and formed again.
+        self.make()
+        self.answer(1, "Today", "Budget lines")
+        shown: list[bool] = []
+        self.reading.deskShown.connect(shown.append)
+        before = len(self.board().sent)
+        self.board().request("clear")
+        settle()
+        self.board().request("restore")
+        settle()
+        self.assertEqual(shown, [])                                          # never folded, never formed again
+        self.assertNotIn({"type": "desk", "state": "leave"}, self.board().sent[before:])
+        self.assertNotIn({"type": "desk", "state": "enter"}, self.board().sent[before:])
+        self.assertTrue(self.reading.desk_shown())
+        self.assertEqual(self.reading.board_count(), 2)
+
+    def test_a_new_answer_while_the_cleared_row_is_offered_never_folds_the_desk(self) -> None:
+        # Part 5c fixes: the same when a new answer made room (8 groups, all cleared): the Clear's frames leave first.
+        self.make()
+        for key in range(1, 9):
+            self.answer(key, f"Frame {key}")
+        self.board().request("clear")
+        settle()
+        self.assertTrue(self.reading.board_held())
+        shown: list[bool] = []
+        self.reading.deskShown.connect(shown.append)
+        before = len(self.board().sent)
+        self.answer(9, "The newest")
+        self.assertEqual(shown, [])
+        self.assertNotIn({"type": "desk", "state": "leave"}, self.board().sent[before:])
+        self.assertTrue(self.reading.desk_shown())
+        self.assertFalse(self.reading.board_held())
+        self.assertEqual(self.reading.board_count(), 1)
+        self.assertEqual(self.board().cleared_ids(), [])                     # the Clear's frames left for room
+
     def test_the_requests_never_reach_further_than_the_board(self) -> None:
         self.make()
         ids = self.answer(1, "Budget lines")

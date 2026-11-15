@@ -121,10 +121,13 @@ def about_followups(words: str) -> bool:
     return bool(_FOLLOWUP_WORDS.search(words or ""))
 
 
-def picture_key(picture: Any, merge: str = "") -> str:
+def picture_key(picture: Any, merge: str = "", plan: str = "") -> str:
     """A LIVE picture's source key (part 5c): the same mail thread (its merge key, "mail:work:t1"), the same page
-    (its address), the same web search (its query) or the same day picture; "" for none (never rebuilt across
-    answers)."""
+    (its address), the same web search (its query) or the same day plan's picture; "" for none (never rebuilt across
+    answers). A day picture has a key only in a day plan's answer (``plan``: the part it plans - "day", "morning" ...)
+    and the key names what it is, never only its day: the day as Jarvis read it ("plan:Tue 17 Nov:read") or the blocks
+    proposed for that part ("plan:Tue 17 Nov:blocks:morning"); any other day picture (a meeting brief's day on its own
+    calendar) has none."""
     kind = getattr(picture, "kind", "")
     if kind == pictures.KIND_EMAIL:
         return merge
@@ -137,7 +140,10 @@ def picture_key(picture: Any, merge: str = "") -> str:
     if kind == pictures.KIND_DAY:
         day = getattr(picture, "day", None)
         days = "|".join(str(item) for item in (getattr(day, "days", ()) or ()))
-        return f"plan:{days}:{getattr(day, 'change', '')}" if days else ""
+        if not days or not plan or getattr(day, "change", "") != pictures.CHANGE_PLAN:
+            return ""
+        proposed = any(getattr(block, "role", "") == pictures.ROLE_NEW for block in (getattr(day, "blocks", ()) or ()))
+        return f"plan:{days}:blocks:{plan}" if proposed else f"plan:{days}:read"
     return ""
 
 
@@ -178,6 +184,7 @@ class _Answer:
     week: Any = None
     done: bool = False
     say: str = ""
+    plan: str = ""                  # a day plan's answer: the part it plans ("day", "morning" ...; its day pictures' key)
 
     def __repr__(self) -> str:      # ids and counts only
         return f"_Answer(key={self.key}, pending={len(self.pending)}, done={self.done})"
@@ -514,10 +521,15 @@ class DeskController(QObject):
         self.big.check()
 
     def _sync_counts(self) -> None:
-        # A Clear's Bring back keeps the desk (part 5c) even with nothing left: held first, so the count's 0 never
-        # folds it while the row is offered.
-        self.reading.set_board_held(self.feed.clearing())
+        # A Clear's Bring back keeps the desk (part 5c) even with nothing left: held before the count when it starts, so
+        # the count's 0 never folds it while the row is offered, and let go only after the count when it ends (Bring
+        # back, or a new answer making room), so the desk never folds and forms again between the two.
+        clearing = self.feed.clearing()
+        if clearing:
+            self.reading.set_board_held(True)
         self.reading.set_board_count(self.feed.frames())
+        if not clearing:
+            self.reading.set_board_held(False)
         self.reading.refresh_turn_frames()
 
     def _turn_frames(self, entry_id: int) -> int:
@@ -638,7 +650,7 @@ class DeskController(QObject):
     def _picture_entry(self, answer: _Answer, item: _Item) -> tuple[Any, ...]:
         return (item.source, lambda frame_id: board_frames.from_picture(item.picture, frame_id=frame_id,
                                                                        now=self._now(), hour24=self._hour24()),
-                item.merge, "", picture_key(item.picture, item.merge))
+                item.merge, "", picture_key(item.picture, item.merge, answer.plan))
 
     def on_ask_outcome(self, outcome: Any, task_id: int = 0) -> None:
         """A finished answer: its frames go up as one group (see the module doc)."""
@@ -659,10 +671,12 @@ class DeskController(QObject):
             return
         answer.say = str(getattr(outcome, "say", "") or "")
         words = f"{answer.request} {answer.say}"
+        planned = getattr(outcome, "mode", "") == "plan"      # a day plan: its own day picture shows its blocks
+        if planned:
+            answer.plan = str(getattr(getattr(outcome, "window", None), "part", "") or "day")
         entries: list[tuple[Any, ...]] = [self._picture_entry(answer, item)
                                           for item in sorted(answer.pending.values(), key=lambda item: item.seq)]
         answer.pending.clear()
-        planned = getattr(outcome, "mode", "") == "plan"      # a day plan: its own day picture shows its blocks
         if not planned:
             entries += self._calendar_entries(answer, outcome, words)
         entries += self._research_entries(outcome)

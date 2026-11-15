@@ -13,8 +13,13 @@ the last 15 px, from the view's left edge to the frame, from the frame's own pla
     refresh()            the board changed (frames came, left, folded): the sentence is matched again
     on_layout(layout)    the page's layout (board.view.BoardLayout): where the frames are; while it scrolls the native
                          part hides, and it is back at once (no draw-in) with the layout after the scroll
-    clear()              nothing lit now (the desk left Home, open big covers the column); it is matched again later
+    clear(now=False)     nothing lit now (the desk left Home, open big covers the column); it is matched again later.
+                         ``now``: the native part goes at once, no fade (open big: it is never drawn over the wide view)
     lit() / path()       the frame lit ("" none) and the native part's path (None when it is not drawn)
+
+Part 5c fixes: the same sentence (never a timer of its own) also dims the words already said - in the conversation's
+current turn, every sentence before the one being said reads in INK_3 (desk_view.DeskTurns.set_read) while the desk is
+seen; when the speech ends, is stopped or muted, the turn eases back to its own colours.
 
 The page gets ``{"type": "lit", "id", "cue"}``: the brackets, its TILE_FOCUS / TILE_AMBER_LIT ground and, when "cue",
 its stub (drawn in after the native part's 200 ms; at once when the cue comes back for the same frame). The lit frame
@@ -32,7 +37,6 @@ from typing import Any
 import shiboken6
 from PySide6.QtCore import QObject, QPoint, QPointF, QTimer
 
-from . import hud
 from .board import lit as lit_mod
 from .desk_view import CuePath
 
@@ -69,6 +73,8 @@ class CueController(QObject):
         self._shown_for = ""                            # the frame the native part is drawn to now
         self._places: dict[str, tuple[int, int]] = {}
         self._scrolling = False
+        self._read_entry: Any = None                    # the turn whose words said so far are dimmed (its entry id)
+        self._watched: Any = None                       # the turns whose rebuilds it follows
         self._timer = QTimer(self)
         self._timer.setInterval(TICK_MS)
         self._timer.timeout.connect(self._tick)
@@ -90,6 +96,7 @@ class CueController(QObject):
         else:
             self._timer.stop()
             self._set_lit("")
+            self._unmark_read()                         # the whole turn back to its own colours (eased when lively)
 
     def on_muted(self) -> None:
         self.on_speech("")
@@ -99,9 +106,13 @@ class CueController(QObject):
         if self._text:
             self._tick()
 
-    def clear(self) -> None:
+    def clear(self, *, now: bool = False) -> None:
         self._dirty = True
         self._set_lit("")
+        if now:
+            line = self._line()
+            if line is not None:
+                line.clear()                            # at once: a fade would be drawn over the wide view
 
     def reset_page(self) -> None:
         """The page came back empty (its renderer stopped): it has no lit frame; matched and sent again."""
@@ -141,13 +152,7 @@ class CueController(QObject):
     def on_screen(self) -> bool:
         """The desk is what the owner sees: Home, the desk shown, the window up, the board's page ready, no frame open
         big."""
-        reading = self.reading
-        if not reading.desk_shown() or reading.current_tab() != hud.TAB_JARVIS or not reading.isVisible():
-            return False
-        window = reading.window()
-        if window is not None and window.isMinimized():
-            return False
-        if reading.board_big():
+        if not self.desk.on_screen() or self.reading.board_big():
             return False
         board = self.desk.board
         return board is not None and shiboken6.isValid(board) and board.is_ready()
@@ -157,18 +162,27 @@ class CueController(QObject):
     def _tick(self) -> None:
         if not self._text:
             return
-        if not self.on_screen():
+        if not self.desk.on_screen():                    # the desk is not seen: nothing lit, the turn as it is
             if self._lit:
                 self._set_lit("")
+            self._unmark_read(at_once=True)
             self._dirty = True
             return
         index = self._sentence_now()
+        if not self.on_screen():                          # open big, or the board not ready: nothing lit, while the
+            if self._lit:                                 # turn's words said so far still follow his voice
+                self._set_lit("")
+            self._dirty = True
+            self._index = index
+            self._mark_read()
+            return
         if index != self._index or self._dirty:
             self._index = index
             self._dirty = False
             self._choose()
         elif self._lit:
             self._place()
+        self._mark_read()
 
     def _sentence_now(self) -> int:
         host = self.host
@@ -246,6 +260,61 @@ class CueController(QObject):
                 self._shown_for = frame_id
             line.set_hidden(self._scrolling)
         self._send((frame_id, bool(path is not None and self._shown_for == frame_id)))
+
+    # ---- the words already said (part 5c fixes) --------------------------------------------------------------------
+
+    def _turns(self) -> Any:
+        """The desk's turns (DeskTurns), followed: when they are built again the current turn's said words are found
+        again at once (the turn being said may be another one now)."""
+        desk = self.reading.desk_page()
+        if desk is None or not shiboken6.isValid(desk):
+            return None
+        turns = desk.turns
+        if turns is not self._watched:
+            self._watched = turns
+            turns.turnsChanged.connect(self._on_turns_changed)
+        return turns
+
+    def _on_turns_changed(self) -> None:
+        if self._text and self._index >= 0 and self.desk.on_screen():
+            self._mark_read()
+
+    def read_end(self, text: str) -> int:
+        """Where the sentence being said begins in ``text`` (the current turn's words): everything before it is said;
+        -1 when it is not known there (the turn stays as it is)."""
+        sentence = self.sentence()
+        if not sentence:
+            return -1
+        start = lit_mod.locate_start(sentence, text)
+        if start >= 0:
+            return start
+        if self._index > 0:                               # said otherwise: just past the sentence before it
+            first, last = self._spans[self._index - 1]
+            end = lit_mod.locate(self._text[first:last], text)
+            if end >= 0:
+                while end < len(text) and text[end].isspace():
+                    end += 1
+                return end
+        return -1
+
+    def _mark_read(self) -> None:
+        """The current turn's words before the sentence being said read in INK_3 (DeskTurns.set_read)."""
+        turns = self._turns()
+        view = turns.current_view() if turns is not None else None
+        if view is None or view.you():
+            return
+        end = self.read_end(view.turn.text)
+        if end < 0:
+            return
+        entry = view.turn.entry_id
+        turns.set_read(entry, end, at_once=entry != self._read_entry)   # a turn first marked (or another): at once
+        self._read_entry = entry
+
+    def _unmark_read(self, *, at_once: bool = False) -> None:
+        turns = self._turns()
+        if turns is not None and turns.read()[0] is not None:
+            turns.set_read(None, 0, at_once=at_once)
+        self._read_entry = None
 
     def _send(self, state: tuple[str, bool]) -> None:
         if state == self._sent:

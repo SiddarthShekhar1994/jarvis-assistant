@@ -12,10 +12,11 @@ the board itself is board.view.BoardView (made and fed by desk_ui.DeskController
                            places (``chip_row``, ``ask_slot``: the app moves Home's own chip row and command bar in),
                            ``set_board(view)`` (the board's place: its geometry is set once per layout, never
                            animated), the seam it paints; ``apply_geometry()``. Part 5c: ``cue_line`` (CueLine: the
-                           cue line's native part, from the column to the seam, never over the view), ``set_big(on)``
-                           (open big: the view spans both columns, ``geometry.big``, set once), ``veil`` (Veil: a
-                           still over the view while its geometry is set), ``column_image(rect)`` (the column as it
-                           looks, never the view: open big's backdrop)
+                           cue line's native part, from the column to the seam, never over the view - hidden while
+                           big), ``set_big(on)`` (open big: the view spans both columns, ``geometry.big``, set once;
+                           the covered ring head and turns take no focus and no click until it is back), ``veil``
+                           (Veil: a still over the view while its geometry is set), ``column_image(rect)`` (the column
+                           as it looks, never the view: open big's backdrop)
     CueLine, CuePath       the cue line's native part and where it runs (part 5c)
     Veil                   open big's still (part 5c)
     RingHead               the ring (an orb.OrbWidget, 120 px centred with hairlines to the column's edges, cyan 0.22
@@ -26,8 +27,10 @@ the board itself is board.view.BoardView (made and fed by desk_ui.DeskController
                            16/25 INK_1 with its times in HOLO_HI and its waiting phrase in AMBER_HI, the owner's as
                            right-aligned bubbles; newest at the bottom under a 64 px top fade; a turn that put frames
                            up ends with "4 frames on the board" (``tokenClicked(entry id)``: the board scrolls to its
-                           group); a turn's own link stays (``linkClicked(link id)``, as the Transcript's)
-    BoardHint              empty Home's one line: "When I find something to show you, it appears beside our
+                           group); a turn's own link stays (``linkClicked(link id)``, as the Transcript's). Part 5c
+                           fixes: ``set_read(entry, end)`` - while Jarvis says the current turn, its words before the
+                           sentence being said read in INK_3 (the mock-up's ``.read``; desk_cue finds the sentence)
+    BoardHint             empty Home's one line: "When I find something to show you, it appears beside our
                            conversation." and a CTRL B key cap
     RingFlight             the ring flying from the stage to the column head as the desk forms (420 ms ease-out-expo,
                            calm x1.6; never with motion off)
@@ -46,7 +49,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import shiboken6
-from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEasingCurve, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -297,15 +300,75 @@ class TextBlock:
         metrics = QFontMetricsF(self.font)
         return QPointF(x, line.y() + metrics.height() / 2)
 
-    def paint(self, painter: QPainter, origin: QPointF, color: str | QColor) -> None:
+    def paint(self, painter: QPainter, origin: QPointF, color: str | QColor,
+              overlay: Sequence[tuple[int, int, QColor]] = ()) -> None:
+        """Paint it at ``origin`` in ``color`` (its marks in theirs); ``overlay``: (start, length, colour) ranges of
+        ``text`` painted in that colour over their own (the current turn's words already said, part 5c fixes) - laid
+        out as they are, never again."""
         painter.save()
         try:
             painter.setFont(self.font)
             painter.setPen(QColor(color))
-            for layout, _count in self._layouts:
-                layout.draw(painter, origin)
+            for (layout, _count), first in zip(self._layouts, self._starts):
+                ranges = []
+                last = first + len(layout.text())
+                for start, length, ink in overlay:
+                    lo, hi = max(start, first), min(start + length, last)
+                    if hi > lo:
+                        item = QTextLayout.FormatRange()
+                        item.start, item.length = lo - first, hi - lo
+                        char = QTextCharFormat()
+                        char.setForeground(QColor(ink))
+                        item.format = char
+                        ranges.append(item)
+                if ranges:
+                    layout.draw(painter, origin, ranges)
+                else:
+                    layout.draw(painter, origin)
         finally:
             painter.restore()
+
+
+# The words already said (part 5c fixes; the mock-up's ``.turn.now .tx .read``): while Jarvis says the current turn,
+# every sentence before the one being said reads in INK_3 - its times and its waiting phrase too -, easing in over
+# READ_EASE_MS in lively motion (calm and off: at once); the sentence being said and the rest keep their colours.
+READ_EASE_MS = 160
+
+
+def _base_runs(start: int, end: int, marks: Sequence[tuple[int, int, str]], ink: str | QColor) \
+        -> list[tuple[int, int, QColor]]:
+    """[start, end) of a turn's words cut where its marks begin and end: (from, to, its own colour) each."""
+    runs: list[tuple[int, int, QColor]] = []
+    at = start
+    for first, length, color in sorted(marks):
+        lo, hi = max(first, at), min(first + length, end)
+        if hi <= lo:
+            continue
+        if lo > at:
+            runs.append((at, lo, QColor(ink)))
+        runs.append((lo, hi, QColor(color)))
+        at = hi
+    if at < end:
+        runs.append((at, end, QColor(ink)))
+    return runs
+
+
+def read_overlay(length: int, marks: Sequence[tuple[int, int, str]], ink: str | QColor, read_from: int, read_to: int,
+                 progress: float = 1.0) -> list[tuple[int, int, QColor]]:
+    """The overlay (TextBlock.paint) of a turn whose first ``read_to`` characters are said: [0, read_to) in INK_3; while
+    it eases (``progress`` under 1) from ``read_from``, the part between them blends from its own colour to INK_3
+    (more said) or back (less: the speech ended)."""
+    read_from = max(0, min(int(read_from), int(length)))
+    read_to = max(0, min(int(read_to), int(length)))
+    progress = max(0.0, min(1.0, float(progress)))
+    dim = QColor(holo.INK_3)
+    low, high = min(read_from, read_to), max(read_from, read_to)
+    overlay: list[tuple[int, int, QColor]] = [(0, low, dim)] if low > 0 else []
+    if high > low and (read_to > read_from or progress < 1.0):
+        for start, end, own in _base_runs(low, high, marks, ink):
+            color = holo.mix(own, dim, progress) if read_to > read_from else holo.mix(dim, own, progress)
+            overlay.append((start, end - start, color))
+    return overlay
 
 
 # --------------------------------------------------------------------------
@@ -597,6 +660,10 @@ class TurnView(QWidget):
         self.link.hide()
         self.link.clicked.connect(lambda: self.linkClicked.emit(self.turn.link_id))
         self._heights: dict[int, int] = {}
+        self._read_from = 0                    # part 5c fixes: the words already said (set_read), easing from ...
+        self._read_to = 0                      # ... to this many characters
+        self._read_p = 1.0
+        self._read_anim: QVariantAnimation | None = None
         self.set_turn(turn)
 
     # ---- content -------------------------------------------------------------------------------------------------
@@ -617,6 +684,11 @@ class TurnView(QWidget):
             changed = True
         if not changed:
             return
+        if not self._current or self.you():
+            self._end_read()                   # no longer the turn being said: its own colours at once
+        elif self._read_to > len(turn.text) or self._read_from > len(turn.text):
+            self._read_to = min(self._read_to, len(turn.text))
+            self._read_from = min(self._read_from, len(turn.text))
         if self._current and not self.you():
             px, line = (15, 23) if self._compact else (16, 25)
             self._block = TextBlock(turn.text, _body_font(px), line, highlights(turn.text))
@@ -649,6 +721,66 @@ class TurnView(QWidget):
 
     def block(self) -> TextBlock | None:
         return self._block
+
+    # ---- the words already said (part 5c fixes) -------------------------------------------------------------------
+
+    def set_read(self, end: int, *, at_once: bool = False) -> None:
+        """While Jarvis says this, the current turn: its first ``end`` characters - every sentence before the one being
+        said - read in INK_3, its times and waiting phrase too; 0 none (the speech ended, was stopped or muted: the turn
+        in its own colours again). The change eases over READ_EASE_MS in lively motion; at once in calm and off, with
+        ``at_once``, and out of sight."""
+        end = max(0, min(int(end), len(self.turn.text))) if self._current and not self.you() else 0
+        if end == self._read_to:
+            return
+        if self._read_anim is not None:
+            self._read_anim.stop()
+        self._read_from, self._read_to = self._read_to, end      # (an ease cut short: the next starts where it went)
+        if at_once or holo.motion_level() != holo.MOTION_LIVELY or not self.isVisible():
+            self._read_from, self._read_p = end, 1.0
+        else:
+            self._read_p = 0.0
+            self._read_animation().start()
+        self.update()
+
+    def read_end(self) -> int:
+        """How many of its characters read as said now (the target, when it eases)."""
+        return self._read_to
+
+    def read_easing(self) -> bool:
+        return self._read_p < 1.0
+
+    def read_overlay(self) -> list[tuple[int, int, QColor]]:
+        """What set_read paints over the turn's own colours now (TextBlock.paint's overlay)."""
+        if self._block is None or not self._current or self.you() or not (self._read_to or self._read_from):
+            return []
+        ink = holo.ALERT_TX if self.turn.tone == hud.TONE_ERROR else holo.INK_1
+        return read_overlay(len(self.turn.text), self._block.marks, ink, self._read_from, self._read_to, self._read_p)
+
+    def _end_read(self) -> None:
+        if self._read_anim is not None:
+            self._read_anim.stop()
+        self._read_from = self._read_to = 0
+        self._read_p = 1.0
+
+    def _read_animation(self) -> QVariantAnimation:
+        if self._read_anim is None:
+            animation = QVariantAnimation(self)
+            animation.setStartValue(0.0)
+            animation.setEndValue(1.0)
+            animation.setDuration(READ_EASE_MS)
+            animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+            animation.valueChanged.connect(self._on_read_step)
+            animation.finished.connect(self._on_read_done)
+            self._read_anim = animation
+        return self._read_anim
+
+    def _on_read_step(self, value: Any) -> None:
+        self._read_p = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    def _on_read_done(self) -> None:
+        self._read_from, self._read_p = self._read_to, 1.0
+        self.update()
 
     # ---- geometry ------------------------------------------------------------------------------------------------
 
@@ -767,7 +899,7 @@ class TurnView(QWidget):
             ink = holo.ALERT_TX
         else:
             ink = holo.INK_1 if self._current else holo.INK_3
-        self._block.paint(painter, QPointF(0.0, self.LABEL_H + self.LABEL_GAP), ink)
+        self._block.paint(painter, QPointF(0.0, self.LABEL_H + self.LABEL_GAP), ink, self.read_overlay())
 
 
 def _rounded(path: QPainterPath, rect: QRectF, tl: float, tr: float, br: float, bl: float) -> None:
@@ -857,6 +989,7 @@ class DeskTurns(QScrollArea):
     tokenClicked = Signal(int)
     linkClicked = Signal(str)
     escaped = Signal()
+    turnsChanged = Signal()           # the turns shown were built again (the current one may be another now)
     SCROLL_HOLD_S = 4.0
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -880,6 +1013,7 @@ class DeskTurns(QScrollArea):
         self._turns: tuple[Turn, ...] = ()
         self._live = ""
         self._live_after = 0
+        self._read: tuple[Any, int] = (None, 0)    # part 5c fixes: the turn whose words are said so far, and how many
         self._compact = False
         self._earlier = 0
         self._frames_for: Callable[[int], int] = lambda _entry: 0
@@ -912,11 +1046,33 @@ class DeskTurns(QScrollArea):
             self._live_after = max((turn.entry_id for turn in self._turns if turn.role != hud.ROLE_YOU), default=0)
         if text == self._live:
             return
-        newest = next((turn for turn in reversed(self._turns) if turn.role != hud.ROLE_YOU), None)
+        newest = self._answer_since_owner()
         if text and newest is not None and " ".join(newest.text.split()).startswith(text[:40]):
             text = ""                          # it is there already as his turn (spoken after it came, or before)
         self._live = text
         self._rebuild()
+
+    def set_read(self, entry_id: Any, end: int, *, at_once: bool = False) -> None:
+        """Part 5c fixes: while Jarvis says the current turn (``entry_id``: its entry, -1 for what he says now), its
+        first ``end`` characters are said (TurnView.set_read: they read in INK_3); every other turn none. ``None``: no
+        turn (he is done, stopped or muted: the turn eases back to its own colours)."""
+        self._read = (entry_id, max(0, int(end)) if entry_id is not None else 0)
+        self._apply_read(at_once=at_once)
+
+    def read(self) -> tuple[Any, int]:
+        return self._read
+
+    def _apply_read(self, *, at_once: bool) -> None:
+        entry_id, end = self._read
+        for view in self._order:
+            mine = entry_id is not None and view.turn.entry_id == entry_id
+            view.set_read(end if mine else 0, at_once=at_once)
+
+    def _answer_since_owner(self) -> Turn | None:
+        """Jarvis's newest turn when it comes after the owner's latest one (None: he has not answered it yet - an older
+        answer that starts with the same words is never the one being said now)."""
+        last = self._turns[-1] if self._turns else None
+        return last if last is not None and last.role != hud.ROLE_YOU else None
 
     def refresh_frames(self) -> None:
         """The frames' counts changed (a group came, grew or left): the tokens follow."""
@@ -971,7 +1127,9 @@ class DeskTurns(QScrollArea):
                 view.deleteLater()
         self._views = keep
         self._order = order
+        self._apply_read(at_once=True)            # (a turn no longer the one said: its own colours)
         self._relayout()
+        self.turnsChanged.emit()
 
     def _relayout(self) -> None:
         """Each turn at its height for the view's width, the newest at the bottom (older ones above it)."""
@@ -1488,7 +1646,14 @@ class DeskPage(QWidget):
         self._big = bool(big)
         before = QRect(self._view_rect)
         self.apply_geometry()
+        self._cover(self._big)
         return self._view_rect != before
+
+    def _cover(self, covered: bool) -> None:
+        """Open big covers the conversation (part 5c fixes): its ring head and turns take no focus - out of the Tab chain
+        - and no click while covered (disabled: a turn that comes meanwhile too), and are as they were after."""
+        for part in (self.head, self.turns):
+            part.setEnabled(not covered)
 
     def big_shown(self) -> bool:
         return self._big
@@ -1511,9 +1676,14 @@ class DeskPage(QWidget):
                                                            chip_margin + 1))
         bar_margin = 4
         self.ask_slot.setGeometry(geometry.ask.adjusted(-bar_margin, -bar_margin, bar_margin, bar_margin))
-        # The cue line's native part: from the column's left edge to the seam, never over the view (it starts past it).
+        # The cue line's native part: from the column's left edge to the seam, never over the view (it starts past it);
+        # while big the wide view covers the column, so it stays hidden there (never drawn over the web view).
         self.cue_line.setGeometry(0, 0, geometry.seam.x() + 1, max(0, self.height()))
-        self.cue_line.raise_()
+        if self._big:
+            self.cue_line.hide()
+        else:
+            self.cue_line.show()
+            self.cue_line.raise_()
         board = self._board
         target = geometry.big if self._big else geometry.view
         if board is not None and shiboken6.isValid(board) and board.parentWidget() is self \
@@ -1536,6 +1706,9 @@ class DeskPage(QWidget):
                        QImage.Format.Format_RGB32)
         image.setDevicePixelRatio(ratio)
         image.fill(QColor(holo.VOID))
+        covered = self._big
+        if covered:
+            self._cover(False)                  # painted as it looks, never in a disabled look
         painter = QPainter(image)
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -1552,6 +1725,8 @@ class DeskPage(QWidget):
                     child.render(painter, child.pos(), QRegion(), QWidget.RenderFlag.DrawChildren)
         finally:
             painter.end()
+            if covered:
+                self._cover(True)
         return image
 
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
@@ -1569,5 +1744,5 @@ class DeskPage(QWidget):
 
 
 __all__ = ["BIG_GAP", "BoardHint", "CueLine", "CuePath", "DeskGeometry", "DeskPage", "DeskTurns", "FramesToken",
-           "HINT_KEY", "HINT_TEXT", "RingFlight", "RingHead", "TextBlock", "Turn", "TurnView", "Veil", "desk_geometry",
-           "earlier_text", "highlights", "token_text"]
+           "HINT_KEY", "HINT_TEXT", "READ_EASE_MS", "RingFlight", "RingHead", "TextBlock", "Turn", "TurnView", "Veil",
+           "desk_geometry", "earlier_text", "highlights", "read_overlay", "token_text"]

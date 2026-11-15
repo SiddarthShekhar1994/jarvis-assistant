@@ -3,10 +3,12 @@ can't leave the board's view and an animated view geometry re-rasters Chromium o
 
 1. **The geometry, once.** The app paints the conversation column as it looks (desk_view.DeskPage.column_image: the
    window's ground, the ring head, the turns, the chips; never the view) and sends it as a ``backdrop`` - one JPEG
-   within the picture's caps - then sets the view's geometry ONCE, with no animation, to span both columns (from the
-   column's left edge to the board's right edge, from the body's top to 12 px above the ask bar: the ask bar stays
-   live outside it). A still of the window (desk_view.Veil) stands over that place until the page says it is laid out
-   at the new size (``big`` "laid", or VEIL_MS), so nothing jumps. The Dock and the header dim to 20 % natively.
+   within the picture's caps -, sends ``big`` open (so the page keeps its board's layout as it was while the view is
+   wide), then sets the view's geometry ONCE, with no animation, to span both columns (from the column's left edge to
+   the board's right edge, from the body's top to 12 px above the ask bar: the ask bar stays live outside it). A still
+   of the window (desk_view.Veil) stands over that place until the page says it is laid out at the new size (``big``
+   "laid", or VEIL_MS), so nothing jumps. The Dock and the header dim to 20 % natively; the cue line's native part goes
+   at once, and the covered conversation takes no focus and no click (desk_view.DeskPage.set_big) until it is back.
 2. **The scale, in the page.** The frame grows from its rectangle to the whole view (260 ms expo-out, transform and
    opacity only) while the backdrop and the other frames dim to 20 %; its footer says "ESC BACK TO THE BOARD" and
    "OPEN BIG" joins its meta.
@@ -93,6 +95,8 @@ class BigController(QObject):
         self._frame = ""
         self._state = ""                     # "" none, "open", "closing" (the page's scale-down runs)
         self._box: tuple[int, int, int, int] | None = None
+        self._laid_for = ""                  # the page's "laid" the still waits for: "open" (the frame grown in the
+                                             # wide view), "close" (the board back at its size) or "" (none: ignored)
         self._veil_timer = QTimer(self)
         self._veil_timer.setSingleShot(True)
         self._veil_timer.timeout.connect(self._lift_veil)
@@ -143,13 +147,13 @@ class BigController(QObject):
         else:
             self.counts["backdrop:none"] += 1
         self._veil(page, geometry.big.united(geometry.view))
-        self.desk.cue.clear()                            # the column is covered: no cue line, nothing lit
+        self._laid_for = "open"                          # the still goes with the page's "laid" for this open
+        self.desk.cue.clear(now=True)                    # the column is covered: nothing lit, the native part gone at once
         self._frame, self._state = frame_id, "open"
-        self._box = self._box_of(geometry)               # (the desk's layout signal then has nothing new to send)
         self.reading.set_board_big(True)
         page.chip_slot.hide()                            # the chips' bottom edge would show under the wide view
-        page.set_big(True)                               # the geometry, once (never animated)
-        self._send_open(geometry)
+        self._send_open(geometry)                        # the page knows before its view is wide (its board keeps its
+        page.set_big(True)                               # layout) - then the geometry, once (never animated)
         self.reading.set_chrome_dim(DIM, _ms(OPEN_MS))
         self.desk.sound("on_big", True)
         self.counts["opened"] += 1
@@ -199,6 +203,7 @@ class BigController(QObject):
 
     def _lift_veil(self) -> None:
         self._veil_timer.stop()
+        self._laid_for = ""
         page = self._page()
         if page is not None:
             page.veil.clear()
@@ -206,10 +211,19 @@ class BigController(QObject):
     # ---- the page's steps ----------------------------------------------------------------------------------------
 
     def on_step(self, step: str) -> None:
+        """The page's big request. Its "laid" answers the step the still waits for - the open (the frame grown in the
+        wide view) or the close (the board back at its size): a "laid" while none is awaited is ignored (counted). The
+        page sends a "laid" only for its step still going on (never one for an open it left, or a close an open
+        followed), and none for the open after its "back", so each one answers the step awaited then."""
         self.counts[f"step:{step}"] += 1
         if step == "laid":
-            self._lift_veil()
+            if self._laid_for:
+                self._lift_veil()
+            else:
+                self.counts["laid:ignored"] += 1
         elif step == "back":
+            if self._laid_for == "open":
+                self._laid_for = ""                      # the open's "laid" never comes now (the still: VEIL_MS)
             if self._state == "open":
                 self._closing()
         elif step == "shut" and self._state:
@@ -245,11 +259,13 @@ class BigController(QObject):
     def _finish(self, *, animate: bool) -> None:
         """The page's scale-down is over: the geometry is set back once, then the native dim lifts."""
         self._shut_timer.stop()
+        self._laid_for = ""
         page = self._page()
         if page is not None:
             if animate:
                 geometry = page.geometry_now()
                 self._veil(page, geometry.big.united(geometry.view))
+                self._laid_for = "close"                 # the still goes with the page's "laid" at its own size
             page.set_big(False)
             page.chip_slot.show()
         self.reading.set_board_big(False)
@@ -282,9 +298,13 @@ class BigController(QObject):
         if self._state == "open" and not self._shown(self._frame):
             self.close()
 
+    def laid_for(self) -> str:
+        """The page's "laid" the still waits for now ("open", "close"; "" none)."""
+        return self._laid_for
+
     def shutdown(self) -> None:
         self._veil_timer.stop()
         self._shut_timer.stop()
 
 
-__all__ = ["BigController", "CLOSE_MS", "DIM", "LIFT_MS", "OPEN_MS", "VEIL_MS", "jpeg_url"]
+__all__ = ["BigController", "CLOSE_MS", "DIM", "LIFT_MS", "OPEN_MS", "SHUT_GRACE_MS", "VEIL_MS", "jpeg_url"]

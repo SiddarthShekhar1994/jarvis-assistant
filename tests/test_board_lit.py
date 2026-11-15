@@ -10,7 +10,10 @@ matching Python's; the lit state's life in the app (the sentence being said ligh
 the speech ending, a stop, a mute, another screen and the frame leaving clear it), every ring's core glow halving and
 the HUD's following, the cue line's native part (from beside the sentence's end to the seam and along it to the
 frame's anchor, never over the view; hidden while the board scrolls and back without the draw-in; its motion lively,
-calm and off), the ring's halved glow and its paint budget; no words in the logs.
+calm and off), the ring's halved glow and its paint budget; no words in the logs. Part 5c fixes: a short form's full
+stop ending its sentence before a capital, a word said otherwise never found inside another, open big dropping the
+native part at once, the HUD's ring and the Dock's painted 36 px ring following the lit state, and the sentences already
+said reading in INK_3 in the current turn (eased when lively, back on each way the speech ends).
 """
 
 from __future__ import annotations
@@ -23,16 +26,17 @@ import time
 import unittest
 from pathlib import Path
 
-from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QPointF
-from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QPoint, QPointF
+from PySide6.QtGui import QColor, QImage, QPainter, QPixmap, QRegion
+from PySide6.QtWidgets import QApplication, QWidget
 
 from briefing_reader import desk_cue, desk_view, holo, ui, voice_fx
 from briefing_reader import orb as orb_mod
 from briefing_reader.board import lit, protocol
 from briefing_reader.board.frames import Built
 from tests import board_fakes
-from tests.ui_fakes import AppHarness, fonts, settle
+from tests.test_desktop_hud import HudApp
+from tests.ui_fakes import AppHarness, fonts, settle, wait_for
 
 _app: QApplication | None = None
 ASSETS = Path(__file__).resolve().parent.parent / "briefing_reader" / "board" / "assets"
@@ -74,6 +78,15 @@ def jpeg_url(width: int = 64, height: int = 40, *, noise: bool = False) -> str:
     return protocol.PICTURE_PREFIX + base64.b64encode(bytes(data.data())).decode("ascii")
 
 
+def on_void(widget: QWidget) -> QImage:
+    """``widget`` as it paints itself (its own paintEvent and its children's) over the window's VOID, never a palette's
+    ground."""
+    image = QImage(widget.size(), QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(QColor(holo.VOID))
+    widget.render(image, QPoint(), QRegion(), QWidget.RenderFlag.DrawChildren)
+    return image
+
+
 def timeline_for(text: str, sentence: int) -> tuple[voice_fx.VoiceTimeline, int]:
     """The voice's timeline for ``text`` (a word every 300 ms) and a position inside its ``sentence``-th sentence."""
     spans = lit.sentence_spans(text)
@@ -106,6 +119,40 @@ class SentenceTests(unittest.TestCase):
         self.assertEqual(lit.sentence_at(spans, 0), 0)
         self.assertEqual(lit.sentence_at(spans, spans[1][0]), 1)
         self.assertEqual(lit.sentence_at(spans, 10_000), 2)
+
+    def test_a_short_form_ends_its_sentence_before_a_capital(self) -> None:
+        # Part 5c fixes: "no.", "Inc.", "etc." ... ended no sentence, so the next one's frame lit early (or nothing).
+        for text, sentences in (
+                ("Dana's reply says no. The study group moved to noon.",
+                 ["Dana's reply says no.", "The study group moved to noon."]),
+                ("It came from Acme Inc. The study group moved.", ["It came from Acme Inc.", "The study group moved."]),
+                ("Pens, paper etc. The study group moved.", ["Pens, paper etc.", "The study group moved."]),
+                ("Ask Acme Co. Then lunch.", ["Ask Acme Co.", "Then lunch."]),
+                ("Send it to Acme Ltd. The rest can wait.", ["Send it to Acme Ltd.", "The rest can wait."]),
+                ("Meet me on Main St. The study group moved.", ["Meet me on Main St.", "The study group moved."]),
+                ("Meet at 8 a.m. The bus leaves at nine.", ["Meet at 8 a.m.", "The bus leaves at nine."]),
+                ("Room No. 5 is free. Next one?", ["Room No. 5 is free.", "Next one?"]),          # never an end
+                ("Acme Inc. shipped it, etc. and more.", ["Acme Inc. shipped it, etc. and more."]),
+                ("Red vs. blue at 8 a.m. today.", ["Red vs. blue at 8 a.m. today."]),
+                ("Ask Dr. Ruiz. Mr. Lee too.", ["Ask Dr. Ruiz.", "Mr. Lee too."])):
+            with self.subTest(text=text):
+                self.assertEqual([text[a:b] for a, b in lit.sentence_spans(text)], sentences)
+        said = "Dana's reply says no. The study group moved to noon."
+        self.assertEqual([lit.match(said[a:b], {"f1": MAIL, "f2": DAY}) for a, b in lit.sentence_spans(said)],
+                         ["f1", "f2"])                                  # the mail first, then the calendar
+
+    def test_a_word_said_otherwise_is_never_found_inside_another(self) -> None:
+        # Part 5c fixes: the voice's "eight" for "8" was found inside "eighteen", a sentence too far on.
+        text = "Your call with Dana is at 8. The study group has eighteen people."
+        said = [(0, 100, "Your"), (100, 200, "call"), (200, 300, "with"), (300, 400, "Dana"), (400, 500, "is"),
+                (500, 600, "at"), (600, 700, "eight"), (700, 800, "The")]
+        offset = lit.spoken_offset(text, said, 800, 650)
+        self.assertEqual(offset, text.index("at 8"))                    # still on "at": the word before it
+        self.assertEqual(lit.sentence_at(lit.sentence_spans(text), offset), 0)
+        self.assertEqual(lit.spoken_offset(text, said, 800, 750), text.index("The"))   # and on from there
+        self.assertEqual(lit.spoken_offset("Lunch at 8:12 today.", [(0, 100, "Lunch"), (100, 200, "at"),
+                                                                    (200, 300, "8:12")], 300, 250),
+                         "Lunch at 8:12 today.".index("8:12"))          # its own words, whole ("8", "12")
 
     def test_how_far_the_voice_is(self) -> None:
         timeline, position = timeline_for(SAY, 1)
@@ -484,6 +531,25 @@ class CueLineTests(LitApp):
                          + desk_cue.anchor(10, 160, self.board().height()) + 0.5)
         self.assertTrue(self.lit_sent()["cue"])
 
+    def test_open_big_drops_the_native_part_at_once_and_keeps_it_hidden(self) -> None:
+        # Part 5c fixes: its 400 ms fade (640 calm) went on over the wide view after open big (DESIGN-SPEC 8).
+        self.make()
+        mail = self.demo()[0]
+        holo.set_motion_level(holo.MOTION_LIVELY)
+        self.speak(SAY, 1)
+        line = self.reading.desk_page().cue_line
+        self.assertTrue(line.shown())
+        self.board().request("open", id=mail)
+        settle()
+        self.assertEqual(self.desk.big.state(), "open")
+        self.assertIsNone(line.path())
+        self.assertIsNone(line._leaving)                                # noqa: SLF001 - no fade over the view ...
+        self.assertTrue(line.isHidden())                                # ... and out of sight while big
+        self.board().request("big", step="back")
+        self.board().request("big", step="shut")
+        settle()
+        self.assertFalse(line.isHidden())                               # back with the board
+
     def test_its_motion_lively_calm_and_off(self) -> None:
         line = desk_view.CueLine()
         self.addCleanup(line.deleteLater)
@@ -567,6 +633,24 @@ class RingGlowTests(unittest.TestCase):
         mini.set_glow_share(0.5)
         self.assertEqual(mini.glow_share(), 0.5)
 
+    def test_the_dock_s_36_px_ring_paints_its_own_share(self) -> None:
+        # Part 5c fixes: the widget's own paint (paintEvent) passes its share on, not only the free painter.
+        holo.set_motion_level(holo.MOTION_OFF)
+        self.addCleanup(holo.set_motion_level, holo.MOTION_LIVELY)
+        mini = orb_mod.MiniOrb()
+        self.addCleanup(mini.deleteLater)
+        mini.set_state(orb_mod.SPEAKING)
+        mini.settle()
+
+        def painted(share: float) -> int:
+            mini.set_glow_share(share)
+            image = on_void(mini)
+            side = image.width()
+            return sum(image.pixelColor(x, y).green() for x in range(side // 3, 2 * side // 3)
+                       for y in range(side // 3, 2 * side // 3))
+
+        self.assertLess(painted(orb_mod.LIT_GLOW), painted(1.0))
+
     def test_the_paint_budget_holds_with_a_lit_frame(self) -> None:
         """The ring's median paint with its glow halved, speaking (its brightest look): at most 3 ms at 320 px, and
         x2.25 at 1.5x (DESIGN-SPEC 4.4); the measured medians are in the part's report."""
@@ -598,6 +682,149 @@ class RingGlowTests(unittest.TestCase):
                     if best <= budget:
                         break
                 self.assertLessEqual(best, budget)
+
+
+class ReadTests(LitApp):
+    """Part 5c fixes, the sentences already said (the mock-up's ``.turn.now .tx .read``): while Jarvis says the current
+    turn, every sentence before the one being said reads in INK_3 - found from the same sentence the lit frame comes
+    from -, eased in lively motion; the turn's own colours again when he is done, stopped or muted."""
+
+    def current(self) -> desk_view.TurnView:
+        return self.reading.desk_page().turns.current_view()
+
+    @staticmethod
+    def brightest(view: desk_view.TurnView, offset: int) -> int:
+        """The brightest pixel (r + g + b) of the letter at ``offset`` of the turn's words, as painted."""
+        image = on_void(view)
+        ratio = image.devicePixelRatio()
+        left, right = view.text_point(offset), view.text_point(offset + 1)
+        best = 0
+        for x in range(int(left.x() * ratio), int(right.x() * ratio) + 1):
+            for y in range(int((left.y() - 7) * ratio), int((left.y() + 7) * ratio) + 1):
+                if 0 <= x < image.width() and 0 <= y < image.height():
+                    color = image.pixelColor(x, y)
+                    best = max(best, color.red() + color.green() + color.blue())
+        return best
+
+    def test_the_sentences_already_said_read_in_ink_3(self) -> None:
+        self.make()
+        self.demo()
+        self.speak(SAY, 0)
+        view = self.current()
+        self.assertEqual(view.turn.text, SAY)
+        self.assertEqual((view.read_end(), view.read_overlay()), (0, []))   # the first sentence: nothing before it
+        second, third = SAY.index("Dana"), SAY.index("The budget")
+        self.at(1)
+        self.assertEqual(view.read_end(), second)
+        self.assertEqual(view.read_overlay(), [(0, second, QColor(holo.INK_3))])
+        self.assertLess(self.brightest(view, 0) + 80, self.brightest(view, second))   # painted: "Three" dim, "Dana"
+        self.at(2)                                                              # bright
+        self.assertEqual(view.read_overlay(), [(0, third, QColor(holo.INK_3))])   # "8:12" and what waits too
+        self.assertLess(self.brightest(view, SAY.index("8:12")) + 80, self.brightest(view, third))
+        older = [turn for turn in self.reading.desk_page().turns.views() if turn is not view]
+        self.assertTrue(older)
+        self.assertTrue(all(turn.read_end() == 0 and turn.read_overlay() == [] for turn in older))   # as they were
+
+    def test_it_eases_in_lively_motion_and_is_at_once_in_calm_and_off(self) -> None:
+        self.make()
+        self.demo()
+        second, third = SAY.index("Dana"), SAY.index("The budget")
+        holo.set_motion_level(holo.MOTION_LIVELY)
+        self.speak(SAY, 1)
+        view = self.current()
+        self.assertFalse(view.read_easing())                                # the turn first marked: at once
+        self.at(2)
+        self.assertTrue(view.read_easing())                                 # the sentence just said eases ...
+        overlay = view.read_overlay()
+        self.assertEqual(overlay[0], (0, second, QColor(holo.INK_3)))
+        self.assertTrue(all(start >= second and ink != QColor(holo.INK_3) for start, _length, ink in overlay[1:]))
+        self.assertEqual(desk_view.READ_EASE_MS, 160)                       # ... over 160 ms at most
+        self.assertTrue(wait_for(lambda: not view.read_easing(), 1.0))
+        self.assertEqual(view.read_overlay(), [(0, third, QColor(holo.INK_3))])
+        for level in (holo.MOTION_CALM, holo.MOTION_OFF):
+            with self.subTest(level=level):
+                holo.set_motion_level(level)
+                self.speak(SAY + " " * len(level), 1)
+                self.at(2)
+                self.assertFalse(view.read_easing())                        # at once
+                self.assertEqual(view.read_overlay(), [(0, third, QColor(holo.INK_3))])
+
+    def test_the_turn_is_its_own_colours_again_when_he_is_done_stopped_or_muted(self) -> None:
+        self.make()
+        self.demo()
+        for how in ("ends", "stopped", "muted"):
+            for level in (holo.MOTION_LIVELY, holo.MOTION_OFF):
+                with self.subTest(how=how, level=level):
+                    holo.set_motion_level(level)
+                    self.speak(SAY + " " * len(how + level), 2)
+                    view = self.current()
+                    self.assertGreater(view.read_end(), 0)
+                    if how == "muted":
+                        self.c._on_mute_toggled(True)                        # his voice muted: back at once
+                    else:
+                        self.c._on_voice_speaking("")                        # done, or stopped (the voice says "")
+                    settle()
+                    self.assertEqual(view.read_end(), 0)
+                    if level == holo.MOTION_LIVELY:
+                        self.assertTrue(view.read_easing())                  # eased back (lively) ...
+                        self.assertTrue(wait_for(lambda: not view.read_easing(), 1.0))
+                    self.assertEqual(view.read_overlay(), [])                # ... to the turn's own colours
+                    self.c._on_mute_toggled(False)
+
+    def test_the_words_said_move_with_the_turn_being_said(self) -> None:
+        # What he says now shows as the live turn until the answer's own turn comes: it takes the said words at once.
+        self.make()
+        desk = self.desk
+        self.c._you("Question 1?")
+        desk.on_answer_started(1, "Question 1?")
+        answer = desk._answers[1]
+        answer.done, answer.say = True, SAY
+        desk._put(answer, [("mail", lambda fid: Built(({**MAIL, "type": "frame", "id": fid},), 0), "", "", "")])
+        desk._sync_counts()
+        settle(3)
+        holo.set_motion_level(holo.MOTION_LIVELY)
+        self.speak(SAY, 1)
+        live = self.current()
+        self.assertEqual(live.turn.entry_id, -1)                            # what he says now
+        self.assertEqual(live.read_end(), SAY.index("Dana"))
+        self.c._jarvis(SAY)                                                 # his own turn comes meanwhile
+        settle()
+        own = self.current()
+        self.assertNotEqual(own.turn.entry_id, -1)
+        self.assertEqual(own.read_end(), SAY.index("Dana"))                 # at once, no flash of the said words
+        self.assertFalse(own.read_easing())
+
+    def test_older_turns_and_the_classic_home_are_unchanged(self) -> None:
+        self.make()
+        self.demo()
+        self.speak(SAY, 2)
+        first = self.current()
+        self.assertGreater(first.read_end(), 0)
+        self.answer(2, "Anything else, sir?", [("day", DAY, "day:2026-11-17")])   # a newer turn: the first is older
+        self.assertIsNot(self.current(), first)
+        self.assertEqual((first.read_end(), first.read_overlay()), (0, []))
+        harness = AppHarness(self, config_extra="\n[look]\nboard = false\n")     # the classic Home: no desk at all
+        harness.reading(autoplay=False)
+        harness.c._on_voice_speaking(SAY)
+        settle()
+        self.assertIsNone(harness.c.window.reading.desk_page())
+        harness.c._on_voice_speaking("")
+
+
+class HudRingTests(HudApp):
+    """Part 5c fixes: the HUD's ring follows the window's lit state (DesktopController.sync_glance)."""
+
+    def test_the_hud_ring_s_core_glow_halves_while_a_frame_is_lit(self) -> None:
+        self.make()
+        self.enter()                                                     # the owner's Desktop: the HUD shows
+        orb = self.hud().orb
+        self.assertEqual(orb.glow_share(), 1.0)
+        self.reading.set_frame_lit(True)                                 # as the cue line's controller lights a frame
+        settle()
+        self.assertEqual(orb.glow_share(), orb_mod.LIT_GLOW)
+        self.reading.set_frame_lit(False)                                # the speech ended: nothing lit
+        settle()
+        self.assertEqual(orb.glow_share(), 1.0)
 
 
 class LogTests(LitApp):

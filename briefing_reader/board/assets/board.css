@@ -649,10 +649,14 @@ body.wide { position: absolute; left: var(--bx); top: var(--by); width: var(--bw
   user-select: none; -webkit-user-drag: none; cursor: default;
 }
 body.wide #backdrop { display: block; }
-#board, #bar, #strip, #more, #pill, #backdrop { transition: opacity calc(220ms * var(--k)) var(--ease-out); }
-body.dim #board, body.dim #bar, body.dim #strip, body.dim #more, body.dim #pill, body.dim #backdrop {
+#board, #bar, #strip, #more, #pill { transition: opacity calc(220ms * var(--k)) var(--ease-out); }
+body.dim #board, body.dim #bar, body.dim #strip, body.dim #more, body.dim #pill {
   opacity: .2; transition-duration: calc(260ms * var(--k));
 }
+/* The backdrop stays opaque (the conversation's own widgets lie under the translucent view: at a lower opacity they
+   showed through it undimmed) and dims as a picture: to 20 % of its light. */
+#backdrop { transition: filter calc(220ms * var(--k)) var(--ease-out); }
+body.dim #backdrop { filter: brightness(.2); transition-duration: calc(260ms * var(--k)); }
 #big { position: fixed; inset: 0; z-index: 20; }
 .big-scrim { position: absolute; inset: 0; }
 .frame.big-card {

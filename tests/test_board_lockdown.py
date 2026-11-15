@@ -35,7 +35,12 @@ meanwhile, all gone with the speech; the changed lap and the same words sending 
 (Left / Right in the row) and pairs at 1480 x 960; Clear with nothing pinned keeping the desk for its Bring back; a
 real double click opening big (the geometry set once, the backdrop the only new picture, the frame scaling from its
 rectangle to the whole view, the native dim), a resize keeping it over both columns, real Esc reversing it in order
-(the scale-down, the geometry set back once, then the dim lifting), at 900 x 600 and at 1.5x. Skipped when this
+(the scale-down, the geometry set back once, then the dim lifting), at 900 x 600 and at 1.5x. Part 5c fixes: the app's
+layout following a frame's height animation and a picture's load; the hostile messages sent while the page holds the
+frame they name, with a control and the reasons dropped; the page's own "laid" at the open (the still's limit at 5 s);
+real Tab and Shift+Tab staying in the big frame, the board under it inert and keeping its layout (none for the wide
+view, the real width's after); the big frame's new picture; a "laid" only for the step still going on (keys pressed at
+the exact moment the steps cross); the backdrop opaque and dimmed as a picture. Skipped when this
 PySide6 has no QtWebEngine 6.8+.
 """
 
@@ -831,9 +836,40 @@ class LitTests(BoardProbeCase):
         self.assertEqual((report["after_clear_desk"], report["after_clear_stage"]), (False, True))
 
     def test_the_new_messages_hostile_are_refused_by_the_page(self) -> None:
+        # Part 5c fixes: sent while the page holds the frame they name (it used to run on an empty board, where any big
+        # open was dropped as an unknown id), with a control that the page takes, and the reasons each was dropped for.
         report = self.lit()
-        self.assertEqual(report["page_refused"], [False] * 11)
+        self.assertTrue(report["hostile_known"])                       # the frame named is on the page
+        self.assertEqual(report["page_refused"], [False] * 17)
         self.assertEqual(report["big_after_hostile"], "")
+        self.assertEqual(report["hostile_drops"], {"shape": 12, "picture": 5, "id": 0, "size": 0})
+        self.assertEqual(report["control"], [True, True])               # a good open (then close) is taken
+        self.assertEqual(report["big_after_control"], "")
+
+    def test_a_layout_follows_where_the_frames_end_up(self) -> None:
+        # Part 5c fixes: a frame's height animation (close, bring back) or a picture loading after the layout went out
+        # moved the frames below with no new layout, so the native part ended away from the page's stub.
+        report = self.lit()
+        day = report["ids"][1]
+        for name in ("closed_above", "back_above", "picture_load"):
+            with self.subTest(name=name):
+                shown, layout = report[name]["page"], report[name]["layout"]
+                frames = {frame["id"]: frame for frame in shown["frames"]}
+                self.assertTrue(layout)
+                for frame_id, (top, height) in layout.items():
+                    if frame_id in frames:
+                        self.assertLessEqual(abs(top - round(frames[frame_id]["top"])), 1, frame_id)
+                        self.assertLessEqual(abs(height - round(frames[frame_id]["height"])), 1, frame_id)
+        self.assertEqual(report["picture_load"]["loaded"], 1)
+        for name in ("closed_above", "back_above"):                     # the lit day's two halves still meet
+            with self.subTest(name=name):
+                shown, native = report[name]["page"], report[name]["native"]
+                self.assertEqual(shown["lit"], day)
+                stub = shown["stub"]
+                middle = stub["line"]["top"] + stub["line"]["height"] / 2
+                self.assertAlmostEqual(middle, native["path"]["end_y"] - native["board_top"], delta=0.6)
+        closed = next(frame for frame in report["closed_above"]["page"]["frames"] if frame["id"] == report["ids"][0])
+        self.assertIn("closed", closed["cls"].split())                  # (it was closed, then brought back)
 
 
 class BigTests(BoardProbeCase):
@@ -864,8 +900,10 @@ class BigTests(BoardProbeCase):
                 self.assertEqual(done["cardFoot"], "ESC BACK TO THE BOARD")
                 self.assertEqual(done["boardOpacity"], "0.2")
                 backdrop = done["backdrop"]
-                self.assertEqual((backdrop["display"], backdrop["src"], backdrop["opacity"]),
-                                 ("block", "data:image/jpeg;base64,", "0.2"))
+                # Part 5c fixes: the backdrop stays opaque and dims as a picture (at 0.2 opacity the conversation's
+                # own widgets under the translucent view showed through it undimmed).
+                self.assertEqual((backdrop["display"], backdrop["src"], backdrop["opacity"], backdrop["filter"]),
+                                 ("block", "data:image/jpeg;base64,", "1", "brightness(0.2)"))
                 self.assertEqual([round(v) for v in backdrop["box"].values()], [0, 0, 357, 550])
                 outside = [image for image in done["images"] if not image["inBoard"] and not image["inCard"]]
                 self.assertEqual([image["id"] for image in outside], ["backdrop"])   # the one new picture
@@ -912,3 +950,58 @@ class BigTests(BoardProbeCase):
                 self.assertFalse(report["layer_after_close"])                 # nothing left over the board ...
                 self.assertTrue(report["hit_after_close"])                    # ... a click reaches its frame
                 self.assertTrue(report["esc_again_ask"])                      # Esc again: the ask bar
+
+    def test_the_page_says_laid_at_the_open_and_the_still_goes_with_it(self) -> None:
+        # Part 5c fixes: the open's "laid" was never checked (the still's time limit lifted it all the same); here the
+        # limit is 5 s, so only the page's own "laid" can lift it.
+        for case in ("big", "big_x15"):
+            with self.subTest(case=case):
+                report = self.check(case)
+                steps = report["open_steps"]
+                laid = [step for step in steps if step[0] == "laid"]
+                self.assertTrue(laid, steps)
+                self.assertNotIn("back", [step[0] for step in steps])         # before any Esc
+                self.assertFalse(laid[0][2])                                  # the still gone with it ...
+                self.assertLess(laid[0][1] - report["opened_at"], 5.0)        # ... well before its time limit
+                self.assertNotIn("laid:ignored", report["big_counts"])
+                self.assertFalse(report["veil_after"])
+
+    def test_the_board_under_the_big_frame_takes_no_key_and_keeps_its_layout(self) -> None:
+        # Part 5c fixes: Tab left the big frame for the hidden board (its strip, a frame's Close); and the board under
+        # it was laid out for the wide view (three across), then again as it closed.
+        for case in ("big", "big_x15"):
+            with self.subTest(case=case):
+                report = self.check(case)
+                self.assertEqual(report["tab_trail"], ["card", "card", "card"])   # Shift+Tab, Tab, Tab: in the card
+                self.assertEqual(report["big_after_tabs"], "open")
+                self.assertEqual(report["inert_open"], [True, True, True, True])  # the board, its bar, strip, pill
+                self.assertEqual(report["closed"]["inert"], [False] * 4)          # ... and back after
+                for name in ("open", "resized"):
+                    classes = report[name]["rootClass"].split()
+                    self.assertNotIn("pairs", classes, name)                  # its layout as before open big
+                    self.assertNotIn("trios", classes, name)
+                self.assertIn("pairs", report["closed"]["rootClass"].split())  # 1232 x 640 meanwhile: pairs now
+
+    def test_the_big_frame_shows_its_frame_s_new_picture(self) -> None:
+        for case in ("big", "big_x15"):
+            with self.subTest(case=case):
+                report = self.check(case)
+                self.assertNotEqual(report["card_picture_before"], report["card_picture_want"])
+                self.assertEqual(report["card_picture"], report["card_picture_want"])
+
+    def test_a_laid_is_only_ever_for_the_step_still_going_on(self) -> None:
+        # Part 5c fixes: an open's "laid" made ready just before an Esc, or a close's just before an Enter, lifted the
+        # next step's still too early; and an Esc while the backdrop decoded let the frame grow as it closed.
+        for case in ("big", "big_x15"):
+            with self.subTest(case=case):
+                report = self.check(case)
+                self.assertEqual(report["esc_at_open_steps"], ["back", "shut", "laid"])   # the close's only
+                self.assertFalse(report["esc_at_open_veil"])
+                steps = report["enter_at_close_steps"]
+                self.assertEqual(steps[:3], ["back", "shut", "open"])
+                self.assertEqual(steps[3:].count("laid"), 1)                  # the new open's own, nothing else
+                self.assertEqual(report["enter_at_close_state"], "open")
+                self.assertFalse(report["enter_at_close_veil"])
+                self.assertEqual(report["esc_at_grow_steps"], ["back", "shut", "laid"])   # none from a growth
+                self.assertIsNone(report["esc_at_grow_page"]["card"])
+                self.assertEqual(report["esc_at_grow_page"]["active"], "frame:" + report["page_id"])

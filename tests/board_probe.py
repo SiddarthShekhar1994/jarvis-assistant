@@ -1713,6 +1713,42 @@ def lit_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> di
     pump(0.6)
     report["cyan_page"] = page()
     report["cyan_native"] = native()
+    # ---- part 5c fixes: the frame above the lit one closes and comes back (lively: its 200 ms height animation), then
+    # a picture loads after the layout went out (off) - the app's layout follows where the frames end up each time ----
+    layouts: list = []
+    board.layoutChanged.connect(layouts.append)
+
+    def last_layout() -> dict:
+        return {frame_id: [top, height] for frame_id, top, height in layouts[-1].places} if layouts else {}
+
+    holo.set_motion_level("lively")
+    board.set_motion("lively")
+    pump(0.2)
+    main_world(board, f"{frame_js(ids[0])}.querySelector('.f-ctl button:last-child').click(); 1")
+    pump(0.7)
+    report["closed_above"] = {"page": page(), "native": native(), "layout": last_layout()}
+    main_world(board, f"{frame_js(ids[0])}.querySelector('.f-closed .f-act').click(); 1")
+    pump(0.7)
+    report["back_above"] = {"page": page(), "native": native(), "layout": last_layout()}
+    holo.set_motion_level("off")
+    board.set_motion("off")
+    pump(0.2)
+    pictured = _put_answer(c, desk, built, 47, [("pic-page", "page"), ("pic-search", "search")])
+    pump(1.0)
+    main_world(board, "window.__loaded = 0; new MutationObserver(function (records) { records.forEach(function (r) { "
+                      "r.addedNodes.forEach(function (n) { if (n.tagName === 'IMG') { n.addEventListener('load', "
+                      "function () { window.__loaded += 1; }); } }); }); }).observe(document.getElementById('board'), "
+                      "{childList: true, subtree: true}); 1")
+    board.apply({"type": "picture", "id": pictured[0], "src": tiny_jpeg_url(320, 400)})   # a taller picture
+    wait_until(lambda: main_world(board, "window.__loaded") >= 1, 5)
+    loaded = main_world(board, "window.__loaded")
+    pump(0.6)
+    # Its size as a load that comes after the layout went out gives it (here at once: its height changed, then its
+    # load event): the frames below move, and only the picture's own load can say so.
+    main_world(board, f"(function () {{ var picture = {frame_js(pictured[0])}.querySelector('.f-pic'); "
+                      "picture.style.height = '160px'; picture.dispatchEvent(new Event('load')); return 1; })()")
+    pump(0.5)
+    report["picture_load"] = {"page": page(), "layout": last_layout(), "loaded": loaded}
     # ---- an answer arrives while a frame is lit: it traces in LINE_FOCUS (lively motion) ---------------------------
     holo.set_motion_level("lively")
     board.set_motion("lively")
@@ -1777,6 +1813,46 @@ def lit_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> di
     report["pairs_view"] = list(board.geometry().getRect())
     window.resize(1120, 700)
     pump(0.6)
+    # ---- the new messages, hostile, straight into the page while it holds frames (part 5c fixes: a frame it has, so a
+    # check taken out lets a message through - the control opens and closes big for it): refused, and why -----------
+    from briefing_reader.board import protocol
+
+    known = desk.feed.frame_ids()[0]
+    box = {"x": 357, "y": 12, "w": 503, "h": 626}
+    prefix = protocol.PICTURE_PREFIX
+    hostile = [
+        {"type": "lit", "id": known, "cue": "yes"},
+        {"type": "lit", "id": known, "cue": True, "x": 1},
+        {"type": "backdrop", "src": "data:image/png;base64,iVBORw0KGgo="},
+        {"type": "backdrop", "src": "https://example.com/x.jpg"},
+        {"type": "backdrop", "src": jpeg, "id": known},
+        {"type": "backdrop", "src": prefix + "!!!!"},
+        {"type": "backdrop", "src": prefix},
+        {"type": "backdrop", "src": prefix + "A" * (protocol.PICTURE_CAP - len(prefix) + 4)},
+        {"type": "big", "state": "open", "id": known, **box, "x": -1},
+        {"type": "big", "state": "open", "id": known, **box, "x": "1"},
+        {"type": "big", "state": "open", "id": known, **box, "x": 1.5},
+        {"type": "big", "state": "open", "id": known, **box, "y": -1},
+        {"type": "big", "state": "open", "id": known, **box, "w": 0},
+        {"type": "big", "state": "open", "id": known, **box, "w": protocol.BIG_LIMIT + 1},
+        {"type": "big", "state": "open", "id": "<b>", **box},
+        {"type": "big", "state": "close", "id": "", "x": 0},
+        {"type": "big", "state": "half"},
+    ]
+    report["hostile_known"] = main_world(board, f"!!document.getElementById('title-{known}')")
+    before = json.loads(main_world(board, "JSON.stringify(board.counts())"))
+    report["page_refused"] = json.loads(main_world(board, "JSON.stringify(%s.map(function (m) { "
+                                                          "return board.apply(JSON.stringify(m)); }))"
+                                                          % json.dumps(hostile)))
+    report["big_after_hostile"] = main_world(board, "board.counts().big")
+    after = json.loads(main_world(board, "JSON.stringify(board.counts())"))
+    report["hostile_drops"] = {why: after.get(why, 0) - before.get(why, 0) for why in ("shape", "picture", "id", "size")}
+    report["control"] = json.loads(main_world(board, "JSON.stringify([%s, %s].map(function (m) { "
+                                                     "return board.apply(JSON.stringify(m)); }))"
+                                                     % (json.dumps({"type": "big", "state": "open", "id": known, **box}),
+                                                        json.dumps({"type": "big", "state": "close", "id": ""}))))
+    pump(0.3)
+    report["big_after_control"] = main_world(board, "board.counts().big")
     # ---- Clear with nothing pinned: the desk stays for its Bring back row, then folds --------------------------------
     for frame_id in desk.feed.frame_ids():
         if desk.feed.flags(frame_id).get("pinned"):
@@ -1795,25 +1871,6 @@ def lit_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> di
     pump(1.9)
     report["after_clear_desk"] = reading.desk_shown()
     report["after_clear_stage"] = reading.stage.isVisible()
-    # ---- the new messages, hostile, straight into the page: refused -------------------------------------------------
-    known = sorted(board.known_ids())[0] if board.known_ids() else "f1"
-    hostile = [
-        {"type": "lit", "id": known, "cue": "yes"},
-        {"type": "lit", "id": known, "cue": True, "x": 1},
-        {"type": "backdrop", "src": "data:image/png;base64,iVBORw0KGgo="},
-        {"type": "backdrop", "src": "https://example.com/x.jpg"},
-        {"type": "backdrop", "src": jpeg, "id": known},
-        {"type": "big", "state": "open", "id": known, "x": -1, "y": 0, "w": 10, "h": 10},
-        {"type": "big", "state": "open", "id": known, "x": "1", "y": 0, "w": 10, "h": 10},
-        {"type": "big", "state": "open", "id": known, "x": 0, "y": 0, "w": 0, "h": 10},
-        {"type": "big", "state": "open", "id": "<b>", "x": 0, "y": 0, "w": 10, "h": 10},
-        {"type": "big", "state": "close", "id": "", "x": 0},
-        {"type": "big", "state": "half"},
-    ]
-    report["page_refused"] = json.loads(main_world(board, "JSON.stringify(%s.map(function (m) { "
-                                                          "return board.apply(JSON.stringify(m)); }))"
-                                                          % json.dumps(hostile)))
-    report["big_after_hostile"] = main_world(board, "board.counts().big")
     report["counts"] = {key_: value for key_, value in board.counts().items() if isinstance(value, int)}
     report["desk_counts"] = {key_: value for key_, value in desk.counts.items() if isinstance(value, int)}
     report["cue_counts"] = dict(desk.cue.counts)
@@ -1853,14 +1910,49 @@ _BIG_PAGE = r"""JSON.stringify((function () {
           cardFoot: card ? card.querySelector('.f-back').innerText : '', cardFocus: !!card && document.activeElement === card,
           transform: card ? getComputedStyle(card).transform : '',
           backdrop: back ? {display: getComputedStyle(back).display, box: box(back), src: back.src.slice(0, 23),
-                            opacity: getComputedStyle(back).opacity} : null,
+                            opacity: getComputedStyle(back).opacity, filter: getComputedStyle(back).filter} : null,
           board: box(document.getElementById('board')), boardOpacity: getComputedStyle(document.getElementById('board')).opacity,
           body: document.body.className, inner: [window.innerWidth, window.innerHeight], images: images,
           frame: box(document.querySelector('#board .frame')), counts: board.counts(),
+          rootClass: document.getElementById('board').className,
+          inert: ['board', 'bar', 'strip', 'pill'].map(function (id) { var n = document.getElementById(id); return !!n && n.inert; }),
+          cardPicture: card && card.querySelector('.f-pic') ? card.querySelector('.f-pic').src.length : 0,
+          active: (function (a) { return !a ? 'none' : a.closest && a.closest('#big') ? 'card'
+            : a.closest && a.closest('.frame') ? 'frame:' + a.closest('.frame').querySelector('.f-title').id.slice(6)
+            : a.tagName.toLowerCase(); })(document.activeElement),
           shapes: Array.prototype.map.call(document.querySelectorAll('#board .frame'), function (f) {
             return f.className + ' h=' + Math.round(f.getBoundingClientRect().height) + ' a=' + f.getAnimations().length
               + ' ' + Array.prototype.map.call(f.children, function (k) { return Math.round(k.getBoundingClientRect().height); }).join(','); })};
 })())"""
+
+
+# Part 5c fixes: hooks that press a key at the exact moment open big's steps cross (the page's own handlers take the key
+# as a real one): "esc-at-open" (as the open's "laid" is made ready, the view wide), "enter-at-close" (as the close's
+# "laid" is made ready, the view narrow again: Enter on the frame) and "esc-at-grow" (the big frame just added, its
+# backdrop not yet decoded).
+_STEP_HOOKS = r"""(function (frameId) {
+  var raf = window.requestAnimationFrame.bind(window);
+  window.__hook = '';
+  window.requestAnimationFrame = function (fn) {
+    var wide = document.body.classList.contains('wide');
+    if (window.__hook === 'esc-at-open' && wide) {
+      window.__hook = '';
+      document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+    } else if (window.__hook === 'enter-at-close' && !wide) {
+      window.__hook = '';
+      document.getElementById('title-' + frameId).closest('.frame').dispatchEvent(
+        new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));
+    }
+    return raf(fn);
+  };
+  new MutationObserver(function () {
+    if (window.__hook === 'esc-at-grow' && document.getElementById('big')) {
+      window.__hook = '';
+      document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+    }
+  }).observe(document.body, {childList: true});
+  return 1;
+})(%s)"""
 
 
 def big_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> dict[str, Any]:
@@ -1868,10 +1960,11 @@ def big_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> di
     from PySide6.QtCore import QEvent, QObject, QPoint, Qt
     from PySide6.QtTest import QTest
 
-    from briefing_reader import holo
+    from briefing_reader import desk_big, holo
 
     report: dict[str, Any] = {}
     holo.set_motion_level("off")
+    desk_big.VEIL_MS = 5000          # part 5c fixes: the still goes with the page's "laid", never its time limit, here
     shim = _Shim()
     harness, c, boards, desk = _app_case(shim, wait_until, pump, (1120, 700))
     window, reading = c.window, c.window.reading
@@ -1882,6 +1975,7 @@ def big_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> di
     pump(1.2)
     report["ready"] = board.is_ready()
     page_id = ids[0]
+    report["page_id"] = page_id
 
     class Moves(QObject):
         """Every geometry change of the board's view (it is set once each way, never frame by frame)."""
@@ -1900,6 +1994,9 @@ def big_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> di
     board.installEventFilter(moves)
     order: list[list[Any]] = []
     board.bigStep.connect(lambda step: order.append(["page", step, round(time.monotonic(), 3)]))
+    opening: list[list[Any]] = []    # each step from the double click on, the still after the app took it
+    board.bigStep.connect(lambda step: opening.append([step, round(time.monotonic(), 3),
+                                                       reading.desk_page().veil.shown()]))
 
     def page() -> dict:
         return json.loads(main_world(board, _BIG_PAGE))
@@ -1922,6 +2019,7 @@ def big_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> di
     report["frame_start"] = start
     proxy = board.web_view().focusProxy()
     point = QPoint(int(start["left"] + start["width"] / 2), int(start["top"] + 30))
+    opening.clear()
     _double_click(proxy, point)
     opened_at = time.monotonic()
     wait_until(lambda: desk.big.state() == "open", 5)
@@ -1937,6 +2035,27 @@ def big_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> di
     report["moves_open"] = list(moves.events)
     report["open_s"] = round(time.monotonic() - opened_at, 2)
     report["big_counts"] = dict(desk.big.counts)
+    report["opened_at"] = round(opened_at, 3)
+    report["open_steps"] = list(opening)                    # part 5c fixes: the page's own "laid" at the open
+    # ---- part 5c fixes: the big frame's picture follows its frame's; Tab stays in the big frame, the board inert ----
+    other = tiny_jpeg_url(240, 160)                          # (a size of its own: its data: URL is its own length)
+    report["card_picture_before"] = page()["cardPicture"]
+    board.apply({"type": "picture", "id": page_id, "src": other})
+    pump(0.3)
+    report["card_picture"] = page()["cardPicture"]
+    report["card_picture_want"] = len(other)
+    board.web_view().setFocus(Qt.FocusReason.OtherFocusReason)
+    pump(0.2)
+    trail = []
+    for key, modifiers in ((Qt.Key.Key_Backtab, Qt.KeyboardModifier.ShiftModifier),
+                           (Qt.Key.Key_Tab, Qt.KeyboardModifier.NoModifier),
+                           (Qt.Key.Key_Tab, Qt.KeyboardModifier.NoModifier)):
+        QTest.keyClick(board.web_view().focusProxy(), key, modifiers)
+        pump(0.15)
+        trail.append(page()["active"])
+    report["tab_trail"] = trail
+    report["inert_open"] = page()["inert"]
+    report["big_after_tabs"] = desk.big.state()
     # ---- a resize while big (1232 x 640, the Dock still labelled): it keeps spanning both columns, set once ----------
     moves.events.clear()
     window.resize(1232, 640)
@@ -2021,6 +2140,49 @@ def big_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> di
     from PySide6.QtWidgets import QApplication
 
     report["esc_again_ask"] = reading.command_bar.isAncestorOf(QApplication.focusWidget())
+    # ---- part 5c fixes: a "laid" only for the page's step still going on (open big's steps against each other) -------
+    steps: list[str] = []
+    board.bigStep.connect(steps.append)
+    board.openRequested.connect(lambda _frame_id: steps.append("open"))
+    main_world(board, _STEP_HOOKS % json.dumps(page_id))
+    # (1) motion off: Esc as the open's "laid" is made ready (two frames before it would be sent) - it never comes
+    steps.clear()
+    main_world(board, "window.__hook = 'esc-at-open'; 1")
+    desk._on_open(page_id)                                   # as the page's request
+    wait_until(lambda: not desk.big.state() and steps.count("laid") >= 1, 5)
+    pump(0.5)
+    report["esc_at_open_steps"] = list(steps)
+    report["esc_at_open_veil"] = reading.desk_page().veil.shown()
+    # (2) motion off: Enter on a frame as the close's "laid" is made ready - only the new open's "laid" comes
+    desk._on_open(page_id)
+    wait_until(lambda: page()["card"] is not None, 5)
+    pump(0.4)
+    steps.clear()
+    main_world(board, "window.__hook = 'enter-at-close'; 1")
+    board.web_view().setFocus(Qt.FocusReason.OtherFocusReason)
+    pump(0.2)
+    QTest.keyClick(board.web_view().focusProxy(), Qt.Key.Key_Escape)
+    wait_until(lambda: "open" in steps and desk.big.state() == "open" and page()["card"] is not None, 5)
+    pump(0.6)
+    report["enter_at_close_steps"] = list(steps)
+    report["enter_at_close_veil"] = reading.desk_page().veil.shown()
+    report["enter_at_close_state"] = desk.big.state()
+    QTest.keyClick(board.web_view().focusProxy(), Qt.Key.Key_Escape)
+    wait_until(lambda: not desk.big.state(), 5)
+    pump(0.5)
+    # (3) lively: Esc while the backdrop decodes (before the frame starts growing) - it never grows while it closes
+    holo.set_motion_level("lively")
+    board.set_motion("lively")
+    pump(0.2)
+    main_world(board, f"document.getElementById('title-{page_id}').closest('.frame').focus(); 1")
+    pump(0.1)
+    steps.clear()
+    main_world(board, "window.__hook = 'esc-at-grow'; 1")
+    desk._on_open(page_id)
+    wait_until(lambda: not desk.big.state() and steps.count("laid") >= 1, 5)
+    pump(0.5)
+    report["esc_at_grow_steps"] = list(steps)
+    report["esc_at_grow_page"] = page()
     report["desk_counts"] = {key_: value for key_, value in desk.counts.items() if isinstance(value, int)}
     report["big_counts_end"] = dict(desk.big.counts)
     board.removeEventFilter(moves)

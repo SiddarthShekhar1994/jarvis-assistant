@@ -11,7 +11,10 @@ gate and the repeat); the desk calling them from the page's landed requests (by 
 once after a group's last frame, never again for a page that restarted, nothing off screen), the changed light and open
 big; the feed's source keys (a later answer's frame built from the same thread, day, page or list is the same frame,
 sent again with "changed" when what it says differs - never for the clock's own words - and nothing at all when it says
-the same; quiet within one answer; never through a closed or cleared frame; a waiting reply's newer card).
+the same; quiet within one answer; never through a closed or cleared frame; a waiting reply's newer card). Part 5c
+fixes: a page read again keeps its picture until the new one is ready (never "failed" over it; a newer snapshot shown
+quietly), a frame the owner has not seen is brought up to date and never "changed", counts are a frame's own data, and a
+mail read again the next day says the same.
 """
 
 from __future__ import annotations
@@ -399,6 +402,110 @@ class ChangedFeedTests(unittest.TestCase):
         self.assertEqual(self.feed.approvals_for(frame_id), "c2")               # the newer card
         self.assertEqual(sent, [])                                             # the page shows the same: nothing
         self.assertEqual(self.feed.take_changed(), [])
+
+    # ---- part 5c fixes ------------------------------------------------------------------------------------------------
+
+    def put_page(self, answer: int, source: str, status: str = "ok", src: str = "") -> list[dict]:
+        """A page picture's frame of ``answer`` (its key: the page's address), with its picture when ``src``."""
+        frame_id = self.feed.frame_id(answer, source, "", PAGE_KEY)
+        data = {"kind": "picture", "title": "City Hack schedule", "meta": f"9:0{answer} AM",
+                "body": {"caption": "city-hack.example.org"}, "status": status,
+                "status_text": "" if status == "ok" else "Opening the page..."}
+        messages = [{"type": "frame", "id": frame_id, **data}]
+        if src:
+            messages.append({"type": "picture", "id": frame_id, "src": src})
+        return self.page.apply(self.feed.put(answer, source, messages, when="9:41 AM", key=PAGE_KEY))
+
+    def test_a_page_read_again_keeps_its_picture_until_the_new_one_is_ready(self) -> None:
+        # Part 5c fixes: a later answer's re-read of the page hid the good picture behind "Opening the page..." (or
+        # "failed"), and a new snapshot ready at once was dropped.
+        first, second = jpeg_src(40), jpeg_src(56)
+        self.put_page(1, "step:1", src=first)
+        frame_id = self.feed.frame_ids()[0]
+        self.assertEqual(self.put_page(2, "step:9", status="empty"), [])      # on its way: the good one stays
+        self.assertEqual(self.put_page(2, "step:9", status="failed"), [])     # failed: it stays (never "failed")
+        self.assertEqual(self.feed.frame_message(frame_id)["status"], "ok")
+        sent = self.put_page(2, "step:9", src=second)                          # ready: shown, quietly
+        self.assertEqual([message["type"] for message in sent], ["frame", "picture"])
+        self.assertEqual((sent[0]["id"], sent[0]["status"], sent[0]["changed"]), (frame_id, "ok", False))
+        self.assertEqual(sent[1]["src"], second)
+        self.assertEqual(self.feed.take_changed(), [])
+        self.assertEqual(self.put_page(3, "step:12", src=second), [])          # the same picture again: nothing
+
+    def test_a_frame_the_owner_has_not_seen_is_brought_up_to_date_never_changed(self) -> None:
+        # Part 5c fixes: a parked frame, never shown yet, came up CHANGED (the light and the sound on a hidden frame).
+        todos = {"kind": "todos", "title": "To-dos", "body": {"rows": [{"text": "Book the dentist", "meta": "",
+                                                                        "state": "open"}]}}
+        more = json.loads(json.dumps(todos))
+        more["body"]["rows"].append({"text": "Buy milk", "meta": "", "state": "waits"})
+        for answer, data in ((1, todos), (2, more)):
+            frame_id = self.feed.frame_id(answer, "todos", "", "todos")
+            sent = self.page.apply(self.feed.put(answer, "todos", [{"type": "frame", "id": frame_id, **data}],
+                                                 when="9:41 AM", key="todos", park=True))
+        frame_id = self.feed.frame_ids()[0]
+        self.assertTrue(self.feed.is_parked(self.feed.group_of(frame_id)))
+        resent = [message for message in sent if message["type"] == "frame"]
+        self.assertEqual([(message["id"], message["changed"]) for message in resent], [(frame_id, False)])
+        self.assertEqual(len(resent[0]["body"]["rows"]), 2)                   # brought up to date ...
+        self.assertEqual(self.feed.take_changed(), [])                        # ... never "changed"
+        # A frame the owner closed: a later answer's late update through its own id changes nothing either.
+        self.feed.land()
+        put(self.feed, self.page, 3, "todos", todos, key="todos")              # seen, built again: changed
+        self.assertEqual(self.feed.take_changed(), [frame_id])
+        self.feed.close(frame_id, 0.0)
+        put(self.feed, self.page, 3, "todos", more, key="todos")
+        self.assertEqual(self.feed.take_changed(), [])
+
+    def test_a_count_is_the_frame_s_own_data(self) -> None:
+        # Part 5c fixes: a week day's "3 events" or a "+2 MORE" row that changed was never sent.
+        week = {"kind": "calendar", "title": "This week", "meta": "7 events", "body": {
+            "first": 0, "last": 0, "now_min": -1, "ticks": [], "spans": [], "now": "", "rows": [
+                {"time": "Mon 16", "title": "Standup · Design review", "meta": "3 events", "state": "today"}]}}
+        busier = json.loads(json.dumps(week))
+        busier["body"]["rows"][0]["meta"] = "4 events"
+        self.assertNotEqual(substance(week), substance(busier))
+        put(self.feed, self.page, 1, "calendar:week", week, key="week:2026-11-16")
+        sent = put(self.feed, self.page, 2, "calendar:week", busier, key="week:2026-11-16")
+        self.assertEqual([(message["type"], message["changed"]) for message in sent], [("frame", True)])
+        for kind, more_row in (("calendar", {"time": "", "title": "", "meta": "+2 MORE", "state": ""}),
+                               ("todos", {"text": "", "meta": "+2 MORE", "state": "open"})):
+            with self.subTest(kind=kind):
+                frame = {"kind": kind, "title": "T", "body": {"rows": [more_row]}}
+                other = json.loads(json.dumps(frame))
+                other["body"]["rows"][0]["meta"] = "+3 MORE"
+                self.assertNotEqual(substance(frame), substance(other))
+        due = {"kind": "todos", "title": "To-dos", "body": {"rows": [{"text": "Essay", "meta": "DUE THU",
+                                                                      "state": "open"}]}}
+        later = json.loads(json.dumps(due))
+        later["body"]["rows"][0]["meta"] = "DUE TOMORROW"
+        self.assertEqual(substance(due), substance(later))                     # due words are the clock's
+        self.assertEqual(substance(DAY_920), substance(DAY_941))               # so are "now" and "in 19 min"
+
+    def test_a_mail_read_again_the_next_day_says_the_same(self) -> None:
+        # Part 5c fixes: the day shown before a mail's time once it is not today's made an unchanged thread CHANGED.
+        today = {"kind": "mail_thread", "title": "Re: Budget numbers", "meta": "Work · 2:41 PM",
+                 "body": {"sender": "Dana Whitfield", "time": "2:41 PM", "text": "Here are the Q4 numbers."}}
+        tomorrow = json.loads(json.dumps(today))
+        tomorrow["meta"] = "Work · Fri Nov 13 2026, 2:41 PM"
+        tomorrow["body"]["time"] = "Fri Nov 13 2026, 2:41 PM"
+        self.assertEqual(substance(today), substance(tomorrow))
+        put(self.feed, self.page, 1, "step:mail", today, key="mail:work:t1")
+        self.assertEqual(put(self.feed, self.page, 2, "step:mail", tomorrow, key="mail:work:t1"), [])
+        replied = json.loads(json.dumps(tomorrow))
+        replied["body"].update(time="Sat Nov 14 2026, 9:05 AM", text="Line 14 is now 3,400.")
+        sent = put(self.feed, self.page, 3, "step:mail", replied, key="mail:work:t1")
+        self.assertEqual([(message["type"], message["changed"]) for message in sent], [("frame", True)])
+
+
+PAGE_KEY = "page:https://city-hack.example.org/schedule"
+
+
+def jpeg_src(width: int) -> str:
+    import base64
+
+    from tests.ui_fakes import tiny_jpeg
+
+    return protocol.PICTURE_PREFIX + base64.b64encode(tiny_jpeg(width, 30)).decode("ascii")
 
 
 if __name__ == "__main__":

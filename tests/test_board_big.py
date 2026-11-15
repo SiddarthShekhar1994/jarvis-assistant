@@ -11,23 +11,27 @@ dimmed to 20 % natively, the chips' edge kept from showing under the wide view; 
 board's own box; Esc's order (the page's scale-down, then the geometry set back once, then the native dim lifts; a page
 that never says "shut" is gone back from after its grace); a resize while big (still over both columns, set once, the
 page told the new box); open big ending at once off Home and going back when its frame leaves; what can't open big; F6
-skipping the covered conversation; no words in the logs.
+skipping the covered conversation; no words in the logs. Part 5c fixes: the page told before its view is wide; a
+"laid" taken only for the step the still waits for; the covered conversation out of the Tab chain and back as it was;
+the Dock's and the header's own opacity effects; a resize's backdrop counted; the shut grace's own timer; no eased dim
+left behind as an animation.
 """
 
 from __future__ import annotations
 
 import logging
 import unittest
+from unittest import mock
 
-from PySide6.QtCore import QEvent, QObject, QRect
-from PySide6.QtGui import QColor, QImage
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QRect, Qt, QVariantAnimation
+from PySide6.QtGui import QColor, QImage, QPixmap
+from PySide6.QtWidgets import QApplication, QGraphicsOpacityEffect, QWidget
 
 from briefing_reader import desk_big, desk_view, holo, ui
 from briefing_reader.board import protocol
 from briefing_reader.board.frames import Built
 from tests import board_fakes
-from tests.ui_fakes import AppHarness, fonts, settle
+from tests.ui_fakes import AppHarness, fonts, settle, wait_for
 
 _app: QApplication | None = None
 PAGE = {"kind": "picture", "title": "City Hack schedule", "meta": "9:05 AM", "body": {"caption": "city-hack.example.org"}}
@@ -222,15 +226,17 @@ class OpenTests(BigApp):
         self.assertFalse(self.reading.desk_page().chip_slot.isHidden())
 
     def test_a_page_that_never_says_shut_goes_back_after_its_grace(self) -> None:
+        # Part 5c fixes: the real timer goes back (it was called by hand, so a timer never connected passed too).
         self.make()
         page_id = self.answer()[0]
         self.open(page_id)
         self.board().request("big", step="back")
         settle()
-        self.assertTrue(self.desk.big._shut_timer.isActive())                 # noqa: SLF001
-        self.desk.big._on_shut_late()                                         # noqa: SLF001 - as its timer does
-        settle()
-        self.assertEqual(self.desk.big.state(), "")
+        timer = self.desk.big._shut_timer                                     # noqa: SLF001
+        self.assertTrue(timer.isActive())
+        self.assertEqual(timer.interval(), desk_big._ms(desk_big.CLOSE_MS) + desk_big.SHUT_GRACE_MS)
+        self.assertTrue(wait_for(lambda: self.desk.big.state() == "", 3.0))   # its own timeout, nothing else
+        self.assertEqual(self.desk.big.counts["shut_late"], 1)
         self.assertEqual(self.board().geometry(), self.reading.desk_page().geometry_now().view)
 
     def test_a_resize_while_big_keeps_it_over_both_columns(self) -> None:
@@ -238,6 +244,7 @@ class OpenTests(BigApp):
         page_id = self.answer()[0]
         self.open(page_id)
         moves = self.watch()
+        backdrops = len(self.board().of_type("backdrop"))
         self.window.resize(1232, 640)
         settle(6)
         geometry = self.reading.desk_page().geometry_now()
@@ -248,8 +255,122 @@ class OpenTests(BigApp):
         big = self.board().of_type("big")[-1]
         self.assertEqual((big["x"], big["w"], big["h"]), (geometry.view.x() - geometry.big.x(), geometry.view.width(),
                                                           geometry.view.height()))
-        self.assertEqual(self.board().of_type("backdrop")[-1]["type"], "backdrop")   # painted again for it
-        self.assertEqual(self.desk.big.counts["relaid"], 1)
+        self.assertEqual(len(self.board().of_type("backdrop")), backdrops + 1)   # painted again for it (part 5c
+        self.assertEqual(self.desk.big.counts["relaid"], 1)                      # fixes: counted, not just there)
+
+    def test_the_page_is_told_before_its_view_is_wide(self) -> None:
+        # Part 5c fixes: the view went wide first, so a page that took the resize first laid its board out across the
+        # whole wide view (pairs, three across) under the card.
+        self.make()
+        page_id = self.answer()[0]
+        geometry = self.reading.desk_page().geometry_now()
+        board = self.board()
+        at_send: list[QRect] = []
+        run = board._run
+
+        def recording(text: str) -> None:
+            if '"type":"big"' in text:
+                at_send.append(QRect(board.geometry()))
+            run(text)
+
+        board._run = recording                                                # noqa: SLF001 - what the page gets
+        self.addCleanup(setattr, board, "_run", run)
+        self.open(page_id)
+        self.assertEqual(at_send, [geometry.view])                            # still its column when told
+        self.assertEqual(board.geometry(), geometry.big)                      # then wide, once
+
+    def test_a_laid_answers_only_the_step_the_still_waits_for(self) -> None:
+        # Part 5c fixes: any "laid" lifted the still, also one for a step already over.
+        self.make()
+        page_id = self.answer()[0]
+        desk = self.reading.desk_page()
+        big = self.desk.big
+        with mock.patch.object(desk_big.BigController, "_veil", lambda self_, page, rect: page.veil.show_still(
+                QPixmap(4, 4), rect)):
+            self.open(page_id)
+            self.assertEqual(big.laid_for(), "open")
+            self.board().request("big", step="back")                          # Esc before the page was laid out
+            settle()
+            self.assertEqual(big.laid_for(), "")                              # its open's "laid" never comes now
+            self.board().request("big", step="laid")                          # so a "laid" now answers nothing
+            settle()
+            self.assertTrue(desk.veil.shown())
+            self.assertEqual(big.counts["laid:ignored"], 1)
+            self.board().request("big", step="shut")                          # the scale-down is over: back, a still
+            settle()
+            self.assertEqual(big.laid_for(), "close")
+            self.board().request("big", step="laid")                          # the board at its own size
+            settle()
+            self.assertFalse(desk.veil.shown())
+            self.board().request("big", step="laid")                          # nothing awaited: ignored
+            settle()
+            self.assertEqual(big.counts["laid:ignored"], 2)
+
+    def test_the_covered_conversation_takes_no_focus_and_comes_back_as_it_was(self) -> None:
+        # Part 5c fixes: the turns' tokens and links stayed in the Tab chain under the wide view (Enter acted unseen).
+        self.make()
+        page_id = self.answer()[0]
+        desk = self.reading.desk_page()
+        covered = [widget for widget in desk.turns.findChildren(QWidget) + desk.head.findChildren(QWidget)
+                   if widget.focusPolicy() & Qt.FocusPolicy.TabFocus and widget.isVisibleTo(desk)]
+        self.assertTrue(covered)                                              # a frames token at least
+
+        def chain() -> list[QWidget]:
+            found, widget = [], self.window.nextInFocusChain()
+            while widget is not None and widget is not self.window and len(found) < 2000:
+                if widget.isEnabled() and widget.isVisible() and widget.focusPolicy() & Qt.FocusPolicy.TabFocus:
+                    found.append(widget)
+                widget = widget.nextInFocusChain()
+            return found
+
+        before = chain()
+        self.open(page_id)
+        self.assertFalse(any(widget in chain() for widget in covered))       # nothing covered takes focus
+        token = covered[0]
+        token.setFocus(Qt.FocusReason.TabFocusReason)
+        self.assertFalse(token.hasFocus())
+        self.board().request("big", step="back")
+        self.board().request("big", step="shut")
+        settle()
+        self.assertEqual(chain(), before)                                     # the order exactly as before
+
+    def test_the_dock_and_the_header_are_dimmed_by_their_own_effects(self) -> None:
+        # Part 5c fixes: only the controller's own number was read; the effects on the widgets themselves now.
+        self.make()
+        page_id = self.answer()[0]
+        reading = self.reading
+        self.open(page_id)
+        for widget in (reading.dock, reading.header):
+            effect = widget.graphicsEffect()
+            self.assertIsInstance(effect, QGraphicsOpacityEffect)
+            self.assertAlmostEqual(effect.opacity(), desk_big.DIM)
+        self.board().request("big", step="back")
+        self.board().request("big", step="shut")
+        settle()
+        self.assertIsNone(reading.dock.graphicsEffect())                      # gone after the close ...
+        self.assertIsNone(reading.header.graphicsEffect())
+        self.open(page_id)
+        self.desk.big.end_now()
+        self.assertIsNone(reading.dock.graphicsEffect())                      # ... and after end_now
+        self.assertIsNone(reading.header.graphicsEffect())
+
+    def test_its_eased_dims_leave_no_animation_behind(self) -> None:
+        # Part 5c fixes: each eased change left its QVariantAnimation on the window for its life.
+        self.make()
+        reading = self.reading
+        holo.set_motion_level(holo.MOTION_LIVELY)
+
+        def animations() -> int:
+            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            return len(reading.findChildren(QVariantAnimation, options=Qt.FindChildOption.FindDirectChildrenOnly))
+
+        baseline = animations()
+        for _round in range(3):
+            reading.set_chrome_dim(desk_big.DIM, 200)
+            reading.set_chrome_dim(1.0, 100)                                  # one cut short ...
+            self.assertTrue(wait_for(lambda: reading.chrome_dim() == 1.0, 2.0))
+        settle()
+        self.assertEqual(animations(), baseline)                              # ... and none kept
 
     def test_it_ends_at_once_off_home(self) -> None:
         self.make()

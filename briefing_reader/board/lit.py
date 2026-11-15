@@ -7,13 +7,17 @@ case-insensitive, and at least one of the words it names is distinctive: 4 lette
 other frame on the board has it. When no frame is named that way, or two are named equally, nothing is lit for that
 sentence: it never guesses.
 
-    sentence_spans(text) -> list[(start, end)]     the sentences of ``text`` (ends after . ! ? or a line break; not
-                                                   after "Dr." or "a.m.", not inside "2.9k" or "8:12")
+    sentence_spans(text) -> list[(start, end)]     the sentences of ``text`` (ends after . ! ? or a line break; never
+                                                   after a title - "Dr.", "Mr." -, after "No." before a number, or
+                                                   after another short form - "a.m.", "etc.", "Inc." - before a word in
+                                                   lower case or a number; not inside "2.9k" or "8:12")
     spoken_offset(text, words, duration_ms, position_ms) -> int
                                                    how far into ``text`` the voice is (a character offset), from its
                                                    timeline: the word being said (``words``: (start_ms, end_ms, word)
-                                                   as voice_fx.VoiceTimeline has them, found in the text in order), else
-                                                   the share of its duration; -1 when that can't be told
+                                                   as voice_fx.VoiceTimeline has them, found in the text in order as
+                                                   whole words - a word said otherwise is passed by, never found inside
+                                                   another word), else the share of its duration; -1 when that can't be
+                                                   told
     sentence_at(spans, offset) -> int              the index of the sentence holding ``offset`` (-1 none)
     tokens(text) -> list[(word, start, end)]       the words of ``text`` (letters and digits; casefolded), with their
                                                    places in it
@@ -23,6 +27,9 @@ sentence: it never guesses.
     locate(sentence, text, after=0) -> int         where ``sentence`` ends in ``text`` (the conversation's current
                                                    turn: the cue line starts there), past its own end punctuation; -1
                                                    when it is not there
+    locate_start(sentence, text, after=0) -> int   where ``sentence`` begins in ``text`` (its first word), when it is
+                                                   there whole; -1 when it is not (the turn's words before the sentence
+                                                   being said read dimmer while he says it)
 """
 
 from __future__ import annotations
@@ -37,10 +44,14 @@ TAIL_MIN = 3                      # ... and never by fewer than this
 
 _WORD = re.compile(r"[^\W_]+")
 # A sentence ends after . ! ? or … (and the quotes or brackets that close it) before a space or the end, or at a line
-# break; "Dr." and "a.m." are not ends.
+# break; "Dr." is never an end, "No." is not one before a number ("No. 5"), and the other short forms are not ends
+# before a word in lower case or a number ("at 8 a.m. today", "Acme Inc. shipped it") - before a capital they are
+# ("Dana's reply says no. The study group ...", "... from Acme Inc. The study group ...").
 _END = re.compile(r"[.!?…]+[\"'’”)\]]*(?=\s|$)|\n+")
-_ABBREVIATIONS = frozenset({"mr", "mrs", "ms", "dr", "st", "sr", "jr", "prof", "vs", "etc", "e.g", "i.e", "a.m", "p.m",
-                            "no", "approx", "dept", "inc", "ltd", "co"})
+_TITLES = frozenset({"mr", "mrs", "ms", "dr", "sr", "jr", "prof"})
+_BEFORE_NUMBER = frozenset({"no"})
+_ABBREVIATIONS = frozenset({"st", "vs", "etc", "e.g", "i.e", "a.m", "p.m", "approx", "dept", "inc", "ltd", "co"})
+_OPENING = "\"'‘’“”([{"
 # Common words a title can hold that never tell one frame from another (4 letters or more; shorter ones never count).
 COMMON = frozenset("""
 about above after again against also among another anything around away back been before being below best between
@@ -69,6 +80,26 @@ def _letters(word: str) -> int:
     return sum(1 for char in word if char.isalpha())
 
 
+def _next_char(source: str, at: int) -> str:
+    """The first character of the word after ``at`` (spaces and opening quotes or brackets passed by); "" at the end."""
+    for char in source[at:]:
+        if not char.isspace() and char not in _OPENING:
+            return char
+    return ""
+
+
+def _no_end(word: str, source: str, at: int) -> bool:
+    """A full stop after ``word`` does not end its sentence (see _END's note); ``at``: just past the stop."""
+    if word in _TITLES:
+        return True
+    following = _next_char(source, at)
+    if word in _BEFORE_NUMBER:
+        return following.isdigit()
+    if word in _ABBREVIATIONS:
+        return following.isdigit() or following.islower()
+    return False
+
+
 def sentence_spans(text: Any) -> list[tuple[int, int]]:
     """See the module doc: (start, end) of each sentence, its own end punctuation in it, leading spaces out."""
     source = str(text or "")
@@ -79,7 +110,7 @@ def sentence_spans(text: Any) -> list[tuple[int, int]]:
         if found.group(0)[:1] == ".":
             before = source[start:found.start()].split()
             last = before[-1].casefold().rstrip(".") if before else ""
-            if last in _ABBREVIATIONS:
+            if _no_end(last, source, end):
                 continue
         piece = source[start:end]
         lead = len(piece) - len(piece.lstrip())
@@ -104,16 +135,27 @@ def sentence_at(spans: Sequence[tuple[int, int]], offset: int) -> int:
     return len(spans) - 1
 
 
+def _find(said: list[str], needle: list[str], cursor: int) -> int:
+    """The index of the first run of ``said`` from ``cursor`` that is ``needle`` word for word; -1 when there is none."""
+    size = len(needle)
+    for index in range(max(0, cursor), len(said) - size + 1):
+        if said[index:index + size] == needle:
+            return index
+    return -1
+
+
 def spoken_offset(text: Any, words: Iterable[tuple[int, int, str]] = (), duration_ms: int = 0,
                   position_ms: int = -1) -> int:
     """See the module doc."""
-    source = str(text or "").casefold()
+    source = str(text or "")
     try:
         position = int(position_ms)
     except (TypeError, ValueError):
         return -1
     if not source or position < 0:
         return -1
+    places = tokens(source)
+    said = [word for word, _start, _end in places]
     cursor = 0
     found = -1
     known = False
@@ -122,16 +164,16 @@ def spoken_offset(text: Any, words: Iterable[tuple[int, int, str]] = (), duratio
             start, _end, word = int(item[0]), int(item[1]), str(item[2] or "")
         except (TypeError, ValueError, IndexError):
             continue
-        needle = word.strip().casefold()
+        needle = _words(word)                      # the voice's word as the text's words ("8:12": "8", "12")
         if not needle:
             continue
         known = True
-        at = source.find(needle, cursor)
+        at = _find(said, needle, cursor)           # whole words: "eight" is never found inside "eighteen"
         if at < 0:
-            continue                               # a word the voice says otherwise ("eight twelve"): the next one
-        if start > position:
+            continue                               # a word the voice says otherwise ("eight twelve"): passed by, the
+        if start > position:                       # place kept
             break
-        found = at
+        found = places[at][1]
         cursor = at + len(needle)
     if known:
         return found if found >= 0 else 0
@@ -238,5 +280,20 @@ def locate(sentence: Any, text: Any, after: int = 0) -> int:
     return end
 
 
-__all__ = ["COMMON", "MIN_LETTERS", "distinctive", "frame_words", "locate", "match", "sentence_at", "sentence_spans",
-           "spoken_offset", "tokens"]
+def locate_start(sentence: Any, text: Any, after: int = 0) -> int:
+    """See the module doc: the character offset of the sentence's first word in ``text`` when all its words are there in
+    order, the first place at or after ``after``; -1 when they are not."""
+    said = _words(sentence)
+    source = str(text or "")
+    if not said or not source:
+        return -1
+    found = tokens(source)
+    words = [word for word, _start, _end in found]
+    begin = next((index for index, (_word, start, _end) in enumerate(found) if start >= max(0, int(after or 0))),
+                 len(found))
+    at = _find(words, said, begin)
+    return found[at][1] if at >= 0 else -1
+
+
+__all__ = ["COMMON", "MIN_LETTERS", "distinctive", "frame_words", "locate", "locate_start", "match", "sentence_at",
+           "sentence_spans", "spoken_offset", "tokens"]

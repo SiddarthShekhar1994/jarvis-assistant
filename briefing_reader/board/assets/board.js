@@ -296,6 +296,8 @@
   var litCue = false;                          // the app draws the cue line's native part to the lit frame
   var stub = null;                             // the cue line's last 15 px: {el, id}
   var big = null;                              // open big: {id, rec, card, state: wait / open / closing / shut, box}
+  var bigTurn = 0;                             // bumped by each open asked, each step back and each "laid" made ready:
+                                               // a "laid" is sent only while its own step is the latest
   var bigLayer = null;                         // the big frame's layer over the whole view
   var backdrop = null;                         // the conversation column as the app painted it
   var focused = '';
@@ -495,7 +497,7 @@
       if ((event.target.closest && event.target.closest('button')) || rec.sat || rec.closed || !current(rec)) {
         return;
       }
-      post('open', {id: id});
+      askOpen(id);
     });
     art.appendChild(border('fx-outline'));
     ['tl', 'tr', 'bl', 'br'].forEach(function (corner) {
@@ -519,7 +521,7 @@
     var controls = make('div', 'f-ctl');
     rec.pinButton = button('f-icon', WORDS.pin, function () { togglePin(rec); });
     rec.pinButton.appendChild(glyph('pin'));
-    var openBig = button('f-icon', WORDS.openBig, function () { post('open', {id: id}); });
+    var openBig = button('f-icon', WORDS.openBig, function () { askOpen(id); });
     openBig.appendChild(glyph('expand'));
     var closer = button('f-icon', WORDS.close, function () { close(rec); });
     closer.appendChild(glyph('close'));
@@ -801,12 +803,13 @@
     });
   }
 
-  function measureWidth() {                    // the frames area's width: pairs from 500 px, three across from 756
-    if (!root) {
-      return;
-    }
+  function measureWidth(boxWidth) {            // the frames area's width: pairs from 500 px, three across from 756
+    if (!root || (big && boxWidth === undefined)) {
+      return;                                  // open big: the board under the card keeps the layout it had (it is
+    }                                          // measured again once the view is its own size)
     var style = getComputedStyle(root);
-    var width = root.clientWidth - parseFloat(style.paddingLeft || '0') - parseFloat(style.paddingRight || '0');
+    var outer = boxWidth === undefined ? root.clientWidth : boxWidth - (window.innerWidth - root.clientWidth);
+    var width = outer - parseFloat(style.paddingLeft || '0') - parseFloat(style.paddingRight || '0');
     var pairs = width >= PAIRS_FROM, trios = width >= TRIOS_FROM;
     if (pairs !== root.classList.contains('pairs') || trios !== root.classList.contains('trios')) {
       root.classList.toggle('pairs', pairs);
@@ -909,6 +912,7 @@
           function () {
             el.classList.remove('sizing');
             scheduleView();
+            scheduleLayout();                  // the frames below moved: the cue line's other end follows
             if (done) {
               done();
             }
@@ -1118,6 +1122,9 @@
       if (key === 'Escape') {
         shrink(true);                          // Esc leaves open big first (the board again; the next Esc: the ask bar)
         event.preventDefault();
+      } else if (key === 'Tab') {
+        cardTab(event.shiftKey);               // the focus stays in the big frame (the board under it is inert)
+        event.preventDefault();
       }
       return;                                  // the board's own keys wait under the big frame
     }
@@ -1140,7 +1147,7 @@
       if (node === rec.satButton) {
         return;                                // a satellite's row is a button: Enter presses it (it expands)
       }
-      post('open', {id: rec.id});              // part 5c opens it big
+      askOpen(rec.id);                         // part 5c opens it big
     } else if (key === 'p' || key === 'P') {
       togglePin(rec);
     } else if (key === 'Delete') {
@@ -1979,12 +1986,18 @@
     picture.decoding = 'async';
     picture.draggable = false;                 // a picture only: never dragged out, never a link
     picture.src = src;                         // a data: picture the app re-encoded; nothing else loads (img-src data:)
-    picture.addEventListener('load', scheduleView);
+    picture.addEventListener('load', function () {
+      scheduleView();
+      scheduleLayout();                        // its height came with it: the frames below moved
+    });
     if (rec.picture) {
       rec.picture.remove();
     }
     rec.picture = picture;                     // one picture per frame: a new one replaces it
     placePicture(rec);
+    if (big && big.id === message.id && big.card && big.state === 'open') {
+      fillCard(big.card, rec);                 // the big frame shows its frame's new picture too
+    }
     scheduleView();
     scheduleLayout();
     return true;
@@ -2039,7 +2052,8 @@
         endBig();
       }
       big = {id: message.id, rec: rec, card: null, state: 'wait', box: box};
-      placeBig();
+      measureWidth(box.w);                     // the board's own width, as it was before the view went wide (a resize
+      placeBig();                              // that came first measured the wide view)
       return true;
     }
     if (!onlyKeys(message, ['type', 'state', 'id']) || state !== 'close' || typeof message.id !== 'string'
@@ -2055,9 +2069,40 @@
   }
 
   function laidOut() {                         // the page shows itself at the view's new size: the app's still goes
-    requestAnimationFrame(function () {
-      requestAnimationFrame(function () { post('big', {step: 'laid'}); });
+    var mine = ++bigTurn;                      // (only while this step is the latest: never a "laid" for an open it
+    requestAnimationFrame(function () {        // left, or for a close an open asked after)
+      requestAnimationFrame(function () {
+        if (mine === bigTurn) {
+          post('big', {step: 'laid'});
+        }
+      });
     });
+  }
+
+  function askOpen(id) {                       // Enter, a double click, the Open big button: the app opens it big
+    bigTurn += 1;
+    post('open', {id: id});
+  }
+
+  function underBig(on) {                      // while a frame is big the board under it takes no key, no click and
+    [barParts && barParts.bar, root, stripParts && stripParts.nav, stripParts && stripParts.more,   // no focus
+     stripParts && stripParts.pill].forEach(function (node) {
+      if (node) {
+        node.inert = !!on;
+      }
+    });
+  }
+
+  function cardTab(back) {                     // Tab in open big: the big frame, then its own controls, round
+    if (!big || !big.card) {
+      return;
+    }
+    var stops = [big.card].concat(Array.prototype.filter.call(big.card.querySelectorAll('button'), function (node) {
+      return !node.disabled;
+    }));
+    var at = stops.indexOf(document.activeElement);
+    var next = at < 0 ? stops[back ? stops.length - 1 : 0] : stops[(at + (back ? stops.length - 1 : 1)) % stops.length];
+    next.focus({preventScroll: true});
   }
 
   function placeBig() {                        // on each big message and resize: the board keeps its own box
@@ -2074,7 +2119,8 @@
       big.state = 'open';
       grow();
     } else if (big && big.state === 'shut' && !wide) {
-      big = null;                              // the app set the geometry back
+      big = null;                              // the app set the geometry back: the board is its own again, measured
+      measureWidth();                          // at its real width (it re-flows only when that changed meanwhile)
       laidOut();
     }
     placeStub();
@@ -2116,7 +2162,11 @@
     parts.push(make('div', 'f-back t-badge', WORDS.backToBoard));
     card.className = 'frame big-card' + (data.waits ? ' waits' : '') + (data.status === 'failed' ? ' failed' : '')
       + (data.status === 'empty' ? ' empty' : '');
+    var inside = card.contains(document.activeElement) && document.activeElement !== card;
     card.replaceChildren.apply(card, parts);
+    if (inside) {
+      card.focus({preventScroll: true});       // a control of it had the focus: it stays in the big frame
+    }
   }
 
   function grow() {                            // the frame grows from its rectangle to the whole view (260 ms expo-out)
@@ -2144,13 +2194,16 @@
     });
     fillCard(card, rec);
     big.card = card;
+    var mine = big;
     bigLayer.appendChild(card);
     document.body.appendChild(bigLayer);
     document.body.classList.add('dim');        // the backdrop and the other frames go to 20 %
+    underBig(true);
+    card.focus({preventScroll: true});         // the focus goes with it (the frame under it is inert now)
     var from = rec.el.getBoundingClientRect();
     var start = function () {
-      if (!big || big.card !== card) {
-        return;
+      if (big !== mine || mine.state !== 'open' || mine.card !== card) {
+        return;                                // gone back (or another frame big) before its picture was ready
       }
       laidOut();
       card.focus({preventScroll: true});
@@ -2175,6 +2228,7 @@
     }
     var card = big.card, rec = big.rec, mine = big;
     big.state = 'closing';
+    bigTurn += 1;                              // its open's "laid", if still to come, is never sent now
     if (byOwner) {
       post('big', {step: 'back'});
     }
@@ -2190,6 +2244,7 @@
       if (bigLayer) {
         bigLayer.remove();                     // its scrim never stays over the board
       }
+      underBig(false);
       mine.card = null;
       mine.state = 'shut';
       if (hadFocus && current(rec)) {
@@ -2225,6 +2280,7 @@
       bigLayer.remove();
     }
     document.body.classList.remove('dim');
+    underBig(false);
     big = null;
   }
 
