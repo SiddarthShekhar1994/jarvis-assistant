@@ -24,11 +24,12 @@ import math
 import unittest
 from pathlib import Path
 
+from briefing_reader import live
 from briefing_reader.ask import cli, planner, research, stream
 from briefing_reader.board import ask_frames, protocol
-from tests.ask_fakes import plan_stream, result_event
+from tests.ask_fakes import HOURS_URL, RESEARCH_ANSWER, VISIT_URL, plan_stream, result_event
 from tests.ask_fakes import stream as recorded
-from tests.test_ask_planner import FORCED_COMMAND, PlannerTestCase
+from tests.test_ask_planner import COMMAND, FORCED_COMMAND, MOVE_LINE, SAY, PlannerTestCase
 
 MINUS = ask_frames.MINUS
 HOSTILE_WORDS = ("<script>window.pwned=1</script>", "<img src=x onerror=alert(1)>", "javascript:alert(2)",
@@ -200,11 +201,30 @@ class HostileTests(unittest.TestCase):
         cases = (table(onclick="x"), table(html="<b>"), chart(bars=[{"label": "A", "value": 1, "href": "x"}]),
                  timeline(nodes=[{"when": "Mon", "words": "x", "state": "done", "style": "x"}]),
                  maths(steps=[{"name": "x", "expr": "x", "tex": "\\frac{1}{2}"}]),
-                 maths(answer={"expr": "x", "markup": "<b>"}), table(bars=[]), chart(columns=["x"]), timeline(steps=[]),
-                 maths(today=1), {**table(), "__proto__": {"x": 1}})
+                 maths(answer={"expr": "x", "markup": "<b>"}), maths(colour="red", unit="GBP"),
+                 chart(bars=[{"label": "A", "value": 1, "state": "done"}]), {**table(), "__proto__": {"x": 1}},
+                 {**timeline(), 7: "x"})
         for frame in cases:
-            with self.subTest(frame=json.dumps(frame)[:60]):
+            with self.subTest(frame=repr(frame)[:60]):
                 self.assertEqual(ask_frames.check_frame(frame), ask_frames.D_FIELD)
+
+    def test_another_kind_s_field_is_left_out_unread(self) -> None:
+        # The schema's one frame item offers every kind's fields to each kind: one that carries another kind's field is
+        # kept without it (never checked, never shown); only a key no kind has drops it (above).
+        cases = ((maths(unit="GBP"), ("unit",)), (timeline(change="moved from Tuesday"), ("change",)),
+                 (chart(source="From Dana's mail"), ("source",)), (table(today=2), ("today",)),
+                 (timeline(unit="", changed=-1, change="", source=""), ("unit", "changed", "change", "source")),
+                 (maths(unit=["<script>x</script>"], bars="x" * 10_000, today=float("nan")), ("unit", "bars", "today")),
+                 (table(bars=[]), ("bars",)), (chart(columns=["x"]), ("columns",)), (timeline(steps=[]), ("steps",)),
+                 (maths(today=1), ("today",)))
+        for frame, foreign in cases:
+            with self.subTest(kind=frame["kind"], foreign=foreign):
+                found = checked(frame)
+                plain = checked({key: value for key, value in frame.items() if key not in foreign})
+                self.assertEqual((found.kind, found.title, found.meta, found.key, found.body),
+                                 (plain.kind, plain.title, plain.meta, plain.key, plain.body))
+                self.assertNotIn("Tuesday", json.dumps(found.body))
+                self.assertNotIn("script", json.dumps(found.body))
 
     def test_wrong_types_drop_the_frame(self) -> None:
         cases = {ask_frames.D_SHAPE: (table(columns="Line, Friday"), table(rows={"a": 1}), table(rows=[["A", ["x"]]]),
@@ -392,11 +412,48 @@ class NumberTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 ask_frames.format_number(bad)
 
+    def test_a_number_keeps_every_whole_digit(self) -> None:
+        # Only a fraction is ever cut to SIGNIFICANT digits: a figure with cents never loses its last whole digits.
+        for value, words in ((12345678901.5, "12,345,678,902"), (1234567890123.45, "1,234,567,890,123"),
+                             (-12345678901.25, f"{MINUS}12,345,678,901"), (1234567890.5, "1,234,567,891"),
+                             (123456789.125, "123,456,789.1"), (31940416666.67, "31,940,416,667")):
+            self.assertEqual(ask_frames.format_number(value), words, value)
+        # The review's sum: 383,285,000,000 ÷ 12 = 31,940,416,666.67, every whole digit kept in its line and its fact.
+        frame = checked(maths(steps=[{"expr": ["=", "m", ["/", 383285000000, 12]]}],
+                              answer={"expr": ["=", "m", 31940416666.67]}))
+        self.assertEqual(ask_frames.maths_text(frame.body["steps"][0]["expr"]), "m = 383,285,000,000 ÷ 12")
+        self.assertEqual(ask_frames.maths_text(frame.body["answer"]["expr"]), "m = 31,940,416,667")
+        self.assertEqual(ask_frames.answer_fact(frame.body["answer"]["expr"]), "= 31,940,416,667")
+        # Every number under the board's limit fits the page's words.
+        limit = protocol.NUMBER_LIMIT
+        values = [limit - 1, -(limit - 1), float(limit) - 0.125, 999_999_999_999_999.9, -999_999_999_999_999.9,
+                  1e-6, -1e-6, 0.1 + 0.2, 1 / 3, -2 / 3]
+        values += [sign * (10 ** power + fraction) for power in range(15) for fraction in (0.5, 0.123456789, 0.999999)
+                   for sign in (1, -1) if 10 ** power + fraction < limit]
+        for value in values:
+            words = ask_frames.format_number(value)
+            self.assertLessEqual(len(words), protocol.NUMBER_TEXT_CAP, (value, words))
+            protocol.check_message(wire("maths", {"steps": [{"name": "", "expr": ["num", words]}],
+                                                  "answer": {"name": "", "expr": ["num", words]}}))
+
     def test_a_chart_s_values_in_one_scale(self) -> None:
         self.assertEqual(ask_frames.chart_texts([1200, 3400, 2100, 800]), ["1.2k", "3.4k", "2.1k", "0.8k"])
         self.assertEqual(ask_frames.chart_texts([2_500_000, 750_000]), ["2.5M", "0.8M"])     # half up
         self.assertEqual(ask_frames.chart_texts([3, 5.5, 0.25]), ["3", "5.5", "0.25"])
         self.assertEqual(ask_frames.chart_texts([-1500, 500]), [f"{MINUS}1.5k", "0.5k"])
+
+    def test_the_scale_is_the_one_the_largest_needs_as_shown(self) -> None:
+        # Chosen after rounding: a largest bar that rounds up to a thousand of its scale reads in the next one.
+        self.assertEqual(ask_frames.chart_texts([999_950, 10]), ["1.0M", "0.0M"])
+        self.assertEqual(ask_frames.chart_texts([999_999.5]), ["1.0M"])
+        self.assertEqual(ask_frames.chart_texts([-999_999, 100]), [f"{MINUS}1.0M", "0.0M"])
+        self.assertEqual(ask_frames.chart_texts([999_949, 420_000]), ["999.9k", "420.0k"])      # still under: k
+        self.assertEqual(ask_frames.chart_texts([999_950_000, 1]), ["1.0B", "0.0B"])
+        self.assertEqual(ask_frames.chart_texts([999_960_000_000]), ["1.0T"])
+        self.assertEqual(ask_frames.chart_texts([999_960_000_000_000]), ["1,000.0T"])          # T is the top
+        frame = checked(chart(bars=[{"label": "Software", "value": 999_950}, {"label": "Travel", "value": 420_000}],
+                              changed=-1))
+        self.assertEqual([bar["text"] for bar in frame.body["bars"]], ["1.0M", "0.4M"])
 
 
 class MathsWordsTests(unittest.TestCase):
@@ -591,6 +648,15 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual((props["changed"]["type"], props["today"]["type"], props["was"]["type"]),
                          ("integer", "integer", "number"))
 
+    def test_a_cell_is_text_and_the_model_is_told_so(self) -> None:
+        # The schema keeps a cell a string (no new schema feature: a type list was never tried with the CLI), and says
+        # so in words, so the model writes "3,400" rather than 3400 and its answer is never sent back for a retry.
+        for name in ("schema.json", "research_schema.json"):
+            rows = self.load(name)["properties"]["frames"]["items"]["properties"]["rows"]
+            self.assertEqual(rows["items"]["items"]["type"], "string", name)
+            self.assertIn('each is short words or a figure written as text, like "3,400"', rows["description"], name)
+        self.assertEqual(checked(table()).body["rows"][1][1:3], ["2,900", "3,400"])   # Python still takes numbers
+
     def test_only_keywords_ask_s_schemas_already_use(self) -> None:
         for name in ("schema.json", "research_schema.json"):
             self.assertLessEqual(keywords(self.load(name)), KNOWN_KEYWORDS, name)
@@ -647,7 +713,7 @@ class PromptTests(unittest.TestCase):
             words = self.section(path)
             for rule in ('"frames": usually empty.', "numbers to compare (a table", "or a chart of one measure)",
                          "dates in order (a timeline)", "a worked sum (maths", "At most 3", "never for one number",
-                         never, "never markup, links"):
+                         never, "never markup, links", 'Table cells are text: a figure too ("3,400").'):
                 self.assertIn(rule, words, (path.name, rule))
         self.assertIn("only facts from the context", self.section(cli.PROMPT_FILE))
         self.assertIn("only facts from your sources", self.section(cli.RESEARCH_PROMPT_FILE))
@@ -755,6 +821,52 @@ class PlannerFramesTests(PlannerTestCase):
         self.assertEqual([frame.title for frame in outcome.frames], ["Opening days"])
         self.assertIn("Research: 1 frame(s) to show (timeline), 1 dropped (field 1), topic given",
                       "\n".join(logs.output))
+
+    def test_a_frame_nested_ten_thousand_deep_as_json_text_loses_only_itself(self) -> None:
+        plan = dict(PLAN, say=SAY, lines=[MOVE_LINE], frames=[table(), chart(), maths(steps=[{"expr": "DEEP"}])])
+        lines = deep_lines(plan_stream(plan))
+        self.assertEqual(sum(DEEP_TEXT in line for line in lines), 2)        # the assistant line and the result line
+        ask = self.make(lines)
+        stream_view = live.LiveStream(keep_text=True)
+        with self.assertLogs("briefing_reader", level="DEBUG") as logs:
+            outcome = ask.plan(COMMAND, live=stream_view.task(live.TASK_ASK, "request"))
+        self.assertTrue(outcome.ok, outcome)
+        self.assertEqual(outcome.say, SAY)
+        self.assertEqual(len(outcome.cards), 1)                                     # the line's card
+        self.assertEqual([frame.kind for frame in outcome.frames], ["table", "chart"])
+        self.assertIn("Ask: 2 frame(s) to show (table, chart), 1 dropped (depth 1), topic given",
+                      "\n".join(logs.output))
+        steps = stream_view.snapshot()[0].steps
+        blocks = [block for step in steps for block in step.blocks if block.label == "Planner's reply (raw)"]
+        self.assertEqual(len(blocks), 1)
+        self.assertLess(blocks[0].chars, 20_000)                                    # the LIVE block stays small
+
+    def test_a_web_research_frame_nested_ten_thousand_deep_loses_only_itself(self) -> None:
+        lines = recorded("research_success")
+        call, last = json.loads(lines[5]), json.loads(lines[-1])
+        frames = [timeline(title="Opening days"), maths(steps=[{"expr": "DEEP"}])]
+        call["message"]["content"][0]["input"] = dict(call["message"]["content"][0]["input"], frames=frames)
+        last["structured_output"] = dict(last["structured_output"], topic="Museum hours", frames=frames)
+        lines = deep_lines([*lines[:5], json.dumps(call), lines[6], json.dumps(last)])
+        self.assertEqual(sum(DEEP_TEXT in line for line in lines), 2)
+        ask = self.make(lines)
+        with self.assertLogs("briefing_reader", level="DEBUG") as logs:
+            outcome = ask.plan(FORCED_COMMAND)
+        self.assertTrue(outcome.ok, outcome)
+        self.assertEqual(outcome.say, RESEARCH_ANSWER["answer"])
+        self.assertEqual([source.url for source in outcome.research.sources], [VISIT_URL, HOURS_URL])
+        self.assertEqual([frame.title for frame in outcome.frames], ["Opening days"])
+        self.assertIn("Research: 1 frame(s) to show (timeline), 1 dropped (depth 1), topic given",
+                      "\n".join(logs.output))
+
+
+# The model's own JSON text for a maths expr 10 000 deep, as the CLI prints it on a line (never a Python object: the
+# real reading path, stream.parse_event, is the one that must not lose the answer).
+DEEP_TEXT = '["-", ' * 10_000 + '"x"' + "]" * 10_000
+
+
+def deep_lines(lines: list[str]) -> list[str]:
+    return [line.replace('"DEEP"', DEEP_TEXT) for line in lines]
 
 
 if __name__ == "__main__":

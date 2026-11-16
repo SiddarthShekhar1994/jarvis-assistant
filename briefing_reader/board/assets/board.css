@@ -355,7 +355,9 @@ button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 }
 
 /* maths: numbered steps (a name, then its line), the answer boxed in HOLO_HI; every element made by the page from
-   the checked tree (a fraction stacked, a power raised, a root under its bar) */
+   the checked tree (a fraction stacked, a power raised, a root under its bar). A fraction or a root keeps to its line:
+   it shrinks and a fraction's parts wrap over its bar; one that still cannot fit, or a root whose radicand would wrap,
+   reads inline there (a/b, √(…): board.js fitMaths). */
 .mx { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 7px 10px; align-items: baseline; }
 .mx-i { color: var(--ink-4); font: 500 10px/12px var(--font-mono); font-variant-numeric: tabular-nums; }
 .mx-k { color: var(--ink-3); white-space: nowrap; }
@@ -365,14 +367,17 @@ button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 }
 .mx-sup { display: inline-block; margin-left: 1px; font-size: 10px; line-height: 1; vertical-align: 6px; }
 .mx-frac {
-  display: inline-flex; flex-direction: column; align-items: center; margin: 0 2px; vertical-align: middle;
-  font-size: 12.5px; line-height: 15px; white-space: nowrap;
+  display: inline-flex; flex-direction: column; align-items: center; max-width: 100%; margin: 0 2px;
+  vertical-align: middle; font-size: 12.5px; line-height: 15px;
 }
-.mx-top { padding: 0 2px 1px; }
-.mx-bot { align-self: stretch; padding: 1px 2px 0; border-top: 1px solid currentColor; text-align: center; }
-.mx-root { display: inline-flex; align-items: flex-end; white-space: nowrap; }
+.mx-top { min-width: 0; max-width: 100%; padding: 0 2px 1px; text-align: center; overflow-wrap: anywhere; }
+.mx-bot {
+  align-self: stretch; min-width: 0; padding: 1px 2px 0; border-top: 1px solid currentColor; text-align: center;
+  overflow-wrap: anywhere;
+}
+.mx-root { display: inline-flex; align-items: flex-end; max-width: 100%; }
 .mx-idx { align-self: flex-start; margin-right: -4px; font-size: 9px; line-height: 10px; }
-.mx-rad { padding: 1px 1px 0 2px; border-top: 1px solid currentColor; }
+.mx-rad { min-width: 0; padding: 1px 1px 0 2px; border-top: 1px solid currentColor; overflow-wrap: anywhere; }
 .mx-ans {
   display: inline-block; margin-left: -8px; padding: 2px 8px; border: 1px solid var(--line-strong); border-radius: 4px;
   background: color-mix(in srgb, var(--holo) 9%, transparent); color: var(--holo-hi); font-weight: 600;
@@ -800,7 +805,28 @@ body.dim #backdrop { filter: brightness(.2); transition-duration: calc(260ms * v
 .frame.big-card:focus-within .f-meta, .frame.big-card .f-meta { display: block; }   /* "OPEN BIG" stays in its meta */
 .big-card > .f-head { flex: none; }
 .big-card > .f-body {
-  flex: 1 1 auto; min-height: 0; overflow: auto; display: flex; flex-direction: column; scrollbar-width: none;
+  flex: 1 1 auto; min-height: 0; overflow: auto; display: flex; flex-direction: column; overscroll-behavior: contain;
+  --cut-start: #000; --cut-end: #000;
+}
+/* More of it than the card can show, even at the board's own sizes (below): it scrolls, by wheel or by keys (board.js:
+   Down / Up, Page Down / Page Up, Space / Shift+Space, Home / End), and says so - a thin bar (a 4 px thumb in
+   LINE_STRONG, 4 px clear of the words, no arrows, no track), and the cut edge fading over its last 28 px (its first
+   28 px once scrolled), never the bar's own column, so a half-shown row never reads as the end (board.js cutCue) */
+.big-card > .f-body::-webkit-scrollbar { width: 8px; background: transparent; }
+.big-card > .f-body::-webkit-scrollbar-thumb {
+  border-left: 4px solid transparent; border-radius: 4px; background: var(--line-strong); background-clip: padding-box;
+}
+.big-card > .f-body::-webkit-scrollbar-thumb:hover { background-color: var(--line-focus); }
+.big-card > .f-body.cut-start { --cut-start: transparent; }
+.big-card > .f-body.cut-end { --cut-end: transparent; }
+.big-card > .f-body:is(.cut-start, .cut-end) {
+  -webkit-mask-image: linear-gradient(#000, #000),
+    linear-gradient(to bottom, var(--cut-start), #000 28px, #000 calc(100% - 28px), var(--cut-end));
+  mask-image: linear-gradient(#000, #000),
+    linear-gradient(to bottom, var(--cut-start), #000 28px, #000 calc(100% - 28px), var(--cut-end));
+  -webkit-mask-size: 8px 100%, 100% 100%; mask-size: 8px 100%, 100% 100%;
+  -webkit-mask-position: right top, left top; mask-position: right top, left top;
+  -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
 }
 .big-card .pic-slot { flex: 1 1 auto; min-height: 0; display: flex; justify-content: center; }
 .big-card .pic-slot .f-pic {
@@ -809,20 +835,48 @@ body.dim #backdrop { filter: brightness(.2); transition-duration: calc(260ms * v
 .big-card .pic-cap { flex: none; }
 .big-card > .f-wait { flex: none; align-self: flex-start; }
 /* part 6's kinds opened big use the room: a table's rows and cells, a chart's bars, a timeline's nodes (all in one row),
-   maths' lines */
-.big-card .tb th { padding-bottom: 10px; font-size: 12px; line-height: 16px; }
-.big-card .tb td { padding-top: 8px; padding-bottom: 8px; font-size: 15px; line-height: 22px; }
-.big-card .delta, .big-card .delta-lead { font-size: 14px; line-height: 20px; }
+   maths' lines. A table's and maths' sizes step down until the body fits the card (board.js fitBig: fit-1, fit-2, then
+   fit-3, the board's own 448 px sizes, never smaller); past that it scrolls with its cue (above). */
+.big-card {
+  --fit-th: 12px; --fit-th-line: 16px; --fit-th-pad: 10px; --fit-td: 15px; --fit-td-line: 22px; --fit-td-pad: 8px;
+  --fit-delta: 14px; --fit-delta-line: 20px;
+  --fit-mx-row: 14px; --fit-mx-col: 16px; --fit-mx: 24px; --fit-mx-line: 34px;
+  --fit-sup: 15px; --fit-raise: 10px; --fit-frac: 19px; --fit-frac-line: 23px; --fit-idx: 13px; --fit-idx-line: 14px;
+}
+.big-card.fit-1 {
+  --fit-th: 11.5px; --fit-th-line: 15px; --fit-th-pad: 8px; --fit-td: 14px; --fit-td-line: 20px; --fit-td-pad: 6px;
+  --fit-delta: 13px; --fit-delta-line: 19px;
+  --fit-mx-row: 12px; --fit-mx-col: 14px; --fit-mx: 21px; --fit-mx-line: 30px;
+  --fit-sup: 13px; --fit-raise: 9px; --fit-frac: 17px; --fit-frac-line: 20px; --fit-idx: 12px; --fit-idx-line: 13px;
+}
+.big-card.fit-2 {
+  --fit-th: 11px; --fit-th-line: 14px; --fit-th-pad: 7px; --fit-td: 13px; --fit-td-line: 19px; --fit-td-pad: 5px;
+  --fit-delta: 12.5px; --fit-delta-line: 18px;
+  --fit-mx-row: 10px; --fit-mx-col: 12px; --fit-mx: 18px; --fit-mx-line: 26px;
+  --fit-sup: 12px; --fit-raise: 8px; --fit-frac: 15px; --fit-frac-line: 18px; --fit-idx: 11px; --fit-idx-line: 12px;
+}
+.big-card.fit-3 {
+  --fit-th: 11px; --fit-th-line: 14px; --fit-th-pad: 6px; --fit-td: 12.5px; --fit-td-line: 18px; --fit-td-pad: 4px;
+  --fit-delta: 12px; --fit-delta-line: 17px;
+  --fit-mx-row: 7px; --fit-mx-col: 10px; --fit-mx: 15px; --fit-mx-line: 22px;
+  --fit-sup: 10px; --fit-raise: 6px; --fit-frac: 12.5px; --fit-frac-line: 15px; --fit-idx: 9px; --fit-idx-line: 10px;
+}
+.big-card .tb th { padding-bottom: var(--fit-th-pad); font-size: var(--fit-th); line-height: var(--fit-th-line); }
+.big-card .tb td {
+  padding-top: var(--fit-td-pad); padding-bottom: var(--fit-td-pad);
+  font-size: var(--fit-td); line-height: var(--fit-td-line);
+}
+.big-card .delta, .big-card .delta-lead { font-size: var(--fit-delta); line-height: var(--fit-delta-line); }
 .big-card .ch-bars { gap: 16px 16px; }
 .big-card .ch-l { font-size: 15px; line-height: 20px; }
 .big-card .ch-tr { height: 18px; }
 .big-card .ch-v { font-size: 14px; line-height: 18px; }
 .big-card .tl-words { font-size: 15px; line-height: 20px; }
-.big-card .mx { gap: 14px 16px; }
-.big-card .mx-e { font-size: 24px; line-height: 34px; }
-.big-card .mx-sup { font-size: 15px; vertical-align: 10px; }
-.big-card .mx-frac { font-size: 19px; line-height: 23px; }
-.big-card .mx-idx { font-size: 13px; line-height: 14px; }
+.big-card .mx { gap: var(--fit-mx-row) var(--fit-mx-col); }
+.big-card .mx-e { font-size: var(--fit-mx); line-height: var(--fit-mx-line); }
+.big-card .mx-sup { font-size: var(--fit-sup); vertical-align: var(--fit-raise); }
+.big-card .mx-frac { font-size: var(--fit-frac); line-height: var(--fit-frac-line); }
+.big-card .mx-idx { font-size: var(--fit-idx); line-height: var(--fit-idx-line); }
 .f-back {
   flex: none; margin-top: 14px; padding: 12px 0 14px; border-top: 1px solid var(--line-faint);
   color: var(--holo); text-align: center;

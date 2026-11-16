@@ -1333,3 +1333,67 @@ class TypedFramesTests(BoardProbeCase):
         self.assertEqual((big["table"]["rows"], big["table"]["cellFont"]), (4, "15px"))
         self.assertEqual(len(big["timeline"]["timelineColumns"].split()), 6)  # six nodes, in one row
         self.assertEqual(len(set(big["timeline"]["nodeTops"])), 1)
+
+    def test_opened_big_a_long_table_or_maths_fits_or_scrolls_with_its_cue(self) -> None:
+        # Part 6 fixes (board 0): a 12-row table with its change words and source and an 8-step maths frame, at the card
+        # sizes of a 1120x700 and a 900x600 window (860 x 550, 780 x 454).
+        fit = self.report("typed")["fit"]
+        self.assertEqual(set(fit), {"table_860x550", "maths_860x550", "table_780x454", "maths_780x454"})
+        for name, case in fit.items():
+            with self.subTest(case=name):
+                top = case["top"]
+                self.assertEqual(case["state"], "open")
+                self.assertEqual(top["card"], [860, 550] if name.endswith("860x550") else [780, 454])
+                self.assertTrue(top["focus"])                                    # the keys are the big frame's
+                self.assertIn(top["fit"], ("fit-0", "fit-1", "fit-2", "fit-3"))   # never below the board's own
+                height, shown = top["body"][0], top["body"][1]
+                if height <= shown:                                              # it fits: nothing hidden at all
+                    self.assertEqual(top["hidden"], [])
+                    self.assertEqual((top["cut"], top["masked"], top["bar"]), ([False, False], False, 0))
+                    if name.startswith("maths"):
+                        self.assertTrue(top["answer"])                           # the boxed answer in sight
+                    else:
+                        self.assertEqual((top["lastRow"], top["source"]), (True, True))
+                    continue
+                self.assertEqual(top["fit"], "fit-3")                            # the smallest it may be, first
+                self.assertEqual((top["cut"], top["masked"]), ([False, True], True))   # the cue: the end fades ...
+                self.assertEqual(top["bar"], 8)                                  # ... and the thin bar shows
+                keys, most, page = case["keys"], height - shown, max(40, shown - 40)
+                self.assertEqual(keys["Down"], min(40, most))                                     # a line
+                self.assertEqual(keys["PageDown"], min(most, keys["Down"] + page))                # a page
+                self.assertEqual(keys["Space"], min(most, keys["PageDown"] + page))               # Space: a page
+                self.assertEqual(keys["ShiftSpace"], max(0, keys["Space"] - page))                # Shift+Space: back
+                self.assertEqual(keys["PageUp"], max(0, keys["ShiftSpace"] - page))
+                self.assertEqual(keys["Up"], max(0, keys["PageUp"] - 40))
+                self.assertEqual((keys["End"], keys["Home"]), (most, 0))
+                end = case["end"]
+                self.assertEqual((end["lastRow"], end["source"]), (True, True))  # End: the last row and the source
+                self.assertEqual(end["cut"], [True, False])                      # (the start fades now)
+        self.assertLessEqual(*fit["table_860x550"]["top"]["body"][:2])          # 1120x700: the 12 rows fit
+        self.assertGreater(*fit["table_780x454"]["top"]["body"][:2])            # 900x600: they scroll
+        self.assertLessEqual(*fit["maths_860x550"]["top"]["body"][:2])
+        self.assertLessEqual(*fit["maths_780x454"]["top"]["body"][:2])
+
+    def test_maths_stays_inside_its_frame(self) -> None:
+        # Part 6 fixes (board 1): fractions and roots shrink and wrap; one still too wide reads inline (a/b).
+        inside = self.report("typed")["inside"]
+        self.assertEqual(inside["applied"], [True] * len(inside["applied"]))
+        self.assertTrue(inside["pair"]["pairs"])
+        # The long frame: its fraction always stays laid out (its sum wraps over its bar); a root stays laid out where
+        # its radicand fits its line (the 518 px frame beside the pair; the square root at 300 px) and reads inline,
+        # √(…), where it would wrap (beside a long step name at 448 px, and at 270 px).
+        for name, widths, stacked in (("pair", [253, 253, 518], [1, 0, 3]), ("300", [300] * 3, [1, 0, 2]),
+                                      ("270", [270] * 3, [1, 0, 1]), ("448", [448] * 3, [1, 0, 1])):
+            with self.subTest(width=name):
+                shown = inside[name]
+                self.assertEqual([frame["width"] for frame in shown["frames"]], widths)
+                self.assertFalse(shown["pageCut"])
+                for frame in shown["frames"]:
+                    self.assertEqual(frame["over"], [], frame["title"])          # every element in its content box
+                self.assertEqual([frame["stacked"] for frame in shown["frames"]], stacked)
+                lines = shown["frames"][2]["lines"]
+                self.assertEqual(sum("√(" in line for line in lines), 3 - stacked[2])   # inline: bracketed
+        narrow, wide = inside["fallback"]
+        self.assertEqual((narrow["stacked"], narrow["inline"]), (0, True))
+        self.assertEqual(narrow["text"], inside["fallback_expected"])           # as Python reads it
+        self.assertEqual((wide["stacked"], wide["inline"], wide["over"]), (1, False, 0))

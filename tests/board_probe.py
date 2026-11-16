@@ -81,7 +81,14 @@ Cases:
                board.apply directly (Infinity, depth 7, 65 nodes, an unknown op ...); maths' elements made from the
                tree (a fraction, a power, a root) and the page's reading of plain expressions; at 448, 300 and 270 px
                no word cut (the timeline in a row from 300 px, one node a row under it; maths' step names over their
-               lines); opened big, a table's rows and a timeline's six nodes using the room
+               lines); opened big, a table's rows and a timeline's six nodes using the room. Part 6 fixes: a 12-row
+               table with its change words and source and an 8-step maths frame opened big at the card sizes of a
+               1120x700 and a 900x600 window - fitted (their sizes stepped down, never below the board's own) with
+               nothing hidden, or scrolling with its cue (the cut edge's fade, a thin bar) and the real keys (Down,
+               Page Down, Space, Shift+Space, Page Up, Up, End, Home); maths frames on the desk's board (a mean of
+               five as a fraction paired with a chart at 253 px, 300, 270 and 448 px; seven-digit sums beside long
+               step names, a long radicand, an indexed root): every element inside its frame's content box, and a
+               line made too narrow for its fraction reading it inline (a/b), laid out again once wide again
 
 Qt runs offscreen and Chromium's proxy is a dead address (snapshots.OFFLINE_FLAGS, as the board's engine always runs in a
 test): nothing can reach the network whatever the page does. No window is shown on the real screen. Chromium's
@@ -3316,10 +3323,205 @@ def typed_case(make: Any, wait_until: Any, pump: Any, main_world: Any, settle_en
         report["big"][name] = json.loads(main_world(board, _TYPED_BIG) or "null")
         board.apply({"type": "big", "state": "close", "id": ""})
         pump(0.6)
+    report["fit"] = typed_fit(board, wait_until, pump, main_world)
+    report["inside"] = typed_inside(board, pump, main_world)
     after_all = board.counts()
     report["requests"]["allowed_end"] = after_all["allowed"]
     report["requests"]["blocked_end"] = after_all["blocked"]
     settle_end(report, board)
+    return report
+
+
+# Part 6 fixes (board 0): a typed frame opened big - its card, its body (scroll height, height, scroll top), the fit
+# level its sizes stepped down to, the parts that should show (rows, the delta line, the source, maths' lines and its
+# boxed answer) and those outside the body's visible box, its cue (the cut edges' fades, the thin bar), the last row's
+# and the source's place.
+_FIT_BIG = r"""JSON.stringify((function () {
+  var card = document.querySelector('.big-card');
+  if (!card) { return null; }
+  var body = card.querySelector(':scope > .f-body'), view = body.getBoundingClientRect();
+  var inView = function (el) {
+    var r = el.getBoundingClientRect();
+    return r.top >= view.top - 0.5 && r.bottom <= view.bottom + 0.5;
+  };
+  var parts = Array.prototype.slice.call(card.querySelectorAll('tbody tr, .delta, .tb-src, .mx-e, .mx-ans'));
+  var rows = card.querySelectorAll('tbody tr'), source = card.querySelector('.tb-src');
+  var answer = card.querySelector('.mx-ans'), style = getComputedStyle(body);
+  return {card: [Math.round(card.getBoundingClientRect().width), Math.round(card.getBoundingClientRect().height)],
+          body: [body.scrollHeight, body.clientHeight, Math.round(body.scrollTop)],
+          fit: (card.className.match(/fit-[0-9]/) || ['fit-0'])[0], parts: parts.length,
+          hidden: parts.filter(function (el) { return !inView(el); }).map(function (el) {
+            return el.className || el.tagName; }),
+          cut: [body.classList.contains('cut-start'), body.classList.contains('cut-end')],
+          masked: style.maskImage !== 'none' || style.webkitMaskImage !== 'none',
+          bar: body.offsetWidth - body.clientWidth,
+          lastRow: rows.length ? inView(rows[rows.length - 1]) : null, source: source ? inView(source) : null,
+          answer: answer ? inView(answer) : null, cell: rows.length ? getComputedStyle(rows[0].cells[0]).fontSize : '',
+          line: card.querySelector('.mx-e') ? getComputedStyle(card.querySelector('.mx-e')).fontSize : '',
+          focus: document.activeElement === card};
+})())"""
+# Part 6 fixes (board 1): each frame shown, every element of its head and body against its content box (px outside
+# it, left / right), how many fractions and roots are laid out (stacked) in it, and its maths lines' words.
+_TYPED_INSIDE = r"""JSON.stringify((function () {
+  var out = [];
+  document.querySelectorAll('#board .frame').forEach(function (f) {
+    var r = f.getBoundingClientRect(), cs = getComputedStyle(f);
+    if (!r.width || !r.height) { return; }
+    var left = r.left + parseFloat(cs.borderLeftWidth) + parseFloat(cs.paddingLeft);
+    var right = r.right - parseFloat(cs.borderRightWidth) - parseFloat(cs.paddingRight);
+    var over = [];
+    f.querySelectorAll('.f-head *, .f-body *').forEach(function (el) {
+      var b = el.getBoundingClientRect();
+      if (el.closest('.f-ctl') || (!b.width && !b.height)) { return; }
+      if (b.left < left - 0.5 || b.right > right + 0.5) {
+        over.push((typeof el.className === 'string' ? el.className : el.tagName) + ' ' + Math.round(b.left - left)
+                  + ' ' + Math.round(b.right - right));
+      }
+    });
+    out.push({title: f.querySelector('.f-title').textContent, width: Math.round(r.width), over: over,
+              stacked: f.querySelectorAll('.mx-frac, .mx-root').length,
+              lines: Array.prototype.map.call(f.querySelectorAll('.mx-e'), function (el) { return el.textContent; })});
+  });
+  var board = document.getElementById('board');
+  return {frames: out, pageCut: board.scrollWidth > board.clientWidth, pairs: board.classList.contains('pairs')};
+})())"""
+_NARROW_LINE = r"""(function (width) {
+  var lines = document.querySelectorAll('#board .mx-e');
+  var line = window.__narrowLine || Array.prototype.filter.call(lines, function (el) {
+    return el.querySelector('.mx-frac') && el.textContent.indexOf('4,567,890.5') >= 0;
+  })[0];
+  window.__narrowLine = line;
+  line.style.width = width;
+  window.dispatchEvent(new Event('resize'));
+  return 1;
+})(__WIDTH__)"""
+_NARROW_SHOWN = r"""JSON.stringify((function () {
+  var line = window.__narrowLine, edge = line.getBoundingClientRect();
+  return {width: line.clientWidth, stacked: line.querySelectorAll('.mx-frac, .mx-root').length,
+          inline: Array.prototype.some.call(line.querySelectorAll('.mx-op'), function (op) {
+            return op.textContent === '/'; }),
+          text: line.textContent,
+          over: Array.prototype.filter.call(line.querySelectorAll('*'), function (el) {
+            var box = el.getBoundingClientRect();
+            return box.width && (box.left < edge.left - 0.5 || box.right > edge.right + 0.5);
+          }).length};
+})())"""
+BIG_LINES = ("Travel", "Software", "Events", "Hardware", "Office", "Training", "Legal", "Marketing", "Cloud", "Support",
+             "Research", "Facilities")
+
+
+def typed_fit(board: Any, wait_until: Any, pump: Any, main_world: Any) -> dict[str, Any]:
+    """Part 6 fixes (board 0): a 12-row table with its change words and source, and an 8-step maths frame (invented),
+    each opened big at the card sizes of a 1120x700 and a 900x600 window (860 x 550, 780 x 454): where its body fits
+    nothing is hidden; where it cannot, its cue shows and the real keys scroll it (Down, Page Down, Space, Shift+Space,
+    Page Up, Up, End, Home)."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    from briefing_reader.board import ask_frames
+
+    table = ask_frames.check_frame({
+        "kind": "table", "title": "Budget lines", "unit": "USD", "columns": ["Line", "Friday", "Today", "Change"],
+        "rows": [[line, 1200 + 100 * n, 1200 + 100 * n + (100 if n == 11 else 0), "+100" if n == 11 else 0]
+                 for n, line in enumerate(BIG_LINES)],
+        "changed": 11, "change": "+100 Facilities · the other eleven lines unchanged",
+        "source": "From Dana's mail, 8:12 AM"})
+    maths = ask_frames.check_frame({
+        "kind": "maths", "title": "Average spend per line",
+        "steps": [{"name": "Add the lines", "expr": ["=", "s", ["+", 1200, 3400, 2100, 800]]},
+                  {"name": "Their sum", "expr": ["=", "s", 7500]}, {"name": "Count them", "expr": ["=", "n", 4]},
+                  {"name": "Divide", "expr": ["=", "m", ["frac", "s", "n"]]},
+                  {"name": "Put them in", "expr": ["=", "m", ["frac", 7500, 4]]},
+                  {"name": "Work it out", "expr": ["=", "m", 1875]},
+                  {"name": "Per month", "expr": ["=", "p", ["frac", 1875, 12]]},
+                  {"name": "Round it", "expr": ["=", "p", 156.25]}],
+        "answer": {"name": "So", "expr": ["=", "p", 156.25]}})
+    for index, frame in enumerate((table, maths)):
+        board.apply(ask_frames.build(frame, frame_id=f"fit{index}").messages[0])
+    pump(0.6)
+    keys = (("Down", Qt.Key.Key_Down, Qt.KeyboardModifier.NoModifier),
+            ("PageDown", Qt.Key.Key_PageDown, Qt.KeyboardModifier.NoModifier),
+            ("Space", Qt.Key.Key_Space, Qt.KeyboardModifier.NoModifier),
+            ("ShiftSpace", Qt.Key.Key_Space, Qt.KeyboardModifier.ShiftModifier),
+            ("PageUp", Qt.Key.Key_PageUp, Qt.KeyboardModifier.NoModifier),
+            ("Up", Qt.Key.Key_Up, Qt.KeyboardModifier.NoModifier),
+            ("End", Qt.Key.Key_End, Qt.KeyboardModifier.NoModifier),
+            ("Home", Qt.Key.Key_Home, Qt.KeyboardModifier.NoModifier))
+    found: dict[str, Any] = {}
+    for width, height in ((860, 550), (780, 454)):
+        board.setGeometry(0, 0, width, height)
+        pump(0.5)
+        for name, frame_id in (("table", "fit0"), ("maths", "fit1")):
+            board.apply({"type": "big", "state": "open", "id": frame_id, "x": width - 503, "y": 0, "w": 503,
+                         "h": height})
+            wait_until(lambda: main_world(board, "board.counts().big") == "open", 5)
+            pump(0.6)
+            case: dict[str, Any] = {"top": json.loads(main_world(board, _FIT_BIG) or "null"), "keys": {}}
+            board.web_view().setFocus(Qt.FocusReason.OtherFocusReason)
+            pump(0.2)
+            for word, key, modifiers in keys:
+                QTest.keyClick(board.web_view().focusProxy(), key, modifiers)
+                pump(0.2)
+                shown = json.loads(main_world(board, _FIT_BIG) or "null")
+                case["keys"][word] = shown["body"][2] if shown else None
+                if word == "End":
+                    case["end"] = shown
+            case["state"] = main_world(board, "board.counts().big")
+            found[f"{name}_{width}x{height}"] = case
+            board.apply({"type": "big", "state": "close", "id": ""})
+            pump(0.6)
+    return found
+
+
+def typed_inside(board: Any, pump: Any, main_world: Any) -> dict[str, Any]:
+    """Part 6 fixes (board 1): one answer's maths frames (invented) - the mean of five budget lines as a fraction,
+    paired with a chart; a four-term sum of seven-digit figures in a fraction and alone beside long step names; a long
+    radicand and an indexed root - on the desk's board (its bar: the frames area is the view less 55 px) at a pair of
+    253 px frames (1232x640), one of 300, 270 and 448 px: every element of every frame against its content box."""
+    from briefing_reader.board import ask_frames
+    from briefing_reader.board import feed as feed_mod
+
+    raw = [("mean", {"kind": "maths", "title": "Mean of the five lines",
+                     "steps": [{"name": "Add, then divide",
+                                "expr": ["=", "mean", ["frac", ["+", 1200, 3400, 2100, 800, 1500], 5]]}],
+                     "answer": {"name": "So", "expr": ["=", "mean", 1800]}}),
+           ("chart", {"kind": "chart", "title": "The five lines", "unit": "USD",
+                      "bars": [{"label": label, "value": value} for label, value in
+                               (("Travel", 1200), ("Software", 3400), ("Events", 2100), ("Hardware", 800),
+                                ("Office", 1500))]}),
+           ("long", {"kind": "maths", "title": "Long working",
+                     "steps": [{"name": "Multiply both sides by x",
+                                "expr": ["=", "mean", ["frac", ["+", 1234567.5, 2345678.5, 3456789.5, 4567890.5], 4]]},
+                               {"name": "Add every figure",
+                                "expr": ["=", "total", ["+", 1234567, 2345678, 3456789, 4567890]]},
+                               {"name": "Take the square root now",
+                                "expr": ["root", ["+", ["pow", "alphabetical", 2], ["pow", "betamaxwells", 2]]]},
+                               {"name": "Cube root",
+                                "expr": ["=", "r", ["root", ["+", 1234567, 2345678, 3456789], 3]]}],
+                     "answer": {"name": "So", "expr": ["=", "x", 1234567.5]}})]
+    feed = feed_mod.BoardFeed()
+    messages: list[dict[str, Any]] = []
+    report: dict[str, Any] = {}
+    for source, frame_raw in raw:
+        frame = ask_frames.check_frame(frame_raw)
+        frame_id = feed.frame_id(1, source, "", frame.key)
+        messages += feed.put(1, source, ask_frames.build(frame, frame_id=frame_id).messages, when="9:41 AM",
+                             topic="The budget lines", key=frame.key)
+        if source == "long":                                     # its first line as Python reads it (inline: a/b)
+            report["fallback_expected"] = ask_frames.maths_text(frame.body["steps"][0]["expr"])
+    board.apply({"type": "clear"})
+    report["applied"] = [board.apply(message) for message in messages]
+    for name, width in (("pair", 518), ("300", 300), ("270", 270), ("448", 448)):
+        board.setGeometry(0, 0, width + 55, 900)                 # the bar's strip and pads: 28 + 15 + 12 px
+        pump(0.8)
+        report[name] = json.loads(main_world(board, _TYPED_INSIDE))
+    # The fallback itself (a safety net: the shrink and wrap keep every line above): a line made narrower than its
+    # fraction can be (by the probe, through the CSSOM) reads it inline once measured, laid out again once wide again.
+    report["fallback"] = []
+    for width in ("14px", ""):
+        main_world(board, _NARROW_LINE.replace("__WIDTH__", json.dumps(width)))
+        pump(0.5)
+        report["fallback"].append(json.loads(main_world(board, _NARROW_SHOWN)))
     return report
 
 

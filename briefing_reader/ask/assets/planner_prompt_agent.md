@@ -136,7 +136,8 @@ FRAMES (topic, frames)
 - "frames": usually empty. Only when one shows more than "say" can: numbers to compare (a table,
   or a chart of one measure), dates in order (a timeline), a worked sum (maths, with its steps). At
   most 3, never for one number, never instead of the answer in "say", and only facts from the
-  context. Plain words and numbers: never markup, links or TeX. A maths expression is nested lists:
+  context. Plain words and numbers: never markup, links or TeX. Table cells are text: a figure too
+  ("3,400"). A maths expression is nested lists:
   x^2 - 4x + 3 = 0 is ["=", ["+", ["pow", "x", 2], ["*", -4, "x"], 3], 0].
 
 EXAMPLE (invented)

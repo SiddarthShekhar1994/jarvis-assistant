@@ -824,7 +824,7 @@ class BoardView(QWidget):
         # as a plain QWidget), so open big's still can follow its renders (desk_big.BigController._watch).
         from PySide6 import QtQuickWidgets  # noqa: F401
         from PySide6.QtWebChannel import QWebChannel
-        from PySide6.QtWebEngineCore import QWebEngineScript, QWebEngineUrlRequestInfo
+        from PySide6.QtWebEngineCore import QWebEngineScript, QWebEngineSettings, QWebEngineUrlRequestInfo
 
         classes = snapshot_engine.engine_classes()
         kinds = QWebEngineUrlRequestInfo.ResourceType
@@ -851,6 +851,10 @@ class BoardView(QWidget):
         # is cancelled. No download folder is made: nothing of the board is ever on disk.
         profile.downloadRequested.connect(lambda download: self._refuse("downloads", download, "cancel"))
         snapshot_engine.apply_web_settings(profile.settings(), local_storage=False)
+        # Part 6 fixes: the page's scrollbars are its own to show. board.css hides every one (the board scrolls under
+        # its fades and "N more below") but open big's body's: a thin bar in the palette's colours, there only while
+        # the body holds more than its card can show.
+        profile.settings().setAttribute(QWebEngineSettings.WebAttribute.ShowScrollBars, True)
         view = classes.QWebEngineView(self)
         view.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
         view.setAcceptDrops(False)

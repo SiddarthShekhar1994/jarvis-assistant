@@ -53,6 +53,9 @@
   // Open big scales 260 ms up and 220 ms down.
   var OUTLINE_MS = 260, CUE_FADE_MS = 400, MIN_SEEN = 4, DOT_GAP = 6;
   var SCALE_MS = 260, UNSCALE_MS = 220, BIG_LIMIT = 100000;
+  // Part 6 fixes: open big steps a table's and maths' sizes down this many times (board.css fit-1 to fit-3, the last
+  // the board's own) before its body scrolls; a key scrolls it a line of this many px (a page: its height less a line).
+  var FIT_STEPS = 3, FIT_KINDS = ['table', 'maths'], LINE_PX = 40;
   var LANDED_STEPS = ['outline', 'done'];
   // Part 6, Ask's typed frames (board.protocol's caps; board.ask_frames made each one from the model's own, checked):
   // a table 6 x 12, a chart's 8 bars, a timeline's 8 nodes, maths' 8 steps and its tree (6 levels, 64 nodes a frame).
@@ -463,6 +466,8 @@
   var clearedRow = null;                       // "Board cleared · 8 FRAMES · Bring back" (the first row of the board)
   var records = new WeakMap();                 // element -> record
   var sections = new WeakMap();                // a group's section -> its record
+  var mathsLines = new WeakMap();              // a maths line (.mx-e) -> its checked tree, its layout (fitMaths)
+  var mathsTimer = 0;                          // the board's maths measured once a change is laid out (scheduleMaths)
   var lit = '';
   var litCue = false;                          // the app draws the cue line's native part to the lit frame
   var stub = null;                             // the cue line's last 15 px: {el, id}
@@ -667,15 +672,80 @@
 
   function mathsRow(grid, number, step, answer) {
     var line = make('div', 'mx-e');
-    var expression = mathsNode(step.expr);
-    if (answer) {
+    mathsLines.set(line, {expr: step.expr, answer: answer, laid: laysOut(step.expr), flat: false, width: 0});
+    fillLine(line, false);
+    grid.append(make('span', 'mx-i', String(number)), make('span', 'mx-k t-badge', step.name), line);
+  }
+
+  function laysOut(node) {                     // an expression with a fraction or a root in it (laid out, not one line)
+    return node[0] === 'frac' || node[0] === 'root' || node.slice(1).some(function (arg) {
+      return Array.isArray(arg) && laysOut(arg);
+    });
+  }
+
+  function fillLine(line, flat) {              // a maths line from its tree: its fractions and roots laid out or inline
+    var entry = mathsLines.get(line);
+    var expression = mathsNode(entry.expr, flat);
+    if (entry.answer) {
       var box = make('span', 'mx-ans');
       box.appendChild(expression);
-      line.appendChild(box);
+      line.replaceChildren(box);
     } else {
-      line.appendChild(expression);
+      line.replaceChildren(expression);
     }
-    grid.append(make('span', 'mx-i', String(number)), make('span', 'mx-k t-badge', step.name), line);
+    entry.flat = flat;
+  }
+
+  function spills(line) {                      // a fraction or a root of the line that does not stay inside it, or that
+    var edge = line.getBoundingClientRect();   // its own words overflow - or a root whose radicand wraps
+    return Array.prototype.some.call(line.querySelectorAll('.mx-frac, .mx-root'), function (node) {
+      var box = node.getBoundingClientRect();
+      return box.left < edge.left - 0.5 || box.right > edge.right + 0.5 || node.scrollWidth > node.clientWidth + 1;
+    }) || Array.prototype.some.call(line.querySelectorAll('.mx-rad'), wraps);
+  }
+
+  function wraps(radicand) {                   // its own words on more than one line (its sign would stand by the last
+    var places = [];                           // one alone); a fraction's, a power's or a root's inside it keep theirs
+    Array.prototype.forEach.call(radicand.querySelectorAll('.mx-n, .mx-v, .mx-op, .mx-b'), function (leaf) {
+      var layout = leaf.parentElement.closest('.mx-frac, .mx-sup, .mx-root, .mx-idx');
+      if (!layout || !radicand.contains(layout)) {
+        places.push(leaf.getBoundingClientRect());
+      }
+    });
+    return places.some(function (one) {
+      return places.some(function (other) { return other.top >= one.bottom - 0.5; });
+    });
+  }
+
+  // Measured after layout, never from data: a fraction or a root still wider than its line (a fraction shrinks and
+  // wraps its parts first, board.css; a root whose radicand would wrap is too wide) reads inline there (a/b, √(…)); the
+  // line is laid out again once it is wider than when it fell back (``fresh``: every line is - fitBig's new sizes).
+  function fitMaths(scope, fresh) {
+    Array.prototype.forEach.call(scope.querySelectorAll('.mx-e'), function (line) {
+      var entry = mathsLines.get(line);
+      var width = entry && entry.laid ? line.clientWidth : 0;
+      if (!width) {
+        return;                                // nothing laid out in it, or not shown (a satellite, a parked answer)
+      }
+      if (entry.flat && (fresh || width > entry.width)) {
+        fillLine(line, false);
+      }
+      if (!entry.flat && spills(line)) {
+        fillLine(line, true);
+        entry.width = width;
+      }
+    });
+  }
+
+  function scheduleMaths() {                   // the board's maths, measured once this change is laid out (a task of
+    if (!mathsTimer) {                         // its own; the big frame's: fitBig, at its fill and at each resize)
+      mathsTimer = setTimeout(function () {
+        mathsTimer = 0;
+        if (root) {
+          fitMaths(root);
+        }
+      }, 0);
+    }
   }
 
   // How an expression reads (board.ask_frames.maths_text says the same in plain words): what binds tighter, where
@@ -761,8 +831,8 @@
     return make('span', 'mx-op', text);
   }
 
-  function mathsGroup(node, bracketed) {       // a node, in brackets when it must be
-    var built = mathsNode(node);
+  function mathsGroup(node, bracketed, flat) { // a node, in brackets when it must be
+    var built = mathsNode(node, flat);
     if (!bracketed) {
       return built;
     }
@@ -771,7 +841,9 @@
     return group;
   }
 
-  function mathsNode(node) {                   // an expression's elements, from the checked tree only
+  // An expression's elements, from the checked tree only. ``flat``: its fractions and roots inline, as
+  // board.ask_frames.maths_text writes them (a/b, √(…), the index raised before the sign) - a line too narrow for them.
+  function mathsNode(node, flat) {
     var head = node[0], args = node.slice(1), box;
     if (head === 'num') {
       return make('span', 'mx-n', node[1]);
@@ -780,7 +852,7 @@
       return make('span', 'mx-v', node[1]);
     }
     if (head === '()') {
-      return mathsGroup(args[0], true);
+      return mathsGroup(args[0], true, flat);
     }
     box = make('span', 'mx-x');
     if (head === 'or' || head === '=') {
@@ -788,23 +860,23 @@
         if (index) {
           box.appendChild(mathsSign(head === 'or' ? ' or ' : ' = '));
         }
-        box.appendChild(mathsGroup(arg, prec(arg) <= (head === 'or' ? 0 : 1)));
+        box.appendChild(mathsGroup(arg, prec(arg) <= (head === 'or' ? 0 : 1), flat));
       });
     } else if (head === '+') {
-      box.appendChild(mathsGroup(args[0], prec(args[0]) <= 1));
+      box.appendChild(mathsGroup(args[0], prec(args[0]) <= 1, flat));
       args.slice(1).forEach(function (arg) {
         if (negative(arg)) {
           var shown = positive(arg);
-          box.append(mathsSign(' ' + MINUS + ' '), mathsGroup(shown, arg[0] === '-' && negationBracketed(shown)));
+          box.append(mathsSign(' ' + MINUS + ' '), mathsGroup(shown, arg[0] === '-' && negationBracketed(shown), flat));
         } else {
-          box.append(mathsSign(' + '), mathsGroup(arg, prec(arg) <= 1));
+          box.append(mathsSign(' + '), mathsGroup(arg, prec(arg) <= 1, flat));
         }
       });
     } else if (head === '-' && args.length === 1) {
-      box.append(mathsSign(MINUS), mathsGroup(args[0], negationBracketed(args[0])));
+      box.append(mathsSign(MINUS), mathsGroup(args[0], negationBracketed(args[0]), flat));
     } else if (head === '-') {
-      box.append(mathsGroup(args[0], prec(args[0]) <= 1), mathsSign(' ' + MINUS + ' '),
-                 mathsGroup(args[1], negationBracketed(args[1])));
+      box.append(mathsGroup(args[0], prec(args[0]) <= 1, flat), mathsSign(' ' + MINUS + ' '),
+                 mathsGroup(args[1], negationBracketed(args[1]), flat));
     } else if (head === '*') {
       args.forEach(function (arg, index) {
         var bracketed = factorBracketed(arg, index);
@@ -814,30 +886,39 @@
             box.appendChild(mathsSign(' × '));
           }
         }
-        box.appendChild(mathsGroup(arg, bracketed));
+        box.appendChild(mathsGroup(arg, bracketed, flat));
       });
     } else if (head === '/') {
-      box.append(mathsGroup(args[0], prec(args[0]) <= 2), mathsSign(' ÷ '),
-                 mathsGroup(args[1], prec(args[1]) <= 3 || negative(args[1])));
+      box.append(mathsGroup(args[0], prec(args[0]) <= 2, flat), mathsSign(' ÷ '),
+                 mathsGroup(args[1], prec(args[1]) <= 3 || negative(args[1]), flat));
+    } else if (head === 'frac' && flat) {
+      box.append(mathsGroup(args[0], !atom(args[0]), true), mathsSign('/'), mathsGroup(args[1], !atom(args[1]), true));
     } else if (head === 'frac') {
       box = make('span', 'mx-frac');
       var over = make('span', 'mx-top'), under = make('span', 'mx-bot');
-      over.appendChild(mathsNode(args[0]));
-      under.appendChild(mathsNode(args[1]));
+      over.appendChild(mathsNode(args[0], false));
+      under.appendChild(mathsNode(args[1], false));
       box.append(over, under);
     } else if (head === 'pow') {
       var power = make('span', 'mx-sup');
-      power.appendChild(mathsNode(args[1]));
-      box.append(mathsGroup(args[0], !atom(args[0])), power);
+      power.appendChild(mathsNode(args[1], flat));
+      box.append(mathsGroup(args[0], !atom(args[0]), flat), power);
+    } else if (flat) {                         // root, inline: its index raised, the sign, the radicand in brackets
+      if (args.length === 2) {
+        var raised = make('span', 'mx-sup');
+        raised.appendChild(mathsNode(args[1], true));
+        box.appendChild(raised);
+      }
+      box.append(make('span', 'mx-sign', '√'), mathsGroup(args[0], !atom(args[0]), true));
     } else {                                   // root: its index (when it has one), the sign, the radicand under its bar
       box = make('span', 'mx-root');
       if (args.length === 2) {
         var index = make('span', 'mx-idx');
-        index.appendChild(mathsNode(args[1]));
+        index.appendChild(mathsNode(args[1], false));
         box.appendChild(index);
       }
       var radicand = make('span', 'mx-rad');
-      radicand.appendChild(mathsNode(args[0]));
+      radicand.appendChild(mathsNode(args[0], false));
       box.append(make('span', 'mx-sign', '√'), radicand);
     }
     return box;
@@ -1201,6 +1282,7 @@
     }
     scheduleView();
     scheduleLayout();
+    scheduleMaths();
   }
 
   function pairUp() {                          // small kinds side by side: two from a 500 px area, three from 756 (2.3)
@@ -1558,6 +1640,7 @@
   }
 
   var MOVES = ['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Home', 'End'];
+  var BIG_KEYS = ['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', ' ', 'Home', 'End'];   // open big's body scrolls
 
   function onKey(event) {
     if (event.ctrlKey || event.altKey || event.metaKey) {
@@ -1572,6 +1655,10 @@
         event.preventDefault();
       } else if (key === 'Tab') {
         cardTab(event.shiftKey);               // the focus stays in the big frame (the board under it is inert)
+        event.preventDefault();
+      } else if (BIG_KEYS.indexOf(key) >= 0
+                 && !(key === ' ' && event.target.closest && event.target.closest('button'))) {
+        scrollBig(key, event.shiftKey);        // its body scrolls (a control of it keeps its own Space)
         event.preventDefault();
       }
       return;                                  // the board's own keys wait under the big frame
@@ -2601,6 +2688,9 @@
       body.style.setProperty('--bh', big.box.h + 'px');
     }
     body.classList.toggle('wide', wide);
+    if (big && big.card && big.card.isConnected) {
+      fitBig(big.card, big.rec);               // the card is the view's size: laid out for it again
+    }
     if (big && big.state === 'wait' && wide) {
       big.state = 'open';
       grow();
@@ -2653,9 +2743,52 @@
       + (data.status === 'empty' ? ' empty' : '');
     var inside = card.contains(document.activeElement) && document.activeElement !== card;
     card.replaceChildren.apply(card, parts);
+    body.addEventListener('scroll', function () { cutCue(body); }, {passive: true});
     if (inside) {
       card.focus({preventScroll: true});       // a control of it had the focus: it stays in the big frame
     }
+    if (card.isConnected) {
+      fitBig(card, rec);                       // (a card that grows yet is fitted once it is in the view: grow)
+    }
+  }
+
+  // Open big (DESIGN-SPEC 3.5) lays a typed frame out to fit its card: a table's or maths' big sizes step down
+  // (board.css fit-1 to fit-3, the board's own 448 px sizes, never smaller) until its body holds all of it; past that
+  // the body scrolls, with its cue (cutCue) and its keys (scrollBig).
+  function fitBig(card, rec) {
+    var body = card.querySelector(':scope > .f-body');
+    if (!body) {
+      return;
+    }
+    var steps = FIT_KINDS.indexOf(rec.data.kind) >= 0 ? FIT_STEPS : 0;
+    for (var level = 0; level <= steps; level += 1) {
+      for (var step = 1; step <= FIT_STEPS; step += 1) {
+        card.classList.toggle('fit-' + step, step === level);
+      }
+      fitMaths(card, true);
+      if (body.scrollHeight <= body.clientHeight) {
+        break;
+      }
+    }
+    cutCue(body);
+  }
+
+  function cutCue(body) {                      // the cut edge fades while more of the body is out of sight that way
+    var more = body.scrollHeight - body.clientHeight;
+    body.classList.toggle('cut-start', more > 0 && body.scrollTop > 1);
+    body.classList.toggle('cut-end', more > 0 && body.scrollTop < more - 1);
+  }
+
+  function scrollBig(key, back) {              // open big's keys (3.6): its body a line, a page or to an end
+    var body = big && big.state === 'open' && big.card ? big.card.querySelector(':scope > .f-body') : null;
+    if (!body) {
+      return;
+    }
+    var page = Math.max(LINE_PX, body.clientHeight - LINE_PX);
+    var by = {ArrowDown: LINE_PX, ArrowUp: -LINE_PX, PageDown: page, PageUp: -page}[key];
+    var top = key === 'Home' ? 0 : key === 'End' ? body.scrollHeight
+      : body.scrollTop + (by === undefined ? (back ? -page : page) : by);   // Space: a page down, Shift+Space up
+    body.scrollTo({top: top, behavior: K === 0 ? 'auto' : 'smooth'});
   }
 
   function grow() {                            // the frame grows from its rectangle to the whole view (260 ms expo-out)
@@ -2690,6 +2823,7 @@
     bigLayer.classList.add('held');
     bigLayer.appendChild(card);
     document.body.appendChild(bigLayer);
+    fitBig(card, rec);                         // at the view's size (held: laid out, not yet seen)
     underBig(true);
     card.focus({preventScroll: true});         // the focus goes with it (the frame under it is inert now)
     var from = rec.el.getBoundingClientRect();
@@ -2859,6 +2993,7 @@
       measureWidth();
       scheduleView();
       scheduleLayout();
+      scheduleMaths();
     });
     watchReading();
     easeOut = token('--ease-out') || easeOut;

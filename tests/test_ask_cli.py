@@ -481,11 +481,12 @@ class ResearchCliTests(unittest.TestCase):
     # schema_text() (length, sha256) for (allow_search, allow_web): as at 3b598ee but for the words of say's description
     # (up to four sentences, facts from the context) and, with the web on, weather and SAY_WITH_WEB, and for the new
     # look's part 6 (2026-11-15): the optional "topic" and "frames" after the other properties (tests/test_ask_frames.py);
-    # the memory build adds "remember" only when asked, so these change only when schema.json is meant to.
-    SCHEMA_GOLDEN = {(False, False): (3163, "bc7bd3a652675ef5945304173c0776cfe3f5b584a101e78496b292bda682e2c2"),
-                     (False, True): (3850, "ef566b8dc26e2b2fb59541d2e44e7a5ad264638743204b384afd217db59b8345"),
-                     (True, False): (3659, "632605d47b0b9d0ffc74aacebee2fa5b60cb2d5beee0a676b785519c28623ff8"),
-                     (True, True): (4346, "0e93397ac5a7932de7b06c3768f6b8c59d719c956538634b76b1859bee6490b2")}
+    # and part 6's fixes (2026-11-16): the rows' description says a cell is words or a figure written as text
+    # ("3,400"); the memory build adds "remember" only when asked, so these change only when schema.json is meant to.
+    SCHEMA_GOLDEN = {(False, False): (3228, "40a08eb32e109bd935d10e565df416c6316e3bb670fe4368602b7cd4f455115a"),
+                     (False, True): (3915, "d2fc66810ea1d382c7d236cb97aab0d33bd34d6741787535ee8fde5639d9ab27"),
+                     (True, False): (3724, "6304a0faffb5a40faa5af0198f690790fe71da2d2d473c7f0acac41e24b6dc68"),
+                     (True, True): (4411, "42f238354a989eaadc8b06d3a3eebb01e5832cae4778b91187f45953cdf37642")}
 
     def test_say_is_told_of_the_web_only_when_the_web_is_there(self) -> None:
         for allow_search in (False, True):

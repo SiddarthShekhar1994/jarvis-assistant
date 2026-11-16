@@ -81,7 +81,7 @@ from collections.abc import Hashable, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import protocol
+from . import ask_frames, protocol
 from .facts import cut as _cut
 from .facts import fact_of
 
@@ -138,15 +138,23 @@ def _items(body: dict[str, Any], key: str) -> list[dict[str, Any]]:
     return [item for item in found if isinstance(item, dict)] if isinstance(found, list) else []
 
 
+def _table_rows(body: dict[str, Any]) -> list[list[Any]]:
+    """A table body's rows (lists of cells; anything else left out)."""
+    found = body.get("rows")
+    return [row for row in found if isinstance(row, list)] if isinstance(found, list) else []
+
+
 def substance(frame: dict[str, Any]) -> str:
     """What a frame says, as one string to compare (part 5c's "changed"): its kind, title, status, its header's own
     counts (_header_counts: a week's "23 events") and its body's own data - never the clock's: a day's events (time,
     title and their own words and counts - a week's "3 events", the "+2 MORE" row; not its now line, its "IN 19 MIN" or
     its free gaps), a mail's sender, text and own time (not the day shown before it once it is not today's), a mail
     list's senders, subjects and what waits (not their ages), to-dos' words and states and the "+2 MORE" row's count
-    (not their due words); part 6's typed frames: a table's columns and cells and which row changed (not its change's
-    words or its source), a chart's bars and which changed from what (not its delta line), a timeline's nodes - their
-    words and states without the clock's own words ("today", "tomorrow", "in 3 days"), never where TODAY stands - and
+    (not their due words); part 6's typed frames, as the owner sees them: the title as its key folds it (case and
+    spaces aside), a table's columns and cells and which row changed (not its change's words or its source), a chart's
+    bars' labels and shown words ("3.4k": 3400 and 3400.0 are the same) and which changed from what (the old value in
+    those words; not its delta line), a timeline's nodes' words and states (never where TODAY stands) - a table's,
+    a chart's and a timeline's words without the clock's own ("today", "tomorrow", "in 3 days", "2 days ago") - and
     maths' steps and answer; the other kinds' bodies as they are. Never raises."""
     try:
         kind = str(frame.get("kind", ""))
@@ -165,10 +173,16 @@ def substance(frame: dict[str, Any]) -> str:
                        row.get("meta", "") if _MORE.fullmatch(str(row.get("meta", "") or "")) else ""]
                       for row in rows]
         elif kind == "table":                      # part 6: its columns and cells, which row changed, its unit
-            stable = [body.get("columns"), body.get("rows"), body.get("changed"), body.get("unit")]
-        elif kind == "chart":                      # its bars (labels and values), which changed and from what, its unit
-            stable = [[[bar.get("label"), bar.get("value")] for bar in _items(body, "bars")], body.get("changed"),
-                      body.get("was"), body.get("unit")]
+            columns = body.get("columns") if isinstance(body.get("columns"), list) else []
+            cells = [[_no_clock(cell) for cell in row] for row in _table_rows(body)]
+            stable = [[_no_clock(column) for column in columns], cells, body.get("changed"), body.get("unit")]
+        elif kind == "chart":                      # its bars (labels and words), which changed and from what, its unit
+            bars = _items(body, "bars")
+            was = body.get("was")
+            if was is not None:                    # the ghost tick's value in the words of the chart's own scale
+                was = ask_frames.chart_word(was, [bar.get("value") for bar in bars])
+            stable = [[[_no_clock(bar.get("label")), bar.get("text")] for bar in bars], body.get("changed"), was,
+                      body.get("unit")]
         elif kind == "timeline":                   # its nodes' own words and states (never "today", nor where TODAY is)
             stable = [[_no_clock(node.get("when")), _no_clock(node.get("words")), node.get("state")]
                       for node in _items(body, "nodes")]
@@ -176,7 +190,10 @@ def substance(frame: dict[str, Any]) -> str:
             stable = [body.get("steps"), body.get("answer")]
         else:
             stable = body
-        return json.dumps([kind, frame.get("title", ""), frame.get("status", "ok"), frame.get("status_text", ""),
+        title = frame.get("title", "")
+        if kind in ask_frames.KINDS:               # a typed frame's title as its key folds it (the key names it)
+            title = ask_frames.frame_key(kind, title)
+        return json.dumps([kind, title, frame.get("status", "ok"), frame.get("status_text", ""),
                            _header_counts(kind, frame.get("meta", "")), stable], sort_keys=True, ensure_ascii=True,
                           default=str)
     except (TypeError, ValueError, AttributeError):

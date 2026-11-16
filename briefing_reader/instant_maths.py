@@ -26,7 +26,8 @@ The working (the new look, part 6): an exact sum whose working has a step betwee
 checks the model's): the sum as read, then each step - every operation whose arguments are numbers by then worked out,
 one layer at a time, exactly (a fraction that does not end stays a fraction) - and the result. A percentage reads as a
 fraction of 100 ("15% of 80" is 15/100 × 80). No working when there is no step in between ("12 × 7"), when a step would
-need a rounded number, or past WORKING_STEPS.
+need a rounded number (a decimal past WORKING_DIGITS significant digits too: the board would round it), or past
+WORKING_STEPS.
 
 Public API
 ==========
@@ -544,6 +545,8 @@ def percent(text: str) -> Calc | None:
 
 WORKING_STEPS = 8            # lines of working at most (the sum as read, and each step after it)
 WORKING_LIMIT = 10 ** 15     # a number in the working is under this (the board's own limit)
+WORKING_DIGITS = 10          # a decimal in the working ends within this many significant digits (the board shows no
+                             # more of one: board.ask_frames.SIGNIFICANT)
 WORKING_TITLE = 60           # the frame's title (the sum as read) at most
 _SHOWN_POWER = re.compile(r"\s*\^\s*(\d{1,3})(?![\d.,])")
 _SUPERSCRIPTS = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
@@ -708,8 +711,9 @@ def _step_once(node: Any) -> Any:
 
 
 def _as_frame(node: Any) -> Any:
-    """A working's node in the model's own form: a whole number as an int, a decimal that ends within 10 digits as a
-    float, any other fraction as ["frac", top, bottom] (its minus outside)."""
+    """A working's node in the model's own form: a whole number as an int, a decimal that ends as a float, any other
+    fraction as ["frac", top, bottom] (its minus outside). _NoWorking for a decimal that ends past WORKING_DIGITS
+    significant digits: the board would round it, and as a fraction it would not read as the owner's own number."""
     if isinstance(node, list):
         return [node[0], *(_as_frame(arg) for arg in node[1:])]
     if abs(node.numerator) >= WORKING_LIMIT or node.denominator >= WORKING_LIMIT:
@@ -718,8 +722,9 @@ def _as_frame(node: Any) -> Any:
         return int(node)
     if _terminating(node.denominator):
         shown = Decimal(node.numerator) / Decimal(node.denominator)
-        if len(shown.normalize().as_tuple().digits) <= 10:
-            return float(shown)
+        if len(shown.normalize().as_tuple().digits) > WORKING_DIGITS:
+            raise _NoWorking
+        return float(shown)
     fraction = ["frac", abs(node.numerator), node.denominator]
     return ["-", fraction] if node < 0 else fraction
 

@@ -52,7 +52,7 @@ FRAMES (topic, frames)
 - "frames": usually empty. Only when one shows more than "answer" can: numbers to compare (a table,
   or a chart of one measure), dates in order (a timeline), a worked sum (maths). At most 3, never
   for one number, never instead of the answer, and only facts from your sources. Plain words and
-  numbers: never markup, links, web addresses or TeX.
+  numbers: never markup, links, web addresses or TeX. Table cells are text: a figure too ("3,400").
 
 EXAMPLE (invented)
 <question>what time does the Example Museum open this Saturday</question>

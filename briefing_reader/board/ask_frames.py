@@ -8,14 +8,16 @@ reason word (the caller logs the counts and the words, never a value); the answe
     build(frame, *, frame_id) -> frames.Built  its frame message (board.protocol.check_message passes it)
     frame_key(kind, title) -> str              its source key: the kind and the title folded ("table:budget lines")
     format_number(value) -> str                a finite number as the board shows it ("3,400", "0.25", "−4")
+    chart_texts(values) / chart_word(value, values)   a chart's words for its values, in one scale ("1.2k", "3.4k")
     maths_text(tree) -> str                    a checked expression as plain words ("x² − 4x + 3 = 0")
     answer_fact(tree) -> str                   a maths answer as a satellite's fact ("= 3,400"; an equation as it is)
 
 The model's fields. Every string must be a string no longer than its cap as given; it is then cleaned with
 live.clean_line (secrets redacted, control, bidi and invisible characters shown as "<U+202E>", line breaks as " ↵ ") and
 cut to its cap as the page counts it. A number must be an int or a float (never a boolean, never a string), finite,
-under NUMBER_LIMIT and zero or at least NUMBER_FLOOR. A key the kind does not have, a wrong type, too many items or
-nothing in it (no columns or rows, bars, nodes or steps): the frame is dropped. At most FRAMES_CAP frames (the rest are
+under NUMBER_LIMIT and zero or at least NUMBER_FLOOR. A key no kind has, a wrong type, too many items or nothing in
+it (no columns or rows, bars, nodes or steps): the frame is dropped; another kind's field (the schema's one frame item
+offers every kind's) is left out, never read or shown. At most FRAMES_CAP frames (the rest are
 dropped, counted); a second frame of the same kind and title is dropped ("repeat": a key names one frame).
     every kind  "kind" (table, chart, timeline, maths) and "title" (words, at most 60)
     table       "columns" (1 to 6 header words, each at most 24), "rows" (1 to 12, each a list of at most as many cells as
@@ -88,6 +90,7 @@ _KEYS = {
     "timeline": ("kind", "title", "nodes", "today"),
     "maths": ("kind", "title", "steps", "answer"),
 }
+_ANY_KIND = frozenset(key for keys in _KEYS.values() for key in keys)   # the schema's one frame item: every kind's
 _NAME = re.compile(r"[A-Za-zΑ-ΡΣ-Ωα-ω]{1,%d}" % protocol.NAME_LETTERS)
 _SUPER_FROM = "0123456789+=()ni" + MINUS
 _SUPERSCRIPT = str.maketrans(_SUPER_FROM, "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁼⁽⁾ⁿⁱ⁻")
@@ -173,8 +176,9 @@ def _decimal(value: int | float) -> Decimal:
 
 def format_number(value: Any) -> str:
     """A finite number as the board shows it: a whole number in full with thousands separators ("3,400"), any other
-    at most SIGNIFICANT significant digits (rounded half up, never in exponent form: "0.25", "1,234.5"), a negative one
-    after "−". ValueError for anything that is not a number the board can show."""
+    at most SIGNIFICANT significant digits (rounded half up, never in exponent form: "0.25", "1,234.5") but never fewer
+    than its whole digits (12345678901.5 is "12,345,678,902": only a fraction is ever cut), a negative one after "−".
+    ValueError for anything that is not a number the board can show."""
     if not _is_number(value):
         raise ValueError("not a number the board can show")
     exact = _decimal(value)
@@ -182,7 +186,7 @@ def format_number(value: Any) -> str:
     if magnitude == magnitude.to_integral_value():
         text = f"{int(magnitude):,}"
     else:
-        quantum = Decimal(1).scaleb(magnitude.adjusted() - SIGNIFICANT + 1)
+        quantum = Decimal(1).scaleb(min(magnitude.adjusted() - SIGNIFICANT + 1, 0))   # never into the whole part
         try:
             rounded = magnitude.quantize(quantum, rounding=ROUND_HALF_UP)
         except InvalidOperation:
@@ -194,21 +198,41 @@ def format_number(value: Any) -> str:
     return f"{MINUS}{text}" if exact < 0 and text != "0" else text
 
 
+def _in_scale(value: int | float, scale: int) -> Decimal:
+    """``value`` in units of ``scale``, rounded half up to one decimal (as a chart shows it)."""
+    return (_decimal(value) / scale).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+
+
 def _scaled(value: int | float, scale: int, suffix: str) -> str:
     """A chart's value in its scale with one decimal ("3.4k", "0.8k", "−1.2M")."""
-    shown = (_decimal(value) / scale).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+    shown = _in_scale(value, scale)
     text = _grouped(format(abs(shown), "f")) + suffix
     return f"{MINUS}{text}" if shown < 0 else text
 
 
+def _chart_scale(values: list[int | float]) -> tuple[int, str] | None:
+    """The scale a chart of ``values`` shows them in (see chart_texts); None when the largest is under 1,000."""
+    biggest = max((abs(value) for value in values), default=0)
+    for at, (scale, suffix) in enumerate(_CHART_SCALES):
+        if biggest >= scale:
+            if at and abs(_in_scale(biggest, scale)) >= 1000:
+                return _CHART_SCALES[at - 1]
+            return scale, suffix
+    return None
+
+
 def chart_texts(values: list[int | float]) -> list[str]:
     """The words of a chart's values: all in one scale when the largest is 1,000 or more ("1.2k", "3.4k", "0.8k"),
-    else each as format_number says it."""
-    biggest = max((abs(value) for value in values), default=0)
-    for scale, suffix in _CHART_SCALES:
-        if biggest >= scale:
-            return [_scaled(value, scale, suffix) for value in values]
-    return [format_number(value) for value in values]
+    else each as format_number says it. The scale is the one the largest needs as it is shown: 999,950 rounds up to a
+    thousand k, so it reads "1.0M" (and M moves to B, B to T; T is the top, so 999.95T may read "1,000.0T")."""
+    found = _chart_scale(values)
+    return [format_number(value) if found is None else _scaled(value, *found) for value in values]
+
+
+def chart_word(value: int | float, values: list[int | float]) -> str:
+    """``value`` in the words a chart of ``values`` gives its bars (a bar's own, or its old value: the ghost tick's)."""
+    found = _chart_scale(values)
+    return format_number(value) if found is None else _scaled(value, *found)
 
 
 def _clean(value: str, cap: int) -> str:
@@ -392,7 +416,11 @@ def _frame(value: Any) -> AskFrame:
     kind = value.get("kind")
     if type(kind) is not str or kind not in _CHECKS:
         raise _Drop(D_KIND)
-    data = _fields(value, _KEYS[kind], ("kind", "title", *_REQUIRED[kind]))
+    if any(type(key) is not str or key not in _ANY_KIND for key in value):
+        raise _Drop(D_FIELD)                              # a key no kind has
+    # Another kind's field (the schema offers every kind's to each) is left out, never read or shown.
+    data = _fields({key: item for key, item in value.items() if key in _KEYS[kind]}, _KEYS[kind],
+                   ("kind", "title", *_REQUIRED[kind]))
     title = _words(data["title"], protocol.TITLE_CAP, required=True)
     body, meta = _CHECKS[kind](data)
     return AskFrame(kind, title, meta, body, frame_key(kind, title))
@@ -661,5 +689,5 @@ def working_line(body: Mapping[str, Any]) -> str:
 
 
 __all__ = ["AskFrame", "AskFrames", "FRAMES_CAP", "KINDS", "MINUS", "answer_fact", "build", "chart_texts",
-           "check_answer", "check_frame", "factor_bracketed", "format_number", "frame_key", "joined", "maths_text",
-           "negation_bracketed", "negative", "positive", "prec", "working_line"]
+           "chart_word", "check_answer", "check_frame", "factor_bracketed", "format_number", "frame_key", "joined",
+           "maths_text", "negation_bracketed", "negative", "positive", "prec", "working_line"]

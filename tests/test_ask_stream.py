@@ -153,6 +153,89 @@ class ResultTests(Engine):
         self.assertEqual(self.run_with(sneaky).failure.kind, GUARD)
 
 
+def nested(levels: int, inner: str = "1") -> str:
+    """JSON text of lists ``levels`` deep around ``inner``: [[[1]]]."""
+    return "[" * levels + inner + "]" * levels
+
+
+def deep_event(value_text: str) -> str:
+    """An event line whose "v" is ``value_text`` (the event's own object is level 1)."""
+    return '{"type": "x", "v": ' + value_text + ', "after": "kept"}'
+
+
+class DepthTests(Engine):
+    """parse_event reads a line with depth_bounded: an array or object nested past EVENT_DEPTH is null, the rest of the
+    line as it came, so a value the model nested too deep loses only itself; nothing in reading a line raises."""
+
+    def test_at_the_bound_a_line_parses_as_it_came(self) -> None:
+        line = deep_event(nested(st.EVENT_DEPTH - 1))                      # its deepest list is level EVENT_DEPTH
+        self.assertEqual(st.depth_bounded(line), line)
+        self.assertEqual(st.parse_event(line), json.loads(line))
+        for name in ("success", "research_success", "research_parallel", "garbage", "fallback_json"):
+            for recorded in stream(name):
+                self.assertEqual(st.depth_bounded(recorded), recorded, name)        # every recorded line as it came
+
+    def test_past_it_that_value_is_null_and_the_rest_kept(self) -> None:
+        for levels in (st.EVENT_DEPTH, st.EVENT_DEPTH + 1, 3_000, 100_000):
+            with self.subTest(levels=levels):
+                event = st.parse_event(deep_event(nested(levels)))
+                self.assertEqual(event["v"], json.loads(nested(st.EVENT_DEPTH - 1, "null")))
+                self.assertEqual(event["after"], "kept")
+        inside = "[" + nested(st.EVENT_DEPTH - 2) + ', 7, {"a": ' + nested(st.EVENT_DEPTH) + '}, "z"]'
+        event = st.parse_event(deep_event(inside))
+        self.assertEqual(event["v"][0], json.loads(nested(st.EVENT_DEPTH - 2)))   # level EVENT_DEPTH: kept whole
+        self.assertEqual(event["v"][1:3], [7, {"a": json.loads(nested(st.EVENT_DEPTH - 3, "null"))}])
+        self.assertEqual((event["v"][3], event["after"]), ("z", "kept"))
+        objects = deep_event('{"k": ' * st.EVENT_DEPTH + "1" + "}" * st.EVENT_DEPTH)
+        found = st.parse_event(objects)["v"]
+        for _level in range(st.EVENT_DEPTH - 2):
+            found = found["k"]
+        self.assertEqual(found, {"k": None})                                       # objects count the same
+
+    def test_brackets_inside_a_string_stay_text(self) -> None:
+        words = '[[[{{{ "quoted" \\ ]]] }}} ' + "[" * 200 + " \\\\" + '\\"'
+        text = json.dumps(words)                                                    # its quotes and backslashes escaped
+        line = deep_event(nested(st.EVENT_DEPTH - 1, text))
+        self.assertEqual(st.depth_bounded(line), line)
+        self.assertEqual(json.loads(nested(st.EVENT_DEPTH - 1, text)), st.parse_event(line)["v"])
+        beside = deep_event("[" + text + ", " + nested(st.EVENT_DEPTH + 5) + ", " + text + "]")
+        self.assertEqual(st.parse_event(beside)["v"], [words, json.loads(nested(st.EVENT_DEPTH - 2, "null")), words])
+
+    def test_reading_never_raises(self) -> None:
+        for garbage in ('{"type": "x", "v": "never ends', '{"type": "x", "v": ' + "[" * 10_000,
+                        "[" * 100_000 + "]" * 99_999, '{"type": "x", "v": ' + nested(200, '"open'),
+                        '{"type": "x", "v": ' + "{" * 5_000):
+            with self.subTest(garbage=garbage[:24]):
+                self.assertIsNone(st.parse_event(garbage))
+        fallback = json.dumps({"say": "ok", "lines": ["Move: x"], "frames": "DEEP"}).replace('"DEEP"', nested(10_000))
+        result = self.run_with([stream("fallback_json")[0], json.dumps(result_event(None, result=fallback))])
+        self.assertIsNone(result.failure, result.failure)                           # the fallback's JSON is read so too
+        self.assertEqual((result.plan.say, result.plan.lines), ("ok", ("Move: x",)))
+
+    def test_a_ten_thousand_deep_frame_loses_only_itself(self) -> None:
+        plan = {"say": "It comes to one, sir.", "question": "", "lines": ["Move: x"],
+                "frames": [{"kind": "maths", "title": "Deep", "steps": [{"expr": "DEEP"}], "answer": {"expr": 1}}]}
+        deep = '["-", ' * 10_000 + '"x"' + "]" * 10_000                            # as the CLI prints the model's JSON
+        lines = [line.replace('"DEEP"', deep) for line in plan_stream(plan)]
+        self.assertEqual(sum(deep in line for line in lines), 2)                   # the assistant and the result line
+        runner = FakeRunner(lines, clock=self.clock)
+        result = run_planner(runner, ARGV, "p", env={"PATH": "x"}, cwd=Path("."), timeout_s=90.0, allow_search=False,
+                             clock=self.clock, now=lambda: NOW, capture=True)
+        self.assertIsNone(result.failure, result.failure)
+        self.assertEqual((result.plan.say, result.plan.lines), (plan["say"], ("Move: x",)))
+        self.assertEqual(dict(result.plan.frames.dropped), {"depth": 1})
+        self.assertLess(len(result.reply), 20_000)                                 # the LIVE view's block stays small
+
+    def test_the_raw_reply_is_never_huge(self) -> None:
+        plan = {"say": "x", "question": "", "lines": []}
+        self.assertEqual(st.raw_reply(result_event(plan)), json.dumps(plan, indent=2, ensure_ascii=False))
+        wide = {"say": "x", "frames": [json.loads(nested(st.EVENT_DEPTH - 6, "[" + ",".join(["1"] * 50_000) + "]"))]}
+        compact = json.dumps(wide, ensure_ascii=False, separators=(",", ":"))
+        self.assertGreater(len(json.dumps(wide, indent=2)), 50 * len(compact))        # indented: over 6 MB
+        self.assertEqual(st.raw_reply(result_event(wide)), compact)                    # so it comes as it came
+        self.assertEqual(st.raw_reply(result_event(None, result="text")), "text")
+
+
 class KillTests(Engine):
     def assert_killed(self, result: st.RunResult, kind: str, detail: str = "") -> None:
         self.assertEqual(result.failure.kind, kind)

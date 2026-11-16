@@ -82,6 +82,49 @@ class SubstanceTests(unittest.TestCase):
         self.assertEqual(same(message(maths())), same(message(maths())))
         self.assertNotEqual(same(message(maths())), same(message(maths(answer={"expr": ["=", "x", 2]}))))
 
+    def test_what_the_owner_sees_is_what_counts(self) -> None:
+        # Part 6 fixes (board 2): a typed frame's title as its key folds it, and a chart's values and old value as the
+        # words it shows them in (3400.0 is "3.4k" as 3400 is); a real change still counts.
+        same = feed.substance
+        for make in (table, chart, timeline, maths):
+            plain = make()
+            with self.subTest(kind=plain["kind"]):
+                self.assertEqual(same(message(plain)), same(message(make(title=plain["title"].upper()))))
+                self.assertEqual(same(message(plain)), same(message(make(title=plain["title"].title()))))
+                self.assertNotEqual(same(message(plain)), same(message(make(title=plain["title"] + " too"))))
+        floats = chart(bars=[{"label": bar["label"], "value": float(bar["value"])} for bar in chart()["bars"]],
+                       was=2900.0)
+        self.assertEqual(same(message(chart())), same(message(floats)))
+        moved = chart(bars=[{**bar, "value": 3600} if bar["label"] == "Software" else bar for bar in chart()["bars"]])
+        self.assertNotEqual(same(message(chart())), same(message(moved)))                   # 3.4k to 3.6k
+        self.assertNotEqual(same(message(chart())), same(message(chart(was=2700.0))))        # was 2.9k, now 2.7k
+
+    def test_the_clock_s_own_words_in_cells_columns_and_labels_count_for_nothing(self) -> None:
+        # Part 6 fixes (board 3): as in a timeline, "Tomorrow" that became "Today", or "2 days ago" that became "3 days
+        # ago", in a table's cell or column or a chart's label is the clock moving, not the frame; its own words count.
+        same = feed.substance
+
+        def bills(due: str, last: str, rent: str = "1,200") -> dict:
+            return table(title="Bills", unit="", columns=["Bill", "Amount", "Due", "Last reminder"], changed=-1,
+                         rows=[["Rent", rent, due, last], ["Power", "80", "Fri 20 Nov", "never"]])
+
+        self.assertEqual(same(message(bills("Tomorrow", "2 days ago"))), same(message(bills("Today", "3 days ago"))))
+        self.assertEqual(same(message(bills("Due tomorrow", "in 2 h"))), same(message(bills("Due today", "in 1 h"))))
+        self.assertNotEqual(same(message(bills("Tomorrow", "2 days ago"))), same(message(bills("Sat 21 Nov",
+                                                                                               "2 days ago"))))
+        self.assertNotEqual(same(message(bills("Today", "2 days ago"))), same(message(bills("Today", "2 days ago",
+                                                                                            rent="1,250"))))
+        yesterday = table(columns=["Line", "Yesterday", "Today", "Change"])
+        self.assertEqual(same(message(yesterday)), same(message(table(columns=["Line", "2 days ago", "Tomorrow",
+                                                                               "Change"]))))
+        self.assertNotEqual(same(message(yesterday)), same(message(table(columns=["Line", "Before", "After",
+                                                                                 "Change"]))))
+        labels = [{"label": "Dana, in 2 h", "value": 1200}, {"label": "Sam, tomorrow", "value": 3400}]
+        later = [{"label": "Dana, in 1 h", "value": 1200}, {"label": "Sam, today", "value": 3400}]
+        other = [{"label": "Ana, in 1 h", "value": 1200}, {"label": "Sam, today", "value": 3400}]
+        self.assertEqual(same(message(chart(bars=labels, changed=-1))), same(message(chart(bars=later, changed=-1))))
+        self.assertNotEqual(same(message(chart(bars=labels, changed=-1))), same(message(chart(bars=other, changed=-1))))
+
     def test_a_frame_built_again_from_its_key_changes_only_when_what_it_says_differs(self) -> None:
         board = feed.BoardFeed()
         first = checked(table())
@@ -275,6 +318,24 @@ class InstantWorkingTests(unittest.TestCase):
         self.assertIsNone(instant_maths.percent("80 is what percent of 200").working)
         self.assertEqual(instant_maths.calculate("12 x 7"), instant_maths.Calc("12 × 7", "84", spoken="84"))
 
+    def test_no_working_for_a_decimal_the_board_would_round(self) -> None:
+        # A decimal that ends past the board's significant digits gets no working: shown as a fraction it would not
+        # read as the owner's own number or as Jarvis's answer (which the conversation still says as before).
+        self.assertEqual(instant_maths.WORKING_DIGITS, ask_frames.SIGNIFICANT)
+        for words, said in (("12345.678901 + 2 x 3", "12,351.678901"), ("12500.75 x 1.0825 + 40", "13,572.061875"),
+                            ("250000 x 1.045 x 1.045 x 1.045 - 250000", "35,291.53125"),
+                            ("123456789.012 + 1 x 2", "123,456,791.012")):
+            with self.subTest(words=words):
+                calc = instant_maths.calculate(words)
+                self.assertIsNotNone(calc)
+                self.assertEqual((calc.value, calc.exact), (said, True))
+                self.assertIsNone(calc.working)
+        within = instant_maths.calculate("12345.67891 + 2 x 3")              # ten significant digits: its working
+        frame = checked(within.working)
+        self.assertEqual([ask_frames.maths_text(step["expr"]) for step in frame.body["steps"]],
+                         ["12,345.67891 + 2 × 3", "12,345.67891 + 6"])
+        self.assertEqual(ask_frames.maths_text(frame.body["answer"]["expr"]), "12,351.67891")
+
     def test_the_reply_carries_it_and_says_nothing_of_it(self) -> None:
         from datetime import datetime
 
@@ -329,6 +390,31 @@ class DeskFramesTests(DeskApp):
         self.assertEqual(set(after), set(before))                          # the same frames, in their places
         lit = sorted(frame["kind"] for frame in after.values() if frame["changed"])
         self.assertEqual(lit, ["table"])
+
+    def test_asking_again_in_other_capitals_or_as_floats_lights_nothing(self) -> None:
+        # Part 6 fixes (board 2): the same chart asked again as "Q4 Budget by Line" with its values written 3400.0 is
+        # what the owner already sees: nothing is sent again (no CHANGED, no "Changed ·" fact) and nothing is heard. A
+        # real change of a value still lights, with its sound.
+        self.make()
+        heard: list[tuple] = []
+        self.c.look.on_frame_changed = lambda *args: heard.append(args)
+        self.answer("How's the Q4 budget?", self.frames_outcome(frames=(checked(chart()),)))
+        board = self.board()
+        (frame_id,) = board.frames_sent()
+        holo.set_motion_level(holo.MOTION_LIVELY)                          # (the harness's cleanup sets it back)
+        start = len(board.sent)
+        floats = chart(title="Q4 Budget by Line", was=2900.0,
+                       bars=[{"label": bar["label"], "value": float(bar["value"])} for bar in chart()["bars"]])
+        self.answer("And now?", self.frames_outcome(frames=(checked(floats),)))
+        self.assertEqual([message for message in board.sent[start:] if message.get("type") == "frame"], [])
+        self.assertEqual(heard, [])
+        self.assertFalse(board.frames_sent()[frame_id]["changed"])
+        moved = chart(bars=[{**bar, "value": 3600} if bar["label"] == "Software" else bar for bar in chart()["bars"]])
+        self.answer("And now?", self.frames_outcome(frames=(checked(moved),)))
+        sent = [message for message in board.sent[start:] if message.get("type") == "frame"]
+        self.assertEqual([(message["id"], message["changed"]) for message in sent], [(frame_id, True)])
+        self.assertTrue(sent[0]["fact"].startswith("Changed · "))
+        self.assertEqual(heard, [()])
 
     def test_an_instant_sum_s_working_goes_up_in_a_group_of_its_own(self) -> None:
         from datetime import datetime
