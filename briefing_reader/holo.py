@@ -13,7 +13,7 @@ Tokens
     ``TILE_AMBER_LIT``, ``TILE_OK``, ``TILE_ALERT``, ``RAISED``, ``FIELD``, ``PICTURE``, ``FOCUS``, ``HOLO`` (+ ``_HI``,
     ``_LO``, ``_INK``), ``INK_1`` .. ``INK_4``, ``INK_KICKER``, ``AMBER`` (+ ``_HI``, ``_LO``, ``_INK``,
     ``_TX``, ``_TX2``), ``OK``, ``OK_INK``, ``ALERT`` (+ ``_HI``, ``_LO``, ``_TX``, ``_TX2``, ``_INK``),
-    ``STEEL``. Translucent tokens (QColor): ``GRID``, ``SCAN``, ``SCAN_AMBER``, ``LINE_FAINT``,
+    ``STEEL``; the second screen's ``OLED_BLACK`` and ``OLED_INK``. Translucent tokens (QColor): ``GRID``, ``SCAN``, ``SCAN_AMBER``, ``LINE_FAINT``,
     ``LINE``, ``LINE_STRONG``, ``LINE_FOCUS``, ``LINE_INPUT``, ``AMBER_LINE``; the board's ``FRAME_EDGE``, ``CUE``,
     ``CUE_AMBER``. (The board's page gets all of them, written out as CSS by board.scheme.tokens_css.)
     ``alpha(color, a) -> QColor``; ``mix(a, b, t) -> QColor``.
@@ -140,6 +140,10 @@ ALERT_TX = "#FF9A8C"
 ALERT_TX2 = "#FFD9D3"
 ALERT_INK = "#1F0705"
 STEEL = "#6C8A95"
+# The second screen (the new look, part 7; DESIGN-SPEC 6 and 10): its true black, and its softened white (OLED care:
+# nothing there is whiter than this).
+OLED_BLACK = "#000000"
+OLED_INK = "#CFE6EB"
 
 
 def alpha(color: str | QColor, a: float) -> QColor:

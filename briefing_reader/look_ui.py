@@ -1,5 +1,7 @@
-"""The new look's controller (build-plan item 2): the soft sounds (part 1), Settings > Look, and (part 5a) the board on
-Home (``desk``: desk_ui.DeskController while ``[look] board`` is on); the second screen joins it in a later part.
+"""The new look's controller (build-plan item 2): the soft sounds (part 1), Settings > Look, (part 5a) the board on
+Home (``desk``: desk_ui.DeskController while ``[look] board`` is on) and (part 7) the second-screen display
+(``second``: second_screen.SecondScreenController, made with the main window; it shows nothing until the owner turns
+it on).
 
 The app (``ui.AppController``) makes one ``LookController`` and calls it through ``_look_call(name, *args)``, which
 never lets it stop the app. Its hooks:
@@ -14,6 +16,9 @@ never lets it stop the app. Its hooks:
 - ``on_action_result(status, failed)``: DONE when an approved card's action finished, FAILED when it failed;
 - ``on_speaking()``: Jarvis's voice or a briefing started or stopped (part 5c: his utterance goes on to the desk, whose
   sentence being said lights the frame it is about); ``on_muted(muted)``: his voice was muted (nothing lit).
+- part 7: ``on_board_changed(feed)`` (the desk's every send: the board's frames to the second screen),
+  ``on_events(events)`` (the calendar's events as the app read them: its NEXT), ``shutdown()`` (Jarvis closes: the
+  second screen's window goes).
 
 Part 5c, the board's sounds (the desk calls them; SoundBoard's gate and this controller's quiet rules decide, so they
 are never heard while Jarvis speaks - dropped, never queued -, muted, in quiet hours, focus mode, while a meeting
@@ -24,8 +29,11 @@ records, locked, while Windows says busy or full screen, with sounds off, or und
 - ``on_frame_changed()``: CHANGED, as the changed light starts;
 - ``on_big(opened)``: OPEN_BIG / CLOSE_BIG.
 
-Settings > Look shows the switches as they are and has the one thing it changes on this PC: the sounds on or off
-(assistant.json's "look" table). [look] in config.toml sets the defaults; ``sounds = "off"`` there wins.
+Settings > Look shows the switches as they are and has the two things it changes on this PC: the sounds on or off,
+and (part 7) "Show Jarvis on my second screen" - a switch, greyed with "Needs a second monitor" while there is one
+monitor, following monitors plugged in or out while Settings is open (assistant.json's "look" table). [look] in
+config.toml sets the defaults; ``sounds = "off"`` there wins; the second screen's switch, once used, wins over
+``[look] second_screen``.
 
 Logs hold event names and reasons only.
 """
@@ -33,12 +41,14 @@ Logs hold event names and reasons only.
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
 import shiboken6
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtCore import QObject, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFontMetricsF, QPainter, QPen
+from PySide6.QtWidgets import QAbstractButton, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from . import holo, sounds
 from .config import SOUNDS_OFF
@@ -51,8 +61,8 @@ THINKING_AFTER_MS = 400           # a request that has said nothing by then gets
 SETTINGS_KEY = "look"
 SETTINGS_TITLE = "Look"
 SETTINGS_NOTE = "How Jarvis looks and sounds."
-SETTINGS_HOW = ("The sounds can be turned off or on here, on this PC. [look] in config.toml sets the defaults; "
-                "restart Jarvis after editing it.")
+SETTINGS_HOW = ("The sounds and the second screen can be turned off or on here, on this PC. [look] in config.toml "
+                "sets the defaults; restart Jarvis after editing it.")
 SOUNDS_LABEL = "Sounds"
 SOUNDS_SOFT_VALUE = "Soft"
 SOUNDS_OFF_VALUE = "Off"
@@ -65,12 +75,86 @@ TURN_OFF_TEXT = "Turn sounds off"
 TURN_ON_TEXT = "Turn sounds on"
 SAVE_FAILED_TEXT = "That couldn't be saved; it lasts until Jarvis closes."
 BOARD_LABEL = "Board beside the conversation"
+SECOND_LABEL = "Show Jarvis on my second screen"       # part 7 (DESIGN-SPEC 6 and 9)
+SECOND_NEEDS = "Needs a second monitor"
+
+
+class SwitchButton(QAbstractButton):
+    """A switch with its words (Settings > Look's "Show Jarvis on my second screen"): the words at the left, a 36 x 20
+    track at the right whose knob sits at its right end while on (cyan) and its left end while off; greyed and not
+    clickable while disabled. Keyboard: Tab reaches it, Space toggles it; its focus ring shows for the keyboard only."""
+
+    TRACK_W, TRACK_H, KNOB = 36, 20, 14
+
+    def __init__(self, text: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setCheckable(True)
+        self.setText(text)
+        self.setAccessibleName(text)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._font = holo.font("body")
+        self._focus_visible = False
+
+    def track_rect(self) -> QRectF:
+        return QRectF(self.width() - self.TRACK_W - 2, (self.height() - self.TRACK_H) / 2, self.TRACK_W, self.TRACK_H)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        words = QFontMetricsF(self._font).horizontalAdvance(self.text())
+        return QSize(math.ceil(words + 24 + self.TRACK_W + 4), 34)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return self.sizeHint()
+
+    def focusInEvent(self, event: object) -> None:  # noqa: N802 - Qt override
+        self._focus_visible = holo.keyboard_focus(event.reason(), self._focus_visible)
+        super().focusInEvent(event)
+        self.update()
+
+    def focusOutEvent(self, event: object) -> None:  # noqa: N802 - Qt override
+        super().focusOutEvent(event)
+        self.update()
+
+    def paintEvent(self, _event: object) -> None:  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            enabled, on = self.isEnabled(), self.isChecked()
+            hover = enabled and self.underMouse()
+            if not enabled:
+                painter.setOpacity(0.45)
+            painter.setFont(self._font)
+            painter.setPen(QColor(holo.INK_1 if enabled else holo.INK_3))
+            track = self.track_rect()
+            painter.drawText(QRectF(0, 0, track.left() - 16, self.height()),
+                             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), self.text())
+            radius = track.height() / 2
+            if on:
+                painter.setPen(QPen(QColor(holo.HOLO_HI if hover else holo.HOLO), 1.0))
+                painter.setBrush(holo.alpha(holo.HOLO, 0.28 if hover else 0.22))
+            else:
+                painter.setPen(QPen(holo.LINE_FOCUS if hover else holo.LINE_STRONG, 1.0))
+                painter.setBrush(QColor(holo.FIELD))
+            painter.drawRoundedRect(track.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
+            knob = self.KNOB
+            x = track.right() - 3 - knob if on else track.left() + 3
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(holo.HOLO_HI if on else holo.INK_3))
+            painter.drawEllipse(QPointF(x + knob / 2, track.center().y()), knob / 2, knob / 2)
+            if self.hasFocus() and self._focus_visible:
+                painter.setOpacity(1.0)
+                holo.paint_focus_ring(painter, track, radius)
+        finally:
+            painter.end()
 
 
 class LookSettingsPanel(QWidget):
-    """Settings > Look's own part: the sounds line and its one button."""
+    """Settings > Look's own part: the sounds line and its one button; (part 7) the second screen's switch."""
 
     soundsToggled = Signal(bool)           # True: turn the sounds on; False: off
+    secondScreenToggled = Signal(bool)     # True: show Jarvis on the second screen; False: not
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -80,6 +164,11 @@ class LookSettingsPanel(QWidget):
         self.button = holo.HoloButton(TURN_OFF_TEXT, holo.GHOST, size=holo.SIZE_SM)
         self.button.clicked.connect(self._clicked)
         self._on = True
+        self.second = SwitchButton(SECOND_LABEL)
+        self.second.setObjectName("lookSecondScreen")
+        self.second.clicked.connect(self._second_clicked)
+        self.second_note: QLabel = body_label(SECOND_NEEDS, "body_sm", holo.INK_4, name="lookSecondNote")
+        self.second_note.hide()
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(12)
@@ -90,6 +179,9 @@ class LookSettingsPanel(QWidget):
         column.setSpacing(6)
         column.addLayout(row)
         column.addWidget(self.problem)
+        column.addSpacing(10)
+        column.addWidget(self.second)
+        column.addWidget(self.second_note)
 
     def set_state(self, on: bool, *, config_off: bool = False, problem: str = "") -> None:
         """The sounds as they are now; ``config_off``: config.toml turned them off (no button then)."""
@@ -106,6 +198,20 @@ class LookSettingsPanel(QWidget):
 
     def _clicked(self) -> None:
         self.soundsToggled.emit(not self._on)
+
+    def set_second(self, on: bool, available: bool) -> None:
+        """The second screen's switch as it is: on or off, greyed with "Needs a second monitor" without one."""
+        switch = self.second
+        switch.blockSignals(True)
+        switch.setChecked(bool(on))
+        switch.blockSignals(False)
+        switch.setEnabled(bool(available))
+        switch.setAccessibleDescription("" if available else SECOND_NEEDS)
+        self.second_note.setVisible(not available)
+        switch.update()
+
+    def _second_clicked(self) -> None:
+        self.secondScreenToggled.emit(self.second.isChecked())
 
 
 class LookController(QObject):
@@ -127,9 +233,14 @@ class LookController(QObject):
         self._thinking.setInterval(THINKING_AFTER_MS)
         self._thinking.timeout.connect(self._thinking_due)
         self._save_problem = ""
+        self.second: Any = None              # part 7 (made below, once the desk is)
         self.panel: LookSettingsPanel | None = None
         self._install_settings()
         self.desk = self._make_desk()        # part 5a: the board on Home ([look] board), or None
+        self.second = self._make_second()    # part 7: the second-screen display (shown only once turned on), or None
+        if self.second is not None and self.panel is not None:
+            self.panel.secondScreenToggled.connect(self.set_second_screen_on)
+            self.second.availabilityChanged.connect(self._on_screens)
         if start_sounds:
             self.sounds.start()
 
@@ -147,6 +258,20 @@ class LookController(QObject):
         if not desk_ui.can_have_board(factory):
             return None
         return desk_ui.DeskController(self.host, factory=factory, look=self)
+
+    def _make_second(self) -> Any:
+        """The second-screen display's controller (second_screen), made with the main window; None without one. It
+        shows nothing until the owner turns it on (or [look] second_screen does) and a second monitor is there."""
+        window = getattr(self.host, "window", None)
+        if getattr(window, "reading", None) is None:
+            return None
+        from . import second_screen
+
+        return second_screen.SecondScreenController(self.host, look=self, board=self._board_feed)
+
+    def _board_feed(self) -> Any:
+        desk = self.desk
+        return getattr(desk, "feed", None) if desk is not None else None
 
     # ---- the switches ---------------------------------------------------------------------------
 
@@ -168,6 +293,24 @@ class LookController(QObject):
             return not (store is not None and store.look.sounds_off)
         except Exception:  # noqa: BLE001
             return True
+
+    def second_screen_on(self) -> bool:
+        """Jarvis is to show on the second screen (Settings > Look on this PC, else [look] second_screen)."""
+        second = self.second
+        return bool(second is not None and second.is_on())
+
+    def set_second_screen_on(self, on: bool) -> bool:
+        """Settings > Look's switch: the second screen on or off on this PC, at once; False when it could not be
+        saved (it holds until Jarvis closes)."""
+        second = self.second
+        saved = bool(second is not None and second.set_enabled(bool(on)))
+        self._save_problem = "" if saved else SAVE_FAILED_TEXT
+        self._sync_panel()
+        return saved
+
+    def _on_screens(self, _available: bool) -> None:
+        """A monitor was plugged in or out: Settings > Look's switch follows (greyed with one)."""
+        self._sync_panel()
 
     def set_sounds_on(self, on: bool) -> bool:
         """Settings > Look's button: the sounds on or off on this PC; False when it could not be saved."""
@@ -229,6 +372,23 @@ class LookController(QObject):
         """His voice was muted (or unmuted): a lit frame and its cue line go at once."""
         if muted and self.desk is not None:
             self.desk.on_muted()
+
+    # ---- the second screen (part 7) -------------------------------------------------------------------------------
+
+    def on_board_changed(self, feed: Any) -> None:
+        """The board changed (the desk's every send): its frames, as the page has them, to the second screen."""
+        if self.second is not None:
+            self.second.on_board(feed)
+
+    def on_events(self, events: Any) -> None:
+        """The calendar's events as the app last read them: the second screen's NEXT."""
+        if self.second is not None:
+            self.second.set_events(events or ())
+
+    def shutdown(self) -> None:
+        """Jarvis closes: the second screen's window goes now."""
+        if self.second is not None:
+            self.second.shutdown()
 
     # ---- the board's sounds (part 5c) -----------------------------------------------------------------------------
 
@@ -337,6 +497,9 @@ class LookController(QObject):
         if self.panel is None:
             return
         self.panel.set_state(self.sounds_on(), config_off=self._config_sounds_off(), problem=self._save_problem)
+        second = self.second
+        self.panel.set_second(self.second_screen_on(), bool(second is not None and second.available()))
+        self.panel.second.setVisible(second is not None)
         window = getattr(self.host, "window", None)
         page = getattr(getattr(window, "reading", None), "settings_page", None)
         refresh = getattr(page, "refresh", None)

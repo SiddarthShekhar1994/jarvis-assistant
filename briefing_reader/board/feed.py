@@ -58,7 +58,7 @@ raises for odd data.
                                                    ones are not; ("", 0): none - its token goes)
         approvals_for(frame_id) -> str             the card a frame's go_approvals opens ("" none)
         frames(), waits(), pinned(), cleared(), parked_groups(), groups(), group_of(frame_id), group_for(answer),
-        frame_ids(), flags(frame_id), counts()
+        frame_ids(), flags(frame_id), counts(), frame_message(frame_id), picture_message(frame_id)
         clear()                                    nothing on the board any more (the app's own reset)
         resend()                                   the board as it is, for a page that has nothing
 
@@ -382,6 +382,17 @@ class BoardFeed:
     def frame_message(self, frame_id: str) -> dict[str, Any] | None:
         frame = self._frames.get(frame_id)
         return self._shown(frame) if frame is not None else None
+
+    def picture_message(self, frame_id: str) -> dict[str, Any] | None:
+        """The picture message the frame shows (with the frame's id), None without one (part 7: the second screen's
+        read-only tiles take it as the page does)."""
+        frame = self._frames.get(frame_id)
+        picture = frame.shown()[1] if frame is not None else None
+        if picture is None:
+            return None
+        message = dict(picture)
+        message["id"] = frame_id
+        return message
 
     def approvals_for(self, frame_id: str) -> str:
         frame = self._frames.get(frame_id)

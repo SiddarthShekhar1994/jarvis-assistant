@@ -14,7 +14,9 @@ one file of this package that imports Qt; BrowserClient is how the endpoint's th
     WatchWindow           the window: frameless, the HUD's flags and tokens, never activated and never the focus, a thin
                           strip with the tag "Jarvis is reading", the host, the last few pages and a small Hide, over
                           the page. On a second screen if there is one, else the right part of the main screen, clear of
-                          the HUD, kept on screen. Mouse and keyboard off: it is Jarvis's to drive. A page that did not
+                          the HUD, kept on screen (the new look, part 7: on a second screen the display's placement
+                          broker follows it and keeps the display's strip clear; with the display off it goes where it
+                          always did). Mouse and keyboard off: it is Jarvis's to drive. A page that did not
                           come leaves words on its dark page, not emptiness: a refusal (HTTP 401, 403, 429) says the
                           site keeps automated browsers out
     BrowserClient         agent.web's Browser seam, for any thread: hands work to the GUI thread and waits, with a
@@ -385,7 +387,14 @@ class WatchWindow(hud_overlay._OverlayWindow):  # noqa: SLF001 - the HUD's own w
                                            else known[0])
         others = [screen for screen in known if screen is not here]
         target = others[0] if others else here
-        self.setGeometry(watch_rect(target.availableGeometry(), avoid if target is here else None, bool(others)))
+        area = target.availableGeometry()
+        if others:          # the new look: the second screen's broker follows it there and keeps the display's strip
+            from .. import second_screen
+
+            room = second_screen.broker()
+            room.watch(self, second_screen.WATCH)
+            area = room.room(target.geometry(), area, second_screen.WATCH)
+        self.setGeometry(watch_rect(area, avoid if target is here else None, bool(others)))
 
     # ---- Qt ------------------------------------------------------------------------------------------------
 

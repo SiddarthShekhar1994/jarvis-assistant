@@ -20,6 +20,14 @@ paints its glance tiles with ``private=True``).
 
 ``scale`` multiplies every size (the second screen's type: 1.333 at 2560x1440); the painter's device pixel ratio does the
 rest. Frames' words are drawn as they came (already cleaned and capped by the board's builders and protocol), as text.
+
+``screen`` (part 7): BOARD (the default: the board's own sizes, as the page has them) or SECOND, the second screen's face
+(DESIGN-SPEC 6, its still second.html): type read across a desk (titles Chakra 20, bodies Sora 16, the badge role 13 px
+and the label role 14 px, a table's change and a maths answer large), 20 / 22 px of padding, a 20 px glyph, a calendar
+row's meta under its title, no past rows, no now pill and no hour labels (the day bar's now tick says where now is), no
+row rules, and whites capped at OLED_INK (OLED care: INK_1 and AMBER_TX drawn as OLED_INK and AMBER_TX2, nothing filled
+with a tile's ground). Lines break at spaces only, never after a hyphen (a word longer than a line breaks inside it,
+not right after a hyphen of its own).
 """
 
 from __future__ import annotations
@@ -64,6 +72,14 @@ _MORE_RE = re.compile(r"\+(\d+) MORE", re.IGNORECASE)
 _ZERO_RE = re.compile(r"[+\-−]?[$€£]?0+(?:[.,]0+)?%?")       # a table cell that says none (the page's)
 _FIGURE_RE = re.compile(r"[+\-−]?[$€£]?[0-9]")                 # a delta line that starts with its figure
 _PLAIN_NUMBER_RE = re.compile(r"[$€£]?[0-9][0-9,]*(?:\.[0-9]+)?[%kKMB]?")   # "2,900", "$3.4k" (no sign)
+# Part 6 fixes (review 6, board 4): a table's change column - headed as one ("Change", "Change %", "Δ", "Diff",
+# "Delta", "+/-", "Variance") or a cell with its sign ("+500", "−200") - names the row's before and after figures: the two
+# columns just before it.
+_SIGNED_RE = re.compile(r"[+\-−±][$€£]?[0-9][0-9,]*(?:\.[0-9]+)?[%kKMB]?")
+_CHANGE_HEAD_RE = re.compile(r"\b(?:change|changes|changed|chg|delta|diff|difference|variance)\b|Δ|±|\+/-",
+                             re.IGNORECASE)
+
+BOARD, SECOND = "board", "second"   # the faces a tile is laid out in (part 7: SECOND, the second screen)
 
 # Type: (family, px, line height, weight, tracking em, caps) - holo's roles, and the few the board's style sets itself.
 _TYPE: dict[str, tuple[str, float, float, int, float, bool]] = {
@@ -90,8 +106,64 @@ _TYPE: dict[str, tuple[str, float, float, int, float, bool]] = {
     "step": (hud.MONO_FAMILY, 10, 12, 500, 0.0, False),           # a maths step's number
     "expr": (hud.BODY_FAMILY, 15, 22, 400, 0.02, False),          # a maths line
     "expr_strong": (hud.BODY_FAMILY, 15, 22, 600, 0.02, False),   # ... the answer
-    "headline": (hud.DISPLAY_FAMILY, 32, 38, 500, 0.0, False),    # the second screen's headline: a change, an answer
+    "headline": (hud.DISPLAY_FAMILY, 32, 38, 500, 0.0, False),    # private: a table's change, large
+    "answer": (hud.DISPLAY_FAMILY, 32, 38, 500, 0.0, False),      # ... and a maths answer
 }
+# Part 7: the second screen's face (DESIGN-SPEC 6: the badge role 13 px, the label role 14 px, bodies Sora 16, titles
+# Chakra 20; the rest as second.html sets them), read across a desk. Every key of _TYPE is here.
+_SECOND_TYPE: dict[str, tuple[str, float, float, int, float, bool]] = {
+    "title": (hud.DISPLAY_FAMILY, 20, 26, 500, 0.01, False),
+    "badge": (hud.MONO_FAMILY, 13, 16, 500, 0.16, True),
+    "body": (hud.BODY_FAMILY, 16, 24, 400, 0.0, False),
+    "row": (hud.BODY_FAMILY, 17, 22, 400, 0.0, False),
+    "strong": (hud.BODY_FAMILY, 16, 22, 600, 0.0, False),
+    "small": (hud.BODY_FAMILY, 15, 20, 400, 0.0, False),
+    "caption": (hud.BODY_FAMILY, 15, 20, 400, 0.0, False),
+    "time": (hud.MONO_FAMILY, 15, 20, 500, 0.0, False),
+    "axis": (hud.MONO_FAMILY, 13, 16, 500, 0.04, False),
+    "meta": (hud.MONO_FAMILY, 13, 16, 500, 0.12, True),
+    "pill": (hud.MONO_FAMILY, 13, 18, 600, 0.06, False),
+    "chip": (hud.BODY_FAMILY, 17, 22, 400, 0.0, False),
+    "kbd": (hud.MONO_FAMILY, 13, 16, 500, 0.08, True),
+    "label": (hud.MONO_FAMILY, 14, 18, 500, 0.20, True),
+    "cell": (hud.BODY_FAMILY, 15, 20, 400, 0.0, False),
+    "cell_strong": (hud.BODY_FAMILY, 15, 20, 600, 0.0, False),
+    "value": (hud.MONO_FAMILY, 14, 18, 500, 0.0, False),
+    "delta": (hud.BODY_FAMILY, 15, 20, 400, 0.0, False),
+    "delta_strong": (hud.BODY_FAMILY, 15, 20, 600, 0.0, False),
+    "step": (hud.MONO_FAMILY, 13, 16, 500, 0.0, False),
+    "expr": (hud.BODY_FAMILY, 18, 26, 400, 0.02, False),
+    "expr_strong": (hud.BODY_FAMILY, 18, 26, 600, 0.02, False),
+    "headline": (hud.DISPLAY_FAMILY, 52, 56, 500, 0.0, False),    # "2,900 › 3,400"
+    "answer": (hud.BODY_FAMILY, 44, 52, 600, 0.01, False),        # "x = 1 or x = 3"
+}
+_TYPES_OF = {BOARD: _TYPE, SECOND: _SECOND_TYPE}
+
+
+@dataclass(frozen=True)
+class _Face:
+    """A face's room (px at scale 1): the tile's padding (from its outer edge), the kind's glyph and the gap after it,
+    the header's least height and the gap under it, the title's least room beside the meta, a calendar row's time
+    column at least, and a chart bar's track and the gap between bars."""
+
+    pad_top: float
+    pad_side: float
+    pad_bottom: float
+    glyph: float
+    glyph_gap: float
+    head_min: float
+    head_gap: float
+    title_min: float
+    time_col: float
+    track: float
+    bar_gap: float
+
+
+_FACES = {BOARD: _Face(PAD_TOP, PAD_SIDE, PAD_BOTTOM, GLYPH, 8, 24, HEAD_GAP, TITLE_MIN, 96, 11, 8),
+          SECOND: _Face(21, 23, 21, 20, 10, 26, 14, 150, 62, 14, 12)}
+# Second screen (OLED care, DESIGN-SPEC 6): its whites are capped at OLED_INK - the brightest ink a tile may use there.
+_CAPPED = {QColor(holo.INK_1).rgb(): holo.OLED_INK, QColor(holo.FOCUS).rgb(): holo.OLED_INK,
+           QColor(holo.AMBER_TX).rgb(): holo.AMBER_TX2}
 
 
 def _color(value: Any, alpha: float | None = None) -> QColor:
@@ -102,13 +174,14 @@ def _color(value: Any, alpha: float | None = None) -> QColor:
 
 
 class _Type:
-    """The fonts of one scale (QFont and QFontMetricsF per kind of words)."""
+    """The fonts of one scale and face (QFont and QFontMetricsF per kind of words)."""
 
-    def __init__(self, scale: float) -> None:
+    def __init__(self, scale: float, screen: str = BOARD) -> None:
         self.scale = scale
+        self.table = _TYPES_OF.get(screen, _TYPE)
         self.fonts: dict[str, QFont] = {}
         self.metrics: dict[str, QFontMetricsF] = {}
-        for key, (family, px, _line, weight, tracking, _caps) in _TYPE.items():
+        for key, (family, px, _line, weight, tracking, _caps) in self.table.items():
             size = max(1, round(px * scale))
             font = QFont()
             font.setFamilies([family, *hud._FALLBACKS.get(family, ())])   # noqa: SLF001 - hud's own fallbacks
@@ -125,23 +198,24 @@ class _Type:
             self.metrics[key] = QFontMetricsF(font)
 
     def line(self, key: str) -> float:
-        return _TYPE[key][2] * self.scale
+        return self.table[key][2] * self.scale
 
     def words(self, key: str, text: str) -> str:
-        return text.upper() if _TYPE[key][5] else text
+        return text.upper() if self.table[key][5] else text
 
     def width(self, key: str, text: str) -> float:
         return self.metrics[key].horizontalAdvance(self.words(key, text))
 
 
-_TYPES: dict[float, _Type] = {}
+_TYPES: dict[tuple[float, str], _Type] = {}
 
 
-def _type(scale: float) -> _Type:
-    key = round(float(scale), 4)
+def _type(scale: float, screen: str = BOARD) -> _Type:
+    screen = screen if screen in _TYPES_OF else BOARD
+    key = (round(float(scale), 4), screen)
     found = _TYPES.get(key)
     if found is None:
-        found = _TYPES[key] = _Type(key)
+        found = _TYPES[key] = _Type(key[0], screen)
     return found
 
 
@@ -227,6 +301,8 @@ def _wrap(text: str, kind: str, width: float, types: _Type) -> list[str]:
                         low = middle
                     else:
                         high = middle - 1
+                if low > 1 and word[low - 1] in "-‐‑":
+                    low -= 1                          # never right after a hyphen (DESIGN-SPEC 6): before it
                 lines.append(word[:low])
                 word = word[low:]
             current = word
@@ -264,15 +340,18 @@ class _Builder:
     """Lays out one tile of ``width`` px."""
 
     def __init__(self, frame: Mapping[str, Any], width: float, scale: float, private: bool,
-                 picture: QImage | None) -> None:
+                 picture: QImage | None, screen: str = BOARD) -> None:
         self.frame = frame
         self.s = scale
-        self.t = _type(scale)
+        self.screen = screen if screen in _FACES else BOARD
+        self.second = self.screen == SECOND
+        self.face = _FACES[self.screen]
+        self.t = _type(scale, self.screen)
         self.private = private
         self.picture = picture
         self.width = max(40.0 * scale, float(width))
-        self.left = PAD_SIDE * scale
-        self.inner = max(1.0, self.width - 2 * PAD_SIDE * scale)
+        self.left = self.face.pad_side * scale
+        self.inner = max(1.0, self.width - 2 * self.face.pad_side * scale)
         self.right = self.left + self.inner
         self.waits = bool(frame.get("waits")) and frame.get("status", "ok") == "ok"
         self.status = str(frame.get("status", "ok"))
@@ -283,25 +362,28 @@ class _Builder:
     # ---- header ----------------------------------------------------------------------------------------------------
 
     def header(self) -> _Block:
-        frame, t = self.frame, self.t
+        frame, t, face = self.frame, self.t, self.face
         ops: list[Op] = []
         glyph = GLYPHS.get(str(frame.get("kind", "")), "read_all")
         glyph_color = holo.AMBER if self.waits else holo.ALERT if self.status == "failed" else holo.HOLO_LO
-        ops.append(Op("glyph", QRectF(self.left, self.px(2), self.px(GLYPH), self.px(GLYPH)), _color(glyph_color),
+        top = (t.line("title") - self.px(face.glyph)) / 2 if self.second else self.px(2)
+        ops.append(Op("glyph", QRectF(self.left, top, self.px(face.glyph), self.px(face.glyph)), _color(glyph_color),
                       name=glyph))
-        title_x = self.left + self.px(GLYPH + 8)
+        title_x = self.left + self.px(face.glyph + face.glyph_gap)
         title_room = self.right - title_x
         meta = str(frame.get("meta", ""))
         if frame.get("changed"):
             meta = f"{meta} · {CHANGED}" if meta else CHANGED
         pin = self.px(13 + 6) if frame.get("pinned") else 0.0
         meta_w = t.width("badge", meta) if meta else 0.0
-        beside = bool(meta) and title_room - meta_w - pin - self.px(8) >= self.px(TITLE_MIN)
+        beside = bool(meta) and title_room - meta_w - pin - self.px(8) >= self.px(face.title_min)
+        if self.second and meta:       # the second screen: beside it exactly when the title then keeps one line
+            beside = t.width("title", str(frame.get("title", ""))) + self.px(8) + meta_w + pin <= title_room
         title_w = title_room - (meta_w + pin + self.px(8) if beside else 0.0)
         title_color = holo.AMBER_TX if self.waits else holo.INK_1
         title = _text_op(str(frame.get("title", "")), "title", title_x, 0.0, title_w, title_color, t)
         ops.append(title)
-        height = max(self.px(24), title.rect.height())
+        height = max(self.px(face.head_min), title.rect.height())
         meta_color = holo.AMBER_TX2 if self.waits else holo.INK_4
         if beside:
             top = (t.line("title") - t.line("badge")) / 2
@@ -316,7 +398,7 @@ class _Builder:
                 ops.append(Op("glyph", QRectF(line.rect.left() - pin, line.rect.top(), self.px(13), self.px(13)),
                               _color(holo.INK_3), name="pin"))
             height = line.rect.bottom()
-        return _Block(height + self.px(HEAD_GAP), ops)
+        return _Block(height + self.px(face.head_gap), ops)
 
     # ---- the body ----------------------------------------------------------------------------------------------------
 
@@ -368,6 +450,10 @@ class _Builder:
     def rule(self, y: float) -> Op:
         return Op("rule", QRectF(self.left, y, self.inner, 0.0), _color(holo.LINE_FAINT))
 
+    def divider(self) -> list[Op]:
+        """A list row's divider over it: a LINE_FAINT rule on the board; none on the second screen (no grid there)."""
+        return [] if self.second else [self.rule(0.0)]
+
     def paragraph(self, text: str, color: Any, most: int = 0, top: float = 0.0) -> _Block:
         def build(lines_most: int) -> _Block:
             op = _text_op(text, "body", self.left, top, self.inner, color, self.t, most=lines_most)
@@ -395,7 +481,7 @@ class _Builder:
                 continue
             divided = index > 0 or bool(words)
             top = self.px(5) if divided else 0.0
-            ops: list[Op] = [self.rule(0.0)] if divided else []
+            ops: list[Op] = self.divider() if divided else []
             x = self.left
             columns: list[Op] = []
             if leads:
@@ -421,16 +507,21 @@ class _Builder:
             blocks.append(self.day_bar(data, first, last))
         rows = list(data.get("rows") or [])
         now = str(data.get("now", ""))
+        if self.second:          # the second screen: what is still to come (the day bar's tick says where now is and
+            rows = [_start_only(row) for row in rows      # shows the free time), each row at its start
+                    if row.get("state") not in ("past", "free")]
+            now = ""
         horizon = -1
         if now:
             horizon = next((index for index, row in enumerate(rows) if row.get("state") != "past"), len(rows))
-        narrow = self.inner <= self.px(NARROW)
+        narrow = self.second or self.inner <= self.px(NARROW)     # the second screen: a row's meta under its title
         time_w = max((t.width("time", row.get("time", "")) for row in rows), default=0.0)
-        time_w = max(self.px(86 if narrow else 96), min(time_w, self.inner * (0.45 if narrow else 0.4)))
+        least = self.face.time_col if self.second else 86 if narrow else 96
+        time_w = max(self.px(least), min(time_w, self.inner * (0.45 if narrow else 0.4)))
         meta_w = 0.0 if narrow else min(self.inner * 0.35, max((max(t.width("small", row.get("meta", "")),
                                                                      t.width("meta", row.get("meta", "")))
                                                                  for row in rows), default=0.0))
-        gap = self.px(8 if narrow else 10)
+        gap = self.px(10 if self.second or not narrow else 8)
         divided = False
         for index, row in enumerate(rows):
             if index == horizon:
@@ -441,12 +532,13 @@ class _Builder:
                 continue
             state = str(row.get("state", ""))
             free = state == "free"
-            top = self.px(5) + (self.px(4) if free else 0.0)
-            ops: list[Op] = [self.rule(0.0)] if divided and not free else []
+            boxed = free and not self.second          # the board's dashed free row; the second screen's is plain
+            top = self.px(5) + (self.px(4) if boxed else 0.0)
+            ops: list[Op] = self.divider() if divided and not free else []
             time_color = (holo.HOLO_HI if state in ("next", "now", "today") else holo.INK_4 if state == "past"
-                          else holo.INK_3)
-            title_color = (holo.INK_3 if state in ("free", "struck") else holo.INK_4 if state == "past"
-                           else holo.HOLO_HI if state == "new" else holo.INK_1)
+                          else holo.INK_4 if free and self.second else holo.INK_3)
+            title_color = (holo.INK_4 if free and self.second else holo.INK_3 if state in ("free", "struck")
+                           else holo.INK_4 if state == "past" else holo.HOLO_HI if state == "new" else holo.INK_1)
             columns = [_text_op(str(row.get("time", "")), "time", self.left, top + self.px(1), time_w, time_color, t)]
             x = self.left + time_w + gap
             meta = str(row.get("meta", ""))
@@ -456,15 +548,17 @@ class _Builder:
             if meta:
                 loud = state in ("next", "now", "new", "struck")
                 kind = "meta" if loud else "small"
-                color = holo.HOLO_HI if state in ("next", "now", "new") else holo.INK_4
+                color = ((holo.HOLO if self.second else holo.HOLO_HI) if state in ("next", "now", "new")
+                         else holo.INK_4)
                 if narrow:
-                    columns.append(_text_op(meta, kind, x, columns[-1].rect.bottom(), self.right - x, color, t))
+                    under = columns[-1].rect.bottom() + (self.px(2) if self.second else 0.0)
+                    columns.append(_text_op(meta, kind, x, under, self.right - x, color, t))
                 else:
                     columns.append(_text_op(meta, kind, self.right - meta_w, top + self.px(2 if loud else 1), meta_w,
                                             color, t, align="right"))
             ops += columns
             bottom = max(op.rect.bottom() for op in columns) + self.px(5)
-            if free:
+            if boxed:
                 ops.insert(0, Op("box", QRectF(self.left - self.px(7), self.px(4) + self.px(1), self.inner + self.px(14),
                                                bottom - self.px(5) - self.px(1)), _color(holo.INK_3, 0.35),
                                  fill=_color(holo.HOLO, 0.02), radius=self.px(4), dashed=True))
@@ -497,6 +591,8 @@ class _Builder:
         if now_min >= 0:
             x = x_of(now_min)
             ops.append(Op("box", QRectF(x - self.px(1), 0.0, self.px(2), self.px(12)), None, fill=_color(holo.HOLO_HI)))
+        if self.second:                          # the second screen: the bar alone (2 px over it, 14 under it)
+            return _Block(self.px(2 + 12 + 14), [op.moved(self.px(2)) for op in ops], bar=True)
         top = self.px(12 + 3)
         reach = -1.0
         for tick in data.get("ticks") or []:
@@ -570,7 +666,7 @@ class _Builder:
                 blocks.append(self.more_block(str(row.get("meta", ""))))
                 continue
             top = 0.0 if first else self.px(6)
-            ops: list[Op] = [] if first else [self.rule(0.0)]
+            ops: list[Op] = [] if first else self.divider()
             x = self.left + self.px(6 + 10)
             side = _side(row)
             sender_w = self.right - x - (side_w + self.px(10) if side else 0.0)
@@ -606,7 +702,7 @@ class _Builder:
                 continue
             state = str(row.get("state", "open"))
             top = 0.0 if first else self.px(6)
-            ops: list[Op] = [] if first else [self.rule(0.0)]
+            ops: list[Op] = [] if first else self.divider()
             x = self.left + self.px(16 + 10)
             word = _todo_word(row)
             text_w = self.right - x - (meta_w + self.px(10) if word else 0.0)
@@ -700,7 +796,7 @@ class _Builder:
         rows = [[str(cell) for cell in row] for row in data.get("rows") or [] if isinstance(row, list)]
         changed = int(data.get("changed", -1)) if isinstance(data.get("changed"), int) else -1
         if self.private and 0 <= changed < len(rows):
-            headline = self.table_headline(rows[changed], str(data.get("change", "")))
+            headline = self.table_headline(columns, rows[changed], str(data.get("change", "")))
             if headline:
                 return headline
         t = self.t
@@ -760,32 +856,35 @@ class _Builder:
             blocks.append(_Block(line.rect.bottom(), [line]))
         return blocks
 
-    def table_headline(self, row: list[str], change: str) -> list[_Block]:
+    def table_headline(self, columns: list[str], row: list[str], change: str) -> list[_Block]:
         """The second screen's table: the changed row's first words, then what it was and is now, large ("2,900 →
-        3,400", the new figure in HOLO_HI), then its change; [] when the row has no two plain figures to say so."""
-        figures = [cell for cell in row[1:] if _PLAIN_NUMBER_RE.fullmatch(cell)]
-        if len(figures) < 2:
+        3,400", the new figure in HOLO_HI), then its change; [] when its before and after figures can't be told
+        without doubt (headline_figures): the rows show then."""
+        figures = headline_figures(columns, row)
+        if figures is None:
             return []
         t = self.t
         blocks: list[_Block] = []
         if row[0]:
             label = _text_op(row[0], "body", self.left, 0.0, self.inner, holo.INK_2, t)
-            blocks.append(_Block(label.rect.bottom() + self.px(6), [label]))
-        before, after = figures[-2], figures[-1]
-        arrow = self.px(22)
+            blocks.append(_Block(label.rect.bottom() + self.px(22 if self.second else 6), [label]))
+        before, after = figures
+        arrow = self.px(50 if self.second else 22)          # the second screen's arrow: 30 px, 10 either side
+        mark_size = self.px(30 if self.second else 14)
         width = t.width("headline", before) + arrow + t.width("headline", after)
         old = _text_op(before, "headline", self.left, 0.0, self.inner, holo.INK_1, t)
         if width <= self.inner:
             x = old.rect.right()
-            mark = Op("glyph", QRectF(x + self.px(3), (t.line("headline") - self.px(14)) / 2, self.px(14), self.px(14)),
-                      _color(holo.INK_3), name="chevron")
+            mark = Op("glyph", QRectF(x + self.px(10 if self.second else 3), (t.line("headline") - mark_size) / 2,
+                                      mark_size, mark_size), _color(holo.INK_4 if self.second else holo.INK_3),
+                      name="chevron")
             new = _text_op(after, "headline", x + arrow, 0.0, self.right - x - arrow, holo.HOLO_HI, t)
             blocks.append(_Block(max(old.rect.bottom(), new.rect.bottom()), [old, mark, new]))
         else:
             new = _text_op(after, "headline", self.left, old.rect.bottom(), self.inner, holo.HOLO_HI, t)
             blocks.append(_Block(new.rect.bottom(), [old, new]))
         if change:
-            blocks.append(self.delta(change, self.px(8)))
+            blocks.append(self.delta(change, self.px(12 if self.second else 8)))
         return blocks
 
     def chart(self, data: Mapping[str, Any]) -> list[_Block]:
@@ -806,12 +905,12 @@ class _Builder:
         track_w = max(self.px(32), self.right - value_w - gap - track_x)
         blocks: list[_Block] = []
         for index, bar in enumerate(bars):
-            top = 0.0 if index == 0 else self.px(8)
+            top = 0.0 if index == 0 else self.px(self.face.bar_gap)
             label = _text_op(str(bar.get("label", "")), "small", self.left, top, label_w, holo.INK_2, t)
             value = _text_op(str(bar.get("text", "")), "value", self.right - value_w, top + self.px(1), value_w,
                              holo.INK_1, t, align="right")
             middle = top + max(label.rect.height(), t.line("value")) / 2
-            track = QRectF(track_x, middle - self.px(5.5), track_w, self.px(11))
+            track = QRectF(track_x, middle - self.px(self.face.track) / 2, track_w, self.px(self.face.track))
 
             def x_of(number: float) -> float:
                 return track.left() + track.width() * (number - low) / span
@@ -978,11 +1077,13 @@ class _Builder:
         answer = data.get("answer") if isinstance(data.get("answer"), Mapping) else {}
         if self.private:                          # the second screen: the answer large, the working in one line
             t = self.t
-            big = _text_op(maths_text(answer.get("expr")), "headline", self.left, 0.0, self.inner, holo.HOLO_HI, t)
+            top = self.px(6) if self.second else 0.0
+            big = _text_op(maths_text(answer.get("expr")), "answer", self.left, top, self.inner, holo.HOLO_HI, t)
             blocks = [_Block(big.rect.bottom(), [big])]
             line = working_line(data)
             if line:
-                said = _text_op(line, "body", self.left, self.px(8), self.inner, holo.HOLO_LO, t)
+                said = _text_op(line, "body", self.left, self.px(12 if self.second else 8), self.inner,
+                                holo.INK_3 if self.second else holo.HOLO_LO, t)
                 blocks.append(_Block(said.rect.bottom(), [said]))
             return blocks
         narrow = self.width - self.px(2 * PAD_SIDE + 2) < self.px(ROW_FROM)     # the page's content box (and border)
@@ -1067,6 +1168,42 @@ class _Builder:
         return _Block(top + chip_h, ops)
 
 
+def headline_figures(columns: Sequence[Any], row: Sequence[Any]) -> tuple[str, str] | None:
+    """A changed table row's before and after figures, chosen by column (part 6 fixes, review 6 board 4): the two
+    columns just before its change column - the first after the row's label headed as a change ("Change", "Change %",
+    "Δ", "Diff" ...) or whose cell in this row carries its sign ("+500", "−200") - when both are plain figures ("2,900",
+    "17%"); with no change column, the row's only two plain figures after its label. None when that is not without
+    doubt (a change column too near the label, a figure that is not plain, three figures and no change column): the
+    tile shows the rows then. An unsigned change cell ("500", "17%") under a Change header is never taken for a figure."""
+    cells = [str(cell).strip() for cell in row]
+    heads = [str(word) for word in columns]
+    change = next((index for index in range(1, len(cells))
+                   if (index < len(heads) and _CHANGE_HEAD_RE.search(heads[index]))
+                   or _SIGNED_RE.fullmatch(cells[index])), None)
+    if change is not None:
+        if change < 3:
+            return None
+        before, after = cells[change - 2], cells[change - 1]
+        if _PLAIN_NUMBER_RE.fullmatch(before) and _PLAIN_NUMBER_RE.fullmatch(after):
+            return before, after
+        return None
+    figures = [cell for cell in cells[1:] if _PLAIN_NUMBER_RE.fullmatch(cell)]
+    return (figures[0], figures[1]) if len(figures) == 2 else None
+
+
+_RANGE_RE = re.compile(r"^(.*?\d{1,2}:\d{2})\s*[-–‒—]\s*\d")
+
+
+def _start_only(row: Mapping[str, Any]) -> Mapping[str, Any]:
+    """A calendar row with its time's start alone ("10:00-10:30" -> "10:00"; "All day" as it is): the second screen."""
+    found = _RANGE_RE.match(str(row.get("time", "")))
+    if found is None:
+        return row
+    copy = dict(row)
+    copy["time"] = found.group(1)
+    return copy
+
+
 def _side(row: Mapping[str, Any]) -> str:
     """A mail row's right side: its meta (WAITING / OWED) and its time."""
     parts = [str(row.get("meta", "")), str(row.get("time", ""))]
@@ -1080,7 +1217,7 @@ def _todo_word(row: Mapping[str, Any]) -> str:
 
 def _assemble(builder: _Builder, blocks: list[_Block], height: float | None) -> TileLayout:
     s = builder.s
-    top, bottom_pad = PAD_TOP * s, PAD_BOTTOM * s
+    top, bottom_pad = builder.face.pad_top * s, builder.face.pad_bottom * s
     head = blocks[0]
     body = blocks[1:]
     dropped = 0
@@ -1122,44 +1259,84 @@ def _assemble(builder: _Builder, blocks: list[_Block], height: float | None) -> 
         y += block.height
     natural = y + bottom_pad
     final = natural if height is None else float(height)
+    if builder.second:
+        ops = [_capped(op) for op in ops]
     return TileLayout(builder.width, final, ops, more=dropped, clipped=natural > final + 0.5)
 
 
+def cap_ink(color: QColor | None) -> QColor | None:
+    """OLED care (the second screen, DESIGN-SPEC 6): ``color`` with its white capped - INK_1 and FOCUS as OLED_INK,
+    AMBER_TX as AMBER_TX2 (their alpha kept); any other colour brighter than OLED_INK scaled down to it."""
+    if color is None:
+        return None
+    found = _CAPPED.get(QColor(color).rgb())
+    if found is not None:
+        capped = QColor(found)
+        capped.setAlphaF(color.alphaF())
+        return capped
+    cap = _luma(QColor(holo.OLED_INK))
+    luma = _luma(color)
+    if luma <= cap + 0.5:
+        return color
+    k = cap / luma
+    return QColor.fromRgbF(color.redF() * k, color.greenF() * k, color.blueF() * k, color.alphaF())
+
+
+def _luma(color: QColor) -> float:
+    return 0.2126 * color.red() + 0.7152 * color.green() + 0.0722 * color.blue()
+
+
+def _capped(op: Op) -> Op:
+    """An op as the second screen draws it: its whites capped (cap_ink), and nothing filled with a tile's ground (a
+    timeline's dot is true black there)."""
+    copy = op.moved(0.0)
+    copy.color = cap_ink(op.color)
+    fill = op.fill
+    if fill is not None and fill.rgb() == QColor(holo.TILE).rgb():
+        fill = QColor(holo.OLED_BLACK)
+    copy.fill = cap_ink(fill)
+    return copy
+
+
 def tile_layout(frame: Mapping[str, Any], width: float, height: float | None = None, *, scale: float = 1.0,
-                private: bool = False, picture: QImage | None = None) -> TileLayout:
+                private: bool = False, picture: QImage | None = None, screen: str = BOARD) -> TileLayout:
     """See the module doc."""
     scale = max(0.25, float(scale or 1.0))
-    builder = _Builder(frame, width, scale, bool(private), picture)
+    builder = _Builder(frame, width, scale, bool(private), picture, screen)
     return _assemble(builder, [builder.header(), *builder.body()], height)
 
 
 def tile_height(frame: Mapping[str, Any], width: float, *, scale: float = 1.0, private: bool = False,
-                picture: QImage | None = None) -> float:
+                picture: QImage | None = None, screen: str = BOARD) -> float:
     """The natural height of ``frame``'s tile ``width`` px wide."""
-    return tile_layout(frame, width, None, scale=scale, private=private, picture=picture).height
+    return tile_layout(frame, width, None, scale=scale, private=private, picture=picture, screen=screen).height
 
 
 # --------------------------------------------------------------------------
 # Painting
 # --------------------------------------------------------------------------
 
-def _outline(frame: Mapping[str, Any]) -> tuple[QColor, QColor, float]:
-    """(border, ground, radius) of a tile: amber and rounder when it waits, coral when it failed (DESIGN-SPEC 3.4)."""
+def _outline(frame: Mapping[str, Any], screen: str = BOARD) -> tuple[QColor, QColor, float]:
+    """(border, ground, radius) of a tile: amber and rounder when it waits, coral when it failed (DESIGN-SPEC 3.4). The
+    second screen's outlines are LINE (cyan 0.20) and amber at 0.55, as second.html draws them on true black."""
     status = frame.get("status", "ok")
+    second = screen == SECOND
     if frame.get("waits") and status == "ok":
-        return _color(holo.AMBER_LINE), _color(holo.TILE_AMBER), float(holo.RADIUS_TILE_AMBER)
+        return (_color(holo.AMBER, 0.55) if second else _color(holo.AMBER_LINE), _color(holo.TILE_AMBER),
+                float(holo.RADIUS_TILE_AMBER))
     if status == "failed":
         return _color(holo.TILE_STYLES[holo.TILE_ERROR].border), _color(holo.TILE_ALERT), float(holo.RADIUS_FRAME)
-    return _color(holo.FRAME_EDGE), _color(holo.TILE), float(holo.RADIUS_FRAME)
+    return (_color(holo.LINE) if second else _color(holo.FRAME_EDGE)), _color(holo.TILE), float(holo.RADIUS_FRAME)
 
 
 def paint_tile(painter: QPainter, rect: QRectF, frame: Mapping[str, Any], *, scale: float = 1.0, private: bool = False,
-               picture: QImage | None = None, ground: bool = False) -> TileLayout:
+               picture: QImage | None = None, ground: bool = False, screen: str = BOARD) -> TileLayout:
     """Paint one read-only tile into ``rect`` (see the module doc); returns its layout (what went where)."""
     rect = QRectF(rect)
-    layout = tile_layout(frame, rect.width(), rect.height(), scale=scale, private=private, picture=picture)
-    types = _type(max(0.25, float(scale or 1.0)))
-    border, fill, radius = _outline(frame)
+    layout = tile_layout(frame, rect.width(), rect.height(), scale=scale, private=private, picture=picture,
+                         screen=screen)
+    types = _type(max(0.25, float(scale or 1.0)), screen)
+    border, fill, radius = _outline(frame, screen)
     painter.save()
     try:
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -1387,5 +1564,6 @@ class GlanceTiles(QWidget):
             painter.end()
 
 
-__all__ = ["CHANGED", "GAP", "GLYPHS", "GROUP_HEAD", "GlanceTiles", "HIDDEN", "MORE", "ON_MAIN", "Op", "PICTURE_ONLY",
-           "TileLayout", "paint_group_head", "paint_tile", "tile_height", "tile_layout"]
+__all__ = ["BOARD", "CHANGED", "GAP", "GLYPHS", "GROUP_HEAD", "GlanceTiles", "HIDDEN", "MORE", "ON_MAIN", "Op",
+           "PICTURE_ONLY", "SECOND", "TileLayout", "cap_ink", "headline_figures", "paint_group_head", "paint_tile",
+           "tile_height", "tile_layout"]

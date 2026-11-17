@@ -14,8 +14,9 @@ owner clicked Turn on on the first-run "Jarvis on your desktop" card (Settings >
 Desktop's Turn off takes it away again), with ``"desktop_consent_version": 2`` once the
 card he turned on listed Phase 2's rows (none: Phase 1's card, version 1); ``"look":
 {"sounds_off": true, "second_screen": true, "board_hints": 2}`` for the new look's switches
-on this PC (Settings > Look: the soft sounds turned off, Jarvis on the second screen) and
-how many times the empty board's one-line hint was shown. Ids, numbers and booleans
+on this PC (Settings > Look: the soft sounds turned off, Jarvis on the second screen - true
+or false once the owner chose; none: [look] second_screen decides) and how many times the
+empty board's one-line hint was shown. Ids, numbers and booleans
 only: never any text (the LIVE view's steps are never saved).
 
 The file is written atomically (temporary file + ``os.replace``); a missing,
@@ -51,7 +52,9 @@ class LookPrefs:
     """The new look's switches on this PC (Settings > Look) and the empty board's hint count."""
 
     sounds_off: bool = False      # the soft sounds are off on this PC (whatever [look] sounds says)
-    second_screen: bool = False   # Jarvis shows on the second monitor (with [look] second_screen as the default)
+    # Jarvis shows on the second monitor: True or False once the owner chose in Settings > Look (part 7); None - never
+    # chosen on this PC - lets [look] second_screen decide (the default).
+    second_screen: bool | None = None
     board_hints: int = 0          # times the empty Home's board hint line was shown (it stops after a few)
 
 
@@ -218,8 +221,8 @@ class AssistantPrefs:
             look: dict[str, object] = {}
             if self._look.sounds_off:
                 look["sounds_off"] = True
-            if self._look.second_screen:
-                look["second_screen"] = True
+            if self._look.second_screen is not None:
+                look["second_screen"] = bool(self._look.second_screen)   # an Off chosen here outlives [look]'s on
             if self._look.board_hints:
                 look["board_hints"] = self._look.board_hints
             values["look"] = look
@@ -276,13 +279,15 @@ def _load(path: Path) -> _Loaded:
 
 
 def _look(raw: object) -> LookPrefs:
-    """The "look" table (booleans that are exactly true, a hint count 0-99); anything else is the default."""
+    """The "look" table (booleans that are exactly true, the second screen's true or false, a hint count 0-99);
+    anything else is the default."""
     if not isinstance(raw, dict):
         return LookPrefs()
     hints = raw.get("board_hints")
     count = hints if isinstance(hints, int) and not isinstance(hints, bool) and 0 <= hints <= BOARD_HINTS_MAX else 0
-    return LookPrefs(sounds_off=raw.get("sounds_off") is True, second_screen=raw.get("second_screen") is True,
-                     board_hints=count)
+    second = raw.get("second_screen")
+    return LookPrefs(sounds_off=raw.get("sounds_off") is True,
+                     second_screen=second if isinstance(second, bool) else None, board_hints=count)
 
 
 def _consent_version(data: dict) -> int:

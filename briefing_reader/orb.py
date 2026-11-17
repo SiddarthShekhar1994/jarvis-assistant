@@ -69,7 +69,9 @@ OrbWidget(px=HERO)
     ``is_recording()``. ``is_animating()``, ``frame_interval()``, ``detail()`` (``"full"`` / ``"reduced"`` /
     ``"compact"``), ``sample(now=None) -> OrbFrame`` (the computed values, for tests), ``paint_times()``,
     ``snapshot()`` (the ring now without its ground, in a transparent pixmap of the widget's size: the switch to the
-    desktop HUD flies it; also while hidden). Accessible name "Jarvis, <state>" (e.g. "Jarvis, needs you").
+    desktop HUD flies it; also while hidden), ``paint_into(painter, origin, frame=None)`` (a sample painted by another
+    window's painter, its layers cached here: the second screen, part 7). Accessible name "Jarvis, <state>" (e.g.
+    "Jarvis, needs you").
 
 Paint (DESIGN-SPEC 4.4: a median of at most 3 ms at 320 px, x2.25 at 1.5x)
     The ground slice and the fixed sight are one cached pixmap per tone (ink, dashed, listening; at most
@@ -1370,8 +1372,8 @@ class OrbWidget(_OrbBase):
         text = super()._describe()
         return f"{text}, recording a meeting" if getattr(self, "_recording", False) else text
 
-    def _paint_recording(self, painter: QPainter) -> None:
-        center = self.orb_rect().center()
+    def _paint_recording(self, painter: QPainter, origin: QPointF | None = None) -> None:
+        center = self.orb_rect().center() + (origin if origin is not None else QPointF(0.0, 0.0))
         k = self._px / 360.0
         painter.resetTransform()
         painter.setOpacity(1.0)
@@ -1489,6 +1491,25 @@ class OrbWidget(_OrbBase):
         finally:
             self._ground, self._backdrops, self._layer_builds = ground, backdrops, builds
         return pixmap
+
+    def paint_into(self, painter: QPainter, origin: QPointF, frame: OrbFrame | None = None, *,
+                   dpr: float | None = None) -> OrbFrame:
+        """The ring - ``frame`` (one of this ring's samples, which the caller may have changed), else the ring now -
+        painted by ``painter`` with this widget's top-left at ``origin``, without a ground, its recording ring too: a
+        window that paints a ring of its own uses it (the second screen, part 7: never shown, this widget is its ring's
+        clock and layers). The sight's cached layers are this widget's own (at ``dpr``, default this widget's);
+        ``painter``'s state is as it was after. Returns the frame painted."""
+        frame = self.sample() if frame is None else frame
+        ratio = float(dpr if dpr is not None else (self.devicePixelRatioF() or 1.0))
+        painter.save()
+        try:
+            painter.translate(origin)
+            self._paint(painter, frame, ratio)
+            if self._recording:
+                self._paint_recording(painter, QPointF(origin))
+        finally:
+            painter.restore()
+        return frame
 
     def set_dim(self, level: float) -> None:
         """Draw the whole ring at ``level`` (0..1) of its strength over the ground: quiet hours dim it to 0.7

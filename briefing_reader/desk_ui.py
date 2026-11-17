@@ -48,6 +48,9 @@ are never saved. The desk forms with a group's first frame (ReadingView: the rin
 geometry is set once, then ``desk: enter``); the first time in a session the empty Home's hint is counted
 (prefs.note_board_hint; it stops after three).
 
+Part 7: after every send that changed the board, the look controller's ``on_board_changed(feed)`` gives the second
+screen the board as it is (its frames as the page has them; never the lit frame, a backdrop or open big).
+
 Logs: ids, kinds, counts, durations and statuses only - never a frame's words, a turn's words or an address.
 """
 
@@ -317,6 +320,17 @@ class DeskController(QObject):
         window = reading.window()
         return not (window is not None and window.isMinimized())
 
+    def _look_call(self, name: str, *args: Any) -> None:
+        """A look controller's hook (part 7: on_board_changed, the board as it is now to the second screen, which
+        never sounds); never stops the board."""
+        look = self.look
+        if look is None or (isinstance(look, QObject) and not shiboken6.isValid(look)):
+            return
+        try:
+            getattr(look, name)(*args)
+        except Exception as exc:  # noqa: BLE001 - the second screen never stops the board
+            logger.debug("Board: the look controller's %s failed (%s)", name, type(exc).__name__)
+
     def sound(self, name: str, *args: Any) -> None:
         """One of the look controller's board sounds (its gate and SoundBoard's decide); never stops the board."""
         look = self.look
@@ -538,6 +552,7 @@ class DeskController(QObject):
             logger.info("Board: %d frame(s) changed", len(changed))
         self.cue.refresh()
         self.big.check()
+        self._look_call("on_board_changed", self.feed)    # part 7: the board as it is now, to the second screen
 
     def _sync_counts(self) -> None:
         # A Clear's Bring back keeps the desk (part 5c) even with nothing left: held before the count when it starts, so

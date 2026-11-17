@@ -9181,6 +9181,7 @@ class AppController(QObject):
             self._agenda_record = records
             self._show_agenda_rows(panel, rows)
         self._show_deadlines(panel, now)
+        self._look_call("on_events", self._agenda_events or ())    # the new look: the second screen's NEXT
 
     def _agenda_line(self) -> tuple[str, str, str, str]:
         """(text, colour, link, tooltip) of TODAY when there are no rows to show."""
@@ -13392,6 +13393,9 @@ class AppController(QObject):
             window.clearRequested.connect(self.clear_live)
             window.linkClicked.connect(self._on_live_link)
             window.set_summary(self._live_summary)
+            from . import second_screen
+
+            second_screen.broker().watch(window, second_screen.LIVE)   # the new look: it goes first on that screen
         return window
 
     def pop_out_live(self, *, activate: bool = True) -> None:
@@ -13481,6 +13485,10 @@ class AppController(QObject):
         others = [screen for screen in QGuiApplication.screens() if screen is not main_screen]
         target = others[0] if others else main_screen
         area = target.availableGeometry() if target is not None else QRect(0, 0, 1280, 800)
+        if others:                                   # the new look: clear of the second screen's strip there
+            from . import second_screen
+
+            area = second_screen.broker().room(target.geometry(), area, second_screen.LIVE)
         window.resize(LIVE_WINDOW_SIZE.boundedTo(area.size() - QSize(2 * SCREEN_MARGIN, 2 * SCREEN_MARGIN))
                       .expandedTo(LIVE_WINDOW_MIN_SIZE))
         width, height = window.width(), window.height()
@@ -15552,6 +15560,11 @@ class AppController(QObject):
                 desk.shutdown()            # the new look's board: its page, renderer and profile go now
             except Exception as exc:  # noqa: BLE001 - the board never stops the quit
                 logger.warning("Board: not shut down cleanly (%s)", type(exc).__name__)
+        if look is not None and shiboken6.isValid(look) and callable(getattr(look, "shutdown", None)):
+            try:
+                look.shutdown()            # the new look's second screen: its window goes now
+            except Exception as exc:  # noqa: BLE001 - the second screen never stops the quit
+                logger.warning("Second screen: not shut down cleanly (%s)", type(exc).__name__)
         self._close_live_window()
         if self._dialog is not None:
             self._dialog.reject()

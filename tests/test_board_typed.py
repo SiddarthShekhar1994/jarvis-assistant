@@ -195,6 +195,36 @@ class GlanceTests(unittest.TestCase):
         self.assertIn("Divide by 2, then factor: (x − 1)(x − 3) = 0", said)
         self.assertNotIn("x² − 4x + 3 = 0", said)
 
+    def test_private_the_table_s_headline_takes_its_figures_by_column(self) -> None:
+        # Part 6 fixes (review 6, board 4): the last two plain figures made an unsigned change cell the "now" figure -
+        # "3,400 › 500", "3,400 › 17%". The two columns before the change column (signed, or headed Change) are the
+        # figures; when that is not without doubt the rows show.
+        def headline(frame: dict, **kwargs) -> list[str]:
+            return [line for op in self.layout(frame, private=True, **kwargs).ops if op.kind == "text"
+                    and op.font == "headline" for line in op.lines]
+
+        for change in ("+500", "500", "17%"):
+            rows = [["Travel", 1200, 1200, 0], ["Software", 2900, 3400, change], ["Events", 2100, 2100, 0]]
+            for screen in (glance.BOARD, glance.SECOND):
+                with self.subTest(change=change, screen=screen):
+                    self.assertEqual(headline(table(rows=rows), screen=screen), ["2,900", "3,400"])
+        unheaded = table(columns=["Line", "Friday", "Today", "Diff"], rows=[["Software", 2900, 3400, "500"]], changed=0)
+        self.assertEqual(headline(unheaded), ["2,900", "3,400"])                 # "Diff" heads a change column too
+        signed = table(columns=["Line", "Friday", "Today", "Moved"], rows=[["Software", 2900, 3400, "−500"]],
+                       changed=0)
+        self.assertEqual(headline(signed), ["2,900", "3,400"])                   # a signed cell names it
+        two = table(columns=["Line", "Before", "After"], rows=[["Software", 2900, 3400]], changed=0)
+        self.assertEqual(headline(two), ["2,900", "3,400"])                      # the only two figures
+        three = table(columns=["Line", "Q1", "Q2", "Q3"], rows=[["Software", 100, 200, 300]], changed=0)
+        self.assertEqual(headline(three), [])                                     # which two? the rows show
+        self.assertIn("Q2", self.layout(three, private=True).words().upper())
+        near = table(columns=["Line", "Change", "Friday", "Today"], rows=[["Software", "+500", 2900, 3400]], changed=0)
+        self.assertEqual(headline(near), [])                                      # no two figures before it
+        self.assertEqual(glance.headline_figures(["Line", "Friday", "Today", "Change"],
+                                                 ["Software", "2,900", "3,400", "17%"]), ("2,900", "3,400"))
+        self.assertIsNone(glance.headline_figures(["Line", "Friday", "Today", "Change"],
+                                                  ["Software", "two", "3,400", "+500"]))
+
     def test_a_timeline_in_a_row_or_one_node_a_row(self) -> None:
         row = self.layout(timeline(), 448)
         rows = self.layout(timeline(), 260)
