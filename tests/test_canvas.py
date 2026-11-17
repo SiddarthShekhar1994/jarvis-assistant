@@ -127,8 +127,10 @@ class GoRequestTests(unittest.TestCase):
             with self.assertRaises(protocol.Refused, msg=repr(payload)):
                 protocol.check_request("go", json.dumps(payload), ())
 
-    def test_the_list_is_the_buttons_and_three_more(self) -> None:
-        self.assertEqual(set(protocol.GO_WORDS) - set(protocol.CANVAS_BUTTONS), {"undo", "stop_rec", "drag"})
+    def test_the_list_is_the_buttons_and_five_more(self) -> None:
+        # (part 2 added the corner's Tidy and the task card's Stop to part 1's undo, stop_rec and drag)
+        self.assertEqual(set(protocol.GO_WORDS) - set(protocol.CANVAS_BUTTONS),
+                         {"undo", "stop_rec", "drag", "tidy", "stop"})
         self.assertIn("go", protocol.REQUEST_KINDS)
         self.assertEqual(protocol.kind_word("go"), "go")
 
@@ -1073,6 +1075,343 @@ class WindowTests(CanvasApp):
         settle()
         self.assertFalse(window.isFullScreen() or window.isMaximized())
         self.assertFalse(window.start_drag())
+
+
+# --------------------------------------------------------------------------
+# The canvas, part 2: the task card, the big-number frame, Tidy and Stop
+# --------------------------------------------------------------------------
+
+TASK = {"type": "task", "state": "working", "title": "Working on it", "words": "Reading your calendar", "seconds": 4,
+        "steps": 1, "sources": 0, "frames": 0, "group": "", "stop": True}
+
+
+class TaskMessageTests(unittest.TestCase):
+    def test_a_task_message_is_rebuilt_field_by_field(self) -> None:
+        checked = protocol.check_message(dict(TASK))
+        self.assertEqual(checked.type, "task")
+        self.assertEqual(json.loads(checked.text), TASK)
+
+    def test_only_the_state_is_needed(self) -> None:
+        clean = json.loads(protocol.check_message({"type": "task", "state": "gone"}).text)
+        self.assertEqual(clean, dict(TASK, state="gone", title="", words="", seconds=0, steps=0, stop=False))
+
+    def test_states_words_and_counts_are_checked(self) -> None:
+        for state in protocol.TASK_STATES:
+            protocol.check_message(dict(TASK, state=state))
+        for bad in (dict(TASK, state="thinking"), dict(TASK, title="x" * 41), dict(TASK, words="x" * 61),
+                    dict(TASK, seconds=-1), dict(TASK, seconds=1.5), dict(TASK, seconds=True), dict(TASK, steps=100),
+                    dict(TASK, sources="2"), dict(TASK, frames=25), dict(TASK, stop=1), dict(TASK, html="<b>"),
+                    dict(TASK, title=None)):
+            with self.assertRaises(protocol.Refused, msg=repr(bad)):
+                protocol.check_message(bad)
+
+    def test_done_names_a_group_the_app_sent(self) -> None:
+        done = dict(TASK, state="done", group="g1")
+        with self.assertRaises(protocol.Refused):
+            protocol.check_message(done)
+        checked = protocol.check_message(done, (), ("g1",))
+        self.assertEqual(checked.group_id, "g1")
+        with self.assertRaises(protocol.Refused):
+            protocol.check_message(dict(done, group="<g>"), (), ("g1",))
+
+    def test_markup_in_its_words_stays_text(self) -> None:
+        words = "<img src=x onerror=1>"
+        self.assertEqual(json.loads(protocol.check_message(dict(TASK, words=words)).text)["words"], words)
+
+
+class NumberFrameTests(unittest.TestCase):
+    CHART = {"kind": "chart", "title": "Q4 budget by line", "unit": "USD", "changed": 1, "was": 2900,
+             "change": "+500 Software · was 2.9k on Friday",
+             "bars": [{"label": "Travel", "value": 1200}, {"label": "Software", "value": 3400}]}
+    TABLE = {"kind": "table", "title": "Budget lines", "unit": "USD", "changed": 1,
+             "change": "+500 Software · was 2,900 on Friday", "source": "Dana's mail, 8:12 AM",
+             "columns": ["Line", "Friday", "Today"], "rows": [["Travel", 1200, 1200], ["Software", 2900, 3400]]}
+
+    def test_a_charts_change_is_its_big_number(self) -> None:
+        from briefing_reader.board import ask_frames
+
+        chart = ask_frames.check_frame(self.CHART)
+        number = ask_frames.number_frame(chart)
+        self.assertEqual((number.kind, number.title, number.meta), ("number", "Software", "USD"))
+        self.assertEqual(number.body, {"figure": "+500", "text": "Was 2,900, now 3,400.", "source": "Q4 budget by line"})
+        self.assertEqual(number.key, "number:" + chart.key)
+        message = ask_frames.build(number, frame_id="n1").messages[0]
+        protocol.check_message(message)                                   # the board takes it
+
+    def test_a_fall_and_no_change_read_right(self) -> None:
+        from briefing_reader.board import ask_frames
+
+        fall = ask_frames.number_frame(ask_frames.check_frame(dict(self.CHART, was=4000)))
+        self.assertEqual(fall.body["figure"], "−600")
+        self.assertEqual(fall.body["text"], "Was 4,000, now 3,400.")
+        same = ask_frames.number_frame(ask_frames.check_frame(dict(self.CHART, was=3400)))
+        self.assertEqual(same.body["figure"], "0")
+        half = ask_frames.number_frame(ask_frames.check_frame(dict(
+            self.CHART, was=2.9, bars=[{"label": "A", "value": 1}, {"label": "B", "value": 3.4}])))
+        self.assertEqual(half.body["figure"], "+0.5")
+
+    def test_a_chart_without_its_old_value_takes_the_delta_lines_figure(self) -> None:
+        from briefing_reader.board import ask_frames
+
+        data = {key: value for key, value in self.CHART.items() if key != "was"}
+        number = ask_frames.number_frame(ask_frames.check_frame(data))
+        self.assertEqual(number.body["figure"], "+500")
+        self.assertEqual(number.body["text"], "Was 2.9k on Friday")
+        no_figure = ask_frames.number_frame(ask_frames.check_frame(dict(data, change="Software went up")))
+        self.assertIsNone(no_figure)
+
+    def test_a_tables_changed_row_is_its_big_number(self) -> None:
+        from briefing_reader.board import ask_frames
+
+        number = ask_frames.number_frame(ask_frames.check_frame(self.TABLE))
+        self.assertEqual((number.title, number.meta), ("Software", "USD"))
+        self.assertEqual(number.body, {"figure": "+500", "text": "Was 2,900 on Friday", "source": "Dana's mail, 8:12 AM"})
+        bare = ask_frames.number_frame(ask_frames.check_frame(dict(self.TABLE, change="+500")))
+        self.assertEqual(bare.body["text"], "2,900 · 3,400")              # no words after the figure: the row's cells
+        self.assertIsNone(ask_frames.number_frame(ask_frames.check_frame(dict(self.TABLE, change="Software rose"))))
+
+    def test_nothing_changed_no_big_number(self) -> None:
+        from briefing_reader.board import ask_frames
+
+        for data in (dict(self.CHART, changed=-1), dict(self.TABLE, changed=-1),
+                     {"kind": "timeline", "title": "Dates", "nodes": [{"when": "Mon", "words": "x", "state": ""}]}):
+            data = {key: value for key, value in data.items() if not (key in ("was", "change") and data.get("changed") == -1)}
+            self.assertIsNone(ask_frames.number_frame(ask_frames.check_frame(data)))
+
+    def test_the_number_body_is_checked(self) -> None:
+        def frame_of(body: dict) -> dict:
+            return {"type": "frame", "id": "n1", "kind": "number", "title": "Software", "body": body}
+
+        protocol.check_message(frame_of({"figure": "+500", "text": "Was 2,900, now 3,400.", "source": "Dana"}))
+        for body in ({"figure": "<b>5</b>", "text": "", "source": ""}, {"figure": "", "text": "", "source": ""},
+                     {"figure": "+500", "text": "", "source": "", "href": "x"}, {"figure": "+500", "text": ""},
+                     {"figure": "five", "text": "", "source": ""}, {"figure": "+500", "text": "x" * 81, "source": ""},
+                     {"figure": 500, "text": "", "source": ""}):
+            with self.assertRaises(protocol.Refused, msg=repr(body)):
+                protocol.check_message(frame_of(body))
+
+    def test_a_folded_big_number_says_its_figure(self) -> None:
+        from briefing_reader.board import facts
+
+        self.assertEqual(facts.fact_of({"kind": "number", "title": "Software", "status": "ok",
+                                        "body": {"figure": "+500", "text": "", "source": ""}}), "+500")
+
+
+class FakeAsk:
+    """A running request as the task card reads it (no thread, no model)."""
+
+    def __init__(self) -> None:
+        self.busy = True
+        self.running_mode = ""
+        self.at = ""
+
+    def stage(self) -> str:
+        return self.at
+
+
+class TaskCardTests(CanvasApp):
+    def begin(self) -> tuple[board_fakes.StandInBoard, FakeAsk, list]:
+        self.make()
+        board = self.started()
+        fake = FakeAsk()
+        self.canvas()._ask = lambda: fake                                  # noqa: SLF001 - the harness's stand-in
+        self.reading.command_bar.set_running(True)
+        ticks = [100.0]
+        self.canvas()._clock = lambda: ticks[0]                            # noqa: SLF001
+        return board, fake, ticks
+
+    def test_an_ask_shows_the_card_in_the_apps_own_words(self) -> None:
+        board, fake, ticks = self.begin()
+        self.c._look_call("on_answer_started", 7, "What did Dana send, <b>sir</b>?")
+        card = self.last("task")
+        self.assertEqual((card["state"], card["title"], card["words"]), ("working", "Working on it", "Starting"))
+        self.assertEqual((card["steps"], card["sources"], card["frames"], card["group"]), (0, 0, 0, ""))
+        self.assertTrue(card["stop"])
+        self.assertNotIn("Dana", json.dumps(board.of_type("task")))       # the owner's own words never go to it
+
+    def test_its_words_follow_the_stage_and_its_steps_count_the_finished_ones(self) -> None:
+        from briefing_reader import ask_ui
+        from briefing_reader.ask import planner
+
+        board, fake, ticks = self.begin()
+        self.canvas().on_answer_started(7)
+        for count, stage in enumerate((planner.STAGE_CONTEXT, planner.STAGE_PLANNING, planner.STAGE_MAIL)):
+            fake.at = stage
+            ticks[0] += 2
+            self.canvas().sync()
+            card = self.last("task")
+            self.assertEqual(card["words"], ask_ui.STAGE_TEXTS[stage].rstrip("."))
+            self.assertEqual(card["steps"], count)
+            self.assertEqual(card["seconds"], 2 * (count + 1))
+        self.assertEqual(self.last("task")["words"], "Searching your mail")
+
+    def test_it_is_sent_only_when_it_differs(self) -> None:
+        board, fake, ticks = self.begin()
+        self.canvas().on_answer_started(7)
+        sent = len(board.of_type("task"))
+        for _ in range(4):
+            ticks[0] += 0.5                                               # the seconds alone: the page counts them
+            self.canvas().sync()
+        self.assertEqual(len(board.of_type("task")), sent)
+
+    def test_a_planner_mode_heads_it_with_its_own_words(self) -> None:
+        from briefing_reader import ask_ui
+        from briefing_reader.ask.modes import MODE_PLAN
+
+        board, fake, ticks = self.begin()
+        fake.running_mode = MODE_PLAN
+        self.canvas().on_answer_started(7)
+        self.assertEqual(self.last("task")["title"], ask_ui.MODE_STATUS[MODE_PLAN].rstrip("."))
+
+    def test_the_answers_frames_make_it_their_groups_head(self) -> None:
+        board, fake, ticks = self.begin()
+        self.canvas().on_answer_started(0)
+        ticks[0] += 9
+        fake.busy = False
+        self.put(3)                                                       # the answer's frames, through the desk
+        self.c.look.canvas.on_answer(0)
+        card = self.last("task")
+        desk = self.c.look.desk
+        self.assertEqual(card["state"], "done")
+        self.assertEqual(card["group"], desk.feed.groups()[0])
+        self.assertEqual((card["frames"], card["seconds"], card["stop"]), (3, 9, False))
+        self.assertEqual(self.canvas().counts["task:done"], 1)
+        sent = len(board.of_type("task"))
+        self.canvas().sync()
+        self.assertEqual(len(board.of_type("task")), sent)                # nothing more of it
+
+    def test_an_answer_with_nothing_for_the_canvas_takes_the_card_away(self) -> None:
+        board, fake, ticks = self.begin()
+        self.c._look_call("on_answer_started", 7, "Thanks")
+        fake.busy = False
+        self.c._look_call("on_ask_outcome", SimpleNamespace(ok=True, say="Any time, sir.", cards=(), research=None,
+                                                             calendar_read=None, mode="", frames=()), 7)
+        self.assertEqual(self.last("task")["state"], "gone")
+        self.assertEqual(self.canvas().counts["task:gone:no_frames"], 1)
+
+    def test_stop_is_the_ask_lines_own_cancel_and_only_while_a_request_runs(self) -> None:
+        board, fake, ticks = self.begin()
+        cancelled: list[int] = []
+        self.reading.command_bar.cancelRequested.connect(lambda: cancelled.append(1))
+        self.canvas().on_answer_started(7)
+        self.assertTrue(self.canvas().on_go("stop"))
+        self.assertEqual(cancelled, [1])
+        self.canvas()._on_ask_stopping(1)                                  # noqa: SLF001 - the Ask says it is stopping
+        card = self.last("task")
+        self.assertEqual((card["words"], card["stop"]), ("Stopping", False))
+        fake.busy = False
+        self.canvas()._on_ask_cancelled(1)                                 # noqa: SLF001 - ... and that it stopped
+        self.assertEqual(self.last("task")["state"], "gone")
+        self.reading.command_bar.set_running(False)
+        self.assertFalse(self.canvas().on_go("stop"))                     # nothing runs: the word does nothing
+        self.assertEqual(cancelled, [1])
+        self.assertEqual(self.canvas().counts["go:unavailable"], 1)
+
+    def test_a_request_that_ended_without_a_word_loses_its_card_after_a_moment(self) -> None:
+        board, fake, ticks = self.begin()
+        self.canvas().on_answer_started(7)
+        fake.busy = False
+        self.canvas().sync()
+        self.assertEqual(self.last("task")["state"], "working")           # its answer's hook may still come
+        ticks[0] += canvas_ui.TASK_GRACE_S + 0.1
+        self.canvas().sync()
+        self.assertEqual(self.last("task")["state"], "gone")
+
+    def test_the_page_coming_back_gets_the_card_again(self) -> None:
+        board, fake, ticks = self.begin()
+        self.canvas().on_answer_started(7)
+        sent = len(board.of_type("task"))
+        self.canvas()._on_ready()                                          # noqa: SLF001 - the renderer came back
+        self.assertEqual(len(board.of_type("task")), sent + 1)
+        self.assertEqual(self.last("task")["state"], "working")
+
+    def test_an_instant_answer_is_not_the_cards(self) -> None:
+        board, fake, ticks = self.begin()
+        self.canvas().on_answer_started(7)
+        self.c._look_call("on_instant_answer", SimpleNamespace(working=None, speech="Four, sir."), "2 + 2")
+        self.assertEqual(self.last("task")["state"], "working")
+
+
+class CanvasFramesTests(CanvasApp):
+    OUTCOME_FRAMES = (NumberFrameTests.CHART, NumberFrameTests.TABLE)
+
+    def outcome(self) -> SimpleNamespace:
+        from briefing_reader.board import ask_frames
+
+        frames = tuple(ask_frames.check_frame(data) for data in self.OUTCOME_FRAMES)
+        return SimpleNamespace(ok=True, say="Software went up 500, sir.", cards=(), research=None, calendar_read=None,
+                               mode="", frames=frames, topic="Dana's budget")
+
+    def test_on_the_canvas_a_change_also_puts_up_its_big_number(self) -> None:
+        self.make()
+        board = self.started()
+        self.c._look_call("on_answer_started", 3, "What changed in the budget?")
+        self.c._look_call("on_ask_outcome", self.outcome(), 3)
+        settle(4)
+        kinds = [message["kind"] for message in board.of_type("frame")]
+        self.assertEqual(kinds, ["chart", "number", "table", "number"])   # each right after its chart or table
+        numbers = [message for message in board.of_type("frame") if message["kind"] == "number"]
+        self.assertEqual(numbers[0]["body"]["figure"], "+500")
+        self.assertEqual(numbers[0]["title"], "Software")
+        self.assertEqual(self.c.look.desk.counts["frame:number"], 2)
+
+    def test_beside_a_conversation_no_big_number_is_built(self) -> None:
+        self.make(canvas=False)
+        self.c._look_call("on_answer_started", 3, "What changed in the budget?")
+        self.c._look_call("on_ask_outcome", self.outcome(), 3)
+        self.assertTrue(wait_for(lambda: bool(self.boards)))
+        settle(4)
+        self.assertEqual([message["kind"] for message in self.boards[0].of_type("frame")], ["chart", "table"])
+
+    def test_the_same_answer_again_builds_the_number_in_its_place(self) -> None:
+        self.make()
+        board = self.started()
+        for key in (3, 4):
+            self.c._look_call("on_answer_started", key, "What changed in the budget?")
+            self.c._look_call("on_ask_outcome", self.outcome(), key)
+            settle(4)
+        ids = {message["id"] for message in board.of_type("frame") if message["kind"] == "number"}
+        self.assertEqual(len(ids), 2)                                     # two numbers, each one frame for both answers
+        self.assertEqual(self.c.look.desk.feed.frames(), 4)
+
+    def test_tidy_is_a_word_only_while_frames_show(self) -> None:
+        self.make()
+        self.started()
+        self.assertFalse(self.canvas().on_go("tidy"))
+        self.put(2)
+        self.assertTrue(self.canvas().on_go("tidy"))
+        self.assertEqual(self.canvas().counts["go:tidy"], 1)
+
+    def test_the_new_words_go_through_the_bridges_check(self) -> None:
+        self.assertEqual(set(protocol.GO_WORDS) - set(protocol.CANVAS_BUTTONS),
+                         {"undo", "stop_rec", "drag", "tidy", "stop"})
+        for word in ("tidy", "stop"):
+            self.assertEqual(protocol.check_request("go", json.dumps({"to": word}), ()).to, word)
+
+    def test_after_clear_view_the_orb_is_back_at_the_centre_while_bring_back_is_offered(self) -> None:
+        self.make()
+        board = self.started()
+        self.put(3)
+        self.assertEqual(self.last("orb")["form"], "corner")
+        desk = self.c.look.desk
+        desk._on_clear()                                                   # noqa: SLF001 - the page's Clear view
+        settle(4)
+        self.assertTrue(self.reading.desk_shown())                        # the Bring back row keeps the board up ...
+        self.assertEqual(self.reading.board_count(), 0)
+        self.assertEqual(self.last("orb")["form"], "rings")               # ... and the orb is back at the centre
+        desk._on_restore()                                                 # noqa: SLF001 - Bring back
+        settle(4)
+        self.assertEqual(self.reading.board_count(), 3)
+        self.assertEqual(self.last("orb")["form"], "corner")
+
+    def test_no_cue_line_is_asked_for_on_the_canvas(self) -> None:
+        self.make()
+        board = self.started()
+        self.put(2)
+        self.c._utterance = "Frame 0 is the one, sir."
+        self.c.look.desk.on_speech("Frame 0 is the one, sir.")
+        settle(4)
+        self.assertTrue(all(not message.get("cue", False) for message in board.of_type("lit")))
 
 
 if __name__ == "__main__":

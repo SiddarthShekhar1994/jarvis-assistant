@@ -425,7 +425,8 @@ class _Builder:
         data = self.frame.get("body") or {}
         kinds = {"text": self.text, "calendar": self.calendar, "mail_thread": self.mail_thread,
                  "mail_list": self.mail_list, "todos": self.todos, "picture": self.picture_body,
-                 "table": self.table, "chart": self.chart, "timeline": self.timeline, "maths": self.maths}
+                 "table": self.table, "chart": self.chart, "timeline": self.timeline, "maths": self.maths,
+                 "number": self.number}
         blocks = kinds.get(kind, self.text)(data)
         if self.waits:
             blocks.append(self.waits_chip())
@@ -482,6 +483,11 @@ class _Builder:
         return _Block(words.rect.bottom(), [glyph, words])
 
     # ---- the kinds -----------------------------------------------------------------------------------------------------
+
+    def number(self, data: Mapping[str, Any]) -> list[_Block]:
+        """A big number (the canvas, part 2) as a read-only tile: its figure, then what it was and is, as words."""
+        said = " ".join(part for part in (str(data.get("figure", "")), str(data.get("text", ""))) if part)
+        return self.text({"text": said})
 
     def text(self, data: Mapping[str, Any]) -> list[_Block]:
         blocks: list[_Block] = []

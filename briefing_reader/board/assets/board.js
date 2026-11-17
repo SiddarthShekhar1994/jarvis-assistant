@@ -4,7 +4,9 @@
    the page answers on its web channel with bridge.post(kind, <JSON text>), the short list Python accepts (ready, layout,
    focus, open, close, pin, bring_back, retry, go_approvals, clear, restore, show_new, reading, focus_out, landed, big,
    go). The canvas (PLAN-canvas part 1): the same page is Home itself - the orb and the corners' controls under the
-   board (makeCanvas, at the first orb or canvas message; a board beside a conversation has none of it).
+   board (makeCanvas, at the first orb or canvas message; a board beside a conversation has none of it). Part 2: on
+   the canvas the frames are laid out over the whole screen on a 12-column grid (packCanvas), in the mock's glowing
+   style, with the task card, the boot of an arriving frame, Tidy and Clear view's lines into the orb.
    DESIGN-SPEC 3.1 (the bar, the groups, the index strip, "N more below" and the fades), 3.2 (the frame), 3.3 (the kinds
    and the satellite), 3.4 (its states: lit, changed), 3.5 (order, parking, pin, close, Clear, open big), 3.6 (the
    keyboard), 5 (motion) and 8 (the cue line's stub). The app is the source of truth: what the owner does shows here at
@@ -76,6 +78,7 @@
   var MATHS_NAME = /^[A-Za-zΑ-ΡΣ-Ωα-ω]{1,12}$/;
   var ZERO = /^[+\-−]?[$€£]?0+(?:[.,]0+)?%?$/;   // a cell that says none: INK_4
   var FIGURE = /^[+\-−]?[$€£]?[0-9]/;             // a delta line that starts with its figure ("+500")
+  var FIGURE_TEXT = /^[+\-−]?[$€£]?[0-9][0-9,.]*[kMBT%]?$/;     // a big number's figure (board.protocol's)
   var SVG = 'http://www.w3.org/2000/svg';
   var WORDS = {
     changed: 'Changed', tryAgain: 'Try again', bringBack: 'Bring back', closed: 'Closed: ',
@@ -92,10 +95,11 @@
   var STATE_WORDS = {done: 'Done', next: 'Next', due: 'Due'};   // a timeline node's state, its non-colour cue
   // Each kind's glyph (holo's icons, drawn by tokens.css) and its name (the index strip's accessible names).
   var GLYPHS = {text: 'read-all', calendar: 'calendar', mail_thread: 'mail', mail_list: 'inbox', todos: 'todos',
-                picture: 'image', table: 'table', chart: 'chart', timeline: 'timeline', maths: 'maths'};
+                picture: 'image', table: 'table', chart: 'chart', timeline: 'timeline', maths: 'maths',
+                number: 'chart'};
   var KIND_WORDS = {text: 'Answer', calendar: 'Calendar', mail_thread: 'Mail', mail_list: 'Mail list',
                     todos: 'To-dos', picture: 'Picture', table: 'Table', chart: 'Chart', timeline: 'Timeline',
-                    maths: 'Maths'};
+                    maths: 'Maths', number: 'Number'};
 
   // The renderer table: one function per kind (DESIGN-SPEC 3.3). Each checks the frame's body as board.protocol does
   // (its keys, types, caps and lists) and throws on anything it can't show - the message is then dropped and nothing
@@ -456,6 +460,23 @@
     });
     mathsRow(grid, data.steps.length + 1, data.answer, true);
     body.appendChild(grid);
+  };
+
+  // A big number (the canvas, part 2): the app builds it from a chart's or a table's change - the figure large, what
+  // it was and is under it, and where it comes from as the frame's footer. Every word as text.
+  KINDS.number = function (body, frame) {
+    var data = frame.body;
+    if (!exactKeys(data, ['figure', 'text', 'source']) || !words(data.figure, CHART.text) || !FIGURE_TEXT.test(data.figure)
+        || !words(data.text, TABLE.change) || !words(data.source, TABLE.source)) {
+      throw new TypeError('number');
+    }
+    body.appendChild(make('p', 'nb-fig', data.figure));
+    if (data.text) {
+      body.appendChild(make('p', 'nb-text', data.text));
+    }
+    if (data.source) {
+      body.appendChild(make('p', 'nb-src t-badge', data.source));
+    }
   };
 
   var root = null;
@@ -998,7 +1019,8 @@
     var rec = {id: id, el: art, kind: '', data: null, pinned: false, closed: false, picture: null,
                closedTimer: 0, drawTimer: 0, outlineTimer: 0, lapTimer: 0, noteTimer: 0, group: '', fact: '',
                sat: false, expanded: false, cleared: false, away: false, paired: '', mates: null, ix: null,
-               ixGlyph: null, ixKind: ''};
+               ixGlyph: null, ixKind: '', fold: false, fx: false, rev: 0, nat: null, booting: false, wantBoot: false,
+               folding: false};
     records.set(art, rec);
     art.tabIndex = 0;
     art.setAttribute('aria-labelledby', 'title-' + id);
@@ -1139,6 +1161,7 @@
     rec.satButton.setAttribute('aria-label', message.title + (rec.fact ? ', ' + rec.fact : '') + WORDS.showMore);
     updatePinned(rec, message.pinned);
     rec.data = message;
+    rec.rev += 1;                              // (the canvas measures it again)
     if (rec.ix) {
       labelIndex(rec);
     }
@@ -1243,8 +1266,9 @@
     frames.forEach(function (rec) {
       var group = groupOf(rec);
       rec.away = rec.cleared || (filter === 'pinned' && !rec.pinned);
-      rec.sat = !!group && group.older && !rec.pinned && !rec.expanded && !rec.closed;
-      rec.el.classList.toggle('away', rec.away);
+      rec.sat = canvas ? (rec.fold && !rec.closed)                          // the canvas: by room (packCanvas)
+        : (!!group && group.older && !rec.pinned && !rec.expanded && !rec.closed);
+      rec.el.classList.toggle('away', rec.away && !rec.folding);
       rec.el.classList.toggle('sat', rec.sat);
       rec.el.tabIndex = rec.sat || rec.closed ? -1 : 0;
       rec.satButton.tabIndex = rec.sat ? 0 : -1;
@@ -1285,6 +1309,7 @@
     scheduleView();
     scheduleLayout();
     scheduleMaths();
+    schedulePack('');                          // the canvas: what changed is placed (never moves what stays)
   }
 
   function pairUp() {                          // small kinds side by side: two from a 500 px area, three from 756 (2.3)
@@ -1384,6 +1409,11 @@
   }
 
   function arrive(rec) {                       // the outline traces, the ticks snap on, the content comes in
+    if (canvas) {
+      rec.wantBoot = true;                     // the canvas: it boots once it has its place (packCanvas)
+      schedulePack('full');
+      return;
+    }
     var index = batch;
     batch += 1;
     clearTimeout(batchTimer);
@@ -1426,6 +1456,14 @@
   }
 
   function resize(el, from, done) {            // close / bring back / expand: fade 160 ms, height 200 ms
+    if (canvas && K > 0 && el.animate) {       // the canvas: its cell keeps its size - the fade alone
+      after(el.animate([{opacity: 0.25}, {opacity: 1}], {duration: FADE_MS * K, easing: easeOut}), function () {
+        if (done) {
+          done();
+        }
+      });
+      return;
+    }
     if (K === 0 || !el.animate) {
       if (done) {
         done();
@@ -1580,6 +1618,16 @@
       refresh();
       return;
     }
+    if (canvas) {                              // the canvas: it fades in its cell (the others stay where they are)
+      el.classList.add('folding');
+      after(el.animate([{opacity: 1, transform: 'none'}, {opacity: 0, transform: 'scale(0.97)'}],
+                       {duration: FADE_MS * K, easing: easeOut, fill: 'forwards'}), function () {
+        el.remove();
+        refresh();
+      });
+      refresh();
+      return;
+    }
     var height = el.getBoundingClientRect().height;
     el.classList.add('sizing');
     after(el.animate([{opacity: 1}, {opacity: 0}], {duration: FADE_MS * K, easing: easeOut, fill: 'forwards'}),
@@ -1616,10 +1664,16 @@
     }
     var node = target(rec);
     node.focus({preventScroll: true});
-    node.scrollIntoView({block: 'nearest', behavior: K === 0 ? 'auto' : 'smooth'});
+    if (!canvas) {                             // (the canvas never scrolls)
+      node.scrollIntoView({block: 'nearest', behavior: K === 0 ? 'auto' : 'smooth'});
+    }
   }
 
   function move(rec, key) {
+    if (canvas) {
+      goTo(nextOnCanvas(rec, key));            // the canvas: by where the frames are on the screen
+      return;
+    }
     var all = rows();
     var at = -1, column = 0;
     all.forEach(function (row, index) {
@@ -1790,6 +1844,8 @@
     filter = which;
     refresh();
     root.scrollTo({top: 0});
+    schedulePack('full');
+    syncCanvasBoard();
   }
 
   function syncBar() {
@@ -2187,6 +2243,9 @@
     if (!rec) {
       rec = build(message.id);
       frames.set(message.id, rec);
+      if (canvas) {
+        rec.el.classList.add('unplaced');      // the canvas: out of sight until it has its place
+      }
       placeFrame(rec, message.group || '');
     }
     fill(rec, message, body);
@@ -2267,6 +2326,7 @@
     }
     Array.from(frames.values()).forEach(function (rec) { forget(rec, false); });
     groups.forEach(function (group) {
+      dropHead(group);
       group.el.remove();
       group.rule.remove();
     });
@@ -2328,7 +2388,9 @@
     }
     if ((fresh && !parkedNow) || (wasParked && !parkedNow)) {
       root.scrollTo({top: 0, behavior: K === 0 ? 'auto' : 'smooth'});   // nobody reads: the new answer on top
+      schedulePack('full');                    // the canvas: the newest answer's frames take the best places
     }
+    syncHead(group);
     refresh();
     return true;
   };
@@ -2342,6 +2404,7 @@
       return true;
     }
     groups.delete(message.id);
+    dropHead(group);
     var before = document.activeElement;       // where the keyboard was (given back below only if this took it)
     var hadFocus = group.el.contains(before);
     Array.from(frames.values()).forEach(function (rec) {     // the whole group leaves, its frames with it
@@ -2413,6 +2476,7 @@
     syncCanvasBoard();
     if (barPinned === 0 && filter === 'pinned') {
       filter = 'all';                          // nothing pinned any more: the whole board again
+      schedulePack('full');
     }
     measureWidth();
     refresh();
@@ -2427,7 +2491,11 @@
     html.classList.remove('desk-in');
     deskOn = message.state === 'enter';
     syncCanvasBoard();                           // the canvas: the board's box shows, or is away (folded, empty)
-    if (message.state === 'enter' && K > 0) {    // (motion off: there at once, no entrance to drop)
+    if (message.state === 'enter') {
+      schedulePack('full');
+    }
+    if (message.state === 'enter' && K > 0 && !canvas) {    // (motion off: there at once, no entrance to drop; the
+                                                            // canvas: each frame boots in its own place)
       void html.getBoundingClientRect();         // the fade and slide start again (dropped once over: entranceOver)
       html.classList.add('desk-in');
     }
@@ -2455,13 +2523,20 @@
     }
     var gone = new Set(message.frames);
     var hadFocus = null;
+    var taken = [], back = [];
     frames.forEach(function (rec) {
       if (gone.has(rec.id) && rec.el.contains(document.activeElement)) {
         hadFocus = rec;
       }
+      if (gone.has(rec.id) !== rec.cleared && !rec.closed && !parked(rec)) {
+        (rec.cleared ? back : taken).push(rec);
+      }
       rec.cleared = gone.has(rec.id);
     });
+    drawIntoOrb(taken);                        // the canvas: each folds to a line the orb draws in ...
     refresh();
+    drawOutOfOrb(back);                        // ... and Bring back lets them out again
+    schedulePack('full');
     if (hadFocus && clearedRow) {
       clearedRow.back.focus();                 // the focus stays on the board: on Bring back
     }
@@ -2496,7 +2571,7 @@
   }
 
   function focusStrip() {
-    if (!stripParts) {
+    if (!stripParts || canvas) {               // (the canvas draws no strip)
       return false;
     }
     updateView();
@@ -3824,8 +3899,14 @@
     clear.setAttribute('aria-label', CANVAS_WORDS.clearAll);
     buttons.board = canvasButton('board', CANVAS_WORDS.board, '');
     buttons.board.setAttribute('aria-label', CANVAS_WORDS.boardBack);
+    // part 2: Tidy (only while there is something to tidy) and Pinned (a filter, only while something is pinned)
+    var tidyButton = canvasButton('tidy', TASK_WORDS.tidy, '', function () { tidy(); });
+    tidyButton.setAttribute('aria-label', TASK_WORDS.tidyAll);
+    var pinnedButton = canvasButton('pinned', TASK_WORDS.pinned, '', function () {
+      setFilter(filter === 'pinned' ? 'all' : 'pinned');
+    });
     var rule1 = make('div', 'c-rule'), rule2 = make('div', 'c-rule');
-    tr.append(buttons.history, clear, buttons.board, rule1);
+    tr.append(buttons.history, tidyButton, clear, pinnedButton, buttons.board, rule1);
     SCREEN_BUTTONS.forEach(function (word) {
       buttons[word] = canvasButton(word, CANVAS_WORDS[word], '');
       tr.appendChild(buttons[word]);
@@ -3864,7 +3945,8 @@
     canvas = {
       el: el, orb: parts.orb, pic: parts.pic, ctx: parts.ctx, tl: tl, tr: tr, bl: bl,
       state: state, hold: hold, undo: undo, clockText: clockText, clockButton: clockButton, buttons: buttons,
-      clear: clear, rules: [rule1, rule2], meter: meter, bars: bars, levelWords: levelWords, wake: wake, rec: rec,
+      clear: clear, tidy: tidyButton, pinned: pinnedButton, rules: [rule1, rule2], meter: meter, bars: bars,
+      levelWords: levelWords, wake: wake, rec: rec,
       stopRec: stopRec, form: '', orbState: '', muted: false, level: -1, hasMeter: false, shown: []
     };
     html.classList.add('canvas');
@@ -3873,6 +3955,13 @@
     watchCanvasPointer();
     document.addEventListener('visibilitychange', wake);     // seen again: it moves again
     placeCanvas();
+    if (stripParts) {                          // (nothing is "above" on the canvas: a parked answer is just new)
+      var pillWords = stripParts.pill.querySelector('.pill-words');
+      if (pillWords) {
+        pillWords.textContent = TASK_WORDS.newAnswer;
+      }
+    }
+    schedulePack('full');                      // frames that came before it take their places on the grid
     return canvas;
   }
 
@@ -3935,7 +4024,7 @@
     o.dim = message.dim;
     o.away = message.away;
     setLevels(message.level, message.voice);
-    setForm(message.form);
+    setFormSoon(message.form);
     if (K === 0) {                             // off: the state's lean at once
       var lean = LEANS[o.state] || [0, 0];
       o.leanX = o.flatTo ? 0 : lean[0];
@@ -4004,6 +4093,13 @@
     }
     document.documentElement.classList.toggle('board-off', !deskOn);
     c.clear.hidden = !(deskOn && barFrames > 0);
+    c.tidy.hidden = !(deskOn && lay.untidy);
+    var only = filter === 'pinned';
+    c.pinned.hidden = !(deskOn && (barPinned > 0 || only));
+    c.pinned.textContent = barPinned ? TASK_WORDS.pinned + ' ' + barPinned : TASK_WORDS.pinned;
+    c.pinned.classList.toggle('on', only);
+    c.pinned.setAttribute('aria-pressed', only ? 'true' : 'false');
+    c.pinned.setAttribute('aria-label', TASK_WORDS.pinnedOnly);
     c.rules[0].hidden = false;
     c.rules[1].hidden = ['desktop', 'minimize', 'maximize', 'close'].every(function (word) {
       return c.shown.indexOf(word) < 0;
@@ -4011,10 +4107,9 @@
     placeCanvas();
   }
 
-  function overBoard(event) {                  // the pointer is over the board's own box (the canvas around it is not it)
-    var box = document.body.getBoundingClientRect();
-    return deskOn && event.clientX >= box.left && event.clientX <= box.right && event.clientY >= box.top
-      && event.clientY <= box.bottom;
+  function overBoard(event) {                  // the pointer is on a frame (the canvas between the frames is not
+    var node = event.target;                   // the board: part 2, the frames are spread over the whole of it)
+    return deskOn && !!node && !!node.closest && !!node.closest('.frame');
   }
 
   function inCanvasChrome(node) {              // the orb's layer and its corner buttons: not the board
@@ -4043,6 +4138,1077 @@
     }
     stops[0].focus({preventScroll: true});
     return true;
+  }
+
+  // ---- the canvas, part 2 (PLAN-canvas part 2): frames across the screen ---------------------------------------------
+  // On the canvas the board's frames are not a column: this page places each one on a grid of GRID_COLS columns over
+  // the whole area between the top controls and the caption's strip (<body>'s box there: board.css). The area is cut
+  // into rows and each row into sub-rows ("lines"): a frame takes a row at least, and as many lines more as what it
+  // holds needs (up to two or three rows; a wide table or a long timeline twice the columns), and a folded one (a
+  // tile: the board's satellite, its title and its fact) one line. The grid is as roomy as what is shown allows (densities: fewer, larger cells while few frames
+  // are up); when not everything fits at the finest grid, frames fold to tiles, the oldest answer's first, never a
+  // pinned one while anything else can fold. The orb's corner is never given to a frame. A group's first full frame
+  // carries the group's head tile - a slim strip over it, in its own place's top HEAD_H px (the task card, shrunk,
+  // once its answer arrived). Nothing scrolls.
+  // What stays put: a close, a bring back, a pin and an opened tile never move the other frames (keepPack); a new
+  // answer, a resize, the Pinned filter, Clear view and Tidy pack everything again (canonical). "Something to tidy"
+  // means: a fresh pack would place something differently than it is now.
+  // Frames glide to their new places with a spring (lively), without its overshoot (calm) or cut (off).
+  //
+  // MEASURED (the web engine has no GPU): everything here that moves - six or twelve frames booting, all of them
+  // gliding at once, Clear view's lines - holds 58 to 60 frames a second at 1920 x 1080, as long as the frames'
+  // area (<body> on the canvas) has NO ground of its own: an opaque background on that box, now the whole canvas,
+  // halved the rate of everything moving on or under it (board.css says so where it is cleared).
+
+  var GRID_COLS = 12, ROW_MIN = 165, ROW_MAX = 300, SPAN_TARGET = 410, SPAN_MAX = 640, TILE_MIN = 200, TILE_MAX = 480,
+      LINE_TARGET = 54;
+  var SPANS = [2, 3, 4, 6, 12];
+  var HEAD_H = 30, HEAD_GAP = 8;               // a group's head tile over its first frame, and the gap under it
+  var PACK_MS = 30;                            // a burst of messages is placed once
+  // An arriving frame boots: its outline draws itself from one corner, a scan line wipes down it, the content comes
+  // in behind the line, the heading decodes, numbers count up, bars grow a little past their end (board.css has the
+  // drawn part; the words and numbers are set here). Frames of one arrival boot one after another.
+  var BOOT = {first: 60, stagger: 90, outline: 420, content: 260, decode: 520, count: 700, total: 1050, max: 12};
+  var GLIDE_MS = 560, FOLD_MS = 260, LINE_MS = 460, LINE_STAGGER = 26, SHRINK_MS = 360;
+  var DECODE_GLYPHS = 'ABCDEFGHJKLMNPQRSTUVWXYZ0123456789#/+';
+  var COUNT_TEXT = /^([+\-−]?[$€£]?)([0-9][0-9,]*)(\.[0-9]+)?([kMBT%]?)$/;
+  var TASK_STATES = ['working', 'done', 'gone'];
+  var TASK_CAPS = {title: 40, words: 60, seconds: 86400, count: 99};
+  var TASK_BLOCKS = 10, CARD_WIDTH = 372;
+  var TASK_WORDS = {stop: 'Stop', step: ' step', steps: ' steps', source: ' source', sources: ' sources',
+                    more: 'More · Enter', tidy: 'Tidy', pinned: 'Pinned', newAnswer: 'New answer',
+                    tidyAll: 'Tidy: put every frame back in its place',
+                    pinnedOnly: 'Show the pinned frames only'};
+  var lay = {timer: 0, mode: '', cells: new Map(), heads: new Map(), m: null, untidy: false, hold: 0, formTimer: 0,
+             over: 0, packs: 0, heads_made: 0, adopted: 0};
+  var placed = new WeakMap();                  // an element -> the box it was last given (px, in the board's own box)
+  var card = null;                             // the task card while Jarvis works (makeHead's parts)
+
+  // ---- the grid -------------------------------------------------------------------------------------------------------
+
+  function gridGap() {
+    return root.clientWidth < 1100 ? 10 : 14;
+  }
+
+  function gridMetrics(span, rows, tight, narrow) {     // one grid: a frame ``span`` columns wide, ``rows`` rows of lines
+    var w = root.clientWidth, h = root.clientHeight, gap = gridGap();
+    var unit = (w + gap) / GRID_COLS;
+    var rowH = (h - (rows - 1) * gap) / rows;
+    var sub = clamp(Math.round((rowH + gap) / (LINE_TARGET + gap)), 2, 6) + (tight ? 1 : 0);
+    var tile = span;                           // a tile is as wide as a frame (they line up), unless frames are
+    if (tight || narrow || span * unit - gap > TILE_MAX) {     // wide here or room is short: the narrowest that reads
+      SPANS.forEach(function (width) {
+        if (width < tile && width * unit - gap >= TILE_MIN) {
+          tile = Math.min(tile, width);
+        }
+      });
+    }
+    return {w: w, h: h, gap: gap, unit: unit, span: span, rows: rows, rowH: rowH, sub: sub,
+            subH: (rowH - (sub - 1) * gap) / sub, tile: tile, lines: rows * sub, tight: !!tight};
+  }
+
+  function densities() {                       // the grids this size offers, the roomiest first; the last is the finest
+    var w = root.clientWidth, h = root.clientHeight, gap = gridGap(), unit = (w + gap) / GRID_COLS;
+    var want = SPAN_TARGET / unit;
+    var base = SPANS.reduce(function (best, width) {
+      return Math.abs(width - want) < Math.abs(best - want) ? width : best;
+    }, SPANS[0]);
+    var most = Math.max(1, Math.floor((h + gap) / (ROW_MIN + gap)));
+    if (h >= 300 && most < 2) {
+      most = 2;
+    }
+    var fewest = Math.max(1, Math.min(most, Math.ceil((h + gap) / (ROW_MAX + gap))));
+    var found = [];
+    SPANS.forEach(function (width) {
+      if (width < base || (width > base && width * unit - gap > SPAN_MAX)) {
+        return;
+      }
+      for (var rows = fewest; rows <= most; rows += 1) {
+        found.push({span: width, rows: rows, area: (width * unit - gap) * ((h - (rows - 1) * gap) / rows)});
+      }
+    });
+    found.sort(function (a, b) { return b.area - a.area; });
+    return found;
+  }
+
+  function blockedCells(m) {                   // the orb's corner: no frame is ever placed over it
+    var occ = new Uint8Array(GRID_COLS * m.lines);
+    var box = root.getBoundingClientRect(), places = orbPlaces();
+    var reach = STAGE * CORNER_SCALE * clamp(places.fit, 0.8, 1) * 0.36 + 16;
+    var left = window.innerWidth - CORNER_INSET - reach - box.left;
+    var top = window.innerHeight - CORNER_INSET - reach - box.top;
+    for (var line = 0; line < m.lines; line += 1) {
+      for (var col = 0; col < GRID_COLS; col += 1) {
+        if ((col + 1) * m.unit - m.gap > left && (line + 1) * (m.subH + m.gap) - m.gap > top) {
+          occ[line * GRID_COLS + col] = 1;
+        }
+      }
+    }
+    return occ;
+  }
+
+  function cellsFree(occ, cell) {
+    for (var line = cell.cy; line < cell.cy + cell.ch; line += 1) {
+      for (var col = cell.cx; col < cell.cx + cell.cw; col += 1) {
+        if (occ[line * GRID_COLS + col]) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  function takeCells(occ, cell) {
+    for (var line = cell.cy; line < cell.cy + cell.ch; line += 1) {
+      for (var col = cell.cx; col < cell.cx + cell.cw; col += 1) {
+        occ[line * GRID_COLS + col] = 1;
+      }
+    }
+  }
+
+  function firstFit(occ, m, cw, ch, step) {    // the first free place in reading order, from the top left
+    for (var cy = 0; cy + ch <= m.lines; cy += step) {
+      for (var cx = 0; cx + cw <= GRID_COLS; cx += 1) {
+        var cell = {cx: cx, cy: cy, cw: cw, ch: ch};
+        if (cellsFree(occ, cell)) {
+          takeCells(occ, cell);
+          return cell;
+        }
+      }
+    }
+    return null;
+  }
+
+  // ---- what is placed: the frames shown, their sizes ---------------------------------------------------------------
+
+  function packItems() {                       // the frames the canvas shows, in board order (closed ones too: their
+    var list = [];                             // row keeps their place until the app takes them away)
+    Array.prototype.forEach.call(root.querySelectorAll('.frame'), function (node) {
+      var rec = records.get(node);
+      if (current(rec) && !rec.away && !parked(rec) && !(rec.group && !groups.has(rec.group))) {
+        list.push(rec);
+      }
+    });
+    return list;
+  }
+
+  function isWideKind(rec) {                   // a wide table, a long timeline (its nodes in one row): twice the columns
+    var data = rec.data, body = data && data.body;
+    if (!body || data.status !== 'ok') {
+      return false;
+    }
+    return (rec.kind === 'table' && body.columns.length >= 4) || (rec.kind === 'timeline' && body.nodes.length > 4);
+  }
+
+  function frameCols(rec, m) {
+    return isWideKind(rec) ? Math.min(GRID_COLS, m.span * 2) : m.span;
+  }
+
+  function colsPx(cols, m) {
+    return Math.round(cols * m.unit - m.gap);
+  }
+
+  function measure(list, m) {                  // each frame's own height at the width its place would have; what it
+    var todo = list.filter(function (rec) {    // looks like now is put back at once (nothing is painted in between)
+      var px = colsPx(frameCols(rec, m), m);
+      if (!rec.nat || rec.nat.rev !== rec.rev) {
+        rec.nat = {rev: rec.rev, sizes: {}};
+      }
+      return !rec.closed && rec.nat.sizes[px] === undefined;
+    });
+    if (!todo.length) {
+      return;
+    }
+    var was = todo.map(function (rec) {
+      var el = rec.el, cols = frameCols(rec, m);
+      var keep = {w: el.style.width, h: el.style.height, sat: el.classList.contains('sat'),
+                  wide: el.classList.contains('wide'), cut: el.classList.contains('cut')};
+      el.classList.add('measuring');
+      el.classList.remove('sat', 'cut');
+      el.classList.toggle('wide', cols > m.span);
+      el.style.width = colsPx(cols, m) + 'px';
+      el.style.height = 'auto';
+      return keep;
+    });
+    todo.forEach(function (rec) {
+      rec.nat.sizes[colsPx(frameCols(rec, m), m)] = rec.el.offsetHeight;
+    });
+    todo.forEach(function (rec, index) {
+      var el = rec.el, keep = was[index];
+      el.classList.remove('measuring');
+      el.classList.toggle('sat', keep.sat);
+      el.classList.toggle('wide', keep.wide);
+      el.classList.toggle('cut', keep.cut);
+      el.style.width = keep.w;
+      el.style.height = keep.h;
+    });
+  }
+
+  function frameLines(rec, m, headed) {        // the lines a frame takes: a row at least, more for what it holds
+    var most = Math.min(m.rows, m.rows >= 4 ? 3 : 2) * m.sub;      // (its group's head over it counted)
+    if (rec.kind === 'picture' && rec.data && rec.data.status === 'ok') {
+      return Math.min(m.rows, 2) * m.sub;      // a page picture: two rows, the picture filling them
+    }
+    var need = (rec.nat && rec.nat.sizes[colsPx(frameCols(rec, m), m)]) || 0;
+    if (headed) {
+      need += HEAD_H + HEAD_GAP;
+    }
+    return clamp(Math.ceil((need + m.gap - 1) / (m.subH + m.gap)), m.sub, most);
+  }
+
+  function foldOrder(list, reset) {            // who folds first: the oldest answer's frames, each from its end; one
+    var plain = [], opened = [], pinned = [];  // the owner opened after them; a pinned one only when nothing else can
+    list.slice().reverse().forEach(function (rec) {
+      if (rec.closed) {
+        return;
+      }
+      if (rec.pinned) {
+        pinned.push(rec);
+      } else if (rec.expanded && !reset) {
+        opened.push(rec);
+      } else {
+        plain.push(rec);
+      }
+    });
+    return plain.concat(opened, pinned);
+  }
+
+  // ---- the pack -----------------------------------------------------------------------------------------------------
+
+  function tryPack(list, m, folded, withCard, lenient) {
+    var occ = blockedCells(m), cells = new Map(), heads = new Map(), headed = new Set(), ok = true, over = 0;
+    if (withCard) {
+      var spot = firstFit(occ, m, m.span, m.sub, 1);
+      if (!spot) {
+        return null;
+      }
+      spot.kind = 'card';
+      cells.set(card.el, spot);
+    }
+    list.forEach(function (rec) {              // first the frames, each on whole rows
+      if (!ok || rec.closed || folded.has(rec)) {
+        return;
+      }
+      var head = !!rec.group && !headed.has(rec.group);
+      var cols = frameCols(rec, m);
+      var cell = firstFit(occ, m, cols, frameLines(rec, m, head), 1);
+      if (!cell) {
+        ok = false;
+        return;
+      }
+      if (head) {                              // its group's head tile takes the top of its place
+        headed.add(rec.group);
+        heads.set(rec.group, rec.el);
+        cell.top = HEAD_H + HEAD_GAP;
+      }
+      cell.kind = 'full';
+      cells.set(rec.el, cell);
+    });
+    if (!ok) {
+      return null;
+    }
+    list.forEach(function (rec) {              // then the tiles, into what is left
+      if (!(rec.closed || folded.has(rec))) {
+        return;
+      }
+      var cell = ok || lenient ? firstFit(occ, m, m.tile, 1, 1) : null;
+      if (!cell) {
+        ok = false;
+        over += 1;
+        return;
+      }
+      cell.kind = 'tile';
+      cells.set(rec.el, cell);
+    });
+    return ok || lenient ? {m: m, cells: cells, heads: heads, over: over} : null;
+  }
+
+  function canonical(list, withCard, reset) {  // a fresh pack: the roomiest grid that holds everything; else the
+    var none = new Set(), options = densities(), found = null, m = null;   // finest, the oldest folded until it does
+    for (var index = 0; index < options.length; index += 1) {
+      m = gridMetrics(options[index].span, options[index].rows, false);
+      measure(list, m);
+      found = tryPack(list, m, none, withCard, false);
+      if (found) {
+        return found;
+      }
+    }
+    // Not everything fits whole: the finest grid, the oldest folded one by one until it does - with tiles as wide
+    // as the frames, with narrow ones, then with every line a little lower; the way that folds the fewest is taken.
+    var finest = options[options.length - 1], order = foldOrder(list, reset), folded = none, best = null;
+    for (var way = 0; way < 3; way += 1) {
+      m = gridMetrics(finest.span, finest.rows, way === 2, way === 1);
+      measure(list, m);
+      folded = new Set();
+      for (var count = 0; count <= order.length; count += 1) {
+        found = tryPack(list, m, folded, withCard, false);
+        if (found) {
+          for (var back = count - 1; back >= 0; back -= 1) {     // one that folded for another's sake may be whole
+            folded.delete(order[back]);                          // after all (the newest of them first)
+            var again = tryPack(list, m, folded, withCard, false);
+            if (again) {
+              found = again;
+            } else {
+              folded.add(order[back]);
+            }
+          }
+          found.folds = folded.size;
+          if (!best || found.folds < best.folds) {
+            best = found;
+          }
+          break;
+        }
+        if (count < order.length) {
+          folded.add(order[count]);
+        }
+      }
+    }
+    if (best) {
+      return best;
+    }
+    return tryPack(list, m, folded, false, true);     // more than even tiles have room for: what fits, the rest counted
+  }
+
+  function keepPack(list, withCard) {          // what is placed stays; what is new, or was opened, takes a free place
+    var m = lay.m;
+    if (!m || m.w !== root.clientWidth || m.h !== root.clientHeight) {
+      return null;
+    }
+    measure(list, m);
+    var occ = blockedCells(m), cells = new Map(), heads = new Map(), todo = [], ok = true;
+    if (withCard) {
+      var had = lay.cells.get(card.el);
+      if (had) {
+        cells.set(card.el, had);
+        takeCells(occ, had);
+      } else {
+        todo.push(null);
+      }
+    }
+    list.forEach(function (rec) {
+      var was = lay.cells.get(rec.el);
+      var full = rec.closed ? !!was && was.kind === 'full' : (!rec.fold || rec.pinned || rec.expanded);
+      if (was && (was.kind === 'full') === full) {
+        cells.set(rec.el, was);
+        takeCells(occ, was);
+      } else {
+        todo.push({rec: rec, full: full});
+      }
+    });
+    todo.forEach(function (item) {
+      var cell = null;
+      if (!ok) {
+        return;
+      }
+      if (!item) {
+        cell = firstFit(occ, m, m.span, m.sub, 1);
+      } else if (item.full) {
+        cell = firstFit(occ, m, frameCols(item.rec, m), frameLines(item.rec, m, false), 1);
+      } else {
+        cell = firstFit(occ, m, m.tile, 1, 1);
+      }
+      if (!cell) {
+        ok = false;
+        return;
+      }
+      cell.kind = !item ? 'card' : (item.full ? 'full' : 'tile');
+      cells.set(item ? item.rec.el : card.el, cell);
+    });
+    lay.heads.forEach(function (el, id) {      // a head stays over its frame while that frame keeps its place
+      var cell = cells.get(el);
+      if (groups.has(id) && cell && cell.top) {
+        heads.set(id, el);
+      }
+    });
+    return ok ? {m: m, cells: cells, heads: heads, over: 0} : null;
+  }
+
+  function sameCell(a, b) {
+    return !!a && !!b && a.cx === b.cx && a.cy === b.cy && a.cw === b.cw && a.ch === b.ch
+      && (a.top || 0) === (b.top || 0);
+  }
+
+  function samePack(a, b) {                    // two packs place everything alike
+    if (!a || !b || a.m.span !== b.m.span || a.m.rows !== b.m.rows || a.m.tight !== b.m.tight || a.m.tile !== b.m.tile
+        || a.cells.size !== b.cells.size || a.heads.size !== b.heads.size) {
+      return false;
+    }
+    var same = true;
+    a.cells.forEach(function (cell, el) {
+      same = same && sameCell(cell, b.cells.get(el));
+    });
+    a.heads.forEach(function (el, id) {
+      same = same && el === b.heads.get(id);
+    });
+    return same;
+  }
+
+  function schedulePack(mode) {                // '' places what changed; 'full' packs everything again
+    if (!canvas) {
+      return;
+    }
+    if (mode === 'full') {
+      lay.mode = 'full';
+    }
+    if (!lay.timer) {
+      lay.timer = setTimeout(function () {
+        lay.timer = 0;
+        packCanvas(lay.mode);
+      }, PACK_MS);
+    }
+  }
+
+  function packCanvas(mode) {
+    clearTimeout(lay.timer);
+    lay.timer = 0;
+    lay.mode = '';
+    if (!canvas || !root) {
+      return;
+    }
+    var list = packItems(), withCard = !!card && list.length > 0;
+    var found = mode === 'full' ? null : keepPack(list, withCard);
+    if (!found) {
+      found = canonical(list, withCard, false);
+    }
+    applyPack(found, list);
+    // Something to tidy: a fresh pack would place something otherwise (after a fresh pack: only what the owner opened)
+    lay.untidy = list.length > 0 && (mode === 'full'
+      ? list.some(function (rec) { return rec.expanded && !rec.pinned; })
+      : !samePack(found, canonical(list, withCard, true)));
+    lay.packs += 1;
+    syncCanvasBoard();
+  }
+
+  // ---- a place given: where an element is, the glide to it ---------------------------------------------------------
+
+  function springAt(t) {                       // a spring let go at 0, settled at 1: a little past its end and back
+    var damping = 0.62, rate = 11.5, swing = rate * Math.sqrt(1 - damping * damping);
+    return 1 - Math.exp(-damping * rate * t) * (Math.cos(swing * t) + (damping * rate / swing) * Math.sin(swing * t));
+  }
+
+  function glide(el, dx, dy) {                 // from where it was to its place: a spring (calm: no overshoot)
+    if (K === 0 || !el.animate || (Math.abs(dx) < 1 && Math.abs(dy) < 1)) {
+      return;
+    }
+    if (motion !== 'lively') {
+      el.animate([{transform: 'translate(' + dx + 'px, ' + dy + 'px)'}, {transform: 'none'}],
+                 {duration: GLIDE_MS * 0.7 * K, easing: easeOut});
+      return;
+    }
+    var steps = [];
+    for (var step = 0; step <= 18; step += 1) {
+      var left = 1 - springAt(step / 18);
+      steps.push({transform: 'translate(' + (dx * left).toFixed(1) + 'px, ' + (dy * left).toFixed(1) + 'px)'});
+    }
+    steps[steps.length - 1] = {transform: 'none'};
+    el.animate(steps, {duration: GLIDE_MS * K, easing: 'linear'});
+  }
+
+  function cellBox(cell, m) {                  // a place in px (under its group's head tile, when it carries one)
+    var top = cell.top || 0;
+    return {x: Math.round(cell.cx * m.unit), y: Math.round(cell.cy * (m.subH + m.gap)) + top,
+            w: Math.round(cell.cw * m.unit - m.gap), h: Math.round(cell.ch * (m.subH + m.gap) - m.gap) - top};
+  }
+
+  function putAt(el, box, fresh) {
+    var was = placed.get(el);
+    el.style.left = box.x + 'px';
+    el.style.top = box.y + 'px';
+    el.style.width = box.w + 'px';
+    el.style.height = box.h ? box.h + 'px' : '';
+    el.classList.remove('unplaced');
+    placed.set(el, box);
+    if (!was || fresh || K === 0) {
+      return;
+    }
+    glide(el, was.x - box.x, was.y - box.y);
+    if (el.classList.contains('task') && el.animate && box.h && was.h && (was.w !== box.w || was.h !== box.h)) {
+      el.animate([{width: was.w + 'px', height: was.h + 'px'}, {width: box.w + 'px', height: box.h + 'px'}],
+                 {duration: SHRINK_MS * K, easing: easeOut});     // the task card shrinks to its group's head tile
+    }
+  }
+
+  function ensureFx(rec) {                     // the canvas's own parts of a frame, made once: the scan line, the
+    if (rec.fx) {                              // changed light, "MORE" for a body its place cuts
+      return;
+    }
+    rec.fx = true;
+    var scan = make('span', 'fx-scanbox');
+    scan.setAttribute('aria-hidden', 'true');
+    scan.appendChild(make('i', 'fx-scan'));
+    var pulse = make('span', 'fx-pulse');
+    pulse.setAttribute('aria-hidden', 'true');
+    var more = make('span', 'f-cut t-badge', TASK_WORDS.more);
+    more.setAttribute('aria-hidden', 'true');
+    rec.el.append(scan, pulse, more);
+  }
+
+  function cardFreeBox() {                     // nothing else on the canvas: the card beside the orb, as the mock has it
+    var box = root.getBoundingClientRect(), places = orbPlaces(), el = card.el;
+    var width = Math.round(Math.min(CARD_WIDTH, window.innerWidth * 0.34));
+    var orbLeft = places.rest.x - STAGE * places.fit * 0.3;
+    var x = Math.max(box.left, Math.min(window.innerWidth * 0.064, orbLeft - 20 - width));
+    el.style.width = width + 'px';
+    el.style.height = '';
+    var height = el.offsetHeight;
+    var y = Math.max(box.top, Math.min(window.innerHeight * 0.62, box.bottom - height - 8));
+    return {x: Math.round(x - box.left), y: Math.round(y - box.top), w: width, h: 0};
+  }
+
+  function applyPack(found, list) {
+    var m = found.m;
+    lay.over = 0;
+    root.classList.toggle('tight', m.tight);
+    list.forEach(function (rec) {
+      var el = rec.el, cell = found.cells.get(el);
+      if (!cell) {
+        el.classList.add('over');              // (counted: board.layout().over)
+        lay.over += 1;
+        return;
+      }
+      el.classList.remove('over');
+      ensureFx(rec);
+      var tile = cell.kind === 'tile', held = el.contains(document.activeElement), wasSat = rec.sat;
+      rec.fold = tile && !rec.closed;          // (a closed frame's row is no tile: brought back, it is whole)
+      rec.sat = rec.fold;
+      el.classList.toggle('sat', rec.sat);
+      el.classList.toggle('wide', !tile && cell.cw > m.span);
+      el.tabIndex = rec.sat || rec.closed ? -1 : 0;
+      rec.satButton.tabIndex = rec.sat ? 0 : -1;
+      if (!rec.sat) {
+        rec.satButton.setAttribute('aria-expanded', rec.expanded ? 'true' : 'false');
+      }
+      putAt(el, cellBox(cell, m), rec.wantBoot || rec.wantOut);
+      if (held && wasSat !== rec.sat && !rec.closed) {
+        target(rec).focus({preventScroll: true});     // a frame that folded or opened keeps the keyboard
+      }
+    });
+    groups.forEach(function (group) {
+      var under = found.heads.get(group.id), cell = under ? found.cells.get(under) : null;
+      if (!cell) {
+        if (group.head) {
+          group.head.el.classList.add('away');
+        }
+        return;
+      }
+      var head = group.head || (group.head = makeHead('head'));
+      var fresh = !head.el.isConnected;
+      if (fresh) {
+        root.appendChild(head.el);
+      }
+      head.el.classList.remove('away');
+      syncHead(group);
+      var over = cellBox(cell, m);
+      putAt(head.el, {x: over.x, y: over.y - (cell.top || 0), w: over.w, h: HEAD_H}, fresh);
+      if (fresh && K > 0 && head.el.animate) {
+        head.el.animate([{opacity: 0}, {opacity: 1}], {duration: 220 * K, easing: easeOut});
+      }
+    });
+    if (card) {
+      var spot = found.cells.get(card.el);
+      var arriving = !placed.get(card.el);
+      putAt(card.el, spot ? cellBox(spot, m) : cardFreeBox(), arriving);
+      card.el.classList.toggle('free', !spot);
+      if (arriving && K > 0 && card.el.animate) {
+        card.el.animate([{opacity: 0, transform: 'translateY(10px)'}, {opacity: 1, transform: 'none'}],
+                        {duration: 260 * K, easing: easeOut});
+      }
+    }
+    lay.cells = found.cells;
+    lay.heads = found.heads;
+    lay.m = m;
+    list.forEach(function (rec) {              // a body its place cuts says so (Enter opens it big: all of it)
+      var body = rec.body;
+      rec.el.classList.toggle('cut', !rec.sat && !rec.closed && !!body && body.scrollHeight > body.clientHeight + 1);
+    });
+    bootPending(list);
+    letOut(list);
+    scheduleMaths();
+    scheduleLayout();
+  }
+
+  // ---- the boot of an arriving frame --------------------------------------------------------------------------------
+
+  function bootPending(list) {
+    var index = 0;
+    var base = BOOT.first + (lay.adopted && performance.now() - lay.adopted < 200 ? SHRINK_MS * 0.5 * K : 0);
+    list.forEach(function (rec) {
+      if (!rec.wantBoot) {
+        return;
+      }
+      rec.wantBoot = false;
+      if (K === 0 || index >= BOOT.max || rec.el.classList.contains('over')) {
+        landed(rec, 'done');                   // there at once
+        return;
+      }
+      boot(rec, base + index * BOOT.stagger * K);
+      index += 1;
+    });
+  }
+
+  function boot(rec, delay) {
+    var el = rec.el;
+    el.style.setProperty('--d', Math.round(delay) + 'ms');
+    el.classList.remove('boot');
+    void el.getBoundingClientRect();
+    el.classList.add('boot');
+    rec.booting = true;
+    clearTimeout(rec.drawTimer);
+    clearTimeout(rec.outlineTimer);
+    rec.outlineTimer = setTimeout(function () { landed(rec, 'outline'); }, delay + BOOT.outline * K);
+    rec.drawTimer = setTimeout(function () {
+      el.classList.remove('boot');
+      el.style.removeProperty('--d');
+      rec.booting = false;
+      landed(rec, 'done');
+    }, delay + BOOT.total * K + 50);
+    if (motion === 'lively' && !rec.sat) {     // (calm: no decode, no count-up)
+      decode(rec, delay + BOOT.content);
+      Array.prototype.forEach.call(rec.body.querySelectorAll('.ch-v, .nb-fig'), function (node) {
+        countUp(node, delay + BOOT.content + 60);
+      });
+    }
+  }
+
+  function decode(rec, delay) {                // the heading decodes into place: its letters settle left to right
+    var heading = rec.heading, text = rec.data ? rec.data.title : '';
+    if (!text) {
+      return;
+    }
+    var over = make('span', 'd-fx');           // over the real words (which keep the heading's size and its name)
+    over.setAttribute('aria-hidden', 'true');
+    heading.classList.add('decoding');
+    heading.appendChild(over);
+    var began = performance.now() + delay, last = 0;
+    (function tick(now) {
+      if (!over.isConnected) {
+        heading.classList.remove('decoding');  // (the frame was filled again meanwhile)
+        return;
+      }
+      var at = (now - began) / BOOT.decode;
+      if (at >= 1) {
+        over.remove();
+        heading.classList.remove('decoding');
+        return;
+      }
+      if (at >= 0 && now - last > 30) {
+        last = now;
+        var done = Math.floor(at * text.length), shown = text.slice(0, done);
+        for (var index = done; index < Math.min(text.length, done + 4); index += 1) {
+          shown += text.charAt(index) === ' ' ? ' '
+            : DECODE_GLYPHS.charAt(Math.floor(Math.random() * DECODE_GLYPHS.length));
+        }
+        over.textContent = shown;
+      }
+      requestAnimationFrame(tick);
+    })(performance.now());
+  }
+
+  function countUp(node, delay) {              // a number counts up to its words (which stand again at the end)
+    var text = node.textContent, parts = COUNT_TEXT.exec(text);
+    if (!parts) {
+      return;
+    }
+    var grouped = parts[2].indexOf(',') >= 0, places = parts[3] ? parts[3].length - 1 : 0;
+    var value = parseFloat(parts[2].replace(/,/g, '') + (parts[3] || ''));
+    var began = performance.now() + delay, last = 0;
+    node.textContent = parts[1] + (0).toFixed(places) + parts[4];
+    (function tick(now) {
+      if (!node.isConnected) {
+        return;
+      }
+      var at = (now - began) / BOOT.count;
+      if (at >= 1) {
+        node.textContent = text;
+        return;
+      }
+      if (at >= 0 && now - last > 30) {
+        last = now;
+        var words = (value * easeOutCubic(at)).toFixed(places);
+        if (grouped) {
+          var dot = words.indexOf('.'), head = dot < 0 ? words : words.slice(0, dot);
+          words = head.replace(/\B(?=(\d{3})+(?!\d))/g, ',') + (dot < 0 ? '' : words.slice(dot));
+        }
+        node.textContent = parts[1] + words + parts[4];
+      }
+      requestAnimationFrame(tick);
+    })(performance.now());
+  }
+
+  // ---- a group's head tile and the task card (one element: the card shrinks to the head) ---------------------------
+
+  function clockWords(seconds) {
+    var whole = Math.max(0, Math.floor(seconds));
+    var minutes = Math.floor(whole / 60), rest = whole % 60;
+    return (minutes < 10 ? '0' : '') + minutes + ':' + (rest < 10 ? '0' : '') + rest;
+  }
+
+  function makeHead(cls) {
+    lay.heads_made += 1;
+    var el = make('section', 'task ' + cls);
+    var title = make('h2', 't-h');
+    title.id = 'task-' + lay.heads_made;
+    el.setAttribute('aria-labelledby', title.id);
+    var time = make('span', 't-time c-mono');
+    var top = make('div', 't-hd');
+    top.append(title, time);
+    var doing = make('div', 't-words c-mono');
+    doing.setAttribute('aria-live', 'polite');
+    var blocks = make('div', 't-blocks');
+    blocks.setAttribute('aria-hidden', 'true');
+    var cells = [];
+    for (var index = 0; index < TASK_BLOCKS; index += 1) {
+      var block = make('i', '');
+      cells.push(block);
+      blocks.appendChild(block);
+    }
+    var counts = make('span', 't-counts c-mono');
+    var stop = button('c-btn', '', function () { post('go', {to: 'stop'}); });
+    stop.textContent = TASK_WORDS.stop;
+    var foot = make('div', 't-ft');
+    foot.append(counts, stop);
+    el.append(top, doing, blocks, foot);
+    return {el: el, title: title, time: time, doing: doing, blocks: cells, counts: counts, stop: stop,
+            base: 0, at: 0, timer: 0, sources: 0, took: 0};
+  }
+
+  function countWords(count, one, many) {
+    return count + (count === 1 ? one : many);
+  }
+
+  function syncHead(group) {                   // the head tile's words: the topic, the time, what the answer holds
+    var head = group.head;
+    if (!head) {
+      return;
+    }
+    var first = null, count = 0;
+    Array.prototype.forEach.call(group.list.children, function (node) {
+      var rec = records.get(node);
+      if (current(rec) && rec.data) {
+        first = first || rec;
+        count += rec.away || rec.closed ? 0 : 1;
+      }
+    });
+    head.title.textContent = group.topic.textContent || (first ? first.data.title : '');
+    head.time.textContent = group.time.textContent;
+    var parts = [countWords(count, WORDS.frame, WORDS.frames)];
+    if (head.sources) {
+      parts.push(countWords(head.sources, TASK_WORDS.source, TASK_WORDS.sources));
+    }
+    if (head.took) {
+      parts.push(clockWords(head.took));
+    }
+    head.counts.textContent = parts.join(' ' + WORDS.dot + ' ');
+  }
+
+  function dropHead(group) {
+    if (group && group.head) {
+      group.head.el.remove();
+      group.head = null;
+    }
+    if (group) {
+      lay.heads.delete(group.id);
+    }
+  }
+
+  function tickCard() {
+    if (card) {
+      var words = clockWords(card.base + (performance.now() - card.at) / 1000);
+      if (words !== card.time.textContent) {   // (drawn again only when it reads otherwise)
+        card.time.textContent = words;
+      }
+    }
+  }
+
+  function leaveCard(gone) {                   // the card goes (stopped, or an answer with nothing for the canvas)
+    var el = gone.el;
+    clearInterval(gone.timer);
+    lay.cells.delete(el);
+    if (K === 0 || !el.animate) {
+      el.remove();
+      return;
+    }
+    el.classList.add('leaving');
+    after(el.animate([{opacity: 1}, {opacity: 0}], {duration: FADE_MS * K, easing: easeOut, fill: 'forwards'}),
+          function () { el.remove(); });
+  }
+
+  // The task card: what Jarvis is doing while he works, in the app's own words (never the owner's), the time, the
+  // counts so far, blocks that fill as steps finish, and Stop (the app's own). "done" with the answer's group: the
+  // card becomes that group's head tile - it shrinks to the head's place and its heading is the answer's topic.
+  HANDLERS.task = function (message) {
+    if (!onlyKeys(message, ['type', 'state', 'title', 'words', 'seconds', 'steps', 'sources', 'frames', 'group', 'stop'])
+        || TASK_STATES.indexOf(message.state) < 0 || !words(message.title, TASK_CAPS.title)
+        || !words(message.words, TASK_CAPS.words) || !whole(message.seconds, 0, TASK_CAPS.seconds)
+        || !whole(message.steps, 0, TASK_CAPS.count) || !whole(message.sources, 0, TASK_CAPS.count)
+        || !whole(message.frames, 0, MAX_FRAMES) || typeof message.group !== 'string'
+        || (message.group !== '' && !groups.has(message.group)) || typeof message.stop !== 'boolean') {
+      return drop('shape');
+    }
+    if (!canvas) {
+      return true;                             // (a board beside a conversation shows no card)
+    }
+    if (message.state === 'working') {
+      var fresh = !card;
+      if (fresh) {
+        card = makeHead('working unplaced');
+        root.appendChild(card.el);
+        card.timer = setInterval(tickCard, 250);
+      }
+      card.title.textContent = message.title;
+      card.doing.textContent = message.words;
+      card.base = message.seconds;
+      card.at = performance.now();
+      card.sources = message.sources;
+      tickCard();
+      var parts = [];
+      if (message.steps) {
+        parts.push(countWords(message.steps, TASK_WORDS.step, TASK_WORDS.steps));
+      }
+      if (message.sources) {
+        parts.push(countWords(message.sources, TASK_WORDS.source, TASK_WORDS.sources));
+      }
+      if (message.frames) {
+        parts.push(countWords(message.frames, WORDS.frame, WORDS.frames));
+      }
+      card.counts.textContent = parts.join(' ' + WORDS.dot + ' ');
+      var lit = Math.min(TASK_BLOCKS - 1, message.steps * 2);
+      card.blocks.forEach(function (block, index) {
+        block.className = index < lit ? 'on' : (index === lit ? 'next' : '');
+      });
+      card.stop.hidden = !message.stop;
+      if (fresh) {
+        schedulePack('');
+      }
+      return true;
+    }
+    if (!card) {
+      return true;
+    }
+    var mine = card;
+    card = null;
+    clearInterval(mine.timer);
+    var group = message.state === 'done' && message.group ? groups.get(message.group) : null;
+    if (!group || group.parked) {
+      leaveCard(mine);
+      schedulePack('');
+      return true;
+    }
+    if (group.head && group.head !== mine) {
+      group.head.el.remove();
+    }
+    lay.cells.delete(mine.el);
+    group.head = mine;
+    mine.sources = message.sources;
+    mine.took = mine.base + (performance.now() - mine.at) / 1000;
+    mine.blocks.forEach(function (block) { block.className = 'on'; });
+    mine.el.classList.remove('working', 'free', 'unplaced');
+    mine.el.classList.add('head');
+    lay.adopted = performance.now();           // its frames boot once it has shrunk to their head
+    syncHead(group);
+    schedulePack('full');
+    return true;
+  };
+
+  // ---- Tidy, the keyboard, Clear view --------------------------------------------------------------------------------
+
+  function tidy() {                            // every frame back in its place: what the owner opened folds again
+    var held = !!canvas && document.activeElement === canvas.tidy;
+    frames.forEach(function (rec) {
+      if (rec.expanded) {
+        rec.expanded = false;
+        rec.satButton.setAttribute('aria-expanded', 'false');
+      }
+    });
+    packCanvas('full');
+    post('go', {to: 'tidy'});
+    if (held) {
+      focusBoard();                            // its button is gone with the mess: the keyboard goes to the frames
+    }
+  }
+
+  function apart(low, high, from, to) {        // how far two spans are from overlapping (0: they overlap)
+    return Math.max(0, from - high, low - to);
+  }
+
+  function nextOnCanvas(rec, key) {            // the arrows: the nearest frame that way, by where they are on screen
+    var all = boardFrames().filter(function (item) { return !item.el.classList.contains('over'); });
+    if (key === 'Home' || key === 'End') {
+      var ordered = all.map(function (item) { return {rec: item, cell: lay.cells.get(item.el) || {cx: 0, cy: 0}}; })
+        .sort(function (a, b) { return a.cell.cy - b.cell.cy || a.cell.cx - b.cell.cx; });     // reading order
+      var edge = ordered[key === 'Home' ? 0 : ordered.length - 1];
+      return edge ? edge.rec : null;
+    }
+    var from = rec.el.getBoundingClientRect(), best = null, least = Infinity;
+    all.forEach(function (item) {
+      if (item === rec) {
+        return;
+      }
+      var to = item.el.getBoundingClientRect(), ahead = 0, off = 0, skew = 0;
+      if (key === 'ArrowRight' || key === 'ArrowLeft') {
+        ahead = key === 'ArrowRight' ? to.left - from.right : from.left - to.right;
+        off = apart(from.top, from.bottom, to.top, to.bottom);
+        skew = Math.abs(to.top - from.top);
+      } else {
+        ahead = key === 'ArrowDown' ? to.top - from.bottom : from.top - to.bottom;
+        off = apart(from.left, from.right, to.left, to.right);
+        skew = Math.abs(to.left - from.left);
+      }
+      if (ahead < -1) {
+        return;                                // not that way
+      }
+      var cost = ahead + off * 4 + skew * 0.01;
+      if (cost < least) {
+        least = cost;
+        best = item;
+      }
+    });
+    return best;
+  }
+
+  function orbCornerAt() {                     // the orb's place in its corner, in the board's own box
+    var box = root.getBoundingClientRect();
+    return {x: window.innerWidth - CORNER_INSET - box.left, y: window.innerHeight - CORNER_INSET - box.top};
+  }
+
+  function lineFor(rec, box) {
+    var line = make('i', 'fx-line' + (rec.el.classList.contains('waits') ? ' amber' : ''));
+    line.setAttribute('aria-hidden', 'true');
+    line.style.left = box.x + 'px';
+    line.style.top = Math.round(box.y + box.h / 2 - 1) + 'px';
+    line.style.width = box.w + 'px';
+    root.appendChild(line);
+    return line;
+  }
+
+  function intoOrb(box) {                      // a line's last transform: at the orb's centre, almost a point
+    var to = orbCornerAt();
+    return 'translate(' + (to.x - (box.x + box.w / 2)).toFixed(1) + 'px, ' + (to.y - (box.y + box.h / 2)).toFixed(1)
+      + 'px) scaleX(0.02)';
+  }
+
+  function drawIntoOrb(recs) {                 // Clear view: each frame folds to a bright line the orb draws in
+    if (!canvas || K === 0 || !recs.length || !root.animate) {
+      return;
+    }
+    var lively = motion === 'lively', longest = 0;
+    recs.forEach(function (rec, index) {
+      var el = rec.el, box = placed.get(el);
+      if (!box || !box.h || el.classList.contains('over') || el.classList.contains('away')) {
+        return;
+      }
+      var delay = (lively ? index * LINE_STAGGER : 0) * K;
+      rec.folding = true;
+      el.classList.add('folding');
+      var fold = el.animate([{transform: 'none', opacity: 1}, {transform: 'scaleY(0.015)', opacity: 1, offset: 0.85},
+                             {transform: 'scaleY(0.015)', opacity: 0}],
+                            {duration: FOLD_MS * K, delay: delay, easing: 'cubic-bezier(0.5, 0, 0.75, 0.3)',
+                             fill: 'forwards'});
+      var line = lineFor(rec, box), end = intoOrb(box);
+      var fly = line.animate([{transform: 'none', opacity: 0}, {transform: 'none', opacity: 1, offset: 0.18},
+                              {transform: end, opacity: 1, offset: 0.94}, {transform: end, opacity: 0}],
+                             {duration: LINE_MS * K, delay: delay + FOLD_MS * 0.7 * K,
+                              easing: 'cubic-bezier(0.6, 0, 0.9, 0.55)', fill: 'both'});
+      longest = Math.max(longest, delay + FOLD_MS * 0.7 * K + LINE_MS * K);
+      after(fly, function () {
+        line.remove();
+        fold.cancel();
+        rec.folding = false;
+        el.classList.remove('folding');
+        el.classList.toggle('away', rec.away);
+      });
+    });
+    lay.hold = performance.now() + longest + 90;      // the orb keeps its corner until the last line is in
+    setTimeout(function () {
+      if (ORB && ORB.flatTo && lively) {
+        ORB.click = performance.now();         // ... and takes them with one small beat
+        wake();
+      }
+    }, Math.max(0, longest - 60));
+  }
+
+  function drawOutOfOrb(recs) {                // Bring back: they come out again once they have their places
+    if (!canvas || K === 0 || !recs.length) {
+      return;
+    }
+    recs.forEach(function (rec) {
+      rec.wantOut = true;
+      rec.el.classList.add('unplaced');
+    });
+  }
+
+  function letOut(list) {                      // the lines out of the orb to their places, then each unfolds
+    var out = list.filter(function (rec) { return rec.wantOut; });
+    if (!out.length) {
+      return;
+    }
+    var lively = motion === 'lively', now = performance.now();
+    var base = ORB && ORB.trip ? Math.max(0, ORB.trip.began + ORB.trip.ms * 0.8 - now) : 0;     // the orb is on its
+    out.forEach(function (rec, index) {                                                         // way to the corner
+      var el = rec.el, box = placed.get(el);
+      rec.wantOut = false;
+      if (K === 0 || !box || !box.h || !el.animate || el.classList.contains('over')) {
+        return;
+      }
+      var delay = base + (lively ? index * LINE_STAGGER : 0) * K;
+      var line = lineFor(rec, box), start = intoOrb(box);
+      after(line.animate([{transform: start, opacity: 0}, {transform: start, opacity: 1, offset: 0.08},
+                          {transform: 'none', opacity: 1, offset: 0.9}, {transform: 'none', opacity: 0}],
+                         {duration: LINE_MS * K, delay: delay, easing: 'cubic-bezier(0.1, 0.6, 0.3, 1)', fill: 'both'}),
+            function () { line.remove(); });
+      el.animate([{transform: 'scaleY(0.015)', opacity: 0}, {transform: 'scaleY(0.015)', opacity: 1, offset: 0.05},
+                  {transform: lively ? 'scaleY(1.04)' : 'none', opacity: 1, offset: 0.75},
+                  {transform: 'none', opacity: 1}],
+                 {duration: FOLD_MS * 1.3 * K, delay: delay + LINE_MS * 0.85 * K, easing: easeOut, fill: 'backwards'});
+    });
+  }
+
+  function setFormSoon(form) {                 // the orb leaves its corner only once Clear view's last line is in
+    clearTimeout(lay.formTimer);
+    var wait = lay.hold - performance.now();
+    if (wait > 0 && ORB.form === 'corner' && form !== 'corner') {
+      lay.formTimer = setTimeout(function () { setForm(form); }, wait);
+      return;
+    }
+    setForm(form);
+  }
+
+  function layoutLook() {                      // the canvas's layout now, in numbers (the probes' own word on it)
+    var m = lay.m, area = root.getBoundingClientRect();
+    function box(el) {
+      var r = el.getBoundingClientRect();
+      return [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)];
+    }
+    var items = [];
+    frames.forEach(function (rec) {
+      var cell = lay.cells.get(rec.el);
+      items.push({id: rec.id, kind: cell ? cell.kind : '', shown: !!cell && !rec.away && !parked(rec), sat: rec.sat,
+                  closed: rec.closed, pinned: rec.pinned, group: rec.group, box: box(rec.el),
+                  cell: cell ? [cell.cx, cell.cy, cell.cw, cell.ch] : null,
+                  cut: rec.el.classList.contains('cut'), wide: rec.el.classList.contains('wide'),
+                  boot: rec.el.classList.contains('boot'), over: rec.el.classList.contains('over')});
+    });
+    var heads = [];
+    groups.forEach(function (group) {
+      if (group.head && group.head.el.isConnected && !group.head.el.classList.contains('away')) {
+        heads.push({group: group.id, box: box(group.head.el), title: group.head.title.textContent,
+                    counts: group.head.counts.textContent, time: group.head.time.textContent});
+      }
+    });
+    var places = orbPlaces();
+    var reach = STAGE * CORNER_SCALE * clamp(places.fit, 0.8, 1) * 0.36 + 16;
+    return {
+      area: [Math.round(area.left), Math.round(area.top), Math.round(area.width), Math.round(area.height)],
+      win: [window.innerWidth, window.innerHeight],
+      grid: m ? {span: m.span, rows: m.rows, sub: m.sub, tile: m.tile, tight: m.tight, gap: m.gap} : null,
+      orb: [Math.round(window.innerWidth - CORNER_INSET - reach), Math.round(window.innerHeight - CORNER_INSET - reach)],
+      items: items, heads: heads, untidy: lay.untidy, over: lay.over, packs: lay.packs, filter: filter,
+      card: card ? {box: box(card.el), title: card.title.textContent, words: card.doing.textContent,
+                    time: card.time.textContent, counts: card.counts.textContent, stop: !card.stop.hidden,
+                    blocks: card.blocks.filter(function (block) { return block.className === 'on'; }).length,
+                    free: card.el.classList.contains('free')} : null,
+      lines: root.querySelectorAll('.fx-line').length
+    };
   }
 
   function apply(text) {
@@ -4122,6 +5288,7 @@
     window.addEventListener('resize', function () {
       placeBig();                              // first: the board keeps its own box in a wide view (open big)
       placeCanvas();                           // the canvas: the orb's place and size, the board's top
+      schedulePack('full');                    // ... and its frames packed for the new size
       measureWidth();
       scheduleView();
       scheduleLayout();
@@ -4138,10 +5305,14 @@
       apply: apply,
       counts: function () {
         return Object.assign({frames: frames.size, groups: groups.size, big: big ? big.state : '', lit: lit,
-                              canvas: canvas ? canvas.form : '', orb: canvas ? canvas.orbState : ''}, dropped);
+                              canvas: canvas ? canvas.form : '', orb: canvas ? canvas.orbState : '',
+                              task: card ? 'working' : ''}, dropped);
       },
       orb: function () {                       // the orb as it is drawn now, in numbers (null: no canvas)
         return canvas ? orbLook() : null;
+      },
+      layout: function () {                    // the canvas's layout as it is now, in numbers (null: no canvas)
+        return canvas ? layoutLook() : null;
       }
     }),
     writable: false, configurable: false, enumerable: false

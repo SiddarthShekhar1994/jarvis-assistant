@@ -311,9 +311,9 @@ class PageListsTests(unittest.TestCase):
         self.assertEqual(mine & (classes(chrome) | corners), set())
         css = (ASSETS / "board.css").read_text(encoding="utf-8")
         rules = re.findall(r"([^{}\n]*\.tl(?![\w-])[^{]*)\{", css)
-        self.assertEqual(len(rules), 2)
-        for rule in rules:
-            self.assertRegex(rule.strip(), r"^\.fx-(bracket|tick)\.tl$")       # only the corners' own rules
+        self.assertEqual(len(rules), 3)                                       # (the canvas, part 2: its tick's place)
+        for rule in rules:                                                    # only the corners' own rules
+            self.assertRegex(rule.strip(), r"^(:root\.canvas #board \.frame )?\.fx-(bracket|tick)\.tl$")
 
     def test_one_block_for_the_under_300_px_rules(self) -> None:
         css = (ASSETS / "board.css").read_text(encoding="utf-8")

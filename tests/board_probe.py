@@ -99,6 +99,19 @@ Cases:
                its own word, forged words on a second channel dropped; hostile orb and canvas messages put into
                board.apply directly refused by the page; the board's frame in the right-hand part with the orb in
                its corner, Clear view asking for the board's own clear, and the board away when the desk leaves
+    canvas_layout  the canvas, part 2 (frames across the screen): 1, 3, 6, 9, 12 and 24 frames at 900x600, 1280x800,
+               1920x1080 and 2560x1440 - the same page resized, packing again - with nothing overlapping, nothing
+               outside the frames' area, the orb's corner and the caption's strip free, every frame placed or folded
+               to a tile and nothing scrolling; then each kind with long words (a 60-character title, 40-character
+               cells, 8 bars, 12 rows, markup among them) in the mock's style: no word cut sideways, a body its place
+               cuts saying so, and nothing of the data in any attribute
+    canvas_ways  the canvas, part 2, at 1280x800: the task card (working beside the orb, a step on, Stop asking the
+               app, done: it becomes its group's head), the arrival lively (one after another, the heading decoding,
+               numbers counting up), calm (slower, no decode, no count-up) and off (at once), hover (the ticks and the
+               controls), the arrows by where the frames are (real keys), open big growing from a grid cell, the
+               Pinned filter, a close leaving a gap with Tidy packing again (the frames gliding, lively: a little
+               past), Clear view's lines into the orb before the orb leaves its corner, Bring back, and hostile task
+               and number messages refused
 
 Qt runs offscreen and Chromium's proxy is a dead address (snapshots.OFFLINE_FLAGS, as the board's engine always runs in a
 test): nothing can reach the network whatever the page does. No window is shown on the real screen. Chromium's
@@ -867,7 +880,10 @@ def main(case: str) -> dict[str, Any]:
         report["engine_flags"] = snapshots.flag_tokens(os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", ""))
         board.shutdown()
         pump(0.3)
-        wait_until(lambda: not any("renderer" in kind for kind in process_kinds(children())), 15)
+        # A process that is on its way out can no longer say what it is ("unknown": its command line cannot be read
+        # while it exits; the canvas's heavier page takes longer to go): wait for it to be gone too, within the same
+        # bound. One that stays past it still fails the test.
+        wait_until(lambda: not any("renderer" in kind or kind == "unknown" for kind in process_kinds(children())), 15)
         report["kinds_after"] = process_kinds(children())
         report["profile_warning"] = any("still not deleted" in text for text in messages)
 
@@ -992,6 +1008,10 @@ def main(case: str) -> dict[str, Any]:
         report.update(typed_case(make, wait_until, pump, main_world, settle_end))
     elif case == "canvas":
         report.update(canvas_case(make, wait_until, pump, main_world, settle_end))
+    elif case == "canvas_layout":
+        report.update(canvas_layout_case(make, wait_until, pump, main_world, settle_end))
+    elif case == "canvas_ways":
+        report.update(canvas_ways_case(make, wait_until, pump, main_world, settle_end))
     elif case == "reduced":
         # The page's own reduced motion, Chromium told reduced motion (REDUCED_MOTION): lively plays as off.
         host, board = make()
@@ -3853,6 +3873,537 @@ def canvas_case(make: Any, wait_until: Any, pump: Any, main_world: Any, settle_e
     report["allowed"] = counts.get("allowed", {})
     report["console"] = {key: value for key, value in counts.items() if key.startswith("console:")}
     report["messages_refused"] = {key: value for key, value in counts.items() if key.startswith("refused:")}
+    settle_end(report, board)
+    return report
+
+
+# ---- the canvas, part 2 (PLAN-canvas part 2): frames across the screen - the layout at every size, each kind in the
+# new style with long words, the arrival at each motion level, the task card, Tidy, Clear view, open big, the keys --------
+
+CANVAS2_MARKS = ("<img", "<script", "javascript:", "onerror", "onmouseover", "pwned", "example.com", "http:")
+CANVAS2_SIZES = ((900, 600), (1280, 800), (1920, 1080), (2560, 1440))
+CANVAS2_COUNTS = (1, 3, 6, 9, 12, 24)
+LONG_TITLE = "A sixty character title that goes on and on to its very cap!"          # 60 characters
+LONG_CELL = "A forty character cell, cut at its cap!!"                                # 40 characters
+
+# What the canvas shows, checked in the page: the layout in numbers (board.layout()) and, of everything it places - the
+# frames and tiles, the groups' heads, the task card -: any two that overlap, any that leaves the frames' area, any on
+# the orb's corner or under the area's end (the caption's strip), any frame neither placed nor folded, and every
+# attribute in the board (for the data's marks).
+CANVAS2_LOOK = r"""JSON.stringify((function (marks) {
+  var look = board.layout();
+  if (!look) { return null; }
+  var boxes = [];
+  look.items.forEach(function (item) {
+    if (item.shown && !item.over) { boxes.push({name: item.id, box: item.box, kind: item.kind}); }
+  });
+  look.heads.forEach(function (head) { boxes.push({name: 'head:' + head.group, box: head.box, kind: 'head'}); });
+  if (look.card) { boxes.push({name: 'card', box: look.card.box, kind: 'card'}); }
+  function hits(a, b) {
+    return a[0] < b[0] + b[2] - 0.5 && b[0] < a[0] + a[2] - 0.5 && a[1] < b[1] + b[3] - 0.5 && b[1] < a[1] + a[3] - 0.5;
+  }
+  var overlaps = [], outside = [], onOrb = [], empty = [];
+  var area = look.area, orb = [look.orb[0], look.orb[1], look.win[0] - look.orb[0], look.win[1] - look.orb[1]];
+  boxes.forEach(function (one, index) {
+    for (var other = index + 1; other < boxes.length; other += 1) {
+      if (hits(one.box, boxes[other].box)) { overlaps.push([one.name, boxes[other].name]); }
+    }
+    var b = one.box;
+    if (b[0] < area[0] - 1 || b[1] < area[1] - 1 || b[0] + b[2] > area[0] + area[2] + 1
+        || b[1] + b[3] > area[1] + area[3] + 1) { outside.push(one.name); }
+    if (hits(b, orb)) { onOrb.push(one.name); }
+    if (b[2] < 40 || b[3] < 20) { empty.push(one.name); }
+  });
+  var attrs = [], hit = [];
+  Array.prototype.forEach.call(document.querySelectorAll('#board *, #big *'), function (n) {
+    for (var j = 0; j < n.attributes.length; j += 1) {
+      var text = n.attributes[j].name + '=' + n.attributes[j].value;
+      marks.forEach(function (mark) { if (text.indexOf(mark) >= 0) { hit.push(text.slice(0, 80)); } });
+      if (n.attributes[j].name !== 'class' && n.attributes[j].name !== 'style') { attrs.push(n.attributes[j].name); }
+    }
+  });
+  var names = {};
+  attrs.forEach(function (name) { names[name] = (names[name] || 0) + 1; });
+  return {
+    win: look.win, area: area, grid: look.grid, orb: look.orb, untidy: look.untidy, over: look.over, packs: look.packs,
+    card: look.card, heads: look.heads, items: look.items, filter: look.filter, lines: look.lines,
+    full: look.items.filter(function (i) { return i.shown && i.kind === 'full'; }).length,
+    tiles: look.items.filter(function (i) { return i.shown && i.kind === 'tile'; }).length,
+    lost: look.items.filter(function (i) { return !i.shown || i.over; }).map(function (i) { return i.id; }),
+    overlaps: overlaps, outside: outside, on_orb: onOrb, empty: empty,
+    strip: look.win[1] - (area[1] + area[3]),
+    scroll: [getComputedStyle(document.getElementById('board')).overflowY, document.getElementById('board').scrollTop,
+             document.documentElement.scrollHeight - innerHeight, document.documentElement.scrollTop],
+    attr_names: names, attr_hits: hit, pwned: typeof window.pwned,
+    foreign: document.querySelectorAll('#board script, #board iframe, #board a, #board style, #board link, '
+      + '#board object, #board embed, #board form, #board input').length,
+    bar: getComputedStyle(document.getElementById('bar') || document.body).display,
+    strip_shown: getComputedStyle(document.getElementById('strip')).display,
+    buttons: Array.prototype.filter.call(document.querySelectorAll('#canvas button'), function (b) { return !b.hidden; })
+      .map(function (b) { return b.textContent || b.getAttribute('aria-label'); }),
+    counts: board.counts()
+  };
+})(%s))"""
+
+# Each frame as it is drawn: its own style (the mock's outline, corners, glows, caps heading, mono labels), whether
+# any word of it is cut sideways, whether its body is whole or says it is cut, the sizes of its text.
+CANVAS2_STYLE = r"""JSON.stringify((function () {
+  var found = [];
+  Array.prototype.forEach.call(document.querySelectorAll('#board .frame'), function (el) {
+    var style = getComputedStyle(el), body = el.querySelector(':scope > .f-body'), title = el.querySelector('.f-title');
+    var box = el.getBoundingClientRect(), head = title.getBoundingClientRect();
+    var glow = getComputedStyle(el, '::before').boxShadow, sizes = [];
+    Array.prototype.forEach.call(el.querySelectorAll('.f-body *'), function (n) {
+      if (n.children.length === 0 && n.textContent.trim() && n.getClientRects().length) {
+        sizes.push(parseFloat(getComputedStyle(n).fontSize));
+      }
+    });
+    var wide = [];
+    Array.prototype.forEach.call(el.querySelectorAll('.f-head *, .f-body *'), function (n) {
+      var r = n.getBoundingClientRect();
+      if (r.width > 0 && (r.left < box.left - 0.5 || r.right > box.right + 0.5)) { wide.push(n.className || n.tagName); }
+    });
+    found.push({
+      id: title.id.slice(6), cls: el.className.split(' ').filter(Boolean).sort(), radius: style.borderTopLeftRadius,
+      border: style.borderTopColor, ground: style.backgroundColor, glow: glow, position: style.position,
+      title: {font: getComputedStyle(title).fontFamily, size: getComputedStyle(title).fontSize,
+              caps: getComputedStyle(title).textTransform, weight: getComputedStyle(title).fontWeight,
+              color: getComputedStyle(title).color, inside: head.top >= box.top - 0.5 && head.bottom <= box.bottom + 0.5
+                && head.left >= box.left - 0.5 && head.right <= box.right + 0.5, text: title.textContent},
+      meta: (function () { var m = el.querySelector('.f-meta'), s = getComputedStyle(m);
+                           return {font: s.fontFamily, caps: s.textTransform, size: s.fontSize}; })(),
+      body: body ? {fits: body.scrollHeight <= body.clientHeight + 1, cut: el.classList.contains('cut'),
+                    more: getComputedStyle(el.querySelector('.f-cut') || el).display,
+                    sideways: body.scrollWidth > body.clientWidth + 1} : null,
+      smallest: sizes.length ? Math.min.apply(null, sizes) : 0, wide: wide.slice(0, 4),
+      glyph: getComputedStyle(el.querySelector('.f-glyph')).display
+    });
+  });
+  return found;
+})())"""
+
+# A stretch of the page's own time, sampled every frame: what boots, decodes and counts, where a frame is (a glide),
+# how many of Clear view's lines fly, the orb's form.
+CANVAS2_WATCH = r"""(function (ms, id) {
+  window.__c2 = []; window.__c2done = false;
+  var began = performance.now();
+  (function sample(now) {
+    var el = id ? document.getElementById('title-' + id).closest('.frame') : null;
+    var value = document.querySelector('#board .ch-v'), figure = document.querySelector('#board .nb-fig');
+    var boots = Array.prototype.map.call(document.querySelectorAll('#board .frame.boot'), function (n) {
+      return [n.querySelector('.f-title').id.slice(6), parseFloat(n.style.getPropertyValue('--d')) || 0]; });
+    var r = el ? el.getBoundingClientRect() : null;
+    window.__c2.push({t: Math.round(now - began), boots: boots, decoding: document.querySelectorAll('.d-fx').length,
+                      value: value ? value.textContent : '', figure: figure ? figure.textContent : '',
+                      box: r ? [r.left, r.top, r.width, r.height] : null,
+                      lines: document.querySelectorAll('#board .fx-line').length,
+                      folding: document.querySelectorAll('#board .frame.folding').length,
+                      form: board.orb().form, big: (function () { var c = document.querySelector('#big .big-card');
+                        if (!c) { return null; } var b = c.getBoundingClientRect(); return [b.left, b.top, b.width, b.height]; })()});
+    if (now - began < ms) { requestAnimationFrame(sample); } else { window.__c2done = true; }
+  })(performance.now());
+})(%d, %s)"""
+
+
+def canvas2_frames(count: int, hostile: bool = False) -> list[dict[str, Any]]:
+    """``count`` made-up frames of every kind in turn (short, ordinary words; ``hostile``: markup among them)."""
+    from briefing_reader.board import ask_frames
+
+    evil = "<img src=x onerror=window.pwned=41>" if hostile else "Dana Whitfield"
+    chart = ask_frames.check_frame({
+        "kind": "chart", "title": "Q4 budget by line", "unit": "USD", "changed": 1, "was": 2900,
+        "change": "+500 Software · was 2.9k on Friday",
+        "bars": [{"label": "Travel", "value": 1200}, {"label": "Software", "value": 3400},
+                 {"label": "Events", "value": 2100}, {"label": "Hardware", "value": 800}]})
+    table = ask_frames.check_frame({
+        "kind": "table", "title": "Budget lines", "unit": "USD", "changed": 1, "change": "+500 Software",
+        "source": "Dana's mail", "columns": ["Line", "Friday", "Today"],
+        "rows": [["Travel", 1200, 1200], ["Software", 2900, 3400], ["Events", 2100, 2100]]})
+    timeline = ask_frames.check_frame({
+        "kind": "timeline", "title": "City Hack dates", "today": 1,
+        "nodes": [{"when": "Mon 9 Nov", "words": "Registration", "state": "done"},
+                  {"when": "Thu 19 Nov", "words": "Idea due", "state": "next"},
+                  {"when": "Sat 21 Nov", "words": "Hack day", "state": "due"}]})
+    maths = ask_frames.check_frame({
+        "kind": "maths", "title": "Average per line", "steps": [{"name": "Sum", "expr": ["+", 1200, 3400, 2100]}],
+        "answer": {"name": "Mean", "expr": ["=", "m", ["frac", 6700, 3]]}})
+    kinds: list[dict[str, Any]] = [
+        {"kind": "mail_thread", "title": "Re: Budget numbers", "meta": "Work",
+         "body": {"sender": evil, "time": "8:12 AM", "text": "Here are the Q4 numbers. Line 14 changed since Friday."},
+         "waits": "A reply waits for your OK"},
+        {"kind": "calendar", "title": "Today", "meta": "3 meetings",
+         "body": {"first": 0, "last": 0, "now_min": -1, "ticks": [], "spans": [], "now": "",
+                  "rows": [{"time": "10:00", "title": "AI-Trader check-in", "meta": "In 19 min", "state": "next"},
+                           {"time": "13:00", "title": "Study group", "meta": "", "state": ""},
+                           {"time": "16:00", "title": "Project check-in", "meta": "", "state": ""}]}},
+        dict(ask_frames.build(chart, frame_id="x").messages[0]),
+        dict(ask_frames.build(ask_frames.number_frame(chart), frame_id="x").messages[0]),
+        {"kind": "todos", "title": "To-dos", "meta": "3",
+         "body": {"rows": [{"text": "Send budget comments to Dana", "meta": "Waits", "state": "waits"},
+                           {"text": "LING essay draft", "meta": "Thu", "state": "open"},
+                           {"text": "Print boarding pass", "meta": "", "state": "done"}]}},
+        dict(ask_frames.build(table, frame_id="x").messages[0]),
+        dict(ask_frames.build(timeline, frame_id="x").messages[0]),
+        dict(ask_frames.build(maths, frame_id="x").messages[0]),
+        {"kind": "text", "title": "City Hack: what changed", "meta": "2 sources",
+         "body": {"text": "The schedule moved to Saturday.",
+                  "rows": [{"lead": "1", "text": "City Hack schedule", "meta": "city-hack.example.org"}]}},
+        {"kind": "mail_list", "title": "Follow-ups", "meta": "2",
+         "body": {"rows": [{"sender": "Prof. Ana Ruiz", "time": "30 h", "subject": "Lab section moved",
+                            "meta": "Waiting", "unread": True}]}},
+        {"kind": "picture", "title": "City Hack schedule", "meta": "Page", "body": {"caption": "city-hack.example.org"}},
+        {"kind": "mail_thread", "title": "Lab section moved", "meta": "", "status": "failed",
+         "status_text": "The mail could not be read.", "body": {"sender": "", "time": "", "text": ""}},
+    ]
+    return [dict(kinds[index % len(kinds)], type="frame", id=f"f{index + 1}") for index in range(count)]
+
+
+def canvas2_long() -> list[dict[str, Any]]:
+    """Each kind with long words: a 60-character title, 40-character cells, 8 bars, 12 rows, markup among them."""
+    from briefing_reader.board import ask_frames
+
+    mark = "<img src=http://example.com/x.png onerror=window.pwned=42>"
+    cell = LONG_CELL
+    table = ask_frames.check_frame({
+        "kind": "table", "title": LONG_TITLE, "unit": "USD", "changed": 2, "change": "+500 " + "x" * 60,
+        "source": "S" * 60, "columns": ["Line " + "c" * 19, "Friday", "Today", "Change"],
+        "rows": [[cell, 1200 + row, 3400, "<b>" + "z" * 30] for row in range(12)]})
+    chart = ask_frames.check_frame({
+        "kind": "chart", "title": LONG_TITLE, "unit": "USD", "changed": 7, "was": 2900, "change": "+500 " + "y" * 70,
+        "bars": [{"label": "A label of 24 characters"[:24], "value": 1000 + 300 * bar} for bar in range(8)]})
+    timeline = ask_frames.check_frame({
+        "kind": "timeline", "title": LONG_TITLE, "today": 3,
+        "nodes": [{"when": "Thu 19 November 2026 9am"[:24], "words": cell, "state": ("done", "next", "due", "")[n % 4]}
+                  for n in range(8)]})
+    maths = ask_frames.check_frame({
+        "kind": "maths", "title": LONG_TITLE,
+        "steps": [{"name": "A step name of 24 chars!"[:24], "expr": ["+", 1234567, 2345678, 3456789, step]}
+                  for step in range(8)],
+        "answer": {"name": "Answer", "expr": ["=", "x", ["frac", 7037034, 3]]}})
+    rows8 = [{"time": "10:00 - 11:30 AM", "title": cell, "meta": "In 19 min", "state": ""} for _ in range(8)]
+    frames = [
+        {"kind": "mail_thread", "title": LONG_TITLE, "meta": "M" * 40,
+         "body": {"sender": mark, "time": "8:12 AM", "text": "Long words. " * 30}, "waits": "W" * 60},
+        {"kind": "calendar", "title": LONG_TITLE, "meta": "8 meetings",
+         "body": {"first": 0, "last": 0, "now_min": -1, "ticks": [], "spans": [], "now": "", "rows": rows8}},
+        {"kind": "mail_list", "title": LONG_TITLE, "meta": "8",
+         "body": {"rows": [{"sender": cell, "time": "30 h", "subject": LONG_TITLE, "meta": "Waiting", "unread": True}
+                           for _ in range(8)]}},
+        {"kind": "todos", "title": LONG_TITLE, "meta": "8",
+         "body": {"rows": [{"text": LONG_TITLE, "meta": "This week", "state": ("waits", "open", "done")[n % 3]}
+                           for n in range(8)]}},
+        {"kind": "text", "title": LONG_TITLE, "meta": "8 sources",
+         "body": {"text": "Research words. " * 24,
+                  "rows": [{"lead": str(n + 1), "text": LONG_TITLE, "meta": cell} for n in range(8)]}},
+        {"kind": "picture", "title": LONG_TITLE, "meta": "Page", "body": {"caption": LONG_TITLE}},
+        dict(ask_frames.build(table, frame_id="x").messages[0]),
+        dict(ask_frames.build(chart, frame_id="x").messages[0]),
+        dict(ask_frames.build(ask_frames.number_frame(chart), frame_id="x").messages[0]),
+        dict(ask_frames.build(timeline, frame_id="x").messages[0]),
+        dict(ask_frames.build(maths, frame_id="x").messages[0]),
+        {"kind": "mail_thread", "title": LONG_TITLE, "meta": "", "status": "failed", "status_text": "F" * 160,
+         "body": {"sender": "", "time": "", "text": ""}},
+        {"kind": "picture", "title": LONG_TITLE, "meta": "", "status": "empty", "status_text": "Getting the picture",
+         "status_meta": "Started 9:41 AM", "body": {"caption": ""}},
+    ]
+    return [dict(frame, type="frame", id=f"k{index + 1}") for index, frame in enumerate(frames)]
+
+
+def _canvas2_start(make: Any, wait_until: Any, pump: Any, size: tuple[int, int]) -> tuple[Any, Any]:
+    host, board = make(canvas=True)
+    host.resize(*size)
+    board.setGeometry(0, 0, *size)
+    host.show()
+    wait_until(board.is_ready, 40)
+    board.apply({"type": "canvas", "clock": "Tue 17 Nov · 9:41 AM", "word": "Standby", "tone": "holo",
+                 "approvals": 0, "buttons": CANVAS_BUTTONS, "briefing_new": False, "hold": "", "rec": "", "wake": "",
+                 "meter": True})
+    board.apply({"type": "orb", "state": "idle", "form": "corner", "muted": False, "offline": False, "dim": False,
+                 "level": 0, "voice": 0})
+    return host, board
+
+
+def _canvas2_put(board: Any, frames: list[dict[str, Any]], group: str = "g1", pinned: int = 0) -> None:
+    """One answer's group and its frames, as the feed sends them (the group first, then its frames, then its order)."""
+    board.apply({"type": "group", "id": group, "time": "9:41 AM", "topic": "Dana's budget", "frames": [],
+                 "older": False})
+    for frame in frames:
+        board.apply(dict(frame, group=group))
+    board.apply({"type": "group", "id": group, "time": "9:41 AM", "topic": "Dana's budget",
+                 "frames": [frame["id"] for frame in frames], "older": False})
+    board.apply({"type": "bar", "frames": len(frames), "waits": 0, "pinned": pinned, "compact": False})
+    board.apply({"type": "desk", "state": "enter"})
+
+
+def canvas_layout_case(make: Any, wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> dict[str, Any]:
+    """The canvas's layout in the real page: 1, 3, 6, 9, 12 and 24 frames at 900x600, 1280x800, 1920x1080 and
+    2560x1440 (the same page, resized: it packs again), then each kind with long words at 1280x800 and 1920x1080."""
+    report: dict[str, Any] = {"sizes": {}}
+    host, board = _canvas2_start(make, wait_until, pump, CANVAS2_SIZES[0])
+    report["ready"] = board.is_ready()
+    board.set_motion("off")                               # (the layout is the same at every level; off: no waiting)
+    marks = json.dumps(list(CANVAS2_MARKS))
+
+    def look() -> dict[str, Any]:
+        return json.loads(main_world(board, CANVAS2_LOOK % marks))
+
+    for count in CANVAS2_COUNTS:
+        board.apply({"type": "clear"})
+        _canvas2_put(board, canvas2_frames(count, hostile=True))
+        for size in CANVAS2_SIZES:
+            host.resize(*size)
+            board.setGeometry(0, 0, *size)
+            pump(0.22)
+            report["sizes"][f"{count}@{size[0]}x{size[1]}"] = look()
+    # each kind with long words
+    report["long"] = {}
+    for size in ((1280, 800), (1920, 1080)):
+        board.apply({"type": "clear"})
+        host.resize(*size)
+        board.setGeometry(0, 0, *size)
+        frames = canvas2_long()
+        _canvas2_put(board, frames)                       # all at once: most fold (what a tile shows of long words)
+        board.apply({"type": "picture", "id": "k6", "src": tiny_jpeg_url(320, 200)})
+        pump(0.4)
+        found: dict[str, Any] = {"look": look(), "style": json.loads(main_world(board, CANVAS2_STYLE)), "full": [],
+                                 "looks": []}
+        for start in range(0, len(frames), 3):            # three at a time: each kind as a whole frame
+            board.apply({"type": "clear"})
+            _canvas2_put(board, frames[start:start + 3])
+            if start <= 5 < start + 3:
+                board.apply({"type": "picture", "id": "k6", "src": tiny_jpeg_url(320, 200)})
+            pump(0.35)
+            found["full"] += json.loads(main_world(board, CANVAS2_STYLE))
+            found["looks"].append(look())
+        report["long"][f"{size[0]}x{size[1]}"] = found
+    report["long_titles"] = [LONG_TITLE, len(LONG_TITLE), len(LONG_CELL)]
+    counts = board.counts()
+    report["blocked"] = counts.get("blocked", {})
+    report["allowed"] = counts.get("allowed", {})
+    report["messages_refused"] = {key: value for key, value in counts.items() if key.startswith("refused:")}
+    report["console"] = {key: value for key, value in counts.items() if key.startswith("console:")}
+    settle_end(report, board)
+    return report
+
+
+def canvas_ways_case(make: Any, wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> dict[str, Any]:
+    """The canvas's moves and ways in the real page at 1280x800: the task card's states, the arrival at each motion
+    level, hover, the keyboard's moves by where the frames are, open big from a grid cell, the Pinned filter, a close
+    leaving a gap and Tidy, Clear view's lines into the orb and Bring back, and the page's own refusals."""
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    report: dict[str, Any] = {}
+    host, board = _canvas2_start(make, wait_until, pump, (1280, 800))
+    report["ready"] = board.is_ready()
+    went: list[str] = []
+    board.goRequested.connect(went.append)
+    asked: list[list[Any]] = []
+    for name in ("openRequested", "closeRequested"):
+        getattr(board, name).connect(lambda frame_id, n=name: asked.append([n, frame_id]))
+    board.pinRequested.connect(lambda frame_id, on: asked.append(["pinRequested", frame_id, on]))
+    landed: list[list[str]] = []
+    board.frameLanded.connect(lambda frame_id, step: landed.append([frame_id, step]))
+    marks = json.dumps(list(CANVAS2_MARKS))
+
+    def look() -> dict[str, Any]:
+        return json.loads(main_world(board, CANVAS2_LOOK % marks))
+
+    def watch(ms: int, frame_id: str = "") -> list[dict[str, Any]]:
+        main_world(board, CANVAS2_WATCH % (ms, json.dumps(frame_id) if frame_id else "''"))
+        wait_until(lambda: main_world(board, "String(window.__c2done === true)") == "true", ms / 1000 + 6)
+        return json.loads(main_world(board, "JSON.stringify(window.__c2)"))
+
+    def orb(form: str) -> None:
+        board.apply({"type": "orb", "state": "idle", "form": form, "muted": False, "offline": False, "dim": False,
+                     "level": 0, "voice": 0})
+
+    def task(state: str, **more: Any) -> bool:
+        message = {"type": "task", "state": state, "title": "Working on it", "words": "Reading your calendar",
+                   "seconds": 3, "steps": 0, "sources": 0, "frames": 0, "group": "", "stop": True}
+        message.update(more)
+        return board.apply(message)
+
+    def proxy() -> Any:
+        return board.web_view().focusProxy()
+
+    def press(label: str) -> str:
+        return main_world(board, r"""(function (label) {
+          var hit = '';
+          Array.prototype.forEach.call(document.querySelectorAll('#canvas button, #board .task button'), function (b) {
+            if (!b.hidden && !hit && b.textContent.indexOf(label) === 0) { hit = b.textContent; b.click(); }
+          });
+          return hit;
+        })(%s)""" % json.dumps(label))
+
+    def active() -> str:
+        return main_world(board, "(function () { var a = document.activeElement, f = a && a.closest ? "
+                                 "a.closest('.frame') : null; return f ? f.querySelector('.f-title').id.slice(6) : "
+                                 "(a ? a.tagName : ''); })()")
+
+    def key(code: Any) -> str:
+        QTest.keyClick(QApplication.focusWidget() or host, code)
+        pump(0.25)
+        return active()
+
+    # ---- the task card: working (alone on the canvas, beside the orb), a step on, then done with its group ----------
+    board.set_motion("lively")
+    orb("rings")
+    pump(1.0)
+    report["task_sent"] = [task("working"), task("working", words="<script>window.pwned=43</script>", steps=2,
+                                                 sources=1, seconds=7)]
+    pump(0.7)
+    report["task_working"] = look()
+    report["stop_pressed"] = press("Stop")
+    pump(0.3)
+    frames = canvas2_frames(6)
+    orb("corner")
+    _canvas2_put(board, frames)
+    report["task_done_sent"] = task("done", title="", words="", seconds=9, steps=3, sources=2, frames=6, group="g1",
+                                    stop=False)
+    # ---- the arrival, lively: one after another, the heading decodes, numbers count up ----------------------------
+    report["lively"] = watch(2600, "f3")
+    report["lively_after"] = look()
+    report["lively_style"] = json.loads(main_world(board, CANVAS2_STYLE))
+    report["lively_anim"] = main_world(board, "(function () { return 1; })()")
+    report["landed_lively"] = list(landed)
+    # ---- hover: the frame brightens, its corner ticks and its controls show -----------------------------------------
+    first = next(item for item in report["lively_after"]["items"] if item["id"] == "f3")
+    QTest.mouseMove(proxy(), QPoint(first["box"][0] + first["box"][2] // 2, first["box"][1] + first["box"][3] // 2))
+    pump(0.5)
+    report["hover"] = json.loads(main_world(board, r"""JSON.stringify((function () {
+      var el = document.getElementById('title-f3').closest('.frame');
+      return {hovered: el.matches(':hover'), tick: getComputedStyle(el.querySelector('.fx-tick')).opacity,
+              controls: getComputedStyle(el.querySelector('.f-ctl')).opacity,
+              glow: getComputedStyle(el, '::after').opacity, border: getComputedStyle(el).borderTopColor,
+              other: getComputedStyle(document.getElementById('title-f2').closest('.frame').querySelector('.f-ctl')).opacity,
+              box: (function () { var r = el.getBoundingClientRect(); return [r.left, r.top, r.width, r.height]; })()};
+    })())"""))
+    QTest.mouseMove(proxy(), QPoint(3, 3))
+    pump(0.3)
+    # ---- the keyboard: the arrows go to the nearest frame that way; Enter, P and Delete ask the app -----------------
+    board.focus_part("board")
+    pump(0.3)
+    moves: list[list[str]] = [["start", active()]]
+    for name, code in (("Right", Qt.Key.Key_Right), ("Down", Qt.Key.Key_Down), ("Left", Qt.Key.Key_Left),
+                       ("Up", Qt.Key.Key_Up), ("End", Qt.Key.Key_End), ("Home", Qt.Key.Key_Home)):
+        moves.append([name, key(code)])
+    report["moves"] = moves
+    report["move_boxes"] = {item["id"]: item["box"] for item in look()["items"]}
+    key(Qt.Key.Key_P)
+    key(Qt.Key.Key_Return)
+    report["asked"] = list(asked)
+    # ---- open big from a grid cell: it grows from its place, and goes back ------------------------------------------
+    home = moves[-1][1]
+    main_world(board, "document.body.focus(); 0")
+    board.apply({"type": "big", "state": "open", "id": home, "x": 0, "y": 0, "w": 1280, "h": 800})
+    report["big"] = watch(700, home)
+    board.apply({"type": "big", "state": "close", "id": ""})
+    pump(0.7)
+    report["big_shut"] = main_world(board, "String(board.counts().big) + '/' + String(!!document.querySelector('#big .big-card'))")
+    # ---- Pinned: a filter in the corner, only while something is pinned ---------------------------------------------
+    report["before_pin"] = look()["buttons"]
+    board.apply(dict(frames[2], group="g1", pinned=True))
+    board.apply({"type": "bar", "frames": 6, "waits": 0, "pinned": 1, "compact": False})
+    pump(0.4)
+    report["pinned_buttons"] = look()["buttons"]
+    report["pinned_pressed"] = press("Pinned")
+    pump(0.9)
+    report["pinned_only"] = look()
+    press("Pinned")
+    pump(0.9)
+    report["pinned_all"] = look()
+    board.apply(dict(frames[2], group="g1", pinned=False))
+    board.apply({"type": "bar", "frames": 6, "waits": 0, "pinned": 0, "compact": False})
+    pump(0.4)
+    # ---- a close leaves a gap (nothing else moves); Tidy shows and packs again, the frames gliding ------------------
+    before = look()
+    report["before_close"] = before
+    board.apply(dict(frames[1], group="g1", closed=True))
+    pump(0.5)
+    report["closed"] = look()
+    board.apply({"type": "remove", "id": "f2"})
+    board.apply({"type": "group", "id": "g1", "time": "9:41 AM", "topic": "Dana's budget",
+                 "frames": [frame["id"] for frame in frames if frame["id"] != "f2"], "older": False})
+    board.apply({"type": "bar", "frames": 5, "waits": 0, "pinned": 0, "compact": False})
+    pump(0.7)
+    report["gap"] = look()
+    mover = next((item["id"] for item in report["gap"]["items"] if item["id"] not in ("f1", "f2")), "f3")
+    report["tidy_mover"] = mover
+    main_world(board, CANVAS2_WATCH % (1500, json.dumps("f6")))
+    report["tidy_pressed"] = press("Tidy")
+    wait_until(lambda: main_world(board, "String(window.__c2done === true)") == "true", 8)
+    report["tidy"] = json.loads(main_world(board, "JSON.stringify(window.__c2)"))
+    report["tidied"] = look()
+    report["went"] = list(went)
+    # ---- Clear view: each frame folds to a line the orb draws in; then the orb leaves its corner; Bring back ---------
+    left = [item["id"] for item in report["tidied"]["items"]]
+    main_world(board, CANVAS2_WATCH % (1500, "''"))
+    board.apply({"type": "cleared", "frames": left})
+    board.apply({"type": "bar", "frames": 0, "waits": 0, "pinned": 0, "compact": False})
+    orb("rings")                                              # (the app: nothing shows any more)
+    wait_until(lambda: main_world(board, "String(window.__c2done === true)") == "true", 8)
+    report["clear"] = json.loads(main_world(board, "JSON.stringify(window.__c2)"))
+    pump(0.9)
+    report["cleared"] = look()
+    report["cleared_row"] = main_world(board, "(function () { var r = document.querySelector('.cleared-row'); return "
+                                              "r.classList.contains('shown') ? r.textContent : ''; })()")
+    report["cleared_orb"] = json.loads(main_world(board, "JSON.stringify(board.orb())"))
+    main_world(board, CANVAS2_WATCH % (2400, json.dumps("f1")))
+    board.apply({"type": "cleared", "frames": []})
+    board.apply({"type": "bar", "frames": 5, "waits": 0, "pinned": 0, "compact": False})
+    orb("corner")
+    wait_until(lambda: main_world(board, "String(window.__c2done === true)") == "true", 9)
+    report["back"] = json.loads(main_world(board, "JSON.stringify(window.__c2)"))
+    report["brought_back"] = look()
+    # ---- calm: the same arrival, slower, no decode, no count-up; off: there at once ---------------------------------
+    for level in ("calm", "off"):
+        board.apply({"type": "clear"})
+        board.set_motion(level)
+        pump(0.3)
+        del landed[:]
+        _canvas2_put(board, canvas2_frames(6))
+        report[level] = watch(3600 if level == "calm" else 500, "f3")
+        report[f"{level}_after"] = look()
+        report[f"landed_{level}"] = list(landed)
+    board.set_motion("lively")
+    # ---- a card whose request ends with nothing for the canvas goes; hostile cards are refused by the page ----------
+    task("working")
+    pump(0.5)
+    report["card_again"] = look()["card"]
+    task("gone", title="", words="", stop=False)
+    pump(0.6)
+    report["card_gone"] = look()["card"]
+    tries = {
+        "state": {"type": "task", "state": "evil", "title": "", "words": "", "seconds": 0, "steps": 0, "sources": 0,
+                  "frames": 0, "group": "", "stop": False},
+        "long": {"type": "task", "state": "working", "title": "x" * 41, "words": "", "seconds": 0, "steps": 0,
+                 "sources": 0, "frames": 0, "group": "", "stop": False},
+        "fraction": {"type": "task", "state": "working", "title": "", "words": "", "seconds": 0.5, "steps": 0,
+                     "sources": 0, "frames": 0, "group": "", "stop": False},
+        "group": {"type": "task", "state": "done", "title": "", "words": "", "seconds": 0, "steps": 0, "sources": 0,
+                  "frames": 0, "group": "nope", "stop": False},
+        "extra": {"type": "task", "state": "working", "title": "", "words": "", "seconds": 0, "steps": 0,
+                  "sources": 0, "frames": 0, "group": "", "stop": False, "html": "<b>x</b>"},
+        "figure": {"type": "frame", "id": "n9", "kind": "number", "title": "T", "meta": "", "status": "ok",
+                   "status_text": "", "status_meta": "", "waits": "", "changed": False, "pinned": False,
+                   "closed": False, "body": {"figure": "<b>500</b>", "text": "", "source": ""}},
+        "number_key": {"type": "frame", "id": "n9", "kind": "number", "title": "T", "meta": "", "status": "ok",
+                       "status_text": "", "status_meta": "", "waits": "", "changed": False, "pinned": False,
+                       "closed": False, "body": {"figure": "+500", "text": "", "source": "", "href": "x"}},
+    }
+    report["page_refused"] = {name: main_world(board, f"String(board.apply({json.dumps(json.dumps(message))}))")
+                              for name, message in tries.items()}
+    report["python_refused"] = {name: board.apply(message) for name, message in tries.items()}
+    report["forged"] = main_world(board, CANVAS_FORGED.replace("format_disk", "tidy_all").replace("'settings'", "'tidy'"))
+    pump(0.4)
+    report["went_end"] = list(went)
+    report["end"] = look()
+    counts = board.counts()
+    report["blocked"] = counts.get("blocked", {})
+    report["allowed"] = counts.get("allowed", {})
+    report["console"] = {key: value for key, value in counts.items() if key.startswith("console:")}
     settle_end(report, board)
     return report
 

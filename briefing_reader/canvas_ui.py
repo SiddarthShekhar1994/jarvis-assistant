@@ -24,6 +24,20 @@ board`` is on, a board can be made here and it is the canvas's (the real board a
 * falls back when the page can't start or its renderer dies for good (the board's ``unavailable``): canvas mode off -
   Home's native ring, the Dock's buttons to every screen, the ask line, and the read-only tiles in the desk.
 
+Part 2 (frames across the screen):
+
+* the task card (``task_message``; board.protocol's "task"): while an Ask shown on Home runs, what Jarvis is doing in
+  the app's own words - the request's stage as the ask line words it (ask_ui.STAGE_TEXTS; a planner mode's own:
+  MODE_STATUS), never the owner's words -, the seconds it has run, the steps finished (the stages before the one
+  running), the sources read so far (the answer's LIVE pictures) and whether Stop works now. When the answer puts
+  frames up (``on_answer``) the card is told "done" with their group: the page shrinks it to that group's head tile;
+  an answer with nothing for the canvas, a Stop or a failure: "gone". Sent only when it differs (the page counts the
+  seconds itself);
+* two more of the page's words (``on_go``): "stop" - the card's Stop, exactly the ask line's own Cancel (only while a
+  request runs) - and "tidy" (the page packed its frames again: counted);
+* the orb goes back to the centre once Clear view left nothing on the canvas, also while its Bring back is still
+  offered (``form``: the corner only while frames show).
+
 Logs: reason words, counts and durations only.
 """
 
@@ -52,6 +66,10 @@ LEVEL_MS = 50                     # ... and the levels this often while he liste
 BADGE_LINGER_MS = 2600            # the badge stays this long after he stops speaking
 PLACEHOLDER_TALK = "Type, or hold the key and talk"
 PLACEHOLDER_TYPE = "Type a request"
+TASK_TITLE = "Working on it"      # the task card's heading while he works (the answer's topic takes its place)
+TASK_STARTING = "Starting"
+TASK_STOPPING = "Stopping"
+TASK_GRACE_S = 1.5                # a request that ended without an answer's hook: its card goes this long after
 
 # A page button's word -> the Dock's slot it presses.
 _SCREEN_SLOTS = {"briefing": dock_mod.BRIEFING, "approvals": dock_mod.APPROVALS, "followups": dock_mod.FOLLOWUPS,
@@ -83,6 +101,9 @@ class CanvasController(QObject):
         self._started = False
         self._began = 0.0
         self.ready_ms: int | None = None                # the page's start, from the board's start to its ready
+        self._task: dict[str, Any] | None = None        # the task card's request: its key, start, stages (part 2)
+        self._task_sent: tuple[Any, ...] | None = None  # the card as the page has it (its seconds apart)
+        self._ask_hooked: Any = None                    # the Ask controller whose Stop and end the card follows
         self._linger = QTimer(self)
         self._linger.setSingleShot(True)
         self._linger.setInterval(BADGE_LINGER_MS)
@@ -148,6 +169,7 @@ class CanvasController(QObject):
             self.ready_ms = int((self._clock() - self._began) * 1000)
             logger.info("Canvas: page ready %d ms after its start", self.ready_ms)
         self._sent.clear()
+        self._task_sent = None                   # (a card still working is drawn again)
         self.sync()
         self.focus_ask()
 
@@ -185,7 +207,16 @@ class CanvasController(QObject):
     def form(self) -> str:
         """The orb's form now (canvas_view.orb_form)."""
         state, _muted, _offline = self._state()
-        return canvas_view.orb_form(state, self.reading.desk_shown(), self._lingering)
+        return canvas_view.orb_form(state, self._frames_shown(), self._lingering)
+
+    def _frames_shown(self) -> bool:
+        """The canvas shows frames now (part 2): the board is up and holds some - not while only a Clear's Bring back
+        is offered (the orb is back at the centre then)."""
+        reading = self.reading
+        try:
+            return bool(reading.desk_shown()) and int(reading.board_count()) > 0
+        except Exception:  # noqa: BLE001 - unknown: as the board says
+            return bool(reading.desk_shown())
 
     def _voice(self, state: str) -> float | None:
         """His voice's level while he speaks: the app's own (voice_fx, as the native ring reads it), else a slow
@@ -272,6 +303,7 @@ class CanvasController(QObject):
             self._track_speaking()
             self._send(self.canvas_message())
             self._send(self.orb_message())
+            self._sync_task()
         except Exception as exc:  # noqa: BLE001 - the canvas never stops the app
             logger.debug("Canvas: not synced (%s)", type(exc).__name__)
         self._sync_timers()
@@ -354,9 +386,144 @@ class CanvasController(QObject):
         self.counts["focus:ask"] += 1
         return True
 
-    def on_answer(self) -> None:
-        """An answer arrived (the look controller's hook): the keyboard is in the ask line for the next request."""
+    def on_answer(self, task_id: int = 0, *, card: bool = True) -> None:
+        """An answer arrived (the look controller's hook, after its frames went up): the task card becomes the head
+        of its group of frames - or goes, when it put nothing on the canvas - and the keyboard is in the ask line for
+        the next request. ``card`` False: an answer that was no Ask's (Jarvis's own instant one): the card stays."""
+        if card:
+            self._end_task(task_id)
         QTimer.singleShot(0, self, self.focus_ask)
+
+    # ---- the task card (part 2) --------------------------------------------------------------------------------
+
+    def _ask(self) -> Any:
+        ask = getattr(self.host, "ask", None)
+        return ask if _alive(ask) else None
+
+    def _hook_ask(self) -> None:
+        """The running request's Stop and its end without an answer reach the card at once (hooked once)."""
+        ask = self._ask()
+        if ask is None or ask is self._ask_hooked:
+            return
+        self._ask_hooked = ask
+        try:
+            ask.askStopping.connect(self._on_ask_stopping)
+            ask.askCancelled.connect(self._on_ask_cancelled)
+        except Exception as exc:  # noqa: BLE001 - no such signals: the card follows the 500 ms sync alone
+            logger.debug("Canvas: the Ask's end is not followed (%s)", type(exc).__name__)
+
+    def on_answer_started(self, task_id: int = 0) -> None:
+        """An Ask shown on Home started (the look controller's hook): its task card."""
+        if self._fallen:
+            return
+        self._hook_ask()
+        self._task = {"key": int(task_id or 0), "began": self._clock(), "stages": [], "stopping": False, "idle": None}
+        self._task_sent = None
+        self.counts["task:started"] += 1
+        self._sync_task()
+
+    def _on_ask_stopping(self, _seq: int = 0) -> None:
+        if self._task is not None:
+            self._task["stopping"] = True
+            self._sync_task()
+
+    def _on_ask_cancelled(self, _seq: int = 0) -> None:
+        self._gone_task("cancelled")
+
+    def _task_words(self, ask: Any, task: dict[str, Any]) -> tuple[str, str]:
+        """The card's heading and what Jarvis is doing, in the app's own words (the ask line's own: never the
+        owner's)."""
+        from . import ask_ui
+
+        mode = str(getattr(ask, "running_mode", "") or "") if ask is not None else ""
+        stage = str(ask.stage() or "") if ask is not None else ""
+        if stage and stage not in task["stages"]:
+            task["stages"].append(stage)
+        if task["stopping"]:
+            words = TASK_STOPPING
+        else:
+            words = ask_ui.STAGE_TEXTS.get(stage, TASK_STARTING).rstrip(". ")
+        title = ask_ui.MODE_STATUS.get(mode, TASK_TITLE).rstrip(". ")
+        return title[:protocol.TOPIC_CAP], words[:protocol.TASK_WORDS_CAP]
+
+    def task_message(self) -> dict[str, Any] | None:
+        """The card while the request runs (None: no card)."""
+        task = self._task
+        if task is None:
+            return None
+        ask = self._ask()
+        title, words = self._task_words(ask, task)
+        bar = self.reading.command_bar
+        try:
+            sources = int(self.desk.answer_sources(task["key"]))
+        except Exception:  # noqa: BLE001 - unknown: none counted
+            sources = 0
+        return {"type": "task", "state": "working", "title": title, "words": words,
+                "seconds": max(0, min(protocol.TASK_SECONDS_MAX, int(self._clock() - task["began"]))),
+                "steps": max(0, min(protocol.TASK_COUNT_MAX, len(task["stages"]) - 1)),
+                "sources": max(0, min(protocol.TASK_COUNT_MAX, sources)), "frames": 0, "group": "",
+                "stop": bool(bar.is_running()) and not task["stopping"]}
+
+    def _sync_task(self) -> None:
+        """The card as it is now, when it differs from what the page has (its seconds apart: the page counts them).
+        A request that is no longer running and whose answer's hook never came: the card goes after TASK_GRACE_S."""
+        task = self._task
+        if task is None or self._fallen:
+            return
+        ask = self._ask()
+        if ask is None or not bool(getattr(ask, "busy", False)):
+            now = self._clock()
+            if task["idle"] is None:
+                task["idle"] = now
+            elif now - task["idle"] >= TASK_GRACE_S:
+                self._gone_task("ended")
+            return
+        task["idle"] = None
+        message = self.task_message()
+        if message is None:
+            return
+        mark = tuple(value for key, value in message.items() if key != "seconds")
+        if mark == self._task_sent:
+            return
+        board = self._board()
+        if board is not None and board.apply(message):
+            self._task_sent = mark
+            self.counts["sent:task"] += 1
+
+    def _end_task(self, task_id: int = 0) -> None:
+        """The answer arrived: "done" with the group its frames went to (the card shrinks to that group's head tile),
+        or "gone" when it put nothing on the canvas."""
+        task = self._task
+        if task is None:
+            return
+        try:
+            group = str(self.desk.answer_group(task_id or task["key"]) or "")
+            frames = len(self.desk.feed.group_order(group)) if group else 0
+            sources = int(self.desk.answer_sources(task_id or task["key"]))
+        except Exception:  # noqa: BLE001 - unknown: the card goes
+            group, frames, sources = "", 0, 0
+        if not group:
+            self._gone_task("no_frames")
+            return
+        self._task = None
+        self._task_sent = None
+        board = self._board()
+        message = {"type": "task", "state": "done", "title": "", "words": "",
+                   "seconds": max(0, min(protocol.TASK_SECONDS_MAX, int(self._clock() - task["began"]))),
+                   "steps": max(0, min(protocol.TASK_COUNT_MAX, len(task["stages"]))),
+                   "sources": max(0, min(protocol.TASK_COUNT_MAX, sources)),
+                   "frames": max(0, min(protocol.MAX_FRAMES, frames)), "group": group, "stop": False}
+        if board is not None and board.apply(message):
+            self.counts["task:done"] += 1
+
+    def _gone_task(self, reason: str) -> None:
+        if self._task is None:
+            return
+        self._task = None
+        self._task_sent = None
+        board = self._board()
+        if board is not None and board.apply({"type": "task", "state": "gone"}):
+            self.counts[f"task:gone:{reason}"] += 1
 
     # ---- the page's buttons ----------------------------------------------------------------------------------
 
@@ -372,6 +539,10 @@ class CanvasController(QObject):
             allowed.add("undo")
         if reading.recording_state()[0]:
             allowed.add("stop_rec")
+        if reading.command_bar.is_running():
+            allowed.add("stop")                  # part 2: the task card's Stop, while a request runs
+        if reading.desk_shown():
+            allowed.add("tidy")                  # ... and Tidy, while the canvas shows frames
         if word not in allowed:
             self.counts["go:unavailable"] += 1
             return False
@@ -400,6 +571,9 @@ class CanvasController(QObject):
             window.close()
         elif word == "drag":
             window.start_drag()
+        elif word == "stop":
+            reading.command_bar.cancelRequested.emit()     # exactly the ask line's own Cancel
+        # ("tidy": the page packed its frames again by itself - counted above, nothing more to do here)
         self.sync()
         return True
 

@@ -673,7 +673,7 @@ class BoardView(QWidget):
         self._counts[f"sent:{checked.type}"] += 1
         if self._phase == _READY:
             self._run(checked.text)
-        elif checked.type in ("orb", "canvas"):
+        elif checked.type in ("orb", "canvas", "task"):
             self._latest[checked.type] = checked.text    # the newest of each: a level never takes a frame's room
         else:
             if len(self._queue) >= QUEUE_CAP:

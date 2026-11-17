@@ -191,8 +191,14 @@ def _maths(frame: Mapping[str, Any], body: Mapping[str, Any]) -> str:
     return found or _words(frame.get("meta"))
 
 
+def _number(frame: Mapping[str, Any], body: Mapping[str, Any]) -> str:
+    """A big number's figure ("+500")."""
+    return _words(body.get("figure")) or _words(frame.get("meta"))
+
+
 _KINDS = {"calendar": _calendar, "mail_thread": _mail_thread, "mail_list": _mail_list, "todos": _todos,
-          "picture": _picture, "table": _table, "chart": _chart, "timeline": _timeline, "maths": _maths}
+          "picture": _picture, "table": _table, "chart": _chart, "timeline": _timeline, "maths": _maths,
+          "number": _number}
 
 
 def fact_of(frame: Any) -> str:

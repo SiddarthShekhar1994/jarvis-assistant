@@ -446,20 +446,23 @@ class LookController(QObject):
         """An Ask shown on Home started (its LIVE task id; the owner's words): its group-to-be on the board."""
         if self.desk is not None:
             self.desk.on_answer_started(task_id, text)
+        if self.canvas is not None:
+            self.canvas.on_answer_started(task_id)      # the canvas, part 2: its task card (never the owner's words)
 
     def on_ask_outcome(self, outcome: Any, task_id: int = 0) -> None:
         """A finished answer: its frames go up on the board as one group."""
         if self.desk is not None:
             self.desk.on_ask_outcome(outcome, task_id)
         if self.canvas is not None:
-            self.canvas.on_answer()          # the canvas: the keyboard is in the ask line after an answer
+            self.canvas.on_answer(task_id)   # the canvas: the task card heads its frames (or goes); the keyboard is
+                                             # in the ask line after an answer
 
     def on_instant_answer(self, reply: Any, words: str) -> None:
         """Part 6: Jarvis's own instant answer; a sum's working, when it has one, goes up as a maths frame."""
         if self.desk is not None:
             self.desk.on_instant_answer(reply, words)
         if self.canvas is not None:
-            self.canvas.on_answer()
+            self.canvas.on_answer(card=False)    # (Jarvis's own instant answer: no Ask's card is its)
 
     def on_ask_answer(self) -> None:
         self._answered = True

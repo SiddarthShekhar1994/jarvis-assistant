@@ -334,24 +334,24 @@ button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .tl-today { display: flex; align-items: center; gap: 10px; height: 12px; color: var(--holo-hi); }
 .tl-today::before { content: ''; flex: none; width: 18px; height: 1.5px; background: var(--holo-hi); }
 @container frame (min-width: 300px) {
-  :is(.tline.few, .big-card .tline) { grid-template-columns: repeat(var(--n), minmax(0, 1fr)); row-gap: 0; margin: 18px 0 2px; }
-  :is(.tline.few, .big-card .tline) .tl-rail { left: 9px; right: 9px; top: 8.25px; bottom: auto; width: auto; height: 1.5px; }
-  :is(.tline.few, .big-card .tline) .tl-past {
+  :is(.tline.few, .big-card .tline, .frame.wide .tline) { grid-template-columns: repeat(var(--n), minmax(0, 1fr)); row-gap: 0; margin: 18px 0 2px; }
+  :is(.tline.few, .big-card .tline, .frame.wide .tline) .tl-rail { left: 9px; right: 9px; top: 8.25px; bottom: auto; width: auto; height: 1.5px; }
+  :is(.tline.few, .big-card .tline, .frame.wide .tline) .tl-past {
     display: block; position: absolute; left: 9px; top: 8.25px; height: 1.5px;
     width: max(0px, calc(var(--today) - 9px)); background: var(--holo-lo);
   }
-  :is(.tline.few, .big-card .tline) .tl-n { display: flex; flex-direction: column; align-items: center; min-width: 0; text-align: center; }
-  :is(.tline.few, .big-card .tline) .tl-n.first { align-items: flex-start; text-align: left; }
-  :is(.tline.few, .big-card .tline) .tl-n.last:not(.first) { align-items: flex-end; text-align: right; }
-  :is(.tline.few, .big-card .tline) .tl-when { margin-top: 7px; }
-  :is(.tline.few, .big-card .tline) .tl-words, :is(.tline.few, .big-card .tline) .tl-state { margin-top: 2px; }
-  :is(.tline.few, .big-card .tline) .tl-today {
+  :is(.tline.few, .big-card .tline, .frame.wide .tline) .tl-n { display: flex; flex-direction: column; align-items: center; min-width: 0; text-align: center; }
+  :is(.tline.few, .big-card .tline, .frame.wide .tline) .tl-n.first { align-items: flex-start; text-align: left; }
+  :is(.tline.few, .big-card .tline, .frame.wide .tline) .tl-n.last:not(.first) { align-items: flex-end; text-align: right; }
+  :is(.tline.few, .big-card .tline, .frame.wide .tline) .tl-when { margin-top: 7px; }
+  :is(.tline.few, .big-card .tline, .frame.wide .tline) .tl-words, :is(.tline.few, .big-card .tline, .frame.wide .tline) .tl-state { margin-top: 2px; }
+  :is(.tline.few, .big-card .tline, .frame.wide .tline) .tl-today {
     position: absolute; left: var(--today); top: -14px; height: 32px; width: 0; gap: 0; z-index: 2;
     border-left: 1.5px solid var(--holo-hi);
   }
-  :is(.tline.few, .big-card .tline) .tl-today::before { display: none; }
-  :is(.tline.few, .big-card .tline) .tl-today span { position: absolute; left: 5px; top: -1px; white-space: nowrap; }
-  :is(.tline.few, .big-card .tline) .tl-today.right span { left: auto; right: 6px; }
+  :is(.tline.few, .big-card .tline, .frame.wide .tline) .tl-today::before { display: none; }
+  :is(.tline.few, .big-card .tline, .frame.wide .tline) .tl-today span { position: absolute; left: 5px; top: -1px; white-space: nowrap; }
+  :is(.tline.few, .big-card .tline, .frame.wide .tline) .tl-today.right span { left: auto; right: 6px; }
 }
 
 /* maths: numbered steps (a name, then its line), the answer boxed in HOLO_HI; every element made by the page from
@@ -897,8 +897,8 @@ body.dim #backdrop { filter: brightness(.2); transition-duration: calc(260ms * v
    (makeCanvas) at the first orb or canvas message, so a board that is not the canvas has none of it. The orb
    itself is one 2D canvas that board.js draws (its forms, its states and the moves between them are there); the rest
    moves with transforms and opacity only, and --k scales it as everywhere (calm 1.6; off: cuts). In canvas mode
-   <body> is the board's own box at the right (as body.wide is for open big), so the bar, the frames, the strip,
-   "N more below" and the pill are placed exactly as beside a conversation. ==== */
+   <body> is the frames' own area (part 2, below: the whole canvas between the top controls and the caption's
+   strip). ==== */
 :root.canvas {
   --c: #35D3F0;                  /* Jarvis's cyan, as the approved mock draws it */
   --c-hi: #8FEBFF;
@@ -911,13 +911,10 @@ body.dim #backdrop { filter: brightness(.2); transition-duration: calc(260ms * v
   --g: 53, 211, 240;             /* the glow's colour (rgb) ... */
   --g-hi: 143, 235, 255;         /* ... and its bright core */
   --edge: 28px;                  /* the canvas's side gutter */
-  --board-w: clamp(420px, 38vw, 760px);
   background: #000;
 }
 :root.canvas, :root.canvas body { background: #000; }
-:root.canvas body {
-  position: absolute; left: auto; right: var(--edge); top: var(--board-top, 64px); bottom: 212px; width: var(--board-w); height: auto;
-}
+:root.canvas body { position: absolute; }                   /* (its box: part 2, below) */
 :root.canvas.board-off body { visibility: hidden; }          /* folded away (Ctrl+B), or nothing on it */
 :root.canvas.board-off #canvas, :root.canvas.board-off #big { visibility: visible; }
 :root.canvas .b-clear { display: none; }                      /* the canvas's own "Clear view" is the one Clear */
@@ -983,3 +980,430 @@ button.c-clock:focus-visible, :root.keys button.c-clock:focus { outline: 2px sol
 
 /* ---- open big on the canvas: the card over the whole canvas but the corners' rows and the ask line ---- */
 :root.canvas .frame.big-card { inset: 58px var(--edge) 150px var(--edge); }
+
+/* ==== The canvas, part 2 (PLAN-canvas part 2): frames across the screen. <body> is the whole area between the top
+   controls and the caption's strip; board.js places every frame in it on a 12-column grid (packCanvas: left, top,
+   width and height, the page's own numbers) and nothing scrolls. The frames are the approved mock's: a thin bright
+   outline, square corners, a soft outer glow and a faint inner one, caps headings, small mono labels, amber for what
+   waits on the owner. The glows are two layers that only ever change their opacity (the web engine has no GPU here:
+   a shadow is painted once, never animated), and everything that moves does so by transform and opacity. The old
+   bar, the index strip, "N more below" and the groups' rule lines are not drawn here. ==== */
+:root.canvas {
+  --board-bottom: 160px;         /* the caption's strip and the ask line under the frames */
+  /* the mock's palette over the board's tokens: every kind's rows, words and marks take it */
+  --tile: rgba(3, 10, 13, .94);
+  --tile-focus: rgba(5, 19, 25, .96);
+  --tile-amber: rgba(14, 9, 3, .95);
+  --tile-amber-lit: rgba(26, 16, 4, .96);
+  --tile-alert: rgba(17, 6, 5, .95);
+  --raised: rgba(53, 211, 240, .07);
+  --frame-edge: rgba(175, 240, 255, .8);
+  --line-faint: rgba(143, 235, 255, .16);
+  --line: rgba(143, 235, 255, .3);
+  --line-strong: rgba(143, 235, 255, .55);
+  --line-focus: rgba(175, 240, 255, .9);
+  --ink-1: #FFFFFF;
+  --ink-2: #CFE6EB;
+  --ink-3: #A9C7CF;
+  --ink-4: #7FA3AD;
+  --holo: #35D3F0;
+  --holo-hi: #8FEBFF;
+  --holo-lo: #2A93A9;
+  --amber: #F5B14A;
+  --amber-hi: #FFD08A;
+  --amber-line: #F5B14A;
+  --amber-tx: #FFE2B0;
+  --amber-tx2: #F3D9AE;
+  --focus: #8FEBFF;
+  --radius-frame: 1px;
+  --radius-amber: 1px;
+  --radius-badge: 1px;
+  --radius-button-sm: 1px;
+  --ga: 245, 177, 74;            /* the amber glow */
+}
+:root.canvas body {
+  left: var(--edge); right: var(--edge); top: var(--board-top, 64px); bottom: var(--board-bottom);
+  width: auto; height: auto; overflow: visible;
+  background: transparent;       /* the canvas's black is the page's own (:root). MEASURED: a ground of its own on this
+                                    box, now the whole area, halved the frame rate of everything moving under it */
+}
+:root.canvas #board {
+  inset: 0; display: block; padding: 0; overflow: visible;
+  -webkit-mask-image: none; mask-image: none;
+}
+:root.canvas #bar, :root.canvas #strip, :root.canvas body #more, :root.canvas body #more.shown { display: none; }
+:root.canvas .group, :root.canvas .g-frames { display: contents; }
+:root.canvas .group.parked { display: none; }
+:root.canvas .g-head { display: none; }
+
+/* ---- a frame in its place ---- */
+:root.canvas .frame {
+  background: var(--tile); border: 1px solid var(--frame-edge); border-radius: 1px;
+  transition: border-color calc(160ms * var(--k)) var(--ease-out), background-color calc(160ms * var(--k)) var(--ease-out);
+}
+:root.canvas #board .frame {
+  position: absolute; left: 0; top: 0; display: flex; flex-direction: column; min-width: 0;
+  padding: 13px 15px 11px;
+}
+:root.canvas .frame::before, :root.canvas .frame::after {
+  content: ''; position: absolute; inset: -1px; border-radius: 1px; pointer-events: none;
+}
+:root.canvas .frame::before { box-shadow: 0 0 14px rgba(var(--g), .28), inset 0 0 22px rgba(var(--g), .06); }
+:root.canvas .frame::after {
+  box-shadow: 0 0 24px 2px rgba(var(--g), .5), inset 0 0 30px rgba(var(--g), .13);
+  opacity: 0; transition: opacity calc(180ms * var(--k)) var(--ease-out);
+}
+:root.canvas #board .frame:not(.sat):hover, :root.canvas #board .frame:not(.sat):focus-within { border-color: #fff; }
+:root.canvas #board .frame:hover::after, :root.canvas #board .frame:focus-within::after { opacity: .7; }
+:root.canvas .frame:focus-visible, :root.canvas .frame:has(button:focus-visible),
+:root.canvas.keys .frame:focus, :root.canvas.keys .frame:has(button:focus) { outline: 2px solid var(--focus); outline-offset: 4px; }
+
+:root.canvas .f-head {
+  flex: none; align-items: baseline; column-gap: 12px; row-gap: 3px; min-height: 22px; margin-bottom: 9px;
+}
+:root.canvas .f-glyph { display: none; }
+:root.canvas .f-title {
+  position: relative; flex: 1 1 7em; color: #fff;
+  font: 700 19px/22px var(--font-display); letter-spacing: .02em; text-transform: uppercase;
+}
+:root.canvas .t-badge, :root.canvas .f-meta, :root.canvas .f-note {
+  font: 500 10px/13px var(--font-mono); letter-spacing: .16em; text-transform: uppercase;
+}
+:root.canvas .f-meta { color: var(--ink-4); }
+:root.canvas .f-tag { padding: 2px 6px; border-color: var(--c-hi); color: #fff; }
+:root.canvas .f-pinned { color: var(--c-hi); }
+:root.canvas #board .frame > .f-body { flex: 1 1 auto; min-height: 0; overflow: hidden; color: var(--ink-2); font: 400 13px/19px var(--font-body); }
+:root.canvas #board .frame.measuring { height: auto !important; }
+:root.canvas #board .frame.measuring > .f-body { flex: none; overflow: visible; }
+:root.canvas .f-keys { display: none; }
+:root.canvas #board .frame.unplaced, :root.canvas .task.unplaced { visibility: hidden; }
+:root.canvas #board .frame.folding { pointer-events: none; }
+
+/* a body its place cuts: its last lines fade and the frame says so (Enter, or Open big, shows all of it) */
+.f-cut { display: none; }
+:root.canvas #board .frame.cut > .f-body {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 30px), transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 30px), transparent 100%);
+}
+:root.canvas #board .frame.cut > .f-cut {
+  display: block; position: absolute; right: 13px; bottom: 7px; padding: 2px 6px;
+  background: var(--tile); border: 1px solid var(--line); color: var(--c-hi);
+}
+:root.canvas #board .frame.waits.cut > .f-cut { background: var(--tile-amber); border-color: rgba(var(--ga), .5); color: var(--amber-hi); }
+
+/* Pin, Open big and Close: over the heading's end while the pointer or the keyboard is on the frame (nothing in the
+   frame moves for them), with corner ticks */
+:root.canvas #board .frame .f-ctl {
+  position: absolute; top: 8px; right: 9px; z-index: 2; display: flex; gap: 4px; margin: 0; padding: 2px 0 2px 10px;
+  background: linear-gradient(to right, transparent, var(--tile) 10px);
+  opacity: 0; pointer-events: none; transition: opacity calc(120ms * var(--k)) var(--ease-out);
+}
+:root.canvas #board .frame.waits .f-ctl { background: linear-gradient(to right, transparent, var(--tile-amber) 10px); }
+:root.canvas #board .frame:hover .f-ctl, :root.canvas #board .frame:focus-within .f-ctl { opacity: 1; pointer-events: auto; }
+:root.canvas #board .frame:hover .f-meta, :root.canvas #board .frame:hover .f-pinned,
+:root.canvas #board .frame:focus-within .f-meta, :root.canvas #board .frame:focus-within .f-pinned { visibility: hidden; }
+:root.canvas #board .frame:focus-within .f-meta { display: inline; }
+:root.canvas #board .frame.pinned:focus-within .f-pinned { display: block; }
+:root.canvas #board .frame.noted .f-ctl { display: none; }
+:root.canvas #board .frame.noted .f-meta { display: none; }
+:root.canvas .f-icon {
+  width: 24px; height: 22px; border: 1px solid rgba(var(--g-hi), .5); border-radius: 1px; color: #D8F3F8;
+  background: rgba(var(--g), .04);
+}
+:root.canvas .f-icon:first-child { border-color: rgba(var(--g-hi), .5); }
+:root.canvas .f-icon:hover { border-color: #fff; color: #fff; background: rgba(var(--g), .12); }
+:root.canvas .f-icon.on { border-color: var(--c-hi); color: #fff; background: rgba(var(--g), .2); }
+:root.canvas .frame.waits .f-icon { border-color: rgba(var(--ga), .6); color: var(--amber-tx); background: rgba(var(--ga), .05); }
+:root.canvas .frame.waits .f-icon:hover { border-color: #FFE2B0; color: #fff; }
+:root.canvas #board .frame .fx-tick {
+  display: block; width: 10px; height: 10px; border-color: #fff; opacity: 0;
+  transition: opacity calc(140ms * var(--k)) var(--ease-out);
+}
+:root.canvas #board .frame .fx-tick.tl { left: -5px; top: -5px; }
+:root.canvas #board .frame .fx-tick.tr { right: -5px; top: -5px; }
+:root.canvas #board .frame .fx-tick.bl { left: -5px; bottom: -5px; }
+:root.canvas #board .frame .fx-tick.br { right: -5px; bottom: -5px; }
+:root.canvas #board .frame:hover .fx-tick, :root.canvas #board .frame:focus-within .fx-tick { opacity: 1; }
+:root.canvas .frame.waits .fx-tick { border-color: var(--amber-hi); }
+:root.canvas .fx-bracket { display: none; }
+
+/* ---- what waits on the owner: amber ---- */
+:root.canvas .frame.waits { background: var(--tile-amber); border-color: var(--amber); }
+:root.canvas .frame.waits::before { box-shadow: 0 0 16px rgba(var(--ga), .4), inset 0 0 22px rgba(var(--ga), .07); }
+:root.canvas .frame.waits::after { box-shadow: 0 0 26px 2px rgba(var(--ga), .55), inset 0 0 30px rgba(var(--ga), .14); }
+:root.canvas #board .frame.waits:not(.sat):hover, :root.canvas #board .frame.waits:not(.sat):focus-within { border-color: #FFE2B0; }
+:root.canvas .frame.waits .f-title { color: #FFE2B0; }
+:root.canvas .frame.waits .f-meta { color: var(--amber); }
+:root.canvas .frame.waits .f-body { color: var(--amber-tx2); }
+:root.canvas .f-wait {
+  flex: none; align-self: flex-start; min-height: 0; margin-top: auto; padding: 5px 9px; gap: 8px;
+  border: 1px solid var(--amber); border-radius: 1px; background: rgba(var(--ga), .05);
+  color: var(--amber-hi); font: 600 10px/13px var(--font-mono); letter-spacing: .16em; text-transform: uppercase;
+  box-shadow: 0 0 8px rgba(var(--ga), .35);
+}
+:root.canvas #board .frame > .f-wait { margin-top: auto; }
+:root.canvas #board .frame.waits > .f-body { flex: 0 1 auto; margin-bottom: 10px; }
+:root.canvas .f-wait:hover { background: rgba(var(--ga), .14); border-color: #FFE2B0; color: #FFE9C7; }
+:root.canvas .f-wait .f-dia { width: 9px; height: 9px; }
+:root.canvas .f-wait .f-key { padding: 0 4px; border-color: rgba(var(--ga), .5); border-radius: 1px; font: inherit; letter-spacing: .12em; }
+:root.canvas .frame.waits:focus-within .f-wait { box-shadow: 0 0 8px rgba(var(--ga), .35); }
+
+/* ---- failed, empty (also a frame still waiting for what it shows), closed ---- */
+:root.canvas .frame.failed { background: var(--tile-alert); border-color: var(--alert-line); }
+:root.canvas .frame.failed::before { box-shadow: 0 0 14px rgba(255, 122, 104, .3), inset 0 0 22px rgba(255, 122, 104, .06); }
+:root.canvas .frame.failed::after { box-shadow: 0 0 24px 2px rgba(255, 122, 104, .45), inset 0 0 30px rgba(255, 122, 104, .12); }
+:root.canvas .frame.failed .f-title { color: var(--alert-tx); }
+:root.canvas .frame.empty { border-color: rgba(143, 235, 255, .5); }
+:root.canvas .frame.empty::before { box-shadow: 0 0 12px rgba(var(--g), .16), inset 0 0 20px rgba(var(--g), .04); }
+:root.canvas .f-ring { border-color: var(--c-hi); }
+:root.canvas .f-act {
+  height: auto; padding: 5px 9px; border: 1px solid rgba(var(--g-hi), .7); border-radius: 1px;
+  background: rgba(var(--g), .04); color: #D8F3F8; box-shadow: 0 0 8px rgba(var(--g), .25);
+  font: 600 10px/13px var(--font-mono); letter-spacing: .16em; text-transform: uppercase;
+}
+:root.canvas .f-act:hover { border-color: #fff; color: #fff; background: rgba(var(--g), .1); }
+:root.canvas .f-act.alert { border-color: var(--alert-line); background: var(--alert-wash); color: var(--alert-tx2); box-shadow: 0 0 8px rgba(255, 122, 104, .25); }
+:root.canvas .f-closed { border: 1px dashed rgba(var(--g-hi), .45); border-radius: 1px; color: var(--ink-3); min-height: 36px; }
+:root.canvas .f-closed .f-act { height: auto; padding: 4px 8px; font-size: 10px; }
+
+/* ---- lit: the frame Jarvis speaks of brightens (no cue line here) ---- */
+:root.canvas .frame.lit { background: var(--tile-focus); border-color: #fff; box-shadow: none; }
+:root.canvas .frame.lit::after { opacity: 1; }
+:root.canvas .frame.waits.lit { background: var(--tile-amber-lit); border-color: #FFE2B0; }
+:root.canvas .frame.lit .f-pic, :root.canvas #board .frame:hover .f-pic { filter: none; }
+
+/* ---- changed: the frame pulses once in its changed light, then CHANGED stays ---- */
+.fx-pulse, .fx-scanbox { display: none; }
+:root.canvas .frame.lap .fx-light { display: none; }
+:root.canvas #board .frame .fx-pulse {
+  display: block; position: absolute; inset: -1px; pointer-events: none; opacity: 0;
+  border: 1px solid #fff; box-shadow: 0 0 28px 4px rgba(var(--g-hi), .85), inset 0 0 36px rgba(var(--g-hi), .32);
+}
+:root.canvas #board .frame.waits .fx-pulse { box-shadow: 0 0 28px 4px rgba(var(--ga), .85), inset 0 0 36px rgba(var(--ga), .3); }
+:root.canvas #board .frame.lap .fx-pulse { animation: changed-light calc(900ms * var(--k)) cubic-bezier(.2, .7, .3, 1) both; }
+@keyframes changed-light { 0% { opacity: 0; } 22% { opacity: 1; } 100% { opacity: 0; } }
+
+/* ---- a tile: a folded frame, its title and its one fact; a click or Enter opens it again ---- */
+:root.canvas #board .frame.sat { padding: 0; border-color: rgba(143, 235, 255, .42); background: rgba(3, 10, 13, .8); }
+:root.canvas #board .frame.sat::before { box-shadow: none; }
+:root.canvas #board .frame.sat:hover, :root.canvas #board .frame.sat:focus-within { border-color: #fff; }
+:root.canvas #board .frame.sat.waits { border-color: rgba(var(--ga), .7); background: rgba(14, 9, 3, .85); }
+:root.canvas #board .frame.sat > .f-sat {
+  display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto; align-content: center;
+  row-gap: 4px; width: 100%; height: 100%; min-height: 0; padding: 0 13px; border-radius: 1px; text-align: left;
+}
+:root.canvas .s-glyph { display: none; }
+:root.canvas .s-title {
+  grid-column: 1; color: #fff; font: 600 13px/16px var(--font-display); letter-spacing: .04em; text-transform: uppercase;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+:root.canvas .s-fact { grid-column: 1; color: var(--ink-4); white-space: nowrap; overflow: hidden; }
+:root.canvas .s-words, :root.canvas .s-note { overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; }
+:root.canvas .frame.sat.waits .s-title { color: #FFE2B0; }
+:root.canvas #board.tight .frame.sat .s-fact { display: none; }
+:root.canvas #board.tight .frame.sat > .f-sat { padding: 0 10px; }
+:root.canvas #board.tight .s-title { font-size: 12px; line-height: 15px; }
+
+/* ---- the kinds in the mock's rows, numbers and bars ---- */
+:root.canvas .cal-time { min-width: 0; color: var(--ink-2); font: 500 13px/19px var(--font-mono); letter-spacing: 0; text-transform: none; }
+:root.canvas .cal-rows { column-gap: 12px; }
+:root.canvas .cal-title, :root.canvas .tx-text, :root.canvas .td-text { font: 400 13px/19px var(--font-body); }
+:root.canvas .cal-meta, :root.canvas .tx-meta { font: 500 10px/13px var(--font-mono); letter-spacing: .16em; text-transform: uppercase; color: var(--ink-4); }
+:root.canvas .cal-row.next .cal-title, :root.canvas .cal-row.now .cal-title { color: #fff; }
+:root.canvas .cal-row:not(.next):not(.now):not(.new):not(.past):not(.struck):not(.free) .cal-title { color: var(--ink-2); }
+:root.canvas .cal-bar { border-radius: 0; height: 12px; background: #0B1B20; border-color: transparent; }
+:root.canvas .cal-span { border-radius: 0; background: #1B6E80; }
+:root.canvas .cal-span.next { background: var(--holo); box-shadow: 0 0 10px rgba(var(--g), .8); }
+:root.canvas .cal-pill { border-radius: 1px; background: var(--c-hi); color: #021014; }
+:root.canvas .cal-row.free::before { border-radius: 1px; }
+:root.canvas .mt-sender, :root.canvas .ml-sender { font: 600 13px/19px var(--font-body); }
+:root.canvas .frame.waits .mt-sender { color: #FFE9C7; }
+:root.canvas .mt-text { margin-top: 4px; }
+:root.canvas .ml-subject { font: 400 13px/19px var(--font-body); }
+:root.canvas .td-box { border-radius: 1px; border-width: 1px; border-color: var(--ink-4); }
+:root.canvas .td-row.waits .td-text { color: #FFE2B0; }
+:root.canvas .ch-bars { gap: 9px 12px; }
+:root.canvas .ch-l { color: var(--ink-2); font: 400 13px/19px var(--font-body); }
+:root.canvas .ch-tr { height: 12px; border-radius: 0; background: #0B1B20; }
+:root.canvas .ch-fl { border-radius: 0; background: #1B6E80; }
+:root.canvas .ch-fl.hot { background: var(--holo); box-shadow: 0 0 10px rgba(var(--g), .8); }
+:root.canvas .ch-v { color: #E6FBFF; font: 500 13px/19px var(--font-mono); }
+:root.canvas .delta { margin-top: auto; padding-top: 8px; color: var(--ink-3); font: 400 13px/19px var(--font-body); }
+:root.canvas .delta-lead { color: var(--c-hi); font: 600 13px/19px var(--font-body); }
+:root.canvas #board .frame > .f-body:has(> .delta) { display: flex; flex-direction: column; }
+:root.canvas .tb th { color: var(--ink-4); font: 500 10px/13px var(--font-mono); letter-spacing: .16em; }
+:root.canvas .tb td { font: 400 13px/19px var(--font-body); }
+:root.canvas .tb td:not(:first-child) { font-family: var(--font-mono); font-weight: 500; }
+:root.canvas .tb tr.hot td { background: rgba(var(--g), .1); }
+:root.canvas .tb-src { color: var(--ink-4); }
+:root.canvas .tl-o { background: #020a0d; }
+:root.canvas .tl-words { font: 400 13px/18px var(--font-body); }
+:root.canvas .mx-ans { border-radius: 1px; border-color: var(--c-hi); background: rgba(var(--g), .1); box-shadow: 0 0 10px rgba(var(--g), .3); }
+:root.canvas .mx-k { color: var(--ink-3); }
+:root.canvas .f-pic { margin-top: 0; border: 0; border-radius: 0; background: #0A1418; }
+:root.canvas #board .frame > .f-body:has(> .pic-slot) { display: flex; flex-direction: column; }
+:root.canvas #board .frame .pic-slot { flex: 1 1 auto; min-height: 0; overflow: hidden; border: 1px solid rgba(var(--g-hi), .3); background: #0A1418; }
+:root.canvas #board .frame .pic-slot .f-pic { width: 100%; height: 100%; object-fit: cover; object-position: top left; }
+:root.canvas .pic-cap { flex: none; margin-top: 9px; }
+:root.canvas .pic-host { color: #E6FBFF; font: 400 13px/19px var(--font-body); }
+:root.canvas .x-more { color: var(--ink-4); }
+
+/* the big number: the figure large, what it was and is, where it comes from at the frame's foot */
+.nb-fig { margin: 0; color: var(--holo-hi); font: 600 44px/46px var(--font-display); font-variant-numeric: tabular-nums; }
+.nb-text { margin: 6px 0 0; color: var(--ink-3); overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.nb-src { margin: 8px 0 0; color: var(--ink-4); overflow-wrap: anywhere; }
+:root.canvas #board .frame > .f-body:has(> .nb-fig) { display: flex; flex-direction: column; align-items: flex-start; }
+:root.canvas .nb-fig {
+  color: #8FEBFF; font: 700 66px/64px var(--font-display); letter-spacing: 0;
+  text-shadow: 0 0 18px rgba(var(--g), .7); white-space: nowrap;
+}
+:root.canvas .nb-text { margin-top: 8px; color: var(--ink-3); font: 400 13px/19px var(--font-body); }
+:root.canvas .nb-src { margin-top: auto; padding-top: 8px; }
+@container frame (max-width: 330px) { :root.canvas .nb-fig { font-size: 52px; line-height: 52px; } }
+
+/* ---- an arriving frame boots (board.js boot: --d is its place in the stagger): the outline draws itself from the
+   top left corner, the ground and the glow come in behind it, a scan line wipes down, the content rises behind the
+   line, the corner ticks stand for a moment, bars grow a little past their end. Calm: 1.6 times slower, no overshoot,
+   no rise. Off: nothing of this runs (the frame is there at once). ---- */
+:root.canvas #board .frame.boot {
+  animation:
+    boot-ground calc(240ms * var(--k)) var(--ease-out) calc(var(--d, 0ms) + 200ms * var(--k)) both,
+    boot-edge calc(160ms * var(--k)) linear calc(var(--d, 0ms) + 400ms * var(--k)) both;
+}
+@keyframes boot-ground { from { background-color: rgba(3, 10, 13, 0); } }
+@keyframes boot-edge { from { border-color: transparent; } }
+:root.canvas #board .frame.boot::before { animation: show calc(300ms * var(--k)) var(--ease-out) calc(var(--d, 0ms) + 380ms * var(--k)) both; }
+:root.canvas #board .frame.boot .fx-outline {
+  display: block; animation: relax calc(220ms * var(--k)) linear calc(var(--d, 0ms) + 440ms * var(--k)) forwards;
+}
+:root.canvas #board .frame.boot .fx-outline rect {
+  rx: 1px; stroke: #fff; stroke-width: 1.4;
+  animation: trace calc(420ms * var(--k)) cubic-bezier(.55, 0, .2, 1) var(--d, 0ms) both;
+}
+:root.canvas #board .frame.waits.boot .fx-outline rect { stroke: #FFE2B0; }
+:root.canvas #board .frame.boot .fx-tick { animation: tick-stand calc(760ms * var(--k)) linear calc(var(--d, 0ms) + 320ms * var(--k)) both; }
+@keyframes tick-stand { 0% { opacity: 0; } 8%, 70% { opacity: 1; } 100% { opacity: 0; } }
+:root.canvas #board .frame .fx-scanbox { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+:root.canvas #board .frame.boot .fx-scanbox { display: block; }
+.fx-scan {
+  position: absolute; left: 0; right: 0; top: 0; height: 100%; transform: translateY(-100%);
+  background: linear-gradient(to bottom, transparent calc(100% - 72px), rgba(var(--g), .2) calc(100% - 2px), #fff calc(100% - 2px), #fff 100%);
+}
+:root.canvas .frame.waits .fx-scan {
+  background: linear-gradient(to bottom, transparent calc(100% - 72px), rgba(var(--ga), .22) calc(100% - 2px), #FFE2B0 calc(100% - 2px), #FFE2B0 100%);
+}
+:root.canvas #board .frame.boot .fx-scan { animation: scan calc(540ms * var(--k)) cubic-bezier(.45, 0, .25, 1) calc(var(--d, 0ms) + 200ms * var(--k)) both; }
+@keyframes scan { 0% { transform: translateY(-100%); opacity: 1; } 88% { opacity: 1; } 100% { transform: translateY(0); opacity: 0; } }
+:root.canvas #board .frame.boot > .f-head, :root.canvas #board .frame.boot > .f-body,
+:root.canvas #board .frame.boot > .f-wait, :root.canvas #board .frame.boot > .f-sat,
+:root.canvas #board .frame.boot > .f-cut {
+  animation: rise calc(240ms * var(--k)) var(--ease-out) calc(var(--d, 0ms) + 260ms * var(--k)) both;
+}
+:root.canvas.motion-calm #board .frame.boot > .f-head, :root.canvas.motion-calm #board .frame.boot > .f-body,
+:root.canvas.motion-calm #board .frame.boot > .f-wait, :root.canvas.motion-calm #board .frame.boot > .f-sat,
+:root.canvas.motion-calm #board .frame.boot > .f-cut { animation-name: show; }
+:root.canvas #board .frame.boot .ch-fl, :root.canvas #board .frame.boot .cal-span {
+  animation: bar-grow calc(640ms * var(--k)) cubic-bezier(.3, 1.5, .5, 1) calc(var(--d, 0ms) + 340ms * var(--k)) both;
+}
+:root.canvas #board .frame.boot .cal-span { transform-origin: 0 50%; }
+:root.canvas.motion-calm #board .frame.boot .ch-fl, :root.canvas.motion-calm #board .frame.boot .cal-span { animation-timing-function: cubic-bezier(.33, 1, .68, 1); }
+/* the heading decodes (board.js decode): its real words keep its size and its name, unseen, under the letters settling */
+:root.canvas .f-title.decoding { color: transparent; }
+:root.canvas .frame.waits .f-title.decoding { color: transparent; }
+.d-fx { position: absolute; left: 0; top: 0; right: 0; color: #fff; }
+:root.canvas .frame.waits .d-fx { color: #FFE2B0; }
+
+/* ---- the task card (what Jarvis is doing while he works) and a group's head tile: one element - the card shrinks
+   to the head of its answer's frames (board.js makeHead, HANDLERS.task) ---- */
+.task { display: none; }
+:root.canvas .task {
+  position: absolute; left: 0; top: 0; z-index: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden;
+  padding: 16px 18px 12px; border: 1px solid rgba(175, 240, 255, .9); border-radius: 1px;
+  background: rgba(3, 10, 13, .92); color: var(--c-ink);
+  box-shadow: 0 0 18px rgba(var(--g), .35), inset 0 0 24px rgba(var(--g), .08);
+}
+:root.canvas .task.working:not(.unplaced) { visibility: visible; }     /* shown while the board itself is away, too */
+:root.canvas .task.away { display: none; }
+:root.canvas .task.leaving { pointer-events: none; }
+.t-hd { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; min-width: 0; }
+.t-h {
+  margin: 0; min-width: 0; color: #fff; font: 700 30px/32px var(--font-display); letter-spacing: .01em;
+  text-transform: uppercase; overflow-wrap: anywhere; unicode-bidi: plaintext;
+}
+.t-time { flex: none; color: var(--c-hi); }
+.t-words { margin-top: 10px; color: #D8F3F8; white-space: normal; overflow-wrap: anywhere; }
+.t-blocks { display: flex; gap: 3px; margin: 14px 0 12px; }
+.t-blocks i { flex: 1; height: 9px; background: #1A3A44; }
+.t-blocks i.on { background: #fff; box-shadow: 0 0 8px rgba(var(--g-hi), .9); animation: block-on calc(320ms * var(--k)) cubic-bezier(.3, 1.6, .5, 1) both; }
+.t-blocks i.next { background: #3F7482; }                 /* the step he is on (still: nothing here moves by itself) */
+@keyframes block-on { from { transform: scaleY(.25); } }
+:root.motion-calm .t-blocks i.on { animation-timing-function: var(--ease-out); }
+:root.motion-off .t-blocks i.on { animation: none; }
+.t-ft { display: flex; justify-content: space-between; align-items: center; gap: 12px; min-height: 24px; margin-top: auto; }
+.t-counts { min-width: 0; white-space: normal; }
+.task .c-btn[hidden] { display: none; }
+:root.canvas .task.head {
+  flex-direction: row; align-items: center; justify-content: space-between; gap: 14px; padding: 0 12px 0 15px; z-index: 0;
+  border-color: rgba(143, 235, 255, .34); background: rgba(3, 10, 13, .55); box-shadow: none;
+}
+:root.canvas .task.head .t-hd { flex: 0 1 auto; justify-content: flex-start; gap: 10px; }
+:root.canvas .task.head .t-h {
+  font: 700 13px/16px var(--font-display); letter-spacing: .08em; color: var(--c-hi);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+:root.canvas .task.head .t-time { color: var(--c-dim); }
+:root.canvas .task.head .t-words, :root.canvas .task.head .t-blocks, :root.canvas .task.head .c-btn { display: none; }
+:root.canvas .task.head .t-ft { flex: none; min-height: 0; margin: 0; }
+:root.canvas .task.head .t-counts { white-space: nowrap; }
+
+/* ---- Clear view: each frame folds to a bright line that the orb draws in (board.js drawIntoOrb); Bring back lets
+   them out again. The row that offers it stands over the caption's strip. ---- */
+.fx-line { display: none; }
+:root.canvas .fx-line {
+  display: block; position: absolute; z-index: 6; height: 2px; opacity: 0; pointer-events: none; background: #fff;
+  box-shadow: 0 0 10px 2px rgba(var(--g-hi), .95), 0 0 26px 6px rgba(var(--g), .5);
+}
+:root.canvas .fx-line.amber { background: #FFE2B0; box-shadow: 0 0 10px 2px rgba(var(--ga), .95), 0 0 26px 6px rgba(var(--ga), .5); }
+:root.canvas .cleared-row {
+  position: absolute; left: 50%; bottom: 4px; z-index: 4; transform: translateX(-50%); min-height: 0;
+  gap: 12px; padding: 7px 8px 7px 14px; border: 1px solid rgba(var(--g-hi), .6); border-radius: 1px;
+  background: rgba(3, 10, 13, .94); box-shadow: 0 0 12px rgba(var(--g), .25);
+  color: #D8F3F8; font: 500 10px/13px var(--font-mono); letter-spacing: .16em; text-transform: uppercase; white-space: nowrap;
+}
+:root.canvas .cleared-row > .glyph { display: none; }
+:root.canvas .cr-count { color: var(--c-dim); }
+:root.canvas .cleared-row .f-act { margin-left: 4px; height: auto; padding: 5px 9px; font-size: 10px; }
+:root.canvas.board-off .cleared-row.shown { visibility: visible; }
+
+/* ---- a parked answer: "New answer · Show" over the frames' top edge ---- */
+:root.canvas #pill { left: 0; right: 0; top: 6px; }
+:root.canvas .pill-btn {
+  height: auto; padding: 0 0 0 12px; border: 1px solid var(--c-hi); border-radius: 1px; background: rgba(3, 10, 13, .96);
+  color: #fff; font: 500 10px/13px var(--font-mono); letter-spacing: .16em; text-transform: uppercase;
+  box-shadow: 0 0 14px rgba(var(--g), .45);
+}
+:root.canvas .pill-show { padding: 7px 10px; border-left-color: rgba(var(--g-hi), .5); font: inherit; letter-spacing: inherit; color: var(--c-hi); }
+
+/* ---- open big on the canvas: the mock's frame, larger. The canvas under it dims at once (a fade of the whole
+   screen under the growing frame cost a third of the frame rate, measured) ---- */
+:root.canvas #board, :root.canvas #canvas, :root.canvas #pill { transition: none; }
+:root.canvas .frame.big-card { padding: 20px 24px 0; border-color: #fff; box-shadow: none; }
+:root.canvas .frame.big-card::before { box-shadow: 0 0 30px 2px rgba(var(--g), .45), inset 0 0 40px rgba(var(--g), .08); }
+:root.canvas .frame.big-card.waits { border-color: #FFE2B0; }
+:root.canvas .frame.big-card.waits::before { box-shadow: 0 0 30px 2px rgba(var(--ga), .5), inset 0 0 40px rgba(var(--ga), .08); }
+:root.canvas .big-card .f-title { font-size: 26px; line-height: 30px; }
+:root.canvas .big-card > .f-head { margin-bottom: 14px; }
+:root.canvas .big-card > .f-body { font: 400 15px/23px var(--font-body); color: var(--ink-2); }
+:root.canvas .big-card .mt-text { -webkit-line-clamp: unset; line-clamp: unset; display: block; overflow: visible; }
+:root.canvas .big-card .cal-title, :root.canvas .big-card .tx-text, :root.canvas .big-card .td-text,
+:root.canvas .big-card .mt-sender, :root.canvas .big-card .ml-sender, :root.canvas .big-card .ml-subject { font-size: 15px; line-height: 23px; }
+:root.canvas .big-card .nb-fig { font-size: 120px; line-height: 116px; }
+:root.canvas .big-card > .f-wait { margin-top: 14px; }
+:root.canvas .f-back { color: var(--c-hi); border-top-color: rgba(var(--g-hi), .2); }
+
+/* the states that take a whole frame's contents away come last: nothing above shows through them */
+:root.canvas #board .frame.away, :root.canvas #board .frame.over { display: none; }
+:root.canvas #board .frame.closed { padding: 0; background: transparent; border-color: transparent; }
+:root.canvas #board .frame.closed::before, :root.canvas #board .frame.closed::after { display: none; }
+:root.canvas #board .frame.closed > :not(.f-closed), :root.canvas #board .frame.sat > :not(.f-sat) { display: none; }
+:root.canvas #board .frame.closed > .f-closed { display: flex; }

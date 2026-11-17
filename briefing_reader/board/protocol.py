@@ -88,6 +88,16 @@ In (app -> page): check_message(message, known, groups=()) -> Checked
                  while pressing it works), "Briefing ready", a Send's hold word ("Sent": its Undo shows), REC's words
                  (its Stop shows), "Hey Jarvis"'s badge and whether the microphone's meter shows. Every label of a
                  button is the page's own; none comes from here
+      The canvas, part 2 (frames across the screen):
+        frame    + the kind "number" {"figure", "text", "source"}: a big number the app builds from a chart's or a
+                 table's change - the figure large ("+500": NUMBER_TEXT_CAP at most, a signed number's words), what it
+                 was and is (at most CHANGE_CAP) and where it comes from (at most SOURCE_CAP)
+        task     {"state", "title", "words", "seconds", "steps", "sources", "frames", "group", "stop"}: the task card
+                 - "working" (what Jarvis is doing in the app's own words, never the owner's: "title" at most
+                 TOPIC_CAP, "words" at most TASK_WORDS_CAP; the seconds it has run, the steps finished, the sources
+                 read and the frames put up so far, each a whole number; "stop": the app's Stop works now), "done" (the
+                 answer arrived: "group" is the group it heads - one the app sent - and the card shrinks to that
+                 group's head tile; "" none: it goes) or "gone" (stopped, or it failed: the card goes)
     The ids of lit, remove and picture must be frames the app sent (``known``), and a group's those of groups it sent
     (``groups``); a new frame past MAX_FRAMES is refused.
 
@@ -113,6 +123,9 @@ Out (page -> app): check_request(kind, payload, known) -> Request
         go {"to": one of GO_WORDS}              a corner button of the page: a screen, History, the Day view, the
                           switch to the desktop HUD, the window's minimise / maximise / close / drag, Mute, a hold's
                           Undo, REC's Stop, the folded board back. A word that is not on the list is refused
+      The canvas, part 2:
+        go {"to": "tidy"}                       the corner's Tidy: the page packed its frames again (counted)
+        go {"to": "stop"}                       the task card's Stop: the app's own Stop of the running request
     Anything else is refused. A log line may carry kind_word(kind) and the reason word, never the payload.
 """
 
@@ -180,7 +193,7 @@ MATHS_OPS = {"+": (2, 8), "-": (1, 2), "*": (2, 8), "/": (2, 2), "=": (2, 4), "f
              "root": (1, 2), "()": (1, 1), "or": (2, 4)}
 
 MESSAGE_TYPES = ("frame", "lit", "remove", "clear", "motion", "picture", "group", "remove_group", "bar", "desk",
-                 "reveal", "cleared", "focus_part", "backdrop", "big", "orb", "canvas")
+                 "reveal", "cleared", "focus_part", "backdrop", "big", "orb", "canvas", "task")
 # The canvas, part 1: the orb's states (the native ring's looks: orb.IDLE ...), its three forms, its levels' range, the
 # corners' words' caps and tones, the page's own buttons the app may show, and the words a button may send back.
 ORB_STATES = ("idle", "listening", "thinking", "speaking", "needs", "waiting")
@@ -195,7 +208,12 @@ APPROVALS_MAX = 999
 CANVAS_TONES = ("holo", "amber", "steel")
 CANVAS_BUTTONS = ("history", "board", "briefing", "approvals", "followups", "meetings", "agents", "live", "memory",
                   "settings", "desktop", "minimize", "maximize", "close", "mute", "day")
-GO_WORDS = (*CANVAS_BUTTONS, "undo", "stop_rec", "drag")
+GO_WORDS = (*CANVAS_BUTTONS, "undo", "stop_rec", "drag", "tidy", "stop")
+# The canvas, part 2: the task card's states, its words' caps and its counts' range.
+TASK_STATES = ("working", "done", "gone")
+TASK_WORDS_CAP = 60              # "Reading your calendar"
+TASK_SECONDS_MAX = 86_400
+TASK_COUNT_MAX = 99
 BIG_STATES = ("open", "close")                      # big's "state"
 LANDED_STEPS = ("outline", "done")                  # landed's "step"
 BIG_STEPS = ("back", "laid", "shut")                # the big request's "step"
@@ -219,6 +237,7 @@ _JPEG = b"\xff\xd8\xff"
 # A number's words as board.ask_frames writes them ("3,400", "0.25", "−4"; a chart's value also "3.4k") and a maths name.
 _NUMBER_TEXT = re.compile(r"−?(?:0|[1-9][0-9]{0,2}(?:,[0-9]{3})*)(?:\.[0-9]+)?")
 _VALUE_TEXT = re.compile(r"−?(?:0|[1-9][0-9]{0,2}(?:,[0-9]{3})*)(?:\.[0-9]+)?[kMBT]?")
+_FIGURE_TEXT = re.compile(r"[+\-−]?[$€£]?[0-9][0-9,.]*[kMBT%]?")     # a big number's figure ("+500", "−1.2k")
 _MATHS_NAME = re.compile(r"[A-Za-zΑ-ΡΣ-Ωα-ω]{1,%d}" % NAME_LETTERS)
 
 # Reason words (a log line may carry them; never a value).
@@ -565,10 +584,20 @@ def _maths_body(body: Any) -> dict[str, Any]:
     return {"steps": steps, "answer": _step(fields["answer"], budget)}
 
 
+def _number_body(body: Any) -> dict[str, Any]:
+    """A big number (the canvas, part 2; the app builds it from a chart's or a table's change): the figure - a signed
+    number's words -, what it was and is, and where it comes from. Every key present."""
+    keys = ("figure", "text", "source")
+    fields = _fields(body, keys, keys)
+    return {"figure": _pattern(fields["figure"], NUMBER_TEXT_CAP, _FIGURE_TEXT),
+            "text": _text(fields["text"], CHANGE_CAP), "source": _text(fields["source"], SOURCE_CAP)}
+
+
 KINDS: dict[str, Callable[[Any], dict[str, Any]]] = {
     "text": _text_body, "calendar": _calendar_body, "mail_thread": _mail_thread_body, "mail_list": _mail_list_body,
     "todos": _todos_body, "picture": _picture_body,
     "table": _table_body, "chart": _chart_body, "timeline": _timeline_body, "maths": _maths_body,
+    "number": _number_body,
 }
 
 
@@ -729,6 +758,22 @@ def _canvas(value: dict[str, Any]) -> dict[str, Any]:
             "wake": _text(fields.get("wake", ""), WAKE_CAP), "meter": _flag(fields.get("meter", False))}
 
 
+def _task(value: dict[str, Any], groups: Collection[str]) -> tuple[dict[str, Any], str]:
+    """The task card (the canvas, part 2): its state, the app's own words for what Jarvis is doing, the seconds and
+    the counts so far, the group it heads once done (one the app sent; "" none) and whether Stop works now."""
+    fields = _fields(value, ("type", "state", "title", "words", "seconds", "steps", "sources", "frames", "group",
+                             "stop"), ("type", "state"))
+    group = fields.get("group", "")
+    group_id = _known_id(group, groups) if group != "" else ""
+    return {"type": "task", "state": _choice(fields["state"], TASK_STATES),
+            "title": _text(fields.get("title", ""), TOPIC_CAP), "words": _text(fields.get("words", ""), TASK_WORDS_CAP),
+            "seconds": _number(fields.get("seconds", 0), 0, TASK_SECONDS_MAX),
+            "steps": _number(fields.get("steps", 0), 0, TASK_COUNT_MAX),
+            "sources": _number(fields.get("sources", 0), 0, TASK_COUNT_MAX),
+            "frames": _number(fields.get("frames", 0), 0, MAX_FRAMES), "group": group_id,
+            "stop": _flag(fields.get("stop", False))}, group_id
+
+
 def check_message(message: Any, known: Collection[str] = (), groups: Collection[str] = ()) -> Checked:
     """``message`` as the page gets it (see the module doc), or Refused. ``known``: the ids of the frames the app sent;
     ``groups``: those of the groups it sent."""
@@ -783,6 +828,8 @@ def check_message(message: Any, known: Collection[str] = (), groups: Collection[
         clean = _orb(message)
     elif kind == "canvas":
         clean = _canvas(message)
+    elif kind == "task":
+        clean, group_id = _task(message, groups)
     else:   # motion
         fields = _fields(message, ("type", "level"), ("type", "level"))
         clean = {"type": "motion", "level": _choice(fields["level"], MOTION_LEVELS)}

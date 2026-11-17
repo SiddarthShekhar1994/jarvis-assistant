@@ -55,7 +55,10 @@ The canvas (PLAN-canvas part 1; ``canvas``: canvas_ui.CanvasController, set by t
 canvas): the board's view is Home itself and starts with the window, not at the first Ask (the canvas calls
 ``ensure_board``); the view is handed to the canvas as it is made (``on_board``: its black ground, the page's ``go``
 requests, its ready and unavailable). No desk forms there: ReadingView's ``desk_shown()`` then says the board shows
-frames on the canvas, and everything here that asks it works as before.
+frames on the canvas, and everything here that asks it works as before. Part 2: on the canvas a chart or a table that
+carries a change also puts up its big-number frame (board.ask_frames.number_frame: built from the same checked data,
+right after it); ``answer_group`` / ``answer_sources`` say what the task card needs; the canvas is told at once when
+the board's count changed (the orb's form follows Clear view and its Bring back without waiting for its own timer).
 
 Logs: ids, kinds, counts, durations and statuses only - never a frame's words, a turn's words or an address.
 """
@@ -578,6 +581,9 @@ class DeskController(QObject):
         if not clearing:
             self.reading.set_board_held(False)
         self.reading.refresh_turn_frames()
+        canvas = self.canvas
+        if canvas is not None and shiboken6.isValid(canvas):
+            canvas.sync()                        # the canvas: the orb's form follows the frames at once
 
     def _turn_frames(self, entry_id: int) -> int:
         return self.feed.turn_frames(entry_id)[1]
@@ -842,18 +848,47 @@ class DeskController(QObject):
 
         return [("research", research, "", "")]
 
-    @staticmethod
-    def _frame_entries(outcome: Any) -> list[tuple[Any, ...]]:
+    def _on_canvas(self) -> bool:
+        """Home is the canvas now (never once it fell back to the native ring and the read-only tiles)."""
+        canvas = self.canvas
+        try:
+            return canvas is not None and shiboken6.isValid(canvas) and not canvas.fallen()
+        except Exception:  # noqa: BLE001 - unknown: not the canvas
+            return False
+
+    def _frame_entries(self, outcome: Any) -> list[tuple[Any, ...]]:
         """Part 6: the answer's typed frames (a table, a chart, a timeline, maths: board.ask_frames checked them), each
         with its source key - its kind and its title folded ("table:budget lines") - so a later answer with the same
-        frame builds it again in its place (changed only when what it says differs)."""
+        frame builds it again in its place (changed only when what it says differs). The canvas, part 2: a chart or a
+        table that carries a change is followed by its big-number frame (ask_frames.number_frame: the same checked
+        data, keyed "number:" and its frame's key)."""
         entries: list[tuple[Any, ...]] = []
+        numbers = self._on_canvas()
         for index, frame in enumerate(getattr(outcome, "frames", ()) or ()):
             if isinstance(frame, ask_frames.AskFrame):
                 entries.append((f"ask:{index}",
                                 lambda frame_id, frame=frame: ask_frames.build(frame, frame_id=frame_id), "", "",
                                 frame.key))
+                number = ask_frames.number_frame(frame) if numbers else None
+                if number is not None:
+                    entries.append((f"ask:{index}:number",
+                                    lambda frame_id, frame=number: ask_frames.build(frame, frame_id=frame_id), "", "",
+                                    number.key))
         return entries
+
+    # ---- what the canvas's task card asks (part 2) --------------------------------------------------------------
+
+    def answer_group(self, task_id: int = 0) -> str:
+        """The group an answer's frames went to ("" - it put none on the board)."""
+        key = int(task_id or 0) or self._current
+        group = self.feed.group_for(key)
+        return group if group and self.feed.group_order(group) else ""
+
+    def answer_sources(self, task_id: int = 0) -> int:
+        """How many sources Jarvis read for an answer so far: its LIVE task's pictures (a mail thread, a page, a
+        web search, a day)."""
+        answer = self._answers.get(int(task_id or 0) or self._current)
+        return len(answer.seen) if answer is not None else 0
 
     def on_instant_answer(self, reply: Any, words: str) -> None:
         """Part 6: Jarvis's own instant answer (instant.InstantReply). A sum whose working has a step between the sum as

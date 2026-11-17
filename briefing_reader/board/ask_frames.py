@@ -7,6 +7,8 @@ reason word (the caller logs the counts and the words, never a value); the answe
     check_frame(value) -> AskFrame | str       one frame, else the reason word it is dropped for
     build(frame, *, frame_id) -> frames.Built  its frame message (board.protocol.check_message passes it)
     frame_key(kind, title) -> str              its source key: the kind and the title folded ("table:budget lines")
+    number_frame(frame) -> AskFrame | None     the canvas, part 2: the big-number frame of a chart or a table that
+                                               carries a change, built from the same checked data (kind "number")
     format_number(value) -> str                a finite number as the board shows it ("3,400", "0.25", "−4")
     chart_texts(values) / chart_word(value, values)   a chart's words for its values, in one scale ("1.2k", "3.4k")
     maths_text(tree) -> str                    a checked expression as plain words ("x² − 4x + 3 = 0")
@@ -479,6 +481,70 @@ def build(frame: AskFrame, *, frame_id: str) -> Any:
     message = {"type": "frame", "id": frame_id, "kind": frame.kind, "title": frame.title, "meta": frame.meta,
                "body": copy.deepcopy(frame.body)}
     return frames.Built((message,))
+
+
+# --------------------------------------------------------------------------
+# The big number (the canvas, part 2)
+# --------------------------------------------------------------------------
+
+NUMBER_KIND = "number"
+_FIGURE = re.compile(r"[+\-" + MINUS + r"]?[$\u20ac\u00a3]?[0-9][0-9,.]*[kMBT%]?")
+_CHANGE_DOT = " \u00b7 "
+
+
+def _lead_figure(change: str) -> tuple[str, str]:
+    """A delta line's figure and what it says after it: "+500 Software \u00b7 was 2.9k on Friday" is ("+500", "Was 2.9k
+    on Friday") - the words after its first " \u00b7 ", else the words after the figure; ("", "") when the line does not
+    start with a figure."""
+    lead, _space, rest = change.strip().partition(" ")
+    if not lead or len(lead) > protocol.NUMBER_TEXT_CAP or not _FIGURE.fullmatch(lead):
+        return "", ""
+    _first, dot, later = rest.partition(_CHANGE_DOT)
+    said = (later if dot else rest).strip()
+    return lead, said[:1].upper() + said[1:]
+
+
+def number_frame(frame: AskFrame) -> AskFrame | None:
+    """The big-number frame of a chart or a table that carries a change (its ``changed`` bar or row), built from the
+    same checked data - no field of the model's is read that the chart or the table did not show: the figure large (a
+    chart's value less its old one, "+500"; else the figure its delta line starts with), what it was and is ("Was
+    2,900, now 3,400.", else the delta line's own words after the figure, else the changed row's other cells), and where
+    it comes from (a table's source, else the frame's title). Its title is the changed bar's label or the changed
+    row's first cell; its meta the unit; its key "number:" and the frame's own. None when nothing changed or no figure
+    can be shown. Never raises."""
+    try:
+        body = frame.body
+        changed = body.get("changed", -1)
+        if type(changed) is not int or changed < 0:
+            return None
+        change = str(body.get("change", "") or "")
+        figure, said = _lead_figure(change)
+        if frame.kind == "chart":
+            bar = body["bars"][changed]
+            label, source = str(bar["label"]), frame.title
+            was = body.get("was")
+            if was is not None:
+                try:
+                    delta = _number(bar["value"] - was)
+                    words = format_number(delta)
+                    figure = words if delta <= 0 else f"+{words}"
+                    said = f"Was {format_number(was)}, now {format_number(bar['value'])}."
+                except _Drop:
+                    pass                           # a difference the board can't show: the delta line's own figure
+        elif frame.kind == "table":
+            row = body["rows"][changed]
+            label, source = str(row[0]) if row else "", str(body.get("source", "") or "") or frame.title
+            if not said:
+                said = _CHANGE_DOT.join(cell for cell in row[1:] if cell)
+        else:
+            return None
+        if not figure or not _FIGURE.fullmatch(figure):
+            return None
+        return AskFrame(NUMBER_KIND, _cut(label or frame.title, protocol.TITLE_CAP), str(body.get("unit", "") or ""),
+                        {"figure": figure, "text": _cut(said, protocol.CHANGE_CAP),
+                         "source": _cut(source, protocol.SOURCE_CAP)}, f"{NUMBER_KIND}:{frame.key}")
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError):
+        return None
 
 
 # --------------------------------------------------------------------------
