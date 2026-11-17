@@ -51,6 +51,12 @@ geometry is set once, then ``desk: enter``); the first time in a session the emp
 Part 7: after every send that changed the board, the look controller's ``on_board_changed(feed)`` gives the second
 screen the board as it is (its frames as the page has them; never the lit frame, a backdrop or open big).
 
+The canvas (PLAN-canvas part 1; ``canvas``: canvas_ui.CanvasController, set by the look controller when Home is the
+canvas): the board's view is Home itself and starts with the window, not at the first Ask (the canvas calls
+``ensure_board``); the view is handed to the canvas as it is made (``on_board``: its black ground, the page's ``go``
+requests, its ready and unavailable). No desk forms there: ReadingView's ``desk_shown()`` then says the board shows
+frames on the canvas, and everything here that asks it works as before.
+
 Logs: ids, kinds, counts, durations and statuses only - never a frame's words, a turn's words or an address.
 """
 
@@ -215,6 +221,7 @@ class DeskController(QObject):
         super().__init__(host if isinstance(host, QObject) else None)
         self.host = host
         self.look = look                    # look_ui.LookController: the board's sounds (part 5c)
+        self.canvas: Any = None             # canvas_ui.CanvasController while Home is the canvas (PLAN-canvas part 1)
         self.reading = host.window.reading
         self.feed = BoardFeed(close_s=self.CLOSE_S, clear_s=self.CLEAR_S)
         self.board: Any = None
@@ -301,6 +308,12 @@ class DeskController(QObject):
         view.showNewRequested.connect(self._on_show_new)
         view.readingChanged.connect(self._on_reading)
         view.focusOutRequested.connect(self._on_focus_out)
+        canvas = self.canvas
+        if canvas is not None and shiboken6.isValid(canvas):
+            try:
+                canvas.on_board(view)            # the canvas: this view is Home itself
+            except Exception as exc:  # noqa: BLE001 - the canvas never stops the board
+                logger.warning("Canvas: the board was not taken (%s)", type(exc).__name__)
         self.reading.set_board_view(view)
         self._started_at = time.monotonic()
         view.start()
@@ -988,6 +1001,9 @@ class DeskController(QObject):
         self._land_timer.stop()
         self.cue.shutdown()
         self.big.shutdown()
+        canvas = self.canvas
+        if canvas is not None and shiboken6.isValid(canvas):
+            canvas.shutdown()
         feed = getattr(self.host, "_live_feed", None)
         if feed is not None:
             try:

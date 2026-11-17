@@ -89,6 +89,16 @@ Cases:
                five as a fraction paired with a chart at 253 px, 300, 270 and 448 px; seven-digit sums beside long
                step names, a long radicand, an indexed root): every element inside its frame's content box, and a
                line made too narrow for its fraction reading it inline (a/b), laid out again once wide again
+    canvas     the canvas (PLAN-canvas part 1), the real page as Home at 1280 x 800: no canvas layer until the first
+               orb message; the rings (seen at an angle, each ring at its own depth), the badge (flat, facing, the
+               name in it) and the corner (a third of its size, bottom right); the moves between them lively (the
+               turn's three keyframes: it overshoots; the trip's trail), calm (x1.6, two keyframes, no trail) and off
+               (a cut, the turns still); each state's own sign (the lean and the level, the counter turn, the amber
+               arc, the slash, the steel); the corners' words set as text - hostile ones among them - with nothing
+               of them in any attribute and no element made of them; a real press of every button that shows posting
+               its own word, forged words on a second channel dropped; hostile orb and canvas messages put into
+               board.apply directly refused by the page; the board's frame in the right-hand part with the orb in
+               its corner, Clear view asking for the board's own clear, and the board away when the desk leaves
 
 Qt runs offscreen and Chromium's proxy is a dead address (snapshots.OFFLINE_FLAGS, as the board's engine always runs in a
 test): nothing can reach the network whatever the page does. No window is shown on the real screen. Chromium's
@@ -980,6 +990,8 @@ def main(case: str) -> dict[str, Any]:
         report.update(expiry_case(wait_until, pump, main_world, settle_end))
     elif case == "typed":
         report.update(typed_case(make, wait_until, pump, main_world, settle_end))
+    elif case == "canvas":
+        report.update(canvas_case(make, wait_until, pump, main_world, settle_end))
     elif case == "reduced":
         # The page's own reduced motion, Chromium told reduced motion (REDUCED_MOTION): lively plays as off.
         host, board = make()
@@ -3547,6 +3559,301 @@ def typed_inside(board: Any, pump: Any, main_world: Any) -> dict[str, Any]:
         main_world(board, _DIVISOR_LINE.replace("__WIDTH__", json.dumps(width)))
         pump(0.5)
         report["divisor"].append(json.loads(main_world(board, _NARROW_SHOWN)))
+    return report
+
+
+# ---- the canvas (PLAN-canvas part 1): the orb's forms and states in the real page, and nothing from data in an
+# attribute ---------------------------------------------------------------------------------------------------------
+
+CANVAS_HOSTILE = {
+    "clock": "<img src=http://example.com/c.png>", "word": "<script>window.pwned=31</script>",
+    "hold": "\"><b onclick=pwn()>", "rec": "javascript:pwned=32 <iframe src=x>",
+    "wake": "' onmouseover='pwned=33",
+}
+CANVAS_BUTTONS = ["history", "briefing", "approvals", "followups", "meetings", "agents", "live", "memory", "settings",
+                  "desktop", "minimize", "maximize", "close", "mute", "day"]
+
+# What the page shows of the canvas: the orb as board.js draws it now, in numbers (board.orb(): its form, how far it
+# is turned to face and its rings are shut, its tilt, the state's lean, its levels, where it is and how big, its trip,
+# each ring's rate) and in pixels (its own canvas: how much of it is lit, amber, cyan); the corners' words; every
+# attribute in the canvas layer; its buttons.
+CANVAS_LOOK = r"""JSON.stringify((function () {
+  var canvas = document.getElementById('canvas'), look = board.orb();
+  if (!canvas || !look) { return {made: false, html: document.documentElement.className.split(' ').sort()}; }
+  function box(n) { var r = n.getBoundingClientRect(); return {x: r.left, y: r.top, w: r.width, h: r.height}; }
+  function text(sel) { var n = canvas.querySelector(sel); return n && !n.hidden ? n.textContent : ''; }
+  var orb = document.getElementById('orb'), pic = orb.querySelector('canvas');
+  var copy = document.createElement('canvas');   // read from a copy made for reading (the orb's own canvas is not)
+  copy.width = pic.width;
+  copy.height = pic.height;
+  var reader = copy.getContext('2d', {willReadFrequently: true});
+  reader.drawImage(pic, 0, 0);
+  var data = reader.getImageData(0, 0, pic.width, pic.height).data;
+  var lit = 0, amber = 0, cyan = 0;
+  for (var i = 0; i < data.length; i += 16) {
+    var r = data[i], g = data[i + 1], b = data[i + 2];
+    if (data[i + 3] > 48) {
+      lit += 1;
+      if (r > 170 && b < 140 && r > b * 1.5) { amber += 1; } else if (b > r * 1.3 && g > r * 1.2) { cyan += 1; }
+    }
+  }
+  var attrs = [];
+  Array.prototype.forEach.call(canvas.querySelectorAll('*'), function (n) {
+    for (var j = 0; j < n.attributes.length; j += 1) { attrs.push(n.attributes[j].name + '=' + n.attributes[j].value); }
+  });
+  return {
+    made: true, orb: look, cls: orb.className.split(' ').filter(Boolean).sort(),
+    html: document.documentElement.className.split(' ').sort(),
+    pixels: {lit: lit, amber: amber, cyan: cyan}, pic: [pic.width, pic.height], win: [innerWidth, innerHeight],
+    elements: orb.querySelectorAll('*').length,
+    texts: {state: text('.c-state'), clock: text('span.c-clock') || text('button.c-clock'), hold: text('.c-hold'),
+            rec: text('.c-rec'), wake: canvas.querySelectorAll('.c-state')[1] && !canvas.querySelectorAll('.c-state')[1].hidden
+              ? canvas.querySelectorAll('.c-state')[1].textContent : ''},
+    foreign: canvas.querySelectorAll('img, script, iframe, a, style, link, object, embed, form, input, b').length,
+    attrs: attrs,
+    buttons: Array.prototype.filter.call(canvas.querySelectorAll('button'), function (b) { return !b.hidden; })
+      .map(function (b) { return b.textContent || b.getAttribute('aria-label'); }),
+    bars: canvas.querySelectorAll('.c-meter i.on').length,
+    level: (function () { var n = canvas.querySelector('.c-bl > span.c-mono'); return n && !n.hidden ? n.textContent : ''; })(),
+    board: box(document.body), frame: (function () { var f = document.querySelector('#board .frame'); return f ? box(f) : null; })(),
+    counts: board.counts(), pwned: typeof window.pwned
+  };
+})())"""
+
+# A move, sampled in the page every frame: how far the orb is turned to face (flat) and its rings are shut, where it
+# is and its trail - so what a move does on its way (past its end and back, or not) can be read afterwards.
+CANVAS_WATCH = r"""(function () {
+  window.__move = [];
+  var began = performance.now();
+  (function sample() {
+    var look = board.orb();
+    window.__move.push([Math.round(performance.now() - began), look.flat, look.shut, look.centre[0], look.centre[1],
+                        look.size, look.ghosts, look.travelling ? 1 : 0]);
+    if (performance.now() - began < %d) { requestAnimationFrame(sample); } else { window.__moved = true; }
+  })();
+})()"""
+
+# The page's own channel asked for words the list does not have (a second channel, as script in the page could make).
+CANVAS_FORGED = r"""(function () {
+  new QWebChannel(qt.webChannelTransport, function (channel) {
+    var b = channel.objects.bridge;
+    b.post('go', JSON.stringify({to: 'format_disk'}));
+    b.post('go', JSON.stringify({to: 'briefing', then: 'approve_all'}));
+    b.post('go', 'x');
+    b.post('go', JSON.stringify({to: 'settings'}));
+    window.__forged = true;
+  });
+})()"""
+
+
+def canvas_case(make: Any, wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> dict[str, Any]:
+    """The canvas in the real page: its three forms and the moves between them at each motion level, the states, the
+    corners' words as text (hostile ones among them) with nothing of them in an attribute, the buttons' words through
+    the bridge (forged ones refused), hostile orb and canvas messages refused by the page itself, and the board's
+    frames in the right-hand part with the orb in its corner."""
+    report: dict[str, Any] = {}
+    host, board = make(canvas=True)
+    host.resize(1280, 800)
+    board.setGeometry(0, 0, 1280, 800)
+    went: list[str] = []
+    board.goRequested.connect(went.append)
+    cleared: list[int] = []
+    board.clearRequested.connect(lambda: cleared.append(1))
+    host.show()
+    wait_until(board.is_ready, 40)
+    report["ready"] = board.is_ready()
+    board.set_motion("lively")
+
+    def look() -> dict[str, Any]:
+        return json.loads(main_world(board, CANVAS_LOOK))
+
+    def watch(ms: int) -> list[list[float]]:
+        """The move just asked for, sampled in the page each frame for ``ms``."""
+        main_world(board, "window.__moved = false; 0")
+        main_world(board, CANVAS_WATCH.replace("%d", str(ms)))
+        wait_until(lambda: main_world(board, "String(window.__moved === true)") == "true", ms / 1000 + 5)
+        return json.loads(main_world(board, "JSON.stringify(window.__move)"))
+
+    def orb(state: str = "idle", form: str = "rings", **more: Any) -> bool:
+        message = {"type": "orb", "state": state, "form": form, "muted": False, "offline": False, "dim": False,
+                   "level": 0, "voice": 0}
+        message.update(more)
+        return board.apply(message)
+
+    def corners(**more: Any) -> bool:
+        message = {"type": "canvas", "clock": "Tue 17 Nov · 9:41 AM", "word": "Standby", "tone": "holo",
+                   "approvals": 0, "buttons": CANVAS_BUTTONS, "briefing_new": False, "hold": "", "rec": "", "wake": "",
+                   "meter": True}
+        message.update(more)
+        return board.apply(message)
+
+    report["before"] = look()                              # a board that was sent no orb has no canvas at all
+    report["sent"] = [corners(), orb()]
+    pump(1.4)                                              # the orb's own entrance is over
+    report["rings"] = look()
+
+    # the states, in the rings
+    orb("listening", level=62)
+    pump(0.9)
+    report["listening"] = look()
+    orb("thinking")
+    pump(0.9)
+    report["thinking"] = look()
+    orb("needs")
+    pump(0.5)
+    report["needs"] = look()
+    orb("waiting")
+    pump(1.2)
+    report["waiting"] = look()
+    orb("idle", muted=True)
+    pump(0.5)
+    report["muted"] = look()
+    orb("idle", offline=True)
+    pump(0.3)
+    report["offline"] = look()
+    orb("idle")
+    pump(0.7)
+
+    # the rings -> the badge (lively: the turn goes a little past and back), then -> the corner (the curve, the trail)
+    orb("speaking", "badge", voice=80)
+    report["turn"] = watch(1500)
+    report["badge"] = look()
+    orb("idle", "corner")
+    report["trip"] = watch(1300)
+    report["corner"] = look()
+    orb("idle", "rings")
+    report["back"] = watch(1700)
+    report["rings_again"] = look()
+
+    # calm: the same moves, x1.6, no overshoot, no trail
+    board.set_motion("calm")
+    orb("speaking", "badge", voice=40)
+    report["calm_turn"] = watch(2400)
+    orb("idle", "corner")
+    report["calm_trip"] = watch(1900)
+    report["calm_corner"] = look()
+
+    # off: cuts
+    board.set_motion("off")
+    orb("idle", "rings")
+    pump(0.05)
+    report["off_cut"] = look()
+    pump(0.4)
+    orb("speaking", "badge", voice=40)
+    pump(0.3)
+    report["off_badge"] = look()
+    pump(0.4)
+    report["off_still"] = json.loads(main_world(board, "JSON.stringify(board.orb().frames)"))
+    board.set_motion("lively")
+    orb("idle", "rings")
+    pump(1.2)
+
+    # the corners' words: hostile ones are text, and nothing of them is in any attribute
+    report["hostile_sent"] = corners(approvals=3, tone="amber", briefing_new=True, **CANVAS_HOSTILE)
+    pump(0.3)
+    report["hostile"] = look()
+
+    # the buttons: a real press of each one that shows posts its own word; forged words are dropped
+    corners(hold="Sent", rec="Rec 0:42")
+    pump(0.2)
+    report["pressed"] = json.loads(main_world(board, r"""JSON.stringify((function () {
+      var pressed = [];
+      Array.prototype.forEach.call(document.querySelectorAll('#canvas button'), function (b) {
+        if (!b.hidden) { pressed.push(b.textContent || b.getAttribute('aria-label')); b.click(); }
+      });
+      return pressed;
+    })())"""))
+    pump(0.4)
+    report["went"] = list(went)
+    del went[:]
+    report["console_before_forged"] = {key: value for key, value in board.counts().items()
+                                       if key.startswith("console:")}
+    main_world(board, CANVAS_FORGED)
+    wait_until(lambda: main_world(board, "String(window.__forged === true)") == "true", 5)
+    pump(0.3)
+    report["forged_went"] = list(went)
+    report["requests"] = {key: value for key, value in board.counts().items()
+                          if key.startswith(("accepted:go", "dropped:go", "why:"))}
+
+    # hostile messages put into the page directly (past Python's check): the page refuses each and changes nothing
+    tries = {
+        "state": {"type": "orb", "state": "evil", "form": "rings", "muted": False, "offline": False, "dim": False, "away": False,
+                  "level": 0, "voice": 0},
+        "form": {"type": "orb", "state": "idle", "form": "cube", "muted": False, "offline": False, "dim": False, "away": False,
+                 "level": 0, "voice": 0},
+        "level": {"type": "orb", "state": "idle", "form": "rings", "muted": False, "offline": False, "dim": False, "away": False,
+                  "level": 101, "voice": 0},
+        "fraction": {"type": "orb", "state": "idle", "form": "rings", "muted": False, "offline": False, "dim": False, "away": False,
+                     "level": 0, "voice": 0.5},
+        "extra": {"type": "orb", "state": "idle", "form": "rings", "muted": False, "offline": False, "dim": False, "away": False,
+                  "level": 0, "voice": 0, "html": "<b>x</b>"},
+        "button": {"type": "canvas", "clock": "", "word": "", "tone": "holo", "approvals": 0,
+                   "buttons": ["history", "wipe"], "briefing_new": False, "hold": "", "rec": "", "wake": "",
+                   "meter": False},
+        "twice": {"type": "canvas", "clock": "", "word": "", "tone": "holo", "approvals": 0,
+                  "buttons": ["history", "history"], "briefing_new": False, "hold": "", "rec": "", "wake": "",
+                  "meter": False},
+        "long": {"type": "canvas", "clock": "", "word": "x" * 41, "tone": "holo", "approvals": 0, "buttons": [],
+                 "briefing_new": False, "hold": "", "rec": "", "wake": "", "meter": False},
+        "tone": {"type": "canvas", "clock": "", "word": "", "tone": "url(x)", "approvals": 0, "buttons": [],
+                 "briefing_new": False, "hold": "", "rec": "", "wake": "", "meter": False},
+        "label": {"type": "canvas", "clock": "", "word": "", "tone": "holo", "approvals": 0, "buttons": [],
+                  "briefing_new": False, "hold": "", "rec": "", "wake": "", "meter": False, "label": "Approve"},
+    }
+    report["page_refused"] = {name: main_world(board, f"String(board.apply({json.dumps(json.dumps(message))}))")
+                              for name, message in tries.items()}
+    report["after_refused"] = look()
+
+    # the board's frames in the right-hand part, the orb in its corner; folded: the board away, the orb back
+    corners()
+    board.apply({"type": "frame", "id": "c1", "kind": "text", "title": "Dana's budget", "meta": "Now",
+                 "body": {"text": "Made-up words for the canvas probe."}})
+    board.apply({"type": "group", "id": "g1", "time": "9:41 AM", "topic": "Dana's budget", "frames": ["c1"],
+                 "older": False})
+    board.apply({"type": "bar", "frames": 1, "waits": 0, "pinned": 0, "compact": False})
+    board.apply({"type": "desk", "state": "enter"})
+    orb("idle", "corner")
+    pump(1.8)
+    report["with_frames"] = look()
+    # open big on the canvas: no box to keep, no backdrop - the frame grows over the canvas, the orb and the corners
+    # dim with the board, and it goes back
+    seen_big: list[str] = []
+    board.bigStep.connect(seen_big.append)
+    board.apply({"type": "big", "state": "open", "id": "c1", "x": 0, "y": 0, "w": 1280, "h": 800})
+    pump(0.9)
+    report["big_open"] = json.loads(main_world(board, r"""JSON.stringify((function () {
+      var card = document.querySelector('#big .big-card'), r = card ? card.getBoundingClientRect() : null;
+      return {state: board.counts().big, card: r ? [r.left, r.top, r.width, r.height] : null,
+              wide: document.body.classList.contains('wide'), dim: document.body.classList.contains('dim'),
+              canvas: getComputedStyle(document.getElementById('canvas')).opacity,
+              title: card ? card.querySelector('.f-title').textContent : '',
+              body: (function () { var b = document.body.getBoundingClientRect(); return [b.left, b.top, b.width, b.height]; })()};
+    })())"""))
+    board.apply({"type": "big", "state": "close", "id": ""})
+    pump(0.9)
+    report["big_shut"] = json.loads(main_world(board, r"""JSON.stringify({state: board.counts().big,
+      layer: !!document.querySelector('#big .big-card'), dim: document.body.classList.contains('dim'),
+      canvas: getComputedStyle(document.getElementById('canvas')).opacity})"""))
+    report["big_steps"] = list(seen_big)
+    report["clear_pressed"] = main_world(board, r"""(function () {
+      var hit = '';
+      Array.prototype.forEach.call(document.querySelectorAll('#canvas button'), function (b) {
+        if (!b.hidden && b.textContent === 'Clear view') { hit = b.textContent; b.click(); }
+      });
+      return hit;
+    })()""")
+    pump(0.3)
+    report["cleared"] = len(cleared)
+    board.apply({"type": "desk", "state": "leave"})
+    orb("idle", "rings")
+    pump(1.4)
+    report["folded"] = look()
+    counts = board.counts()
+    report["blocked"] = counts.get("blocked", {})
+    report["allowed"] = counts.get("allowed", {})
+    report["console"] = {key: value for key, value in counts.items() if key.startswith("console:")}
+    report["messages_refused"] = {key: value for key, value in counts.items() if key.startswith("refused:")}
+    settle_end(report, board)
     return report
 
 

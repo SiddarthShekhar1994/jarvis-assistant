@@ -114,6 +114,12 @@ from . import orb as orb_mod
 # --------------------------------------------------------------------------
 
 CAPTION_WORDS = 14
+# The canvas's caption (PLAN-canvas part 1; the approved mock's ``.cap``): each role's (px, weight, line height) in the
+# body face, its ink and its width.
+CANVAS_TYPE = {"caption": (15, 400, 22), "caption_sm": (13, 400, 20), "greeting": (15, 400, 22),
+               "question": (15, 400, 22)}
+CANVAS_INK = "#F2FDFF"
+CANVAS_WIDTH = 640
 THINKING_WORDS = 8
 SPOKEN_WPS = 2.7           # the voice's pace as estimated from the text (when the audio's length is unknown)
 WORD_MS_RANGE = (150, 1200)  # a word's reveal interval paced from a known audio length stays in this range
@@ -308,6 +314,7 @@ class CaptionView(QWidget):
         self.setAccessibleName("Jarvis says")
         self._resting = ""
         self._thinking = ""
+        self._canvas = False                # the canvas's caption (set_canvas): the mock's 15 / 22 body face
         self._pages: list[str] = []
         self._page = -1
         self._words: list[str] = []
@@ -625,10 +632,45 @@ class CaptionView(QWidget):
         return [self._words[i] for i in sorted(self._highlights())]
 
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
-        return QSize(holo.CAPTION_MAX_WIDTH, self.minimumSizeHint().height() + 16)
+        return QSize(self._max_width(), self.minimumSizeHint().height() + 16)
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
-        return QSize(200, 2 * holo.line_height("caption") + 4)
+        return QSize(200, 2 * self._line("caption") + 4)
+
+    # ---- the canvas (PLAN-canvas part 1): the same band in the approved mock's type ----------------
+
+    def set_canvas(self, on: bool) -> None:
+        """The canvas's caption over the ask line: the body face at 15 / 22 in CANVAS_INK, centred, at most
+        CANVAS_WIDTH wide (the mock's ``.cap``); the thinking line and the greeting in the same face. Everything else
+        the band does is unchanged. ``False``: Home's own caption type again."""
+        if bool(on) != self._canvas:
+            self._canvas = bool(on)
+            self.updateGeometry()
+            self.update()
+
+    def is_canvas(self) -> bool:
+        return self._canvas
+
+    def band_height(self) -> int:
+        """Two lines of the caption's type and 4 px (what its holder gives it)."""
+        return 2 * self._line("caption") + 4
+
+    def _font(self, role: str) -> QFont:
+        if not self._canvas:
+            return holo.font(role)
+        from . import hud
+
+        px, weight = CANVAS_TYPE.get(role, CANVAS_TYPE["caption"])[:2]
+        return hud.body_font(px, weight)
+
+    def _line(self, role: str) -> int:
+        return CANVAS_TYPE.get(role, CANVAS_TYPE["caption"])[2] if self._canvas else holo.line_height(role)
+
+    def _max_width(self) -> int:
+        return CANVAS_WIDTH if self._canvas else holo.CAPTION_MAX_WIDTH
+
+    def _ink(self) -> QColor:
+        return QColor(CANVAS_INK if self._canvas else holo.INK_1)
 
     # ---- pages and words -----------------------------------------------------------------
 
@@ -817,15 +859,15 @@ class CaptionView(QWidget):
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-            width = min(float(self.width()), float(holo.CAPTION_MAX_WIDTH))
+            width = min(float(self.width()), float(self._max_width()))
             left = (self.width() - width) / 2
             if self._state in (SPEAKING, HOLDING):
                 self._paint_page(painter, left, width)
             elif self._state == THINKING:
                 self._paint_thinking(painter)
             elif self._question or self._resting:
-                painter.setFont(holo.font("question" if self._question else "greeting"))
-                painter.setPen(QColor(holo.INK_1))
+                painter.setFont(self._font("question" if self._question else "greeting"))
+                painter.setPen(self._ink())
                 rect = QRectF(left, 0, width, self.height())
                 painter.drawText(rect, int(Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap),
                                  self._question or self._resting)
@@ -833,8 +875,8 @@ class CaptionView(QWidget):
             painter.end()
 
     def _paint_thinking(self, painter: QPainter) -> None:
-        font = holo.font("caption_sm")
-        line_h = holo.line_height("caption_sm")
+        font = self._font("caption_sm")
+        line_h = self._line("caption_sm")
         top = (self.height() - line_h - 16) / 2
         painter.setFont(font)
         painter.setPen(QColor(holo.INK_2))
@@ -862,9 +904,9 @@ class CaptionView(QWidget):
         return at
 
     def _paint_page(self, painter: QPainter, left: float, width: float) -> None:
-        font = holo.font("caption")
+        font = self._font("caption")
         metrics = QFontMetricsF(font)
-        line_h = holo.line_height("caption")
+        line_h = self._line("caption")
         lines = self._lines(font, width)
         now = time.monotonic()
         still = _caption_still()
@@ -889,13 +931,13 @@ class CaptionView(QWidget):
                     p = 1.0 if still else (now - self._revealed_at[i]) / (REVEAL_MS / 1000.0)
                     opacity = _ease_out(p) * self._fade * swap
                     rise = 0.0 if still else RISE_PX * (1.0 - _ease_out(p))
-                    color = QColor(holo.ALERT_TX if self._alert else holo.HOLO if i in marks else holo.INK_1)
+                    color = QColor(holo.ALERT_TX if self._alert else holo.HOLO if i in marks else self._ink())
                     if i != newest and i not in marks and not self._alert:
                         color.setAlphaF(0.9)
                     blur = (1.0 - _ease_out(p)) if lively else 0.0
                     _draw_word(painter, QPointF(x, baseline + rise), word, color, opacity, blur)
                 elif lively and self._state == SPEAKING:
-                    _draw_word(painter, QPointF(x, baseline), word, QColor(holo.INK_1),
+                    _draw_word(painter, QPointF(x, baseline), word, self._ink(),
                                GHOST_OPACITY * self._fade * swap, 1.0)
                 x += w + space
         painter.setOpacity(1.0)
@@ -933,6 +975,9 @@ _MONTHS = ("JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT",
 _MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July", "August", "September",
                 "October", "November", "December")
 MUTE_LABEL = "Mute Jarvis"
+BACK_LABEL = "Back"                  # the canvas: a screen opened over it goes back to it
+BACK_NAME = "Back to Home"
+BACK_TIP = "Back to Home (Esc)"
 MINIMIZE_LABEL = "Minimise"
 CLOSE_LABEL = "Done, close Jarvis"
 
@@ -1267,6 +1312,7 @@ class HoloHeader(QWidget):
     muteClicked = Signal()
     minimizeClicked = Signal()
     closeClicked = Signal()
+    backClicked = Signal()               # the canvas's Back (Esc does the same): Home again
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1317,6 +1363,17 @@ class HoloHeader(QWidget):
         row = QHBoxLayout(self)
         row.setContentsMargins(holo.GUTTER_SIDE, 0, holo.GUTTER_SIDE - holo.HoloButton.MARGIN, 0)
         row.setSpacing(0)
+        # The canvas (PLAN-canvas part 1): a screen opened over it has Back at the top left (hidden otherwise).
+        self.back_button = holo.HoloButton(BACK_LABEL, holo.GHOST, size=holo.SIZE_SM)
+        self.back_button.setAccessibleName(BACK_NAME)
+        self.back_button.setToolTip(BACK_TIP)
+        self.back_button.clicked.connect(self.backClicked)
+        self.back_button.hide()
+        self._back_gap = QWidget()
+        self._back_gap.setFixedWidth(14)
+        self._back_gap.hide()
+        row.addWidget(self.back_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(self._back_gap)
         row.addWidget(self.wordmark, 0, Qt.AlignmentFlag.AlignVCenter)
         row.addSpacing(16)
         row.addWidget(self.readout, 1, Qt.AlignmentFlag.AlignVCenter)
@@ -1341,6 +1398,19 @@ class HoloHeader(QWidget):
     def set_state_word(self, word: str, tone: str = TONE_HOLO) -> None:
         self.readout.set_word(word, tone)
         self._fit_notes()
+
+    def state_tone(self) -> str:
+        """The state word's tone (TONE_HOLO / TONE_AMBER / TONE_STEEL): the canvas's corner shows the same."""
+        return self.readout.tone()
+
+    def set_back_visible(self, visible: bool) -> None:
+        """The canvas's Back at the header's left: shown on every screen opened over the canvas."""
+        self.back_button.setVisible(bool(visible))
+        self._back_gap.setVisible(bool(visible))
+        self._fit_notes()
+
+    def back_visible(self) -> bool:
+        return not self.back_button.isHidden()
 
     # ---- the start-up: J.A.R.V.I.S. types in ---------------------------------------------------
 

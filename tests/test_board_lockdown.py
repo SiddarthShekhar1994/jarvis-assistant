@@ -82,7 +82,7 @@ from briefing_reader.board import view
 PROBE = Path(__file__).with_name("board_probe.py")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CASES = ("lockdown", "control", "media", "keys", "fallback", "shell", "kinds", "desk", "desk_x15", "ways", "lit", "big",
-         "big_x15", "expiry", "reduced", "typed")
+         "big_x15", "expiry", "reduced", "typed", "canvas")
 # Round 5: what each probe's engine is told of reduced motion (tests/board_probe.py NO_REDUCED_MOTION, REDUCED_MOTION).
 NO_REDUCED_MOTION = "--force-prefers-no-reduced-motion"
 REDUCED_MOTION = "--force-prefers-reduced-motion"
@@ -1409,3 +1409,237 @@ class TypedFramesTests(BoardProbeCase):
         for shown in (laid, again):                                             # laid out: the bar, no brackets
             self.assertEqual((shown["stacked"], shown["inline"]), (1, False))
             self.assertNotIn("(", shown["text"])
+
+
+class CanvasProbeTests(BoardProbeCase):
+    """The canvas (PLAN-canvas part 1) in the real engine: the page as Home at 1280 x 800 - the orb's three forms and
+    the moves between them at each motion level, its states, the corners' words as text with nothing of them in an
+    attribute, the buttons' words through the bridge, and the board's frames in the right-hand part. The orb is one
+    2D canvas the page draws: what it shows is read as the page's own numbers (board.orb()) and as its pixels."""
+
+    HOSTILE = ("<img", "<script", "javascript:", "onclick", "onmouseover", "iframe", "pwned", "example.com")
+    FIT = 0.8875                      # 800 px high: 0.71 of it over the mock's 640 px stage
+
+    def looks(self) -> dict:
+        report = self.report("canvas")
+        self.assertTrue(report["ready"])
+        self.assertEqual(report["sent"], [True, True])
+        return report
+
+    def test_a_board_that_was_sent_no_orb_has_no_canvas(self) -> None:
+        before = self.looks()["before"]
+        self.assertFalse(before["made"])
+        self.assertNotIn("canvas", before["html"])
+
+    def test_the_rings_are_seen_at_an_angle_in_the_centre(self) -> None:
+        rings = self.looks()["rings"]
+        orb = rings["orb"]
+        self.assertIn("canvas", rings["html"])
+        self.assertEqual((orb["form"], orb["state"]), ("rings", "idle"))
+        self.assertAlmostEqual(orb["flat"], 0, delta=0.03)                # turned away ...
+        self.assertAlmostEqual(orb["shut"], 0, delta=0.03)                # ... each ring at its own depth
+        self.assertAlmostEqual(orb["tilt"], 57, delta=9)                  # the mock's angle (it precesses a little)
+        self.assertEqual((orb["name"], orb["axis"]), (0, 1))              # the axis lit, no name
+        width, height = rings["win"]
+        self.assertAlmostEqual(orb["centre"][0], width / 2, delta=1)      # in the centre
+        self.assertAlmostEqual(orb["centre"][1], height * 0.478, delta=1)
+        self.assertAlmostEqual(orb["size"], self.FIT, delta=0.01)
+        self.assertTrue(orb["looping"])                                   # it moves
+        self.assertGreater(rings["pixels"]["cyan"], 400)                  # Jarvis's cyan, lit
+        self.assertEqual(rings["pixels"]["amber"], 0)
+        self.assertEqual(rings["elements"], 1)                            # one canvas: no layer a ring
+        self.assertEqual(rings["counts"]["canvas"], "rings")
+
+    def test_the_turn_to_face_goes_a_little_past_and_the_rings_click_shut(self) -> None:
+        report = self.looks()
+        turn = report["turn"]
+        flats = [sample[1] for sample in turn]
+        shuts = [sample[2] for sample in turn]
+        self.assertLess(flats[0], 0.3)                                    # it starts turned away
+        self.assertGreater(max(flats), 1.03)                              # lively: past facing ...
+        self.assertLess(max(flats), 1.3)                                  # ... a little
+        self.assertAlmostEqual(flats[-1], 1, delta=0.01)                  # ... and back
+        first_shut = next(sample[0] for sample in turn if sample[2] > 0.5)
+        first_turned = next(sample[0] for sample in turn if sample[1] > 0.5)
+        self.assertGreater(first_shut, first_turned)                      # the rings close after it has turned
+        self.assertGreater(max(shuts), 1.01)                              # a touch through, as they click shut
+        self.assertAlmostEqual(shuts[-1], 1, delta=0.01)
+        settled = next(sample[0] for sample in turn
+                       if all(abs(later[1] - 1) < 0.02 and abs(later[2] - 1) < 0.02
+                              for later in turn if later[0] >= sample[0]))
+        self.assertLess(settled, 1200)                                    # about three quarters of a second
+
+    def test_the_badge_is_flat_facing_with_the_name_in_it(self) -> None:
+        badge = self.looks()["badge"]
+        orb = badge["orb"]
+        self.assertEqual((orb["form"], orb["state"]), ("badge", "speaking"))
+        self.assertEqual(badge["cls"], ["flat", "s-speaking"])
+        self.assertAlmostEqual(orb["flat"], 1, delta=0.01)
+        self.assertAlmostEqual(orb["shut"], 1, delta=0.01)                # every ring in one plane
+        self.assertLess(orb["tilt"], 1.5)                                 # facing the owner
+        self.assertEqual((orb["name"], orb["axis"]), (1, 0))              # JARVIS shows; the axis is gone
+        self.assertAlmostEqual(orb["voice"], 0.8, delta=0.02)             # the main ring follows his voice
+        self.assertAlmostEqual(orb["centre"][0], badge["win"][0] / 2, delta=1)
+
+    def test_the_trip_to_the_corner_is_a_curve_with_a_trail_and_a_bounce(self) -> None:
+        report = self.looks()
+        trip, corner = report["trip"], report["corner"]
+        width, height = corner["win"]
+        moving = [sample for sample in trip if sample[7]]
+        self.assertGreater(len(moving), 12)
+        self.assertEqual(max(sample[6] for sample in moving), 3)          # lively: three ghosts behind it
+        start, end = (width / 2, height * 0.478), (width - 112, height - 112)
+        # a curve, out to the side first: half way along x it has hardly gone down
+        half = next(sample for sample in trip if sample[3] > (start[0] + end[0]) / 2)
+        self.assertLess(half[4], start[1] + (end[1] - start[1]) * 0.42)
+        self.assertGreater(max(sample[3] for sample in trip), end[0] + 1)  # a little past its place ...
+        sizes = [sample[5] for sample in trip]
+        self.assertLess(min(sizes), corner["orb"]["size"] * 0.985)        # ... and its size settles with a bounce
+        orb = corner["orb"]
+        self.assertEqual((orb["form"], orb["travelling"], orb["ghosts"]), ("corner", False, 0))
+        self.assertAlmostEqual(orb["centre"][0], end[0], delta=1)         # bottom right
+        self.assertAlmostEqual(orb["centre"][1], end[1], delta=1)
+        self.assertAlmostEqual(orb["size"] / self.FIT, 0.34, delta=0.02)  # about a third of its size
+        self.assertEqual(orb["name"], 1)                                  # the badge, there
+        back = report["rings_again"]["orb"]
+        self.assertEqual((back["form"], back["travelling"]), ("rings", False))
+        self.assertAlmostEqual(back["centre"][0], start[0], delta=1)      # back in the centre, the rings open again
+        self.assertAlmostEqual(back["flat"], 0, delta=0.03)
+        opening = [sample[2] for sample in report["back"]]
+        self.assertLess(min(opening), -0.02)                              # they spring open a little wide
+
+    def test_calm_plays_the_moves_slower_with_no_overshoot_and_no_trail(self) -> None:
+        report = self.looks()
+        turn, trip = report["calm_turn"], report["calm_trip"]
+        self.assertLessEqual(max(sample[1] for sample in turn), 1.005)    # it turns to face, not past
+        self.assertLessEqual(max(sample[2] for sample in turn), 1.005)
+        self.assertAlmostEqual(turn[-1][1], 1, delta=0.02)
+        self.assertEqual(max(sample[6] for sample in trip), 0)            # no trail
+        width = report["corner"]["win"][0]
+        self.assertLessEqual(max(sample[3] for sample in trip), width - 112 + 0.5)   # never past its place
+        lively = [sample[0] for sample in report["trip"] if sample[7]][-1]
+        calm = [sample[0] for sample in trip if sample[7]][-1]
+        self.assertGreater(calm, lively * 1.35)                           # x1.6
+        self.assertEqual(report["calm_corner"]["orb"]["centre"], report["corner"]["orb"]["centre"])
+
+    def test_off_cuts_and_nothing_turns(self) -> None:
+        report = self.looks()
+        cut, badge = report["off_cut"]["orb"], report["off_badge"]["orb"]
+        self.assertEqual((cut["form"], cut["k"]), ("rings", 0))
+        self.assertEqual((cut["flat"], cut["shut"], cut["travelling"]), (0, 0, False))   # there at once
+        self.assertAlmostEqual(cut["centre"][0], report["rings"]["win"][0] / 2, delta=1)
+        self.assertFalse(cut["looping"])                                  # no loop draws it: nothing turns
+        self.assertEqual((badge["flat"], badge["shut"], badge["name"]), (1, 1, 1))
+        self.assertFalse(badge["looping"])
+        self.assertEqual(report["off_still"], badge["frames"])            # and no frame was drawn while it rested
+
+    def test_each_state_has_its_own_sign(self) -> None:
+        report = self.looks()
+        rings = report["rings"]
+        listening = report["listening"]["orb"]
+        self.assertAlmostEqual(listening["lean"][1], -25, delta=1.5)      # the rings lean toward the owner
+        self.assertLess(listening["tilt"], rings["orb"]["tilt"] - 12)     # ... so they open up
+        self.assertAlmostEqual(listening["lvl"], 0.62, delta=0.02)        # the tick ring follows the microphone
+        self.assertEqual(report["listening"]["bars"], 5)                  # ... and the meter
+        self.assertEqual(report["listening"]["level"], "Lvl −29 dB")
+        thinking = report["thinking"]["orb"]
+        self.assertLess(thinking["rate"]["ticks"], -6)                    # the rings counter-spin, faster
+        self.assertGreater(thinking["rate"]["arc"], 2.5)
+        self.assertLess(thinking["rate"]["front"], -2.5)
+        self.assertGreater(thinking["rate"]["front2"], 2)
+        self.assertAlmostEqual(rings["orb"]["rate"]["ticks"], 1, delta=0.05)
+        self.assertGreater(report["needs"]["pixels"]["amber"], 25)        # an amber arc on the outer ring
+        self.assertAlmostEqual(report["waiting"]["orb"]["rate"]["arc"], 0.4, delta=0.1)
+        self.assertEqual(report["muted"]["cls"], ["muted", "s-idle"])
+        self.assertTrue(report["muted"]["orb"]["muted"])
+        self.assertLess(report["muted"]["pixels"]["cyan"], rings["pixels"]["cyan"] * 0.8)   # low, a slash across
+        offline = report["offline"]
+        self.assertEqual(offline["cls"], ["offline", "s-idle"])
+        self.assertLess(offline["pixels"]["cyan"], rings["pixels"]["cyan"] * 0.2)   # the cyan gone steel
+        self.assertGreater(offline["pixels"]["lit"], rings["pixels"]["lit"] * 0.5)
+
+    def test_the_corners_words_are_text_and_nothing_of_them_is_in_an_attribute(self) -> None:
+        report = self.looks()
+        self.assertTrue(report["hostile_sent"])
+        hostile = report["hostile"]
+        self.assertEqual(hostile["texts"], {
+            "state": "<script>window.pwned=31</script>", "clock": "<img src=http://example.com/c.png>",
+            "hold": "\"><b onclick=pwn()>", "rec": "javascript:pwned=32 <iframe src=x>",
+            "wake": "' onmouseover='pwned=33"})                           # every word whole, as text
+        self.assertEqual(hostile["foreign"], 0)                           # no element was made of them
+        self.assertEqual(hostile["pwned"], "undefined")                   # nothing ran
+        self.assertGreater(len(hostile["attrs"]), 40)
+        for attr in hostile["attrs"]:
+            for mark in self.HOSTILE:
+                self.assertNotIn(mark, attr)                              # no attribute carries a word of the data
+        names = {attr.split("=", 1)[0] for attr in hostile["attrs"]}
+        self.assertLessEqual(names, {"id", "class", "type", "role", "aria-label", "aria-hidden", "aria-live",
+                                     "aria-pressed", "hidden", "viewBox", "focusable", "style", "width", "height"})
+        for attr in hostile["attrs"]:
+            if attr.startswith("style="):                                 # the orb's canvas's own place and size only
+                self.assertRegex(attr, r"^style=((left|top|width|height): -?[0-9.]+px; ?)+$")
+            elif attr.startswith(("width=", "height=")):
+                self.assertRegex(attr, r"^(width|height)=[0-9]+$")
+
+    def test_a_press_posts_the_button_s_own_word_and_forged_words_are_dropped(self) -> None:
+        report = self.looks()
+        self.assertEqual(report["pressed"], [
+            "Undo", "Tue 17 Nov · 9:41 AM", "History", "Briefing", "Approvals", "Follow-ups", "Meetings", "Agents",
+            "Live", "Memory", "Settings", "Desktop", "Minimise the window", "Maximise or restore the window", "Close",
+            "Mute", "Stop"])
+        self.assertEqual(report["went"], ["undo", "day", "history", "briefing", "approvals", "followups", "meetings",
+                                          "agents", "live", "memory", "settings", "desktop", "minimize", "maximize",
+                                          "close", "mute", "stop_rec"])
+        self.assertEqual(report["console_before_forged"], {})             # the page said nothing on its console so far
+        self.assertEqual(report["forged_went"], ["settings"])             # only the word on the list got through
+        self.assertEqual(report["requests"]["dropped:go"], 3)
+        self.assertEqual(report["requests"]["accepted:go"], 18)
+
+    def test_the_page_itself_refuses_hostile_orb_and_canvas_messages(self) -> None:
+        report = self.looks()
+        self.assertEqual(set(report["page_refused"].values()), {"false"})
+        self.assertEqual(len(report["page_refused"]), 10)
+        after = report["after_refused"]
+        self.assertEqual((after["orb"]["state"], after["orb"]["form"]), ("idle", "rings"))   # nothing changed
+        self.assertEqual(after["texts"]["state"], "Standby")
+        self.assertEqual(after["foreign"], 0)
+
+    def test_frames_show_in_the_right_hand_part_with_the_orb_in_its_corner(self) -> None:
+        report = self.looks()
+        shown = report["with_frames"]
+        width, height = shown["win"]
+        self.assertNotIn("board-off", shown["html"])
+        frame, board, orb = shown["frame"], shown["board"], shown["orb"]
+        self.assertGreater(frame["x"], width / 2)                         # the right-hand part of the screen
+        self.assertLessEqual(frame["x"] + frame["w"], width - 28)
+        self.assertGreaterEqual(frame["y"], board["y"])
+        self.assertEqual(orb["form"], "corner")
+        self.assertLess(board["y"] + board["h"], orb["centre"][1] - orb["main"] / 2 - 20)   # the board ends over the orb
+        self.assertEqual((report["clear_pressed"], report["cleared"]), ("Clear view", 1))   # the board's own clear
+        self.assertNotIn("Clear view", report["rings"]["buttons"])        # ... a button only while frames show
+        folded = report["folded"]
+        self.assertIn("board-off", folded["html"])                        # the desk left: the board is away
+        self.assertEqual(folded["orb"]["form"], "rings")
+
+    def test_open_big_grows_over_the_canvas_and_goes_back(self) -> None:
+        report = self.looks()
+        opened, shut = report["big_open"], report["big_shut"]
+        width, height = report["with_frames"]["win"]
+        self.assertEqual((opened["state"], opened["title"]), ("open", "Dana's budget"))
+        self.assertFalse(opened["wide"])                                  # the board's box is its own: no box to keep
+        self.assertEqual(opened["body"], [report["with_frames"]["board"][key] for key in ("x", "y", "w", "h")])
+        left, top, wide, tall = opened["card"]
+        self.assertEqual((left, top), (28, 58))                           # over the canvas, under the corners' row ...
+        self.assertAlmostEqual(left + wide, width - 28, delta=1)
+        self.assertAlmostEqual(top + tall, height - 150, delta=1)         # ... and over the ask line
+        self.assertTrue(opened["dim"])
+        self.assertAlmostEqual(float(opened["canvas"]), 0.2, delta=0.02)  # the orb and the corners dim with the board
+        self.assertEqual((shut["state"], shut["layer"], shut["dim"]), ("", False, False))
+        self.assertAlmostEqual(float(shut["canvas"]), 1, delta=0.02)
+        self.assertEqual(report["big_steps"], ["laid", "shut", "laid"])   # the page's own steps, as beside a conversation
+
+    def test_nothing_of_it_asks_the_network_for_anything(self) -> None:
+        report = self.looks()
+        self.assertEqual(report["blocked"], {})
+        self.assertEqual(list(report["allowed"]), ["jarvis-board"])
+        self.assertEqual(report["messages_refused"], {})

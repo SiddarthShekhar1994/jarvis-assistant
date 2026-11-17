@@ -332,6 +332,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractButton,
     QApplication,
+    QBoxLayout,
     QCheckBox,
     QDialog,
     QFrame,
@@ -7449,8 +7450,10 @@ class _CommandInput(QLineEdit):
         """The longest COMMAND_PLACEHOLDERS text the field shows whole (the hologram bar: "Ask Jarvis",
         HOLOGRAM_SPEC 11.3)."""
         if getattr(self, "_holo", False):
-            if self.placeholderText() != COMMAND_PLACEHOLDERS[-1]:
-                self.setPlaceholderText(COMMAND_PLACEHOLDERS[-1])
+            # The canvas's ask line says how to ask ("Type, or hold the key and talk"); the hologram pill "Ask Jarvis".
+            text = getattr(self, "_canvas_placeholder", "") or COMMAND_PLACEHOLDERS[-1]
+            if self.placeholderText() != text:
+                self.setPlaceholderText(text)
             return
         room = self.width() - 8   # QLineEdit's own text margins
         metrics = QFontMetricsF(self.font())
@@ -7470,6 +7473,12 @@ class _CommandField(QWidget):
     HUD_HEIGHT = 44               # the desktop HUD's input row (Switch.dc.html .qrow)
     HUD_GLYPH = 16
     HUD_SEND = 28                 # ... its send arrow, smaller than the hologram pill's (where DesktopB has the mic)
+    CANVAS_HEIGHT = 44            # the canvas's ask line (the approved mock: a thin outlined line, 40 px, in a 2 px halo)
+    CANVAS_LABEL = "Ask"          # its mono label at the left ...
+    CANVAS_HINT = "Ctrl K"        # ... and the Find key at the right while there is nothing to send
+    CANVAS_LINE = "#8FEBFF"       # the mock's line and label colour
+    CANVAS_INK = "#F2FDFF"
+    CANVAS_DIM = "#7FA3AD"
     _CUT = 8
 
     def __init__(self, line_edit: _CommandInput, parent: QWidget | None = None) -> None:
@@ -7481,6 +7490,8 @@ class _CommandField(QWidget):
         self._glyph = make_label(_PROMPT_GLYPH, mono_font(15, 600), ACCENT)
         self._holo = False
         self._hud = False
+        self._canvas = False
+        self._canvas_send: QWidget | None = None
         self._listening = False
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 0, 10, 0)
@@ -7532,6 +7543,64 @@ class _CommandField(QWidget):
         self.line_edit.setFont(holo.font("body"))
         self.update()
 
+    def set_canvas(self, on: bool, send_button: QWidget | None = None) -> None:
+        """The canvas's ask line (after ``set_holo``; the approved mock): a thin outlined line, square, with a soft
+        glow - "ASK" in the mono face at the left, the input in the body face, and at the right "CTRL K" while there
+        is nothing to send, else the send arrow (the stop square while a request runs) as an outline glyph. Off: the
+        hologram pill again, exactly as it was."""
+        from . import holo
+
+        on = bool(on) and self._holo and not self._hud
+        if on == self._canvas:
+            return
+        self._canvas = on
+        if send_button is not None:
+            self._canvas_send = send_button
+        send = self._canvas_send
+        layout = self.layout()
+        palette = self.line_edit.palette()
+        if on:
+            self.setFixedHeight(self.CANVAS_HEIGHT)
+            label_w = math.ceil(QFontMetricsF(self._canvas_font()).horizontalAdvance(self.CANVAS_LABEL.upper()))
+            layout.setContentsMargins(2 + 14 + label_w + 12, 2, 2 + 8, 2)
+            layout.setSpacing(8)
+            self.line_edit.setFont(body_font(13))
+            palette.setColor(QPalette.ColorRole.Text, QColor(self.CANVAS_INK))
+            palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(self.CANVAS_DIM))
+            palette.setColor(QPalette.ColorRole.Highlight, rgba("#35D3F0", 0.35))
+            if send is not None:
+                send.setFixedSize(self.HUD_SEND, self.HUD_SEND)
+                if isinstance(send, _SendButton):
+                    send.set_hud(True)
+        else:
+            self.setFixedHeight(self.HOLO_HEIGHT)
+            layout.setContentsMargins(4 + 6 + self.HOLO_GLYPH + 10, 10, 4 + 6, 10)
+            layout.setSpacing(10)
+            self.line_edit.setFont(holo.font("input"))
+            palette.setColor(QPalette.ColorRole.Text, QColor(holo.INK_1))
+            palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(holo.INK_4))
+            palette.setColor(QPalette.ColorRole.Highlight, holo.alpha(holo.HOLO, 0.35))
+            if send is not None:
+                send.setFixedSize(_SendButton.SIZE, _SendButton.SIZE)
+                if isinstance(send, _SendButton):
+                    send.set_hud(False)
+                send.show()
+        self.line_edit.setPalette(palette)
+        self.line_edit._fit_placeholder()
+        self.update()
+
+    def is_canvas(self) -> bool:
+        return self._canvas
+
+    @staticmethod
+    def _canvas_font() -> QFont:
+        return mono_font(10, 600, 0.18)
+
+    def canvas_hint_shown(self) -> bool:
+        """The canvas line shows "CTRL K" (its send arrow is hidden: nothing to send, nothing running)."""
+        send = self._canvas_send
+        return self._canvas and (send is None or send.isHidden())
+
     def set_listening(self, listening: bool) -> None:
         if bool(listening) != self._listening:
             self._listening = bool(listening)
@@ -7545,6 +7614,27 @@ class _CommandField(QWidget):
                                                            QEvent.Type.ReadOnlyChange):
             self.update()
         return super().eventFilter(watched, event)
+
+    def _paint_canvas(self, painter: QPainter) -> None:
+        """The mock's ask line: 1 px of #8FEBFF at 60 % (brighter with the focus), a 1 px corner, a soft cyan halo."""
+        rect = QRectF(self.rect()).adjusted(2.5, 2.5, -2.5, -2.5)
+        lit = self.line_edit.hasFocus() or self._listening
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for grow, alpha in ((2.0, 0.05), (1.0, 0.10)):          # the glow: two faint lines outside the outline
+            painter.setPen(QPen(rgba("#35D3F0", alpha * (1.6 if lit else 1.0)), 1.0))
+            painter.drawRoundedRect(rect.adjusted(-grow, -grow, grow, grow), 1 + grow, 1 + grow)
+        painter.setPen(QPen(rgba(self.CANVAS_LINE, 0.95 if lit else 0.6), 1.0))
+        painter.setBrush(rgba("#000000", 0.55))
+        painter.drawRoundedRect(rect, 1, 1)
+        font = self._canvas_font()
+        painter.setFont(font)
+        painter.setPen(QColor(self.CANVAS_LINE))
+        painter.drawText(QRectF(rect.left() + 14, rect.top(), 80, rect.height()),
+                         int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), self.CANVAS_LABEL.upper())
+        if self.canvas_hint_shown():
+            painter.setPen(QColor(self.CANVAS_DIM))
+            painter.drawText(QRectF(rect.right() - 94, rect.top(), 80, rect.height()),
+                             int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter), self.CANVAS_HINT.upper())
 
     def mousePressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         self.line_edit.setFocus(Qt.FocusReason.MouseFocusReason)   # a click beside the text
@@ -7581,6 +7671,9 @@ class _CommandField(QWidget):
 
                 box = QRectF(0, (self.height() - self.HUD_GLYPH) / 2, self.HUD_GLYPH, self.HUD_GLYPH)
                 holo.paint_icon(painter, box, "chevron", QColor(holo.HOLO), stroke=2.0)
+                return
+            if self._canvas:
+                self._paint_canvas(painter)
                 return
             if self._holo:
                 self._paint_holo(painter)
@@ -7770,6 +7863,7 @@ class CommandBar(QWidget):
         self._hint = False           # the status is only the idle hint: it may fold away
         self._holo = False           # the hologram pill (set_holo): no meta line, only what needs the owner
         self._hud = False            # the desktop HUD's row (set_hud): no status line either
+        self._canvas = False         # the canvas's ask line (set_canvas): the mock's thin outlined line
         self._typing = False
         self._escape_hook: Any = None   # asked at Esc in the empty field (a task's Stop on the HUD's bar)
         self._last_request = ""      # the last request accepted from here, as typed (Up brings it back)
@@ -7878,12 +7972,45 @@ class CommandBar(QWidget):
     def is_hud(self) -> bool:
         return self._hud
 
+    def set_canvas(self, on: bool = True) -> None:
+        """The canvas's ask line (PLAN-canvas part 1; only the hologram bar, never the HUD's): everything the bar does
+        stays - typing, Enter, Esc, Up for the last request, the running state with its stop, the status line for an
+        answer, a question or a problem - in the mock's look: a thin outlined line with ASK at its left and CTRL K at
+        its right, the send arrow there instead while there is text or a request runs, and the status line OVER the
+        line (the line itself stays at the canvas's bottom). ``False`` puts the hologram pill back as it was."""
+        on = bool(on) and self._holo and not self._hud
+        if on == self._canvas:
+            return
+        self._canvas = on
+        self.field.set_canvas(on, self.send_button)
+        layout = self.layout()
+        if isinstance(layout, QBoxLayout):
+            layout.setDirection(QBoxLayout.Direction.BottomToTop if on else QBoxLayout.Direction.TopToBottom)
+        self._status_row.setContentsMargins(*((2, 0, 2, 0) if on else (16, 0, 16, 0)))
+        if not on:
+            self.input._canvas_placeholder = ""
+            self.input._fit_placeholder()
+        self._sync_send()
+        self._show_link()
+        self.updateGeometry()
+
+    def is_canvas(self) -> bool:
+        return self._canvas
+
+    def set_canvas_placeholder(self, text: str) -> None:
+        """What the canvas's ask line says while it is empty ("": the hologram bar's own "Ask Jarvis")."""
+        self.input._canvas_placeholder = str(text or "") if self._canvas else ""
+        self.input._fit_placeholder()
+
     def _sync_send(self) -> None:
         self.send_button.set_look(bool(self.text()), self._running)
         self.send_button.setToolTip("Stop planning; nothing is proposed (Esc)" if self._running
                                     else "Plan this request (Enter)")
-        if self._hud:
-            self.send_button.setVisible(bool(self.input.text()) or self._running)
+        if self._hud or self._canvas:
+            shown = bool(self.input.text()) or self._running
+            if shown != (not self.send_button.isHidden()):
+                self.send_button.setVisible(shown)
+                self.field.update()            # the canvas line: CTRL K gives way to the arrow, and back
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt override
         if watched is self.input and event.type() in (QEvent.Type.FocusIn, QEvent.Type.FocusOut):

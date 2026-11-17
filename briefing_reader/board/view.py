@@ -22,7 +22,11 @@ its place when it can't be.
                           (F6: the keyboard focus to the page, then its frames or its index strip); the read-only tiles
                           leave out a parked answer and what a Clear took away. Part 5c: frameLanded(id, step) (a frame
                           drawing in: "outline", then "done"), bigStep(step) (open big: "back", "laid", "shut"); the
-                          lit, backdrop and big messages (the fallback's tiles have neither)
+                          lit, backdrop and big messages (the fallback's tiles have neither). The canvas, part 1:
+                          ``canvas=True`` (or set_canvas before it starts): the page is Home itself - an opaque black
+                          ground, so nothing of the window shows through and nothing flashes while it loads; the orb
+                          and canvas messages (the newest of each waits for the page, never the queue's room);
+                          goRequested(word) (a corner button of the page: board.protocol.GO_WORDS)
     BoardBridge           the one object the page sees on its web channel: post(kind, payload), checked against
                           board.protocol (the kinds on the list, the frame ids the app sent); anything else dropped and
                           counted (a log line names the kind only when it is on the list, else "unknown")
@@ -97,6 +101,8 @@ _WINDOW_KEY_CODES = frozenset(int(key.value) for key in WINDOW_KEYS)
 # F6 (and Shift+F6 back) cycles the desk's parts: the ask bar, the conversation, the board and its index strip
 # (DESIGN-SPEC 3.6). The window's shortcut takes it from the page too; the page is told where the focus goes.
 CYCLE_KEY = Qt.Key.Key_F6
+# The canvas (PLAN-canvas part 1): F11 is the window's full screen; with the focus in the page it still goes to it.
+FULL_KEY = Qt.Key.Key_F11
 
 _IDLE, _WAITING, _LOADING, _READY, _FALLBACK, _SHUT = "idle", "waiting", "loading", "ready", "fallback", "shut"
 _OWN_REASONS = frozenset({NO_SCHEME, NO_READY, LOAD_FAILED, CRASHED})
@@ -135,6 +141,16 @@ def is_cycle_key(key: Any, modifiers: Any) -> bool:
         held = Qt.KeyboardModifier(modifiers) & ~Qt.KeyboardModifier.KeypadModifier
         return code == int(CYCLE_KEY.value) and held in (Qt.KeyboardModifier.NoModifier,
                                                          Qt.KeyboardModifier.ShiftModifier)
+    except Exception:  # noqa: BLE001 - not a key this knows
+        return False
+
+
+def is_full_key(key: Any, modifiers: Any) -> bool:
+    """True for F11 alone (the canvas window's full screen)."""
+    try:
+        code = int(key.value) if hasattr(key, "value") else int(key)
+        held = Qt.KeyboardModifier(modifiers) & ~Qt.KeyboardModifier.KeypadModifier
+        return code == int(FULL_KEY.value) and held == Qt.KeyboardModifier.NoModifier
     except Exception:  # noqa: BLE001 - not a key this knows
         return False
 
@@ -415,7 +431,7 @@ class WindowKeysFilter(QObject):
             kind = event.type()
             if kind == QEvent.Type.ShortcutOverride:
                 window_key = is_window_key(event.key(), event.modifiers())
-                if window_key or is_cycle_key(event.key(), event.modifiers()):
+                if window_key or is_cycle_key(event.key(), event.modifiers())                         or is_full_key(event.key(), event.modifiers()):
                     event.ignore()                 # not the page's: the window's shortcut fires
                     if watched is not self.view:
                         if window_key:
@@ -495,13 +511,17 @@ class BoardView(QWidget):
     # "laid", "shut").
     frameLanded = Signal(str, str)
     bigStep = Signal(str)
+    # The canvas, part 1: a corner button of the page (a word of board.protocol.GO_WORDS).
+    goRequested = Signal(str)
     unavailable = Signal(str)              # the reason word (no_engine, sandbox, unsafe_flags, no_ready, ...)
 
     def __init__(self, parent: QWidget | None = None, *, start_delay_ms: int = START_DELAY_MS,
                  ready_timeout_ms: int = READY_TIMEOUT_MS, engine: Callable[[], str] | None = None,
-                 scheme_ready: Callable[[], bool] | None = None) -> None:
+                 scheme_ready: Callable[[], bool] | None = None, canvas: bool = False) -> None:
         super().__init__(parent)
         self.setObjectName("board")
+        self._canvas = bool(canvas)          # the page is Home itself (an opaque black ground)
+        self._latest: dict[str, str] = {}    # the newest orb and canvas message while the page is not ready
         self._engine = engine or snapshot_engine.ensure_engine
         self._scheme_ready = scheme_ready or scheme.scheme_ready
         self._start_delay_ms = max(0, int(start_delay_ms))
@@ -591,6 +611,20 @@ class BoardView(QWidget):
     def motion(self) -> str:
         return self._motion
 
+    def set_canvas(self, canvas: bool) -> None:
+        """The page is Home itself (the canvas): its ground opaque black, so the window never shows through it and
+        nothing flashes while it loads; else see-through, as beside the conversation. Takes effect at once."""
+        self._canvas = bool(canvas)
+        page = self._page
+        if page is not None and _alive(page):
+            _quietly(lambda: page.setBackgroundColor(self._ground()))
+
+    def is_canvas(self) -> bool:
+        return self._canvas
+
+    def _ground(self) -> QColor:
+        return QColor(0, 0, 0, 255) if self._canvas else QColor(0, 0, 0, 0)
+
     def known_ids(self) -> frozenset[str]:
         """The ids of the frames the app sent (the page's requests must name one of them)."""
         return frozenset(self._known)
@@ -639,6 +673,8 @@ class BoardView(QWidget):
         self._counts[f"sent:{checked.type}"] += 1
         if self._phase == _READY:
             self._run(checked.text)
+        elif checked.type in ("orb", "canvas"):
+            self._latest[checked.type] = checked.text    # the newest of each: a level never takes a frame's room
         else:
             if len(self._queue) >= QUEUE_CAP:
                 self._queue.popleft()
@@ -782,6 +818,7 @@ class BoardView(QWidget):
         self._start_timer.stop()
         self._ready_timer.stop()
         self._queue.clear()
+        self._latest.clear()
         self._frames.clear()
         self._pictures.clear()
         self._images.clear()
@@ -861,7 +898,8 @@ class BoardView(QWidget):
         view.setAccessibleName("Board")
         page = _page_class()(profile, view, self._accept_navigation, self._count)
         profile.setParent(page)        # the profile goes with its page, after it (Qt: never before)
-        page.setBackgroundColor(QColor(0, 0, 0, 0))   # the window's ground shows through between the frames
+        page.setBackgroundColor(self._ground())       # the window's ground shows through between the frames (the
+                                                      # canvas: opaque black, the page is Home itself)
         page.setAudioMuted(True)
         self._connect(page, profile)
         channel = QWebChannel(page)
@@ -1015,6 +1053,8 @@ class BoardView(QWidget):
             self.frameLanded.emit(request.frame_id, request.step)
         elif kind == "big":
             self.bigStep.emit(request.step)
+        elif kind == "go":
+            self.goRequested.emit(request.to)
 
     def _on_ready(self) -> None:
         if self._phase != _LOADING or self._load_pending:
@@ -1029,6 +1069,10 @@ class BoardView(QWidget):
         self._run(protocol.check_message({"type": "motion", "level": self._motion}).text)
         while self._queue:
             self._run(self._queue.popleft())
+        for kind in ("canvas", "orb"):
+            text = self._latest.pop(kind, "")
+            if text:
+                self._run(text)
         self._check_proxy()
         self.ready.emit()
 
@@ -1082,6 +1126,7 @@ class BoardView(QWidget):
         self._start_timer.stop()
         self._ready_timer.stop()
         self._queue.clear()
+        self._latest.clear()
         self._teardown()
         box = QWidget(self)
         box_layout = QVBoxLayout(box)
@@ -1164,6 +1209,6 @@ def keeps_space(widget: QWidget | None) -> bool:
 
 
 __all__ = ["BAR_TITLE", "BoardBar", "BoardBridge", "BoardFallback", "BoardLayout", "BoardView", "CANT_START",
-           "CYCLE_KEY", "MAX_RESTARTS", "READY_TIMEOUT_MS", "READ_ONLY", "READ_ONLY_BELOW", "START_DELAY_MS", "STRIP",
-           "TILE_PICTURE_PIXELS", "WINDOW_KEYS", "WindowKeysFilter", "is_cycle_key", "is_window_key", "keeps_space",
-           "tile_picture"]
+           "CYCLE_KEY", "FULL_KEY", "MAX_RESTARTS", "READY_TIMEOUT_MS", "READ_ONLY", "READ_ONLY_BELOW",
+           "START_DELAY_MS", "STRIP", "TILE_PICTURE_PIXELS", "WINDOW_KEYS", "WindowKeysFilter", "is_cycle_key",
+           "is_full_key", "is_window_key", "keeps_space", "tile_picture"]

@@ -890,3 +890,96 @@ body.dim #backdrop { filter: brightness(.2); transition-duration: calc(260ms * v
 }
 .frame.lap .fx-light rect { animation: lap calc(900ms * var(--k)) linear both; }
 @keyframes lap { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -100; } }
+
+/* ==== The canvas (PLAN-canvas part 1): Home is this page. One black surface, the orb in three forms (rings on one lit
+   axis seen at an angle; the badge: flat, facing, JARVIS in it; the corner: the badge at a third of its size, bottom
+   right, while the board holds frames), and small controls in the corners. board.js makes every element of it
+   (makeCanvas) at the first orb or canvas message, so a board that is not the canvas has none of it. The orb
+   itself is one 2D canvas that board.js draws (its forms, its states and the moves between them are there); the rest
+   moves with transforms and opacity only, and --k scales it as everywhere (calm 1.6; off: cuts). In canvas mode
+   <body> is the board's own box at the right (as body.wide is for open big), so the bar, the frames, the strip,
+   "N more below" and the pill are placed exactly as beside a conversation. ==== */
+:root.canvas {
+  --c: #35D3F0;                  /* Jarvis's cyan, as the approved mock draws it */
+  --c-hi: #8FEBFF;
+  --c-tick: #BFF4FF;
+  --c-white: #F2FDFF;
+  --c-ink: #CFE6EB;
+  --c-dim: #7FA3AD;
+  --c-amber: #F5B14A;
+  --c-amber-hi: #FFD08A;
+  --g: 53, 211, 240;             /* the glow's colour (rgb) ... */
+  --g-hi: 143, 235, 255;         /* ... and its bright core */
+  --edge: 28px;                  /* the canvas's side gutter */
+  --board-w: clamp(420px, 38vw, 760px);
+  background: #000;
+}
+:root.canvas, :root.canvas body { background: #000; }
+:root.canvas body {
+  position: absolute; left: auto; right: var(--edge); top: var(--board-top, 64px); bottom: 212px; width: var(--board-w); height: auto;
+}
+:root.canvas.board-off body { visibility: hidden; }          /* folded away (Ctrl+B), or nothing on it */
+:root.canvas.board-off #canvas, :root.canvas.board-off #big { visibility: visible; }
+:root.canvas .b-clear { display: none; }                      /* the canvas's own "Clear view" is the one Clear */
+:root.canvas ::selection { background: rgba(var(--g), .35); color: #fff; }
+
+#canvas { position: fixed; inset: 0; z-index: 0; overflow: hidden; pointer-events: none; color: var(--c-ink); }
+#canvas button, #canvas .c-drag { pointer-events: auto; }
+body.dim #canvas { opacity: .2; }
+#canvas { transition: opacity calc(220ms * var(--k)) var(--ease-out); }
+
+/* ---- the orb: one 2D canvas board.js draws each frame (the web engine has no GPU here: a stack of glowing layers
+   turned in 3D was composited at about 9 frames a second; see board.js). board.js places and sizes it. ---- */
+#orb { position: absolute; left: 0; top: 0; width: 0; height: 0; }
+#orb .o-pic { position: absolute; display: block; }
+
+/* ---- the corners (the mock's type: the display face for the wordmark, the mono face for labels) ---- */
+.c-corner { position: absolute; display: flex; align-items: center; }
+.c-tl { left: var(--edge); top: 22px; gap: 16px; max-width: calc(100% - 2 * var(--edge)); }
+.c-tr { right: var(--edge); top: 18px; gap: 7px; flex-wrap: wrap; justify-content: flex-end; max-width: calc(100% - 430px); row-gap: 7px; }
+.c-bl { left: var(--edge); bottom: 24px; gap: 12px; max-width: calc(50% - 300px); flex-wrap: wrap; row-gap: 8px; }
+.c-word { font: 600 13px/18px var(--font-display); letter-spacing: .38em; color: var(--c-white); white-space: nowrap; cursor: default; user-select: none; }
+.c-mono, .c-btn {
+  font: 500 9.5px/12px var(--font-mono); letter-spacing: .18em; text-transform: uppercase; white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.c-mono { color: var(--c-dim); }
+.c-state { color: var(--c-hi); }
+.c-state.amber { color: var(--c-amber); }
+.c-state.steel { color: var(--c-dim); }
+.c-btn {
+  font-weight: 600; color: #D8F3F8; background: rgba(var(--g), .04); border: 1px solid rgba(var(--g-hi), .7);
+  padding: 5px 9px; border-radius: 1px; box-shadow: 0 0 8px rgba(var(--g), .25);
+  transition: color calc(120ms * var(--k)), border-color calc(120ms * var(--k)), background-color calc(120ms * var(--k));
+}
+.c-btn:hover { border-color: #fff; color: #fff; }
+.c-btn:active { transform: translateY(1px); }
+.c-btn:focus-visible, :root.keys .c-btn:focus { outline: 2px solid var(--c-hi); outline-offset: 2px; }
+.c-btn.need { border-color: var(--c-amber); color: var(--c-amber-hi); box-shadow: 0 0 8px rgba(245, 177, 74, .35); }
+.c-btn.need:hover { border-color: #FFE2B0; color: #FFE9C7; }
+.c-btn.new { background: rgba(var(--g), .16); border-color: var(--c-hi); color: #fff; }
+.c-btn.on { background: rgba(var(--g), .2); border-color: #fff; color: #fff; }
+.c-btn.quiet { border-color: rgba(var(--g-hi), .34); box-shadow: none; color: var(--c-ink); }
+.c-btn.quiet:hover { border-color: #fff; color: #fff; }
+.c-btn.icon { display: grid; place-items: center; width: 26px; height: 24px; padding: 0; }
+.c-btn.icon .glyph { width: 13px; height: 13px; }
+.c-btn[hidden], .c-mono[hidden], .c-rule[hidden], .c-meter[hidden] { display: none; }
+.c-rule { width: 1px; height: 18px; margin: 0 5px; background: rgba(var(--g-hi), .3); }
+.c-group { display: flex; align-items: center; gap: 7px; }
+.c-clock { color: var(--c-dim); }
+button.c-clock { padding: 3px 0; border-bottom: 1px solid transparent; }
+button.c-clock:hover { color: var(--c-white); border-bottom-color: rgba(var(--g-hi), .5); }
+button.c-clock:focus-visible, :root.keys button.c-clock:focus { outline: 2px solid var(--c-hi); outline-offset: 3px; }
+.c-hold { color: #9FE6C4; }
+.c-rec { color: #FF9A8C; }
+.c-meter { display: flex; gap: 2px; align-items: center; height: 14px; }
+.c-meter i { display: block; width: 3px; height: 10px; background: #12323B; transition: background-color 90ms linear; }
+.c-meter i.on { background: var(--c); }
+.c-meter i.edge { background: #1B6E80; }
+@media (max-width: 1180px) {
+  .c-tl { flex-wrap: wrap; row-gap: 6px; max-width: 300px; }
+  .c-tr { max-width: calc(100% - 340px); }
+}
+
+/* ---- open big on the canvas: the card over the whole canvas but the corners' rows and the ask line ---- */
+:root.canvas .frame.big-card { inset: 58px var(--edge) 150px var(--edge); }

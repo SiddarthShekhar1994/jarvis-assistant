@@ -75,6 +75,19 @@ In (app -> page): check_message(message, known, groups=()) -> Checked
         big      {"state": open / close, "id", "x", "y", "w", "h"}: open - that frame grows to the whole view; the view
                  is wide now and the board keeps its own box in it (x, y, w, h: px, BIG_LIMIT at most); close - it
                  goes back to its place ("id" "" or the frame's; no box)
+      The canvas, part 1 (PLAN-canvas 3: Home is the board's page, the orb is drawn in it):
+        orb      {"state", "form", "muted", "offline", "dim", "away", "level", "voice"}: the orb's state word
+                 (ORB_STATES), its form (ORB_FORMS: rings, the badge, the corner), the two modifiers the native ring
+                 has (muted, offline voice), "dim" (quiet hours), "away" (Jarvis's window is not the one the owner works
+                 in: at rest the orb is drawn 10 times a second, not 30) and two levels, whole numbers 0 to LEVEL_MAX:
+                 the microphone's (listening) and Jarvis's voice's (speaking). Nothing else of the app's state goes
+                 to the orb
+        canvas   {"clock", "word", "tone", "approvals", "buttons", "briefing_new", "hold", "rec", "wake", "meter"}: the
+                 corners' words - the date and time, the state word and its tone (CANVAS_TONES), how many cards wait
+                 on Approvals, which of the page's own buttons show (CANVAS_BUTTONS, each once: a button is there only
+                 while pressing it works), "Briefing ready", a Send's hold word ("Sent": its Undo shows), REC's words
+                 (its Stop shows), "Hey Jarvis"'s badge and whether the microphone's meter shows. Every label of a
+                 button is the page's own; none comes from here
     The ids of lit, remove and picture must be frames the app sent (``known``), and a group's those of groups it sent
     (``groups``); a new frame past MAX_FRAMES is refused.
 
@@ -96,6 +109,10 @@ Out (page -> app): check_request(kind, payload, known) -> Request
                           whole draw-in is done (at once when nothing animates) - the board's sounds
         big {"step": back / laid / shut}        open big: the owner asked to go back (Esc, a click beside the big
                           frame), the page is laid out at the view's new size, the frame's scale-down has finished
+      The canvas, part 1:
+        go {"to": one of GO_WORDS}              a corner button of the page: a screen, History, the Day view, the
+                          switch to the desktop HUD, the window's minimise / maximise / close / drag, Mute, a hold's
+                          Undo, REC's Stop, the folded board back. A word that is not on the list is refused
     Anything else is refused. A log line may carry kind_word(kind) and the reason word, never the payload.
 """
 
@@ -163,13 +180,28 @@ MATHS_OPS = {"+": (2, 8), "-": (1, 2), "*": (2, 8), "/": (2, 2), "=": (2, 4), "f
              "root": (1, 2), "()": (1, 1), "or": (2, 4)}
 
 MESSAGE_TYPES = ("frame", "lit", "remove", "clear", "motion", "picture", "group", "remove_group", "bar", "desk",
-                 "reveal", "cleared", "focus_part", "backdrop", "big")
+                 "reveal", "cleared", "focus_part", "backdrop", "big", "orb", "canvas")
+# The canvas, part 1: the orb's states (the native ring's looks: orb.IDLE ...), its three forms, its levels' range, the
+# corners' words' caps and tones, the page's own buttons the app may show, and the words a button may send back.
+ORB_STATES = ("idle", "listening", "thinking", "speaking", "needs", "waiting")
+ORB_FORMS = ("rings", "badge", "corner")
+LEVEL_MAX = 100
+CLOCK_CAP = 40                   # "Tue 17 Nov · 9:41 AM"
+STATE_WORD_CAP = 40              # "QUIET HOURS UNTIL 8:00 AM"
+HOLD_CAP = 24                    # "Sent" / "Cancelled"
+REC_CAP = 40                     # "REC 12:03 · No call audio"
+WAKE_CAP = 24                    # "Hey Jarvis"
+APPROVALS_MAX = 999
+CANVAS_TONES = ("holo", "amber", "steel")
+CANVAS_BUTTONS = ("history", "board", "briefing", "approvals", "followups", "meetings", "agents", "live", "memory",
+                  "settings", "desktop", "minimize", "maximize", "close", "mute", "day")
+GO_WORDS = (*CANVAS_BUTTONS, "undo", "stop_rec", "drag")
 BIG_STATES = ("open", "close")                      # big's "state"
 LANDED_STEPS = ("outline", "done")                  # landed's "step"
 BIG_STEPS = ("back", "laid", "shut")                # the big request's "step"
 STATUSES = ("ok", "failed", "empty")
 DESK_STATES = ("enter", "leave")
-FOCUS_PARTS = ("board", "strip", "next", "prev")      # focus_part (F6's cycle)
+FOCUS_PARTS = ("board", "strip", "next", "prev", "controls")   # focus_part (F6's cycle; the canvas's buttons)
 FOCUS_OUT = ("ask", "conversation")                  # focus_out's "to"
 # A calendar row: past (dim), now (on now), next (the next event: its meta "IN 19 MIN"), free (a dashed gap), new (what
 # a card adds or moves to), struck (where it was, or what is cancelled), today (a week's row for today).
@@ -178,7 +210,7 @@ SPAN_KINDS = ("busy", "next", "free")
 TODO_STATES = ("open", "waits", "done")
 MOTION_LEVELS = ("lively", "calm", "off")
 REQUEST_KINDS = ("ready", "layout", "focus", "open", "close", "pin", "bring_back", "retry", "go_approvals",
-                 "clear", "restore", "show_new", "reading", "focus_out", "landed", "big")
+                 "clear", "restore", "show_new", "reading", "focus_out", "landed", "big", "go")
 _ID_KINDS = frozenset({"focus", "open", "close", "bring_back", "retry", "go_approvals"})
 _BARE_KINDS = frozenset({"clear", "restore", "show_new"})     # a payload of no field at all
 _ID = re.compile(r"[A-Za-z0-9_-]{1,%d}" % ID_CAP)
@@ -668,6 +700,35 @@ def _big(value: dict[str, Any], known: Collection[str]) -> tuple[dict[str, Any],
     return {"type": "big", "state": "close", "id": frame_id}, frame_id
 
 
+def _orb(value: dict[str, Any]) -> dict[str, Any]:
+    """The orb (the canvas, part 1): a state word, a form, the native ring's two modifiers, quiet hours' dim and the
+    two levels - whole numbers from 0 to LEVEL_MAX, never a boolean, never a fraction."""
+    fields = _fields(value, ("type", "state", "form", "muted", "offline", "dim", "away", "level", "voice"),
+                     ("type", "state", "form"))
+    return {"type": "orb", "state": _choice(fields["state"], ORB_STATES), "form": _choice(fields["form"], ORB_FORMS),
+            "muted": _flag(fields.get("muted", False)), "offline": _flag(fields.get("offline", False)),
+            "dim": _flag(fields.get("dim", False)), "away": _flag(fields.get("away", False)),
+            "level": _number(fields.get("level", 0), 0, LEVEL_MAX),
+            "voice": _number(fields.get("voice", 0), 0, LEVEL_MAX)}
+
+
+def _canvas(value: dict[str, Any]) -> dict[str, Any]:
+    """The canvas's corners (part 1): words the page sets as text, a count, and which of its own buttons show (words
+    of CANVAS_BUTTONS, each once). A button's label is never among them."""
+    fields = _fields(value, ("type", "clock", "word", "tone", "approvals", "buttons", "briefing_new", "hold", "rec",
+                             "wake", "meter"), ("type", "buttons"))
+    buttons = [_choice(item, CANVAS_BUTTONS) for item in _list(fields["buttons"], len(CANVAS_BUTTONS))]
+    if len(set(buttons)) != len(buttons):
+        raise Refused(R_FIELD)
+    return {"type": "canvas", "clock": _text(fields.get("clock", ""), CLOCK_CAP),
+            "word": _text(fields.get("word", ""), STATE_WORD_CAP),
+            "tone": _choice(fields.get("tone", "holo"), CANVAS_TONES),
+            "approvals": _number(fields.get("approvals", 0), 0, APPROVALS_MAX), "buttons": buttons,
+            "briefing_new": _flag(fields.get("briefing_new", False)),
+            "hold": _text(fields.get("hold", ""), HOLD_CAP), "rec": _text(fields.get("rec", ""), REC_CAP),
+            "wake": _text(fields.get("wake", ""), WAKE_CAP), "meter": _flag(fields.get("meter", False))}
+
+
 def check_message(message: Any, known: Collection[str] = (), groups: Collection[str] = ()) -> Checked:
     """``message`` as the page gets it (see the module doc), or Refused. ``known``: the ids of the frames the app sent;
     ``groups``: those of the groups it sent."""
@@ -718,6 +779,10 @@ def check_message(message: Any, known: Collection[str] = (), groups: Collection[
     elif kind == "clear":
         _fields(message, ("type",))
         clean = {"type": "clear"}
+    elif kind == "orb":
+        clean = _orb(message)
+    elif kind == "canvas":
+        clean = _canvas(message)
     else:   # motion
         fields = _fields(message, ("type", "level"), ("type", "level"))
         clean = {"type": "motion", "level": _choice(fields["level"], MOTION_LEVELS)}
@@ -794,6 +859,9 @@ def check_request(kind: Any, payload: Any, known: Collection[str]) -> Request:
     if kind == "big":
         fields = _fields(value, ("step",), ("step",))
         return Request("big", step=_choice(fields["step"], BIG_STEPS))
+    if kind == "go":
+        fields = _fields(value, ("to",), ("to",))
+        return Request("go", to=_choice(fields["to"], GO_WORDS))
     if kind not in _ID_KINDS:
         raise Refused(R_KIND)
     fields = _fields(value, ("id",), ("id",))

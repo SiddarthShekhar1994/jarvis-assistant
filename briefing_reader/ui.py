@@ -125,7 +125,7 @@ from PySide6.QtWidgets import (
 from . import (alive, approvals_view, brief_view, briefing_view, context_view, find_view, followups_view, live_view,
                meetings_view, memory_view, offer_view, plan_view, settings_view, standing_view, states_view,
                transcript_view, voice_fx)
-from . import desk_view
+from . import canvas_view, desk_view
 from . import dock as dock_mod
 from . import holo, home, hud
 from .board import view as board_view
@@ -1182,6 +1182,18 @@ class ReadingView(QWidget):
     with nothing left on the board (the header's count says 0); ``set_frame_lit`` halves every ring's core glow while
     a frame is lit (``glow_share()``: the HUD's ring follows through glanceChanged); open big's native dim of the Dock
     and the header (``set_chrome_dim``) and ``set_board_big`` (F6 then skips the covered conversation).
+
+    The canvas (PLAN-canvas part 1; canvas_ui.CanvasController turns it on with ``set_canvas(True)`` while ``[look]
+    board`` is on and the board's page can be): Home is ``canvas_page()`` (canvas_view.CanvasPage) - the board's one
+    view over the whole of Home, with the ask line (``command_bar`` in its canvas look), the caption band and the chip
+    row at its bottom centre and the one offer / error tile at its left. No Dock in canvas mode and no header on Home
+    (the page draws the corners' controls); every other screen, and a moment (the plan, the brief), opens over the
+    canvas as it is today, with the header and its Back (``header.back_button``; Esc does the same: ``go_home``). The
+    desk never forms: ``desk_shown()`` then means "the board shows frames on the canvas" (deskShown still says so),
+    ``desk_page()`` stays None, Ctrl+B folds the board away and brings it back, F6 goes the ask line, the board, its
+    strip and the corner buttons. ``mic_level()`` / ``voice_level()`` are what the orb in the page follows.
+    ``set_canvas(False)`` (the page could not start, or its renderer died for good): Home exactly as before the
+    canvas - the Dock, the header, the native ring, and the read-only tiles in the desk.
     """
 
     playPause = Signal()
@@ -1229,6 +1241,8 @@ class ReadingView(QWidget):
     # Part 5b: F6's cycle reached the board - "board" / "strip" (into the page), "next" / "prev" (on from where the
     # focus is in it); the desk controller hands it to the page (board.view.BoardView.focus_part).
     boardFocusRequested = Signal(str)
+    # The canvas (PLAN-canvas part 1): canvas mode went on (True) or off (False: the fallback); the window follows.
+    canvasChanged = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1507,6 +1521,13 @@ class ReadingView(QWidget):
         self.header.findClicked.connect(self.open_find)
         self.header.undoClicked.connect(self.holdUndo)
         self.header.boardClicked.connect(self.toggle_board)
+        self.header.backClicked.connect(self.go_home)
+        # The canvas (PLAN-canvas part 1): Home is the board's page (set_canvas; canvas_ui.CanvasController).
+        self._canvas = False                      # canvas mode is on
+        self._canvas_page: canvas_view.CanvasPage | None = None
+        self._canvas_bar = False                  # the ask line is on the canvas now (else in Home's own holder)
+        self._mic_level: float | None = None      # the microphone's level (0..1; None: not open)
+        self._voice_level: Callable[[], float | None] | None = None   # the voice's level now (None: not timed)
         # The new look's desk (part 5a): the board beside the conversation while it holds frames. Nothing of it is made
         # until the board can be (set_board_available: [look] board on), and the desk itself at its first use.
         self._board_on = False                    # the board can be (the header's button, Ctrl+B, the hint line)
@@ -1729,7 +1750,9 @@ class ReadingView(QWidget):
         self._sync_summary_cards()              # ... and a meeting summary's draft and block cards
         page = self._screens.widget(index)
         self._screens.setCurrentWidget(page)
-        self.transition.play(page)              # the wipe and the panels assembling (never blocks a click)
+        self._sync_canvas_chrome()              # the canvas: the header (with Back) on every screen but Home
+        if not (self._canvas and index == SCREEN_HOME):
+            self.transition.play(page)          # the wipe and the panels assembling (never blocks a click)
         if index == SCREEN_MEMORY:
             self._set_memory_unread(False)
         elif index == SCREEN_APPROVALS:
@@ -1854,7 +1877,7 @@ class ReadingView(QWidget):
         """The hero orb's rings assemble from the centre out, J.A.R.V.I.S. types in and one scan line sweeps
         the window (lively, about 1.8 s; calm: the rings only, slower; off: nothing). Nothing waits for it."""
         level = holo.motion_level()
-        if level == holo.MOTION_OFF:
+        if level == holo.MOTION_OFF or self._canvas:      # (the canvas: its orb assembles in the page, by itself)
             return
         self.hero.play_intro(calm=level == holo.MOTION_CALM)
         if level == holo.MOTION_LIVELY:
@@ -1899,7 +1922,7 @@ class ReadingView(QWidget):
         when it is given (an offer's or an answer's chip) and still there, else at the newest entry."""
         self.set_tab(SCREEN_HOME)
         self.stage.set_unread(False)
-        self.transcript_drawer.open_drawer(self.stage.transcript_button)
+        self.transcript_drawer.open_drawer(self.command_bar.input if self._canvas else self.stage.transcript_button)
         if entry_id and self.conversation.entry(entry_id) is not None:
             self.conversation.follow_from(entry_id)
         self.conversation.scroll_to_newest()
@@ -1916,7 +1939,7 @@ class ReadingView(QWidget):
         """The Day view (the header clock): TODAY / DEADLINES in a drawer over the current screen."""
         self._place_agenda(self.day_drawer.body_layout, hud.AGENDA_DAY)
         self.transcript_drawer.close_drawer()
-        self.day_drawer.open_drawer(self.header.clock)
+        self.day_drawer.open_drawer(self.command_bar.input if self._canvas_home() else self.header.clock)
 
     # ---- Home: the look, captions, chips (HOLOGRAM_SPEC 12.6, 14, 16.0) -------------------------------
 
@@ -2145,6 +2168,15 @@ class ReadingView(QWidget):
         errors = self.errors()
         shown = errors[0] if errors and not offer else None
         tile = self.error_tile if shown is not None else self.offer_tile
+        page = self._canvas_page if self._canvas else None
+        if page is not None:                      # the canvas: the one tile at its left
+            if page.side_tile() is not tile:
+                if self.stage.side_tile() is tile:
+                    self.stage.set_side_tile(None)
+                page.set_side_tile(tile)
+            self.error_tile.set_error(shown)
+            page.place_side_tile()
+            return
         if self.stage.side_tile() is not tile:
             self.stage.set_side_tile(tile)
         self.error_tile.set_error(shown)
@@ -2248,7 +2280,10 @@ class ReadingView(QWidget):
         had_focus = current is not None and _holds_focus(current)
         self._set_moment("")
         if had_focus:
-            self.stage.transcript_button.setFocus(Qt.FocusReason.OtherFocusReason)
+            if self._canvas:
+                self.focus_ask_bar()
+            else:
+                self.stage.transcript_button.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def moment(self) -> str:
         return self._moment
@@ -2259,6 +2294,7 @@ class ReadingView(QWidget):
         self._moment = moment
         page = {MOMENT_PLAN: self.plan_stage, MOMENT_BRIEF: self.brief_stage}.get(moment, self._home_rest)
         self._home_pages.setCurrentWidget(page)
+        self._sync_canvas_home()                # the canvas: a moment opens over it (the header, Back), then it is back
         self._sync_brief_cards()
         if self._board_on:
             self._sync_desk(fly=False)          # a moment takes Home's stage: the desk steps aside while it shows
@@ -2376,6 +2412,7 @@ class ReadingView(QWidget):
         curve)."""
         desk_ring = self._desk.head.orb if self._desk is not None else None
         if timeline is None or position is None or not (timeline.has_words or timeline.has_envelope):
+            self._voice_level = None
             self.hero.set_voice(None)
             if desk_ring is not None:
                 desk_ring.set_voice(None)
@@ -2388,6 +2425,7 @@ class ReadingView(QWidget):
                 return None
             return voice_fx.level_at(timeline, ms) if ms >= 0 else None
 
+        self._voice_level = level               # the canvas's orb follows the same voice (voice_level)
         self.hero.set_voice(level)
         if desk_ring is not None:
             desk_ring.set_voice(level)          # the desk's ring speaks with the same voice
@@ -2397,7 +2435,7 @@ class ReadingView(QWidget):
     def show_context(self, infos: Sequence[context_view.TileInfo]) -> int:
         """The greeting's context tiles fly out of the orb, when Home shows the orb (else nothing); how many."""
         if (self._screen != SCREEN_HOME or self._moment or not self.isVisible() or not infos
-                or not self.stage.isVisible()):
+                or not self.stage.isVisible() or self._canvas):
             return 0
         return self.stage.context.show_tiles(infos)
 
@@ -2513,6 +2551,9 @@ class ReadingView(QWidget):
         """At most one quiet chip at rest and none while an offer's amber tile waits (one focal point): the
         answer just given (cyan: Plan ready / Brief ready), Briefing ready (cyan) before N need your OK
         (amber); the Dock carries the last two as well. On the desk: _sync_desk_chips."""
+        if self._canvas:
+            self._sync_canvas_chips()
+            return
         if self._desk_shown:
             self._sync_desk_chips()
             return
@@ -2538,6 +2579,24 @@ class ReadingView(QWidget):
         self.approvals_chip.setVisible(approvals)
         if briefing and not was_shown:
             self.briefing_chip.start_ping()
+
+    def _sync_canvas_chips(self) -> None:
+        """The canvas's chip row (over the caption): only the answer just given (Plan ready / Brief ready), the
+        waiting readout or the Windows voice's badge - Briefing ready and N need your OK are the page's own Briefing and
+        Approvals buttons there. A task's chip with its Stop and a timer's are the row's own (set_task_chip,
+        set_timer_chip)."""
+        resting = self.captions.state() == home.RESTING
+        answer = resting and bool(self._answer[0])
+        quiet_row = resting and not answer
+        readout = quiet_row and self._waiting and bool(self._waiting_readout)
+        self.waiting_readout.setVisible(readout)
+        self.voice_badge.setVisible(quiet_row and not readout and self._offline_voice)
+        if answer and self.answer_chip.text() != self._answer[0]:
+            self.answer_chip.setText(self._answer[0])
+            self.answer_chip.updateGeometry()
+        self.answer_chip.setVisible(answer)
+        self.briefing_chip.setVisible(False)
+        self.approvals_chip.setVisible(False)
 
     def set_task_look(self, base: str, word: str = "") -> None:
         """The orb while a task runs (agent_feed): it thinks; orb.NEEDS while a card of it waits; "" none. ``word``: the
@@ -2692,6 +2751,9 @@ class ReadingView(QWidget):
         from PySide6.QtWidgets import QGraphicsOpacityEffect
 
         level = max(0.0, min(1.0, float(level)))
+        if self._canvas:                         # the canvas: the page dims its own corners with its board
+            self._chrome_dim = level
+            return
         if self._chrome_anim is not None:
             if shiboken6.isValid(self._chrome_anim):
                 self._chrome_anim.stop()                 # (deleted when stopped: none is left behind)
@@ -2791,7 +2853,7 @@ class ReadingView(QWidget):
 
     def desk_compact(self) -> bool:
         """The desk's narrow column (the folded Dock's): one chip, the last exchange, the bar without its count."""
-        return self.width() > 0 and self.width() < DOCK_LABELS_FROM
+        return not self._canvas and self.width() > 0 and self.width() < DOCK_LABELS_FROM
 
     def set_board_view(self, view: QWidget | None) -> None:
         """The board's one view (desk_ui makes it once): in the desk's board column, or the drawer."""
@@ -2808,6 +2870,8 @@ class ReadingView(QWidget):
 
     def board_in_drawer(self) -> bool:
         """The frames area would be under 360 px: the board opens as today's drawer instead (DESIGN-SPEC 2.3)."""
+        if self._canvas:
+            return False                         # the canvas: the board's box is the page's own
         area = self._home_area()
         return desk_view.desk_geometry(area.width(), area.height(), folded_dock=self.desk_compact()).drawer
 
@@ -2819,6 +2883,10 @@ class ReadingView(QWidget):
     def _place_board_view(self) -> None:
         view = self._board_view
         if view is None or not shiboken6.isValid(view):
+            return
+        if self._canvas:                         # the canvas: the view is the whole of Home
+            if self._canvas_page is not None:
+                self._canvas_page.set_board(view)
             return
         if self.board_in_drawer():
             drawer = self._board_drawer_widget()
@@ -2838,6 +2906,16 @@ class ReadingView(QWidget):
         and comes back; from another screen, Home with the board; the board as a drawer opens and closes it. Nothing
         while the board is empty."""
         if not self._board_on or self._board_count == 0:
+            return
+        if self._canvas:                         # the canvas: the board's box folds away and comes back
+            if self._screen != SCREEN_HOME or self._moment:
+                self._board_folded = False
+                self.close_moment()
+                self.set_tab(SCREEN_HOME)
+            else:
+                self._board_folded = not self._board_folded
+            self._sync_desk(fly=False)
+            self.glanceChanged.emit()
             return
         if self.board_in_drawer():
             drawer = self._board_drawer_widget()
@@ -2876,6 +2954,10 @@ class ReadingView(QWidget):
     def _show_desk(self, shown: bool, *, fly: bool) -> None:
         """Home's page: the desk (the command bar and the chip row move into its column; the ring flies from the stage
         to the column head) or the stage again (they move back)."""
+        if self._canvas:                         # the canvas: no desk forms - the board shows its frames, or not
+            self._desk_shown = bool(shown)
+            self.deskShown.emit(bool(shown))
+            return
         if shown:
             desk = self.desk()
             flight = fly and self._screen == SCREEN_HOME and self.stage.isVisible() and self.isVisible()
@@ -2956,7 +3038,7 @@ class ReadingView(QWidget):
     def _sync_board_chip(self) -> None:
         """Folded Home's "9 on the board" (and the board as a drawer's): it brings the board back."""
         shown = self._board_on and self._board_count > 0 and not self._desk_shown and \
-            (self._board_folded or self.board_in_drawer())
+            (self._board_folded or self.board_in_drawer()) and not self._canvas    # (the canvas: the page's Show board)
         if self.board_chip is None:
             if not shown:
                 return
@@ -2984,7 +3066,7 @@ class ReadingView(QWidget):
 
     def _sync_board_hint(self) -> None:
         shown = (self._board_on and self._board_hint and self._board_count == 0 and not self._moment
-                 and self.captions.state() == home.RESTING)
+                 and self.captions.state() == home.RESTING and not self._canvas)
         if shown != (not self.board_hint.isHidden()):
             self.board_hint.setVisible(shown)
 
@@ -3016,13 +3098,23 @@ class ReadingView(QWidget):
         "next" / "prev" on from where its focus is - past the strip it hands the focus back here). Nothing off the
         desk."""
         desk = self._desk
-        if self._screen != SCREEN_HOME or not self._desk_shown or desk is None:
-            return
         focus = QApplication.focusWidget()
 
         def within(widget: QWidget | None) -> bool:
             return (focus is not None and widget is not None and shiboken6.isValid(widget)
                     and (focus is widget or widget.isAncestorOf(focus)))
+
+        if self._canvas:
+            # The canvas: the ask line, the board (its frames, then its strip), the page's corner buttons, round.
+            if self._screen != SCREEN_HOME or self._moment:
+                return
+            if within(self._board_view):
+                self.boardFocusRequested.emit("next" if forward else "prev")
+            else:
+                self.boardFocusRequested.emit("board" if forward else "controls")
+            return
+        if self._screen != SCREEN_HOME or not self._desk_shown or desk is None:
+            return
 
         if self._board_big:                      # open big covers the conversation: the ask bar and the board only
             if within(self._board_view):
@@ -3057,6 +3149,10 @@ class ReadingView(QWidget):
 
     def focus_conversation(self) -> None:
         """The keyboard focus on the desk's conversation (F6): the arrows scroll it, Tab goes on to its tokens."""
+        if self._canvas:
+            if self.ask_available():
+                self.command_bar.focus_input()   # the canvas has no conversation column: the ask line
+            return
         if self._desk is not None and self._desk_shown:
             self._desk.turns.setFocus(Qt.FocusReason.ShortcutFocusReason)
 
@@ -3071,10 +3167,147 @@ class ReadingView(QWidget):
         return True
 
     def ring_level(self, level: float | None) -> None:
-        """The microphone's level on the ring the owner sees (Home's hero, and the desk's)."""
+        """The microphone's level on the ring the owner sees (Home's hero, and the desk's; the canvas's orb reads
+        ``mic_level()``)."""
+        self._mic_level = level
         self.hero.set_level(level)
         if self._desk is not None:
             self._desk.head.orb.set_level(level)
+
+    # ---- the canvas (PLAN-canvas part 1) ---------------------------------------------------------------------------
+
+    def set_canvas(self, on: bool) -> None:
+        """Canvas mode on: Home is the board's page over the whole window - no Dock, no header on Home, the ask line,
+        the caption and the chips at its bottom centre. Off (the page can't start): Home as before the canvas."""
+        on = bool(on)
+        if on == self._canvas:
+            return
+        if on:
+            if self._canvas_page is None:
+                self._canvas_page = canvas_view.CanvasPage()
+                self._home_switch.addWidget(self._canvas_page)
+            if self._desk_shown:                 # (never in the app: the canvas is chosen before any frame)
+                self._show_desk(False, fly=False)
+            self._canvas = True
+            self.stage.context.dismiss()
+            page = self._canvas_page
+            self.captions.set_canvas(True)
+            self.captions.setFixedHeight(self.captions.band_height())
+            page.take_captions(self.captions)
+            chips = self._chip_row.layout()
+            page.take_chips(self._chip_row)
+            chips.setStretch(0, 1)
+            self.board_hint.hide()
+            self.echo.hide()
+        else:
+            # Off first, then the desk: with frames on the board it forms below (_sync_desk), as beside a conversation,
+            # and says so itself (deskShown) - nothing may count the canvas's "shown" as the desk's.
+            self._canvas = False
+            self._desk_shown = False
+            self.captions.set_canvas(False)
+            self.captions.setFixedHeight(self.captions.band_height())
+            self._rest_layout.insertWidget(self._rest_layout.indexOf(self.board_hint), self.captions)
+            self._rest_layout.addWidget(self._chip_row)
+            self.captions.show()
+            self._chip_row.show()
+            if self._canvas_page is not None:
+                self._canvas_page.set_side_tile(None)
+                self._canvas_page.set_board(None)
+        self.dock.setVisible(not on)
+        self._sync_canvas_home()
+        self._sync_canvas_chrome()
+        self._sync_side()
+        self._place_board_view()
+        self._sync_desk(fly=False)
+        self._sync_look()
+        self.canvasChanged.emit(on)
+
+    def canvas_on(self) -> bool:
+        return self._canvas
+
+    def canvas_page(self) -> canvas_view.CanvasPage | None:
+        """Home's page in canvas mode (made when the canvas first went on; None before)."""
+        return self._canvas_page
+
+    def _canvas_home(self) -> bool:
+        """The canvas itself is what Home shows now (canvas mode, Home, no moment over it)."""
+        return self._canvas and self._screen == SCREEN_HOME and not self._moment
+
+    def canvas_shown(self) -> bool:
+        """The owner sees the canvas: canvas mode, Home with no moment over it, the view up."""
+        return self._canvas_home() and self.isVisible()
+
+    def _sync_canvas_home(self) -> None:
+        """Home's page in canvas mode: the canvas, or - a moment (the plan, the brief) - Home's own stage page over
+        it, the ask line with it. Off: Home's stage page (the desk forms as before)."""
+        on_canvas = self._canvas and not self._moment
+        self._place_canvas_bar(on_canvas)
+        if self._canvas_page is None:
+            return
+        if on_canvas:
+            self._home_switch.setCurrentWidget(self._canvas_page)
+        elif self._home_switch.currentWidget() is self._canvas_page:
+            self._home_switch.setCurrentWidget(self._home_stage_page)
+        self._sync_canvas_chrome()
+
+    def _place_canvas_bar(self, on_canvas: bool) -> None:
+        """The ask line: on the canvas in its canvas look, or back in Home's own holder as the hologram pill."""
+        bar = self.command_bar
+        if on_canvas == self._canvas_bar:
+            return
+        self._canvas_bar = on_canvas
+        if on_canvas and self._canvas_page is not None:
+            bar.set_canvas(True)
+            self._canvas_page.take_bar(bar)
+            bar.setVisible(self.ask_available())
+        else:
+            bar.set_canvas(False)
+            bar.setMaximumWidth(holo.COMMAND_MAX_WIDTH + 2 * 4)
+            self._command_holder.layout().insertWidget(1, bar, 1000)
+            bar.show()
+
+    def _sync_canvas_chrome(self) -> None:
+        """Canvas mode: the header shows on every screen but Home (and over a moment), with Back at its left."""
+        if not hasattr(self, "_screens"):
+            return
+        if self._canvas:
+            over = self._screen != SCREEN_HOME or bool(self._moment)
+            self.header.setVisible(over)
+            self.header.set_back_visible(True)
+        else:
+            self.header.setVisible(True)
+            self.header.set_back_visible(False)
+
+    def go_home(self) -> None:
+        """The canvas's Back and Esc: a moment closes, another screen goes back to Home."""
+        if self._screen == SCREEN_HOME and self._moment:
+            self.close_moment()
+        else:
+            self.set_tab(SCREEN_HOME)
+        if self._canvas:
+            self.focus_ask_bar()
+
+    def mic_level(self) -> float | None:
+        """The microphone's level now (0..1; None while it is not open): the canvas's orb and meter."""
+        return self._mic_level
+
+    def voice_level(self) -> float | None:
+        """Jarvis's voice's level now (0..1; None: not speaking, or not timed)."""
+        level = self._voice_level
+        if level is None:
+            return None
+        try:
+            return level()
+        except Exception:  # noqa: BLE001 - unknown: the page plays its own pulse
+            return None
+
+    def needs_ok_count(self) -> int:
+        """The cards that wait for the owner's OK, in the window and on the desktop HUD (the amber chip's number)."""
+        return self._pending + self._desktop_waiting
+
+    def hold_word(self) -> str:
+        """A Send's hidden hold as the header says it ("Sent" / "Cancelled"; "" none, and on Approvals)."""
+        return "" if self._screen == SCREEN_APPROVALS else self._hold_word
 
     def _build_briefing(self) -> QWidget:
         """The Briefing screen (round 2, HOLOGRAM_SPEC 16.1): the stage with the compact orb, the ready view
@@ -3502,6 +3735,8 @@ class ReadingView(QWidget):
     def set_ask_available(self, available: bool) -> None:
         """Show Ask Jarvis's command bar on Home ([ask] enabled) or keep it out of the layout."""
         self._command_holder.setVisible(available)
+        if self._canvas_bar:
+            self.command_bar.setVisible(bool(available))     # the canvas's ask line is the same bar
         if self._desk is not None:
             self._desk.ask_slot.setVisible(bool(available) and self._desk_shown)
 
@@ -3798,6 +4033,11 @@ class ReadingView(QWidget):
             if self.board_drawer is not None:
                 self.board_drawer.close_drawer()
             return
+        if (self._canvas and event.key() == Qt.Key.Key_Escape and event.modifiers() == Qt.KeyboardModifier.NoModifier
+                and (self._screen != SCREEN_HOME or self._moment)):
+            event.accept()                       # the canvas: Esc on a screen opened over it goes back to it
+            self.go_home()
+            return
         super().keyPressEvent(event)
 
     def _auto_scroll(self, block: QTextBlock) -> None:
@@ -3983,6 +4223,13 @@ class BriefingWindow(hud.HudWindowFrame):
     ``muteToggled``; its chips the service states). The window paints the hologram ground there
     (``ground``, a holo.GroundCache the hero orb paints its slice of), and reads the Windows
     animation setting again on WM_SETTINGCHANGE (holo.refresh_reduced_motion).
+
+    The canvas (PLAN-canvas part 1; ``reading.canvasChanged``): in canvas mode the window is an ordinary one - not
+    always on top (a maximised window that stayed on top would cover every other app) - and the first time the
+    reading view shows it opens maximised (the app remembers no size between starts; within a session it keeps what
+    the owner made of it). F11 toggles full screen (``toggle_fullscreen``), ``toggle_maximized`` the page's
+    maximise button, ``start_drag`` its wordmark. Maximised or full screen the frame has no margins and no cut
+    corners; restored it has them again, and resizes down to READING_MIN_SIZE as before.
     """
 
     closeRequested = Signal()
@@ -4029,6 +4276,16 @@ class BriefingWindow(hud.HudWindowFrame):
         mute.setContext(Qt.ShortcutContext.WindowShortcut)
         mute.setAutoRepeat(False)
         mute.activated.connect(self._on_mute_shortcut)
+        # The canvas (PLAN-canvas part 1): the window follows canvas mode; F11 is full screen while it is on.
+        self._frame_cut = self._cut           # the frame's cut corners (none while maximised or full screen)
+        self._canvas_sized = False            # the canvas window was opened maximised once (then the owner's size holds)
+        self._before_full = Qt.WindowState.WindowNoState    # what F11 goes back to
+        self._full_shortcut = QShortcut(QKeySequence(Qt.Key.Key_F11), self)
+        self._full_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._full_shortcut.setAutoRepeat(False)
+        self._full_shortcut.setEnabled(False)
+        self._full_shortcut.activated.connect(self.toggle_fullscreen)
+        self.reading.canvasChanged.connect(self._on_canvas)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt override
         event.ignore()   # the controller decides what closing means
@@ -4048,6 +4305,7 @@ class BriefingWindow(hud.HudWindowFrame):
     def changeEvent(self, event: QEvent) -> None:  # noqa: N802 - Qt override
         super().changeEvent(event)
         if event.type() == QEvent.Type.WindowStateChange:
+            self._sync_frame()                # maximised or full screen: no margins, no cut corners
             self.visibilityChanged.emit()
         elif event.type() == QEvent.Type.ActivationChange:
             if self.isActiveWindow():
@@ -4111,6 +4369,76 @@ class BriefingWindow(hud.HudWindowFrame):
     def is_reading_view(self) -> bool:
         return self._stack.currentWidget() is self.reading
 
+    # ---- the canvas's window (PLAN-canvas part 1) ---------------------------------------------------------------
+
+    def _on_canvas(self, on: bool) -> None:
+        """Canvas mode went on: an ordinary window (never always on top), F11 for full screen. Off (the page could
+        not start): the window stays as the owner has it."""
+        self._full_shortcut.setEnabled(bool(on))
+        if on and bool(self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint):
+            shown = self.isVisible()
+            self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
+            if shown:
+                self.show()                   # (changing a flag hides a window; the app turns the canvas on before it shows)
+        self._sync_frame()
+
+    def canvas_window(self) -> bool:
+        """The reading view shows in canvas mode: the window may be maximised and full screen."""
+        return self.is_reading_view() and self.reading.canvas_on()
+
+    def _filled(self) -> bool:
+        return bool(self.windowState() & (Qt.WindowState.WindowMaximized | Qt.WindowState.WindowFullScreen))
+
+    def _sync_frame(self) -> None:
+        """The frame around the reading view: its margins (the resize grab zone) and cut corners while it is a
+        window on the desktop; none while it fills the screen."""
+        if not self.is_reading_view():
+            return
+        filled = self._filled()
+        margins = (0, 0, 0, 0) if filled else _READING_MARGINS
+        cut = 0 if filled else self._frame_cut
+        current = self.layout().contentsMargins()
+        if (current.left(), current.top(), current.right(), current.bottom()) != margins or cut != self._cut:
+            self.layout().setContentsMargins(*margins)
+            self._cut = cut
+            self._cache = None
+            self.update()
+
+    def toggle_fullscreen(self) -> None:
+        """F11 (canvas mode): full screen, and back to what the window was (maximised or its own size)."""
+        if not self.canvas_window():
+            return
+        state = self.windowState()
+        if state & Qt.WindowState.WindowFullScreen:
+            self.setWindowState((state & ~Qt.WindowState.WindowFullScreen) | self._before_full)
+        else:
+            self._before_full = state & Qt.WindowState.WindowMaximized
+            self.setWindowState((state & ~Qt.WindowState.WindowMaximized) | Qt.WindowState.WindowFullScreen)
+
+    def toggle_maximized(self) -> None:
+        """The page's maximise button (canvas mode): maximised, or the window's own size again (out of full screen
+        first)."""
+        if not self.canvas_window():
+            return
+        state = self.windowState()
+        if state & Qt.WindowState.WindowFullScreen:
+            self.setWindowState((state & ~Qt.WindowState.WindowFullScreen) | Qt.WindowState.WindowMaximized)
+        elif state & Qt.WindowState.WindowMaximized:
+            self.setWindowState(state & ~Qt.WindowState.WindowMaximized)
+        else:
+            self.setWindowState(state | Qt.WindowState.WindowMaximized)
+
+    def start_drag(self) -> bool:
+        """The page's wordmark was pressed (canvas mode): the system moves the window with the pointer, while it is
+        not filling the screen. False when it does not."""
+        if not self.canvas_window() or self._filled():
+            return False
+        handle = self.windowHandle()
+        try:
+            return bool(handle is not None and handle.startSystemMove())
+        except Exception:  # noqa: BLE001 - no move rather than an error
+            return False
+
     def set_hour24(self, hour24: bool) -> None:
         """The header clock and the activity times: "13:05" (True) or "1:05 PM" (False)."""
         assert self.header is not None
@@ -4146,6 +4474,11 @@ class BriefingWindow(hud.HudWindowFrame):
         self.header.show()
         self._cache = None
         self._show_reading_chips(False)
+        if self._filled():                    # the canvas filled the screen: the prompt is a small window again
+            self.setWindowState(self.windowState() & ~(Qt.WindowState.WindowMaximized
+                                                        | Qt.WindowState.WindowFullScreen))
+            self._canvas_sized = False        # (the canvas opens maximised again after it)
+        self._cut = self._frame_cut
         self.layout().setContentsMargins(*_PROMPT_MARGINS)
         self.set_resizable(False)
         self.set_glow_anchor(self.prompt.orb)
@@ -4207,7 +4540,17 @@ class BriefingWindow(hud.HudWindowFrame):
         self.set_glow_anchor(None)
         room = self._screen_room()
         minimum = READING_MIN_SIZE.boundedTo(room)   # a small screen gets a smaller window
-        self._apply_size(READING_SIZE.boundedTo(room).expandedTo(minimum), minimum)
+        if not (self.reading.canvas_on() and self._filled()):
+            self._apply_size(READING_SIZE.boundedTo(room).expandedTo(minimum), minimum)
+        else:
+            self.setMinimumSize(minimum)      # filling the screen already: only the minimum it resizes down to
+            self.setMaximumSize(_QWIDGETSIZE_MAX, _QWIDGETSIZE_MAX)
+        if self.reading.canvas_on() and not self._canvas_sized:
+            # The canvas opens maximised (the app remembers no size between starts); after that the owner's own
+            # size holds for the session.
+            self._canvas_sized = True
+            self.setWindowState(self.windowState() | Qt.WindowState.WindowMaximized)
+        self._sync_frame()
         self.reading.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _screen_room(self) -> QSize:
@@ -5927,6 +6270,7 @@ class AppController(QObject):
         self.window.set_speaker_available(bool(config.assistant.speak))
         self._sync_speaker()
         self._init_hologram()
+        self._say_network_use()                         # the canvas's engine start never opens a usable gate
         self.look: Any = self._create_look()            # the new look: the soft sounds and Settings > Look
 
     def _init_hologram(self) -> None:
@@ -15120,6 +15464,18 @@ class AppController(QObject):
             picked.connect(controller.mic_picked)       # Settings > Meetings > Microphone: the listener moves to it
         self._on_wake_changed()
         return controller
+
+    def _say_network_use(self) -> None:
+        """Tell the web engine whether a page picture ([live] page pictures) or an agent page ([agent]) can be asked
+        for in this run: with neither, the board's engine starts with the dead proxy and Jarvis's network gate is
+        never made (snapshot_engine.set_network_use; the final review's ship-gate finding)."""
+        try:
+            from . import snapshot_engine
+
+            snapshot_engine.set_network_use(
+                lambda: getattr(self, "_snapshots", None) is not None or getattr(self, "agent", None) is not None)
+        except Exception as exc:  # noqa: BLE001 - unsaid: the gate binds sealed
+            logger.debug("Web engine: the network use was not said (%s)", type(exc).__name__)
 
     def _create_look(self) -> Any:
         """The new look's controller (look_ui): the soft sounds and Settings > Look; None if it could not start."""

@@ -217,10 +217,11 @@ class RequestTests(unittest.TestCase):
 
     def test_the_list_of_requests(self) -> None:
         # Part 5b added clear .. focus_out on purpose (tests/test_board_ways.py checks each of them and their hostile
-        # shapes); part 5c added landed and big on purpose (tests/test_board_lit.py checks them).
+        # shapes); part 5c added landed and big on purpose (tests/test_board_lit.py checks them); the canvas (part 1)
+        # added go on purpose (tests/test_canvas.py checks its fixed list of words and that an unknown one is refused).
         self.assertEqual(protocol.REQUEST_KINDS, ("ready", "layout", "focus", "open", "close", "pin", "bring_back",
                                                   "retry", "go_approvals", "clear", "restore", "show_new", "reading",
-                                                  "focus_out", "landed", "big"))
+                                                  "focus_out", "landed", "big", "go"))
         for kind in ("focus", "open", "close", "bring_back", "retry", "go_approvals"):
             self.assertEqual(protocol.check_request(kind, '{"id":"f1"}', self.known), protocol.Request(kind, "f1"))
         self.assertEqual(protocol.check_request("pin", '{"id":"f2","on":true}', self.known),
@@ -920,7 +921,9 @@ class EngineHelperTests(unittest.TestCase):
                 mock.patch.object(snapshots, "sandbox_problem", return_value=""), \
                 mock.patch.object(snapshots, "engine_flags_problem", return_value=""):
             self.assertEqual(snapshot_engine.ensure_engine(), "")
-        start.assert_called_once_with()
+        # The canvas (part 1): the board's start says it is a page of Jarvis's own, so the engine never opens a usable
+        # network gate for it (tests/test_canvas.py GateTests).
+        start.assert_called_once_with(page=False)
         with mock.patch.object(snapshot_engine, "QCoreApplication") as core, \
                 mock.patch.object(snapshot_engine, "_start_engine") as start:
             core.instance.return_value = None

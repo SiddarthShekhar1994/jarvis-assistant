@@ -35,6 +35,11 @@ monitor, following monitors plugged in or out while Settings is open (assistant.
 config.toml sets the defaults; ``sounds = "off"`` there wins; the second screen's switch, once used, wins over
 ``[look] second_screen``.
 
+The canvas (PLAN-canvas part 1): with ``[look] board`` on and a board that can be made, Home is the canvas
+(``canvas``: canvas_ui.CanvasController, made with the desk) - always with the real board; a test's factory asks for
+it with ``factory.canvas = True`` (without it the factory's board stands beside the conversation, as the desk's own
+tests have it). ``on_ask_outcome`` and ``on_instant_answer`` then also put the keyboard back in the ask line.
+
 Logs hold event names and reasons only.
 """
 
@@ -75,6 +80,7 @@ TURN_OFF_TEXT = "Turn sounds off"
 TURN_ON_TEXT = "Turn sounds on"
 SAVE_FAILED_TEXT = "That couldn't be saved; it lasts until Jarvis closes."
 BOARD_LABEL = "Board beside the conversation"
+CANVAS_LABEL = "Home as the canvas"                    # the same switch while Home is the canvas (PLAN-canvas part 1)
 SECOND_LABEL = "Show Jarvis on my second screen"       # part 7 (DESIGN-SPEC 6 and 9)
 SECOND_NEEDS = "Needs a second monitor"
 
@@ -236,6 +242,7 @@ class LookController(QObject):
         self.second: Any = None              # part 7 (made below, once the desk is)
         self.panel: LookSettingsPanel | None = None
         self._install_settings()
+        self.canvas: Any = None              # PLAN-canvas part 1: Home as the canvas (made with the desk), or None
         self.desk = self._make_desk()        # part 5a: the board on Home ([look] board), or None
         self.second = self._make_second()    # part 7: the second-screen display (shown only once turned on), or None
         if self.second is not None and self.panel is not None:
@@ -257,7 +264,17 @@ class LookController(QObject):
         factory = getattr(self.host, "_board_factory", None)
         if not desk_ui.can_have_board(factory):
             return None
-        return desk_ui.DeskController(self.host, factory=factory, look=self)
+        desk = desk_ui.DeskController(self.host, factory=factory, look=self)
+        if factory is None or bool(getattr(factory, "canvas", False)):
+            # Home is the canvas: the real board always; a test's factory when it says so.
+            try:
+                from . import canvas_ui
+
+                self.canvas = desk.canvas = canvas_ui.CanvasController(desk)
+            except Exception as exc:  # noqa: BLE001 - no canvas: the board beside the conversation, as before
+                logger.warning("Canvas: not started (%s)", type(exc).__name__)
+                self.canvas = desk.canvas = None
+        return desk
 
     def _make_second(self) -> Any:
         """The second-screen display's controller (second_screen), made with the main window; None without one. It
@@ -434,11 +451,15 @@ class LookController(QObject):
         """A finished answer: its frames go up on the board as one group."""
         if self.desk is not None:
             self.desk.on_ask_outcome(outcome, task_id)
+        if self.canvas is not None:
+            self.canvas.on_answer()          # the canvas: the keyboard is in the ask line after an answer
 
     def on_instant_answer(self, reply: Any, words: str) -> None:
         """Part 6: Jarvis's own instant answer; a sum's working, when it has one, goes up as a maths frame."""
         if self.desk is not None:
             self.desk.on_instant_answer(reply, words)
+        if self.canvas is not None:
+            self.canvas.on_answer()
 
     def on_ask_answer(self) -> None:
         self._answered = True
@@ -473,6 +494,9 @@ class LookController(QObject):
         else:
             value = SOUNDS_SOFT_VALUE if self.sounds_on() else SOUNDS_OFF_VALUE
         board = "On" if getattr(getattr(self.config, "look", None), "board", True) else "Off"
+        canvas = self.canvas
+        if canvas is not None and not canvas.fallen():
+            return [(SOUNDS_LABEL, value), (CANVAS_LABEL, board)]      # Home is the canvas (the same [look] board)
         return [(SOUNDS_LABEL, value), (BOARD_LABEL, board)]
 
     def _install_settings(self) -> None:

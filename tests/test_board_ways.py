@@ -141,7 +141,9 @@ class ProtocolTests(unittest.TestCase):
     def test_focus_part_takes_the_four_parts_only(self) -> None:
         for part in ("board", "strip", "next", "prev"):
             self.assertEqual(json.loads(protocol.check_message({"type": "focus_part", "part": part}).text)["part"], part)
-        self.assertEqual(protocol.FOCUS_PARTS, ("board", "strip", "next", "prev"))
+        # The canvas (part 1) added "controls" on purpose: the page's corner buttons are a part F6 reaches
+        # (tests/test_canvas.py; tests/board_probe.py canvas).
+        self.assertEqual(protocol.FOCUS_PARTS, ("board", "strip", "next", "prev", "controls"))
         self.assertEqual(self.refused({"type": "focus_part", "part": "address bar"}), protocol.R_FIELD)
         self.assertEqual(self.refused({"type": "focus_part", "part": 1}), protocol.R_FIELD)
         self.assertEqual(self.refused({"type": "focus_part"}), protocol.R_FIELD)

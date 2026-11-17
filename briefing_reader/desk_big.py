@@ -25,6 +25,10 @@ at once; calm x1.6. A resize of the window while big keeps it spanning both colu
 It ends at once (no animation) when the desk leaves Home, the window goes to another screen, or the page restarts or
 falls back; and goes back by itself when its frame leaves the board.
 
+The canvas (PLAN-canvas part 1): the board's view is the whole of Home already, so step 1 falls away - no backdrop, no
+still, no geometry, no native dim (the page dims its own orb and corners with its board): ``big`` open is sent with the
+view's own size (the page keeps the board's box it has), and the page's scale and its way back are step 2 as above.
+
 ``BigController(desk)`` is desk_ui.DeskController's (``desk.big``): ``open(frame_id)`` (the page's Enter, a double
 click, the frame's Open big button), ``on_step(step)`` (the page's big request), ``on_layout()`` (the desk's layout
 changed), ``check()`` (the board changed), ``close()``, ``end_now()``; ``frame()`` / ``state()``. ``view_shows(view,
@@ -161,6 +165,11 @@ class BigController(QObject):
         page = self.reading.desk_page()
         return page if page is not None and shiboken6.isValid(page) else None
 
+    def _canvas(self) -> bool:
+        """Home is the canvas (ui.ReadingView.canvas_on): the board's view is the whole of Home, no desk page."""
+        canvas_on = getattr(self.reading, "canvas_on", None)
+        return bool(canvas_on()) if callable(canvas_on) else False
+
     def _shown(self, frame_id: str) -> bool:
         feed = self.desk.feed
         flags = feed.flags(frame_id)
@@ -174,16 +183,31 @@ class BigController(QObject):
         dim), then ``big`` open for the page's step 2. False when it can't be now (counted)."""
         board = self.desk.board
         page = self._page()
+        canvas = self._canvas()
         if self._state:
             self.counts["refused:busy"] += 1
             return False
-        if board is None or not shiboken6.isValid(board) or not board.is_ready() or page is None \
-                or page.board() is not board or not self.desk.on_screen():
+        if board is None or not shiboken6.isValid(board) or not board.is_ready() or not self.desk.on_screen() \
+                or (not canvas and (page is None or page.board() is not board)):
             self.counts["refused:not_shown"] += 1
             return False
         if not self._shown(frame_id):
             self.counts["refused:frame"] += 1
             return False
+        if canvas:
+            # The canvas: the view is the whole of Home already - only the page's own step (see the module doc).
+            self._backdrop_sent = False
+            self._laid_for, self._still, self._judged = "open", "", False
+            self.desk.cue.clear(now=True)
+            self._frame, self._state = frame_id, "open"
+            self.reading.set_board_big(True)
+            self._box = (0, 0, max(1, int(board.width())), max(1, int(board.height())))
+            x, y, w, h = self._box
+            self.desk._send([{"type": "big", "state": "open", "id": frame_id, "x": x, "y": y, "w": w, "h": h}])
+            self.desk.sound("on_big", True)
+            self.counts["opened"] += 1
+            logger.info("Board: frame %s open big", frame_id)
+            return True
         geometry = page.geometry_now()
         src = self._backdrop(page, geometry)
         if src:

@@ -2,7 +2,9 @@
    createElement, every word is set with textContent and every listener with addEventListener: no markup is ever read,
    no address is ever opened. The app sends board.apply(<JSON text>), checked in Python first and checked here again;
    the page answers on its web channel with bridge.post(kind, <JSON text>), the short list Python accepts (ready, layout,
-   focus, open, close, pin, bring_back, retry, go_approvals, clear, restore, show_new, reading, focus_out, landed, big).
+   focus, open, close, pin, bring_back, retry, go_approvals, clear, restore, show_new, reading, focus_out, landed, big,
+   go). The canvas (PLAN-canvas part 1): the same page is Home itself - the orb and the corners' controls under the
+   board (makeCanvas, at the first orb or canvas message; a board beside a conversation has none of it).
    DESIGN-SPEC 3.1 (the bar, the groups, the index strip, "N more below" and the fades), 3.2 (the frame), 3.3 (the kinds
    and the satellite), 3.4 (its states: lit, changed), 3.5 (order, parking, pin, close, Clear, open big), 3.6 (the
    keyboard), 5 (motion) and 8 (the cue line's stub). The app is the source of truth: what the owner does shows here at
@@ -22,7 +24,7 @@
                       'changed', 'pinned', 'closed', 'fact', 'group'];
   var MAX_GROUPS = 8;
   var DESK_STATES = ['enter', 'leave'];
-  var FOCUS_PARTS = ['board', 'strip', 'next', 'prev'];
+  var FOCUS_PARTS = ['board', 'strip', 'next', 'prev', 'controls'];
   var GROUP_FADE_MS = 160;                     // a group that leaves for room fades, then goes
   var STATUSES = ['ok', 'failed', 'empty'];
   var CALENDAR_STATES = ['', 'past', 'now', 'next', 'free', 'new', 'struck', 'today'];
@@ -1370,6 +1372,9 @@
     html.classList.remove('motion-lively', 'motion-calm', 'motion-off');
     html.classList.add('motion-' + level);
     K = reducedMotion() ? 0 : MOTIONS[level];
+    if (canvas) {                              // the orb's own moves: calm slower, off still
+      orbMotionChanged();
+    }
   }
 
   function landed(rec, step) {                 // the board's sounds (part 5c): the app hears a frame land, then settle
@@ -1647,7 +1652,9 @@
       return;
     }
     document.documentElement.classList.add('keys');   // the keyboard's own focus shows (as :focus-visible)
-    signOfReading();
+    if (!inCanvasChrome(event.target)) {
+      signOfReading();                         // (a key on one of the canvas's corner buttons is not the board's)
+    }
     var key = event.key;
     if (big && (big.state === 'wait' || big.state === 'open')) {
       if (key === 'Escape') {
@@ -1737,6 +1744,9 @@
   function watchReading() {
     var html = document.documentElement;
     html.addEventListener('mouseenter', function () {
+      if (canvas) {
+        return;                                // the canvas is the whole window: the board's own box says so
+      }
       reading.pointer = true;
       sendReading(true);
     });
@@ -1744,13 +1754,13 @@
       reading.pointer = false;
       sendReading(true);
     });
-    document.addEventListener('focusin', function () {
-      reading.focus = true;
+    document.addEventListener('focusin', function (event) {
+      reading.focus = !inCanvasChrome(event.target);
       sendReading(false);
     });
     document.addEventListener('focusout', function () {
       setTimeout(function () {
-        reading.focus = pageFocused();
+        reading.focus = pageFocused() && !inCanvasChrome(document.activeElement);
         sendReading(false);
       }, 0);
     });
@@ -1758,10 +1768,16 @@
       reading.focus = false;
       sendReading(false);
     });
-    document.addEventListener('wheel', signOfReading, {passive: true, capture: true});
-    document.addEventListener('pointerdown', function () {
+    document.addEventListener('wheel', function (event) {
+      if (!canvas || overBoard(event)) {
+        signOfReading();
+      }
+    }, {passive: true, capture: true});
+    document.addEventListener('pointerdown', function (event) {
       html.classList.remove('keys');           // a press: no keyboard focus ring until the next key
-      signOfReading();
+      if (!canvas || overBoard(event)) {
+        signOfReading();
+      }
     }, {passive: true, capture: true});
   }
 
@@ -2393,6 +2409,8 @@
     barParts.waitsWords.textContent = message.waits + WORDS.waitsCount;
     barParts.pinned.textContent = message.pinned ? WORDS.pinned + ' ' + message.pinned : WORDS.pinned;
     barPinned = message.pinned;
+    barFrames = message.frames;
+    syncCanvasBoard();
     if (barPinned === 0 && filter === 'pinned') {
       filter = 'all';                          // nothing pinned any more: the whole board again
     }
@@ -2407,6 +2425,8 @@
     }
     var html = document.documentElement;
     html.classList.remove('desk-in');
+    deskOn = message.state === 'enter';
+    syncCanvasBoard();                           // the canvas: the board's box shows, or is away (folded, empty)
     if (message.state === 'enter' && K > 0) {    // (motion off: there at once, no entrance to drop)
       void html.getBoundingClientRect();         // the fade and slide start again (dropped once over: entranceOver)
       html.classList.add('desk-in');
@@ -2498,8 +2518,26 @@
       return true;
     }
     var inStrip = !!stripParts && stripParts.nav.contains(document.activeElement);
+    var inControls = inCanvasChrome(document.activeElement);
     var part = message.part;
-    if (part === 'next') {
+    if (canvas) {                              // the canvas: the board, its strip, the corner buttons, the ask line
+      if (part === 'next') {
+        part = inControls ? 'ask' : (inStrip ? 'controls' : 'strip');
+      } else if (part === 'prev') {
+        part = inControls ? 'strip' : (inStrip ? 'board' : 'ask');
+      }
+      if (part === 'strip' && !focusStrip()) {
+        part = message.part === 'prev' ? 'board' : 'controls';
+      }
+      if (part === 'board' && !focusBoard()) {
+        part = message.part === 'prev' ? 'ask' : 'controls';
+      }
+      if (part === 'controls' && !focusControls()) {
+        part = 'ask';
+      }
+    } else if (part === 'controls') {
+      part = 'ask';                            // no canvas: nothing of it to take the keyboard
+    } else if (part === 'next') {
       part = inStrip ? 'ask' : 'strip';
     } else if (part === 'prev') {
       part = inStrip ? 'board' : 'conversation';
@@ -2609,8 +2647,10 @@
         endBig();
       }
       big = {id: message.id, rec: rec, card: null, state: 'wait', box: box};
-      measureWidth(box.w);                     // the board's own width, as it was before the view went wide (a resize
-      placeBig();                              // that came first measured the wide view)
+      if (!canvas) {
+        measureWidth(box.w);                   // the board's own width, as it was before the view went wide (a resize
+      }                                        // that came first measured the wide view)
+      placeBig();
       return true;
     }
     if (!onlyKeys(message, ['type', 'state', 'id']) || state !== 'close' || typeof message.id !== 'string'
@@ -2622,6 +2662,9 @@
   };
 
   function isWide() {                          // the view is as wide as the app made it: the board's box ends at its edge
+    if (canvas) {
+      return !!big && big.state !== 'shut';    // the canvas: the view is the whole window from the start
+    }
     return !!big && big.box.x > 0 && Math.abs(window.innerWidth - (big.box.x + big.box.w)) <= 2;
   }
 
@@ -2681,13 +2724,13 @@
   function placeBig() {                        // on each big message and resize: the board keeps its own box
     var body = document.body;
     var wide = isWide();
-    if (wide) {
+    if (wide && !canvas) {
       body.style.setProperty('--bx', big.box.x + 'px');
       body.style.setProperty('--by', big.box.y + 'px');
       body.style.setProperty('--bw', big.box.w + 'px');
       body.style.setProperty('--bh', big.box.h + 'px');
     }
-    body.classList.toggle('wide', wide);
+    body.classList.toggle('wide', wide && !canvas);   // (the canvas: the board's box is its own already)
     if (big && big.card && big.card.isConnected) {
       fitBig(big.card, big.rec);               // the card is the view's size: laid out for it again
     }
@@ -2838,10 +2881,11 @@
       if (K === 0 || !card.animate || from.width < 1 || from.height < 1) {
         return;                                // motion off: there at once
       }
-      var width = window.innerWidth, height = window.innerHeight;
+      var room = card.getBoundingClientRect();
+      var width = room.width || window.innerWidth, height = room.height || window.innerHeight;
       card.animate([
-        {transform: 'translate(' + from.left + 'px, ' + from.top + 'px) scale(' + (from.width / width) + ', '
-          + (from.height / height) + ')', opacity: 0.35},
+        {transform: 'translate(' + (from.left - room.left) + 'px, ' + (from.top - room.top) + 'px) scale('
+          + (from.width / width) + ', ' + (from.height / height) + ')', opacity: 0.35},
         {opacity: 1, offset: 0.4},
         {transform: 'none', opacity: 1}
       ], {duration: SCALE_MS * K, easing: easeOut});
@@ -2890,12 +2934,13 @@
       return;
     }
     var to = rec.el.getBoundingClientRect();
-    var width = window.innerWidth, height = window.innerHeight;
+    var room = card.getBoundingClientRect();
+    var width = room.width || window.innerWidth, height = room.height || window.innerHeight;
     after(card.animate([
       {transform: 'none', opacity: 1},
       {opacity: 1, offset: 0.6},
-      {transform: 'translate(' + to.left + 'px, ' + to.top + 'px) scale(' + (to.width / width) + ', '
-        + (to.height / height) + ')', opacity: 0}
+      {transform: 'translate(' + (to.left - room.left) + 'px, ' + (to.top - room.top) + 'px) scale('
+        + (to.width / width) + ', ' + (to.height / height) + ')', opacity: 0}
     ], {duration: UNSCALE_MS * K, easing: easeOut, fill: 'forwards'}), done);
   }
 
@@ -2912,6 +2957,1092 @@
     document.body.classList.remove('dim');
     underBig(false);
     big = null;
+  }
+
+  // ---- the canvas (PLAN-canvas part 1): Home is this page - the orb in three forms and the corners' controls --------
+  // The app sends two kinds: "orb" (a state word, a form, two modifiers, quiet hours' dim and two levels) and "canvas"
+  // (the corners' words, a count and which of this page's own buttons show). Every element is made here, once, at the
+  // first of them; every label is this page's own (CANVAS_WORDS), and a press posts "go" with a word of the list
+  // Python accepts (board.protocol.GO_WORDS) - or the board's own "clear" for Clear view. The orb is one 2D canvas
+  // drawn here each frame (below: why, and how); its moves between forms are springs and a curve - the turn a
+  // little past and back, the rings clicking shut, the curved trip with its trail and bounce. Calm: x1.6 and no
+  // overshoot; off: cuts and a short fade, and nothing turns.
+
+  var ORB_STATES = ['idle', 'listening', 'thinking', 'speaking', 'needs', 'waiting'];
+  var ORB_FORMS = ['rings', 'badge', 'corner'];
+  var CANVAS_TONES = ['holo', 'amber', 'steel'];
+  var CANVAS_BUTTONS = ['history', 'board', 'briefing', 'approvals', 'followups', 'meetings', 'agents', 'live',
+                        'memory', 'settings', 'desktop', 'minimize', 'maximize', 'close', 'mute', 'day'];
+  var CANVAS_CAPS = {clock: 40, word: 40, hold: 24, rec: 40, wake: 24, approvals: 999, level: 100};
+  var CANVAS_WORDS = {
+    name: 'JARVIS', wordmark: 'J.A.R.V.I.S.', history: 'History', clear: 'Clear view', board: 'Show board',
+    briefing: 'Briefing', approvals: 'Approvals', followups: 'Follow-ups', meetings: 'Meetings', agents: 'Agents',
+    live: 'Live', memory: 'Memory', settings: 'Settings', desktop: 'Desktop', mute: 'Mute', unmute: 'Unmute',
+    undo: 'Undo', stop: 'Stop', level: 'Lvl ', db: ' dB', micIdle: 'Mic idle',
+    orb: 'Jarvis', minimize: 'Minimise the window', maximize: 'Maximise or restore the window', close: 'Close',
+    clearAll: 'Clear view: take away every unpinned frame', boardBack: 'Show the board again',
+    desktopSwitch: 'Jarvis on your desktop', day: 'Today and deadlines', briefingNew: 'Briefing, ready',
+    approvalsWait: ' waiting'
+  };
+  // The screens' buttons, left to right (the mock's order; the others take their place only while they can work).
+  var SCREEN_BUTTONS = ['briefing', 'approvals', 'followups', 'meetings', 'agents', 'live', 'memory', 'settings'];
+  var canvas = null;                           // the canvas's elements and state, made at the first orb / canvas message
+  var deskOn = false;                          // the board is on the canvas (desk: enter) or away (leave, folded)
+  var barFrames = 0;                           // the bar's count of frames (Clear view shows while there are some)
+
+  function clamp(value, low, high) {
+    return Math.max(low, Math.min(high, value));
+  }
+
+  function canvasButton(word, label, cls, press) {
+    var node = button('c-btn' + (cls ? ' ' + cls : ''), '', press || function () { post('go', {to: word}); });
+    if (label) {
+      node.textContent = label;
+    }
+    node.hidden = true;                        // shown only while the app says pressing it works
+    return node;
+  }
+
+  function iconButton(word, icon, label) {
+    var node = canvasButton(word, '', 'icon quiet');
+    node.setAttribute('aria-label', label);
+    node.appendChild(glyph(icon, ''));
+    return node;
+  }
+
+  // ---- the orb: ONE 2D canvas, drawn by this page (PLAN-canvas part 1) ---------------------------------------------
+  // The web engine runs without a GPU (Jarvis's own flags), so a stack of glowing layers turned in 3D is composited
+  // on the processor - measured at about 9 frames a second at 1920 x 1080. The orb is therefore drawn here, each
+  // frame, as what it is: rings in space on one lit axis. Each ring is a circle in its own plane; the pose (a 3 x 3
+  // rotation) gives the plane, the ring's depth along the axis its place and its size (the mock's 1200 px
+  // perspective), and the canvas's transform turns the circle into the ellipse the owner sees - so arcs, ticks and
+  // dashes keep their places as the ring spins, and a stroke thins where it is seen edge on. A glow is the stroke
+  // drawn again, wider and fainter, under itself. Everything is numbers: the model below (ORB), eased each frame.
+
+  var POSE_Z = -15, POSE_Y = 57;               // the rings' pose (the mock's rotateZ(-15deg) rotateY(57deg))
+  var PERSPECTIVE = 1200;                      // px, as the mock's stage
+  var STAGE = 640, REACH_X = 720, REACH_Y = 620;   // the mock's stage; the canvas's own box around the orb's centre
+  var CORNER_SCALE = 0.34, CORNER_INSET = 112, TRAIL = 3, METER_BARS = 8;
+  var TRIP_MS = 900, INTRO_MS = 900, CUT_FADE_MS = 140, CLICK_MS = 170;
+  // The rings, back to front along the axis: its radius (the mock's ring, to the middle of its line), its depth,
+  // its line, how far its glow reaches and how strong it is, its colour key, its arcs (degrees, 0 at 3 o'clock,
+  // clockwise) and its own turn (degrees a second). ``halo`` (the two whole rings): the glow as [px from the line,
+  // strength] stops - one smooth fill in the ring's own plane, where the mock has a blurred shadow.
+  var RINGS = [
+    {name: 'far', r: 214, z: -190, w: 1.5, glow: 0, power: 0, key: 'hi', alpha: 0.55, dash: [4, 4], turn: 0},
+    {name: 'need', r: 214, z: -190, w: 3.5, glow: 16, power: 0.9, key: 'amber', arcs: [[-150, -30]], turn: 138},
+    {name: 'ticks', r: 178, z: -150, w: 2.4, glow: 0, power: 0, key: 'tick', ticks: 72, turn: 9},
+    {name: 'arc', r: 163.5, z: -60, w: 3, glow: 14, power: 0.5, key: 'c', arcs: [[-135, -45]], turn: 51.4},
+    {name: 'main', r: 131, z: 0, w: 8, glow: 34, power: 0.85, key: 'c', turn: 0,
+     halo: [[-34, 0], [-26, 0.05], [-18, 0.16], [-10, 0.36], [-4, 0.62], [4, 0.74], [10, 0.52], [19, 0.28],
+            [29, 0.13], [39, 0.05], [50, 0]]},
+    {name: 'inner', r: 97, z: 0, w: 2, glow: 16, power: 0.8, key: 'white', turn: 0, haloKey: 'hi',
+     halo: [[-15, 0], [-9, 0.12], [-4, 0.34], [-1, 0.6], [1, 0.72], [5, 0.42], [11, 0.16], [19, 0]]},
+    {name: 'front', r: 111.5, z: 130, w: 3, glow: 14, power: 0.75, key: 'white', haloKey: 'hi', arcs: [[135, 405]],
+     turn: 32.7},
+    {name: 'front2', r: 149.2, z: 190, w: 1.5, glow: 10, power: 0.7, key: 'hi', arcs: [[-135, -45], [45, 135]],
+     turn: -60}
+  ];
+  // How fast each ring turns in each state, as a rate of its own turn; thinking: against each other, fast.
+  var RATES = {
+    idle: {ticks: 1, arc: 1, front: 1, front2: 1}, listening: {ticks: 0.5, arc: 0.55, front: 0.6, front2: 0.6},
+    thinking: {ticks: -11, arc: 3.4, front: -4.5, front2: 3}, speaking: {ticks: 1.4, arc: 1.5, front: 1.3, front2: 1.4},
+    needs: {ticks: 0.8, arc: 0.8, front: 0.8, front2: 0.8}, waiting: {ticks: 0.45, arc: 0.4, front: 0.4, front2: 0.4}
+  };
+  var LEANS = {listening: [7, -25], thinking: [-5, 7]};      // the lean (degrees about x, about y) a state adds
+  var INKS = {                                 // Jarvis's cyan as the mock draws it; the offline voice's steel
+    live: {c: [53, 211, 240], hi: [143, 235, 255], tick: [191, 244, 255], white: [242, 253, 255], amber: [245, 177, 74]},
+    steel: {c: [143, 169, 179], hi: [180, 198, 204], tick: [195, 210, 214], white: [226, 234, 237], amber: [245, 177, 74]}
+  };
+  var ORB = null;                              // the model (made with the canvas)
+
+  function rgba(colour, alpha) {
+    return 'rgba(' + colour[0] + ',' + colour[1] + ',' + colour[2] + ',' + Math.max(0, Math.min(1, alpha)).toFixed(3) + ')';
+  }
+
+  function makeOrb() {
+    var orb = make('div', '');
+    orb.id = 'orb';
+    orb.setAttribute('role', 'img');
+    orb.setAttribute('aria-label', CANVAS_WORDS.orb);
+    var pic = document.createElement('canvas');
+    pic.className = 'o-pic';
+    pic.setAttribute('aria-hidden', 'true');
+    orb.appendChild(pic);
+    ORB = {
+      state: 'idle', muted: false, offline: false, dim: false, away: false, form: '',
+      lvl: 0, lvlTo: 0, voice: 0, voiceTo: 0,
+      flat: 0, flatV: 0, flatTo: 0,            // 0: the rings' pose .. 1: facing (a spring: lively turns a little past)
+      shut: 0, shutV: 0, shutTo: 0,            // 0: each ring at its depth .. 1: all in one plane (they click shut)
+      leanX: 0, leanXV: 0, leanY: 0, leanYV: 0,
+      spin: {far: 0, need: 0, ticks: 0, arc: 0, main: 0, inner: 0, front: 0, front2: 0},
+      rate: {ticks: 1, arc: 1, front: 1, front2: 1},
+      x: 0, y: 0, s: 1,                        // where its centre is (from the resting place) and its size
+      trip: null,                              // the way to or from the corner: {from, to, began, ms, lively}
+      ghosts: [],                              // the trail: [{x, y, s, a}] while it travels
+      click: -1, born: -1, clock: 0, last: 0, frame: 0, raf: 0, parity: 0,
+      q: 1, slow: 0, timed: 0,                 // the drawing's own resolution (lowered when frames come late)
+      box: null, fit: 1, cut: null, sprites: {}
+    };
+    return {orb: orb, pic: pic, ctx: pic.getContext('2d')};
+  }
+
+  // ---- where it is ------------------------------------------------------------------------------------------------
+
+  function orbPlaces() {                       // the orb's centre, from its resting place: the centre, the corner
+    var w = window.innerWidth, h = window.innerHeight;
+    var fit = clamp(Math.min((h * 0.71) / STAGE, (w * 0.62) / STAGE), 0.5, 1.15);
+    return {
+      fit: fit, rest: {x: w / 2, y: h * 0.478},
+      centre: {x: 0, y: 0, s: 1},
+      corner: {x: (w - CORNER_INSET) - w / 2, y: (h - CORNER_INSET) - h * 0.478,
+               s: CORNER_SCALE * clamp(fit, 0.8, 1) / fit}
+    };
+  }
+
+  function orbPlace(form) {
+    var places = orbPlaces();
+    return form === 'corner' ? places.corner : places.centre;
+  }
+
+  function boxAround(points, fit) {            // the canvas's own box in the page: around every place the orb is drawn at
+    var left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+    points.forEach(function (point) {
+      var wide = REACH_X * fit * point.s / 2 + 2, tall = REACH_Y * fit * point.s / 2 + 2;
+      left = Math.min(left, point.x - wide);
+      top = Math.min(top, point.y - tall);
+      right = Math.max(right, point.x + wide);
+      bottom = Math.max(bottom, point.y + tall);
+    });
+    return {x: Math.floor(left), y: Math.floor(top), w: Math.ceil(right - left), h: Math.ceil(bottom - top)};
+  }
+
+  function setOrbBox(box) {                    // the canvas placed and sized (its pixels at the drawing's resolution)
+    var c = canvas, o = ORB;
+    var same = o.box && o.box.x === box.x && o.box.y === box.y && o.box.w === box.w && o.box.h === box.h
+      && o.box.q === o.q;
+    if (same) {
+      return;
+    }
+    o.box = {x: box.x, y: box.y, w: box.w, h: box.h, q: o.q};
+    c.pic.style.left = box.x + 'px';
+    c.pic.style.top = box.y + 'px';
+    c.pic.style.width = box.w + 'px';
+    c.pic.style.height = box.h + 'px';
+    c.pic.width = Math.max(1, Math.round(box.w * o.q));
+    c.pic.height = Math.max(1, Math.round(box.h * o.q));
+  }
+
+  function placeCanvas() {                     // on a resize, a new form, a new row of buttons
+    var c = canvas;
+    if (!c) {
+      return;
+    }
+    // The board's box starts under the buttons' rows (two at a narrow window).
+    var top = Math.max(64, Math.ceil(c.tr.getBoundingClientRect().bottom) + 14);
+    document.documentElement.style.setProperty('--board-top', top + 'px');
+    var places = orbPlaces(), o = ORB;
+    if (o.fit !== places.fit) {
+      o.fit = places.fit;
+      o.sprites = {};                          // the bloom is painted again at the new size
+    }
+    if (!o.trip) {
+      var place = orbPlace(o.form);
+      o.x = place.x;
+      o.y = place.y;
+      o.s = place.s;
+      setOrbBox(boxAround([{x: places.rest.x + o.x, y: places.rest.y + o.y, s: o.s}], o.fit));
+    }
+    wake();
+  }
+
+  // ---- its moves ----------------------------------------------------------------------------------------------------
+
+  function easeOutCubic(t) {
+    return 1 - Math.pow(1 - t, 3);
+  }
+
+  function easeOutBack(t) {                    // past its end by a little, then back
+    var c1 = 1.15, c3 = c1 + 1;
+    return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+  }
+
+  function tripAt(trip, own) {                 // where the orb is on its way, ``own`` 0..1 of it: a curve (out to the
+    var places = orbPlaces();                  // side first, then down - back the same way); lively: a little past its
+    var ctrl = {x: places.corner.x * 0.94, y: places.centre.y - 26};    // end and back, its size settling with a bounce
+    var from = trip.from, to = trip.to;
+    var u = trip.lively ? easeOutBack(own) : easeOutCubic(own);
+    var s = from.s + (to.s - from.s) * easeOutCubic(clamp(own / 0.8, 0, 1));
+    if (trip.lively && own > 0.8) {
+      var tail = (own - 0.8) / 0.2;
+      s *= 1 + 0.085 * Math.sin(2 * Math.PI * tail) * (1 - tail);
+    }
+    return {x: (1 - u) * (1 - u) * from.x + 2 * (1 - u) * u * ctrl.x + u * u * to.x,
+            y: (1 - u) * (1 - u) * from.y + 2 * (1 - u) * u * ctrl.y + u * u * to.y, s: s};
+  }
+
+  function setForm(form) {
+    var c = canvas, o = ORB, was = o.form;
+    if (form === was) {
+      return;
+    }
+    var from = {x: o.x, y: o.y, s: o.s}, to = orbPlace(form);
+    var flat = form !== 'rings';
+    o.form = c.form = form;
+    o.flatTo = o.shutTo = flat ? 1 : 0;
+    c.orb.classList.toggle('flat', flat);
+    c.orb.classList.toggle('cornered', form === 'corner');
+    var now = performance.now();
+    if (!was) {                                // the page came up: the orb assembles, once (off: it is there)
+      o.flat = o.flatTo;
+      o.shut = K === 0 ? o.shutTo : 1;
+      o.born = K === 0 ? -1 : now;
+      placeCanvas();
+      return;
+    }
+    if (K === 0) {                             // off: a cut and a short fade
+      o.flat = o.flatTo;
+      o.shut = o.shutTo;
+      o.flatV = o.shutV = 0;
+      if (o.trip) {
+        o.q = o.trip.q;
+      }
+      o.trip = null;
+      o.ghosts = [];
+      placeCanvas();
+      if (c.pic.animate) {
+        c.pic.animate([{opacity: 0.2}, {opacity: 1}], {duration: CUT_FADE_MS});
+      }
+      return;
+    }
+    if ((was === 'corner') !== (form === 'corner')) {
+      var places = orbPlaces();
+      o.trip = {from: from, to: to, began: now, ms: TRIP_MS * K, lively: motion === 'lively', q: o.q};
+      o.q = Math.min(o.q, 0.75);               // its canvas is large and it is moving: drawn a little coarser
+      setOrbBox(boxAround([{x: places.rest.x + from.x, y: places.rest.y + from.y, s: Math.max(from.s, 1.1 * to.s)},
+                           {x: places.rest.x + to.x, y: places.rest.y + to.y, s: Math.max(to.s, from.s * 0.4) * 1.12},
+                           {x: places.rest.x + places.corner.x * 0.94, y: places.rest.y - 26, s: 0.7}], o.fit));
+    }
+    wake();
+  }
+
+  function spring(value, speed, target, stiffness, damping, dt) {
+    var force = (target - value) * stiffness - speed * damping;
+    speed += force * dt;
+    return [value + speed * dt, speed];
+  }
+
+  function stepOrb(now, dt) {                  // the model, ``dt`` seconds on
+    var o = ORB, lively = motion === 'lively';
+    var slow = K > 1 ? K : 1;                  // calm: 1.6 times slower, and no overshoot
+    o.clock += dt / slow;
+    // the turn to face (and back): a spring - lively turns a little past and settles; calm does not
+    var stiff = 150 / (slow * slow), damp = 2 * Math.sqrt(stiff) * (lively ? 0.52 : 1);
+    var turned = spring(o.flat, o.flatV, o.flatTo, stiff, damp, dt);
+    o.flat = turned[0];
+    o.flatV = turned[1];
+    // the rings along the axis: they close late and fast, a touch through, and click shut; they spring open
+    var closing = o.shutTo === 1, due = closing ? o.flat > 0.45 : true;
+    if (due) {
+      var hard = (closing ? 420 : 170) / (slow * slow), ease = 2 * Math.sqrt(hard) * (lively ? 0.46 : 1);
+      var before = o.shut;
+      var shutting = spring(o.shut, o.shutV, o.shutTo, hard, ease, dt);
+      o.shut = shutting[0];
+      o.shutV = shutting[1];
+      if (closing && before < 1 && o.shut >= 1 && lively && o.click < 0) {
+        o.click = now;                         // the click: one small beat of the whole badge
+      }
+    }
+    if (!closing) {
+      o.click = -1;
+    }
+    // the lean a state adds
+    var lean = LEANS[o.state] || [0, 0], hold = 60 / (slow * slow), give = 2 * Math.sqrt(hold) * (lively ? 0.6 : 1);
+    var leanX = spring(o.leanX, o.leanXV, o.flatTo ? 0 : lean[0], hold, give, dt);
+    var leanY = spring(o.leanY, o.leanYV, o.flatTo ? 0 : lean[1], hold, give, dt);
+    o.leanX = leanX[0];
+    o.leanXV = leanX[1];
+    o.leanY = leanY[0];
+    o.leanYV = leanY[1];
+    // each ring's own turn, at its state's rate (eased, so a change of state never jumps)
+    var rates = o.muted ? RATES.waiting : (RATES[o.state] || RATES.idle);
+    var blend = 1 - Math.exp(-dt / 0.22);
+    RINGS.forEach(function (ring) {
+      if (!ring.turn) {
+        return;
+      }
+      var want = ring.name === 'need' ? 1 : (rates[ring.name] || 1);
+      var rate = o.rate[ring.name] === undefined ? want : o.rate[ring.name];
+      rate += (want - rate) * blend;
+      o.rate[ring.name] = rate;
+      o.spin[ring.name] = (o.spin[ring.name] + ring.turn * rate * dt / slow) % 360;
+    });
+    // the levels: the microphone's and his voice's, eased a little
+    var quick = 1 - Math.exp(-dt / 0.07);
+    o.lvl += (o.lvlTo - o.lvl) * quick;
+    o.voice += (o.voiceTo - o.voice) * quick;
+    // the trip to the corner (or back)
+    if (o.trip) {
+      var own = clamp((now - o.trip.began) / o.trip.ms, 0, 1);
+      var at = tripAt(o.trip, own);
+      o.x = at.x;
+      o.y = at.y;
+      o.s = at.s;
+      o.ghosts = [];
+      if (o.trip.lively) {
+        for (var i = 1; i <= TRAIL; i += 1) {
+          var lag = 0.07 * i, behind = clamp((own - lag) / (1 - lag), 0, 1);
+          var ghost = tripAt(o.trip, behind);
+          ghost.a = 0.4 * Math.sin(Math.PI * own) * (1 - lag * 3);
+          o.ghosts.push(ghost);
+        }
+      }
+      if (own >= 1) {
+        o.q = o.trip.q;
+        o.trip = null;
+        o.ghosts = [];
+        placeCanvas();
+      }
+    }
+  }
+
+  function orbBusy(now) {                      // something of it is lively: every frame is drawn (a move between
+    var o = ORB;                               // forms, listening, thinking, speaking); at rest every other frame is
+    return !!o.trip || (!o.muted && (o.state === 'thinking' || o.state === 'listening' || o.state === 'speaking'))
+      || Math.abs(o.flat - o.flatTo) > 0.002 || Math.abs(o.flatV) > 0.01
+      || Math.abs(o.shut - o.shutTo) > 0.002 || Math.abs(o.shutV) > 0.01
+      || Math.abs(o.leanXV) > 0.5 || Math.abs(o.leanYV) > 0.5
+      || (o.born >= 0 && now - o.born < INTRO_MS * K) || (o.click >= 0 && now - o.click < CLICK_MS * 2);
+  }
+
+  // ---- the drawing ----------------------------------------------------------------------------------------------------
+
+  function matrix(rx, ry, rz) {                // Rz * Ry * Rx (degrees), as CSS's rotateZ() rotateY() rotateX()
+    var a = rx * Math.PI / 180, b = ry * Math.PI / 180, g = rz * Math.PI / 180;
+    var ca = Math.cos(a), sa = Math.sin(a), cb = Math.cos(b), sb = Math.sin(b), cg = Math.cos(g), sg = Math.sin(g);
+    return [cg * cb, cg * sb * sa - sg * ca, cg * sb * ca + sg * sa,
+            sg * cb, sg * sb * sa + cg * ca, sg * sb * ca - cg * sa,
+            -sb, cb * sa, cb * ca];
+  }
+
+  function times(m, n) {
+    var out = [];
+    for (var row = 0; row < 3; row += 1) {
+      for (var col = 0; col < 3; col += 1) {
+        out.push(m[row * 3] * n[col] + m[row * 3 + 1] * n[3 + col] + m[row * 3 + 2] * n[6 + col]);
+      }
+    }
+    return out;
+  }
+
+  function orbPose() {                         // the whole pose now: the rings' own, the state's lean, the slow cone
+    var o = ORB, open = clamp(1 - o.flat, -0.4, 1.2);
+    var cone = (K === 0 || o.state === 'listening') ? 0 : clamp(1 - o.flat, 0, 1);
+    var turn = 2 * Math.PI * o.clock / 14;
+    var pose = matrix(0, POSE_Y * open, POSE_Z * open);
+    var lean = matrix(o.leanX, o.leanY, 0);
+    var sweep = matrix(4.5 * Math.sin(turn) * cone, 5.5 * (1 - Math.cos(turn)) * cone, -3 * (1 - Math.cos(turn)) * cone);
+    return times(times(pose, lean), sweep);
+  }
+
+  function bloomSprite(key, size) {            // the soft light behind it, painted once for its size and colour
+    var o = ORB, id = key + ':' + size;
+    if (o.sprites[id]) {
+      return o.sprites[id];
+    }
+    var sprite = document.createElement('canvas');
+    sprite.width = sprite.height = size;
+    var paint = sprite.getContext('2d'), half = size / 2;
+    var inks = INKS[o.offline ? 'steel' : 'live'];
+    // (the mock's gradient ends at 68 % of its 280 px: the sprite is only as large as what it lights)
+    var light = paint.createRadialGradient(half, half, 0, half, half, half);
+    light.addColorStop(0, rgba(key === 'amber' ? inks.amber : inks.c, key === 'amber' ? 0.2 : 0.30));
+    light.addColorStop(0.62, rgba(inks.c, 0.09));
+    light.addColorStop(1, rgba(inks.c, 0));
+    paint.fillStyle = light;
+    paint.fillRect(0, 0, size, size);
+    o.sprites[id] = sprite;
+    return sprite;
+  }
+
+  function haloFill(ctx, ring, inks, alpha, lift) {
+    // A whole ring's glow: one fill of the band around its line with a radial gradient (smooth, as a blurred shadow
+    // is), in the ring's own plane - so it is seen at the ring's angle. Made once for each colour.
+    var id = ORB.offline ? 'steel' : 'live';
+    ring.fills = ring.fills || {};
+    var first = ring.halo[0][0], last = ring.halo[ring.halo.length - 1][0];
+    var inner = ring.r + first, outer = ring.r + last;
+    if (!ring.fills[id]) {
+      var colour = inks[ring.haloKey || ring.key];
+      var fill = ctx.createRadialGradient(0, 0, inner, 0, 0, outer);
+      ring.halo.forEach(function (stop) {
+        fill.addColorStop((stop[0] - first) / (last - first), rgba(colour, stop[1]));
+      });
+      var band = new Path2D();
+      band.arc(0, 0, outer, 0, 2 * Math.PI);
+      band.arc(0, 0, inner, 0, 2 * Math.PI, true);
+      ring.fills[id] = {fill: fill, band: band};
+    }
+    ctx.globalAlpha = clamp(alpha * lift, 0, 1);
+    ctx.fillStyle = ring.fills[id].fill;
+    ctx.fill(ring.fills[id].band, 'evenodd');
+    ctx.globalAlpha = 1;
+  }
+
+  function nameSprite(size, exact) {           // JARVIS in the display face with its glow, painted once for its size
+    // (its exact size while the badge rests - a plain copy then - else the nearest tenth, drawn through the pose)
+    var o = ORB, px = exact ? Math.max(0.1, size) : Math.max(0.2, Math.round(size * 10) / 10);
+    var id = 'name:' + px.toFixed(4) + (o.offline ? ':steel' : '');
+    if (Object.keys(o.sprites).length > 12) {
+      o.sprites = {};                          // (sizes on the way of a trip: never kept for good)
+    }
+    if (o.sprites[id]) {
+      return o.sprites[id];
+    }
+    var inks = INKS[o.offline ? 'steel' : 'live'];
+    var pic = document.createElement('canvas');
+    pic.width = Math.ceil(260 * px);
+    pic.height = Math.ceil(96 * px);
+    var paint = pic.getContext('2d');
+    o.font = o.font || (token('--font-display') || 'sans-serif');
+    paint.font = '600 ' + (37 * px).toFixed(2) + 'px ' + o.font;
+    paint.textAlign = 'center';
+    paint.textBaseline = 'middle';
+    try {
+      paint.letterSpacing = (3.3 * px).toFixed(2) + 'px';
+    } catch (ignored) {
+      // an engine without it: the name with its own spacing
+    }
+    paint.fillStyle = '#fff';
+    [[34 * px, 0.8, inks.c], [14 * px, 0.95, inks.hi]].forEach(function (glow) {   // the mock's two shadows
+      paint.shadowColor = rgba(glow[2], glow[1]);
+      paint.shadowBlur = glow[0];
+      paint.fillText(CANVAS_WORDS.name, pic.width / 2 + 1.6 * px, pic.height / 2 + px);
+    });
+    paint.shadowBlur = 0;
+    paint.shadowColor = 'rgba(0,0,0,0)';
+    paint.fillText(CANVAS_WORDS.name, pic.width / 2 + 1.6 * px, pic.height / 2 + px);
+    o.sprites[id] = {pic: pic, px: px};
+    return o.sprites[id];
+  }
+
+  function glowStroke(ctx, path, ring, colour, alpha, lift, glow) {
+    // An arc's line, and its glow under it: ONE fill of the band around the line (a sector of a ring) with a radial
+    // gradient, and a soft blob at each of its ends - wide strokes laid over each other cost several times more.
+    if (ring.glow) {
+      var id = ORB.offline ? 'steel' : 'live', reach = ring.glow * 1.15, rad = Math.PI / 180;
+      ring.fills = ring.fills || {};
+      if (!ring.fills[id]) {
+        var ink = glow || colour, peak = 0.34 * ring.power;
+        var fill = ctx.createRadialGradient(0, 0, ring.r - reach, 0, 0, ring.r + reach);
+        [[0, 0], [0.22, 0.1], [0.38, 0.42], [0.5, 1], [0.62, 0.42], [0.78, 0.1], [1, 0]].forEach(function (stop) {
+          fill.addColorStop(stop[0], rgba(ink, stop[1] * peak));
+        });
+        var band = new Path2D(), ends = [];
+        (ring.arcs || [[0, 360]]).forEach(function (arc) {
+          band.moveTo(Math.cos(arc[0] * rad) * (ring.r + reach), Math.sin(arc[0] * rad) * (ring.r + reach));
+          band.arc(0, 0, ring.r + reach, arc[0] * rad, arc[1] * rad);
+          band.arc(0, 0, ring.r - reach, arc[1] * rad, arc[0] * rad, true);
+          band.closePath();
+          ends.push([Math.cos(arc[0] * rad) * ring.r, Math.sin(arc[0] * rad) * ring.r],
+                    [Math.cos(arc[1] * rad) * ring.r, Math.sin(arc[1] * rad) * ring.r]);
+        });
+        var blob = ctx.createRadialGradient(0, 0, 0, 0, 0, reach);
+        blob.addColorStop(0, rgba(ink, 0.55 * peak));
+        blob.addColorStop(0.45, rgba(ink, 0.2 * peak));
+        blob.addColorStop(1, rgba(ink, 0));
+        ring.fills[id] = {fill: fill, band: band, ends: ends, blob: blob, reach: reach};
+      }
+      var made = ring.fills[id];
+      ctx.globalAlpha = clamp(alpha * lift, 0, 1);
+      ctx.fillStyle = made.fill;
+      ctx.fill(made.band);
+      ctx.fillStyle = made.blob;
+      made.ends.forEach(function (end) {
+        ctx.translate(end[0], end[1]);
+        ctx.beginPath();
+        ctx.arc(0, 0, made.reach, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.translate(-end[0], -end[1]);
+      });
+      ctx.globalAlpha = 1;
+    }
+    ctx.lineWidth = ring.w;
+    ctx.strokeStyle = rgba(colour, (ring.alpha || 1) * alpha);
+    ctx.stroke(path);
+  }
+
+  function ringPath(ring) {                    // a ring's own line, in its own plane (made once)
+    if (ring.path) {
+      return ring.path;
+    }
+    var path = new Path2D(), rad = Math.PI / 180;
+    if (ring.ticks) {
+      for (var i = 0; i < ring.ticks; i += 1) {
+        var angle = 2 * Math.PI * i / ring.ticks;
+        path.moveTo(Math.cos(angle) * (ring.r - 6), Math.sin(angle) * (ring.r - 6));
+        path.lineTo(Math.cos(angle) * (ring.r + 6), Math.sin(angle) * (ring.r + 6));
+      }
+    } else {
+      (ring.arcs || [[0, 360]]).forEach(function (arc) {
+        path.moveTo(Math.cos(arc[0] * rad) * ring.r, Math.sin(arc[0] * rad) * ring.r);
+        path.arc(0, 0, ring.r, arc[0] * rad, arc[1] * rad);
+      });
+    }
+    ring.path = path;
+    return path;
+  }
+
+  function drawOrbAt(ctx, cx, cy, size, now) { // the whole orb, its centre at (cx, cy), ``size`` px a mock px
+    var o = ORB, inks = INKS[o.offline ? 'steel' : 'live'];
+    var m = orbPose(), open = 1 - o.shut;
+    var dimmed = (o.muted ? 0.38 : 1) * (o.dim ? 0.7 : 1);
+    var born = o.born >= 0 ? clamp((now - o.born) / (INTRO_MS * K || 1), 0, 1) : 1;
+    var grown = 0.86 + 0.14 * easeOutCubic(born);
+    var beat = 0;
+    if (o.click >= 0) {
+      var since = (now - o.click) / CLICK_MS;
+      beat = since < 2 ? Math.sin(Math.PI * clamp(since, 0, 1)) * (since < 1 ? 1 : 0) : 0;
+    }
+    var scale = size * grown * (1 + 0.05 * beat);
+    var breath = K === 0 ? 0.5 : 0.5 + 0.5 * Math.sin(2 * Math.PI * o.clock / 2.6);
+    var slowBreath = K === 0 ? 0.5 : 0.5 + 0.5 * Math.sin(2 * Math.PI * o.clock / 5.2);
+    var flatness = clamp(o.flat, 0, 1);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+    // the soft light behind it
+    var bloomSize = Math.max(8, Math.round(382 * size));
+    var bloom = bloomSprite(o.state === 'needs' && !o.muted ? 'amber' : 'c', bloomSize);
+    ctx.globalAlpha = clamp(easeOutCubic(born) * dimmed * (0.72 + 0.2 * slowBreath + 0.3 * beat), 0, 1);
+    ctx.drawImage(bloom, Math.round(cx - bloomSize / 2), Math.round(cy - bloomSize / 2));
+    ctx.globalAlpha = easeOutCubic(born);
+    ctx.lineCap = 'butt';
+    // the axis's own line, and the parts along it, back to front
+    var axisAlpha = clamp(1 - flatness * 1.7, 0, 1) * dimmed;
+    if (o.state === 'thinking' && K > 0 && !o.muted) {     // thinking: the axis flickers
+      var tick = Math.floor(o.clock * 17);
+      axisAlpha *= [1, 1, 0.3, 1, 1, 0.55, 1, 0.2, 0.85, 1, 0.45, 1, 1][tick % 13];
+    }
+    function along(z) {                        // a point on the axis, on the canvas, and its size there
+      var depth = m[8] * z, near = PERSPECTIVE / (PERSPECTIVE - depth * size);
+      return {x: cx + m[2] * z * scale * near, y: cy + m[5] * z * scale * near, near: near};
+    }
+    function axisPiece(from, to) {
+      if (axisAlpha <= 0.01) {
+        return;
+      }
+      var a = along(from), b = along(to);
+      var fade = function (z) { return clamp((380 - Math.abs(z)) / 296, 0, 1); };
+      var mid = function (z) { return Math.abs(z) < 60 ? inks.white : inks.c; };
+      var line = ctx.createLinearGradient(a.x, a.y, b.x, b.y);
+      line.addColorStop(0, rgba(mid(from), fade(from) * axisAlpha));
+      line.addColorStop(1, rgba(mid(to), fade(to) * axisAlpha));
+      ctx.lineWidth = Math.max(1, 1.8 * scale);
+      ctx.strokeStyle = line;
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+    }
+    if (axisAlpha > 0.01) {                    // the axis's glow, once, under everything on it
+      var tail = along(-380), head = along(380);
+      [[20 * scale, 0.07], [10 * scale, 0.15], [4.5 * scale, 0.34]].forEach(function (pass) {
+        var glow = ctx.createLinearGradient(tail.x, tail.y, head.x, head.y);
+        glow.addColorStop(0, rgba(inks.c, 0));
+        glow.addColorStop(0.24, rgba(inks.c, pass[1] * axisAlpha));
+        glow.addColorStop(0.5, rgba(inks.hi, pass[1] * axisAlpha));
+        glow.addColorStop(0.76, rgba(inks.c, pass[1] * axisAlpha));
+        glow.addColorStop(1, rgba(inks.c, 0));
+        ctx.lineWidth = pass[0];
+        ctx.strokeStyle = glow;
+        ctx.beginPath();
+        ctx.moveTo(tail.x, tail.y);
+        ctx.lineTo(head.x, head.y);
+        ctx.stroke();
+      });
+    }
+    function core() {                          // the lit point where the axis meets the main ring
+      if (axisAlpha <= 0.01) {
+        return;
+      }
+      var radius = 78 * scale, light = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+      light.addColorStop(0, rgba([255, 255, 255], axisAlpha));
+      light.addColorStop(0.115, rgba([255, 255, 255], axisAlpha));
+      light.addColorStop(0.17, rgba(inks.hi, 0.9 * axisAlpha));
+      light.addColorStop(0.3, rgba(inks.hi, 0.5 * axisAlpha));
+      light.addColorStop(0.55, rgba(inks.c, 0.2 * axisAlpha));
+      light.addColorStop(1, rgba(inks.c, 0));
+      ctx.fillStyle = light;
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, 0, 2 * Math.PI);
+      ctx.fill();
+    }
+    var reach = -380;
+    RINGS.forEach(function (ring) {
+      var z = ring.z * open * (o.born >= 0 ? easeOutCubic(born) : 1);
+      if (z > reach) {
+        axisPiece(reach, Math.min(z, 380));
+        reach = z;
+      }
+      if (ring.name === 'front') {
+        core();
+      }
+      var alpha = dimmed, lift = 1, grow = 1;
+      if (ring.name === 'need') {
+        alpha = o.state === 'needs' && !o.muted ? dimmed : 0;
+      } else if (ring.name === 'ticks') {
+        if (o.state === 'listening') {         // the tick ring follows the microphone
+          grow = 1 + o.lvl * 0.13;
+          alpha *= 0.55 + 0.45 * o.lvl;
+        } else if (o.state === 'waiting' && K > 0) {
+          alpha *= 0.45 + 0.55 * slowBreath;
+        }
+      } else if (ring.name === 'main') {
+        if (o.state === 'speaking') {          // the main ring pulses with his voice
+          grow = 1 + o.voice * 0.055;
+          lift = 0.75 + 0.85 * o.voice;
+        } else {
+          lift = 1 + 0.5 * breath;               // the breath
+        }
+        lift += 0.5 * beat;
+      }
+      if (alpha <= 0.01) {
+        return;
+      }
+      var centre = along(z), k = scale * centre.near * grow;
+      ctx.setTransform(m[0] * k, m[3] * k, m[1] * k, m[4] * k, centre.x, centre.y);
+      ctx.rotate(o.spin[ring.name] * Math.PI / 180);
+      if (ring.halo) {
+        haloFill(ctx, ring, inks, alpha, ring.name === 'main' ? 0.7 * lift : 1);
+        ctx.lineWidth = ring.w;
+        ctx.strokeStyle = rgba(inks[ring.key], alpha);
+        ctx.stroke(ringPath(ring));
+      } else {
+        ctx.setLineDash(ring.dash || []);
+        glowStroke(ctx, ringPath(ring), ring, inks[ring.key], alpha, lift, ring.haloKey ? inks[ring.haloKey] : null);
+        ctx.setLineDash([]);
+      }
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+    });
+    axisPiece(reach, 380);
+    // the name, in the badge (it turns with it)
+    var named = clamp((o.shut - 0.72) / 0.28, 0, 1) * (o.flatTo ? 1 : clamp(o.flat * 2 - 1, 0, 1)) * (o.muted ? 0.6 : 1)
+      * (o.dim ? 0.7 : 1);
+    if (named > 0.01) {
+      var name = nameSprite(size, !o.trip && o.flat === o.flatTo);
+      var facing = Math.abs(m[0] - 1) < 0.002 && Math.abs(m[4] - 1) < 0.002 && Math.abs(m[1]) < 0.002
+        && Math.abs(scale - size) < 0.002 * size;
+      ctx.globalAlpha = named * easeOutCubic(born);
+      if (facing && name.px === size) {        // facing, at its own size: a plain copy (an image through a transform
+        ctx.drawImage(name.pic, Math.round(cx - name.pic.width / 2), Math.round(cy - name.pic.height / 2));   // costs)
+      } else {
+        var per = 1 / name.px;                 // the sprite's pixels in the badge's own units
+        ctx.setTransform(m[0] * scale * per, m[3] * scale * per, m[1] * scale * per, m[4] * scale * per, cx, cy);
+        ctx.drawImage(name.pic, -name.pic.width / 2, -name.pic.height / 2);
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+      }
+    }
+    // muted: a slash across it
+    if (o.muted) {
+      ctx.globalAlpha = 0.9 * easeOutCubic(born);
+      ctx.setTransform(m[0] * scale, m[3] * scale, m[1] * scale, m[4] * scale, cx, cy);
+      ctx.rotate(-Math.PI / 4);
+      [[10, 0.18], [3, 1]].forEach(function (pass) {
+        ctx.lineWidth = pass[0];
+        ctx.strokeStyle = rgba(inks.white, pass[1]);
+        ctx.beginPath();
+        ctx.moveTo(-180, 0);
+        ctx.lineTo(180, 0);
+        ctx.stroke();
+      });
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawGhost(ctx, cx, cy, size, alpha) {      // a faint copy of the main ring, on the orb's way
+    var inks = INKS[ORB.offline ? 'steel' : 'live'];
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    [[22 * size, 0.2], [6 * size, 0.8]].forEach(function (pass) {
+      ctx.lineWidth = pass[0];
+      ctx.strokeStyle = rgba(inks.c, pass[1] * alpha);
+      ctx.beginPath();
+      ctx.arc(cx, cy, 131 * size, 0, 2 * Math.PI);
+      ctx.stroke();
+    });
+  }
+
+  function drawOrb(now) {
+    var c = canvas, o = ORB, box = o.box;
+    if (!box) {
+      return;
+    }
+    var ctx = c.ctx, places = orbPlaces(), q = o.q;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.clearRect(0, 0, c.pic.width, c.pic.height);
+    var size = o.fit * q;
+    o.ghosts.forEach(function (ghost) {
+      drawGhost(ctx, (places.rest.x + ghost.x - box.x) * q, (places.rest.y + ghost.y - box.y) * q, size * ghost.s, ghost.a);
+    });
+    drawOrbAt(ctx, (places.rest.x + o.x - box.x) * q, (places.rest.y + o.y - box.y) * q, size * o.s, now);
+    o.frame += 1;
+  }
+
+  function tickOrb(now) {                      // one frame: the model a step on, then the drawing
+    var o = ORB;
+    o.raf = -1;                                // in the frame: wake() asks for nothing (the frame itself goes on)
+    if (!canvas || document.hidden) {
+      o.last = 0;
+      o.raf = 0;
+      return;
+    }
+    var dt = o.last ? Math.min(0.05, (now - o.last) / 1000) : 0.016;
+    var gap = o.last ? now - o.last : 16;
+    o.last = now;
+    if (K === 0) {
+      stepOrb(now, 0);
+      o.lvl = o.lvlTo;
+      o.voice = o.voiceTo;
+      drawOrb(now);
+      o.raf = 0;
+      return;                                  // off: drawn when something changes, never in a loop
+    }
+    stepOrb(now, dt);
+    var busy = orbBusy(now);
+    // At rest its moves are slow: every other frame is enough - every sixth while Jarvis's window is not the one the
+    // owner works in (the app says so: "away"); a move or an active state draws every frame.
+    var every = busy ? 1 : (o.away ? 6 : 2);
+    o.parity = (o.parity + 1) % every;
+    if (o.parity === 0) {
+      drawOrb(now);
+    }
+    // Frames that come late for a while (a busy PC, a very large window): the drawing's resolution steps down, once
+    // or twice, so what is lively stays at the screen's own rate (it is a little softer then, never slower).
+    if (busy && !o.trip) {
+      o.timed += 1;
+      o.slow += gap > 21 ? 1 : 0;
+      if (o.timed >= 90) {
+        if (o.slow >= 14 && o.q > 0.6) {
+          o.q = o.q > 0.85 ? 0.8 : 0.64;
+          if (!o.trip) {
+            placeCanvas();
+          }
+        }
+        o.timed = o.slow = 0;
+      }
+    }
+    o.raf = requestAnimationFrame(tickOrb);
+  }
+
+  function wake() {                            // something changed: the next frame is drawn
+    var o = ORB;
+    if (canvas && o && o.raf === 0) {
+      o.raf = requestAnimationFrame(tickOrb);
+    }
+  }
+
+  function orbMotionChanged() {                // the motion level changed: lively, calm (slower, no overshoot), off (still)
+    var o = ORB;
+    if (!o) {
+      return;
+    }
+    if (K === 0) {
+      o.flat = o.flatTo;
+      o.shut = o.shutTo;
+      o.flatV = o.shutV = o.leanXV = o.leanYV = 0;
+      var lean = LEANS[o.state] || [0, 0];
+      o.leanX = o.flatTo ? 0 : lean[0];
+      o.leanY = o.flatTo ? 0 : lean[1];
+      if (o.trip) {
+        o.q = o.trip.q;
+      }
+      o.trip = null;
+      o.ghosts = [];
+      o.born = o.click = -1;
+      placeCanvas();
+    }
+    wake();
+  }
+
+  function orbLook() {                         // the orb as it is now, in numbers (the probes' own word on it)
+    var o = ORB;
+    if (!o) {
+      return null;
+    }
+    var places = orbPlaces(), m = orbPose(), now = performance.now();
+    var round = function (value) { return Math.round(value * 1000) / 1000; };
+    return {
+      state: o.state, form: o.form, muted: o.muted, offline: o.offline, dim: o.dim, away: o.away,
+      flat: round(o.flat), shut: round(o.shut), tilt: round(Math.acos(clamp(m[8], -1, 1)) * 180 / Math.PI),
+      lean: [round(o.leanX), round(o.leanY)], lvl: round(o.lvl), voice: round(o.voice),
+      centre: [round(places.rest.x + o.x), round(places.rest.y + o.y)], size: round(o.fit * o.s),
+      main: round(2 * 131 * o.fit * o.s), travelling: !!o.trip, ghosts: o.ghosts.length,
+      name: round(clamp((o.shut - 0.72) / 0.28, 0, 1) * (o.flatTo ? 1 : clamp(o.flat * 2 - 1, 0, 1))),
+      axis: round(clamp(1 - clamp(o.flat, 0, 1) * 1.7, 0, 1)),
+      lively: !!(o.trip && o.trip.lively), tripMs: o.trip ? o.trip.ms : 0,
+      rate: {ticks: round(o.rate.ticks), arc: round(o.rate.arc), front: round(o.rate.front),
+             front2: round(o.rate.front2)},
+      busy: orbBusy(now), looping: o.raf !== 0, frames: o.frame, q: o.q,
+      box: o.box ? [o.box.x, o.box.y, o.box.w, o.box.h] : null, k: K
+    };
+  }
+
+  function makeCanvas() {                      // once: the canvas layer under the board, its orb and its corners
+    if (canvas) {
+      return canvas;
+    }
+    var html = document.documentElement;
+    var el = make('div', '');
+    el.id = 'canvas';
+    var parts = makeOrb();
+    el.appendChild(parts.orb);
+
+    // top left: the wordmark (the window is dragged by it), the state word, a Send's hold with its Undo, the clock
+    var tl = make('div', 'c-corner c-tl');
+    var wordmark = make('div', 'c-word c-drag', CANVAS_WORDS.wordmark);
+    wordmark.addEventListener('mousedown', function (event) {
+      if (event.button === 0) {
+        post('go', {to: 'drag'});
+      }
+    });
+    var state = make('span', 'c-mono c-state');
+    state.setAttribute('aria-live', 'polite');
+    var hold = make('span', 'c-mono c-hold');
+    hold.hidden = true;
+    var undo = canvasButton('undo', CANVAS_WORDS.undo, '');
+    var clockText = make('span', 'c-mono c-clock');
+    var clockButton = button('c-mono c-clock', CANVAS_WORDS.day, function () { post('go', {to: 'day'}); });
+    clockButton.hidden = true;
+    tl.append(wordmark, state, hold, undo, clockText, clockButton);
+
+    // top right: History, Clear view, the folded board | the screens | the desktop HUD, the window
+    var tr = make('div', 'c-corner c-tr');
+    var buttons = {};
+    buttons.history = canvasButton('history', CANVAS_WORDS.history, '');
+    var clear = canvasButton('clear', CANVAS_WORDS.clear, '', function () { post('clear', {}); });
+    clear.setAttribute('aria-label', CANVAS_WORDS.clearAll);
+    buttons.board = canvasButton('board', CANVAS_WORDS.board, '');
+    buttons.board.setAttribute('aria-label', CANVAS_WORDS.boardBack);
+    var rule1 = make('div', 'c-rule'), rule2 = make('div', 'c-rule');
+    tr.append(buttons.history, clear, buttons.board, rule1);
+    SCREEN_BUTTONS.forEach(function (word) {
+      buttons[word] = canvasButton(word, CANVAS_WORDS[word], '');
+      tr.appendChild(buttons[word]);
+    });
+    buttons.desktop = canvasButton('desktop', CANVAS_WORDS.desktop, '');
+    buttons.desktop.setAttribute('aria-label', CANVAS_WORDS.desktopSwitch);
+    buttons.minimize = iconButton('minimize', 'minimize', CANVAS_WORDS.minimize);
+    buttons.maximize = iconButton('maximize', 'window', CANVAS_WORDS.maximize);
+    buttons.close = iconButton('close', 'close', CANVAS_WORDS.close);
+    var windowGroup = make('div', 'c-group');     // the switch and the window's own three stay together on a row
+    windowGroup.append(rule2, buttons.desktop, buttons.minimize, buttons.maximize, buttons.close);
+    tr.appendChild(windowGroup);
+
+    // bottom left: the microphone's level and Mute, "Hey Jarvis", REC and its Stop
+    var bl = make('div', 'c-corner c-bl');
+    var meter = make('div', 'c-meter');
+    meter.setAttribute('aria-hidden', 'true');
+    meter.hidden = true;
+    var bars = [];
+    for (var b = 0; b < METER_BARS; b += 1) {
+      var bar = make('i', '');
+      bars.push(bar);
+      meter.appendChild(bar);
+    }
+    var levelWords = make('span', 'c-mono');
+    levelWords.hidden = true;
+    buttons.mute = canvasButton('mute', CANVAS_WORDS.mute, '');
+    var wake = make('span', 'c-mono c-state');
+    wake.hidden = true;
+    var rec = make('span', 'c-mono c-rec');
+    rec.hidden = true;
+    var stopRec = canvasButton('stop_rec', CANVAS_WORDS.stop, 'need');
+    bl.append(meter, levelWords, buttons.mute, wake, rec, stopRec);
+    el.append(tl, tr, bl);
+
+    canvas = {
+      el: el, orb: parts.orb, pic: parts.pic, ctx: parts.ctx, tl: tl, tr: tr, bl: bl,
+      state: state, hold: hold, undo: undo, clockText: clockText, clockButton: clockButton, buttons: buttons,
+      clear: clear, rules: [rule1, rule2], meter: meter, bars: bars, levelWords: levelWords, wake: wake, rec: rec,
+      stopRec: stopRec, form: '', orbState: '', muted: false, level: -1, hasMeter: false, shown: []
+    };
+    html.classList.add('canvas');
+    html.classList.toggle('board-off', !deskOn);
+    document.body.insertBefore(el, document.body.firstChild);    // first: the board is drawn over it
+    watchCanvasPointer();
+    document.addEventListener('visibilitychange', wake);     // seen again: it moves again
+    placeCanvas();
+    return canvas;
+  }
+
+  function setLevels(level, voice) {
+    var c = canvas;
+    ORB.lvlTo = level / 100;                   // the tick ring and the main ring follow them (eased in stepOrb)
+    ORB.voiceTo = voice / 100;
+    if (level === c.level) {
+      return;
+    }
+    c.level = level;
+    var lit = c.orbState === 'listening' ? Math.round(level / 100 * METER_BARS) : 0;
+    c.bars.forEach(function (bar, index) {
+      bar.className = index < lit ? 'on' : (index === lit && lit > 0 ? 'edge' : '');
+    });
+    syncLevelWords();
+  }
+
+  function syncLevelWords() {                  // "LVL −52 DB" while the microphone is open (the app's own range), else idle
+    var c = canvas;
+    c.levelWords.hidden = !c.hasMeter;
+    if (c.orbState === 'listening' && c.level >= 0) {
+      c.levelWords.textContent = CANVAS_WORDS.level + MINUS + Math.round(60 - c.level / 100 * 50) + CANVAS_WORDS.db;
+    } else {
+      c.levelWords.textContent = CANVAS_WORDS.micIdle;
+    }
+  }
+
+  HANDLERS.orb = function (message) {
+    if (!onlyKeys(message, ['type', 'state', 'form', 'muted', 'offline', 'dim', 'away', 'level', 'voice'])
+        || ORB_STATES.indexOf(message.state) < 0 || ORB_FORMS.indexOf(message.form) < 0
+        || typeof message.muted !== 'boolean' || typeof message.offline !== 'boolean'
+        || typeof message.dim !== 'boolean' || typeof message.away !== 'boolean'
+        || !whole(message.level, 0, CANVAS_CAPS.level)
+        || !whole(message.voice, 0, CANVAS_CAPS.level)) {
+      return drop('shape');
+    }
+    var c = makeCanvas();
+    if (message.state !== c.orbState || message.muted !== c.muted) {
+      ORB_STATES.forEach(function (name) {
+        c.orb.classList.toggle('s-' + name, name === message.state);
+      });
+      c.orbState = message.state;
+      c.muted = message.muted;
+      c.buttons.mute.textContent = message.muted ? CANVAS_WORDS.unmute : CANVAS_WORDS.mute;
+      c.buttons.mute.classList.toggle('on', message.muted);
+      c.buttons.mute.setAttribute('aria-pressed', message.muted ? 'true' : 'false');
+      c.level = -1;                            // the meter and its words follow the new state
+    }
+    c.orb.classList.toggle('muted', message.muted);
+    c.orb.classList.toggle('offline', message.offline);
+    c.orb.classList.toggle('dimmed', message.dim);
+    var o = ORB;
+    if (message.offline !== o.offline) {
+      o.sprites = {};                          // the light behind it in the other colour
+    }
+    o.state = message.state;
+    o.muted = message.muted;
+    o.offline = message.offline;
+    o.dim = message.dim;
+    o.away = message.away;
+    setLevels(message.level, message.voice);
+    setForm(message.form);
+    if (K === 0) {                             // off: the state's lean at once
+      var lean = LEANS[o.state] || [0, 0];
+      o.leanX = o.flatTo ? 0 : lean[0];
+      o.leanY = o.flatTo ? 0 : lean[1];
+    }
+    wake();
+    return true;
+  };
+
+  HANDLERS.canvas = function (message) {
+    if (!onlyKeys(message, ['type', 'clock', 'word', 'tone', 'approvals', 'buttons', 'briefing_new', 'hold', 'rec',
+                            'wake', 'meter'])
+        || !words(message.clock, CANVAS_CAPS.clock) || !words(message.word, CANVAS_CAPS.word)
+        || CANVAS_TONES.indexOf(message.tone) < 0 || !whole(message.approvals, 0, CANVAS_CAPS.approvals)
+        || !list(message.buttons, CANVAS_BUTTONS.length) || typeof message.briefing_new !== 'boolean'
+        || !words(message.hold, CANVAS_CAPS.hold) || !words(message.rec, CANVAS_CAPS.rec)
+        || !words(message.wake, CANVAS_CAPS.wake) || typeof message.meter !== 'boolean') {
+      return drop('shape');
+    }
+    var shown = message.buttons;
+    if (!shown.every(function (word, index) {
+      return typeof word === 'string' && CANVAS_BUTTONS.indexOf(word) >= 0 && shown.indexOf(word) === index;
+    })) {
+      return drop('shape');
+    }
+    var c = makeCanvas();
+    c.shown = shown.slice();
+    Object.keys(c.buttons).forEach(function (word) {
+      c.buttons[word].hidden = shown.indexOf(word) < 0;
+    });
+    c.state.textContent = message.word;
+    c.state.classList.toggle('amber', message.tone === 'amber');
+    c.state.classList.toggle('steel', message.tone === 'steel');
+    c.state.hidden = !message.word;
+    var day = shown.indexOf('day') >= 0;       // the clock opens the Day view only while that works
+    c.clockText.textContent = message.clock;
+    c.clockButton.textContent = message.clock;
+    c.clockText.hidden = day || !message.clock;
+    c.clockButton.hidden = !day || !message.clock;
+    var approvals = c.buttons.approvals;
+    approvals.textContent = message.approvals ? CANVAS_WORDS.approvals + ' ' + message.approvals : CANVAS_WORDS.approvals;
+    approvals.classList.toggle('need', message.approvals > 0);
+    approvals.setAttribute('aria-label', message.approvals
+      ? CANVAS_WORDS.approvals + ', ' + message.approvals + CANVAS_WORDS.approvalsWait : CANVAS_WORDS.approvals);
+    c.buttons.briefing.classList.toggle('new', message.briefing_new);
+    c.buttons.briefing.setAttribute('aria-label', message.briefing_new ? CANVAS_WORDS.briefingNew : CANVAS_WORDS.briefing);
+    c.hold.textContent = message.hold;
+    c.hold.hidden = !message.hold;
+    c.undo.hidden = !message.hold;
+    c.rec.textContent = message.rec;
+    c.rec.hidden = !message.rec;
+    c.stopRec.hidden = !message.rec;
+    c.wake.textContent = message.wake;
+    c.wake.hidden = !message.wake;
+    c.hasMeter = message.meter;
+    c.meter.hidden = !message.meter;
+    syncLevelWords();
+    syncCanvasBoard();
+    return true;
+  };
+
+  function syncCanvasBoard() {                 // Clear view only while the board shows frames; the rules between groups
+    var c = canvas;
+    if (!c) {
+      return;
+    }
+    document.documentElement.classList.toggle('board-off', !deskOn);
+    c.clear.hidden = !(deskOn && barFrames > 0);
+    c.rules[0].hidden = false;
+    c.rules[1].hidden = ['desktop', 'minimize', 'maximize', 'close'].every(function (word) {
+      return c.shown.indexOf(word) < 0;
+    });
+    placeCanvas();
+  }
+
+  function overBoard(event) {                  // the pointer is over the board's own box (the canvas around it is not it)
+    var box = document.body.getBoundingClientRect();
+    return deskOn && event.clientX >= box.left && event.clientX <= box.right && event.clientY >= box.top
+      && event.clientY <= box.bottom;
+  }
+
+  function inCanvasChrome(node) {              // the orb's layer and its corner buttons: not the board
+    return !!canvas && !!node && canvas.el.contains(node);
+  }
+
+  function watchCanvasPointer() {              // on the canvas "the owner at the board" means over the board's box
+    document.addEventListener('mousemove', function (event) {
+      var over = overBoard(event);
+      if (over !== reading.pointer) {
+        reading.pointer = over;
+        sendReading(true);
+      }
+    }, {passive: true});
+  }
+
+  function focusControls() {                   // F6: the first corner button that shows
+    if (!canvas) {
+      return false;
+    }
+    var stops = Array.prototype.filter.call(canvas.el.querySelectorAll('button'), function (node) {
+      return !node.hidden;
+    });
+    if (!stops.length) {
+      return false;
+    }
+    stops[0].focus({preventScroll: true});
+    return true;
   }
 
   function apply(text) {
@@ -2990,6 +4121,7 @@
     document.addEventListener('dragstart', function (event) { event.preventDefault(); });   // nothing leaves the page
     window.addEventListener('resize', function () {
       placeBig();                              // first: the board keeps its own box in a wide view (open big)
+      placeCanvas();                           // the canvas: the orb's place and size, the board's top
       measureWidth();
       scheduleView();
       scheduleLayout();
@@ -3005,7 +4137,11 @@
     value: Object.freeze({
       apply: apply,
       counts: function () {
-        return Object.assign({frames: frames.size, groups: groups.size, big: big ? big.state : '', lit: lit}, dropped);
+        return Object.assign({frames: frames.size, groups: groups.size, big: big ? big.state : '', lit: lit,
+                              canvas: canvas ? canvas.form : '', orb: canvas ? canvas.orbState : ''}, dropped);
+      },
+      orb: function () {                       // the orb as it is drawn now, in numbers (null: no canvas)
+        return canvas ? orbLook() : null;
       }
     }),
     writable: false, configurable: false, enumerable: false

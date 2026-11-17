@@ -14,6 +14,9 @@ board.view.BoardView whose page is a plain native widget.
                                   ``boards``
     fallback_factory(boards)      the board that can't start here: BoardView with an engine that says no (its
                                   native tile and read-only tiles: the real fallback, no engine)
+
+The canvas (PLAN-canvas part 1): both factories take ``canvas=True`` - Home is then the canvas, as with the real app's
+own board (look_ui reads the factory's ``canvas``); without it the board stands beside the conversation (the desk).
 """
 
 from __future__ import annotations
@@ -186,20 +189,22 @@ class StandInBoard(view.BoardView):
         return order
 
 
-def stand_in_factory(boards: list[Any], **options: Any) -> Any:
+def stand_in_factory(boards: list[Any], *, canvas: bool = False, **options: Any) -> Any:
     def make(parent: QWidget) -> StandInBoard:
         board = StandInBoard(parent, **options)
         boards.append(board)
         return board
 
+    make.canvas = bool(canvas)          # Home is the canvas (look_ui.LookController reads it)
     return make
 
 
-def fallback_factory(boards: list[Any]) -> Any:
+def fallback_factory(boards: list[Any], *, canvas: bool = False) -> Any:
     def make(parent: QWidget) -> view.BoardView:
         board = view.BoardView(parent, start_delay_ms=0, engine=lambda: snapshots.R_NO_ENGINE,
                                scheme_ready=lambda: True)
         boards.append(board)
         return board
 
+    make.canvas = bool(canvas)
     return make
