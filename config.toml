@@ -467,14 +467,22 @@ timeout_seconds = 120         # one standing run may take this many seconds (30.
 
 [look]
 # The new look. "sounds": "soft" (the default) plays a few quiet sounds made in
-# code (heard you, thinking, a card waits for your OK, done, failed, and the
-# board's frames landing); they never play while Jarvis is muted, in quiet hours,
-# in focus mode, while a meeting records, while the PC is locked, while Windows
-# says you're busy or a full-screen app runs, or over his voice. "off": none.
-# Settings > Look can also turn them off on this PC. "Hey Jarvis"'s chime keeps
-# its own rules. "board": false keeps Home as it was, with no board beside the
-# conversation. "second_screen": true shows Jarvis on a second monitor (also in
-# Settings > Look).
+# code: heard you, still thinking, a frame lands on the board and a group of
+# frames settles, something new waits for your OK, a frame changed, an approved
+# card done or failed, a frame opened big or put back. They never play while
+# Jarvis is muted, in quiet hours, in focus mode, while a meeting records, while
+# the PC is locked, while Windows says you're busy or a full-screen app runs, or
+# over his voice (dropped, never kept for later); the board's only while its
+# window shows. "off": none, and Settings > Look then has no button for them;
+# with "soft", Settings > Look can turn them off (or on again) on this PC.
+# true / false mean "soft" / "off". "Hey Jarvis"'s chime keeps its own rules.
+# "board": true shows a board of frames beside the conversation once an answer
+# has something to show (its web view starts with the first Ask, never with
+# Jarvis); false keeps Home exactly as it was: no Board button, no hint line,
+# no desk, and the board never starts. "second_screen": true shows Jarvis on
+# your second monitor by default (the ring, the clock, the counts and the
+# board's frames; never mail text); once you use its switch in Settings > Look,
+# your choice there wins on this PC.
 sounds = "soft"
 board = true
 second_screen = false

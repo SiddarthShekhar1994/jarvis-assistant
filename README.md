@@ -77,6 +77,15 @@ your own scheduled routine (see
   window of its own, for a second screen. It only shows, and only on screen:
   nothing of it is saved or logged. See
   [LIVE: watch Jarvis work](#live-watch-jarvis-work).
+- **A board beside the conversation.** When an answer has something to show,
+  Home becomes a desk: the conversation on the left and a board of frames on
+  the right - the mail he read, your day, to-dos, a page picture, and the
+  tables, charts, timelines and worked maths an answer brings. While he
+  speaks, the frame each sentence is about lights up. The board only shows:
+  it never approves or sends anything, and nothing on it is saved. Jarvis can
+  also show himself on a second monitor, with mail text hidden there, and a
+  few soft sounds mark moments such as a frame landing. See
+  [The look](#the-look-the-hologram).
 - **Web research.** Start a request with `web:` (or let the planner hand it
   over) to look something up on the web: a separate Claude Code run whose
   only tools are web search and web fetch, and which gets your words and
@@ -142,8 +151,8 @@ your own scheduled routine (see
   [Start menu shortcut](#start-menu-shortcut).
 
 The assistant screen is a calm hologram: a dark, frameless window with Jarvis's
-orb in the middle and a rail of screens at its left edge (see
-[The look](#the-look-the-hologram)).
+orb in the middle (beside the board, while it holds something) and a rail of
+screens at its left edge (see [The look](#the-look-the-hologram)).
 
 ## How it stays safe
 
@@ -200,6 +209,13 @@ orb in the middle and a rail of screens at its left edge (see
   block or draft still waits for its own click (and keeps its Undo). Jarvis's own reads
   for the offers are of your calendar only (titles, times and guests, on this
   PC, kept in memory) and are shown in LIVE.
+- **The board only shows.** Its frames are data Jarvis checked and hands it
+  (words and numbers, shown as plain text), on one locked-down web view with
+  no network and nothing saved; nothing on it approves, sends or undoes
+  anything, and a waiting reply's chip only opens its card on Approvals. The
+  second-screen display never shows mail text, a web research's answer, a
+  search, your question or what Jarvis says ([The
+  look](#the-look-the-hologram), [Privacy and cost](#privacy-and-cost)).
 - **Mail Jarvis reads on his own is headers only (sender, recipients, subject,
   date), from the last 14 days, on this PC; never the text, never saved, never
   sent anywhere**, but for the standing agents and rules you set up (the next
@@ -406,14 +422,15 @@ Built: **Visual snapshots in LIVE** - see [Pictures in LIVE](#pictures-in-live);
 **Meeting recording and summaries** (only with the consent of everyone in the
 meeting) - see [Meetings](#meetings-recording-and-summaries);
 **Standing agents and rules** - see
-[Standing agents and rules](#standing-agents-and-rules).
+[Standing agents and rules](#standing-agents-and-rules);
+**The new look** (the ring, the board of frames beside the conversation, the
+second-screen display and the soft sounds) - see
+[The look](#the-look-the-hologram).
 
 Planned for later versions; none of these is built yet, and all of them will
 keep the same rules (they propose, your click approves, and what they did
 shows, in LIVE or, for standing jobs, on the Agents screen):
 
-- **A new look**: a board of typed frames beside the chat (mail, calendar,
-  to-dos, charts, timelines, tables, pictures), drawn from data only.
 - **Capture**: screenshots, PDFs, pasted text and calendar files (.ics,
   webcal) become events and to-dos, each linked to where it came from and
   each a card for your click; a whole repeating series comes in on one
@@ -1033,14 +1050,172 @@ them.
   **voice** (grey: no audio yet, green: online voice, amber: the Windows
   voice, red: no speech could be generated) and **calendar** (green: signed in
   to Google, amber: not signed in yet, grey: turned off or not set up).
-- **The orb** in the middle of Home shows the same state as the header word:
-  it breathes at rest, draws in while you type, races while Jarvis thinks,
-  pulses with his voice, shows an amber arc while something waits for you,
-  turns steel and struck through while muted, flat with a broken outer track on
-  the Windows voice, dim with one slow scanner while he waits for a briefing,
-  and at 70 % in quiet hours. A failure never turns it red: the failure is a
-  tile beside it. It moves only while the window is visible and not minimized
-  (and not while the PC is locked), and slower after two quiet minutes.
+- **The orb** in the middle of Home is Jarvis's ring: a band of light segments
+  round a fixed sight, with corner brackets. It shows the same state as the
+  header word, and each look keeps a shape of its own at every size (also the
+  36 px one in the Dock and the toast, which has no word beside it), so none
+  relies on colour alone. At rest it lies tipped back and breathes (STANDBY).
+  While you talk to him (the talk key or "Hey Jarvis") it swings level to face
+  you, a crosshair appears, its brackets close round it like a sight locking
+  on, and the band lights up with your voice from the first sound; while you
+  type it only leans towards you. While he thinks a white head with a tail
+  races round it; while he speaks the band reaches out with his voice; while
+  something waits for you it shows an amber arc and amber segments; muted it
+  turns steel, nearly edge-on and struck through; on the Windows voice its
+  sight is dashed and its core flat; while he waits for a briefing the band
+  is dark but for one slow scanner. A meeting being recorded adds a coral
+  ring, quiet hours dim it to 70 %, and while a frame on the board is lit its
+  glow halves (one thing bright at a time). A failure never turns it red: the
+  failure is a tile beside it. It moves only while the window is visible and
+  not minimized (and not while the PC is locked), slower after two quiet
+  minutes, and holds one still pose per look with motion off.
+
+### The desk and the board
+
+When Jarvis has something to show you, Home becomes a desk: the conversation
+on the left, with the orb at its head, and a board of frames on the right.
+With nothing on the board, Home looks as it always has, with a **Board**
+button in the header (**Ctrl+B**; dimmed while the board is empty) and, until
+you have seen the board three times, one line under the greeting: "When I
+find something to show you, it appears beside our conversation."
+
+- **The desk forms** with an answer's first frame: the orb flies to the top of
+  the conversation column, the board slides in, and the column shows your
+  requests and his answers (his newest in larger type, its times in cyan and
+  what waits on you in amber; older ones above it, under a fade). An answer
+  that put frames up ends with "4 frames on the board", which scrolls the
+  board to them. **Ctrl+B** or the Board button folds the desk away (Home's
+  stage comes back, with a "9 on the board" chip that brings it back); from
+  another screen they bring you to Home with the board. In a small window
+  (under 1,024 px wide, the Dock folded) the column keeps the last exchange,
+  with **Earlier** for the rest (the Transcript drawer).
+- **Frames.** Each answer's frames come up together as one group, headed by
+  its time and topic, the newest group on top. In a group, what waits on you
+  comes first, then the frames in the order Jarvis speaks of them, and nothing
+  moves after that. Each frame draws in as an outline, then fills. Frames are
+  made from what Jarvis already has: your day (a bar from 8 to 18 with a "now"
+  line, the events as rows, the next one "IN 19 MIN", free time dashed), a
+  mail thread he read (the sender, the time and three lines of its text, with
+  an amber "Reply waits on Approvals" when he drafted a reply for your OK),
+  your follow-ups, to-dos (waiting, done or open), a page picture from web
+  research (only a picture: it opens nothing), web research's answer with its
+  sources, a web search's results, and the tables, charts, timelines and maths
+  of an Ask's answer ([below](#tables-charts-timelines-and-maths-from-ask)).
+  Every word in a frame is shown as plain text. A frame that waits on you is
+  amber, with a diamond and rounder corners, so waiting is a shape as well as
+  a colour.
+- **The bar and the index strip.** The board's bar says how many frames are
+  on it and how many wait on you, with **All | Pinned** and **Clear**. The
+  narrow strip at its right edge has a small button per frame, in board order
+  (a waiting one with an amber diamond); a click scrolls to that frame. "7
+  MORE BELOW", under a small arrow, shows whenever frames below are not fully
+  in view.
+- **Older answers fold.** When a new answer lands, the unpinned frames of
+  older answers fold to one-line rows with one fact each ("REPLY WAITS", "3
+  EVENTS · NEXT 10:00 AM"); a click or Enter opens one again where it is.
+- **Pin, close, Clear.** **P** (or a frame's pin) keeps a frame and its place,
+  six at most. **Delete** (or its close) leaves a "Closed: ..." row with
+  **Bring back** for 8 seconds. **Clear** takes every unpinned frame away,
+  with "Board cleared · 8 FRAMES · Bring back" for 8 seconds; with nothing
+  left, Home's stage comes back. The board holds at most 24 frames in 8
+  groups: past that, the oldest group without a pin leaves whole. Frames last
+  for the session: they are never saved, and Jarvis starts with an empty
+  board.
+- **Reading is safe.** While you read the board (the pointer over it, the
+  keyboard in it, or a scroll or key in it in the last 8 seconds), a new
+  answer does not move it: "New answer above · Show" appears, and the answer
+  lands on **Show** or after 8 quiet seconds.
+- **Open big** (**Enter**, a double click or a frame's open-big button): the
+  frame grows over both columns, the ask bar stays live under it, and the Dock
+  and the header dim. **Esc** (or a click beside it) puts it back. A long
+  table or working that does not fit scrolls inside it, with the mouse wheel
+  or the keys (Up, Down, Page Up, Page Down, Space, Shift+Space, Home, End),
+  and a fade at the cut edge shows there is more.
+- **While Jarvis speaks**, the frame each sentence is about lights up:
+  brackets at its corners, and a thin cue line from that sentence in the
+  conversation to the frame. Only a sentence that names a frame by its own
+  words (its title, a sender, an event) lights it; otherwise nothing is lit.
+  When a later answer brings a frame that is already on the board (the same
+  thread, day, page, list or table) with something new in it, that frame
+  updates where it is and says CHANGED.
+- **Nothing on the board acts.** It never approves, sends or undoes anything.
+  A waiting reply's amber chip (or **Ctrl+3**) only opens its card on
+  Approvals, where you decide as always.
+- **The keyboard.** **F6** (Shift+F6 back) moves between the ask bar, the
+  conversation, the board and its index strip. In the board, Up and Down move
+  between frames (Left and Right within a pair), Home and End go to the first
+  and the last, Tab reaches a frame's buttons, Enter opens big, P pins, Delete
+  closes, and Esc leaves open big or goes back to the ask bar. Space scrolls
+  the board and never plays the briefing, and Jarvis's own keys (Ctrl+1 to
+  Ctrl+9, Ctrl+K, Ctrl+M, Ctrl+B and the rest) keep working with the keyboard
+  in it.
+- **Window sizes.** Small frames (to-dos, timelines, charts, maths) pair side
+  by side once the board is wide enough (from a window of about 1,200 px) and
+  go three across from about 1,490 px. A window too small for the board shows
+  it as a drawer instead.
+- **On the HUD** ([Jarvis on your desktop](#jarvis-on-your-desktop-the-hud)) a
+  "9 on the board" chip brings Jarvis back with the board.
+- **If the board can't start** on this PC, a tile says "The board can't start
+  on this PC. Answers still show here as text." and the frames show as plain
+  read-only tiles under it (see [Troubleshooting](#troubleshooting)).
+  `[look] board = false` keeps Home exactly as it was, with no board at all.
+
+### Tables, charts, timelines and maths from Ask
+
+With [Ask Jarvis](#ask-jarvis-optional) on, an answer (a web research's too)
+may come with a short topic for its group and up to three frames of its own,
+when one shows more than the answer says: a **table** (up to 6 columns and 12
+rows, the changed row banded with its change in cyan, its source under it), a
+**chart** (up to 8 bars with their values; a changed bar shows where it was
+and by how much), a **timeline** (up to 8 steps marked DONE, NEXT or DUE, and
+where today is) or **worked maths** (up to 8 numbered steps, the answer
+boxed). Most answers bring none. Jarvis checks each one strictly before it
+reaches the board: only words and finite numbers, every size capped, maths
+only from a short list of operations, never markup, a link or a script. A
+frame that fails is dropped (the log counts it) and the answer itself is never
+affected. One of Jarvis's own [instant answers](#instant-answers), a sum with
+a step in its working, shows that working the same way.
+
+### Jarvis on your second screen
+
+Turn it on in Settings > Look: "Show Jarvis on my second screen" (greyed, with
+"Needs a second monitor", while Windows sees one monitor; `[look]
+second_screen` sets the default). Your other monitor then shows, in large type
+for reading across a desk, the orb in its live look, the state word, the clock
+and the date, your next event ("In 19 minutes · video call"), what waits on you
+("Waiting on Approvals, on the main screen"), whether a briefing is ready, how
+many frames are on the board, and the board's first nine frames as outline
+tiles. It is only for glancing at: it takes no clicks and never the keyboard,
+it never makes a sound, and nothing on it can be approved or opened. It never
+shows mail text ("Mail text hidden on this screen": senders and subjects
+show), the text of a web research's answer (its sources show), web searches,
+your question or what Jarvis says. It is left out of screenshots and screen
+sharing, and it hides while the PC is locked, the display is off, battery
+saver is on or a full-screen app runs on that monitor. For OLED screens it is
+true black and never still for long: it shifts a few pixels every 30 seconds,
+swaps its two sides every hour, dims after 5 quiet minutes and keeps only the
+still orb and the clock after 20. While the LIVE pop-out or a task's watch
+window is on that monitor, it folds to a strip at the far edge (the orb, the
+clock and the counts) and comes back 2 seconds after they close; a monitor
+under 1,600 px wide shows only the strip. Jarvis draws it himself (no web
+page), from what his main window shows.
+
+### Soft sounds
+
+A few moments have a soft sound, which Jarvis makes himself when he starts (no
+sound files come with him): when he hears you (the talk key or "Hey Jarvis"),
+when a request has had no answer after a moment, when a frame lands on the
+board and when a group of frames has settled, when something new waits for
+your OK, when a frame changes, when an approved card is done or has failed,
+and when a frame opens big or goes back. They are quiet (at most 8 % of full
+volume) and silent while Jarvis is muted, in quiet hours, in focus mode, while
+a meeting records, while the PC is locked, while Windows says you are busy or
+a full-screen app runs, and over his voice (a sound that would play then is
+dropped, never kept for later). The board's sounds play only while its window
+shows, and the frame and change sounds not with motion off. Settings > Look
+turns them off (or on again) on this PC; `[look] sounds = "off"` turns them
+off whatever Settings > Look says. The "Hey Jarvis" chime is not one of them:
+it keeps its own sound and rules.
 
 ## Using it
 
@@ -1148,12 +1323,15 @@ effects off, and so does turning off "Show animations in Windows".
 - **Agents** (**Ctrl+9**; a cyan dot while a run has something you have not
   seen) shows only while [standing agents and rules](#standing-agents-and-rules)
   are on (with Ask Jarvis): the jobs, what they did and their reports.
-- **Settings** (**Ctrl+,**) is read only: it shows the settings as Jarvis
+- **Settings** (**Ctrl+,**) shows the settings as Jarvis
   loaded them (Voice, Briefing times, Ask, Accounts, Quiet hours, LIVE and
-  privacy), says which `config.toml` tables hold them and opens `config.toml`
-  or the data folder. Every setting lives in `config.toml` (secrets in `.env`);
-  change it there and restart Jarvis. Nothing on this screen changes a
-  setting, and it never shows a secret, a token or an email address.
+  privacy, Look and the rest), says which `config.toml` tables hold them and
+  opens `config.toml` or the data folder. Every setting lives in `config.toml`
+  (secrets in `.env`); change it there and restart Jarvis. Nothing on this
+  screen changes `config.toml`; the few switches it has act on this PC only
+  (such as Settings > Look's soft sounds and "Show Jarvis on my second
+  screen", kept in `assistant.json`), and it never shows a secret, a token or
+  an email address.
 
 Elsewhere in this README "the JARVIS tab" means Home's Transcript, "the
 BRIEFING / LIVE / MEMORY tab" the screen of that name and "the NEEDS YOUR OK
@@ -4741,7 +4919,7 @@ log. Changes apply the next time the app starts.
 | `[assistant] speak_results` | `true` | Speak what happened after an approved card was carried out ("Done, sir - ..."). |
 | `[assistant] scheduled_prompt` | `false` | `true`: the scheduled runs and the catch-up show the classic "Hear it now?" prompt (with Later and Read now) instead of announcing the briefing. |
 | `[display] clock` | `"12h"` | How the header clock, TODAY, ACTIVITY and the Intro line of the SECTIONS list show times: `"12h"` (1:05 PM) or `"24h"` (13:05). Times inside sentences ("Updated today at 10:04 AM", "asking again at 1:15 PM", "until 1:20 PM" on the prompt, in the tray and on the reading screen), the proposal cards, the DEADLINES due labels and the spoken briefing always use 12-hour times. |
-| `[ui] motion` | `"lively"` | How much the screen moves: `"lively"` (a scan line sweeps the stage and the new screen's panels assemble when you change screens; the orb's rings assemble and the J.A.R.V.I.S. name types in when Jarvis first opens or comes back after more than 30 minutes hidden), `"calm"` (slower, gentle fades only) or `"off"` (no entrance or transition effects). "Show animations in Windows" turned off counts as `"off"`. Nothing waits for these effects: clicks and typing work at once. The Settings screen shows it. |
+| `[ui] motion` | `"lively"` | How much the screen moves: `"lively"` (a scan line sweeps the stage and the new screen's panels assemble when you change screens; the orb assembles and the J.A.R.V.I.S. name types in when Jarvis first opens or comes back after more than 30 minutes hidden; the board's frames draw in as outlines, then fill), `"calm"` (slower, gentle fades only) or `"off"` (no entrance or transition effects: the board's frames are there at once and the orb holds one still pose per look). "Show animations in Windows" turned off counts as `"off"`. Nothing waits for these effects: clicks and typing work at once. The Settings screen shows it. |
 | `[live] enabled` | `true` | The LIVE tab ([LIVE: watch Jarvis work](#live-watch-jarvis-work)): every step Jarvis takes for an Ask or a card you approved, on screen only. `false`: no LIVE tab, nothing recorded. |
 | `[live] auto_open` | `"tab"` | When Jarvis starts on an Ask or an approved card: `"tab"` brings up the LIVE tab (not for a request typed on Home, not for a card approved on Approvals, not while the briefing plays, not when the window is hidden or minimized), `"window"` shows the LIVE pop-out window without taking the focus, `"off"` never switches. `true` / `false` mean `"tab"` / `"off"`. |
 | `[live] background` | `true` | Also show the reads Jarvis does on his own (agenda, event checks, sign-ins, Claude Code checks) in one compact LIVE row. The productivity bundle's own reads and offers have a row of their own that is always shown. |
@@ -4821,10 +4999,22 @@ log. Changes apply the next time the app starts.
 | `[standing] quiet_from`, `quiet_until` | `"22:00"`, `"08:00"` | Quiet hours: the spoken line waits, and a check never opens a closed Jarvis (what it found is told after them). The same time twice: never quiet. |
 | `[standing] open_when_closed` | `true` | `false`: a check never opens a closed Jarvis; what it found waits for your next open. |
 | `[standing] timeout_seconds` | `120` | One standing run may take this long (30-600); then it is stopped. |
+| `[look] sounds` | `"soft"` | The [soft sounds](#soft-sounds): `"soft"` or `"off"` (`true` / `false` mean `"soft"` / `"off"`). `"off"` here wins: Settings > Look then says they are off in config.toml and has no button for them. With `"soft"`, Settings > Look can turn them off on this PC. The "Hey Jarvis" chime keeps its own rules either way. |
+| `[look] board` | `true` | The [board](#the-desk-and-the-board) beside the conversation. `false`: Home is exactly as it was before the board (no Board button, no hint line, no desk), the board's web view is never made, and the second screen shows only its counts. |
+| `[look] second_screen` | `false` | [Jarvis on your second screen](#jarvis-on-your-second-screen), by default. Once you use its switch in Settings > Look, your choice there wins over this key on this PC (it is kept in `assistant.json`). |
 
 The offline voice uses the same `rate` and `volume`: the rate scales Windows'
 default 200 words per minute, and a volume above `+0%` cannot get louder than
 full volume.
+
+**Settings > Look** shows the sounds and the board as they are, and has the two
+things it changes on this PC: the soft sounds (**Turn sounds off** / **Turn
+sounds on**) and "Show Jarvis on my second screen" (a switch, greyed with
+"Needs a second monitor" while Windows sees one monitor; it follows monitors
+plugged in or out while Settings is open). Both take effect at once and are
+kept in `assistant.json`. `[look]` in `config.toml` sets the defaults:
+`sounds = "off"` there wins over the button, and the second screen's switch,
+once used, wins over `[look] second_screen`.
 
 ## How the page is read
 
@@ -5131,6 +5321,33 @@ started one". Never a job's name, your sentence, a filter, a report, a
 subject, a sender, an address or a label. The background check writes to the
 same log file, one line at a time, so the app can still rotate it.
 
+The [board](#the-desk-and-the-board) logs only kinds, counts, frame ids (the
+app's own numbers, such as `f3`), durations and reason words: "Board: made and
+starting", "Board: page ready in 420 ms", "Board: ready 640 ms after it
+started", "Board: an answer put up 5 frame(s) in 3 ms", "Board: 1 frame(s)
+changed", "Board: frame f3 open big" and "... back on the board", "Board:
+cleared (1 frame(s) kept)", "Board: a pin was refused (6 pinned at most)",
+"Board: a parked answer landed", "Board: a message was refused (size)", "Board:
+a request of the page was dropped (layout, rate)", "Board: the page's renderer
+stopped (crashed); loading the board again (1 of 3)", "Board: it can't start on
+this PC (no_engine)" (no_engine, no_scheme, no_ready, load_failed, crashed,
+sandbox, ...), "Board: read-only tiles in its place (no_engine)" and, only when
+something was blocked, "Board: closed (requests blocked: file 1)"; the page's
+own console messages are counted, never kept. Never a frame's words, a turn's
+words or an address. Ask's frames add "Ask: 2 frame(s) to show (table, chart),
+1 dropped (depth 1), topic given" (web research: "Research: ..."). [The second
+screen](#jarvis-on-your-second-screen) logs "Second screen: 2 screen(s)",
+"Second screen: turned on", "Second screen: shown (full, 1920x1080)", "Second
+screen: hidden (locked)" (off, one_screen, locked, display_off,
+battery_saver, full_screen), "Second screen: folded to its strip (watch)",
+"Second screen: back in full" and, if Windows refuses to leave it out of
+screenshots, "Second screen: Windows did not leave it out of capture (...); it
+shows anyway"; never a frame's words, an event's title, a sender or an
+address. The [soft sounds](#soft-sounds) log "Sounds: 9 built in 0.04 s" and,
+with `--debug`, each sound left unplayed with its event and one word ("Sounds:
+settled held (speaking)": muted, quiet hours, speaking, hidden, ...);
+Settings > Look logs "Look: sounds turned off on this PC".
+
 Other files in `%LOCALAPPDATA%\briefing-reader`:
 
 | File | What it is |
@@ -5145,7 +5362,8 @@ Other files in `%LOCALAPPDATA%\briefing-reader`:
 | `ask\` | The empty folder Claude Code runs in for Ask. Ask refuses to run while anything is in it (a `CLAUDE.md` or `.mcp.json` there would add instructions or tools). |
 | `research\` | The empty folder Claude Code runs in for web research; research refuses to run while anything is in it. |
 | `runstate.json` | Per scheduled briefing: when it was first shown, when it was announced (`announced_at`) and first viewed (`viewed_at`), when and how a classic prompt was answered (read, dismissed, done), and (the productivity bundle) when the plan offer was posted for it (`plan_offered_at`) and when its day was planned (`planned_at`; an evening "plan tomorrow" marks tomorrow's AM slot), kept for 14 days. The catch-up task uses it, and it keeps a briefing from being announced twice; see [Catch-up and the hotkey](#catch-up-and-the-hotkey). Safe to delete (a briefing may then be announced once more). |
-| `assistant.json` | Whether Jarvis's voice is muted, the ids of the last 5 greetings (so the next one differs), whether the briefings an older version read through its prompt were taken as viewed (done once, at the first start after the update, so they are not announced again), and, once you used it, where the LIVE pop-out window was and whether it was open, and `prod_hint_shown` once the "minimize instead of Done" hint was shown, and `followups_off` while the follow-up list is turned off on this PC, and `desktop_turned_on` (with `desktop_consent_version`, the card's version) once you turned [Jarvis on your desktop](#jarvis-on-your-desktop-the-hud) on. Never any text. Safe to delete. |
+| `assistant.json` | Whether Jarvis's voice is muted, the ids of the last 5 greetings (so the next one differs), whether the briefings an older version read through its prompt were taken as viewed (done once, at the first start after the update, so they are not announced again), and, once you used it, where the LIVE pop-out window was and whether it was open, and `prod_hint_shown` once the "minimize instead of Done" hint was shown, and `followups_off` while the follow-up list is turned off on this PC, and `desktop_turned_on` (with `desktop_consent_version`, the card's version) once you turned [Jarvis on your desktop](#jarvis-on-your-desktop-the-hud) on, and `look`: whether you turned the soft sounds off or the second screen on or off in Settings > Look, and how many times the empty board's hint line was shown. Never any text. Safe to delete. |
+| `sounds\` | The [soft sounds](#soft-sounds), `sound_<name>_v<n>.wav` (nine short tones), made by Jarvis at his start and written once (again only when their recipe changes). Nothing is ever recorded. Safe to delete: they are made again. The board itself writes nothing to disk: its frames last for the session only. |
 | `desktop\` | Jarvis on your desktop's own records, on this PC only: `journal\<run id>.jsonl`, for each NEEDS YOUR OK card you clicked, every file it moved, copied, renamed, zipped or put in the Recycle Bin with its old and new path (Undo needs them; never logged, never sent to Claude; kept 30 days); `timers.json`, your running timers and reminders and their labels (so a restart keeps them); `focus.json` while focus mode runs. Safe to delete (Undo of those changes goes with it). |
 | `instant.json` | The weather town you set by saying or typing "my town is ..." ([Instant answers](#instant-answers)): the place Jarvis found, as shown, and its coordinates. Never logged. "Forget my town" clears it; safe to delete. |
 | `wake.json`, `wake_chime.wav` | ["Hey Jarvis"](#hey-jarvis-the-wake-word): whether you turned it on, its sensitivity and today's two counts (wakes, and wakes that heard nothing) - no audio, words or device names; and the chime, a tone Jarvis makes himself. Deleting `wake.json` turns "Hey Jarvis" off. The wake model's files are in `models\openwakeword-hey-jarvis-v0.1\`. |
@@ -5327,6 +5545,40 @@ cards with their drafts) stays on this PC for 7 days (`standing_runs\`), and
 **Clear** on the Agents screen deletes it. **Pause all** stops everything at
 once. See [Standing agents and rules](#standing-agents-and-rules).
 
+**The board.** It is one web view inside Jarvis's window, on the web engine
+LIVE's page pictures use, and it only shows what Jarvis hands it. It never
+goes online: its page and its few files (its script, its style and the three
+fonts) come from an address scheme of its own inside the app, no web page or
+outside script, style or font is ever loaded, every other address is refused,
+and the page may make no connection at all; its pictures are images Jarvis
+re-encoded himself. It has a private profile of its own, off the record: no
+cache, no cookies, nothing written to disk. It can't open windows, download,
+use the clipboard or ask for the microphone, camera, location or
+notifications. What it can tell Jarvis is a short list of requests about the
+frames he gave it (focus, pin, close, open big, bring back, show its card on
+Approvals); anything else is dropped and counted, and nothing on it approves,
+sends or undoes anything. Its engine starts with your first Ask, never with
+Jarvis. Frames last for the session and are never saved. While a frame is open
+big, the conversation column behind it is a picture Jarvis makes of his own
+window's column (from its own pixels, never a screen capture), held in memory
+only.
+
+**Ask's frames.** The tables, charts, timelines and maths an answer may bring
+cost a little more of your plan: their format and the instructions for them
+add about 3,000 characters (several hundred tokens) to every Ask and web
+research run, and a frame the model writes adds a little to its answer. They
+hold only what the answer is about, and a frame that fails Jarvis's checks is
+dropped, never the answer.
+
+**The second screen.** Jarvis draws it himself from what his main window
+shows (no web page, nothing read for it), and it never shows mail text, the
+text of a web research's answer, web searches, your question or what he says;
+senders, subjects, event titles and page pictures do show there, as on the
+board. It is left out of screenshots and screen sharing (if Windows refuses
+that, it still shows and the log says so), and it hides while the PC is
+locked, the display is off, battery saver is on or a full-screen app runs on
+that monitor. The soft sounds are made and played on this PC only.
+
 **Other proposals.** Share requests, Slack replies, to-dos without a block and
 links are only shown: the app has no access to Drive or Slack, and Gmail only
 to send what you approved on a card (and, for Ask Jarvis with `"gmail_read"`,
@@ -5374,7 +5626,9 @@ when it starts (nothing is installed into Windows):
 All three are licensed under the SIL Open Font License, Version 1.1
 (<https://openfontlicense.org>). Keep each licence file next to its font when you
 copy or share the folder. If a font file is missing, the app logs it and uses
-Windows fonts instead (Bahnschrift, Segoe UI, Cascadia Mono or Consolas).
+Windows fonts instead (Bahnschrift, Segoe UI, Cascadia Mono or Consolas). The
+board's page uses the same three fonts, handed to it from `fonts\` by Jarvis
+himself; nothing is downloaded.
 See also [License](#license).
 
 ## Tests
@@ -5502,6 +5756,33 @@ Code, keep every file in a temporary folder, and check that no subject,
 address, report or sentence of yours reaches a log. The lock and cap tests
 start a second Python process of their own; `--standing-run` does nothing
 while the tests run.
+
+The new look's tests (`test_holo_orb.py` for the ring: its looks at every
+size, facing you, the mic level, its frame rates and paint budget;
+`test_sounds.py` and `test_board_sounds.py` for the soft sounds and every rule
+that keeps them quiet, never touching an audio device; `test_look_ui.py` for
+Settings > Look; `test_board.py`, `test_board_frames.py`, `test_board_feed.py`,
+`test_board_glance.py`, `test_board_ways.py`, `test_board_lit.py`,
+`test_board_big.py` and `test_board_typed.py` for the board's messages and
+their caps, its frames, groups and limits, its read-only tiles, its ways (the
+strip, satellites, pin, close, Clear, parking, the keyboard), the lit frame and
+its cue line, open big and Ask's frames on it; `test_ask_frames.py` for Ask's
+tables, charts, timelines and maths, hostile ones first - markup, scripts,
+links, control characters, huge or deeply nested data - of which only text and
+numbers may arrive; `test_desk.py` for Home as a desk; `test_second_screen.py`
+for the second screen; `board_fakes.py` and `second_screen_fakes.py`, their
+stand-ins) run offscreen in the shared test process without the web engine:
+the board there is a stand-in page that keeps every message it would have run,
+or the real native fallback. `test_board_lockdown.py` runs the real board in a
+separate Python process per case (`tests\board_probe.py <case>`, offscreen,
+Chromium's proxy at an address that is not there): a page that tries every way
+out (fetches, pictures, sockets, new windows, navigation, forms, frames,
+workers, permissions, the clipboard) gets nowhere, Jarvis's keys still work
+after its renderer is killed, it falls back to its native tile when it may not
+start, and the desk, the board's ways, the lit frame, open big and Ask's frames
+work in the real page. The second screen's tests use fake monitors and a fake
+Windows layer. None of them shows a window on the real screen, plays a sound
+or starts a model.
 
 The hotkey tests register Ctrl+Alt+Shift+F24 (a key no keyboard has) for a
 moment with a private agent lock, simulate a press without pressing anything,
@@ -5726,6 +6007,39 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
   type "environment variables": your account's or the system's) and restart
   Jarvis. **"... the private window could not be started"**: the log's
   "Page snapshots: ..." line says why; the next page tries again.
+- **The board says "The board can't start on this PC. Answers still show here
+  as text."**: its web view could not start here, so the frames show as plain
+  read-only tiles in its place (its bar says READ-ONLY; the answers are whole
+  in the conversation, and nothing else changes). The log's "Board: it can't
+  start on this PC (...)" line says why: `no_engine` (this PySide6 has no web
+  engine: `py -3.13 -m pip install --upgrade PySide6`, 6.8 or newer),
+  `sandbox` or `unsafe_flags` (an environment variable changes the web
+  engine's safety settings: the same variables as in the LIVE item above),
+  `engine_failed`, `no_ready` or `load_failed` (the engine or its page did not
+  come up in time), or `crashed` (its renderer kept stopping). Restart Jarvis
+  to try again.
+- **Turning the board off**: **Ctrl+B** (or the header's Board button) folds
+  it away for now. `[look] board = false` in `config.toml`, then a restart,
+  keeps Home exactly as it was: no Board button, no hint line, no desk, and
+  the board's web engine never starts.
+- **Jarvis takes more memory once the board is up**: the board's web view
+  runs one more process of the web engine (a renderer), started with your
+  first Ask of a session, never with Jarvis, and kept until he closes. Measured
+  offscreen with 19 frames on the board: the renderer about 45 MB of private
+  memory (105 to 120 MB working set, at 100 % and 150 % scaling), and about
+  25 MB more in Jarvis's own process for the engine. `[look] board = false`
+  avoids it.
+- **Settings > Look's "Show Jarvis on my second screen" is greyed ("Needs a
+  second monitor")**: Windows sees one monitor. Plug in or turn on the other
+  one; the switch follows while Settings is open. On, but nothing on the
+  second monitor: it hides while the PC is locked, the display is off,
+  battery saver is on or a full-screen app runs on that monitor, and comes back
+  when that ends; the log's "Second screen: hidden (...)" line says which.
+- **Nothing moves on the board** (frames appear at once, no outline draws in,
+  the orb holds still): motion follows `[ui] motion` and Windows' "Show
+  animations" setting (Settings > Accessibility > Visual effects > Animation
+  effects). With animations off, or `motion = "off"`, everything is there at
+  once and the orb holds one still pose per look; that is on purpose.
 - **"Notion rejected the token (401)"**: the secret in `.env` is wrong or was
   regenerated. Copy it again from the integration page into `NOTION_TOKEN=`.
 - **"...not found or is not shared with the integration (404)"**: share the page
@@ -6071,6 +6385,19 @@ briefing_reader/local_voice_ui.py  Settings > Voice's own part: whether the loca
 briefing_reader/player.py     QtMultimedia player that plays sections in order with pauses
 briefing_reader/hud.py        Jarvis HUD widget kit: colours, fonts, chamfered panels, orb, buttons, cards, agenda, command bar, tabs, conversation, the LIVE log, its pictures and the picture viewer
 briefing_reader/ui.py         assistant screen (JARVIS / BRIEFING / LIVE / MEMORY tabs), the LIVE pop-out window, classic prompt, tray icon, approvals, TODAY / DEADLINES, app controller (launch kinds, NEW, greeting, announcement)
+briefing_reader/orb.py        the orb: Jarvis's ring at every size, its looks and facing you, its frame clock and paint budget
+briefing_reader/look_ui.py    the new look in the app: the soft sounds' moments, Settings > Look, the board's and the second screen's controllers
+briefing_reader/sounds.py     the soft sounds, made in code: their recipes and every rule that keeps them quiet
+briefing_reader/board/        the board: its own address scheme (scheme), the messages both ways and their checks
+                              (protocol), the one web view with its fallback and read-only tiles (view), the frames
+                              from what Jarvis already knows (frames) and from Ask (ask_frames), what it holds (feed),
+                              a satellite's fact (facts), which frame a sentence is about (lit), the glance painter
+                              (glance); board/assets: its page, style and script
+briefing_reader/desk_view.py  Home as a desk: its geometry, the conversation column and its ring head, the cue line's native part, the hint line
+briefing_reader/desk_ui.py    the desk's controller: makes and feeds the board, its ways, parking
+briefing_reader/desk_cue.py   the lit frame and its cue line while Jarvis speaks
+briefing_reader/desk_big.py   open big
+briefing_reader/second_screen.py  the second-screen display, when it hides, and the broker of "the other screen"
 briefing_reader/agent/        Tasks (no Qt): the tool registry (tools), the task's own folder (workspace), the local MCP endpoint (endpoint), budgets and what is offered (policy), one run (runner), its prompt and settings (assets)
 briefing_reader/agent_ui.py   Tasks in the app: the controller of the one task that may run, its LIVE task, its words on the caption and in the voice
 briefing_reader/ask_ui.py     Ask Jarvis in the app: the command bar's controller and its "ask" thread (web: requests too)
@@ -6084,8 +6411,8 @@ briefing_reader/standing_setup.py  setting a job up in the app: the setup run, a
 briefing_reader/standing_ui.py  standing agents and rules in the app: their cards, the Agents screen's controller, the spoken line, a Reply checked again at the click, the tidy-up's Undo and sign-in
 briefing_reader/standing_view.py  the Agents screen (Ctrl+9): status line, AGENTS, RULES, ACTIVITY, REPORTS
 fonts/                        Chakra Petch, Sora and JetBrains Mono fonts with their OFL licences
-tests/                        unit tests and saved fake Notion pages (tests/fixtures)
-config.toml                   voice, prompt, polling, section, calendar, actions, schedule, hotkey, agenda, display, Ask, web research, assistant, LIVE and productivity settings
+tests/                        unit tests and saved fake Notion pages (tests/fixtures); board_probe.py runs the real board in a process of its own
+config.toml                   voice, prompt, polling, section, calendar, actions, schedule, hotkey, agenda, display, Ask, web research, assistant, LIVE, productivity and look settings
 .env.example                  template for .env (NOTION_TOKEN, BRIEFING_PAGE_ID; the optional JARVIS_ keys)
 requirements.txt              Python dependencies
 install-schedule.ps1          registers the Briefing AM / PM / catch-up / hotkey / agents scheduled tasks
