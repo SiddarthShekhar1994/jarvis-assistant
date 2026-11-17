@@ -146,7 +146,7 @@ def picture_key(picture: Any, merge: str = "", plan: str = "") -> str:
         return f"page:{url}" if url else ""
     if kind == pictures.KIND_SEARCH:
         query = " ".join(str(getattr(getattr(picture, "search", None), "query", "") or "").split()).casefold()
-        return f"search:{query}" if query else ""
+        return f"{board_frames.SEARCH_KEY}{query}" if query else ""
     if kind == pictures.KIND_DAY:
         day = getattr(picture, "day", None)
         days = "|".join(str(item) for item in (getattr(day, "days", ()) or ()))

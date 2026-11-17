@@ -28,11 +28,12 @@ and title) and its line ("In 19 minutes · video call"), the counts as a shape a
 "9 frames on the board" / "1 pinned"). The right wall: "BOARD · UPDATED 9:41 AM" and "Mail text hidden on this screen"
 over a 3x3 grid of outline-only glance tiles (board.glance, private and in the SECOND face: mail text hidden, page
 pictures at 62 %, a picture over tile_picture's 4 MP never decoded) - the board's first nine frames in its order, as
-the page has them (board.protocol checked; parked, closed and cleared frames left out; a mail's text taken out before
-it reaches the window). With [look] board off the wall holds only the counts' row. The strip (beside a LIVE pop-out
-or a watch window, and on a narrow screen): the ring at 200, the state word, the clock and the counts. Never on this
-screen: the owner's question, the spoken line, a mail's text, the lit frame, the cue line, open big's backdrop, any
-sound. Lines break at spaces only, never after a hyphen.
+the page has them (board.protocol checked; parked, closed and cleared frames left out, and web searches - titled with
+the model's query - too; a mail's text and a text frame's paragraph - a web research answer is the line Jarvis speaks
+- taken out before they reach the window, its title and sources kept). With [look] board off the wall holds only the
+counts' row. The strip (beside a LIVE pop-out or a watch window, and on a narrow screen): the ring at 200, the state
+word, the clock and the counts. Never on this screen: the owner's question, the spoken line, a mail's text, the lit
+frame, the cue line, open big's backdrop, any sound. Lines break at spaces only, never after a hyphen.
 
 OLED care: true black, no grid, no glows; a DRIFT_PX drift on a 3x3 lattice every DRIFT_S; the sides swap every SWAP_S,
 never within SWAP_GUARD_S of a board change; after DIM_AFTER_S quiet seconds (no board change, no state change, no owner
@@ -337,19 +338,21 @@ def next_line(event: NextEvent, now: datetime) -> str:
 # The wall's frames (pure): the board's own frame dicts, checked as the page gets them, a mail's text taken out
 # --------------------------------------------------------------------------
 
-_HIDDEN_TEXT = "-"             # what a mail's text becomes before it reaches the window (glance says it is hidden)
+_HIDDEN_TEXT = "-"             # what a mail's or a text frame's words become before they reach the window (glance says
+                               # they are hidden)
 
 
 def private_frame(frame: Mapping[str, Any]) -> dict[str, Any]:
-    """``frame`` as the second screen may hold it: a mail thread's text replaced by a mark (the glance painter's
-    private mode then says "Text hidden on this screen"), a mail list's rows with no field but the ones it shows
+    """``frame`` as the second screen may hold it: a mail thread's text and a text frame's paragraph (a web research
+    answer: the line Jarvis speaks) replaced by a mark (the glance painter's private mode then says "Text hidden on
+    this screen"; a text frame's title and source rows stay), a mail list's rows with no field but the ones it shows
     (sender, time, subject, meta, unread); everything else as it is."""
     copy = dict(frame)
     body = frame.get("body")
     if not isinstance(body, Mapping):
         return copy
     kind = frame.get("kind")
-    if kind == "mail_thread":
+    if kind in ("mail_thread", "text"):
         body = dict(body)
         if body.get("text"):
             body["text"] = _HIDDEN_TEXT
@@ -367,8 +370,11 @@ def private_frame(frame: Mapping[str, Any]) -> dict[str, Any]:
 def wall_frames(feed: Any, limit: int = TILES_MAX) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """The board's first ``limit`` frames in its order (board.feed.BoardFeed: the newest group first) that are on the
     board for the owner to see - not parked, closed or taken by a Clear - each as board.protocol rebuilds it for the
-    page and made private (private_frame), and their pictures' data: URLs (protocol-checked), by frame id. Never the
-    lit frame, a backdrop or open big's state: only "frame" and "picture" messages exist here."""
+    page and made private (private_frame), and their pictures' data: URLs (protocol-checked), by frame id. A web
+    search's frame (titled with the model's query) never comes here: told by the key it was built from
+    (board.frames.SEARCH_KEY), never by its words. Never the lit frame, a backdrop or open big's state: only "frame"
+    and "picture" messages exist here."""
+    from .board import frames as board_frames
     from .board import protocol
 
     frames: list[dict[str, Any]] = []
@@ -387,6 +393,8 @@ def wall_frames(feed: Any, limit: int = TILES_MAX) -> tuple[list[dict[str, Any]]
             flags = feed.flags(frame_id)
             if not group or feed.is_parked(group) or flags.get("closed") or flags.get("cleared"):
                 continue
+            if str(feed.key_of(frame_id) or "").startswith(board_frames.SEARCH_KEY):
+                continue                         # a web search: off this screen
             message = feed.frame_message(frame_id)
             if message is None:
                 continue
@@ -1167,9 +1175,12 @@ class SecondScreen(QWidget):
         return self._layout
 
     def set_state(self, state: DisplayState) -> None:
-        """What it shows now (the controller decides what changed counts as quiet's end)."""
+        """What it shows now (the controller decides what changed counts as quiet's end). The decoded pictures it keeps
+        are the wall's own now: one that left the wall (or changed) is let go."""
         board_changed = state.board_on != self.state.board_on
         self.state = state
+        self._images = {frame_id: cached for frame_id, cached in self._images.items()
+                        if state.pictures.get(frame_id) == cached[0]}
         if board_changed:
             self._layout = None
         look, muted, offline = state.look
@@ -1241,6 +1252,8 @@ class SecondScreen(QWidget):
         if not self.isVisible():
             self._ring_timer.stop()
             return
+        if self._settle_care(self._clock()):
+            return          # a drift step or a dim stage came: the whole display was asked for, and the ring re-timed
         self.update(self._ring_dirty())
 
     def _ring_dirty(self) -> QRect:
@@ -1504,6 +1517,11 @@ class SecondScreen(QWidget):
             glance.paint_tile(painter, cell, frame, scale=s, private=True, picture=picture, ground=False,
                               screen=glance.SECOND)
 
+    def drop_pictures(self) -> None:
+        """Let every decoded picture go (switched off, one screen left, Jarvis closing): the next paint decodes what
+        the wall has then."""
+        self._images.clear()
+
     def _picture(self, frame_id: str) -> QImage | None:
         """A tile's picture, decoded once per picture (tile_picture: a JPEG of at most its 4 MP, else none)."""
         src = self.state.pictures.get(frame_id, "")
@@ -1569,6 +1587,7 @@ class SecondScreen(QWidget):
 
     def shutdown(self) -> None:
         self._ring_timer.stop()
+        self.drop_pictures()
         try:
             self._native.release()
         except Exception:  # noqa: BLE001
@@ -1809,6 +1828,7 @@ class SecondScreenController(QObject):
         if reason:
             self._hide(reason)
             return
+        self._refresh_wall()          # shown again after it was off or had one screen: the board as it is now
         window.show_quietly()
         if not self._care.isActive():
             self._care.start()
@@ -1826,6 +1846,8 @@ class SecondScreenController(QObject):
         if reason in (R_OFF, R_ONE_SCREEN):
             self._care.stop()
             self._minute.stop()
+            if window is not None and shiboken6.isValid(window):
+                window.drop_pictures()           # nothing decoded is kept for a display that is not there
         elif not self._care.isActive():
             self._care.start()                 # the rule is checked again at the drift's pace
         changed = self._shown or reason != self._reason
@@ -1904,17 +1926,52 @@ class SecondScreenController(QObject):
     def _board_on(self) -> bool:
         return bool(getattr(getattr(getattr(self.host, "config", None), "look", None), "board", True))
 
+    _board_mark: Any = None                 # the board as last noted (board.feed.BoardFeed.mark())
+    _board_at: datetime | None = None       # when it last changed: the wall's "UPDATED"
+    _wall_mark: Any = None                  # the board the wall was last built from
+
     def on_board(self, feed: Any = None) -> None:
-        """The board changed (the desk's every send): its first nine frames as the page has them, private, and their
-        pictures; only "frame" and "picture" data ever come here - never the lit frame, a backdrop or open big."""
+        """The board may have changed (the desk's every send; never the lit frame, a backdrop or open big: only "frame"
+        and "picture" data come here). It is noted - with its time, only when it did change: the desk's resize sends
+        change nothing - and the wall built from it, except while the display is off or on one screen or has no
+        window: then nothing is built (sync() fills the wall from the board as it is when it shows)."""
         feed = feed if feed is not None else self._board()
+        self._note_board(feed)
+        window = self.window
+        if self._reason in (R_OFF, R_ONE_SCREEN) or window is None or not shiboken6.isValid(window):
+            return
+        self._fill_wall(feed)
+
+    def _note_board(self, feed: Any) -> None:
+        """The board as it is now (cheap: BoardFeed.mark()); when it differs from the last one noted, when."""
+        try:
+            mark = feed.mark() if feed is not None else None
+        except Exception:  # noqa: BLE001 - a board that can't say: taken as changed
+            mark = object()
+        if mark != self._board_mark:
+            self._board_mark = mark
+            self._board_at = self._now()
+
+    def _refresh_wall(self) -> None:
+        """The wall from the board as it is now (a new window; a display shown again after it was off or had one
+        screen)."""
+        feed = self._board()
+        self._note_board(feed)
+        self._fill_wall(feed)
+
+    def _fill_wall(self, feed: Any) -> None:
+        """The wall from ``feed`` - its first nine frames as the page has them, private, and their pictures - unless it
+        was built from the board as it is now already; "UPDATED" says when the board last changed."""
+        if self._wall_mark is not None and self._wall_mark == self._board_mark:
+            return                              # nothing on the board changed since: nothing built
+        self._wall_mark = self._board_mark
         frames, pictures = wall_frames(feed)
         tiles = tuple(frames)
         if tiles == self.state.tiles and pictures == self.state.pictures:
             return
         from .text_prep import format_time
 
-        stamp = format_time(self._now(), hour24=self._hour24()) if tiles else ""
+        stamp = format_time(self._board_at or self._now(), hour24=self._hour24()) if tiles else ""
         pinned = 0
         try:
             pinned = int(feed.pinned()) if feed is not None else 0
@@ -1953,7 +2010,7 @@ class SecondScreenController(QObject):
     def _push(self) -> None:
         """A new window: everything as it is now."""
         self.sync_glance()
-        self.on_board()
+        self._refresh_wall()
         events = getattr(self.host, "_agenda_events", None)
         if events:
             self.set_events(events)

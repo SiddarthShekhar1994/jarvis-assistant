@@ -888,9 +888,9 @@
         }
         box.appendChild(mathsGroup(arg, bracketed, flat));
       });
-    } else if (head === '/') {
+    } else if (head === '/') {                 // a fraction that divides, inline: "6 ÷ (1/2)" (stacked: no brackets)
       box.append(mathsGroup(args[0], prec(args[0]) <= 2, flat), mathsSign(' ÷ '),
-                 mathsGroup(args[1], prec(args[1]) <= 3 || negative(args[1]), flat));
+                 mathsGroup(args[1], prec(args[1]) <= 3 || negative(args[1]) || (flat && args[1][0] === 'frac'), flat));
     } else if (head === 'frac' && flat) {
       box.append(mathsGroup(args[0], !atom(args[0]), true), mathsSign('/'), mathsGroup(args[1], !atom(args[1]), true));
     } else if (head === 'frac') {

@@ -617,9 +617,10 @@ def _plain(node: list[Any]) -> str:
                     else " × "
             out += _bracket(_plain(arg), bracketed)
         return out
-    if head == "/":
+    if head == "/":           # a fraction that divides is bracketed inline: "6 ÷ (1/2)", never "6 ÷ 1/2"
         left, right = args
-        return f"{_bracket(_plain(left), prec(left) <= 2)} ÷ {_bracket(_plain(right), prec(right) <= 3 or negative(right))}"
+        divisor = prec(right) <= 3 or negative(right) or right[0] == "frac"
+        return f"{_bracket(_plain(left), prec(left) <= 2)} ÷ {_bracket(_plain(right), divisor)}"
     if head == "frac":
         top, bottom = args
         return f"{_bracket(_plain(top), not _atom(top))}/{_bracket(_plain(bottom), not _atom(bottom))}"

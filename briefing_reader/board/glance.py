@@ -13,8 +13,9 @@ paints its glance tiles with ``private=True``).
     paint_tile(painter, rect, frame, *, scale=1.0, private=False, picture=None, ground=False)
         one read-only tile from a frame dict as board.protocol.check_message rebuilt it: outline only (``ground``: the
         frame's own fill, TILE / TILE_AMBER / TILE_ALERT, as the board's fallback shows it), the kind's glyph, the title,
-        the meta and the headline rows; ``private`` (the second screen) hides a mail's text and says "Text hidden on
-        this screen", and draws a page picture at 62 % instead of 80 %. Nothing in a tile is clickable
+        the meta and the headline rows; ``private`` (the second screen) hides a mail's text and a text frame's
+        paragraph (a web research answer: the line Jarvis speaks; its title and source rows stay) and says "Text hidden
+        on this screen", and draws a page picture at 62 % instead of 80 %. Nothing in a tile is clickable
     GlanceTiles(QWidget)       stacks the tiles of a list of frames (set_frames), each as tall as it needs; closed
                                frames are left out. Never takes the focus
 
@@ -24,10 +25,11 @@ rest. Frames' words are drawn as they came (already cleaned and capped by the bo
 ``screen`` (part 7): BOARD (the default: the board's own sizes, as the page has them) or SECOND, the second screen's face
 (DESIGN-SPEC 6, its still second.html): type read across a desk (titles Chakra 20, bodies Sora 16, the badge role 13 px
 and the label role 14 px, a table's change and a maths answer large), 20 / 22 px of padding, a 20 px glyph, a calendar
-row's meta under its title, no past rows, no now pill and no hour labels (the day bar's now tick says where now is), no
-row rules, and whites capped at OLED_INK (OLED care: INK_1 and AMBER_TX drawn as OLED_INK and AMBER_TX2, nothing filled
-with a tile's ground). Lines break at spaces only, never after a hyphen (a word longer than a line breaks inside it,
-not right after a hyphen of its own).
+row at its start time (its meridiem kept) with its meta under its title, free rows plain ("Free", its length under it,
+in INK_4), no past rows, no now pill and no hour labels (the day bar's now tick says where now is), no row rules, a
+table's headline fitted to its tile (part 7 fixes), and whites capped at OLED_INK (OLED care: INK_1 and AMBER_TX drawn
+as OLED_INK and AMBER_TX2, nothing filled with a tile's ground). Lines break at spaces only, never after a hyphen (a
+word longer than a line breaks inside it, not right after a hyphen of its own).
 """
 
 from __future__ import annotations
@@ -52,6 +54,7 @@ NARROW = 330                    # px of content from which a calendar row's meta
 PICTURE_LEVEL = 0.8             # a page picture's brightness ...
 PRIVATE_PICTURE_LEVEL = 0.62    # ... and on the second screen
 TEXT_LINES = 3                  # a mail's text, at most (the page clamps it the same)
+TITLE_LINES = 2                 # a title on the second screen, at most (part 7 fixes: then "…")
 HIDDEN = "Text hidden on this screen"
 ON_MAIN = "On the main screen, Ctrl+3"
 PICTURE_ONLY = "Picture only"
@@ -136,8 +139,15 @@ _SECOND_TYPE: dict[str, tuple[str, float, float, int, float, bool]] = {
     "expr_strong": (hud.BODY_FAMILY, 18, 26, 600, 0.02, False),
     "headline": (hud.DISPLAY_FAMILY, 52, 56, 500, 0.0, False),    # "2,900 › 3,400"
     "answer": (hud.BODY_FAMILY, 44, 52, 600, 0.01, False),        # "x = 1 or x = 3"
+    # Part 7 fixes (review 7, paint 1): the headline's figures try one line at these sizes before they stack.
+    "headline_48": (hud.DISPLAY_FAMILY, 48, 52, 500, 0.0, False),
+    "headline_44": (hud.DISPLAY_FAMILY, 44, 48, 500, 0.0, False),
+    "headline_40": (hud.DISPLAY_FAMILY, 40, 44, 500, 0.0, False),
+    "headline_35": (hud.DISPLAY_FAMILY, 35, 40, 500, 0.0, False),   # about two thirds of 52
 }
 _TYPES_OF = {BOARD: _TYPE, SECOND: _SECOND_TYPE}
+# The second face's headline sizes, largest first: "2,900 › 3,400" keeps one line at the first that fits its tile.
+_HEADLINE_STEPS = ("headline", "headline_48", "headline_44", "headline_40", "headline_35")
 
 
 @dataclass(frozen=True)
@@ -256,6 +266,7 @@ class _Block:
     bar: bool = False                          # the calendar's day bar (the first to leave when the tile is short)
     paragraph: Any = None                      # (rebuild(max_lines) -> _Block, lines) of a paragraph that may shorten
     fit: Any = None                            # fit(max_height) -> _Block: a picture that may shrink
+    drop: bool = False                         # it may leave when the tile is still short (the second face's delta)
 
 
 @dataclass
@@ -355,6 +366,8 @@ class _Builder:
         self.right = self.left + self.inner
         self.waits = bool(frame.get("waits")) and frame.get("status", "ok") == "ok"
         self.status = str(frame.get("status", "ok"))
+        self.headline = True              # private: a table's changed row as its headline (False: its rows) ...
+        self.headlined = False            # ... and the body built shows one
 
     def px(self, value: float) -> float:
         return value * self.s
@@ -381,7 +394,8 @@ class _Builder:
             beside = t.width("title", str(frame.get("title", ""))) + self.px(8) + meta_w + pin <= title_room
         title_w = title_room - (meta_w + pin + self.px(8) if beside else 0.0)
         title_color = holo.AMBER_TX if self.waits else holo.INK_1
-        title = _text_op(str(frame.get("title", "")), "title", title_x, 0.0, title_w, title_color, t)
+        title = _text_op(str(frame.get("title", "")), "title", title_x, 0.0, title_w, title_color, t,
+                         most=TITLE_LINES if self.second else 0)      # the second screen: two lines at most ("…")
         ops.append(title)
         height = max(self.px(face.head_min), title.rect.height())
         meta_color = holo.AMBER_TX2 if self.waits else holo.INK_4
@@ -460,12 +474,21 @@ class _Builder:
             return _Block(op.rect.bottom(), [op], paragraph=(build, len(op.lines)))
         return build(most)
 
+    def hidden(self) -> _Block:
+        """Private (the second screen): the hidden glyph and "Text hidden on this screen" where a mail's text or a text
+        frame's paragraph would be."""
+        words = _text_op(HIDDEN, "body", self.left + self.px(22), 0.0, self.inner - self.px(22), holo.INK_3, self.t)
+        glyph = Op("glyph", QRectF(self.left, self.px(2), self.px(16), self.px(16)), _color(holo.INK_3), name="hidden")
+        return _Block(words.rect.bottom(), [glyph, words])
+
     # ---- the kinds -----------------------------------------------------------------------------------------------------
 
     def text(self, data: Mapping[str, Any]) -> list[_Block]:
         blocks: list[_Block] = []
         words = str(data.get("text", ""))
-        if words:
+        if words and self.private:          # a web research answer is the line Jarvis speaks: never drawn privately
+            blocks.append(self.hidden())
+        elif words:
             blocks.append(self.paragraph(words, holo.INK_2))
         rows = list(data.get("rows") or [])
         leads = any(row.get("lead") for row in rows)
@@ -507,9 +530,12 @@ class _Builder:
             blocks.append(self.day_bar(data, first, last))
         rows = list(data.get("rows") or [])
         now = str(data.get("now", ""))
-        if self.second:          # the second screen: what is still to come (the day bar's tick says where now is and
-            rows = [_start_only(row) for row in rows      # shows the free time), each row at its start
-                    if row.get("state") not in ("past", "free")]
+        if self.second:          # the second screen: what is still to come, free time too (the day bar's tick says
+            # where now is), each row at its start. Past rows go, and so does free time that began before now: the
+            # free row before the day's now or next row (its start would read as a time gone by).
+            soon = next((index for index, row in enumerate(rows) if row.get("state") in ("now", "next")), -1)
+            rows = [_start_only(row) for index, row in enumerate(rows)
+                    if row.get("state") != "past" and not (row.get("state") == "free" and index < soon)]
             now = ""
         horizon = -1
         if now:
@@ -647,10 +673,7 @@ class _Builder:
             blocks.append(_Block(bottom + self.px(3), ops))
         text = str(data.get("text", ""))
         if self.private and text:
-            words = _text_op(HIDDEN, "body", self.left + self.px(22), 0.0, self.inner - self.px(22), holo.INK_3, t)
-            glyph = Op("glyph", QRectF(self.left, self.px(2), self.px(16), self.px(16)), _color(holo.INK_3),
-                       name="hidden")
-            blocks.append(_Block(words.rect.bottom(), [glyph, words]))
+            blocks.append(self.hidden())
         elif text:
             blocks.append(self.paragraph(text, holo.AMBER_TX2 if self.waits else holo.INK_2, TEXT_LINES))
         return blocks
@@ -766,8 +789,9 @@ class _Builder:
 
     # ---- part 6, Ask's typed frames ------------------------------------------------------------------------------------
 
-    def delta(self, words: str, top: float) -> _Block:
-        """A changed figure's delta line: the delta glyph, its figure first in HOLO_HI 600, then the rest (INK_3)."""
+    def delta(self, words: str, top: float, most: int = 0) -> _Block:
+        """A changed figure's delta line: the delta glyph, its figure first in HOLO_HI 600, then the rest (INK_3);
+        ``most`` lines at most (the last ending with "…"), 0: as many as it takes."""
         t = self.t
         indent = self.px(17)
         glyph = Op("glyph", QRectF(self.left, top + self.px(3), self.px(11), self.px(11)), _color(holo.HOLO_HI),
@@ -782,22 +806,38 @@ class _Builder:
             fit = 0                                   # the words that go on after the figure, on its line ...
             while fit < len(parts) and t.width("delta", " ".join(parts[:fit + 1])) <= self.right - x:
                 fit += 1
-            if fit:
-                ops.append(_text_op(" ".join(parts[:fit]), "delta", x, top, self.right - x, holo.INK_3, t))
-            if fit < len(parts):                      # ... and the rest under them, from the indent
-                ops.append(_text_op(" ".join(parts[fit:]), "delta", self.left + indent, lead.rect.bottom(),
-                                    self.inner - indent, holo.INK_3, t))
+            if most == 1 and fit < len(parts):        # (one line: as many of them as fit with "…")
+                while fit and t.width("delta", " ".join(parts[:fit]) + ELLIPSIS) > self.right - x:
+                    fit -= 1
+                ops.append(_text_op(" ".join(parts[:fit]) + ELLIPSIS, "delta", x, top, self.right - x, holo.INK_3, t))
+            else:
+                if fit:
+                    ops.append(_text_op(" ".join(parts[:fit]), "delta", x, top, self.right - x, holo.INK_3, t))
+                if fit < len(parts):                  # ... and the rest under them, from the indent
+                    ops.append(_text_op(" ".join(parts[fit:]), "delta", self.left + indent, lead.rect.bottom(),
+                                        self.inner - indent, holo.INK_3, t, most=max(0, most - 1)))
         else:
-            ops.append(_text_op(words, "delta", self.left + indent, top, self.inner - indent, holo.INK_3, t))
+            ops.append(_text_op(words, "delta", self.left + indent, top, self.inner - indent, holo.INK_3, t,
+                                most=most))
         return _Block(max(op.rect.bottom() for op in ops), ops)
+
+    def delta_paragraph(self, words: str, top: float) -> _Block:
+        """The second face's headline delta: a paragraph _assemble may shorten to one line ("…") or leave out."""
+        def build(most: int) -> _Block:
+            block = self.delta(words, top, most)
+            lines = round((block.height - top) / self.t.line("delta"))
+            block.paragraph, block.drop = (build, max(1, lines)), True
+            return block
+        return build(0)
 
     def table(self, data: Mapping[str, Any]) -> list[_Block]:
         columns = [str(word) for word in data.get("columns") or []]
         rows = [[str(cell) for cell in row] for row in data.get("rows") or [] if isinstance(row, list)]
         changed = int(data.get("changed", -1)) if isinstance(data.get("changed"), int) else -1
-        if self.private and 0 <= changed < len(rows):
+        if self.private and self.headline and 0 <= changed < len(rows):
             headline = self.table_headline(columns, rows[changed], str(data.get("change", "")))
             if headline:
+                self.headlined = True
                 return headline
         t = self.t
         count = len(columns)
@@ -859,7 +899,9 @@ class _Builder:
     def table_headline(self, columns: list[str], row: list[str], change: str) -> list[_Block]:
         """The second screen's table: the changed row's first words, then what it was and is now, large ("2,900 →
         3,400", the new figure in HOLO_HI), then its change; [] when its before and after figures can't be told
-        without doubt (headline_figures): the rows show then."""
+        without doubt (headline_figures): the rows show then. On the second face (part 7 fixes) the figures keep one
+        line at the largest of _HEADLINE_STEPS that fits (their arrow with them) before they stack, and the change is a
+        paragraph the tile may shorten to one line or leave out."""
         figures = headline_figures(columns, row)
         if figures is None:
             return []
@@ -869,22 +911,32 @@ class _Builder:
             label = _text_op(row[0], "body", self.left, 0.0, self.inner, holo.INK_2, t)
             blocks.append(_Block(label.rect.bottom() + self.px(22 if self.second else 6), [label]))
         before, after = figures
-        arrow = self.px(50 if self.second else 22)          # the second screen's arrow: 30 px, 10 either side
-        mark_size = self.px(30 if self.second else 14)
-        width = t.width("headline", before) + arrow + t.width("headline", after)
-        old = _text_op(before, "headline", self.left, 0.0, self.inner, holo.INK_1, t)
+        kind = "headline"
+        for size in _HEADLINE_STEPS if self.second else (kind,):
+            kind = size
+            share = t.table[kind][1] / t.table["headline"][1]
+            arrow = self.px((50 if self.second else 22) * share)     # the second screen's arrow: 30 px, 10 either side
+            mark_size = self.px((30 if self.second else 14) * share)
+            width = t.width(kind, before) + arrow + t.width(kind, after)
+            if width <= self.inner:
+                break
+        else:
+            kind = "headline"                          # one line at none of them: one figure over the other
+        old = _text_op(before, kind, self.left, 0.0, self.inner, holo.INK_1, t)
         if width <= self.inner:
             x = old.rect.right()
-            mark = Op("glyph", QRectF(x + self.px(10 if self.second else 3), (t.line("headline") - mark_size) / 2,
+            mark = Op("glyph", QRectF(x + self.px((10 if self.second else 3) * share), (t.line(kind) - mark_size) / 2,
                                       mark_size, mark_size), _color(holo.INK_4 if self.second else holo.INK_3),
                       name="chevron")
-            new = _text_op(after, "headline", x + arrow, 0.0, self.right - x - arrow, holo.HOLO_HI, t)
+            new = _text_op(after, kind, x + arrow, 0.0, self.right - x - arrow, holo.HOLO_HI, t)
             blocks.append(_Block(max(old.rect.bottom(), new.rect.bottom()), [old, mark, new]))
         else:
-            new = _text_op(after, "headline", self.left, old.rect.bottom(), self.inner, holo.HOLO_HI, t)
+            new = _text_op(after, kind, self.left, old.rect.bottom(), self.inner, holo.HOLO_HI, t)
             blocks.append(_Block(new.rect.bottom(), [old, new]))
-        if change:
-            blocks.append(self.delta(change, self.px(12 if self.second else 8)))
+        if change and self.second:
+            blocks.append(self.delta_paragraph(change, self.px(12)))
+        elif change:
+            blocks.append(self.delta(change, self.px(8)))
         return blocks
 
     def chart(self, data: Mapping[str, Any]) -> list[_Block]:
@@ -1191,16 +1243,24 @@ def headline_figures(columns: Sequence[Any], row: Sequence[Any]) -> tuple[str, s
     return (figures[0], figures[1]) if len(figures) == 2 else None
 
 
-_RANGE_RE = re.compile(r"^(.*?\d{1,2}:\d{2})\s*[-–‒—]\s*\d")
+# A row's time range as board.frames writes it (pictures.time_range): "10:00-10:30" (24-hour), "10:00-10:30 AM" (one
+# meridiem, after the end), "11:30 AM-12:30 PM" (across noon or midnight: each its own).
+_RANGE_RE = re.compile(r"^(.*?\d{1,2}:\d{2})(?:\s*([AP]M))?"          # the start (its own meridiem) ...
+                       r"\s*[-–‒—]\s*\d{1,2}:\d{2}(?:\s*([AP]M))?",      # ... the end (the range's meridiem)
+                       re.IGNORECASE)
 
 
 def _start_only(row: Mapping[str, Any]) -> Mapping[str, Any]:
-    """A calendar row with its time's start alone ("10:00-10:30" -> "10:00"; "All day" as it is): the second screen."""
+    """A calendar row with its time's start alone, its meridiem kept (the second screen): "10:00-10:30" -> "10:00",
+    "10:00-10:30 AM" -> "10:00 AM", "1:00-2:00 PM" -> "1:00 PM", "11:30 AM-12:30 PM" -> "11:30 AM"; a time that is
+    not a range ("All day", "2:00 PM") as it is."""
     found = _RANGE_RE.match(str(row.get("time", "")))
     if found is None:
         return row
+    start, own, after = found.groups()
+    meridiem = (own or after or "").upper()
     copy = dict(row)
-    copy["time"] = found.group(1)
+    copy["time"] = f"{start} {meridiem}" if meridiem else start
     return copy
 
 
@@ -1228,7 +1288,7 @@ def _assemble(builder: _Builder, blocks: list[_Block], height: float | None) -> 
     if height is not None and total(body) > height + 0.01:
         # 1. The calendar's day bar leaves (its rows say more); 2. rows leave from the last one up, and one "+N MORE"
         # row (more = -1: the painter's own) stands where they were; 3. a paragraph keeps its first lines ("…");
-        # 4. a picture shrinks.
+        # 4. a picture shrinks; 5. a block that may leave does (the second face's headline delta), the last first.
         body = [block for block in body if not block.bar]
         while total(body) > height + 0.01:
             rows = [index for index, block in enumerate(body) if block.row and block.more >= 0]
@@ -1252,6 +1312,11 @@ def _assemble(builder: _Builder, blocks: list[_Block], height: float | None) -> 
             over = total(body) - height
             if block.fit is not None and over > 0.01:
                 body[index] = block.fit(block.height - over)
+        while total(body) > height + 0.01:
+            leaving = [index for index, block in enumerate(body) if block.drop]
+            if not leaving:
+                break
+            body.pop(leaving[-1])
     ops: list[Op] = []
     y = top
     for block in [head, *body]:
@@ -1303,7 +1368,11 @@ def tile_layout(frame: Mapping[str, Any], width: float, height: float | None = N
     """See the module doc."""
     scale = max(0.25, float(scale or 1.0))
     builder = _Builder(frame, width, scale, bool(private), picture, screen)
-    return _assemble(builder, [builder.header(), *builder.body()], height)
+    layout = _assemble(builder, [builder.header(), *builder.body()], height)
+    if layout.clipped and builder.second and builder.headlined:
+        builder.headline = False                 # its header and headline do not fit even so: the table's rows
+        layout = _assemble(builder, [builder.header(), *builder.body()], height)
+    return layout
 
 
 def tile_height(frame: Mapping[str, Any], width: float, *, scale: float = 1.0, private: bool = False,

@@ -476,6 +476,13 @@ class MathsWordsTests(unittest.TestCase):
                            (["+", "a", ["-", ["-", "b"]]], f"a − ({MINUS}b)"), (["*", 2, -3], f"2({MINUS}3)")):
             self.assertEqual(self.words(raw), words, raw)
 
+    def test_a_fraction_that_divides_reads_in_brackets(self) -> None:
+        # Part 7 fixes (part 6 fixes' carried-over low): inline, "6 ÷ 1/2" reads as (6 ÷ 1)/2.
+        self.assertEqual(self.words(["/", 6, ["frac", 1, 2]]), "6 ÷ (1/2)")
+        self.assertEqual(self.words(["/", ["frac", 1, 2], 6]), "1/2 ÷ 6")              # dividing it needs none
+        self.assertEqual(self.words(["/", "x", ["frac", ["+", "a", 1], 2]]), "x ÷ ((a + 1)/2)")
+        self.assertEqual(self.words(["*", 6, ["frac", 1, 2]]), "6 × 1/2")                # (a product: as before)
+
     def test_signs_side_by_side_only_when_nothing_can_be_misread(self) -> None:
         for raw, words in ((["*", "x", "y"], "xy"), (["*", 2, "x"], "2x"), (["*", "rate", "time"], "rate × time"),
                            (["*", 2, 3], "2 × 3"), (["*", "x", 2], "x × 2"), (["*", 2, ["root", 3]], "2√3"),

@@ -58,7 +58,8 @@ raises for odd data.
                                                    ones are not; ("", 0): none - its token goes)
         approvals_for(frame_id) -> str             the card a frame's go_approvals opens ("" none)
         frames(), waits(), pinned(), cleared(), parked_groups(), groups(), group_of(frame_id), group_for(answer),
-        frame_ids(), flags(frame_id), counts(), frame_message(frame_id), picture_message(frame_id)
+        frame_ids(), flags(frame_id), counts(), frame_message(frame_id), picture_message(frame_id), key_of(frame_id),
+        mark() (the board as it shows now: equal while nothing on it changed)
         clear()                                    nothing on the board any more (the app's own reset)
         resend()                                   the board as it is, for a page that has nothing
 
@@ -397,6 +398,25 @@ class BoardFeed:
     def approvals_for(self, frame_id: str) -> str:
         frame = self._frames.get(frame_id)
         return frame.shown()[2] if frame is not None else ""
+
+    def key_of(self, frame_id: str) -> str:
+        """The source key the frame was built from ("" none): what made it (part 7 fixes: the second screen leaves a
+        web search out - board.frames.SEARCH_KEY - by this, never by its words)."""
+        frame = self._frames.get(frame_id)
+        return frame.key if frame is not None else ""
+
+    def mark(self) -> tuple[Any, ...]:
+        """The board as it shows now, as a value equal to an earlier one exactly while nothing on it changed: each
+        frame in board order with its group (parked or not), its message and picture as the page has them (as last
+        sent, or as the page changed them itself) and its own flags. Cheap: the feed's own texts, compared by identity
+        first (part 7 fixes: the second screen notes when the board changed, and rebuilds its wall only then)."""
+        found: list[tuple[Any, ...]] = []
+        for frame_id in self.frame_ids():
+            frame = self._frames[frame_id]
+            group = self._groups.get(frame.group)
+            found.append((frame_id, frame.group, bool(group is not None and group.parked), frame.sent,
+                          frame.sent_picture, frame.pinned, frame.closed, frame.cleared, frame.changed))
+        return tuple(found)
 
     def set_turn(self, answer: Hashable, entry_id: int) -> None:
         group = self._groups.get(self._by_answer.get(answer, ""))

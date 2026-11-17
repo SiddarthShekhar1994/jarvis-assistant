@@ -430,6 +430,11 @@ def _week(picture: Any, frame_id: str, now: datetime, title: str) -> dict[str, A
     return _frame(frame_id, "calendar", _title_of(picture, title), meta=_plural(int(week.total), "event"), body=body)
 
 
+# A web search's frame is keyed by its query (desk_ui.picture_key: "search:" and the query folded): what made it, so the
+# second screen leaves it out (its title is the model's query) without reading its words (part 7 fixes).
+SEARCH_KEY = "search:"
+
+
 def _search(picture: Any, frame_id: str, now: datetime, title: str) -> dict[str, Any]:
     """One web search: the query as the title, each result's title and host (words, never a link)."""
     search = picture.search

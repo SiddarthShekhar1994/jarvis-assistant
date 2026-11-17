@@ -3406,6 +3406,16 @@ _NARROW_SHOWN = r"""JSON.stringify((function () {
             return box.width && (box.left < edge.left - 0.5 || box.right > edge.right + 0.5);
           }).length};
 })())"""
+# Part 7 fixes: the divisor frame's line (frame "dv0"), given a width through the CSSOM ("" its own), read by
+# _NARROW_SHOWN.
+_DIVISOR_LINE = r"""(function (width) {
+  var frame = document.getElementById('title-dv0').closest('.frame');
+  var line = frame.querySelector('.mx-e');
+  window.__narrowLine = line;
+  line.style.width = width;
+  window.dispatchEvent(new Event('resize'));
+  return 1;
+})(__WIDTH__)"""
 BIG_LINES = ("Travel", "Software", "Events", "Hardware", "Office", "Training", "Legal", "Marketing", "Cloud", "Support",
              "Research", "Facilities")
 
@@ -3522,6 +3532,21 @@ def typed_inside(board: Any, pump: Any, main_world: Any) -> dict[str, Any]:
         main_world(board, _NARROW_LINE.replace("__WIDTH__", json.dumps(width)))
         pump(0.5)
         report["fallback"].append(json.loads(main_world(board, _NARROW_SHOWN)))
+    # Part 7 fixes (part 6 fixes' carried-over low): a fraction that divides - laid out (no brackets), then in a line
+    # too narrow for it (inline: "6 ÷ (1/2)", as Python reads it), then laid out again.
+    divisor = ask_frames.check_frame({"kind": "maths", "title": "Divide by a half",
+                                      "steps": [{"name": "", "expr": ["/", 6, ["frac", 1, 2]]}],
+                                      "answer": {"name": "So", "expr": 12}})
+    board.apply({"type": "clear"})
+    report["divisor_applied"] = board.apply(ask_frames.build(divisor, frame_id="dv0").messages[0])
+    board.setGeometry(0, 0, 448 + 30, 900)
+    pump(0.8)
+    report["divisor_expected"] = ask_frames.maths_text(divisor.body["steps"][0]["expr"])
+    report["divisor"] = []
+    for width in ("", "2px", ""):                              # (2 px: narrower than even its "1" over "2")
+        main_world(board, _DIVISOR_LINE.replace("__WIDTH__", json.dumps(width)))
+        pump(0.5)
+        report["divisor"].append(json.loads(main_world(board, _NARROW_SHOWN)))
     return report
 
 

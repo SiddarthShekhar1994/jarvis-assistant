@@ -260,6 +260,49 @@ class FeedTests(unittest.TestCase):
         self.assertEqual(set(page.known), set(self.feed.frame_ids()))
         self.assertEqual(page.order(), {group: self.feed.group_order(group) for group in self.feed.groups()})
 
+    def test_its_mark_changes_exactly_when_what_the_board_shows_does(self) -> None:
+        # Part 7 fixes (review 7, window 3): the second screen notes a board change, and rebuilds its wall, only then.
+        feed = self.feed
+        marks = [feed.mark()]
+
+        def changed(why: str) -> None:
+            marks.append(feed.mark())
+            self.assertNotEqual(marks[-1], marks[-2], why)
+
+        def same(why: str) -> None:
+            self.assertEqual(feed.mark(), marks[-1], why)
+
+        put(feed, self.page, 1, "a", "A", text="One.")
+        changed("a frame put up")
+        same("asked again")
+        put(feed, self.page, 1, "a", "A", text="One.")
+        same("the same words again")
+        feed.set_compact(True)
+        feed.set_compact(False)
+        same("the bar alone (the desk's resize sends)")
+        put(feed, self.page, 1, "a", "A", text="Two.")
+        changed("its words changed")
+        frame_id = feed.frame_ids()[0]
+        feed.pin(frame_id, True)
+        changed("pinned")
+        feed.close(frame_id, 0.0)
+        changed("closed")
+        feed.bring_back(frame_id)
+        changed("brought back")
+        put(feed, self.page, 2, "b", "B")
+        changed("another answer's group, on top")
+        feed.clear_unpinned(0.0)
+        changed("a Clear")
+        feed.restore()
+        changed("its Bring back")
+        frame_id = feed.frame_id(3, "c")
+        feed.put(3, "c", [frame(frame_id, "C")], when="9:41 AM", park=True)
+        changed("a parked answer")
+        feed.land()
+        changed("it landed")
+        feed.clear()
+        changed("the board cleared")
+
     def test_spoken_rank(self) -> None:
         say = "Three meetings today, sir - the first at ten. Dana sent the budget numbers at 8:12."
         self.assertLess(spoken_rank(say, ["meeting"]), spoken_rank(say, ["Dana"]))

@@ -60,7 +60,8 @@ lively and off; and every probe's page plays the probe's own motion level whatev
 every string, through board.ask_frames and board.protocol into the real page - only elements its renderers make,
 no attribute from data in a frame's body, no request, no script run, its words whole as text; the page refusing what
 Python refuses (Infinity, depth 7, 65 nodes, an unknown op ...); maths' elements made from the tree and the page's
-reading of plain expressions the same as Python's; no word cut at 448, 300 and 270 px (the timeline in a row from a
+reading of plain expressions the same as Python's (part 7 fixes: a fraction that divides read inline in brackets,
+"6 ÷ (1/2)", and laid out without); no word cut at 448, 300 and 270 px (the timeline in a row from a
 300 px content width, one node a row under it; maths' step names over their lines); opened big, a table's rows and a
 timeline's six nodes using the room. Skipped when this PySide6 has no QtWebEngine 6.8+.
 """
@@ -1397,3 +1398,14 @@ class TypedFramesTests(BoardProbeCase):
         self.assertEqual((narrow["stacked"], narrow["inline"]), (0, True))
         self.assertEqual(narrow["text"], inside["fallback_expected"])           # as Python reads it
         self.assertEqual((wide["stacked"], wide["inline"], wide["over"]), (1, False, 0))
+
+    def test_a_fraction_that_divides_reads_in_brackets_only_inline(self) -> None:
+        # Part 7 fixes (part 6 fixes' carried-over low): inline, "6 ÷ 1/2" read as (6 ÷ 1)/2.
+        inside = self.report("typed")["inside"]
+        self.assertTrue(inside["divisor_applied"])
+        laid, flat, again = inside["divisor"]
+        self.assertEqual(inside["divisor_expected"], "6 ÷ (1/2)")              # as Python reads it ...
+        self.assertEqual((flat["stacked"], flat["inline"], flat["text"]), (0, True, "6 ÷ (1/2)"))   # ... the page too
+        for shown in (laid, again):                                             # laid out: the bar, no brackets
+            self.assertEqual((shown["stacked"], shown["inline"]), (1, False))
+            self.assertNotIn("(", shown["text"])

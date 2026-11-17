@@ -4,7 +4,8 @@ as read-only tiles. Offscreen; nothing here starts the web engine.
 Covered: every kind and state painted at scale 1 and 1.5, 448 and 300 px wide, into a QImage: no text past its tile
 (measured: every op inside the tile, every line no wider than its box, no two words over each other) and nothing painted
 outside it; a tile given too little height leaves rows out and says "+N MORE", still inside; private hides a mail's
-text ("Text hidden on this screen") and keeps senders and subjects; the waits chip; pictures at 80 % (62 % private);
+text ("Text hidden on this screen") and keeps senders and subjects, and hides a text frame's paragraph (a web research
+answer) and keeps its title and sources; the waits chip; pictures at 80 % (62 % private);
 GlanceTiles stacks them (closed frames left out, never the focus); and BoardView's fallback: frames sent before and
 after it fell back show as tiles, removes and clears follow, pictures come as images, the tile says READ-ONLY TILES
 BELOW only while a tile shows.
@@ -228,6 +229,25 @@ class LayoutTests(unittest.TestCase):
         levels = [op.level for op in glance.tile_layout(frame, 448, private=True, picture=picture).ops
                   if op.kind == "image"]
         self.assertEqual(levels, [glance.PRIVATE_PICTURE_LEVEL])
+
+    def test_private_hides_a_text_frame_s_paragraph_and_keeps_its_title_and_sources(self) -> None:
+        # Part 7 fixes (review 7, privacy 0): a web research answer is the line Jarvis speaks - never on the second
+        # screen; the frame's title and its source rows stay.
+        frame, _picture = all_frames()["research"]
+        answer = "The City Hack schedule moved to Friday"
+        self.assertIn(answer, " ".join(glance.tile_layout(frame, 448).words().split()))
+        for screen in (glance.BOARD, glance.SECOND):
+            with self.subTest(screen=screen):
+                layout = glance.tile_layout(frame, 384, private=True, screen=screen)
+                words = " ".join(layout.words().split())
+                self.assertNotIn(answer[:20], words)
+                self.assertNotIn("registration closes", words)
+                self.assertIn(glance.HIDDEN, layout.words())
+                self.assertIn("Web research", words)                              # its title ...
+                self.assertIn("City Hack schedule", words)                        # ... and its sources stay
+                self.assertIn("Registration rules", words)
+                self.assertEqual([op.name for op in layout.ops if op.kind == "glyph" and op.name == "hidden"],
+                                 ["hidden"])
 
     def test_too_little_height_leaves_rows_out_and_says_how_many(self) -> None:
         for name in ("day", "search", "todos", "followups", "hostile", "week"):

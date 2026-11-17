@@ -1372,10 +1372,16 @@ class OrbWidget(_OrbBase):
         text = super()._describe()
         return f"{text}, recording a meeting" if getattr(self, "_recording", False) else text
 
-    def _paint_recording(self, painter: QPainter, origin: QPointF | None = None) -> None:
+    def _paint_recording(self, painter: QPainter, origin: QPointF | None = None,
+                         base: QTransform | None = None) -> None:
+        """The coral ring and its dot, over the ring centred at ``origin`` (this widget's top-left) under ``base`` - the
+        transform of the window that paints it (paint_into: the second screen's drift); None: the widget's own."""
         center = self.orb_rect().center() + (origin if origin is not None else QPointF(0.0, 0.0))
         k = self._px / 360.0
-        painter.resetTransform()
+        if base is None:
+            painter.resetTransform()
+        else:
+            painter.setTransform(base)
         painter.setOpacity(1.0)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.translate(center)
@@ -1387,7 +1393,10 @@ class OrbWidget(_OrbBase):
         painter.setBrush(QColor(holo.ALERT_HI))
         dot = max(REC_DOT, 2.2 / k)                  # at least a 2.2 px dot on the small rings
         painter.drawEllipse(QPointF(0, -REC_R), dot, dot)
-        painter.resetTransform()
+        if base is None:
+            painter.resetTransform()
+        else:
+            painter.setTransform(base)
 
     def orb_size(self) -> int:
         return self._px
@@ -1503,10 +1512,11 @@ class OrbWidget(_OrbBase):
         ratio = float(dpr if dpr is not None else (self.devicePixelRatioF() or 1.0))
         painter.save()
         try:
+            base = painter.transform()           # the caller's (the second screen's drift): the recording ring keeps it
             painter.translate(origin)
             self._paint(painter, frame, ratio)
             if self._recording:
-                self._paint_recording(painter, QPointF(origin))
+                self._paint_recording(painter, QPointF(origin), base)
         finally:
             painter.restore()
         return frame
