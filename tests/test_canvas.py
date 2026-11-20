@@ -28,6 +28,7 @@ from PySide6.QtWidgets import QApplication
 from unittest import mock
 
 from briefing_reader import canvas_ui, canvas_view, dock, holo, home, hud, snapshot_engine, snapshots, ui
+from briefing_reader import orb as orb_mod
 from briefing_reader.board import protocol, view
 from tests import board_fakes
 from tests.ui_fakes import AppHarness, fonts, settle, wait_for
@@ -103,7 +104,8 @@ class CanvasMessageTests(unittest.TestCase):
 
     def test_the_words_are_capped_and_typed(self) -> None:
         for bad in (dict(CANVAS, clock="x" * (protocol.CLOCK_CAP + 1)), dict(CANVAS, word="x" * 41),
-                    dict(CANVAS, hold="x" * 25), dict(CANVAS, rec="x" * 41), dict(CANVAS, wake="x" * 25),
+                    dict(CANVAS, hold="x" * 25), dict(CANVAS, rec="x" * 41),
+                    dict(CANVAS, wake="x" * (protocol.WAKE_CAP + 1)),
                     dict(CANVAS, tone="pink"), dict(CANVAS, approvals=-1), dict(CANVAS, approvals=1000),
                     dict(CANVAS, approvals=True), dict(CANVAS, meter=1), dict(CANVAS, briefing_new="yes"),
                     dict(CANVAS, label="Approve all"), {"type": "canvas"}):
@@ -1416,3 +1418,65 @@ class CanvasFramesTests(CanvasApp):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --------------------------------------------------------------------------
+# Part 3: the real-screen fixes (the page's own: tests/board_probe.py "canvas_fixes")
+# --------------------------------------------------------------------------
+
+class RealScreenFixesTests(CanvasApp):
+    def test_typing_in_the_ask_line_is_not_listening_on_the_canvas(self) -> None:
+        self.make()
+        self.started()
+        reading, canvas = self.reading, self.canvas()
+        reading.command_bar.typingChanged.emit(True)                      # the owner types in the ask line
+        canvas.sync()
+        self.assertNotEqual(self.last("orb")["state"], "listening")
+        self.assertEqual(self.last("orb")["level"], 0)                    # no meter while he types
+        self.assertNotEqual(self.last("canvas")["word"], orb_mod.READOUTS[orb_mod.LISTENING])
+        reading.set_talking(True)                                         # his voice: that is listening
+        canvas.sync()
+        self.assertEqual(self.last("orb")["state"], "listening")
+        reading.set_talking(False)
+        reading.command_bar.typingChanged.emit(False)
+
+    def test_the_ask_lines_status_never_repeats_what_the_caption_says(self) -> None:
+        self.make()
+        self.started()
+        reading, bar = self.reading, self.reading.command_bar
+        said = "Dana sent the budget numbers at 8:12, sir, and a reply waits for your OK."
+        reading.stream_caption(said, complete=True)
+        bar.set_status(said + " Software went up 500 since Friday.", hud.TONE_DONE)
+        self.assertFalse(bar.status_shown())                              # the caption says it: once
+        reading.captions.clear()                                          # the caption rests (the greeting) ...
+        bar.refresh_status()
+        self.assertFalse(bar.status_shown())                              # ... and it does not come back under it
+        bar.set_status("Claude Code is not signed in: Settings shows how.", hud.TONE_ERROR)
+        self.assertTrue(bar.status_shown())                               # what the caption did not say shows
+        bar.set_status("Your next meeting is the study group at 1 PM.", hud.TONE_DONE)
+        self.assertTrue(bar.status_shown())
+        reading.say_caption("Your next meeting is the study group at 1 PM.", spoken=False)
+        self.assertFalse(bar.status_shown())                              # ... until the caption says it too
+
+    def test_a_word_or_two_only_matches_the_same_words(self) -> None:
+        carried = [ui._caption_words("Done.")]                            # noqa: SLF001
+        self.assertFalse(ui._words_carried(ui._caption_words("Nothing was done: the mail could not be read."), carried))
+        self.assertTrue(ui._words_carried(ui._caption_words("Done"), carried))
+
+    def test_the_wake_badge_gets_its_few_words_whole(self) -> None:
+        from briefing_reader import wake_ui
+
+        self.assertEqual(wake_ui.SHORT_CAP, protocol.WAKE_CAP)
+        for words in wake_ui.SHORT_WORDS:
+            self.assertLessEqual(len(words), protocol.WAKE_CAP, words)
+        self.make()
+        self.started()
+        reading = self.reading
+        reading.set_wake("Not listening: no microphone found.", wake_ui.LOOK_PROBLEM, wake_ui.SHORT_NO_MIC)
+        self.canvas().sync()
+        self.assertEqual(self.last("canvas")["wake"], "Not listening: no microphone")    # whole, never cut
+        self.assertEqual(reading.wake_state(), ("Not listening: no microphone found.", wake_ui.LOOK_PROBLEM))
+        reading.set_wake("Hey Jarvis is off", wake_ui.LOOK_OFF, wake_ui.SHORT_OFF)
+        self.canvas().sync()
+        self.assertEqual(self.last("canvas")["wake"], "")                 # off: no badge
+

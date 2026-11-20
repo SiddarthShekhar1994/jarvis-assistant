@@ -265,7 +265,8 @@ class CanvasController(QObject):
         rec = ""
         if elapsed:
             rec = f"Rec {elapsed}" + (f" · {warning}" if warning else "")
-        wake_words, wake_look = reading.wake_state()
+        _sentence, wake_look = reading.wake_state()
+        wake_words = reading.wake_words()                 # part 3: its few words, whole (never a cut sentence)
         from .wake_ui import LOOK_OFF
 
         return {"type": "canvas", "clock": f"{date_text} · {time_text}"[:protocol.CLOCK_CAP],

@@ -3048,7 +3048,7 @@
   var CANVAS_TONES = ['holo', 'amber', 'steel'];
   var CANVAS_BUTTONS = ['history', 'board', 'briefing', 'approvals', 'followups', 'meetings', 'agents', 'live',
                         'memory', 'settings', 'desktop', 'minimize', 'maximize', 'close', 'mute', 'day'];
-  var CANVAS_CAPS = {clock: 40, word: 40, hold: 24, rec: 40, wake: 24, approvals: 999, level: 100};
+  var CANVAS_CAPS = {clock: 40, word: 40, hold: 24, rec: 40, wake: 32, approvals: 999, level: 100};
   var CANVAS_WORDS = {
     name: 'JARVIS', wordmark: 'J.A.R.V.I.S.', history: 'History', clear: 'Clear view', board: 'Show board',
     briefing: 'Briefing', approvals: 'Approvals', followups: 'Follow-ups', meetings: 'Meetings', agents: 'Agents',
@@ -3057,8 +3057,18 @@
     orb: 'Jarvis', minimize: 'Minimise the window', maximize: 'Maximise or restore the window', close: 'Close',
     clearAll: 'Clear view: take away every unpinned frame', boardBack: 'Show the board again',
     desktopSwitch: 'Jarvis on your desktop', day: 'Today and deadlines', briefingNew: 'Briefing, ready',
-    approvalsWait: ' waiting'
+    approvalsWait: ' waiting', more: 'More', moreAll: 'More buttons'
   };
+  // Part 3: the top right row is ONE line at every width (it never wraps into the frames, and the frames' area never
+  // moves when a button comes or goes). While it would not fit, these fold under More, the least used first; Approvals
+  // and the window's own buttons never fold. TOP_ROW is the row's order (More's list keeps it).
+  var TOP_FOLD = ['memory', 'live', 'meetings', 'followups', 'agents', 'history', 'settings', 'briefing', 'desktop',
+                  'pinned', 'tidy', 'board', 'clear'];
+  var TOP_ROW = ['history', 'tidy', 'clear', 'pinned', 'board', 'briefing', 'approvals', 'followups', 'meetings',
+                 'agents', 'live', 'memory', 'settings', 'desktop'];
+  var BOARD_TOP = 64;                          // the frames' area starts here, whatever the row holds
+  var TL_ROOM = 402, TL_ROOM_NARROW = 312;     // the top left corner's room (from the window's left edge) ...
+  var STATE_ROOM = 112, ROW_GAP = 24;          // ... with this for its state word, and this between the corners
   // The screens' buttons, left to right (the mock's order; the others take their place only while they can work).
   var SCREEN_BUTTONS = ['briefing', 'approvals', 'followups', 'meetings', 'agents', 'live', 'memory', 'settings'];
   var canvas = null;                           // the canvas's elements and state, made at the first orb / canvas message
@@ -3208,14 +3218,107 @@
     c.pic.height = Math.max(1, Math.round(box.h * o.q));
   }
 
+  function topNode(word) {                     // a button of the top right row by its word
+    var c = canvas;
+    return word === 'tidy' ? c.tidy : (word === 'clear' ? c.clear : (word === 'pinned' ? c.pinned : c.buttons[word]));
+  }
+
+  function topRowRoom() {                      // the row's width at most: from the window's right gutter to the top
+    var c = canvas, tl = c.tl.getBoundingClientRect(), stateWidth = 0;    // left corner (its state word counted at
+    if (!c.state.hidden) {                     // STATE_ROOM, so the row does not change as the word does)
+      stateWidth = c.state.getBoundingClientRect().width;
+    }
+    var left = Math.max(window.innerWidth > 1180 ? TL_ROOM : TL_ROOM_NARROW,
+                        tl.right - stateWidth + Math.max(stateWidth, STATE_ROOM) + ROW_GAP);
+    return window.innerWidth - 28 - left;
+  }
+
+  function fitTopRow() {                       // one line: fold the least used under More while it would not fit
+    var c = canvas;
+    TOP_FOLD.forEach(function (word) {
+      topNode(word).classList.remove('folded');
+    });
+    c.more.hidden = true;
+    var room = topRowRoom(), gap = 7, folded = [];
+    var width = c.tr.getBoundingClientRect().width;
+    if (width > room) {
+      c.more.hidden = false;
+      width = c.tr.getBoundingClientRect().width;
+      var sizes = TOP_FOLD.map(function (word) {
+        var node = topNode(word);
+        return node.hidden ? 0 : node.getBoundingClientRect().width + gap;
+      });
+      for (var index = 0; index < TOP_FOLD.length && width > room; index += 1) {
+        if (sizes[index] > 0) {
+          folded.push(TOP_FOLD[index]);
+          width -= sizes[index];
+        }
+      }
+    }
+    var need = false, fresh = false;
+    folded.forEach(function (word) {
+      var node = topNode(word);
+      node.classList.add('folded');
+      need = need || node.classList.contains('need');
+      fresh = fresh || node.classList.contains('new');
+    });
+    c.twins.forEach(function (twin, word) {
+      var node = topNode(word), on = folded.indexOf(word) >= 0;
+      twin.hidden = !on;
+      if (on) {
+        twin.textContent = node.textContent;
+        ['need', 'new', 'on'].forEach(function (cls) {
+          twin.classList.toggle(cls, node.classList.contains(cls));
+        });
+        var pressed = node.getAttribute('aria-pressed');
+        if (pressed === 'true' || pressed === 'false') {
+          twin.setAttribute('aria-pressed', pressed);
+        }
+      }
+    });
+    c.folded = folded;
+    c.more.hidden = folded.length === 0;
+    c.more.classList.toggle('need', need);
+    c.more.classList.toggle('new', fresh && !need);
+    if (!folded.length) {
+      toggleMore(false);
+    } else if (!c.menu.hidden) {
+      toggleMore(true);                        // (its place again)
+    }
+  }
+
+  function toggleMore(open, keys) {            // More's list (open: true / false; else the other way)
+    var c = canvas;
+    if (!c || !c.menu) {
+      return;
+    }
+    var on = open === undefined ? c.menu.hidden : !!open;
+    on = on && !c.more.hidden;
+    c.menu.hidden = !on;
+    c.more.setAttribute('aria-pressed', on ? 'true' : 'false');
+    c.more.classList.toggle('on', on);
+    if (!on) {
+      return;
+    }
+    var box = c.more.getBoundingClientRect();
+    c.menu.style.top = Math.round(box.bottom + 6) + 'px';
+    c.menu.style.right = Math.round(window.innerWidth - box.right) + 'px';
+    if (keys) {
+      var first = Array.prototype.filter.call(c.menu.children, function (node) { return !node.hidden; })[0];
+      if (first) {
+        first.focus({preventScroll: true});
+      }
+    }
+  }
+
   function placeCanvas() {                     // on a resize, a new form, a new row of buttons
     var c = canvas;
     if (!c) {
       return;
     }
-    // The board's box starts under the buttons' rows (two at a narrow window).
-    var top = Math.max(64, Math.ceil(c.tr.getBoundingClientRect().bottom) + 14);
-    document.documentElement.style.setProperty('--board-top', top + 'px');
+    // The board's box starts under the buttons' row - always one line (part 3: fitTopRow), so always at BOARD_TOP.
+    fitTopRow();
+    document.documentElement.style.setProperty('--board-top', BOARD_TOP + 'px');
     var places = orbPlaces(), o = ORB;
     if (o.fit !== places.fit) {
       o.fit = places.fit;
@@ -3911,6 +4014,13 @@
       buttons[word] = canvasButton(word, CANVAS_WORDS[word], '');
       tr.appendChild(buttons[word]);
     });
+    // part 3: the row is one line at every width - the least-used buttons fold under More while it would not fit
+    var moreButton = canvasButton('more', CANVAS_WORDS.more, 'quiet', function (event) {
+      toggleMore(undefined, !!event && event.detail === 0);
+    });
+    moreButton.setAttribute('aria-label', CANVAS_WORDS.moreAll);
+    moreButton.setAttribute('aria-pressed', 'false');          // (pressed: its list is open)
+    tr.appendChild(moreButton);
     buttons.desktop = canvasButton('desktop', CANVAS_WORDS.desktop, '');
     buttons.desktop.setAttribute('aria-label', CANVAS_WORDS.desktopSwitch);
     buttons.minimize = iconButton('minimize', 'minimize', CANVAS_WORDS.minimize);
@@ -3934,7 +4044,7 @@
     var levelWords = make('span', 'c-mono');
     levelWords.hidden = true;
     buttons.mute = canvasButton('mute', CANVAS_WORDS.mute, '');
-    var wake = make('span', 'c-mono c-state');
+    var wake = make('span', 'c-mono c-state c-wake');      // (part 3: its words whole, on two lines when narrow)
     wake.hidden = true;
     var rec = make('span', 'c-mono c-rec');
     rec.hidden = true;
@@ -3946,12 +4056,46 @@
       el: el, orb: parts.orb, pic: parts.pic, ctx: parts.ctx, tl: tl, tr: tr, bl: bl,
       state: state, hold: hold, undo: undo, clockText: clockText, clockButton: clockButton, buttons: buttons,
       clear: clear, tidy: tidyButton, pinned: pinnedButton, rules: [rule1, rule2], meter: meter, bars: bars,
-      levelWords: levelWords, wake: wake, rec: rec,
+      levelWords: levelWords, wake: wake, rec: rec, more: moreButton, menu: null, twins: new Map(), folded: [],
       stopRec: stopRec, form: '', orbState: '', muted: false, level: -1, hasMeter: false, shown: []
     };
+    // More's list: over the frames (outside the canvas's layer, which the board is drawn over), each folded button's
+    // twin - pressing it presses the button itself
+    var menu = make('div', 'c-menu');
+    menu.id = 'c-menu';
+    menu.hidden = true;
+    menu.setAttribute('role', 'group');
+    menu.setAttribute('aria-label', CANVAS_WORDS.moreAll);
+    TOP_ROW.forEach(function (word) {
+      if (TOP_FOLD.indexOf(word) < 0) {
+        return;
+      }
+      var twin = button('c-btn', '', function () {
+        toggleMore(false);
+        topNode(word).click();
+      });
+      twin.hidden = true;
+      menu.appendChild(twin);
+      canvas.twins.set(word, twin);
+    });
+    menu.addEventListener('keydown', function (event) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleMore(false);
+        moreButton.focus({preventScroll: true});
+      }
+    });
+    canvas.menu = menu;
+    document.addEventListener('mousedown', function (event) {
+      if (!menu.hidden && !menu.contains(event.target) && !moreButton.contains(event.target)) {
+        toggleMore(false);
+      }
+    }, true);
     html.classList.add('canvas');
     html.classList.toggle('board-off', !deskOn);
     document.body.insertBefore(el, document.body.firstChild);    // first: the board is drawn over it
+    document.body.appendChild(menu);
     watchCanvasPointer();
     document.addEventListener('visibilitychange', wake);     // seen again: it moves again
     placeCanvas();
@@ -4131,7 +4275,7 @@
       return false;
     }
     var stops = Array.prototype.filter.call(canvas.el.querySelectorAll('button'), function (node) {
-      return !node.hidden;
+      return !node.hidden && node.getClientRects().length > 0;       // (a button folded under More is not one)
     });
     if (!stops.length) {
       return false;
@@ -4163,6 +4307,7 @@
   var GRID_COLS = 12, ROW_MIN = 165, ROW_MAX = 300, SPAN_TARGET = 410, SPAN_MAX = 640, TILE_MIN = 200, TILE_MAX = 480,
       LINE_TARGET = 54;
   var SPANS = [2, 3, 4, 6, 12];
+  var SPREAD_MOST = 3, SPREAD_MAX = 940;       // part 3: up to three frames take up to this width each (spread)
   var HEAD_H = 30, HEAD_GAP = 8;               // a group's head tile over its first frame, and the gap under it
   var PACK_MS = 30;                            // a burst of messages is placed once
   // An arriving frame boots: its outline draws itself from one corner, a scan line wipes down it, the content comes
@@ -4430,7 +4575,7 @@
       measure(list, m);
       found = tryPack(list, m, none, withCard, false);
       if (found) {
-        return found;
+        return withCard ? found : spread(found, list);
       }
     }
     // Not everything fits whole: the finest grid, the oldest folded one by one until it does - with tiles as wide
@@ -4469,6 +4614,53 @@
     return tryPack(list, m, folded, false, true);     // more than even tiles have room for: what fits, the rest counted
   }
 
+  function oneBand(found) {                    // every frame whole, side by side in the top band: its columns used
+    var used = 0, ok = found.cells.size > 0;
+    found.cells.forEach(function (cell) {
+      ok = ok && cell.kind === 'full' && cell.cy === 0;
+      used = Math.max(used, cell.cx + cell.cw);
+    });
+    return ok ? used : 0;
+  }
+
+  function spread(found, list) {               // part 3: one to three frames use the screen - each wider (up to
+    var count = list.filter(function (rec) { return !rec.closed; }).length;     // SPREAD_MAX) while they still stand
+    if (count < 1 || count > SPREAD_MOST || !oneBand(found)) {                  // side by side, then the band centred
+      return found;
+    }
+    var best = found;
+    SPANS.forEach(function (width) {
+      var m = best.m;
+      if (width <= m.span || width * m.unit - m.gap > SPREAD_MAX) {
+        return;
+      }
+      var wider = gridMetrics(width, m.rows, false);
+      measure(list, wider);
+      var tried = tryPack(list, wider, new Set(), false, false);
+      if (tried && oneBand(tried)) {
+        best = tried;
+      }
+    });
+    var m = best.m, dx = Math.floor((GRID_COLS - oneBand(best)) * m.unit / 2);
+    if (dx > 0) {                              // centred - unless that would put a frame on the orb's corner
+      var area = root.getBoundingClientRect(), places = orbPlaces();
+      var reach = STAGE * CORNER_SCALE * clamp(places.fit, 0.8, 1) * 0.36 + 16;
+      var orbLeft = window.innerWidth - CORNER_INSET - reach - area.left;
+      var orbTop = window.innerHeight - CORNER_INSET - reach - area.top;
+      var clear = true;
+      best.cells.forEach(function (cell) {
+        var box = cellBox(cell, m);
+        clear = clear && !(box.x + dx + box.w > orbLeft && box.y + box.h > orbTop);
+      });
+      if (clear) {
+        best.cells.forEach(function (cell) {
+          cell.dx = dx;
+        });
+      }
+    }
+    return best;
+  }
+
   function keepPack(list, withCard) {          // what is placed stays; what is new, or was opened, takes a free place
     var m = lay.m;
     if (!m || m.w !== root.clientWidth || m.h !== root.clientHeight) {
@@ -4495,6 +4687,13 @@
         todo.push({rec: rec, full: full});
       }
     });
+    var shifted = false;
+    cells.forEach(function (cell) {
+      shifted = shifted || !!cell.dx;
+    });
+    if (shifted && todo.length) {
+      return null;                             // a centred band and something new: packed afresh (part 3)
+    }
     todo.forEach(function (item) {
       var cell = null;
       if (!ok) {
@@ -4525,7 +4724,7 @@
 
   function sameCell(a, b) {
     return !!a && !!b && a.cx === b.cx && a.cy === b.cy && a.cw === b.cw && a.ch === b.ch
-      && (a.top || 0) === (b.top || 0);
+      && (a.top || 0) === (b.top || 0) && (a.dx || 0) === (b.dx || 0);
   }
 
   function samePack(a, b) {                    // two packs place everything alike
@@ -4565,16 +4764,18 @@
     if (!canvas || !root) {
       return;
     }
-    var list = packItems(), withCard = !!card && list.length > 0;
-    var found = mode === 'full' ? null : keepPack(list, withCard);
+    // Part 3: the task card takes no part in the frames' pack (it never makes them jump, and never makes Tidy show):
+    // it keeps the mock's size and takes a free place of its own (applyPack: cardGridBox).
+    var list = packItems();
+    var found = mode === 'full' ? null : keepPack(list, false);
     if (!found) {
-      found = canonical(list, withCard, false);
+      found = canonical(list, false, false);
     }
     applyPack(found, list);
     // Something to tidy: a fresh pack would place something otherwise (after a fresh pack: only what the owner opened)
     lay.untidy = list.length > 0 && (mode === 'full'
       ? list.some(function (rec) { return rec.expanded && !rec.pinned; })
-      : !samePack(found, canonical(list, withCard, true)));
+      : !samePack(found, canonical(list, false, true)));
     lay.packs += 1;
     syncCanvasBoard();
   }
@@ -4605,8 +4806,8 @@
   }
 
   function cellBox(cell, m) {                  // a place in px (under its group's head tile, when it carries one)
-    var top = cell.top || 0;
-    return {x: Math.round(cell.cx * m.unit), y: Math.round(cell.cy * (m.subH + m.gap)) + top,
+    var top = cell.top || 0;                   // (dx: a few frames' band, centred - part 3)
+    return {x: Math.round(cell.cx * m.unit) + (cell.dx || 0), y: Math.round(cell.cy * (m.subH + m.gap)) + top,
             w: Math.round(cell.cw * m.unit - m.gap), h: Math.round(cell.ch * (m.subH + m.gap) - m.gap) - top};
   }
 
@@ -4653,6 +4854,43 @@
     var height = el.offsetHeight;
     var y = Math.max(box.top, Math.min(window.innerHeight * 0.62, box.bottom - height - 8));
     return {x: Math.round(x - box.left), y: Math.round(y - box.top), w: width, h: 0};
+  }
+
+  function cardGridBox(found) {                // frames are up (part 3): the card at the mock's size in a free place,
+    var m = found.m, el = card.el;             // the nearest the orb's corner; the frames keep theirs. null: none
+    var width = Math.round(Math.min(CARD_WIDTH, window.innerWidth * 0.34));
+    el.style.width = width + 'px';
+    el.style.height = '';
+    var height = el.offsetHeight;
+    var taken = [];
+    found.cells.forEach(function (cell) {      // each placed frame's whole place (its group's head included)
+      taken.push({x: cell.cx * m.unit + (cell.dx || 0), y: cell.cy * (m.subH + m.gap), w: cell.cw * m.unit - m.gap,
+                  h: cell.ch * (m.subH + m.gap) - m.gap});
+    });
+    var area = root.getBoundingClientRect(), places = orbPlaces();
+    var reach = STAGE * CORNER_SCALE * clamp(places.fit, 0.8, 1) * 0.36 + 16;
+    taken.push({x: window.innerWidth - CORNER_INSET - reach - area.left, y: window.innerHeight - CORNER_INSET - reach - area.top,
+                w: m.w, h: m.h});
+    function free(x, y) {
+      return x >= 0 && y >= 0 && x + width <= m.w + 0.5 && y + height <= m.h + 0.5 && taken.every(function (t) {
+        var g = m.gap - 0.5;                   // (half a pixel: the grid's own places are not whole numbers)
+        return x + width + g <= t.x || t.x + t.w + g <= x || y + height + g <= t.y || t.y + t.h + g <= y;
+      });
+    }
+    var was = placed.get(el);
+    if (was && el.classList.contains('working') && !el.classList.contains('free') && free(was.x, was.y)) {
+      return {x: was.x, y: was.y, w: width, h: 0};       // where it is: it stays
+    }
+    var step = m.subH + m.gap;
+    for (var cy = Math.floor((m.h - height) / step); cy >= 0; cy -= 1) {
+      for (var cx = GRID_COLS - 1; cx >= 0; cx -= 1) {
+        var x = Math.round(cx * m.unit), y = Math.round(cy * step);
+        if (free(x, y)) {
+          return {x: x, y: y, w: width, h: 0};
+        }
+      }
+    }
+    return null;
   }
 
   function applyPack(found, list) {
@@ -4705,9 +4943,9 @@
       }
     });
     if (card) {
-      var spot = found.cells.get(card.el);
       var arriving = !placed.get(card.el);
-      putAt(card.el, spot ? cellBox(spot, m) : cardFreeBox(), arriving);
+      var spot = list.length ? cardGridBox(found) : null;
+      putAt(card.el, spot || cardFreeBox(), arriving);
       card.el.classList.toggle('free', !spot);
       if (arriving && K > 0 && card.el.animate) {
         card.el.animate([{opacity: 0, transform: 'translateY(10px)'}, {opacity: 1, transform: 'none'}],
@@ -5203,6 +5441,10 @@
       grid: m ? {span: m.span, rows: m.rows, sub: m.sub, tile: m.tile, tight: m.tight, gap: m.gap} : null,
       orb: [Math.round(window.innerWidth - CORNER_INSET - reach), Math.round(window.innerHeight - CORNER_INSET - reach)],
       items: items, heads: heads, untidy: lay.untidy, over: lay.over, packs: lay.packs, filter: filter,
+      top: canvas ? {row: box(canvas.tr), tl: box(canvas.tl), folded: canvas.folded.slice(), more: !canvas.more.hidden,
+                     menu: canvas.menu && !canvas.menu.hidden ? box(canvas.menu) : null,
+                     twins: Array.from(canvas.twins.values()).filter(function (twin) { return !twin.hidden; })
+                       .map(function (twin) { return twin.textContent; })} : null,
       card: card ? {box: box(card.el), title: card.title.textContent, words: card.doing.textContent,
                     time: card.time.textContent, counts: card.counts.textContent, stop: !card.stop.hidden,
                     blocks: card.blocks.filter(function (block) { return block.className === 'on'; }).length,

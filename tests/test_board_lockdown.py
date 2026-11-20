@@ -82,7 +82,7 @@ from briefing_reader.board import view
 PROBE = Path(__file__).with_name("board_probe.py")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CASES = ("lockdown", "control", "media", "keys", "fallback", "shell", "kinds", "desk", "desk_x15", "ways", "lit", "big",
-         "big_x15", "expiry", "reduced", "typed", "canvas", "canvas_layout", "canvas_ways")
+         "big_x15", "expiry", "reduced", "typed", "canvas", "canvas_layout", "canvas_ways", "canvas_fixes")
 # Round 5: what each probe's engine is told of reduced motion (tests/board_probe.py NO_REDUCED_MOTION, REDUCED_MOTION).
 NO_REDUCED_MOTION = "--force-prefers-no-reduced-motion"
 REDUCED_MOTION = "--force-prefers-reduced-motion"
@@ -1583,10 +1583,12 @@ class CanvasProbeTests(BoardProbeCase):
 
     def test_a_press_posts_the_button_s_own_word_and_forged_words_are_dropped(self) -> None:
         report = self.looks()
+        # (part 3: at 1280 px the least-used buttons fold under More - still pressed here, as buttons; More posts no
+        # word of its own, it opens their list)
         self.assertEqual(report["pressed"], [
             "Undo", "Tue 17 Nov · 9:41 AM", "History", "Briefing", "Approvals", "Follow-ups", "Meetings", "Agents",
-            "Live", "Memory", "Settings", "Desktop", "Minimise the window", "Maximise or restore the window", "Close",
-            "Mute", "Stop"])
+            "Live", "Memory", "Settings", "More", "Desktop", "Minimise the window", "Maximise or restore the window",
+            "Close", "Mute", "Stop"])
         self.assertEqual(report["went"], ["undo", "day", "history", "briefing", "approvals", "followups", "meetings",
                                           "agents", "live", "memory", "settings", "desktop", "minimize", "maximize",
                                           "close", "mute", "stop_rec"])
@@ -1614,7 +1616,9 @@ class CanvasProbeTests(BoardProbeCase):
         frame, board, orb = shown["frame"], shown["board"], shown["orb"]
         self.assertEqual((board["x"], board["x"] + board["w"]), (28, width - 28))    # from edge to edge
         self.assertEqual(board["y"] + board["h"], height - 160)           # ... over the caption and the ask line
-        self.assertEqual((frame["x"], frame["y"]), (28, board["y"]))      # the first frame: top left
+        # (part 3: one frame alone is wider and centred - CanvasFixesTests; it was at the top left)
+        self.assertEqual(frame["y"], board["y"])                          # the first frame: at the top ...
+        self.assertAlmostEqual(frame["x"] - 28, width - 28 - frame["x"] - frame["w"], delta=2)   # ... centred
         self.assertLessEqual(frame["x"] + frame["w"], width - 28)
         self.assertLessEqual(frame["y"] + frame["h"], board["y"] + board["h"])
         self.assertEqual(orb["form"], "corner")
@@ -1710,9 +1714,17 @@ class CanvasLayoutTests(BoardProbeCase):
             if first["kind"] != "full":
                 continue
             head = look["heads"][0]
-            self.assertEqual((head["box"][0], head["box"][1]), (look["area"][0], look["area"][1]), name)
+            self.assertEqual((head["box"][0], head["box"][1]), (first["box"][0], look["area"][1]), name)
             self.assertEqual(head["box"][3], 30, name)                    # a slim strip over its first frame
-            self.assertEqual(first["box"][0], look["area"][0], name)
+            boxes = [item["box"] for item in look["items"]]
+            if len(boxes) <= 3 and len({box[1] - (38 if box is first["box"] else 0) for box in boxes}) == 1:
+                # part 3: one to three frames side by side are a band, centred (CanvasFixesTests)
+                left = min(box[0] for box in boxes) - look["area"][0]
+                right = look["area"][0] + look["area"][2] - max(box[0] + box[2] for box in boxes)
+                self.assertAlmostEqual(left, right, delta=2, msg=name)
+                self.assertEqual(first["box"][0], look["area"][0] + left, name)
+            else:
+                self.assertEqual(first["box"][0], look["area"][0], name)
             self.assertEqual(first["box"][1], head["box"][1] + 38, name)
             self.assertEqual(head["title"], "Dana's budget", name)
 
@@ -1999,3 +2011,103 @@ class CanvasWaysTests(BoardProbeCase):
         self.assertEqual((end["pwned"], end["attr_hits"], end["foreign"]), ("undefined", [], 0))
         self.assertEqual(report["blocked"], {})
         self.assertEqual(list(report["allowed"]), ["jarvis-board"])
+
+
+class CanvasFixesTests(BoardProbeCase):
+    """The canvas, part 3's real-screen fixes in the real engine at the owner's 1389x868 (tests/board_probe.py
+    "canvas_fixes"): the top right row on one line with every button, the frames' area never moving, More's list; the
+    wake badge's longest words whole; one to three frames using the screen; the task card at the mock's size, the frames
+    never moving as it comes and goes."""
+
+    ROWS = ("row_empty", "row_frames", "row_pinned", "row_tidy", "row_open", "row_after_item", "card_row")
+
+    def fixes(self) -> dict:
+        report = self.report("canvas_fixes")
+        self.assertTrue(report["ready"])
+        self.assertTrue(report["corners_sent"])
+        return report
+
+    def test_the_top_row_is_one_line_with_every_button_and_the_frames_area_never_moves(self) -> None:
+        report = self.fixes()
+        for name in self.ROWS + ("row_900x600", "row_1280x800", "row_1920x1080"):
+            row = report[name]
+            self.assertEqual(row["spread"], 0, name)                       # one line: every middle at the same height
+            self.assertLessEqual(row["row"][3], 26, name)
+            self.assertEqual(row["area_top"], 64, name)                    # the frames' area: never moved by a button
+            self.assertGreaterEqual(row["row"][0], row["tl"][0] + row["tl"][2] + 20, name)   # clear of the top left
+            self.assertEqual(row["row"][0] + row["row"][2], row["win"][0] - 28, name)
+            self.assertLessEqual(row["tl"][1] + row["tl"][3], 64, name)
+            for word in ("Approvals 12", "Minimise the window", "Maximise or restore the window", "Close"):
+                self.assertIn(word, row["shown"], name)                    # never folded
+        tidy = report["row_tidy"]
+        for word in ("Tidy", "Clear view", "Pinned 1", "More"):
+            self.assertIn(word, tidy["shown"])                             # every button at once, on the row ...
+        self.assertEqual(sorted(tidy["shown"] + [item["text"] for item in tidy["items"]]),
+                         sorted(["History", "Tidy", "Clear view", "Pinned 1", "Briefing", "Approvals 12", "Follow-ups",
+                                 "Meetings", "Agents", "Live", "Memory", "Settings", "More", "Desktop",
+                                 "Minimise the window", "Maximise or restore the window", "Close"]))   # ... or under More
+        self.assertNotIn("More", report["row_1920x1080"]["shown"])         # room for all: no More
+        self.assertEqual(report["row_1920x1080"]["layout"]["top"]["folded"], [])
+
+    def test_mores_list_is_over_the_frames_and_an_item_presses_its_own_button(self) -> None:
+        report = self.fixes()
+        self.assertEqual(report["more_pressed"], "More")
+        opened = report["row_open"]
+        menu = opened["menu"]
+        self.assertIsNotNone(menu)
+        self.assertGreaterEqual(menu[1], opened["row"][1] + opened["row"][3])      # under the row ...
+        self.assertEqual(opened["menu_z"], "25")                                    # ... over the frames
+        self.assertFalse(opened["menu_in_canvas"])
+        self.assertLessEqual(menu[0] + menu[2], opened["win"][0])
+        self.assertEqual([item["text"] for item in opened["items"]], ["Follow-ups", "Meetings", "Agents", "Live", "Memory"])
+        self.assertEqual(report["item_pressed"], "Memory|true")             # pressed: the list closes
+        self.assertEqual(report["went"], ["memory"])                        # ... and the button's own word went
+        self.assertIsNone(report["row_after_item"]["menu"])
+
+    def test_the_wake_badges_longest_words_are_whole(self) -> None:
+        report = self.fixes()
+        longest, size = report["wake_words"]
+        for name in self.ROWS + ("row_900x600", "row_1280x800", "row_1920x1080"):
+            wake = report[name]["wake"]
+            self.assertEqual(wake["text"], longest, name)                   # every letter: never cut
+            self.assertFalse(wake["cut"], name)
+            self.assertLessEqual(wake["box"][0] + wake["box"][2], report[name]["win"][0] / 2 - 262, name)  # left of the ask line
+        self.assertGreater(size, 24)                                        # (part 2 cut it at 24)
+
+    def test_one_to_three_frames_use_the_screen(self) -> None:
+        few = self.fixes()["few"]
+        for name, look in few.items():
+            self.assertEqual((look["overlaps"], look["on_orb"], look["outside"], look["lost"]), ([], [], [], []), name)
+            boxes = [item["box"] for item in look["items"]]
+            left = min(box[0] for box in boxes) - look["area"][0]
+            right = look["area"][0] + look["area"][2] - max(box[0] + box[2] for box in boxes)
+            self.assertLessEqual(abs(left - right), 2, name)               # the band centred: no third left black
+            if len(boxes) > 1:
+                self.assertLess(left + right, look["area"][2] / 3, name)
+        self.assertEqual(few["2"]["grid"]["span"], 6)                       # two at 1389: each wider, the row filled
+        self.assertEqual((few["2"]["items"][0]["box"][0], few["3"]["items"][0]["box"][0]), (28, 28))
+        self.assertGreater(few["1"]["items"][0]["box"][2], 600)             # one: wider too, and centred
+        self.assertEqual(few["2@1920x1080"]["grid"]["span"], 6)             # (at 1920 too: two of 925 px)
+
+    def test_the_task_card_keeps_the_mocks_size_and_the_frames_never_move(self) -> None:
+        report = self.fixes()
+        before = {item["id"]: item["box"] for item in report["card_before"]["items"]}
+        for name in ("card_up", "card_step", "card_gone"):
+            self.assertEqual({item["id"]: item["box"] for item in report[name]["items"]}, before, name)
+            self.assertFalse(report[name]["untidy"], name)                  # ... and Tidy never shows for it
+            self.assertNotIn("Tidy", report[name]["buttons"], name)
+            self.assertEqual((report[name]["overlaps"], report[name]["on_orb"], report[name]["outside"]), ([], [], []),
+                             name)
+        up, alone = report["card_up"]["card"], report["card_alone"]["card"]
+        self.assertFalse(up["free"])                                        # a free place among the frames ...
+        self.assertEqual(up["box"][2], 372)                                 # ... at the mock's size
+        self.assertEqual(up["box"][2:], alone["box"][2:])                   # the same card as beside the orb alone
+        self.assertEqual(report["card_step"]["card"]["box"], up["box"])     # a step on: it stays where it is
+        self.assertIsNone(report["card_gone"]["card"])
+
+    def test_nothing_asks_the_network_and_nothing_was_refused(self) -> None:
+        report = self.fixes()
+        self.assertEqual(report["blocked"], {})
+        self.assertEqual(list(report["allowed"]), ["jarvis-board"])
+        self.assertEqual(report["messages_refused"], {})
+        self.assertEqual(report["console"], {})

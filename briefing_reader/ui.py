@@ -1106,6 +1106,35 @@ def needs_ok_chip(count: int) -> str:
 SHOW_WINDOW_TEXT = live_view.SHOW_WINDOW_TEXT
 BRING_BACK_TEXT = live_view.BRING_BACK_TEXT
 SEE_STEPS_TEXT = "See every step"                    # the link under an Ask's answer in the conversation
+# Canvas part 3: the ask line's status line never repeats what the caption carried (ReadingView.caption_said).
+CAPTION_CARRIED = 6                  # the caption's last lines kept for the check
+CAPTION_MATCH = 10                   # a line's first words that must be found as they are, in order
+_WORD = re.compile(r"\w+")
+
+
+def _caption_words(text: str) -> list[str]:
+    """A line's words for the canvas's check: letters and digits only, lower case (punctuation, marks and a source's
+    [1] apart, as the caption and the status line may write them)."""
+    return [word for word in _WORD.findall((text or "").casefold()) if not word.isdigit() or len(word) > 1]
+
+
+def _words_run(part: list[str], whole: list[str]) -> bool:
+    """``part`` (not empty) stands in ``whole`` as it is, in order."""
+    size = len(part)
+    return 0 < size <= len(whole) and any(whole[at:at + size] == part for at in range(len(whole) - size + 1))
+
+
+def _words_carried(words: list[str], carried: list[list[str]]) -> bool:
+    """These words are what the caption carried: its line's first words stand in them, or they stand in its line."""
+    if not words:
+        return False
+    for line in carried:
+        if len(line) < 3 or len(words) < 3:     # a line of a word or two: only the same words
+            if line == words:
+                return True
+        elif _words_run(line[:CAPTION_MATCH], words) or _words_run(words[:CAPTION_MATCH], line):
+            return True
+    return False
 
 
 def _error_rank(key: str) -> tuple[int, str]:
@@ -1461,6 +1490,7 @@ class ReadingView(QWidget):
         self._agenda_slot: QVBoxLayout | None = None
         self._activity = hud.ORB_WORKING
         self._typing = False
+        self._caption_carried: list[list[str]] = []   # what the caption carried lately (canvas part 3: _carried)
         self._talking = False           # the talk key's microphone is open (talk_ui): the orb listens
         self._pending = 0
         self._desktop_waiting = 0              # p2r-5: NEEDS YOUR OK cards waiting on the desktop HUD
@@ -1511,6 +1541,7 @@ class ReadingView(QWidget):
         from .wake_ui import LOOK_OFF, WakeBadge
 
         self._wake: tuple[str, str] = ("", LOOK_OFF)
+        self._wake_short = ""                   # its few words for the canvas (set_wake; canvas part 3)
         self._wake_badges: list[Any] = []
         self.wake_badge = WakeBadge()
         self.header.add_rec_badge(self.wake_badge)      # (any badge goes left of the hold note, REC's place)
@@ -1948,7 +1979,9 @@ class ReadingView(QWidget):
         listening > needs you > waiting > idle)."""
         base = _ORB_BASE.get(self._activity, orb_mod.IDLE)
         if base not in (orb_mod.SPEAKING, orb_mod.THINKING):
-            if self._typing or self._talking:
+            # Typing leans the hologram's ring as if it listened; on the canvas typing is not listening (canvas part 3:
+            # the state word said LISTENING and the meter's words ran beside a badge that said it was not listening).
+            if self._talking or (self._typing and not self._canvas):
                 base = orb_mod.LISTENING
             elif self._task_look:
                 base = self._task_look   # a task works, or a card of it waits (set_task_look)
@@ -2405,7 +2438,28 @@ class ReadingView(QWidget):
         ``duration_ms``: how long the audio says them (a briefing item), which paces the words;
         ``timeline`` + ``position()``: each word as the voice says it (part B of the motion prototype)."""
         self.captions.say(text, spoken=spoken, duration_ms=duration_ms, timeline=timeline, position=position)
+        self._carried(text)
         self._sync_echo()
+
+    def _carried(self, text: str) -> None:
+        """The caption carries ``text`` (canvas part 3): kept (the last CAPTION_CARRIED, a growing stream as one) so
+        the ask line's status line never repeats it on the canvas - also after the caption rests."""
+        words = _caption_words(text)
+        if not words:
+            return
+        carried = self._caption_carried
+        if carried and words[:len(carried[-1])] == carried[-1]:
+            carried[-1] = words                  # the same words, written further
+        elif not carried or carried[-1][:len(words)] != words:
+            carried.append(words)
+            del carried[:-CAPTION_CARRIED]
+        if self._canvas:
+            self.command_bar.refresh_status()
+
+    def caption_said(self, text: str) -> bool:
+        """The caption carried these words (their first CAPTION_MATCH words, or all of a shorter line) - the canvas's
+        check of the ask line's status line."""
+        return _words_carried(_caption_words(text), self._caption_carried)
 
     def set_voice(self, timeline: voice_fx.VoiceTimeline | None, position: Callable[[], int] | None) -> None:
         """The utterance being said drives the hero's voice spikes (None: none, or not timed: the synthetic
@@ -2489,11 +2543,13 @@ class ReadingView(QWidget):
         """An answer's words as they are written, as Home's caption (home.CaptionView.stream): the voice takes the line
         over without typing it again."""
         self.captions.stream(text, complete=complete, spoken=spoken)
+        self._carried(text)
         self._sync_echo()
 
     def correct_caption(self, text: str, *, alert: bool = False, spoken: bool = True) -> None:
         """The words on the band were wrong: ``text`` replaces them at once (``alert``: in coral)."""
         self.captions.correct(text, alert=alert, spoken=spoken)
+        self._carried(text)
         self._sync_echo()
 
     def clear_stream_caption(self) -> None:
@@ -3257,6 +3313,7 @@ class ReadingView(QWidget):
             return
         self._canvas_bar = on_canvas
         if on_canvas and self._canvas_page is not None:
+            bar.set_canvas_said(self.caption_said)       # part 3: never what the caption carries, twice
             bar.set_canvas(True)
             self._canvas_page.take_bar(bar)
             bar.setVisible(self.ask_available())
@@ -3570,11 +3627,13 @@ class ReadingView(QWidget):
         self._wake_badges.append(badge)
         badge.set_state(*self._wake)
 
-    def set_wake(self, text: str, look: str) -> None:
+    def set_wake(self, text: str, look: str, short: str = "") -> None:
         """"Hey Jarvis" (wake_ui): what it is doing in words and its look (wake_ui.LOOK_*) for HEY JARVIS in the
-        headers and on the desktop HUD (hidden while it is off)."""
-        if (text, look) == self._wake:
+        headers and on the desktop HUD (hidden while it is off); ``short``: the same in a few words for the canvas's
+        badge (wake_ui.WakeController.short_status; "": the words themselves)."""
+        if (text, look) == self._wake and short == getattr(self, "_wake_short", ""):
             return
+        self._wake_short = short
         self._wake = (text, look)
         for badge in (self.wake_badge, *self._wake_badges):
             badge.set_state(text, look)
@@ -3584,6 +3643,10 @@ class ReadingView(QWidget):
     def wake_state(self) -> tuple[str, str]:
         """(words, wake_ui.LOOK_*) of "Hey Jarvis" for the desktop HUD's chip; LOOK_OFF while it is off."""
         return self._wake
+
+    def wake_words(self) -> str:
+        """"Hey Jarvis" in a few words, for the canvas's badge (its words when no short form was given)."""
+        return getattr(self, "_wake_short", "") or self._wake[0]
 
     def set_followups_available(self, available: bool) -> None:
         """FOLLOW-UPS is on (the bundle): the Dock's Follow-ups slot and its screen."""
@@ -15559,7 +15622,7 @@ class AppController(QObject):
         if wake is None:
             return
         text, look = wake.status()
-        self.window.reading.set_wake(text, look)
+        self.window.reading.set_wake(text, look, wake.short_status())
         self._update_tray()
         action = self._tray_wake_action
         if action is not None and action.isChecked() != bool(wake.on):

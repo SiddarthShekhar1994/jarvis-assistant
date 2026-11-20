@@ -933,7 +933,8 @@ body.dim #canvas { opacity: .2; }
 /* ---- the corners (the mock's type: the display face for the wordmark, the mono face for labels) ---- */
 .c-corner { position: absolute; display: flex; align-items: center; }
 .c-tl { left: var(--edge); top: 22px; gap: 16px; max-width: calc(100% - 2 * var(--edge)); }
-.c-tr { right: var(--edge); top: 18px; gap: 7px; flex-wrap: wrap; justify-content: flex-end; max-width: calc(100% - 430px); row-gap: 7px; }
+/* the top right row: ONE line at every width (part 3: board.js fitTopRow folds the least used under More) */
+.c-tr { right: var(--edge); top: 18px; gap: 7px; flex-wrap: nowrap; justify-content: flex-end; }
 .c-bl { left: var(--edge); bottom: 24px; gap: 12px; max-width: calc(50% - 300px); flex-wrap: wrap; row-gap: 8px; }
 .c-word { font: 600 13px/18px var(--font-display); letter-spacing: .38em; color: var(--c-white); white-space: nowrap; cursor: default; user-select: none; }
 .c-mono, .c-btn {
@@ -944,6 +945,7 @@ body.dim #canvas { opacity: .2; }
 .c-state { color: var(--c-hi); }
 .c-state.amber { color: var(--c-amber); }
 .c-state.steel { color: var(--c-dim); }
+.c-wake { white-space: normal; min-width: 0; }           /* "Hey Jarvis" in its few words: whole, wrapped if need be */
 .c-btn {
   font-weight: 600; color: #D8F3F8; background: rgba(var(--g), .04); border: 1px solid rgba(var(--g-hi), .7);
   padding: 5px 9px; border-radius: 1px; box-shadow: 0 0 8px rgba(var(--g), .25);
@@ -960,7 +962,15 @@ body.dim #canvas { opacity: .2; }
 .c-btn.quiet:hover { border-color: #fff; color: #fff; }
 .c-btn.icon { display: grid; place-items: center; width: 26px; height: 24px; padding: 0; }
 .c-btn.icon .glyph { width: 13px; height: 13px; }
-.c-btn[hidden], .c-mono[hidden], .c-rule[hidden], .c-meter[hidden] { display: none; }
+.c-btn[hidden], .c-mono[hidden], .c-rule[hidden], .c-meter[hidden], .c-btn.folded { display: none; }
+/* More's list: over the frames, under its button, the folded buttons one under another */
+.c-menu {
+  position: fixed; z-index: 25; visibility: visible; display: flex; flex-direction: column; align-items: stretch;
+  gap: 6px; min-width: 150px; padding: 8px; background: rgba(2, 8, 11, .96); border: 1px solid rgba(var(--g-hi), .45);
+  border-radius: 1px; box-shadow: 0 8px 24px rgba(0, 0, 0, .55), 0 0 14px rgba(var(--g), .18);
+}
+.c-menu[hidden] { display: none; }
+.c-menu .c-btn { text-align: left; }
 .c-rule { width: 1px; height: 18px; margin: 0 5px; background: rgba(var(--g-hi), .3); }
 .c-group { display: flex; align-items: center; gap: 7px; }
 .c-clock { color: var(--c-dim); }
@@ -974,8 +984,7 @@ button.c-clock:focus-visible, :root.keys button.c-clock:focus { outline: 2px sol
 .c-meter i.on { background: var(--c); }
 .c-meter i.edge { background: #1B6E80; }
 @media (max-width: 1180px) {
-  .c-tl { flex-wrap: wrap; row-gap: 6px; max-width: 300px; }
-  .c-tr { max-width: calc(100% - 340px); }
+  .c-tl { flex-wrap: wrap; row-gap: 4px; max-width: 300px; }      /* (two lines: over the frames' area, at 64 px) */
 }
 
 /* ---- open big on the canvas: the card over the whole canvas but the corners' rows and the ask line ---- */

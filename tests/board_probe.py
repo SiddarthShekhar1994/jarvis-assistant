@@ -112,6 +112,12 @@ Cases:
                Pinned filter, a close leaving a gap with Tidy packing again (the frames gliding, lively: a little
                past), Clear view's lines into the orb before the orb leaves its corner, Bring back, and hostile task
                and number messages refused
+    canvas_fixes  the canvas, part 3's real-screen fixes at the owner's 1389x868 (the top row also at 900x600, 1280x800
+               and 1920x1080): the top right row on ONE line with every button (a two-digit Approvals count, Tidy,
+               Clear view, Pinned), the least used under More, its list over the frames and its items pressing their
+               own buttons, the frames' area never moving as a button comes or goes; the wake badge's longest words
+               whole; one, two and three frames using the screen (wider, then centred, the orb's corner free); the
+               task card at the mock's size with two frames up, the frames never moving as it comes and goes
 
 Qt runs offscreen and Chromium's proxy is a dead address (snapshots.OFFLINE_FLAGS, as the board's engine always runs in a
 test): nothing can reach the network whatever the page does. No window is shown on the real screen. Chromium's
@@ -1012,6 +1018,8 @@ def main(case: str) -> dict[str, Any]:
         report.update(canvas_layout_case(make, wait_until, pump, main_world, settle_end))
     elif case == "canvas_ways":
         report.update(canvas_ways_case(make, wait_until, pump, main_world, settle_end))
+    elif case == "canvas_fixes":
+        report.update(canvas_fixes_case(make, wait_until, pump, main_world, settle_end))
     elif case == "reduced":
         # The page's own reduced motion, Chromium told reduced motion (REDUCED_MOTION): lively plays as off.
         host, board = make()
@@ -4403,6 +4411,157 @@ def canvas_ways_case(make: Any, wait_until: Any, pump: Any, main_world: Any, set
     counts = board.counts()
     report["blocked"] = counts.get("blocked", {})
     report["allowed"] = counts.get("allowed", {})
+    report["console"] = {key: value for key, value in counts.items() if key.startswith("console:")}
+    settle_end(report, board)
+    return report
+
+
+CANVAS3_SIZE = (1389, 868)                 # the owner's screen (logical px)
+CANVAS3_ROW_SIZES = ((900, 600), (1280, 800), (1920, 1080))
+# The top right row as drawn: each button that shows (its words, its box), how far apart their middles are (one line:
+# none), the row's and the top left corner's boxes, More's list, the frames' area's top and the wake badge.
+CANVAS3_ROW = r"""JSON.stringify((function () {
+  function box(el) { var r = el.getBoundingClientRect(); return [Math.round(r.left), Math.round(r.top),
+                                                                 Math.round(r.width), Math.round(r.height)]; }
+  var shown = [];
+  Array.prototype.forEach.call(document.querySelectorAll('#canvas .c-tr button'), function (b) {
+    if (b.getClientRects().length) { shown.push({text: b.textContent || b.getAttribute('aria-label'), box: box(b)}); }
+  });
+  var tops = shown.map(function (b) { return b.box[1] + b.box[3] / 2; });
+  var menu = document.getElementById('c-menu');
+  var items = menu ? Array.prototype.filter.call(menu.children, function (b) { return !b.hidden; })
+    .map(function (b) { return {text: b.textContent, box: box(b)}; }) : [];
+  var tl = document.querySelector('#canvas .c-tl'), wake = document.querySelectorAll('#canvas .c-bl .c-state')[0];
+  return {
+    shown: shown.map(function (b) { return b.text; }), boxes: shown.map(function (b) { return b.box; }),
+    spread: tops.length ? Math.max.apply(null, tops) - Math.min.apply(null, tops) : 0,
+    row: box(document.querySelector('#canvas .c-tr')), tl: box(tl), win: [innerWidth, innerHeight],
+    area_top: Math.round(document.body.getBoundingClientRect().top),
+    menu: menu && !menu.hidden ? box(menu) : null, items: items,
+    menu_z: menu ? getComputedStyle(menu).zIndex : '', menu_in_canvas: !!(menu && menu.closest('#canvas')),
+    wake: wake && !wake.hidden ? {text: wake.textContent, box: box(wake), cut: wake.scrollWidth > wake.clientWidth + 1}
+      : null,
+    bl: box(document.querySelector('#canvas .c-bl')),
+    layout: board.layout()
+  };
+})())"""
+CANVAS3_PRESS_MORE = r"""(function () {
+  var hit = '';
+  Array.prototype.forEach.call(document.querySelectorAll('#canvas .c-tr button'), function (b) {
+    if (!hit && b.getClientRects().length && b.textContent === 'More') { hit = b.textContent; b.click(); }
+  });
+  return hit;
+})()"""
+CANVAS3_PRESS_ITEM = r"""(function (label) {
+  var menu = document.getElementById('c-menu'), hit = '';
+  Array.prototype.forEach.call(menu.children, function (b) {
+    if (!hit && !b.hidden && b.textContent === label) { hit = b.textContent; b.click(); }
+  });
+  return hit + '|' + String(menu.hidden);
+})(%s)"""
+
+
+def canvas_fixes_case(make: Any, wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> dict[str, Any]:
+    """The canvas, part 3's six real-screen fixes in the real page (see the module doc's "canvas_fixes")."""
+    from briefing_reader import wake_ui
+
+    report: dict[str, Any] = {}
+    host, board = _canvas2_start(make, wait_until, pump, CANVAS3_SIZE)
+    report["ready"] = board.is_ready()
+    board.set_motion("off")
+    went: list[str] = []
+    board.goRequested.connect(went.append)
+    marks = json.dumps(list(CANVAS2_MARKS))
+    longest = max(wake_ui.SHORT_WORDS, key=len)
+    corners = {"type": "canvas", "clock": "Tue 17 Nov · 9:41 AM", "word": "Standby", "tone": "amber",
+               "approvals": 12, "buttons": CANVAS_BUTTONS, "briefing_new": True, "hold": "", "rec": "",
+               "wake": longest, "meter": True}
+
+    def row() -> dict[str, Any]:
+        return json.loads(main_world(board, CANVAS3_ROW))
+
+    def look() -> dict[str, Any]:
+        return json.loads(main_world(board, CANVAS2_LOOK % marks))
+
+    def resize(size: tuple[int, int]) -> None:
+        host.resize(*size)
+        board.setGeometry(0, 0, *size)
+        pump(0.3)
+
+    # ---- 1. the top row: every button, Approvals 12, then Pinned, then Tidy; the frames' area stays where it is ---
+    report["corners_sent"] = board.apply(corners)
+    report["wake_words"] = [longest, len(longest)]
+    pump(0.3)
+    report["row_empty"] = row()
+    frames = canvas2_frames(6)
+    _canvas2_put(board, frames)
+    pump(0.4)
+    report["row_frames"] = row()                         # Clear view came
+    board.apply(dict(frames[2], group="g1", pinned=True))
+    board.apply({"type": "bar", "frames": 6, "waits": 0, "pinned": 1, "compact": False})
+    pump(0.4)
+    report["row_pinned"] = row()                         # ... and Pinned
+    board.apply(dict(frames[1], group="g1", closed=True))
+    board.apply({"type": "remove", "id": "f2"})
+    board.apply({"type": "group", "id": "g1", "time": "9:41 AM", "topic": "Dana's budget",
+                 "frames": [frame["id"] for frame in frames if frame["id"] != "f2"], "older": False})
+    board.apply({"type": "bar", "frames": 5, "waits": 0, "pinned": 1, "compact": False})
+    pump(0.5)
+    report["row_tidy"] = row()                           # ... and Tidy: every button at once
+    report["more_pressed"] = main_world(board, CANVAS3_PRESS_MORE)
+    pump(0.3)
+    report["row_open"] = row()                           # More's list, over the frames
+    report["item_pressed"] = main_world(board, CANVAS3_PRESS_ITEM % json.dumps("Memory"))
+    pump(0.3)
+    report["row_after_item"] = row()
+    report["went"] = list(went)
+    for size in CANVAS3_ROW_SIZES:
+        resize(size)
+        report[f"row_{size[0]}x{size[1]}"] = row()
+    resize(CANVAS3_SIZE)
+    # ---- 5. one, two and three frames use the screen ----------------------------------------------------------------
+    report["few"] = {}
+    for count in (1, 2, 3):
+        board.apply({"type": "clear"})
+        _canvas2_put(board, canvas2_frames(count))
+        pump(0.4)
+        report["few"][str(count)] = look()
+    board.apply({"type": "clear"})
+    _canvas2_put(board, canvas2_frames(2))
+    for size in ((1920, 1080), (1280, 800)):
+        resize(size)
+        report["few"][f"2@{size[0]}x{size[1]}"] = look()
+    resize(CANVAS3_SIZE)
+    # ---- 6. the task card with two frames up: the mock's size, a place of its own; the frames never move -----------
+    board.apply({"type": "clear"})
+    _canvas2_put(board, canvas2_frames(2))
+    pump(0.4)
+    report["card_before"] = look()
+    card = {"type": "task", "state": "working", "title": "Working on it", "words": "Reading your calendar",
+            "seconds": 3, "steps": 0, "sources": 0, "frames": 0, "group": "", "stop": True}
+    report["card_sent"] = board.apply(card)
+    pump(0.5)
+    report["card_up"] = look()
+    report["card_row"] = row()
+    board.apply(dict(card, words="Searching your mail", steps=2, sources=1, seconds=9))
+    pump(0.4)
+    report["card_step"] = look()
+    board.apply({"type": "task", "state": "gone", "title": "", "words": "", "seconds": 0, "steps": 0, "sources": 0,
+                 "frames": 0, "group": "", "stop": False})
+    pump(0.5)
+    report["card_gone"] = look()
+    # alone on the canvas: beside the orb, at the same size
+    board.apply({"type": "clear"})
+    board.apply({"type": "bar", "frames": 0, "waits": 0, "pinned": 0, "compact": False})
+    board.apply({"type": "desk", "state": "leave"})
+    pump(0.3)
+    board.apply(card)
+    pump(0.5)
+    report["card_alone"] = look()
+    counts = board.counts()
+    report["blocked"] = counts.get("blocked", {})
+    report["allowed"] = counts.get("allowed", {})
+    report["messages_refused"] = {key: value for key, value in counts.items() if key.startswith("refused:")}
     report["console"] = {key: value for key, value in counts.items() if key.startswith("console:")}
     settle_end(report, board)
     return report

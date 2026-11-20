@@ -7866,6 +7866,7 @@ class CommandBar(QWidget):
         self._canvas = False         # the canvas's ask line (set_canvas): the mock's thin outlined line
         self._typing = False
         self._escape_hook: Any = None   # asked at Esc in the empty field (a task's Stop on the HUD's bar)
+        self._said: Any = None       # the canvas: said(text) -> True when the caption carries those words already
         self._last_request = ""      # the last request accepted from here, as typed (Up brings it back)
         self.input = _CommandInput()
         self.field = _CommandField(self.input)
@@ -7997,6 +7998,22 @@ class CommandBar(QWidget):
     def is_canvas(self) -> bool:
         return self._canvas
 
+    def set_canvas_said(self, said: Any) -> None:
+        """The canvas (part 3): ``said(text)`` says whether the caption carries those words already; the status line
+        then stays away (an answer is never shown twice). None: no such check."""
+        # Held weakly: the reading view's own method here kept that view alive in a cycle (bar -> view -> bar), so a
+        # closed app's widgets were freed by Python's cycle collector at some later moment - inside the next app's
+        # event processing (an access violation in the desktop harness).
+        self._said = weakref.WeakMethod(said) if hasattr(said, "__self__") else (lambda: said) if said else None
+        self._fold()
+
+    def refresh_status(self) -> None:
+        """What the caption carries changed: the status line shows or goes again (the canvas's check)."""
+        self._fold()
+
+    def status_shown(self) -> bool:
+        return not self.status_label.isHidden()
+
     def set_canvas_placeholder(self, text: str) -> None:
         """What the canvas's ask line says while it is empty ("": the hologram bar's own "Ask Jarvis")."""
         self.input._canvas_placeholder = str(text or "") if self._canvas else ""
@@ -8090,6 +8107,9 @@ class CommandBar(QWidget):
             return
         if self._holo:
             needs = self._tone in (TONE_DONE, TONE_WARN, TONE_ERROR) and not self._hint and bool(self._status_text)
+            said = self._said() if self._said is not None else None
+            if needs and self._canvas and said is not None and said(self._status_text):
+                needs = False    # the canvas: the caption says it already (it never shows twice)
             self.status_label.setVisible(needs or not self.link_button.isHidden())
             self.meta_label.setVisible(False)
             self.updateGeometry()

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import gc
 import json
 import tempfile
 import threading
@@ -720,6 +721,10 @@ class AppHarness:
         # could be deleted by a collection that happens to run on a worker thread of a later test.
         c.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        # ... and whatever of it only a cycle still holds goes now too, here: a collection that runs later runs wherever
+        # it happens to (a worker thread of the next app, inside its event processing: an access violation in the
+        # desktop harness, where one app follows another in the same process).
+        gc.collect()
 
 
 class _StepClock:
