@@ -10,7 +10,8 @@ Public API
     Rescan, Show hidden and Turn off on this PC); the header readout (``followups_meta``, its text as the app
     gives it, shown in capitals: ``2 WAITING - 1 OWED - UPDATED 10:41 AM``, ``SCANNING...``, ``OFF``); the fix
     lines (each with its link: ``followupsLinkClicked(link_id)``); the groups WAITING ON YOU (an amber label,
-    rows with a 3 px amber bar) and OWED TO YOU (an ``ink-kicker`` label, a 3 px ``holo`` bar), each showing
+    rows with a 3 px amber bar; the canvas look: a 1 px line, the focal row a canvas frame in the row's tone) and OWED
+    TO YOU (an ``ink-kicker`` label, a 3 px ``holo`` bar), each showing
     its first ``shown`` rows with "+N more" / "Show fewer" under it (``followup_more(kind)``); and the empty
     line. ``set_followups(info)`` (a hud.FollowupsInfo; None: nothing shows) fills it.
 
@@ -132,7 +133,8 @@ class FollowupHead(QAbstractButton):
             if self.underMouse() and not self._expanded and info.state != hud.FOLLOWUP_CHECKING:
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(holo.alpha(holo.INK_1, 0.04))
-                painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), 8, 8)
+                radius = holo.CANVAS_RADIUS if holo.canvas_look() else 8
+                painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
             left, top = _HEAD_PAD[0], _HEAD_PAD[1]
             right = rect.width() - _HEAD_PAD[2]
             age_font = holo.font("readout")
@@ -255,11 +257,19 @@ class FollowupTile(QWidget):
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+            bar = holo.STEEL if self.checking() else _BAR.get(self._info.kind, holo.HOLO)
+            if holo.canvas_look():
+                # The canvas look: the focal row is a canvas frame whose edge takes the row's tone (amber: it waits on
+                # the owner); the others keep only a 1 px line in it (no thick coloured bar).
+                if self._expanded:
+                    holo.paint_canvas_frame(painter, QRectF(self.rect()), holo.canvas_tone_frame(bar))
+                else:
+                    painter.fillRect(QRectF(0, 10, 1, max(0.0, self.height() - 20)), holo.alpha(bar, 0.8))
+                return
             if self._expanded:
                 painter.setPen(QPen(holo.LINE, 1.0))
                 painter.setBrush(QColor(holo.TILE_FOCUS))
                 painter.drawRoundedRect(rect, 8, 8)
-            bar = holo.STEEL if self.checking() else _BAR.get(self._info.kind, holo.HOLO)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(bar))
             painter.drawRoundedRect(QRectF(0, 10, 3, max(0.0, self.height() - 20)), 1.5, 1.5)

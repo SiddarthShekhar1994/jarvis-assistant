@@ -185,6 +185,19 @@ _ORB_DISC = 62.2                            # the dark disc's gradient radius (C
 _BAR_LINE = holo.alpha(holo.HOLO, 0.38)
 _BAR_HAIRLINE = holo.alpha(holo.HOLO, 0.16)
 _BAR_SHINE = holo.alpha(holo.HOLO_HI, 0.12)
+# The canvas look (canvas part 4): the bar, the chips and the buttons in the canvas frame style - square, opaque (a
+# window that takes clicks never paints alpha), the frames' bright edge with the inner glow, corner ticks; amber only
+# for what waits on the owner. Their outer glows (the DecorLayer's) go square with them.
+_CANVAS_FILL = QColor(3, 10, 13)            # board.css --tile, opaque
+_CANVAS_FILL_AMBER = QColor(14, 9, 3)       # --tile-amber
+_CANVAS_FILL_ALERT = QColor(17, 6, 5)       # --tile-alert
+_CANVAS_CHIP_EDGE = QColor(175, 240, 255, 178)
+_CANVAS_HAIRLINE = QColor(143, 235, 255, 46)
+
+
+def shape_radius(radius: float) -> float:
+    """A HUD shape's corner: as designed, or the canvas's square corner while Home is the canvas."""
+    return holo.CANVAS_RADIUS if holo.canvas_look() else radius
 
 # The chips (under the bar) and the button beside it.
 CHIP_BRIEFING = "briefing"
@@ -665,6 +678,18 @@ _CHIP_LOOKS = {   # fill, border, hover border, text, dot, chevron
 _DIAMOND_LOOKS = frozenset({CHIP_APPROVALS, CHIP_WAKE_PROBLEM})     # amber: the diamond leads (the new look)
 
 
+def _canvas_chip_colors(look: str) -> tuple[QColor, QColor, QColor, QColor | None]:
+    """(fill, edge, hover edge, corner ticks) of a chip in the canvas look."""
+    if look in _DIAMOND_LOOKS:
+        return (_CANVAS_FILL_AMBER, holo.alpha(holo.CANVAS_AMBER, 0.8), QColor(holo.CANVAS_AMBER_HI),
+                QColor(holo.CANVAS_AMBER_HI))
+    if look == CHIP_REC:
+        return _CANVAS_FILL_ALERT, holo.alpha(holo.ALERT, 0.7), QColor(holo.ALERT_HI), None
+    if look == CHIP_WAKE_PAUSED:
+        return _CANVAS_FILL, holo.alpha(holo.STEEL, 0.55), QColor(holo.STEEL), None
+    return _CANVAS_FILL, QColor(_CANVAS_CHIP_EDGE), QColor(holo.CANVAS_EDGE_HI), None
+
+
 class HudChip(QAbstractButton):
     """A chip under the HUD bar (Switch.dc.html .hchip): 36 high, opaque, a dot, the words and a chevron. Static (no
     ping, no blinking dot: only the orb loops; words that did not change repaint nothing); REC's figures are tabular,
@@ -752,14 +777,19 @@ class HudChip(QAbstractButton):
 
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         fill, border, hover, ink, dot, chevron = _CHIP_LOOKS[self._look]
+        ticks = None
+        if holo.canvas_look():
+            fill, border, hover, ticks = _canvas_chip_colors(self._look)
         painter = QPainter(self)
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-            radius = rect.height() / 2
+            radius = shape_radius(rect.height() / 2)
             painter.setPen(QPen(hover if self._hover else border, 1.0))
             painter.setBrush(QColor(fill))
             painter.drawRoundedRect(rect, radius, radius)
+            if ticks is not None:                    # what waits: the canvas's two corner ticks
+                holo.paint_canvas_ticks(painter, QRectF(self.rect()), ticks, holo.BRACKETS_DIAGONAL, leg=7.0)
             center = QPointF(self.PAD + 3.5, rect.center().y())
             if self._look in _DIAMOND_LOOKS:         # waits on the owner: the drawn diamond (the new look)
                 holo.paint_icon(painter, QRectF(center.x() - 5.5, center.y() - 5.5, 11, 11), "diamond", dot)
@@ -906,9 +936,10 @@ class InstantChip(QWidget):
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-            radius = rect.height() / 2
-            painter.setPen(QPen(holo.alpha(holo.HOLO, 0.42), 1.0))
-            painter.setBrush(QColor(holo.TILE))
+            radius = shape_radius(rect.height() / 2)
+            canvas = holo.canvas_look()
+            painter.setPen(QPen(QColor(_CANVAS_CHIP_EDGE) if canvas else holo.alpha(holo.HOLO, 0.42), 1.0))
+            painter.setBrush(_CANVAS_FILL if canvas else QColor(holo.TILE))
             painter.drawRoundedRect(rect, radius, radius)
             center = QPointF(self.PAD + 3.5, rect.center().y())
             painter.setPen(Qt.PenStyle.NoPen)
@@ -974,9 +1005,13 @@ class _UndoAllChip(QAbstractButton):
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-            radius = rect.height() / 2
-            painter.setPen(QPen(QColor(holo.HOLO) if lit else holo.alpha(holo.HOLO, 0.42), 1.0))
-            painter.setBrush(QColor(holo.TILE))
+            radius = shape_radius(rect.height() / 2)
+            if holo.canvas_look():
+                painter.setPen(QPen(QColor(holo.CANVAS_EDGE_HI) if lit else QColor(_CANVAS_CHIP_EDGE), 1.0))
+                painter.setBrush(_CANVAS_FILL)
+            else:
+                painter.setPen(QPen(QColor(holo.HOLO) if lit else holo.alpha(holo.HOLO, 0.42), 1.0))
+                painter.setBrush(QColor(holo.TILE))
             painter.drawRoundedRect(rect, radius, radius)
             painter.setFont(self._font)
             painter.setPen(QColor(holo.HOLO_HI if lit else holo.HOLO))
@@ -1035,7 +1070,8 @@ class _BackButton(QAbstractButton):
             rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
             painter.setPen(QPen(border, 1.0))
             painter.setBrush(fill)
-            painter.drawRoundedRect(rect, self.RADIUS, self.RADIUS)
+            radius = shape_radius(self.RADIUS)
+            painter.drawRoundedRect(rect, radius, radius)
             ink = QColor(holo.INK_1)
             box = QRectF(self.PAD, (self.height() - self.ICON) / 2, self.ICON, self.ICON)
             holo.paint_icon(painter, box, "window", ink, stroke=1.7)
@@ -1190,14 +1226,15 @@ class HudWindow(_OverlayWindow):
         them (Switch.dc.html .bar and .hchip box-shadows) - this window never does (its margins stay clear). The
         instant row's (P2.5) come after the chips', cyan."""
         origin = self.geometry().topLeft()
-        glows = [Glow(self.bar_rect_local().translated(origin), BAR_RADIUS, GLOW_BAR)]
+        glows = [Glow(self.bar_rect_local().translated(origin), shape_radius(BAR_RADIUS), GLOW_BAR)]
         for key, chip in self.chips.items():
             if not chip.isHidden():
                 amber = key == CHIP_APPROVALS or chip.look() == CHIP_WAKE_PROBLEM
-                glows.append(Glow(chip.geometry().translated(origin), CHIP_HEIGHT / 2, GLOW_CHIP,
+                glows.append(Glow(chip.geometry().translated(origin), shape_radius(CHIP_HEIGHT / 2), GLOW_CHIP,
                                   TONE_AMBER if amber else TONE_CYAN))
         for item in self._instant_shown():
-            glows.append(Glow(item.geometry().translated(origin), CHIP_HEIGHT / 2, GLOW_CHIP, TONE_CYAN))
+            glows.append(Glow(item.geometry().translated(origin), shape_radius(CHIP_HEIGHT / 2), GLOW_CHIP,
+                              TONE_CYAN))
         return glows
 
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
@@ -1586,7 +1623,8 @@ class HudWindow(_OverlayWindow):
         """The window's static paint (the panel, its hairlines and brackets, the orb's dark disc), cached per size
         and device pixel ratio."""
         dpr = float(dpr or self.devicePixelRatioF() or 1.0)
-        key = (self.width(), self.height(), self._bar_width, self._hairline_x, self._holding, dpr)
+        key = (self.width(), self.height(), self._bar_width, self._hairline_x, self._holding, dpr,
+               holo.canvas_look())
         if self._background is None or self._background_key != key:
             pixmap = QPixmap(max(1, round(self.width() * dpr)), max(1, round(self.height() * dpr)))
             pixmap.setDevicePixelRatio(dpr)
@@ -1609,6 +1647,14 @@ class HudWindow(_OverlayWindow):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         bar = QRectF(self.bar_rect_local())
         edge = bar.adjusted(0.5, 0.5, -0.5, -0.5)
+        if holo.canvas_look():                       # a canvas frame: square, opaque, the bright edge, its glow, ticks
+            painter.fillRect(bar, _CANVAS_FILL)
+            holo.paint_canvas_glow(painter, bar.adjusted(1, 1, -1, -1), holo.CANVAS_GLOW, 1.0)
+            painter.setPen(QPen(holo.CANVAS_EDGE_HI if self._holding else holo.CANVAS_EDGE, 1.0))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(edge)
+            holo.paint_canvas_ticks(painter, bar, QColor(255, 255, 255, 150), holo.BRACKETS_RIGHT)   # (the orb: left)
+            return
         path = QPainterPath()
         path.addRoundedRect(edge, BAR_RADIUS, BAR_RADIUS)
         painter.fillPath(path, QColor(holo.FIELD))
@@ -1626,7 +1672,7 @@ class HudWindow(_OverlayWindow):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         bar = QRectF(self.bar_rect_local())
         divider = bar.top() + 1 + ROW_HEIGHT + 0.5
-        painter.setPen(QPen(_BAR_HAIRLINE, 1.0))
+        painter.setPen(QPen(_CANVAS_HAIRLINE if holo.canvas_look() else _BAR_HAIRLINE, 1.0))
         painter.drawLine(QPointF(bar.left() + 1, divider), QPointF(self._hairline_x, divider))
         painter.drawLine(QPointF(self._hairline_x + 0.5, bar.top() + 12), QPointF(self._hairline_x + 0.5,
                                                                                  bar.bottom() - 12))

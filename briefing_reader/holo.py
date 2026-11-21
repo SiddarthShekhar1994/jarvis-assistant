@@ -490,7 +490,28 @@ CANVAS_AMBER = "#F5B14A"
 CANVAS_AMBER_HI = "#FFD08A"
 CANVAS_INK = "#D8F3F8"                        # a button's words (the mock's .btn)
 CANVAS_TICK = 10.0                            # a corner tick's leg
+CANVAS_RADIUS = 1.0                           # the mock's corners (border-radius: 1px)
+CANVAS_CAPS_ROLES = ("screen_title",)         # roles the canvas sets in caps, bolder (the mock's .h: Chakra 700 caps)
 _canvas_look = False
+
+
+def tag_role(widget: QWidget, role: str) -> None:
+    """Remember ``widget``'s type role, so the canvas look can restyle it (its screen titles in caps) and give it back;
+    a widget made while the look is on takes it at once."""
+    widget.setProperty("holoRole", role)
+    _role_look(widget)
+
+
+def _role_look(widget: QWidget) -> None:
+    role = widget.property("holoRole")
+    if role not in CANVAS_CAPS_ROLES:
+        return
+    current = QFont(widget.font())
+    current.setCapitalization(QFont.Capitalization.AllUppercase if _canvas_look
+                              else QFont.Capitalization.MixedCase)
+    current.setWeight(QFont.Weight(700 if _canvas_look else ROLES[role].weight))
+    if current != widget.font():
+        widget.setFont(current)
 
 
 def canvas_look() -> bool:
@@ -513,6 +534,7 @@ def set_canvas_look(on: bool) -> None:
     for widget in app.allWidgets():
         if isinstance(widget, (HoloButton, ActionChip)):
             widget.updateGeometry()
+        _role_look(widget)
         widget.update()
 
 
@@ -1155,7 +1177,8 @@ def status_badge_width(text: str, dot: bool = False) -> float:
 
 def paint_status_badge(painter: QPainter, left_center: QPointF, text: str, tone: str = TONE_CYAN, *,
                        dot: bool = False) -> float:
-    """A status badge (height 20, radius 4, 1 px border at 45 %, fill 8 %); returns its width."""
+    """A status badge (height 20, radius 4 - square in the canvas look, as the mock's - 1 px border at 45 %, fill
+    8 %); returns its width."""
     signal, ink = _TONES.get(tone, _TONES[TONE_CYAN])
     width = status_badge_width(text, dot)
     rect = QRectF(left_center.x(), left_center.y() - BADGE_HEIGHT / 2, width, BADGE_HEIGHT)
@@ -1164,7 +1187,8 @@ def paint_status_badge(painter: QPainter, left_center: QPointF, text: str, tone:
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setPen(QPen(alpha(signal, 0.45), 1.0))
         painter.setBrush(alpha(signal, 0.08))
-        painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), RADIUS_BADGE, RADIUS_BADGE)
+        radius = CANVAS_RADIUS if _canvas_look else RADIUS_BADGE
+        painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
         x = rect.left() + 7
         if dot:
             painter.setPen(Qt.PenStyle.NoPen)

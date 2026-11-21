@@ -1139,8 +1139,18 @@ class MeetingsStage(QWidget):
         holder.setMaximumWidth(COLUMN_MAX + 120)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(holo.GUTTER_SIDE + 8, holo.GUTTER_TOP, holo.GUTTER_SIDE, 16)
+        layout.addStretch(0)                 # the canvas look: the column centred, as every screen over the canvas
         layout.addWidget(holder, 1000)
         layout.addStretch(1)
+        self._row = layout
+
+    def place_column(self) -> None:
+        """The column at the left (the hologram look) or centred (the canvas look)."""
+        self._row.setStretch(0, 1 if holo.canvas_look() else 0)
+
+    def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        self.place_column()
+        super().showEvent(event)
 
     # ---- API ---------------------------------------------------------------------------------
 

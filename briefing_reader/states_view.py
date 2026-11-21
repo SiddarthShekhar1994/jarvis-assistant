@@ -33,7 +33,8 @@ Words (plain text; British spelling; never a vendor name in what Jarvis says)
     other action is the app's to answer (Retry: the same Retry as before; it never sends by itself).
 
 ``Toast``
-    Jarvis's own small window (TOAST_SIZE, ``raised``, radius 14, bottom-right of the work area, on top) -
+    Jarvis's own small window (TOAST_SIZE, ``raised``, radius 14 - the canvas look: a square canvas frame,
+    TOAST_CANVAS - bottom-right of the work area, on top) -
     never a Windows notification, so nothing lands in Windows' notification history. It never takes the
     focus (``Qt.Tool``, ``WindowDoesNotAcceptFocus``, ``WA_ShowWithoutActivating``; its button takes no
     focus either). The mini orb (while Home is the canvas: the canvas orb's flat JARVIS badge, TOAST_BADGE px
@@ -68,6 +69,8 @@ TOAST_RADIUS = 14
 TOAST_MARGIN = 16                 # from the work area's bottom-right corner
 TOAST_BADGE = 60                  # the canvas look: the orb's flat JARVIS badge, this square (the toast's height
                                   # less its 14 px padding)
+TOAST_CANVAS = holo.CanvasFrameLook(QColor(3, 10, 13), holo.CANVAS_EDGE, holo.CANVAS_GLOW, 1.0,
+                                    QColor(255, 255, 255, 150), holo.BRACKETS_ALL)   # the canvas look's frame
 TOAST_LINES = 3                   # the line wraps beside the action (8 words fit)
 OFFLINE_LINE = "My usual voice is out of reach, {sir}. I'll keep trying."
 OFFLINE_BADGE = "WINDOWS VOICE"
@@ -576,9 +579,12 @@ class Toast(QWidget):
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-            painter.setPen(QPen(holo.LINE_STRONG, 1.0))
-            painter.setBrush(QColor(holo.RAISED))
-            painter.drawRoundedRect(rect, TOAST_RADIUS, TOAST_RADIUS)
+            if holo.canvas_look():                   # a canvas frame: square, opaque, the bright edge, glow, ticks
+                holo.paint_canvas_frame(painter, QRectF(self.rect()), TOAST_CANVAS)
+            else:
+                painter.setPen(QPen(holo.LINE_STRONG, 1.0))
+                painter.setBrush(QColor(holo.RAISED))
+                painter.drawRoundedRect(rect, TOAST_RADIUS, TOAST_RADIUS)
             font = hud.display_font(14, 500, 0.02)
             painter.setFont(font)
             painter.setPen(QColor(holo.INK_1))

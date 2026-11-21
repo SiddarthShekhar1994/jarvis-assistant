@@ -1452,10 +1452,32 @@ def _outline(frame: Mapping[str, Any], screen: str = BOARD) -> tuple[QColor, QCo
     return (_color(holo.LINE) if second else _color(holo.FRAME_EDGE)), _color(holo.TILE), float(holo.RADIUS_FRAME)
 
 
+# The canvas look (canvas part 4): the second screen's wall in the canvas frame style, OLED care's - square, a 1 px
+# edge in the frames' own cyan (no fill, no glow: true black stays black), amber with its two corner ticks for what waits
+# on the owner, coral with them for what failed.
+WALL_EDGE = QColor(175, 240, 255, 190)          # board.css --frame-edge at 0.75 (no glow: OLED care)
+WALL_EDGE_AMBER = QColor(245, 177, 74, 215)
+WALL_TICK_AMBER = QColor(255, 208, 138, 230)
+WALL_EDGE_ALERT = holo.alpha(holo.ALERT, 0.7)
+WALL_TICK_ALERT = QColor(holo.ALERT_HI)
+
+
+def wall_outline(frame: Mapping[str, Any]) -> tuple[QColor, QColor | None]:
+    """(edge, corner ticks or None) of a wall tile in the canvas frame style."""
+    status = frame.get("status", "ok")
+    if frame.get("waits") and status == "ok":
+        return QColor(WALL_EDGE_AMBER), QColor(WALL_TICK_AMBER)
+    if status == "failed":
+        return QColor(WALL_EDGE_ALERT), QColor(WALL_TICK_ALERT)
+    return QColor(WALL_EDGE), None
+
+
 def paint_tile(painter: QPainter, rect: QRectF, frame: Mapping[str, Any], *, scale: float = 1.0, private: bool = False,
                picture: QImage | None = None, ground: bool = False, screen: str = BOARD) -> TileLayout:
-    """Paint one read-only tile into ``rect`` (see the module doc); returns its layout (what went where)."""
+    """Paint one read-only tile into ``rect`` (see the module doc); returns its layout (what went where). On the second
+    screen while Home is the canvas (holo.canvas_look): the canvas frame style (``wall_outline``)."""
     rect = QRectF(rect)
+    canvas = screen == SECOND and holo.canvas_look()
     layout = tile_layout(frame, rect.width(), rect.height(), scale=scale, private=private, picture=picture,
                          screen=screen)
     types = _type(max(0.25, float(scale or 1.0)), screen)
@@ -1466,13 +1488,18 @@ def paint_tile(painter: QPainter, rect: QRectF, frame: Mapping[str, Any], *, sca
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         path = QPainterPath()
-        radius *= types.scale
+        radius = 0.0 if canvas else radius * types.scale
         path.addRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
+        ticks = None
+        if canvas:
+            border, ticks = wall_outline(frame)
         if ground:
             painter.fillPath(path, fill)
         painter.setPen(QPen(border, 1.0))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(path)
+        if ticks is not None:
+            holo.paint_canvas_ticks(painter, rect, ticks, holo.BRACKETS_DIAGONAL, leg=holo.CANVAS_TICK * types.scale)
         painter.setClipPath(path)                   # nothing is ever drawn past the tile
         painter.translate(rect.topLeft())
         for op in layout.ops:
