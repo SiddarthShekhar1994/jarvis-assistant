@@ -32,6 +32,13 @@ raises for odd data.
             on its way or failed (``not_ready``: board.frames.Built says so): it changes only when the new one is
             ready. A builder's own final state is never held back: an emptied to-do list ("empty") is sent, changed
             when the owner has seen the list
+            Part 3B (the canvas's resting group "Now"): ``again`` - the same answer's frame built again in place is
+            sent with "changed" when what it says differs (``substance``) and the owner has seen it; ``below`` - a new
+            group goes under every group already there (never the newest: it takes no answer's best places; its
+            group message says "below")
+        remove(frame_id) -> list[dict]             part 3B: one frame taken away at once (``remove``, or its group's
+                                                   ``remove_group``), then the bar
+        quiet_changed(frame_ids)                   part 3B: those frames' changed light goes without its sound
         land() -> list[dict]                       the parked groups land (on top); every other group is then older,
                                                    so its unpinned frames fold to satellites on the page
         pin(frame_id, on) / close(frame_id, now) / bring_back(frame_id) -> list[dict]
@@ -260,6 +267,7 @@ class _Group:
     page_order: list[str] = field(default_factory=list)   # the order the page has
     older: bool = False
     parked: bool = False           # it came while the owner read the board: out of sight until it lands
+    below: bool = False            # the canvas, part 3B: made under the groups already there (the resting group)
     sent: str = ""
     turn: int = 0
 
@@ -460,7 +468,8 @@ class BoardFeed:
 
     def put(self, answer: Hashable, source: str, messages: Sequence[dict[str, Any]], *, when: str = "",
             topic: str = "", merge: str = "", approvals: str = "", rank: float = 0.0,
-            park: bool = False, key: str = "", not_ready: bool = False) -> list[dict[str, Any]]:
+            park: bool = False, key: str = "", not_ready: bool = False, again: bool = False,
+            below: bool = False) -> list[dict[str, Any]]:
         """See the module doc."""
         frame_message = next((dict(item) for item in messages if isinstance(item, dict)
                               and item.get("type") == "frame"), None)
@@ -490,7 +499,8 @@ class BoardFeed:
                 self._counts["refused"] += 1
                 return out
             if group is None:
-                group, made = self._new_group(answer, when, topic or str(frame_message.get("title", "")), park)
+                group, made = self._new_group(answer, when, topic or str(frame_message.get("title", "")), park,
+                                              below=below)
                 out += made
             self._seq += 1
             frame = _Frame(frame_id, group.id, merge, self._seq, float(rank), key=str(key or ""))
@@ -502,8 +512,13 @@ class BoardFeed:
             return out
         if merge and source not in frame.parts and frame.parts:
             self._counts["merged"] += 1
+        before = frame.shown()[0] if again and frame.parts else None
         self._seq += 1
         frame.parts[source] = _Part(source, frame_message, picture, str(approvals or ""), self._seq)
+        if before is not None and before.get("status", "ok") == "ok" and self._seen(frame)                 and substance(frame.shown()[0]) != substance(before):
+            frame.changed = True                   # part 3B: a resting frame kept current says something else
+            self._just_changed.append(frame.id)
+            self._counts["changed"] += 1
         if merge and not frame.merge:
             frame.merge = merge
         shown = self._shown(frame)
@@ -590,11 +605,16 @@ class BoardFeed:
         shown["fact"] = fact_of(shown)
         return shown
 
-    def _new_group(self, answer: Hashable, when: str, topic: str, park: bool) -> tuple[_Group, list[dict[str, Any]]]:
+    def _new_group(self, answer: Hashable, when: str, topic: str, park: bool,
+                   below: bool = False) -> tuple[_Group, list[dict[str, Any]]]:
         self._next_group += 1
         self._seq += 1
+        seq = self._seq
+        below = bool(below) and bool(self._groups)
+        if below:                                  # under every group already there: never the newest
+            seq = min(group.seq for group in self._groups.values()) - 1
         group = _Group(f"g{self._next_group}", answer, _cut(str(when or ""), protocol.TIME_CAP),
-                       _cut(str(topic or ""), protocol.TOPIC_CAP), self._seq, parked=bool(park))
+                       _cut(str(topic or ""), protocol.TOPIC_CAP), seq, parked=bool(park), below=below)
         self._groups[group.id] = group
         self._by_answer[answer] = group.id
         self._counts["groups"] += 1
@@ -611,6 +631,8 @@ class BoardFeed:
                                    "frames": list(group.page_order), "older": group.older}
         if group.parked:
             message["parked"] = True
+        if group.below:
+            message["below"] = True                # part 3B: the page puts it under the groups it has
         group.sent = _same(message)
         return [message]
 
@@ -831,6 +853,18 @@ class BoardFeed:
         if emptied:
             out += self._refresh_older()
         return out
+
+    def remove(self, frame_id: str) -> list[dict[str, Any]]:
+        """Part 3B: the app takes one frame away at once (a resting frame whose source has nothing to say any more):
+        ``remove``, or ``remove_group`` when it was its group's last frame; then the bar when its counts changed."""
+        if frame_id not in self._frames:
+            return []
+        return self._leave([frame_id]) + self._bar_if_changed()
+
+    def quiet_changed(self, frame_ids: Iterable[str]) -> None:
+        """Part 3B: these frames' changed light goes without its sound (take_changed no longer lists them)."""
+        quiet = set(frame_ids)
+        self._just_changed = [frame_id for frame_id in self._just_changed if frame_id not in quiet]
 
     def clear(self) -> None:
         """Nothing on the board any more (the app's reset: the page is told with a clear message)."""

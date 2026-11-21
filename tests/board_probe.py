@@ -118,6 +118,15 @@ Cases:
                own buttons, the frames' area never moving as a button comes or goes; the wake badge's longest words
                whole; one, two and three frames using the screen (wider, then centred, the orb's corner free); the
                task card at the mock's size with two frames up, the frames never moving as it comes and goes
+    canvas_resting  the canvas, part 3B's two resting frames ("waits for your OK" and Agents, as board.resting builds
+               them) at 1389x868, 1920x1080 and 1280x800 beside the day and the to-dos: long words, many rows and
+               markup shown whole as text, nothing of them in an attribute, nothing overlapping; the waiting frame
+               amber with no chip; each frame's one button inside it, a real press posting its corner's own word
+               (approvals, agents), hidden while that corner button is; open big keeping it the only control; the
+               same frames with little in them; the resting group "Now" put under an answer ("below": the answer's
+               frames keep their places); the corner's "Now" shown only while the app says so, a press posting "now";
+               a day with nothing booked ("empty") only as tall as its words;
+               hostile bodies put into board.apply directly refused by the page
 
 Qt runs offscreen and Chromium's proxy is a dead address (snapshots.OFFLINE_FLAGS, as the board's engine always runs in a
 test): nothing can reach the network whatever the page does. No window is shown on the real screen. Chromium's
@@ -1020,6 +1029,8 @@ def main(case: str) -> dict[str, Any]:
         report.update(canvas_ways_case(make, wait_until, pump, main_world, settle_end))
     elif case == "canvas_fixes":
         report.update(canvas_fixes_case(make, wait_until, pump, main_world, settle_end))
+    elif case == "canvas_resting":
+        report.update(canvas_resting_case(make, wait_until, pump, main_world, settle_end))
     elif case == "reduced":
         # The page's own reduced motion, Chromium told reduced motion (REDUCED_MOTION): lively plays as off.
         host, board = make()
@@ -4558,6 +4569,233 @@ def canvas_fixes_case(make: Any, wait_until: Any, pump: Any, main_world: Any, se
     board.apply(card)
     pump(0.5)
     report["card_alone"] = look()
+    counts = board.counts()
+    report["blocked"] = counts.get("blocked", {})
+    report["allowed"] = counts.get("allowed", {})
+    report["messages_refused"] = {key: value for key, value in counts.items() if key.startswith("refused:")}
+    report["console"] = {key: value for key, value in counts.items() if key.startswith("console:")}
+    settle_end(report, board)
+    return report
+
+
+# The canvas, part 3B: the resting frames as drawn - each one's classes, its chip, its rows' words, its foot (the
+# amber words, the button's words, whether it shows and whether it is inside the frame), whether it says CUT.
+CANVAS3B_RESTING = r"""JSON.stringify((function () {
+  function box(el) { var r = el.getBoundingClientRect(); return [Math.round(r.left), Math.round(r.top),
+                                                                 Math.round(r.width), Math.round(r.height)]; }
+  var found = {};
+  Array.prototype.forEach.call(document.querySelectorAll('#board .frame'), function (el) {
+    var foot = el.querySelector('.rs-foot');
+    if (!foot) { return; }
+    var id = el.querySelector('.f-title').id.slice(6), go = foot.querySelector('.rs-go'), b = box(el), g = box(go);
+    var rows = el.querySelector('.rs-rows');
+    found[id] = {
+      cls: el.className.split(' ').filter(Boolean).sort(), box: b, title: el.querySelector('.f-title').textContent,
+      chip: getComputedStyle(el.querySelector(':scope > .f-wait')).display,
+      ap: Array.prototype.map.call(el.querySelectorAll('.ap-row'), function (r) {
+        return [r.querySelector('.ap-kind').textContent, r.querySelector('.ap-title').textContent]; }),
+      ag: Array.prototype.map.call(el.querySelectorAll('.ag-row'), function (r) {
+        var wait = r.querySelector('.ag-wait');
+        return [r.querySelector('.ag-name').textContent, r.querySelector('.ag-state').textContent,
+                r.querySelector('.ag-when').textContent, wait ? wait.textContent : '',
+                r.className.split(' ').filter(Boolean).sort().join(' ')]; }),
+      more: Array.prototype.map.call(el.querySelectorAll('.rs-rows > .x-more'), function (r) { return r.textContent; }),
+      waits: foot.querySelector('.rs-waits').textContent, waits_color: getComputedStyle(foot.querySelector('.rs-waits')).color,
+      go: {text: go.textContent, hidden: go.hidden, shown: go.getClientRects().length > 0, box: g,
+           inside: go.hidden || (g[0] >= b[0] && g[1] >= b[1] && g[0] + g[2] <= b[0] + b[2] + 0.5
+                                 && g[1] + g[3] <= b[1] + b[3] + 0.5),
+           cls: go.className.split(' ').filter(Boolean).sort(), border: getComputedStyle(go).borderTopColor},
+      buttons: Array.prototype.filter.call(el.querySelectorAll('.f-body button'), function (n) {
+        return n.getClientRects().length > 0; }).map(function (n) { return n.textContent; }),
+      cut: el.classList.contains('cut'), rows_cut: !!rows && rows.scrollHeight > rows.clientHeight + 1,
+      border: getComputedStyle(el).borderTopColor, ground: getComputedStyle(el).backgroundColor
+    };
+  });
+  return found;
+})())"""
+CANVAS3B_PRESS = r"""(function (word) {
+  var hit = '';
+  Array.prototype.forEach.call(document.querySelectorAll('#board .rs-go'), function (b) {
+    if (!hit && b.getClientRects().length && b.textContent === word) { hit = b.textContent; b.click(); }
+  });
+  return hit;
+})(%s)"""
+
+
+def canvas3b_resting(hostile: bool = True) -> list[dict[str, Any]]:
+    """The two resting frames as board.resting builds them: long words, many rows, markup among them (``hostile``)."""
+    from briefing_reader.board import resting
+
+    mark = "<img src=x onerror=window.pwned=51>"
+    cards = [(mark if hostile else "REPLY · WORK", LONG_TITLE), ("TO-DO · PERSONAL", "Pay the Example Billing invoice"),
+             ("EVENT · SCHOOL · " + "K" * 30, "<script>window.pwned=52</script>" + "t" * 40),
+             ("EMAIL · WORK", "Budget comments to Dana"), ("REPLY · WORK", "Not shown: past the first four")]
+    lines = [resting.AgentLine(LONG_TITLE, "on", last="Yesterday 12:41 PM", came=3, next="Tomorrow 7:30 AM", waits=2),
+             resting.AgentLine(mark + " javascript:pwned=53", "paused", last="Mon 9:41 AM", came=0, next="", waits=0),
+             resting.AgentLine("Invoices to the sheet", "off", last="", came=-1, next="", waits=0)]
+    lines += [resting.AgentLine(f"Agent number {n} with a longer name", "on", last="8:00 AM", came=n % 3,
+                                next="5:00 PM", waits=n % 2) for n in range(4, 11)]
+    approvals = resting.from_approvals(12, cards, frame_id="r1").messages[0]
+    agents = resting.from_agents(lines, frame_id="r2").messages[0]
+    return [dict(approvals), dict(agents)]
+
+
+def canvas3b_short() -> list[dict[str, Any]]:
+    """The two resting frames with little in them: one card waits; one agent on, nothing of it waits."""
+    from briefing_reader.board import resting
+
+    approvals = resting.from_approvals(1, [("REPLY · WORK", "Re: Budget numbers")], frame_id="r1").messages[0]
+    agents = resting.from_agents([resting.AgentLine("Morning mail sweep", "on", last="8:00 AM", came=0,
+                                                    next="Tomorrow 8:00 AM")], frame_id="r2").messages[0]
+    return [dict(approvals), dict(agents)]
+
+
+def canvas_resting_case(make: Any, wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> dict[str, Any]:
+    """The canvas, part 3B: the two resting frames in the real page at 1389x868 (see the module doc's
+    "canvas_resting")."""
+    report: dict[str, Any] = {}
+    host, board = _canvas2_start(make, wait_until, pump, CANVAS3_SIZE)
+    report["ready"] = board.is_ready()
+    board.set_motion("off")
+    went: list[str] = []
+    board.goRequested.connect(went.append)
+    marks = json.dumps(list(CANVAS2_MARKS))
+
+    def look() -> dict[str, Any]:
+        return json.loads(main_world(board, CANVAS2_LOOK % marks))
+
+    def resting() -> dict[str, Any]:
+        return json.loads(main_world(board, CANVAS3B_RESTING))
+
+    def corners(buttons: list[str]) -> bool:
+        return board.apply({"type": "canvas", "clock": "Tue 17 Nov · 9:41 AM", "word": "Standby", "tone": "amber",
+                            "approvals": 12, "buttons": buttons, "briefing_new": False, "hold": "", "rec": "",
+                            "wake": "", "meter": True})
+
+    def resize(size: tuple[int, int]) -> None:
+        host.resize(*size)
+        board.setGeometry(0, 0, *size)
+        pump(0.3)
+
+    # ---- long words, many rows, markup: beside the day and the to-dos --------------------------------------------
+    built = canvas3b_resting()
+    report["built"] = built
+    report["corners_sent"] = corners(CANVAS_BUTTONS)
+    others = [frame for frame in canvas2_frames(5) if frame["kind"] in ("calendar", "todos")]
+    _canvas2_put(board, built + others)
+    pump(0.6)
+    report["long"] = resting()
+    report["look"] = look()
+    report["style"] = [one for one in json.loads(main_world(board, CANVAS2_STYLE)) if one["id"] in ("r1", "r2")]
+    for size in ((1920, 1080), (1280, 800)):
+        resize(size)
+        report[f"long_{size[0]}x{size[1]}"] = resting()
+        report[f"look_{size[0]}x{size[1]}"] = look()
+    resize(CANVAS3_SIZE)
+    # ---- each button presses its own corner word; without it on the corners it does not show ----------------------
+    report["pressed"] = [main_world(board, CANVAS3B_PRESS % json.dumps(word))
+                         for word in ("Open Approvals", "Open Agents")]
+    pump(0.2)
+    report["went"] = list(went)
+    report["corners_without"] = corners([word for word in CANVAS_BUTTONS if word not in ("approvals", "agents")])
+    pump(0.2)
+    report["without"] = resting()
+    report["pressed_without"] = [main_world(board, CANVAS3B_PRESS % json.dumps(word))
+                                 for word in ("Open Approvals", "Open Agents")]
+    corners(CANVAS_BUTTONS)
+    pump(0.2)
+    report["with_again"] = resting()
+    # ---- open big: the same frame larger, its button still its only control ---------------------------------------
+    board.apply({"type": "big", "state": "open", "id": "r2", "x": 0, "y": 0, "w": CANVAS3_SIZE[0], "h": CANVAS3_SIZE[1]})
+    pump(0.8)
+    report["big"] = json.loads(main_world(board, r"""JSON.stringify((function () {
+      var card = document.querySelector('#big .big-card');
+      if (!card) { return null; }
+      return {cls: card.className.split(' ').filter(Boolean).sort(), rows: card.querySelectorAll('.ag-row').length,
+              buttons: Array.prototype.filter.call(card.querySelectorAll('.f-body button'), function (n) {
+                return n.getClientRects().length > 0; }).map(function (n) { return n.textContent; })};
+    })())"""))
+    board.apply({"type": "big", "state": "close", "id": ""})
+    pump(0.6)
+    # ---- little in them ----------------------------------------------------------------------------------------------
+    board.apply({"type": "clear"})
+    short = canvas3b_short()
+    report["short_built"] = short
+    _canvas2_put(board, short)
+    pump(0.5)
+    report["short"] = resting()
+    report["short_look"] = look()
+    # ---- a day with nothing booked: as tall as its words, beside frames of a row's height -----------------------------
+    board.apply({"type": "clear"})
+    nothing = {"type": "frame", "id": "d1", "kind": "calendar", "title": "Today", "meta": "Tue Nov 17",
+               "body": {"rows": []}, "status": "empty", "status_text": "Nothing booked today", "status_meta": "",
+               "waits": "", "changed": False, "pinned": False, "closed": False}
+    _canvas2_put(board, [nothing] + canvas3b_short())
+    pump(0.5)
+    report["nothing_booked"] = look()
+    report["nothing_booked_words"] = main_world(board, "document.getElementById('title-d1').closest('.frame')"
+                                                       ".querySelector('.f-empty').textContent")
+    # ---- the resting group "Now" put under an answer ("below"): the answer's frames keep their places -------------
+    board.apply({"type": "clear"})
+    answer = canvas2_frames(3)
+    _canvas2_put(board, answer, group="g5")
+    pump(0.5)
+    report["below_before"] = look()
+    rest = [dict(frame, id=f"n{index + 1}") for index, frame in enumerate(canvas3b_short())]
+    board.apply({"type": "group", "id": "g6", "time": "9:41 AM", "topic": "Now", "frames": [], "older": True,
+                 "below": True})
+    for frame in rest:
+        board.apply(dict(frame, group="g6"))
+    board.apply({"type": "group", "id": "g6", "time": "9:41 AM", "topic": "Now", "frames": ["n1", "n2"],
+                 "older": True, "below": True})
+    pump(0.6)
+    report["below_after"] = look()
+    report["below_order"] = json.loads(main_world(board, "JSON.stringify(Array.prototype.map.call("
+                                                  "document.querySelectorAll('#board .frame .f-title'), "
+                                                  "function (n) { return n.id.slice(6); }))"))
+    # ---- the corner's "Now": shown only when the app says so, its press posts its own word --------------------------
+    corners(CANVAS_BUTTONS + ["now"])
+    pump(0.3)
+    report["row_now"] = json.loads(main_world(board, CANVAS3_ROW))["shown"]
+    report["now_pressed"] = main_world(board, r"""(function () {
+      var hit = '';
+      Array.prototype.forEach.call(document.querySelectorAll('#canvas .c-tr button'), function (b) {
+        if (!hit && b.getClientRects().length && b.textContent === 'Now') { hit = b.textContent; b.click(); }
+      });
+      return hit;
+    })()""")
+    pump(0.2)
+    report["went_now"] = list(went)
+    corners(CANVAS_BUTTONS)
+    pump(0.3)
+    report["row_without_now"] = json.loads(main_world(board, CANVAS3_ROW))["shown"]
+    # ---- hostile bodies straight into the page: refused, nothing changes --------------------------------------------
+    report["frames_before_hostile"] = main_world(board, "document.querySelectorAll('#board .frame').length")
+    base = {"type": "frame", "id": "r9", "title": "T", "meta": "", "status": "ok", "status_text": "",
+            "status_meta": "", "waits": "", "changed": False, "pinned": False, "closed": False}
+    row = {"name": "A", "state": "on", "last": "", "came": 0, "next": "", "waits": 0}
+    tries = {
+        "count_0": {"kind": "approvals", "body": {"count": 0, "rows": []}},
+        "count_under_rows": {"kind": "approvals", "body": {"count": 1, "rows": [{"kind": "K", "title": "T"}] * 2}},
+        "nine_cards": {"kind": "approvals", "body": {"count": 9, "rows": [{"kind": "K", "title": "T"}] * 9}},
+        "card_key": {"kind": "approvals", "body": {"count": 1, "rows": [{"kind": "K", "title": "T", "href": "x"}]}},
+        "kind_long": {"kind": "approvals", "body": {"count": 1, "rows": [{"kind": "K" * 41, "title": "T"}]}},
+        "count_text": {"kind": "approvals", "body": {"count": "3", "rows": []}},
+        "no_agents": {"kind": "agents", "body": {"rows": [], "more": 0, "waits": 0}},
+        "state": {"kind": "agents", "body": {"rows": [dict(row, state="evil")], "more": 0, "waits": 0}},
+        "came": {"kind": "agents", "body": {"rows": [dict(row, came=-2)], "more": 0, "waits": 0}},
+        "came_half": {"kind": "agents", "body": {"rows": [dict(row, came=1.5)], "more": 0, "waits": 0}},
+        "waits_sum": {"kind": "agents", "body": {"rows": [dict(row, waits=3)], "more": 0, "waits": 2}},
+        "row_key": {"kind": "agents", "body": {"rows": [dict(row, onclick="x")], "more": 0, "waits": 0}},
+        "missing": {"kind": "agents", "body": {"rows": [row], "waits": 0}},
+        "when_long": {"kind": "agents", "body": {"rows": [dict(row, last="x" * 25)], "more": 0, "waits": 0}},
+    }
+    hostile = [dict(base, **one) for one in tries.values()]
+    report["page_refused"] = dict(zip(tries, json.loads(main_world(
+        board, "JSON.stringify(%s.map(function (m) { return board.apply(JSON.stringify(m)); }))"
+        % json.dumps(hostile)))))
+    pump(0.2)
+    report["frames_after_hostile"] = main_world(board, "document.querySelectorAll('#board .frame').length")
     counts = board.counts()
     report["blocked"] = counts.get("blocked", {})
     report["allowed"] = counts.get("allowed", {})

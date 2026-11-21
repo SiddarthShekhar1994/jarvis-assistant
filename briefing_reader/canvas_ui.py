@@ -54,6 +54,7 @@ from PySide6.QtCore import QObject, QTimer
 from PySide6.QtWidgets import QApplication
 
 from . import canvas_view
+from .canvas_now import NowController
 from . import dock as dock_mod
 from . import orb as orb_mod
 from .board import protocol
@@ -104,6 +105,7 @@ class CanvasController(QObject):
         self._task: dict[str, Any] | None = None        # the task card's request: its key, start, stages (part 2)
         self._task_sent: tuple[Any, ...] | None = None  # the card as the page has it (its seconds apart)
         self._ask_hooked: Any = None                    # the Ask controller whose Stop and end the card follows
+        self.now = NowController(self)                  # part 3B: the resting group "Now"
         self._linger = QTimer(self)
         self._linger.setSingleShot(True)
         self._linger.setInterval(BADGE_LINGER_MS)
@@ -170,6 +172,7 @@ class CanvasController(QObject):
             logger.info("Canvas: page ready %d ms after its start", self.ready_ms)
         self._sent.clear()
         self._task_sent = None                   # (a card still working is drawn again)
+        self.now.start()                         # part 3B: the resting group, the first time the page is up
         self.sync()
         self.focus_ask()
 
@@ -186,6 +189,7 @@ class CanvasController(QObject):
         self._level_timer.stop()
         self._linger.stop()
         self._start_timer.stop()
+        self.now.shutdown()
         logger.info("Canvas: Home goes back to its native ring (%s)", reason)
         if _alive(self.reading):
             self.reading.set_canvas(False)
@@ -256,6 +260,8 @@ class CanvasController(QObject):
             shown.add("mute")
         if reading.board_folded() and reading.board_count() > 0:
             shown.add("board")
+        if self.now.can_show():
+            shown.add("now")                     # part 3B: the resting group back, only while it is not up
         return [word for word in protocol.CANVAS_BUTTONS if word in shown]
 
     def canvas_message(self) -> dict[str, Any]:
@@ -574,6 +580,8 @@ class CanvasController(QObject):
             window.start_drag()
         elif word == "stop":
             reading.command_bar.cancelRequested.emit()     # exactly the ask line's own Cancel
+        elif word == "now":
+            self.now.show()                                # part 3B: the resting group back
         # ("tidy": the page packed its frames again by itself - counted above, nothing more to do here)
         self.sync()
         return True
@@ -583,6 +591,7 @@ class CanvasController(QObject):
     def shutdown(self) -> None:
         for timer in (self._sync_timer, self._level_timer, self._linger, self._start_timer):
             timer.stop()
+        self.now.shutdown()
 
 
 __all__ = ["BADGE_LINGER_MS", "CanvasController", "LEVEL_MS", "PLACEHOLDER_TALK", "PLACEHOLDER_TYPE", "START_AFTER_MS",

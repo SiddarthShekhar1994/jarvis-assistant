@@ -521,7 +521,8 @@ class KindCheckerTests(unittest.TestCase):
     def test_every_kind_on_the_list_and_its_body_rebuilt(self) -> None:
         self.assertEqual(set(protocol.KINDS), {"text", "calendar", "mail_thread", "mail_list", "todos", "picture",
                                                "table", "chart", "timeline", "maths",    # part 6's (test_ask_frames)
-                                               "number"})                                # the canvas, part 2 (test_canvas)
+                                               "number",                                 # the canvas, part 2 (test_canvas)
+                                               "approvals", "agents"})                   # part 3B (test_canvas)
         for kind, body in GOOD.items():
             checked = protocol.check_message(message(kind, body))
             self.assertEqual(json.loads(checked.text)["body"], body, kind)

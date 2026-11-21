@@ -87,7 +87,8 @@ In (app -> page): check_message(message, known, groups=()) -> Checked
                  on Approvals, which of the page's own buttons show (CANVAS_BUTTONS, each once: a button is there only
                  while pressing it works), "Briefing ready", a Send's hold word ("Sent": its Undo shows), REC's words
                  (its Stop shows), "Hey Jarvis"'s badge and whether the microphone's meter shows. Every label of a
-                 button is the page's own; none comes from here
+                 button is the page's own; none comes from here. Part 3B: "now" - the resting group "Now" can come
+                 back (its corner button shows only while the group is not on the canvas)
       The canvas, part 2 (frames across the screen):
         frame    + the kind "number" {"figure", "text", "source"}: a big number the app builds from a chart's or a
                  table's change - the figure large ("+500": NUMBER_TEXT_CAP at most, a signed number's words), what it
@@ -98,6 +99,18 @@ In (app -> page): check_message(message, known, groups=()) -> Checked
                  read and the frames put up so far, each a whole number; "stop": the app's Stop works now), "done" (the
                  answer arrived: "group" is the group it heads - one the app sent - and the card shrinks to that
                  group's head tile; "" none: it goes) or "gone" (stopped, or it failed: the card goes)
+      The canvas, part 3 (the resting frames; board.resting builds them from what the app already holds):
+        frame    + the kind "approvals" {"count", "rows": [{"kind", "title"}]}: the "waits for your OK" frame - how many
+                 cards wait on Approvals (1 to APPROVALS_MAX: it is there only while something waits) and the first
+                 few, each its kind label and title as the Approvals screen words them; amber; its one button (the
+                 page's own words) asks go "approvals". Never an approve, send or undo control
+        group    + "below" (only when given): a new group goes under the groups the page has, never on top (the
+                 resting group "Now": it never takes an answer's best places)
+        frame    + the kind "agents" {"rows": [{"name", "state", "last", "came", "next", "waits"}], "more", "waits"}:
+                 the owner's standing agents (1 to ROWS_CAP rows; "more": agents past them) - each its name, its state
+                 (AGENT_STATES), when it last ran ("" never) and what came of it (its proposals; -1 not known),
+                 when it runs next ("" not planned) and how many of its proposals wait; "waits" all of them that wait
+                 (at least the rows' sum). Its one button (the page's own words) asks go "agents"
     The ids of lit, remove and picture must be frames the app sent (``known``), and a group's those of groups it sent
     (``groups``); a new frame past MAX_FRAMES is refused.
 
@@ -207,13 +220,16 @@ WAKE_CAP = 32                    # "Not listening: add-on missing" (wake_ui.SHOR
 APPROVALS_MAX = 999
 CANVAS_TONES = ("holo", "amber", "steel")
 CANVAS_BUTTONS = ("history", "board", "briefing", "approvals", "followups", "meetings", "agents", "live", "memory",
-                  "settings", "desktop", "minimize", "maximize", "close", "mute", "day")
+                  "settings", "desktop", "minimize", "maximize", "close", "mute", "day", "now")
 GO_WORDS = (*CANVAS_BUTTONS, "undo", "stop_rec", "drag", "tidy", "stop")
 # The canvas, part 2: the task card's states, its words' caps and its counts' range.
 TASK_STATES = ("working", "done", "gone")
 TASK_WORDS_CAP = 60              # "Reading your calendar"
 TASK_SECONDS_MAX = 86_400
 TASK_COUNT_MAX = 99
+# The canvas, part 3: the resting frames' states and counts.
+AGENT_STATES = ("on", "paused", "off")              # an agent on its frame: on, paused, or not on yet (a draft)
+RESTING_COUNT_MAX = 999                             # an agent's proposals, the agents past the rows
 BIG_STATES = ("open", "close")                      # big's "state"
 LANDED_STEPS = ("outline", "done")                  # landed's "step"
 BIG_STEPS = ("back", "laid", "shut")                # the big request's "step"
@@ -593,11 +609,46 @@ def _number_body(body: Any) -> dict[str, Any]:
             "text": _text(fields["text"], CHANGE_CAP), "source": _text(fields["source"], SOURCE_CAP)}
 
 
+def _approval_row(value: Any) -> dict[str, Any]:
+    keys = ("kind", "title")
+    fields = _fields(value, keys, keys)
+    return {"kind": _text(fields["kind"], META_CAP), "title": _text(fields["title"], TITLE_CAP)}
+
+
+def _approvals_body(body: Any) -> dict[str, Any]:
+    """The "waits for your OK" frame (the canvas, part 3): how many cards wait (at least one, and at least its rows)
+    and the first few, each its kind label and title. Every key present."""
+    keys = ("count", "rows")
+    fields = _fields(body, keys, keys)
+    rows = [_approval_row(item) for item in _list(fields["rows"], ROWS_CAP)]
+    return {"count": _number(fields["count"], max(1, len(rows)), APPROVALS_MAX), "rows": rows}
+
+
+def _agent_row(value: Any) -> dict[str, Any]:
+    keys = ("name", "state", "last", "came", "next", "waits")
+    fields = _fields(value, keys, keys)
+    return {"name": _text(fields["name"], TITLE_CAP), "state": _choice(fields["state"], AGENT_STATES),
+            "last": _text(fields["last"], WHEN_CAP), "came": _number(fields["came"], -1, RESTING_COUNT_MAX),
+            "next": _text(fields["next"], WHEN_CAP), "waits": _number(fields["waits"], 0, RESTING_COUNT_MAX)}
+
+
+def _agents_body(body: Any) -> dict[str, Any]:
+    """The Agents frame (the canvas, part 3): one row per standing agent (1 to ROWS_CAP), the agents past them, and how
+    many of their proposals wait in all. Every key present."""
+    keys = ("rows", "more", "waits")
+    fields = _fields(body, keys, keys)
+    rows = [_agent_row(item) for item in _some(fields["rows"], ROWS_CAP)]
+    return {"rows": rows, "more": _number(fields["more"], 0, RESTING_COUNT_MAX),
+            "waits": _number(fields["waits"], min(RESTING_COUNT_MAX, sum(row["waits"] for row in rows)),
+                             RESTING_COUNT_MAX)}
+
+
 KINDS: dict[str, Callable[[Any], dict[str, Any]]] = {
     "text": _text_body, "calendar": _calendar_body, "mail_thread": _mail_thread_body, "mail_list": _mail_list_body,
     "todos": _todos_body, "picture": _picture_body,
     "table": _table_body, "chart": _chart_body, "timeline": _timeline_body, "maths": _maths_body,
     "number": _number_body,
+    "approvals": _approvals_body, "agents": _agents_body,
 }
 
 
@@ -641,7 +692,7 @@ def _frame(value: dict[str, Any], known: Collection[str], groups: Collection[str
 def _group(value: dict[str, Any], known: Collection[str], groups: Collection[str]) -> tuple[dict[str, Any], str]:
     """One answer's group: its header's time and topic, its frames in board order, whether it is older than the
     newest (its header in INK_4) and, when given, whether it is parked (part 5b: out of sight until it lands)."""
-    fields = _fields(value, ("type", "id", "time", "topic", "frames", "older", "parked"),
+    fields = _fields(value, ("type", "id", "time", "topic", "frames", "older", "parked", "below"),
                      ("type", "id", "time", "topic", "frames"))
     group_id = _frame_id(fields["id"])
     if group_id not in groups and len(groups) >= MAX_GROUPS:
@@ -654,6 +705,8 @@ def _group(value: dict[str, Any], known: Collection[str], groups: Collection[str
              "older": _flag(fields.get("older", False))}
     if "parked" in fields:
         clean["parked"] = _flag(fields["parked"])
+    if "below" in fields:       # part 3B: a new group goes under the groups the page has (the resting group)
+        clean["below"] = _flag(fields["below"])
     return clean, group_id
 
 

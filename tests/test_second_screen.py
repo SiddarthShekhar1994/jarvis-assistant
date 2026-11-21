@@ -361,6 +361,40 @@ class PrivacyTests(unittest.TestCase):
         self.assertFalse(any(MARK_REPLY in text for text in texts))               # glance's private mode holds too
         self.assertIn(glance.HIDDEN, texts)
 
+    def test_the_resting_frames_reach_the_wall_as_counts_only(self) -> None:
+        # Part 3B: "waits for your OK" and the Agents frame - no card's title or kind, no agent's name or times, ever
+        # held or drawn here; their counts stay.
+        from briefing_reader.board import resting
+
+        mark_card, mark_kind, mark_agent, mark_when = "zq7cardtitle", "zq7cardkind", "zq7agentname", "zq7when"
+        approvals = resting.from_approvals(3, [(f"REPLY {mark_kind}", f"Re: {mark_card}")] * 2,
+                                           frame_id="r1").messages[0]
+        agents = resting.from_agents([resting.AgentLine(f"Sweep {mark_agent}", "on", last=f"8 {mark_when}", came=2,
+                                                        next=f"9 {mark_when}", waits=2),
+                                      resting.AgentLine(f"Digest {mark_agent}", "paused")], frame_id="r2").messages[0]
+        markers = (mark_card, mark_kind, mark_agent, mark_when)
+        for marker in markers:
+            self.assertIn(marker, json.dumps([approvals, agents]))                # the board's frames have them ...
+        rig = Rig(self)
+        rig.feed = demo_feed([(approvals, ""), (agents, "")])
+        rig.c.on_board(rig.feed)
+        held = json.dumps(rig.c.state.tiles)
+        self.assertEqual([tile["kind"] for tile in rig.c.state.tiles], ["approvals", "agents"])
+        for marker in markers:
+            self.assertNotIn(marker, held)                                        # ... the display never holds them
+        tiles = {tile["kind"]: tile["body"] for tile in rig.c.state.tiles}
+        self.assertEqual(tiles["approvals"], {"count": 3, "rows": []})
+        self.assertEqual((tiles["agents"]["waits"], [row["state"] for row in tiles["agents"]["rows"]]),
+                         (2, ["on", "paused"]))
+        texts = texts_of(drawn(rig.window))
+        for marker in markers:
+            self.assertFalse(any(marker in text for text in texts), marker)      # ... nor draws them
+        self.assertIn("3 wait for your OK", texts)                                # the counts stay
+        self.assertIn("2 agents · 2 proposals wait", texts)
+        for frame in (approvals, agents):                                         # (private_frame by itself too)
+            private = ss.private_frame(frame)
+            self.assertFalse(any(marker in json.dumps(private) for marker in markers))
+
     def test_a_research_answer_and_its_web_searches_are_never_drawn_or_held(self) -> None:
         # Part 7 fixes (review 7, privacy 0 and 1): a web research answer is the line Jarvis speaks; a web search's
         # frame is titled with the model's query. The answer's tile keeps its title and sources, its paragraph hidden;

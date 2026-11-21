@@ -31,7 +31,7 @@ from briefing_reader import canvas_ui, canvas_view, dock, holo, home, hud, snaps
 from briefing_reader import orb as orb_mod
 from briefing_reader.board import protocol, view
 from tests import board_fakes
-from tests.ui_fakes import AppHarness, fonts, settle, wait_for
+from tests.ui_fakes import B_CALENDAR, B_TODO, AppHarness, fonts, settle, wait_for
 
 _app: QApplication | None = None
 
@@ -375,8 +375,16 @@ class ViewTests(unittest.TestCase):
 
 class CanvasApp(unittest.TestCase):
     def make(self, *, canvas: bool = True, factory: str = "stand_in", size=(1280, 800), extra: str = "",
-             show: bool = True, **kwargs) -> AppHarness:
+             show: bool = True, resting: bool = False, **kwargs) -> AppHarness:
         self.boards: list = []
+        if not resting:
+            # Part 3B: the resting group "Now" goes up when the page is ready. These tests check the canvas with
+            # nothing on it but what they put there; RestingGroupTests (resting=True) check the group itself.
+            from briefing_reader import canvas_now
+
+            patcher = mock.patch.object(canvas_now.NowController, "start", lambda _self: None)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         if factory == "stand_in":
             board_factory = board_fakes.stand_in_factory(self.boards, canvas=canvas)
         elif factory == "fallback":
@@ -1199,6 +1207,158 @@ class NumberFrameTests(unittest.TestCase):
                                         "body": {"figure": "+500", "text": "", "source": ""}}), "+500")
 
 
+class _Label:
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def full_text(self) -> str:
+        return self._text
+
+
+class _Card:
+    """An Approvals card as the queue reads it (hud.ActionCard's kind label, title, status and actionable)."""
+
+    def __init__(self, kind: str, title: str, status: str = hud.CARD_PENDING, actionable: bool = True) -> None:
+        self.kind_label, self._title, self._status, self.actionable = _Label(kind), title, status, actionable
+
+    def title(self) -> str:
+        return self._title
+
+    def status(self) -> str:
+        return self._status
+
+
+class RestingFramesTests(unittest.TestCase):
+    """Part 3B: the "waits for your OK" frame and the Agents frame, built only from what the app holds (board.resting)
+    and checked by the board's protocol; the page mirrors their caps and states."""
+
+    def setUp(self) -> None:
+        from briefing_reader import approvals_view
+        from briefing_reader.board import resting
+
+        self.resting, self.waiting = resting, approvals_view.WAITING
+
+    def test_nothing_waiting_no_frame_and_one_waiting_its_card(self) -> None:
+        resting = self.resting
+        self.assertIsNone(resting.from_approvals(0, [], frame_id="r1"))
+        self.assertEqual(resting.approval_rows([_Card("REPLY · WORK", "Re: Budget", hud.CARD_SENT)], self.waiting), [])
+        rows = resting.approval_rows([_Card("REPLY · WORK", "Re: Budget numbers"),
+                                      _Card("TO-DO", "Not a proposal", actionable=False),
+                                      _Card("EMAIL · WORK", "Sent already", hud.CARD_SENT),
+                                      _Card("EVENT · SCHOOL", "Needs its sign-in", hud.CARD_SIGNIN)], self.waiting)
+        self.assertEqual(rows, [("REPLY · WORK", "Re: Budget numbers"), ("EVENT · SCHOOL", "Needs its sign-in")])
+        message = resting.from_approvals(2, rows, frame_id="r1").messages[0]
+        checked = json.loads(protocol.check_message(message).text)
+        self.assertEqual((checked["kind"], checked["title"], checked["meta"]),
+                         ("approvals", "Waits for your OK", "2 waiting"))
+        self.assertEqual(checked["body"], {"count": 2, "rows": [{"kind": "REPLY · WORK", "title": "Re: Budget numbers"},
+                                                                {"kind": "EVENT · SCHOOL", "title": "Needs its sign-in"}]})
+        self.assertEqual(checked["waits"], "")            # amber by its kind: no chip, its one button opens Approvals
+
+    def test_many_waiting_the_first_few_and_the_count(self) -> None:
+        resting = self.resting
+        cards = [("REPLY · WORK", f"Card {n} " + "t" * 70) for n in range(30)]
+        message = resting.from_approvals(31, cards, frame_id="r1").messages[0]
+        body = json.loads(protocol.check_message(message).text)["body"]
+        self.assertEqual(body["count"], 31)                # the desktop HUD's waiting card counts too
+        self.assertEqual(len(body["rows"]), resting.APPROVALS_ROWS)
+        self.assertTrue(all(len(row["title"]) <= protocol.TITLE_CAP and row["title"].endswith("…")
+                            for row in body["rows"]))
+        self.assertEqual(json.loads(protocol.check_message(
+            resting.from_approvals(5000, cards, frame_id="r1").messages[0]).text)["body"]["count"], 999)
+        fewer = resting.from_approvals(1, cards[:3], frame_id="r1").messages[0]     # a count behind its rows: the rows
+        self.assertEqual(fewer["body"]["count"], 3)
+
+    def test_words_from_outside_are_cleaned_and_kept_as_text(self) -> None:
+        resting = self.resting
+        message = resting.from_approvals(1, [("<b>KIND</b>‮", "Pay <script>x</script>")], frame_id="r1").messages[0]
+        row = json.loads(protocol.check_message(message).text)["body"]["rows"][0]
+        self.assertEqual(row, {"kind": "<b>KIND</b><U+202E>", "title": "Pay <script>x</script>"})
+        agents = resting.from_agents([resting.AgentLine("<img src=x>​", "on")], frame_id="r2").messages[0]
+        self.assertEqual(json.loads(protocol.check_message(agents).text)["body"]["rows"][0]["name"],
+                         "<img src=x><U+200B>")
+
+    def test_no_agents_no_frame(self) -> None:
+        self.assertIsNone(self.resting.from_agents([], frame_id="r2"))
+        with self.assertRaises(ValueError):
+            self.resting.from_agents([], frame_id="not an id")
+
+    def test_agents_their_states_runs_and_what_waits(self) -> None:
+        resting = self.resting
+        lines = [resting.AgentLine("Morning mail sweep", "on", last="8:00 AM", came=2, next="Tomorrow 8:00 AM", waits=1),
+                 resting.AgentLine("Invoices to the sheet", "paused", last="Mon 9:41 AM", came=0),
+                 resting.AgentLine("Club digest", "off", came=4),               # never ran: nothing came of it
+                 resting.AgentLine("Odd one", "evil", last="9:00 AM", came=True, waits=-3)]
+        message = resting.from_agents(lines, frame_id="r2").messages[0]
+        checked = json.loads(protocol.check_message(message).text)
+        self.assertEqual((checked["kind"], checked["title"], checked["meta"]), ("agents", "Agents", "1 on"))
+        self.assertEqual(checked["body"], {"more": 0, "waits": 1, "rows": [
+            {"name": "Morning mail sweep", "state": "on", "last": "8:00 AM", "came": 2, "next": "Tomorrow 8:00 AM",
+             "waits": 1},
+            {"name": "Invoices to the sheet", "state": "paused", "last": "Mon 9:41 AM", "came": 0, "next": "",
+             "waits": 0},
+            {"name": "Club digest", "state": "off", "last": "", "came": -1, "next": "", "waits": 0},
+            {"name": "Odd one", "state": "off", "last": "9:00 AM", "came": -1, "next": "", "waits": 0}]})
+        self.assertEqual(resting.from_agents([lines[2]], frame_id="r2").messages[0]["meta"], "None on")
+
+    def test_many_agents_eight_rows_and_the_rest_counted(self) -> None:
+        resting = self.resting
+        lines = [resting.AgentLine(f"Agent {n} " + "n" * 70, "on", last="8:00 AM", came=1, waits=1) for n in range(12)]
+        body = json.loads(protocol.check_message(resting.from_agents(lines, frame_id="r2").messages[0]).text)["body"]
+        self.assertEqual((len(body["rows"]), body["more"], body["waits"]), (protocol.ROWS_CAP, 4, 12))
+        self.assertTrue(all(len(row["name"]) <= protocol.TITLE_CAP for row in body["rows"]))
+
+    def test_the_two_bodies_are_checked(self) -> None:
+        def frame_of(kind: str, body: dict) -> dict:
+            return {"type": "frame", "id": "r9", "kind": kind, "title": "T", "body": body}
+
+        row = {"name": "A", "state": "on", "last": "", "came": 0, "next": "", "waits": 0}
+        protocol.check_message(frame_of("approvals", {"count": 1, "rows": []}))
+        protocol.check_message(frame_of("agents", {"rows": [row], "more": 0, "waits": 0}))
+        for kind, body in (
+                ("approvals", {"count": 0, "rows": []}),
+                ("approvals", {"count": 1, "rows": [{"kind": "K", "title": "T"}] * 2}),
+                ("approvals", {"count": 9, "rows": [{"kind": "K", "title": "T"}] * 9}),
+                ("approvals", {"count": 1, "rows": [{"kind": "K" * 41, "title": "T"}]}),
+                ("approvals", {"count": 1, "rows": [{"kind": "K", "title": "T", "href": "x"}]}),
+                ("approvals", {"count": True, "rows": []}),
+                ("approvals", {"rows": []}),
+                ("agents", {"rows": [], "more": 0, "waits": 0}),
+                ("agents", {"rows": [dict(row, state="evil")], "more": 0, "waits": 0}),
+                ("agents", {"rows": [dict(row, came=-2)], "more": 0, "waits": 0}),
+                ("agents", {"rows": [dict(row, came=1.0)], "more": 0, "waits": 0}),
+                ("agents", {"rows": [dict(row, waits=3)], "more": 0, "waits": 2}),
+                ("agents", {"rows": [dict(row, last="x" * 25)], "more": 0, "waits": 0}),
+                ("agents", {"rows": [dict(row, onclick="x")], "more": 0, "waits": 0}),
+                ("agents", {"rows": [row], "waits": 0})):
+            with self.assertRaises(protocol.Refused, msg=repr(body)):
+                protocol.check_message(frame_of(kind, body))
+
+    def test_the_page_mirrors_the_caps_and_states_and_asks_only_the_corner_words(self) -> None:
+        import re
+        from pathlib import Path
+
+        js = (Path(view.__file__).parent / "assets" / "board.js").read_text(encoding="utf-8")
+        found = re.search(r"var RESTING = \{approvals: (\d+), count: (\d+)\};", js)
+        self.assertEqual((int(found.group(1)), int(found.group(2))),
+                         (protocol.APPROVALS_MAX, protocol.RESTING_COUNT_MAX))
+        states = re.search(r"var AGENT_STATES = \[([^\]]*)\]", js).group(1)
+        self.assertEqual(tuple(re.findall(r"'(\w+)'", states)), protocol.AGENT_STATES)
+        self.assertIn("restingFoot('', 'approvals', WORDS.openApprovals, true)", js)
+        self.assertIn("'agents', WORDS.openAgents, false)", js)
+        self.assertTrue({"approvals", "agents"} <= set(protocol.GO_WORDS))
+        self.assertEqual(protocol.WHEN_CAP, 24)            # (the page checks an agent's times against TIMELINE.when)
+        self.assertIn("var TIMELINE = {nodes: 8, when: 24,", js)
+
+    def test_a_folded_resting_frame_says_its_count(self) -> None:
+        from briefing_reader.board import facts
+
+        resting = self.resting
+        self.assertEqual(facts.fact_of(resting.from_approvals(3, [], frame_id="r1").messages[0]), "3 waiting")
+        self.assertEqual(facts.fact_of(resting.from_agents([resting.AgentLine("A", "on")], frame_id="r2")
+                                       .messages[0]), "1 on")
+
+
 class FakeAsk:
     """A running request as the task card reads it (no thread, no model)."""
 
@@ -1479,4 +1639,200 @@ class RealScreenFixesTests(CanvasApp):
         reading.set_wake("Hey Jarvis is off", wake_ui.LOOK_OFF, wake_ui.SHORT_OFF)
         self.canvas().sync()
         self.assertEqual(self.last("canvas")["wake"], "")                 # off: no badge
+
+
+CARDS = (B_CALENDAR, B_TODO)               # the harness's briefing: a calendar card and a to-do card wait
+
+
+class RestingGroupTests(CanvasApp):
+    """Part 3B: the resting group "Now" - up when the page is ready, built only from what the app holds (the harness's
+    agenda, its briefing's two waiting cards, a to-do card), kept current with the changed light and no sound, Clear
+    view clearing it, the corner's "Now" word only while it is off the canvas, never in an answer's best places."""
+
+    def group(self) -> tuple[str, dict, list]:
+        desk = self.c.look.desk
+        now = self.canvas().now
+        group = desk.feed.group_for(now._answer)                          # noqa: SLF001
+        frames = [desk.feed.frame_message(frame_id) for frame_id in desk.feed.group_order(group)] if group else []
+        return group, dict(zip([frame["kind"] for frame in frames], frames)), frames
+
+    def test_up_when_the_page_is_ready_with_what_the_app_holds(self) -> None:
+        self.make(resting=True, lines=CARDS)
+        board = self.started()
+        group, kinds, _frames = self.group()
+        self.assertTrue(group)
+        self.assertEqual(list(kinds), ["approvals", "calendar", "todos"])  # what waits first; no agents: none made
+        heads = [message for message in board.of_type("group") if message["id"] == group]
+        self.assertEqual(heads[-1]["topic"], "Now")
+        self.assertEqual(kinds["approvals"]["body"]["count"], self.reading.needs_ok_count())
+        self.assertEqual(kinds["calendar"]["title"], "Today")
+        self.assertNotIn("now", self.canvas().buttons())                  # it is up: no "Now" button ...
+        self.assertFalse(self.canvas().on_go("now"))                      # ... and the word does nothing
+        self.assertEqual(self.canvas().form(), "corner")                  # frames on the canvas: the orb's corner
+
+    def test_a_count_that_changes_gets_the_changed_light_and_no_sound(self) -> None:
+        self.make(resting=True, lines=CARDS)
+        board = self.started()
+        desk, now = self.c.look.desk, self.canvas().now
+        _group, kinds, _frames = self.group()
+        count = kinds["approvals"]["body"]["count"]
+        with mock.patch.object(desk, "sound") as sound:
+            self.reading.set_desktop_waiting(3)                           # three more wait (on the desktop HUD)
+            now.refresh()
+            settle(2)
+        _group, kinds, _frames = self.group()
+        self.assertEqual(kinds["approvals"]["body"]["count"], count + 3)
+        sent = [message for message in board.of_type("frame") if message["id"] == kinds["approvals"]["id"]]
+        self.assertTrue(sent[-1]["changed"])                              # the changed light ...
+        self.assertNotIn("on_frame_changed", [call.args[0] for call in sound.call_args_list])   # ... never its sound
+        before = len(board.of_type("frame"))
+        now.refresh()                                                     # the same again: nothing is sent
+        self.assertEqual(len(board.of_type("frame")), before)
+
+    def test_a_source_with_nothing_left_takes_its_frame_away(self) -> None:
+        self.make(resting=True, lines=CARDS)
+        board = self.started()
+        _group, kinds, _frames = self.group()
+        day = kinds["calendar"]["id"]
+        self.c._agenda_events = None                                       # not read or not signed in: no day frame
+        self.canvas().now.refresh()
+        settle(2)
+        self.assertIn({"type": "remove", "id": day}, board.of_type("remove"))
+        self.assertNotIn("calendar", self.group()[1])
+
+    def test_a_day_with_nothing_booked_says_so_in_a_short_frame(self) -> None:
+        from datetime import timedelta
+
+        from briefing_reader import canvas_now
+        from briefing_reader.gcal import CalendarEvent
+
+        self.make(resting=True, lines=CARDS)
+        self.started()
+        now = self.canvas().now
+        self.c._agenda_events = []                                         # read, signed in, nothing today
+        now.refresh()
+        day = self.group()[1]["calendar"]
+        self.assertEqual((day["status"], day["status_text"]), ("empty", canvas_now.NOTHING_BOOKED))
+        self.assertEqual(day["body"]["rows"], [])                         # no bare day bar, no "0 events"
+        self.assertNotIn("event", day["meta"].lower())
+        self.assertTrue(day["meta"])                                      # (its date)
+        protocol.check_message(dict(day), {day["id"]}, {day["group"]})
+        at = self.c.look.desk._now().replace(hour=15, minute=0, second=0, microsecond=0)   # noqa: SLF001
+        self.c._agenda_events = [CalendarEvent("Study group", start=at, end=at + timedelta(hours=1))]
+        now.refresh()
+        day = self.group()[1]["calendar"]
+        self.assertEqual(day["status"], "ok")                             # a day with an event: the frame as before
+        self.assertIn("Study group", [row["title"] for row in day["body"]["rows"]])
+        self.assertIn("1 event", day["meta"])
+
+    def test_a_frame_the_owner_closed_stays_away_until_now_comes_back(self) -> None:
+        self.make(resting=True, lines=CARDS)
+        self.started()
+        desk, now = self.c.look.desk, self.canvas().now
+        todos = self.group()[1]["todos"]["id"]
+        desk._on_close(todos)                                              # noqa: SLF001 - the frame's Close
+        now.refresh()
+        self.assertNotIn("todos", now._ids)                                # noqa: SLF001
+        self.assertTrue(desk.feed.flags(todos).get("closed"))             # (it leaves after its Bring back)
+
+    def test_clear_view_clears_it_and_the_now_button_brings_it_back(self) -> None:
+        self.make(resting=True, lines=CARDS)
+        self.started()
+        desk, canvas = self.c.look.desk, self.canvas()
+        first, _kinds, _frames = self.group()
+        desk._on_clear()                                                   # noqa: SLF001 - Clear view
+        settle(2)
+        self.assertNotIn("now", canvas.buttons())                         # Bring back is offered: that brings it back
+        desk._send(desk.feed.due(desk._clock() + desk.CLEAR_S + 1))        # noqa: SLF001 - the Clear's end
+        settle(2)
+        canvas.now._has_at = None                                          # noqa: SLF001 - (asked again at once)
+        self.assertEqual(desk.feed.frames(), 0)
+        self.assertIn("now", canvas.buttons())                            # off the canvas: its button shows ...
+        canvas.sync()
+        self.assertIn("now", self.last("canvas")["buttons"])
+        self.assertTrue(canvas.on_go("now"))                              # ... and brings it back
+        settle(2)
+        again, kinds, _frames = self.group()
+        self.assertNotEqual(again, first)
+        self.assertEqual(list(kinds), ["approvals", "calendar", "todos"])
+        self.assertNotIn("now", canvas.buttons())
+        self.assertEqual(canvas.counts["go:now"], 1)
+
+    def test_it_never_takes_an_answers_best_places(self) -> None:
+        self.make(resting=True, lines=CARDS)
+        board = self.started()
+        desk, canvas = self.c.look.desk, self.canvas()
+        now_group, _kinds, _frames = self.group()
+        self.put(2)                                                       # an answer: the newest, on top
+        answer_group = desk.feed.groups()[0]
+        self.assertNotEqual(answer_group, now_group)
+        self.assertEqual(desk.feed.groups(), [answer_group, now_group])
+        self.assertTrue(desk.feed.group_header(now_group)[2])             # "Now" older: its frames fold
+        # Now closed away and brought back while the answer is up: under it, the answer still the newest.
+        for frame_id in desk.feed.group_order(now_group):
+            desk._send(desk.feed.close(frame_id, desk._clock()))          # noqa: SLF001
+        desk._send(desk.feed.due(desk._clock() + desk.CLOSE_S + 1))       # noqa: SLF001
+        canvas.now._has_at = None                                          # noqa: SLF001
+        self.assertTrue(canvas.on_go("now"))
+        settle(2)
+        back, _kinds, _frames = self.group()
+        self.assertEqual(desk.feed.groups(), [answer_group, back])
+        head = [message for message in board.of_type("group") if message["id"] == back][0]
+        self.assertTrue(head["below"] and head["older"])                  # the page puts it under the answer
+        self.assertFalse(desk.feed.group_header(answer_group)[2])         # the answer stays the newest
+
+    def test_the_agents_frame_when_the_owner_has_an_agent_and_its_button_works(self) -> None:
+        from tests.standing_fakes import STANDING_ON, agent_data, consent, save_jobs
+
+        def prepare(config) -> None:
+            save_jobs(config, agents=[agent_data()])
+            consent(config)
+
+        self.make(resting=True, lines=CARDS, extra=STANDING_ON, prepare=prepare)
+        self.started()
+        self.c.standing.busy_probe = lambda: False
+        self.c.standing.start_runner = lambda: True
+        self.c.standing.reload(announce=False)
+        self.canvas().now._agents_changed()                                # noqa: SLF001 - (read at once)
+        self.canvas().now.refresh()
+        settle(2)
+        kinds = self.group()[1]
+        self.assertEqual(list(kinds), ["approvals", "calendar", "todos", "agents"])
+        self.assertEqual(kinds["agents"]["body"]["rows"][0]["name"], "Morning mail")
+        self.assertIn("agents", self.canvas().buttons())                  # its button's word works
+        self.assertTrue(self.canvas().on_go("agents"))
+        self.assertTrue(self.canvas().on_go("approvals"))
+
+    def test_the_new_word_goes_through_the_bridges_check(self) -> None:
+        self.assertIn("now", protocol.CANVAS_BUTTONS)
+        self.assertEqual(protocol.check_request("go", json.dumps({"to": "now"}), ()).to, "now")
+        message = {"type": "group", "id": "g1", "time": "9:41 AM", "topic": "Now", "frames": [], "older": True,
+                   "below": True}
+        self.assertTrue(json.loads(protocol.check_message(message, (), ()).text)["below"])
+        with self.assertRaises(protocol.Refused):
+            protocol.check_message(dict(message, below="yes"), (), ())
+
+
+class RestingTilesTests(unittest.TestCase):
+    """Part 3B: the read-only fallback tiles show the two resting frames as plain tiles (the second screen: counts
+    only)."""
+
+    def test_plain_tiles_with_their_words_and_counts(self) -> None:
+        from briefing_reader.board import glance, resting
+
+        approvals = resting.from_approvals(5, [("REPLY · WORK", "Re: Budget numbers"),
+                                               ("TO-DO", "Pay the invoice")], frame_id="r1").messages[0]
+        agents = resting.from_agents([resting.AgentLine("Morning mail sweep", "on", waits=1),
+                                      resting.AgentLine("Club digest", "off")], frame_id="r2").messages[0]
+        words = glance.tile_layout(approvals, 400).words()
+        for text in ("Waits for your OK", "5 wait for your OK", "Re: Budget numbers", "REPLY · WORK", "+3 MORE"):
+            self.assertIn(text, words)
+        words = glance.tile_layout(agents, 400).words()
+        for text in ("Agents", "2 agents · 1 proposal waits", "Morning mail sweep", "On · 1 proposal waits",
+                     "Club digest", "Not on yet"):
+            self.assertIn(text, words)
+        private = glance.tile_layout(agents, 400, private=True).words()
+        self.assertIn("2 agents · 1 proposal waits", private)
+        self.assertNotIn("Morning mail sweep", private)                     # a name never on the second screen
+        self.assertNotIn("Re: Budget numbers", glance.tile_layout(approvals, 400, private=True).words())
 

@@ -82,6 +82,7 @@ from typing import Any
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from . import holo, standing_setup
+from .board.resting import AgentLine
 from .actions import CALENDAR, REPLY, SOURCE_STANDING, STANDING_MODES, STATUS_DENIED, TODO, ProposedAction
 from .google_auth import PROBLEM_DENIED, logged_alias
 from .standing import cards as standing_cards
@@ -749,6 +750,55 @@ class StandingController(QObject):
                           empty_text="" if not (self.agents or self.rules) else EMPTY_TEXT,
                           can_clear=bool(reports or activity),
                           can_pause_all=bool(self.agents or self.rules or paused_all))
+
+    def agent_lines(self) -> list[AgentLine]:
+        """The canvas's Agents frame (PLAN-canvas part 3): each standing agent as the Agents screen shows it - its
+        name, on / paused / not on yet (Pause all: paused), when it last ran and what came of that run (the cards it
+        proposed; -1 when no run file says, or it did not finish), when it runs next (live only) and how many of its
+        cards still wait on Approvals. Only what the app already holds: no run, no model, no network. [] while the
+        owner has no agent (rules alone are not agents)."""
+        if not self.agents:
+            return []
+        now = self._now()
+        hour24 = self._hour24()
+        state = read_runner_state(self.files)
+        jobs_state = state.get("jobs") if isinstance(state.get("jobs"), Mapping) else {}
+        paused_all = self.app_state.paused_all
+        run_jobs = {run.id: run.job_id for run in self.runs}
+        latest: dict[str, RunView] = {}
+        for run in self.runs:                      # oldest first: the newest of each job stays
+            latest[run.job_id] = run
+        waiting = self._waiting_ids()
+        waits: dict[str, int] = {}
+        for card_id, run_id in self._card_runs.items():
+            if card_id in waiting:
+                job_id = run_jobs.get(run_id, "")
+                waits[job_id] = waits.get(job_id, 0) + 1
+        lines: list[AgentLine] = []
+        for agent in self.agents:
+            entry = jobs_state.get(agent.id) if isinstance(jobs_state.get(agent.id), Mapping) else {}
+            live = agent.status == STATUS_LIVE
+            if agent.status not in (STATUS_LIVE, STATUS_PAUSED):
+                line_state = "off"
+            else:
+                line_state = "paused" if paused_all or agent.status == STATUS_PAUSED else "on"
+            upcoming = None
+            if live and not paused_all:
+                if agent.trigger.kind == TRIGGER_TIME:
+                    upcoming = schedule.next_time(agent.trigger, now)
+                elif agent.trigger.kind == TRIGGER_EVERY:
+                    upcoming = schedule.next_every(agent.trigger, parse_stamp(entry.get("last_run")), now)
+            run = latest.get(agent.id)
+            last = parse_stamp(entry.get("last_run")) if entry else None
+            if last is None and run is not None:
+                last = run.ended or run.started
+            came = -1
+            if run is not None and run.status not in ("failed", "signed_out", "held"):
+                came = len(run.cards)
+            lines.append(AgentLine(agent.name, line_state, last=when_text(last, now, hour24) if last else "",
+                                   came=came, next=when_text(upcoming, now, hour24) if upcoming else "",
+                                   waits=waits.get(agent.id, 0)))
+        return lines
 
     def _status(self, now: datetime, state: Mapping[str, Any], today: Any, paused_all: bool,
                 consented: bool) -> tuple[str, list[tuple[str, str, str]]]:

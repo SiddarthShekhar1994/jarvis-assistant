@@ -82,7 +82,8 @@ from briefing_reader.board import view
 PROBE = Path(__file__).with_name("board_probe.py")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CASES = ("lockdown", "control", "media", "keys", "fallback", "shell", "kinds", "desk", "desk_x15", "ways", "lit", "big",
-         "big_x15", "expiry", "reduced", "typed", "canvas", "canvas_layout", "canvas_ways", "canvas_fixes")
+         "big_x15", "expiry", "reduced", "typed", "canvas", "canvas_layout", "canvas_ways", "canvas_fixes",
+         "canvas_resting")
 # Round 5: what each probe's engine is told of reduced motion (tests/board_probe.py NO_REDUCED_MOTION, REDUCED_MOTION).
 NO_REDUCED_MOTION = "--force-prefers-no-reduced-motion"
 REDUCED_MOTION = "--force-prefers-reduced-motion"
@@ -2111,3 +2112,107 @@ class CanvasFixesTests(BoardProbeCase):
         self.assertEqual(list(report["allowed"]), ["jarvis-board"])
         self.assertEqual(report["messages_refused"], {})
         self.assertEqual(report["console"], {})
+
+
+class CanvasRestingTests(BoardProbeCase):
+    """The canvas, part 3B: the two resting frames in the real engine at the owner's 1389x868 (also 1920x1080 and
+    1280x800; tests/board_probe.py "canvas_resting"): long words, many rows and markup shown whole as text with
+    nothing of them in an attribute; "waits for your OK" amber with no chip; each frame's one button inside it, posting
+    its corner's own word, and hidden while that corner button is; the page's own refusals of hostile bodies."""
+
+    def resting(self) -> dict:
+        report = self.report("canvas_resting")
+        self.assertTrue(report["ready"])
+        self.assertTrue(report["corners_sent"])
+        return report
+
+    def test_long_words_and_many_rows_show_whole_as_text_and_nothing_overlaps(self) -> None:
+        report = self.resting()
+        approvals, agents = report["built"]
+        for name in ("long", "long_1920x1080", "long_1280x800"):
+            shown = report[name]
+            self.assertEqual(shown["r1"]["ap"], [[row["kind"], row["title"]] for row in approvals["body"]["rows"]], name)
+            self.assertEqual([row[0] for row in shown["r2"]["ag"]], [row["name"] for row in agents["body"]["rows"]],
+                             name)
+            self.assertEqual(shown["r1"]["more"], ["+8 more wait"], name)       # 12 wait, 4 shown
+            self.assertEqual(shown["r2"]["more"], ["+2 more agents"], name)     # 10 agents, 8 rows
+            self.assertEqual(shown["r2"]["waits"], "5 proposals wait", name)
+        for name in ("look", "look_1920x1080", "look_1280x800"):
+            look = report[name]
+            self.assertEqual((look["overlaps"], look["outside"], look["on_orb"], look["lost"]), ([], [], [], []), name)
+            self.assertEqual(look["attr_hits"], [], name)                     # nothing of the data in an attribute
+            self.assertEqual((look["pwned"], look["foreign"]), ("undefined", 0), name)
+        for one in report["style"]:
+            self.assertEqual(one["wide"], [], one["id"])                       # no word cut sideways
+            self.assertFalse(one["body"]["sideways"], one["id"])
+            self.assertTrue(one["title"]["inside"], one["id"])
+            self.assertEqual(one["body"]["more"], "block" if one["body"]["cut"] else "none", one["id"])  # says CUT
+
+    def test_the_rows_say_the_agents_screens_words(self) -> None:
+        rows = self.resting()["long"]["r2"]["ag"]
+        self.assertEqual(rows[0][1:], ["On", "Ran Yesterday 12:41 PM · 3 proposed · Next Tomorrow 7:30 AM",
+                                       "2 proposals wait", "ag-row on"])
+        self.assertEqual(rows[1][1:], ["Paused", "Ran Mon 9:41 AM · Nothing new", "", "ag-row paused"])
+        self.assertEqual(rows[2][1:], ["Not on yet", "Not run yet", "", "ag-row off"])
+
+    def test_waits_for_your_ok_is_amber_without_a_chip(self) -> None:
+        report = self.resting()
+        for name in ("long", "short"):
+            waits = report[name]["r1"]
+            self.assertIn("waits", waits["cls"], name)
+            self.assertEqual(waits["border"], "rgb(245, 177, 74)", name)
+            self.assertEqual(waits["chip"], "none", name)                      # its button is its own
+            self.assertEqual(waits["go"]["border"], "rgb(245, 177, 74)", name)
+            self.assertNotIn("waits", report[name]["r2"]["cls"], name)         # the Agents frame: cyan, an amber line
+        self.assertEqual(report["short"]["r2"]["waits"], "")                   # nothing waits: no amber line
+
+    def test_one_button_each_inside_its_frame_posting_its_corner_word(self) -> None:
+        report = self.resting()
+        for name in ("long", "long_1920x1080", "long_1280x800", "short", "with_again"):
+            for frame_id, label in (("r1", "Open Approvals"), ("r2", "Open Agents")):
+                frame = report[name][frame_id]
+                self.assertEqual(frame["buttons"], [label], name)              # the only control in its body
+                self.assertTrue(frame["go"]["shown"] and frame["go"]["inside"], name)
+        self.assertEqual(report["pressed"], ["Open Approvals", "Open Agents"])
+        self.assertEqual(report["went"], ["approvals", "agents"])             # the corners' own words, nothing else
+        for frame_id in ("r1", "r2"):
+            self.assertTrue(report["corners_without"])
+            self.assertTrue(report["without"][frame_id]["go"]["hidden"])       # its corner button gone: so is it
+            self.assertEqual(report["without"][frame_id]["buttons"], [])
+        self.assertEqual(report["pressed_without"], ["", ""])
+        self.assertEqual(report["big"], {"cls": ["big-card", "frame"], "rows": 8, "buttons": ["Open Agents"]})
+
+    def test_the_page_refuses_hostile_bodies_and_nothing_asks_the_network(self) -> None:
+        report = self.resting()
+        self.assertEqual(set(report["page_refused"].values()), {False})
+        self.assertEqual(report["frames_after_hostile"], report["frames_before_hostile"])
+        self.assertEqual(report["blocked"], {})
+        self.assertEqual(list(report["allowed"]), ["jarvis-board"])
+        self.assertEqual(report["messages_refused"], {})
+        self.assertEqual(report["console"], {"console:warning": len(report["page_refused"])})   # one per refusal
+
+    def test_the_resting_group_put_under_an_answer_moves_none_of_its_frames(self) -> None:
+        report = self.resting()
+        before = {item["id"]: item["box"] for item in report["below_before"]["items"]}
+        after = {item["id"]: item["box"] for item in report["below_after"]["items"]}
+        self.assertEqual(sorted(before), ["f1", "f2", "f3"])
+        self.assertEqual({key: after[key] for key in before}, before)        # the answer's places: unchanged
+        self.assertEqual(report["below_order"], ["f1", "f2", "f3", "n1", "n2"])   # "Now" under the answer
+        look = report["below_after"]
+        self.assertEqual((look["overlaps"], look["outside"], look["on_orb"], look["lost"]), ([], [], [], []))
+
+    def test_the_corner_now_shows_only_when_the_app_says_and_posts_its_word(self) -> None:
+        report = self.resting()
+        self.assertIn("Now", report["row_now"])
+        self.assertEqual(report["now_pressed"], "Now")
+        self.assertEqual(report["went_now"][-1], "now")
+        self.assertNotIn("Now", report["row_without_now"])
+
+    def test_a_day_with_nothing_booked_is_only_as_tall_as_its_words(self) -> None:
+        report = self.resting()
+        look = report["nothing_booked"]
+        boxes = {item["id"]: item["box"] for item in look["items"]}
+        self.assertEqual(report["nothing_booked_words"], "Nothing booked today")
+        self.assertLess(boxes["d1"][3], 140)                                # short, never a row of empty box ...
+        self.assertLess(boxes["d1"][3], boxes["r2"][3])                     # ... shorter than a frame with rows
+        self.assertEqual((look["overlaps"], look["outside"], look["on_orb"], look["lost"]), ([], [], [], []))

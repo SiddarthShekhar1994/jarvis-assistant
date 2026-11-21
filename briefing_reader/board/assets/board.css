@@ -1270,6 +1270,58 @@ button.c-clock:focus-visible, :root.keys button.c-clock:focus { outline: 2px sol
 :root.canvas .nb-src { margin-top: auto; padding-top: 8px; }
 @container frame (max-width: 330px) { :root.canvas .nb-fig { font-size: 52px; line-height: 52px; } }
 
+/* ---- the canvas, part 3: the resting frames. "Waits for your OK" is amber all through (what waits is amber
+   everywhere): each card that waits its kind label in mono over its title, then its one button, Open Approvals.
+   Agents (the mock's frame): each agent's name and state, when it ran and what came of it, when it runs next, an
+   amber line while its proposals wait; at the foot what waits in all and Open Agents. The rows give way to the foot:
+   the button is never cut (the frame says CUT, and Enter shows all of it). ---- */
+.rs-rows { min-width: 0; }
+.rs-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 10px; }
+.rs-waits { min-width: 0; color: var(--amber); overflow-wrap: anywhere; }
+.rs-go[hidden] { display: none; }
+.ap-row {
+  display: grid; grid-template-columns: 10px minmax(0, 1fr); column-gap: 9px; row-gap: 2px; align-items: baseline;
+  padding: 6px 0; border-top: 1px solid var(--line-faint);
+}
+.rs-rows > .ap-row:first-child, .rs-rows > .ag-row:first-child { border-top: 0; padding-top: 0; }
+.ap-dia { width: 9px; height: 9px; color: var(--amber); align-self: center; }
+.ap-kind { min-width: 0; color: var(--amber); overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.ap-title { grid-column: 2; min-width: 0; color: var(--amber-tx); font: 400 13px/18px var(--font-body); overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.ag-row { padding: 7px 0; border-top: 1px solid var(--line-faint); }
+.ag-top { display: flex; align-items: baseline; gap: 12px; }
+.ag-name { flex: 1 1 auto; min-width: 0; color: var(--ink-1); font: 500 13px/18px var(--font-body); overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.ag-state { flex: none; color: var(--holo-hi); }
+.ag-row.paused .ag-state, .ag-row.off .ag-state { color: var(--ink-4); }
+.ag-row.off .ag-name { color: var(--ink-3); }
+.ag-when { margin: 3px 0 0; color: var(--ink-4); overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.ag-wait { display: flex; align-items: center; gap: 7px; margin: 4px 0 0; color: var(--amber); }
+.ag-dia { flex: none; width: 9px; height: 9px; color: var(--amber); }
+:root.canvas #board .frame > .f-body:has(> .rs-foot), :root.canvas .big-card > .f-body:has(> .rs-foot) {
+  display: flex; flex-direction: column;
+}
+:root.canvas .f-body > .rs-rows { flex: 0 1 auto; min-height: 0; overflow: hidden; }
+:root.canvas #board .frame.cut > .f-body > .rs-rows {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 26px), transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 26px), transparent 100%);
+}
+:root.canvas #board .frame.cut > .f-body:has(> .rs-foot) { -webkit-mask-image: none; mask-image: none; }
+:root.canvas #board .frame.cut:has(.rs-foot) > .f-cut { bottom: 50px; }    /* over the rows' faded end */
+:root.canvas .big-card .f-body > .rs-rows { overflow: visible; }
+:root.canvas .rs-foot { flex: none; margin-top: auto; padding-top: 10px; }
+:root.canvas .rs-waits { font: 500 10px/13px var(--font-mono); letter-spacing: .16em; text-transform: uppercase; }
+:root.canvas .rs-go.need {
+  border-color: var(--amber); color: var(--amber-hi); background: rgba(var(--ga), .05); box-shadow: 0 0 8px rgba(var(--ga), .35);
+}
+:root.canvas .rs-go.need:hover { border-color: #FFE2B0; color: #FFE9C7; background: rgba(var(--ga), .14); }
+:root .frame.needs.waits > .f-wait, :root .frame.needs.waits .f-wait { display: none; }
+:root.canvas .ap-kind, :root.canvas .ag-when, :root.canvas .ag-wait, :root.canvas .ag-state { font: 500 10px/13px var(--font-mono); letter-spacing: .16em; text-transform: uppercase; }
+:root.canvas .ap-title { color: #FFE2B0; font: 400 13px/19px var(--font-body); }
+:root.canvas .ag-name { color: #fff; font: 400 13px/19px var(--font-body); }
+:root.canvas .ag-row.off .ag-name { color: var(--ink-3); }
+:root.canvas .ag-state { color: var(--c-hi); }
+:root.canvas .ag-row.paused .ag-state, :root.canvas .ag-row.off .ag-state { color: var(--ink-4); }
+:root.canvas .big-card .ap-title, :root.canvas .big-card .ag-name { font-size: 15px; line-height: 23px; }
+
 /* ---- an arriving frame boots (board.js boot: --d is its place in the stagger): the outline draws itself from the
    top left corner, the ground and the glow come in behind it, a scan line wipes down, the content rises behind the
    line, the corner ticks stand for a moment, bars grow a little past their end. Calm: 1.6 times slower, no overshoot,

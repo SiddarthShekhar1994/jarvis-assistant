@@ -69,6 +69,11 @@
   var MATHS = {steps: 8, name: 24, depth: 6, nodes: 64, text: 24};
   var NUMBER_LIMIT = 1e15;                     // a number on the board is under this (and finite)
   var NODE_STATES = ['done', 'next', 'due', ''];
+  // The canvas, part 3: the resting frames' counts and an agent's states (board.protocol's APPROVALS_MAX,
+  // RESTING_COUNT_MAX and AGENT_STATES); the words of each state are the page's own.
+  var RESTING = {approvals: 999, count: 999};
+  var AGENT_STATES = ['on', 'paused', 'off'];
+  var AGENT_WORDS = {on: 'On', paused: 'Paused', off: 'Not on yet'};
   var MATHS_OPS = Object.create(null);         // an op and how many arguments it takes (never a prototype's key)
   [['+', 2, 8], ['-', 1, 2], ['*', 2, 8], ['/', 2, 2], ['=', 2, 4], ['frac', 2, 2], ['pow', 2, 2], ['root', 1, 2],
    ['()', 1, 1], ['or', 2, 4]].forEach(function (op) { MATHS_OPS[op[0]] = [op[1], op[2]]; });
@@ -90,16 +95,19 @@
     pinsFull: '6 pins at most · unpin one first', strip: 'Frames on the board', waitsOnYou: ', waits on you',
     newAnswer: 'New answer, ', showMore: ', show it in full', clearAll: 'Clear: take away every unpinned frame',
     bringBackCleared: 'Bring back the cleared frames', showNew: 'New answer above: show it',
-    openBigMeta: 'Open big', backToBoard: 'Esc back to the board', today: 'Today'
+    openBigMeta: 'Open big', backToBoard: 'Esc back to the board', today: 'Today',
+    openApprovals: 'Open Approvals', openAgents: 'Open Agents', moreWait: ' more wait', moreAgents: ' more agents',
+    ran: 'Ran ', nextRun: 'Next ', notRun: 'Not run yet', nothingNew: 'Nothing new', proposed: ' proposed',
+    proposalWaits: '1 proposal waits', proposalsWait: ' proposals wait', dotSep: ' · '
   };
   var STATE_WORDS = {done: 'Done', next: 'Next', due: 'Due'};   // a timeline node's state, its non-colour cue
   // Each kind's glyph (holo's icons, drawn by tokens.css) and its name (the index strip's accessible names).
   var GLYPHS = {text: 'read-all', calendar: 'calendar', mail_thread: 'mail', mail_list: 'inbox', todos: 'todos',
                 picture: 'image', table: 'table', chart: 'chart', timeline: 'timeline', maths: 'maths',
-                number: 'chart'};
+                number: 'chart', approvals: 'diamond', agents: 'board'};
   var KIND_WORDS = {text: 'Answer', calendar: 'Calendar', mail_thread: 'Mail', mail_list: 'Mail list',
                     todos: 'To-dos', picture: 'Picture', table: 'Table', chart: 'Chart', timeline: 'Timeline',
-                    maths: 'Maths', number: 'Number'};
+                    maths: 'Maths', number: 'Number', approvals: 'Waits for your OK', agents: 'Agents'};
 
   // The renderer table: one function per kind (DESIGN-SPEC 3.3). Each checks the frame's body as board.protocol does
   // (its keys, types, caps and lists) and throws on anything it can't show - the message is then dropped and nothing
@@ -479,6 +487,101 @@
     }
   };
 
+  // The canvas, part 3: the resting frames (board.resting builds them from what the app already holds). Their one
+  // button each opens a screen through the corners' own request word (go approvals, go agents), and shows only while
+  // that corner button can work (the canvas message's buttons): never an approve, send, run or undo control.
+  KINDS.approvals = function (body, frame) {
+    var data = frame.body;
+    if (!exactKeys(data, ['count', 'rows']) || !list(data.rows, CAPS.rows)
+        || !data.rows.every(function (row) {
+          return exactKeys(row, ['kind', 'title']) && words(row.kind, CAPS.meta) && words(row.title, CAPS.title);
+        })
+        || !whole(data.count, Math.max(1, data.rows.length), RESTING.approvals)) {
+      throw new TypeError('approvals');
+    }
+    var rows = make('div', 'rs-rows');
+    data.rows.forEach(function (row) {
+      var line = make('div', 'ap-row');
+      line.append(glyph('diamond', 'ap-dia', true), make('span', 'ap-kind t-badge', row.kind),
+                  make('span', 'ap-title', row.title));
+      rows.appendChild(line);
+    });
+    if (data.count > data.rows.length) {
+      rows.appendChild(more('+' + (data.count - data.rows.length) + WORDS.moreWait));
+    }
+    body.append(rows, restingFoot('', 'approvals', WORDS.openApprovals, true));
+  };
+
+  KINDS.agents = function (body, frame) {
+    var data = frame.body;
+    if (!exactKeys(data, ['rows', 'more', 'waits']) || !some(data.rows, CAPS.rows)
+        || !whole(data.more, 0, RESTING.count) || !whole(data.waits, 0, RESTING.count)
+        || !data.rows.every(function (row) {
+          return exactKeys(row, ['name', 'state', 'last', 'came', 'next', 'waits']) && words(row.name, CAPS.title)
+            && AGENT_STATES.indexOf(row.state) >= 0 && words(row.last, TIMELINE.when) && whole(row.came, -1, RESTING.count)
+            && words(row.next, TIMELINE.when) && whole(row.waits, 0, RESTING.count);
+        })
+        || data.rows.reduce(function (sum, row) { return sum + row.waits; }, 0) > data.waits) {
+      throw new TypeError('agents');
+    }
+    var rows = make('div', 'rs-rows');
+    data.rows.forEach(function (row) {
+      var line = make('div', 'ag-row ' + row.state);
+      var top = make('div', 'ag-top');
+      top.append(make('span', 'ag-name', row.name), make('span', 'ag-state t-badge', AGENT_WORDS[row.state]));
+      line.appendChild(top);
+      var when = [];
+      if (row.last) {
+        when.push(WORDS.ran + row.last + (row.came < 0 ? '' : WORDS.dotSep
+          + (row.came === 0 ? WORDS.nothingNew : row.came + WORDS.proposed)));
+      }
+      if (row.next) {
+        when.push(WORDS.nextRun + row.next);
+      }
+      if (!row.last && !row.next) {
+        when.push(WORDS.notRun);
+      }
+      line.appendChild(make('p', 'ag-when t-badge', when.join(WORDS.dotSep)));
+      if (row.waits > 0) {
+        var wait = make('p', 'ag-wait t-badge');
+        wait.append(glyph('diamond', 'ag-dia', true), make('span', '', proposals(row.waits)));
+        line.appendChild(wait);
+      }
+      rows.appendChild(line);
+    });
+    if (data.more > 0) {
+      rows.appendChild(more('+' + data.more + WORDS.moreAgents));
+    }
+    body.append(rows, restingFoot(data.waits > 0 ? proposals(data.waits) : '', 'agents', WORDS.openAgents, false));
+  };
+
+  function proposals(count) {                  // "1 proposal waits", "3 proposals wait"
+    return count === 1 ? WORDS.proposalWaits : count + WORDS.proposalsWait;
+  }
+
+  function restingFoot(waits, word, label, amber) {   // a resting frame's footer: what waits (amber), its one button
+    var foot = make('div', 'rs-foot');
+    foot.appendChild(make('span', 'rs-waits t-badge', waits));
+    var go = button('f-act rs-go' + (amber ? ' need' : ''), '', function () { post('go', {to: word}); });
+    go.textContent = label;
+    goWords.set(go, word);
+    go.hidden = !goWorks(word);
+    foot.appendChild(go);
+    return foot;
+  }
+
+  function goWorks(word) {                     // the corner button of that word shows (pressing it works) on the canvas
+    return !!canvas && !!canvas.shown && canvas.shown.indexOf(word) >= 0;
+  }
+
+  function syncGoButtons() {                   // the resting frames' buttons follow the corners' (a canvas message)
+    Array.prototype.forEach.call(document.querySelectorAll('.rs-go'), function (node) {
+      var word = goWords.get(node);
+      node.hidden = !word || !goWorks(word);
+    });
+  }
+
+  var goWords = new WeakMap();                 // a resting frame's button -> its request word (a fixed one)
   var root = null;
   var bridge = null;
   var readySent = false;
@@ -1151,7 +1254,8 @@
     rec.body = body;
     placePicture(rec);                         // an update in place keeps the frame's picture
     rec.waitWords.textContent = message.waits;
-    rec.el.classList.toggle('waits', message.waits !== '');
+    rec.el.classList.toggle('waits', message.waits !== '' || message.kind === 'approvals');   // what waits: amber
+    rec.el.classList.toggle('needs', message.kind === 'approvals');      // (its chip is its own button: no chip)
     rec.el.classList.toggle('failed', message.status === 'failed');
     rec.el.classList.toggle('empty', message.status === 'empty');
     rec.closedWhat.replaceChildren(document.createTextNode(WORDS.closed), make('b', '', message.title));
@@ -2341,7 +2445,8 @@
   };
 
   HANDLERS.group = function (message) {
-    if (!onlyKeys(message, ['type', 'id', 'time', 'topic', 'frames', 'older', 'parked']) || typeof message.id !== 'string'
+    if (!onlyKeys(message, ['type', 'id', 'time', 'topic', 'frames', 'older', 'parked', 'below'])
+        || (message.below !== undefined && typeof message.below !== 'boolean') || typeof message.id !== 'string'
         || !ID.test(message.id) || !words(message.time, CAPS.time) || !words(message.topic, CAPS.topic)
         || !list(message.frames, MAX_FRAMES) || typeof message.older !== 'boolean'
         || (message.parked !== undefined && typeof message.parked !== 'boolean')
@@ -2356,8 +2461,18 @@
       }
       group = makeGroup(message.id);
       groups.set(message.id, group);
-      root.insertBefore(group.el, clearedRow ? clearedRow.el.nextSibling : root.firstChild);   // the newest on top
+      var under = null;                        // part 3B: "below" - under the groups there are (the resting group)
+      if (message.below === true) {
+        Array.prototype.forEach.call(root.children, function (node) {
+          if (sections.has(node)) {
+            under = node;
+          }
+        });
+      }
+      root.insertBefore(group.el, under ? under.nextSibling
+        : (clearedRow ? clearedRow.el.nextSibling : root.firstChild));   // the newest on top
     }
+    var lands = !!(fresh && !under) || !fresh;  // (a group put under the others takes no one's place)
     var wasParked = group.parked;
     var parkedNow = message.parked === true;
     group.time.textContent = message.time;
@@ -2367,7 +2482,7 @@
     group.parked = parkedNow;
     group.order = message.frames.slice();
     arrange(group);
-    if ((fresh && !parkedNow) || (wasParked && !parkedNow)) {
+    if ((fresh && !parkedNow && lands) || (wasParked && !parkedNow)) {
       // A new answer on top (or one that was parked lands): older ones fold again, expanded or not (3.5).
       frames.forEach(function (rec) {
         var owner = groupOf(rec);
@@ -2386,9 +2501,11 @@
         }
       });
     }
-    if ((fresh && !parkedNow) || (wasParked && !parkedNow)) {
+    if ((fresh && !parkedNow && lands) || (wasParked && !parkedNow)) {
       root.scrollTo({top: 0, behavior: K === 0 ? 'auto' : 'smooth'});   // nobody reads: the new answer on top
       schedulePack('full');                    // the canvas: the newest answer's frames take the best places
+    } else if (fresh) {
+      schedulePack('');                        // under the others: placed where there is room, nothing else moves
     }
     syncHead(group);
     refresh();
@@ -2857,7 +2974,7 @@
       parts.push(chip);
     }
     parts.push(make('div', 'f-back t-badge', WORDS.backToBoard));
-    card.className = 'frame big-card' + (data.waits ? ' waits' : '') + (data.status === 'failed' ? ' failed' : '')
+    card.className = 'frame big-card' + (data.waits || data.kind === 'approvals' ? ' waits' : '') + (data.status === 'failed' ? ' failed' : '')
       + (data.status === 'empty' ? ' empty' : '');
     var inside = card.contains(document.activeElement) && document.activeElement !== card;
     card.replaceChildren.apply(card, parts);
@@ -3047,7 +3164,7 @@
   var ORB_FORMS = ['rings', 'badge', 'corner'];
   var CANVAS_TONES = ['holo', 'amber', 'steel'];
   var CANVAS_BUTTONS = ['history', 'board', 'briefing', 'approvals', 'followups', 'meetings', 'agents', 'live',
-                        'memory', 'settings', 'desktop', 'minimize', 'maximize', 'close', 'mute', 'day'];
+                        'memory', 'settings', 'desktop', 'minimize', 'maximize', 'close', 'mute', 'day', 'now'];
   var CANVAS_CAPS = {clock: 40, word: 40, hold: 24, rec: 40, wake: 32, approvals: 999, level: 100};
   var CANVAS_WORDS = {
     name: 'JARVIS', wordmark: 'J.A.R.V.I.S.', history: 'History', clear: 'Clear view', board: 'Show board',
@@ -3057,14 +3174,15 @@
     orb: 'Jarvis', minimize: 'Minimise the window', maximize: 'Maximise or restore the window', close: 'Close',
     clearAll: 'Clear view: take away every unpinned frame', boardBack: 'Show the board again',
     desktopSwitch: 'Jarvis on your desktop', day: 'Today and deadlines', briefingNew: 'Briefing, ready',
-    approvalsWait: ' waiting', more: 'More', moreAll: 'More buttons'
+    approvalsWait: ' waiting', more: 'More', moreAll: 'More buttons', now: 'Now',
+    nowBack: 'Now: bring back the day, to-dos, what waits and your agents'
   };
   // Part 3: the top right row is ONE line at every width (it never wraps into the frames, and the frames' area never
   // moves when a button comes or goes). While it would not fit, these fold under More, the least used first; Approvals
   // and the window's own buttons never fold. TOP_ROW is the row's order (More's list keeps it).
   var TOP_FOLD = ['memory', 'live', 'meetings', 'followups', 'agents', 'history', 'settings', 'briefing', 'desktop',
-                  'pinned', 'tidy', 'board', 'clear'];
-  var TOP_ROW = ['history', 'tidy', 'clear', 'pinned', 'board', 'briefing', 'approvals', 'followups', 'meetings',
+                  'pinned', 'tidy', 'now', 'board', 'clear'];
+  var TOP_ROW = ['history', 'now', 'tidy', 'clear', 'pinned', 'board', 'briefing', 'approvals', 'followups', 'meetings',
                  'agents', 'live', 'memory', 'settings', 'desktop'];
   var BOARD_TOP = 64;                          // the frames' area starts here, whatever the row holds
   var TL_ROOM = 402, TL_ROOM_NARROW = 312;     // the top left corner's room (from the window's left edge) ...
@@ -3998,6 +4116,8 @@
     var tr = make('div', 'c-corner c-tr');
     var buttons = {};
     buttons.history = canvasButton('history', CANVAS_WORDS.history, '');
+    buttons.now = canvasButton('now', CANVAS_WORDS.now, '');      // part 3B: the resting group back (go now)
+    buttons.now.setAttribute('aria-label', CANVAS_WORDS.nowBack);
     var clear = canvasButton('clear', CANVAS_WORDS.clear, '', function () { post('clear', {}); });
     clear.setAttribute('aria-label', CANVAS_WORDS.clearAll);
     buttons.board = canvasButton('board', CANVAS_WORDS.board, '');
@@ -4009,7 +4129,7 @@
       setFilter(filter === 'pinned' ? 'all' : 'pinned');
     });
     var rule1 = make('div', 'c-rule'), rule2 = make('div', 'c-rule');
-    tr.append(buttons.history, tidyButton, clear, pinnedButton, buttons.board, rule1);
+    tr.append(buttons.history, buttons.now, tidyButton, clear, pinnedButton, buttons.board, rule1);
     SCREEN_BUTTONS.forEach(function (word) {
       buttons[word] = canvasButton(word, CANVAS_WORDS[word], '');
       tr.appendChild(buttons[word]);
@@ -4225,6 +4345,7 @@
     c.wake.hidden = !message.wake;
     c.hasMeter = message.meter;
     c.meter.hidden = !message.meter;
+    syncGoButtons();                           // part 3: the resting frames' buttons show only while theirs work
     syncLevelWords();
     syncCanvasBoard();
     return true;
@@ -4498,7 +4619,10 @@
     if (headed) {
       need += HEAD_H + HEAD_GAP;
     }
-    return clamp(Math.ceil((need + m.gap - 1) / (m.subH + m.gap)), m.sub, most);
+    // Part 3B: a frame that says there is nothing ("Nothing booked today", an emptied list) is only as tall as its
+    // words, never a row of empty box.
+    var least = rec.data && rec.data.status === 'empty' ? 1 : m.sub;
+    return clamp(Math.ceil((need + m.gap - 1) / (m.subH + m.gap)), least, most);
   }
 
   function foldOrder(list, reset) {            // who folds first: the oldest answer's frames, each from its end; one
@@ -4956,8 +5080,9 @@
     lay.heads = found.heads;
     lay.m = m;
     list.forEach(function (rec) {              // a body its place cuts says so (Enter opens it big: all of it)
-      var body = rec.body;
-      rec.el.classList.toggle('cut', !rec.sat && !rec.closed && !!body && body.scrollHeight > body.clientHeight + 1);
+      var body = rec.body, rows = body ? body.querySelector(':scope > .rs-rows') : null;   // (a resting frame's rows
+      rec.el.classList.toggle('cut', !rec.sat && !rec.closed && !!body                    // give way to its button)
+        && (body.scrollHeight > body.clientHeight + 1 || (!!rows && rows.scrollHeight > rows.clientHeight + 1)));
     });
     bootPending(list);
     letOut(list);

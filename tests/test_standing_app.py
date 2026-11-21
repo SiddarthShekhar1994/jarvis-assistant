@@ -369,6 +369,85 @@ class ScreenTests(_Base):
         self.assertEqual(self.said(), [])                               # shown, never said
 
 
+class CanvasFrameDataTests(_Base):
+    """The canvas, part 3B: the Agents frame's and the "waits for your OK" frame's data, from what the app already
+    holds (StandingController.agent_lines; the Approvals screen's cards through board.resting) - no run, no model,
+    no network."""
+
+    def lines(self) -> list:
+        return self.s.agent_lines()
+
+    def test_an_agents_run_its_proposal_waiting_and_its_next_run(self) -> None:
+        from briefing_reader import approvals_view
+        from briefing_reader.board import protocol, resting
+        from briefing_reader.standing import schedule
+
+        reply = reply_record()
+        run_id = write_run(self.app.config, job_kind="agent", job_id=AGENT_ID, job_name=AGENT_NAME,
+                           run_cards=[reply], receipts=[card_receipt(reply)])
+        self.s.reload(announce=False)
+        line, = self.lines()
+        now = self.s._now()
+        run = next(run for run in self.s.runs if run.id == run_id)
+        upcoming = schedule.next_time(self.s.agents[0].trigger, now)
+        self.assertEqual(line, resting.AgentLine(AGENT_NAME, "on", last=standing_ui.when_text(run.ended, now),
+                                                 came=1, next=standing_ui.when_text(upcoming, now), waits=1))
+        built = resting.from_agents(self.lines(), frame_id="r2").messages[0]
+        protocol.check_message(built)                                       # the board takes it
+        self.assertEqual((built["meta"], built["body"]["waits"]), ("1 on", 1))
+        # The same card on the Approvals screen: the waiting frame says its kind and title as the queue does.
+        reading = self.c.window.reading
+        rows = resting.approval_rows(reading.approvals.cards(), approvals_view.WAITING)
+        card = reading.approvals.card(reply["id"])
+        self.assertIn((card.kind_label.full_text(), card.title()), rows)
+        waits = resting.from_approvals(reading.needs_ok_count(), rows, frame_id="r1").messages[0]
+        protocol.check_message(waits)
+        self.assertEqual(waits["body"]["count"], reading.needs_ok_count())
+        self.assertGreaterEqual(reading.needs_ok_count(), 1)
+
+    def test_nothing_waiting_once_its_cards_are_withdrawn_and_paused_has_no_next_run(self) -> None:
+        from briefing_reader import approvals_view
+        from briefing_reader.board import resting
+
+        reply = reply_record()
+        write_run(self.app.config, job_kind="agent", job_id=AGENT_ID, job_name=AGENT_NAME, run_cards=[reply])
+        self.s.reload(announce=False)
+        reading = self.c.window.reading
+        card = reading.approvals.card(reply["id"])
+        words = (card.kind_label.full_text(), card.title())
+        self.assertIn(words, resting.approval_rows(reading.approvals.cards(), approvals_view.WAITING))
+        self.s.toggle_pause(AGENT_ID)                                      # Pause withdraws its waiting cards
+        line, = self.lines()
+        self.assertEqual((line.state, line.next, line.waits), ("paused", "", 0))
+        self.assertNotIn(words, resting.approval_rows(reading.approvals.cards(), approvals_view.WAITING))
+        self.assertIsNone(resting.from_approvals(0, [], frame_id="r1"))    # nothing waits at all: no frame
+
+    def test_pause_all_a_draft_and_a_run_that_did_not_finish(self) -> None:
+        save_jobs(self.app.config, agents=[agent_data(), agent_data(id="a-0000000000b2", name="Draft one",
+                                                                    status="draft")], rules=[rule_data()])
+        write_run(self.app.config, job_kind="agent", job_id=AGENT_ID, job_name=AGENT_NAME, status="failed")
+        AppState(files_of(self.app.config)).set_paused_all(True)
+        self.s.reload(announce=False)
+        live, draft = self.lines()
+        self.assertEqual((live.state, live.next, live.came), ("paused", "", -1))
+        self.assertNotEqual(live.last, "")                                 # it ran: when stays, nothing counted
+        self.assertEqual((draft.name, draft.state, draft.last, draft.next, draft.came), ("Draft one", "off", "", "", -1))
+
+    def test_no_agents_no_frame_rules_alone_are_not_agents(self) -> None:
+        from briefing_reader.board import resting
+
+        save_jobs(self.app.config, agents=[], rules=[rule_data()])
+        self.s.reload(announce=False)
+        self.assertEqual(self.lines(), [])
+        self.assertIsNone(resting.from_agents(self.lines(), frame_id="r2"))
+
+    def test_it_reads_no_mail_and_starts_nothing(self) -> None:
+        with mock.patch.object(self.s, "reader_for", side_effect=AssertionError("no reader")), \
+                mock.patch.object(self.s, "thread_runner", side_effect=AssertionError("no worker")):
+            self.lines()
+        self.assertEqual(self.started, [])
+
+
 class DraftSignInTests(_Base):
     """The owner's state after a restart: consent given, personal signed in, work not, and a draft agent from
     standing.json that reads both (no setup card: its row is where Turn on waits)."""

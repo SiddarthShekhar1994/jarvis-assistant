@@ -233,6 +233,7 @@ class DeskController(QObject):
         self._landed: set[str] = set()      # frames whose landing was heard of (a page that restarts: no sound again)
         self._done: dict[str, set[str]] = {}    # group id -> its frames whose draw-in is done
         self._settled: set[str] = set()     # groups that settled (SETTLED once each)
+        self.quiet_groups: set[str] = set()     # part 3B: groups whose frames land without a sound (the canvas's "Now")
         self._made = False                  # the factory ran (once: one board for the window's life)
         self._answers: dict[int, _Answer] = {}
         self._current = 0
@@ -383,7 +384,7 @@ class DeskController(QObject):
         (a page that came back after its renderer stopped) never sounds again."""
         self._count_request(f"landed:{step}")
         group = self.feed.group_of(frame_id)
-        if not group:
+        if not group or group in self.quiet_groups:
             return
         if step == "outline":
             if frame_id in self._landed:

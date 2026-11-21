@@ -346,7 +346,9 @@ def private_frame(frame: Mapping[str, Any]) -> dict[str, Any]:
     """``frame`` as the second screen may hold it: a mail thread's text and a text frame's paragraph (a web research
     answer: the line Jarvis speaks) replaced by a mark (the glance painter's private mode then says "Text hidden on
     this screen"; a text frame's title and source rows stay), a mail list's rows with no field but the ones it shows
-    (sender, time, subject, meta, unread); everything else as it is."""
+    (sender, time, subject, meta, unread); part 3B's resting frames as counts only - "waits for your OK" with no card
+    (no kind, no title: its count stays), Agents with no name and no times (each agent's state and its count of
+    proposals that wait stay, and the counts in all); everything else as it is."""
     copy = dict(frame)
     body = frame.get("body")
     if not isinstance(body, Mapping):
@@ -357,6 +359,14 @@ def private_frame(frame: Mapping[str, Any]) -> dict[str, Any]:
         if body.get("text"):
             body["text"] = _HIDDEN_TEXT
         copy["body"] = body
+    elif kind == "approvals":
+        copy["body"] = {"count": body.get("count"), "rows": []}
+    elif kind == "agents":
+        rows = body.get("rows")
+        copy["body"] = {"rows": [{"name": "", "state": row.get("state"), "last": "", "came": -1, "next": "",
+                                  "waits": row.get("waits")} for row in rows if isinstance(row, Mapping)]
+                        if isinstance(rows, list) else [],
+                        "more": body.get("more"), "waits": body.get("waits")}
     elif kind == "mail_list":
         rows = body.get("rows")
         keep = ("sender", "time", "subject", "meta", "unread")

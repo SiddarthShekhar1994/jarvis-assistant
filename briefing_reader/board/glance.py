@@ -64,7 +64,13 @@ CHANGED = "Changed"
 MORE = "+{count} MORE"
 ELLIPSIS = "…"
 GLYPHS = {"text": "read_all", "calendar": "calendar", "mail_thread": "mail", "mail_list": "inbox", "todos": "todos",
-          "picture": "image", "table": "table", "chart": "chart", "timeline": "timeline", "maths": "maths"}
+          "picture": "image", "table": "table", "chart": "chart", "timeline": "timeline", "maths": "maths",
+          "approvals": "approvals", "agents": "agents"}            # part 3B: the resting frames
+# Part 3B: the resting frames' words on a plain tile (the page's own words, as board.js says them).
+AGENT_WORDS = {"on": "On", "paused": "Paused", "off": "Not on yet"}
+WAIT_WORDS = ("{count} waits for your OK", "{count} wait for your OK")
+PROPOSAL_WORDS = ("{count} proposal waits", "{count} proposals wait")
+AGENTS_WORDS = ("{count} agent", "{count} agents")
 TODAY_WORD = "Today"                                           # part 6: a timeline's TODAY marker (badge role: caps)
 STATE_WORDS = {"done": "Done", "next": "Next", "due": "Due"}   # ... and its nodes' states
 ROW_NODES = 4                    # a timeline lines its nodes up in a row with at most this many ...
@@ -426,7 +432,7 @@ class _Builder:
         kinds = {"text": self.text, "calendar": self.calendar, "mail_thread": self.mail_thread,
                  "mail_list": self.mail_list, "todos": self.todos, "picture": self.picture_body,
                  "table": self.table, "chart": self.chart, "timeline": self.timeline, "maths": self.maths,
-                 "number": self.number}
+                 "number": self.number, "approvals": self.approvals, "agents": self.agents}
         blocks = kinds.get(kind, self.text)(data)
         if self.waits:
             blocks.append(self.waits_chip())
@@ -488,6 +494,40 @@ class _Builder:
         """A big number (the canvas, part 2) as a read-only tile: its figure, then what it was and is, as words."""
         said = " ".join(part for part in (str(data.get("figure", "")), str(data.get("text", ""))) if part)
         return self.text({"text": said})
+
+    def count_line(self, words: str, color: Any) -> _Block:
+        """Part 3B: a resting frame's count, one line of its own (never hidden: it says no name and no title)."""
+        op = _text_op(words, "row", self.left, 0.0, self.inner, color, self.t)
+        return _Block(op.rect.bottom() + self.px(6), [op])
+
+    def approvals(self, data: Mapping[str, Any]) -> list[_Block]:
+        """Part 3B: "waits for your OK" as a plain tile - how many wait, then (not on the second screen) the first
+        cards: each title with its kind label as its meta."""
+        count = _whole(data.get("count"))
+        blocks = [self.count_line(_plural(WAIT_WORDS, count), holo.AMBER_TX)]
+        rows = [] if self.private else [row for row in (data.get("rows") or []) if isinstance(row, Mapping)]
+        listed = [{"lead": "", "text": str(row.get("title", "")), "meta": str(row.get("kind", ""))} for row in rows]
+        if count > len(listed) and listed:
+            listed.append({"lead": "", "text": "", "meta": MORE.format(count=count - len(listed))})
+        return blocks + self.text({"rows": listed})
+
+    def agents(self, data: Mapping[str, Any]) -> list[_Block]:
+        """Part 3B: the Agents frame as a plain tile - how many agents, how many of their proposals wait, then (not on
+        the second screen: no name there) each agent's name with its state."""
+        rows = [row for row in (data.get("rows") or []) if isinstance(row, Mapping)]
+        total = len(rows) + _whole(data.get("more"))
+        waits = _whole(data.get("waits"))
+        words = _plural(AGENTS_WORDS, total) + (" · " + _plural(PROPOSAL_WORDS, waits) if waits else "")
+        blocks = [self.count_line(words, holo.AMBER_TX if waits else holo.INK_2)]
+        if self.private:
+            return blocks
+        listed = [{"lead": "", "text": str(row.get("name", "")),
+                   "meta": AGENT_WORDS.get(str(row.get("state", "")), "")
+                   + (" · " + _plural(PROPOSAL_WORDS, _whole(row.get("waits"))) if _whole(row.get("waits")) else "")}
+                  for row in rows]
+        if _whole(data.get("more")):
+            listed.append({"lead": "", "text": "", "meta": MORE.format(count=_whole(data.get("more")))})
+        return blocks + self.text({"rows": listed})
 
     def text(self, data: Mapping[str, Any]) -> list[_Block]:
         blocks: list[_Block] = []
@@ -1224,6 +1264,14 @@ class _Builder:
         ops.append(_text_op(KEY_CAP, "kbd", cx + self.px(5), mid - t.line("kbd") / 2, key_w - self.px(10) + 0.5,
                             holo.AMBER_TX2, t))
         return _Block(top + chip_h, ops)
+
+
+def _whole(value: Any) -> int:
+    return value if type(value) is int and value > 0 else 0
+
+
+def _plural(words: tuple[str, str], count: int) -> str:
+    return (words[0] if count == 1 else words[1]).format(count=count)
 
 
 def headline_figures(columns: Sequence[Any], row: Sequence[Any]) -> tuple[str, str] | None:
