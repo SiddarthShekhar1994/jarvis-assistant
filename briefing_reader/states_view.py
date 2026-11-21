@@ -36,7 +36,8 @@ Words (plain text; British spelling; never a vendor name in what Jarvis says)
     Jarvis's own small window (TOAST_SIZE, ``raised``, radius 14, bottom-right of the work area, on top) -
     never a Windows notification, so nothing lands in Windows' notification history. It never takes the
     focus (``Qt.Tool``, ``WindowDoesNotAcceptFocus``, ``WA_ShowWithoutActivating``; its button takes no
-    focus either). The mini orb, one line and ONE action. ``post(line, action, key, look=)`` shows it;
+    focus either). The mini orb (while Home is the canvas: the canvas orb's flat JARVIS badge, TOAST_BADGE px
+    square), one line and ONE action. ``post(line, action, key, look=)`` shows it;
     it hides after ``TOAST_MS`` (hovering pauses the time; leaving gives the rest back); ``actionClicked(key)``
     after a click on its action (the toast hides first). The toast never acts by itself: the app only
     brings an existing screen forward.
@@ -65,6 +66,8 @@ TOAST_MS = 8000
 TOAST_SIZE = QSize(360, 88)
 TOAST_RADIUS = 14
 TOAST_MARGIN = 16                 # from the work area's bottom-right corner
+TOAST_BADGE = 60                  # the canvas look: the orb's flat JARVIS badge, this square (the toast's height
+                                  # less its 14 px padding)
 TOAST_LINES = 3                   # the line wraps beside the action (8 words fit)
 OFFLINE_LINE = "My usual voice is out of reach, {sir}. I'll keep trying."
 OFFLINE_BADGE = "WINDOWS VOICE"
@@ -439,6 +442,7 @@ class Toast(QWidget):
         self._started = 0.0
         self._hovered = False
         self.mini = orb_mod.MiniOrb(self, ring_color=holo.RAISED)
+        self.mini.set_badge_form(True)
         self.action_button = holo.HoloButton("", holo.GO, size=holo.SIZE_SM, parent=self)
         self.action_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)   # a click never moves the focus here
         self.action_button.clicked.connect(self._on_action)
@@ -550,6 +554,9 @@ class Toast(QWidget):
 
     def _place_children(self) -> None:
         pad = 14
+        side = TOAST_BADGE if self.mini.badge_shown() else orb_mod.MINI
+        if self.mini.width() != side:
+            self.mini.setFixedSize(side, side)
         self.mini.move(pad, (self.height() - self.mini.height()) // 2)
         size = self.action_button.sizeHint()
         self.action_button.setGeometry(self.width() - pad + holo.HoloButton.MARGIN - size.width(),

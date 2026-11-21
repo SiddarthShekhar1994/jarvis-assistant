@@ -11,7 +11,7 @@ the chips and the cards (``Glow``) as well as the brackets and tethers.
 
 ``HudWindow``
     The orb (``OrbWidget(ORB_PX)``: the compact level of detail in a 104 px widget, no ground, never resized per
-    frame) over the left end of the command bar, a 760 px bar centred in the work area 16 px from its top
+    frame; while Home is the canvas, the canvas orb's flat JARVIS badge in the same box - orb.set_badge_form) over the left end of the command bar, a 760 px bar centred in the work area 16 px from its top
     (Switch.dc.html ``.hud``): the 44 px input row (a second ``hud.CommandBar`` in its HUD look: the chevron, "Ask
     Jarvis", the HUD key's keycaps - none while no key can work), Jarvis's caption line with the orb's state word, a
     hairline and "Bring Jarvis back"; under the bar the chips: "Briefing ready" (cyan), "N need your OK" (amber;
@@ -1084,6 +1084,7 @@ class HudWindow(_OverlayWindow):
         self._remembered = 0                                # the window that had the keyboard before (0: none known)
         self._lent = False                                  # p2r-10: lent to a card for the owner's Tab (kept held)
         self.orb = orb_mod.OrbWidget(ORB_PX, self)          # no ground: the window is translucent
+        self.orb.set_badge_form(True)                       # the canvas's flat JARVIS badge while Home is the canvas
         self.keycaps = _KeyCaps(hud_key, self)
         self.bar = hud.CommandBar(self)
         # The keycaps say the HUD key only while one can work (settings_view.effective_hud_key); none, none shown.

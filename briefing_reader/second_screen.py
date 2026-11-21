@@ -35,6 +35,9 @@ counts' row. The strip (beside a LIVE pop-out or a watch window, and on a narrow
 word, the clock and the counts. Never on this screen: the owner's question, the spoken line, a mail's text, the lit
 frame, the cue line, open big's backdrop, any sound. Lines break at spaces only, never after a hyphen.
 
+While Home is the canvas (holo.canvas_look) the ring is the canvas orb's flat JARVIS badge (orb.set_badge_form), in
+OLED care's form: no glow, nothing brighter than OLED_INK; the counts-only rule is the same.
+
 OLED care: true black, no grid, no glows; a DRIFT_PX drift on a 3x3 lattice every DRIFT_S; the sides swap every SWAP_S,
 never within SWAP_GUARD_S of a board change; after DIM_AFTER_S quiet seconds (no board change, no state change, no owner
 input to Jarvis) it dims to DIM_LEVEL, after DEEP_AFTER_S only the still ring and the clock remain at DEEP_LEVEL; the
@@ -1127,6 +1130,7 @@ class SecondScreen(QWidget):
         self.ring = orb_mod.OrbWidget(RING, self)
         self.ring.hide()
         self.ring.set_animated(False)
+        self.ring.set_badge_form(True)    # while Home is the canvas: the canvas orb's flat JARVIS badge (OLED care's)
         self._ring_timer = QTimer(self)
         self._ring_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._ring_timer.timeout.connect(self._ring_frame)
@@ -1326,6 +1330,7 @@ class SecondScreen(QWidget):
         origin = QPointF(layout.ring.center().x() - side / 2, layout.ring.center().y() - side / 2)
         frame = ring.sample()
         frame.glow = 0.0                              # OLED care: no glow ...
+        frame.oled = True                             # (the badge: no glow, nothing over OLED_INK)
         frame.core_op *= CORE_SHARE                   # ... the core at 50 % ...
         frame.bands = tuple((look, weight, alphas, tuple(orb_mod.C_HI if color == orb_mod.C_WHITE else color
                                                          for color in colors))

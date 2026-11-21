@@ -86,6 +86,14 @@ MiniOrb()
     (``FRAME_MINI_MS``) only while listening, thinking or speaking (it turns to face only then; at rest it takes its
     pose at once).
 
+The canvas's badge (canvas part 4)
+    ``set_badge_form(True)`` (the desktop HUD's ring, the second screen's; ``MiniOrb.set_badge_form`` for the
+    toast's): while the canvas look is on (holo.canvas_look) the widget paints the canvas orb's flat JARVIS badge
+    (``paint_badge``; see its section) instead of the ring - the same state API, accessible name and frame clock
+    (the amber arc of needs you at ``BADGE_NEEDS_MS``); ``badge_shown()``, ``badge_scale()``,
+    ``badge_layer_builds()``. The recording ring takes the badge's outer ring. ``OrbFrame.oled`` (the second
+    screen) draws it with no glow and nothing over OLED_INK.
+
 Frame clock
     One shared precise QTimer drives every ring at the fastest interval any running ring wants: 33 ms listening /
     thinking / speaking, 100 ms otherwise, 200 ms in deep idle (``DEEP_IDLE_S``, two quiet minutes: the breathing
@@ -111,6 +119,8 @@ from PySide6.QtCore import QEvent, QLineF, QObject, QPoint, QPointF, QRect, QRec
 from PySide6.QtGui import (
     QBrush,
     QColor,
+    QFont,
+    QFontMetricsF,
     QGradient,
     QPainter,
     QPainterPath,
@@ -1293,6 +1303,9 @@ class OrbFrame:
     sight_draw: float = 1.0                    # the start-up: the sight drawn round so far
     band_in: float = 1.0                       # the start-up: how much of the band has swept in
     sweep: tuple[float, ...] | None = None     # the start-up: each segment's share
+    badge: bool = False                        # the canvas's flat JARVIS badge is painted instead of the ring
+    spin: tuple[tuple[str, float], ...] = ()   # ... each turning ring's angle now (degrees, clockwise)
+    oled: bool = False                         # ... OLED care (the second screen): no glow, nothing over OLED_INK
 
     @property
     def alphas(self) -> tuple[float, ...]:
@@ -1352,6 +1365,9 @@ class OrbWidget(_OrbBase):
         self._dim = 1.0                     # quiet hours: the ring at 70 % (set_dim)
         self._intro: tuple[float, bool] | None = None   # the start-up: (orb time it began, calm)
         self._recording = False             # a meeting records: the coral ring (meetings_ui)
+        self._badge_form = False            # the canvas's flat badge while the canvas look is on (set_badge_form)
+        self._badge_motion = BadgeMotion()
+        self._badge_layers = BadgeLayers()
         self.set_orb_size(px)
 
     # ---- API --------------------------------------------------------------------
@@ -1368,6 +1384,34 @@ class OrbWidget(_OrbBase):
     def is_recording(self) -> bool:
         return self._recording
 
+    def set_badge_form(self, on: bool) -> None:
+        """Paint the canvas's flat JARVIS badge instead of the ring while the canvas look is on (holo.canvas_look; the
+        desktop HUD and the second screen ask for it). Off, or without the canvas look, the ring is exactly as it was.
+        The state API, the frame clock's rules and the accessible name are the same in both forms."""
+        on = bool(on)
+        if on != self._badge_form:
+            self._badge_form = on
+            self._sync()
+            self.update()
+
+    def badge_form(self) -> bool:
+        return self._badge_form
+
+    def badge_shown(self) -> bool:
+        """The badge is what this ring paints now (its form asked for and the canvas look on)."""
+        return self._badge_form and holo.canvas_look()
+
+    def badge_tier(self) -> str:
+        return BADGE_FULL if self._px >= COMPACT_BELOW else BADGE_COMPACT
+
+    def badge_scale(self) -> float:
+        """Widget pixels per unit of the badge (the canvas orb's own units): its reach fills the open brackets' box."""
+        return badge_scale(self._px * BRACKET_OPEN / 360.0, self.badge_tier())
+
+    def badge_layer_builds(self) -> int:
+        """How often a cached badge layer was built (tests and measurements)."""
+        return self._badge_layers.builds
+
     def _describe(self) -> str:
         text = super()._describe()
         return f"{text}, recording a meeting" if getattr(self, "_recording", False) else text
@@ -1375,9 +1419,13 @@ class OrbWidget(_OrbBase):
     def _paint_recording(self, painter: QPainter, origin: QPointF | None = None,
                          base: QTransform | None = None) -> None:
         """The coral ring and its dot, over the ring centred at ``origin`` (this widget's top-left) under ``base`` - the
-        transform of the window that paints it (paint_into: the second screen's drift); None: the widget's own."""
+        transform of the window that paints it (paint_into: the second screen's drift); None: the widget's own. On the
+        badge it is the badge's outer ring."""
         center = self.orb_rect().center() + (origin if origin is not None else QPointF(0.0, 0.0))
         k = self._px / 360.0
+        rec_r = REC_R
+        if self.badge_shown():
+            rec_r = BADGE_RINGS[self.badge_tier()][0].r * self.badge_scale() / k
         if base is None:
             painter.resetTransform()
         else:
@@ -1388,11 +1436,11 @@ class OrbWidget(_OrbBase):
         painter.scale(k, k)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(_pen(_rgba(QColor(holo.ALERT), 0.9), 1.5))
-        painter.drawEllipse(QPointF(0, 0), REC_R, REC_R)
+        painter.drawEllipse(QPointF(0, 0), rec_r, rec_r)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(holo.ALERT_HI))
         dot = max(REC_DOT, 2.2 / k)                  # at least a 2.2 px dot on the small rings
-        painter.drawEllipse(QPointF(0, -REC_R), dot, dot)
+        painter.drawEllipse(QPointF(0, -rec_r), dot, dot)
         if base is None:
             painter.resetTransform()
         else:
@@ -1638,6 +1686,8 @@ class OrbWidget(_OrbBase):
                 or not all(fade.done(now) for fade in (self._band, self._ink, self._tone, self._core_look))
                 or self.intro_running(now)):
             ms = min(ms, FRAME_ACTIVE_MS)      # transitions run smoothly, then the rate drops
+        if self.badge_shown() and self._base == NEEDS and not self._muted and not frame_clock().deep():
+            ms = min(ms, BADGE_NEEDS_MS)       # the badge's amber arc turns: a little smoother than at rest
         return ms
 
     # ---- the start-up ------------------------------------------------------------------
@@ -1720,6 +1770,10 @@ class OrbWidget(_OrbBase):
             self._lag += (1.0 - pace) * dt
             self._think = (self._think + think * pace * dt) % 360.0
             self._scan = (self._scan + scan * pace * dt) % 360.0
+        if self.badge_shown():
+            self._badge_motion.advance(self._look, dt, tier=self.badge_tier(), still=still,
+                                       frozen=self._frozen is not None, calm=calm,
+                                       pace=self._tw["pace"].value(now))
         look = self._look
         if self._voice_fn is not None and self._base == SPEAKING:
             try:
@@ -1801,7 +1855,10 @@ class OrbWidget(_OrbBase):
             core_scale=core_scale, core_looks=self._core_look.weights(now), alert=alert, arc=arc,
             slash=tw["slash"].value(now), echo=tw["echo"].value(now), dashed=self._offline, compact=self._compact(),
             fine=not (self._compact() or self._degraded), spikes=spikes, spike_lens=lens,
+            badge=self.badge_shown(), spin=self._badge_motion.angles() if self.badge_shown() else (),
         )
+        if frame.badge:
+            return frame                       # (the badge has no start-up of its own)
         self._apply_intro(frame, now)
         return frame
 
@@ -1905,6 +1962,13 @@ class OrbWidget(_OrbBase):
                 logger.info("Orb: compact layers (paint %.1f ms)", average)
 
     def _paint(self, painter: QPainter, f: OrbFrame, dpr: float = 1.0) -> None:
+        if f.badge:
+            if self._ground is not None:
+                painter.drawPixmap(QPoint(0, 0), self._backdrop(None, dpr, f.fine))
+            paint_badge(painter, self.orb_rect().center(), self.badge_scale(), badge_frame(f, self._offline),
+                        self._badge_layers, dpr, tier=self.badge_tier(),
+                        glow_share=self._tw["glow_share"].value(f.t))
+            return
         tier = ring_tier(self._px)
         n = f.segments
         center = self.orb_rect().center()
@@ -2152,10 +2216,30 @@ class MiniOrb(_OrbBase):
         self._look = self.ring_look()
         pose = POSES[self._look]
         self._pose = {"tilt": _Tween(pose.tilt), "roll": _Tween(pose.roll), "phase": _Tween(0.0)}
+        self._badge_form = False
+        self._badge_motion = BadgeMotion()
+        self._badge_layers = BadgeLayers()
         self.setFixedSize(MINI, MINI)
 
     def frame_interval(self) -> int | None:
         return FRAME_MINI_MS if self._base in ACTIVE_STATES else None
+
+    def set_badge_form(self, on: bool) -> None:
+        """Paint the canvas's flat JARVIS badge (filling the widget: its owner gives it the room) instead of the 36 px
+        ring while the canvas look is on (the toast asks for it); still at rest, 15 fps while active, as the ring."""
+        on = bool(on)
+        if on != self._badge_form:
+            self._badge_form = on
+            self.update()
+
+    def badge_form(self) -> bool:
+        return self._badge_form
+
+    def badge_shown(self) -> bool:
+        return self._badge_form and holo.canvas_look()
+
+    def badge_layer_builds(self) -> int:
+        return self._badge_layers.builds
 
     def settle(self) -> None:
         self._last_advance = None
@@ -2196,9 +2280,42 @@ class MiniOrb(_OrbBase):
             if not turning:
                 tween.settle()
 
+    def _paint_badge(self, now: float, still: bool) -> None:
+        last, self._last_advance = self._last_advance, now
+        dt = 0.0 if last is None else max(0.0, min(0.2, now - last))
+        look = self.ring_look()
+        running = self._base in ACTIVE_STATES        # at rest it is still, as the 36 px ring
+        self._badge_motion.advance(look, dt if running else 0.0, tier=BADGE_MINI, still=still,
+                                   frozen=self._frozen is not None,
+                                   calm=holo.motion_level() == holo.MOTION_CALM)
+        level = 0.0
+        if look == LISTENING:
+            level = self._level
+        elif look == SPEAKING:
+            level = 0.5 if still else synthetic_level(now)
+        frame = BadgeFrame(look=look, offline=self._offline, spin=self._badge_motion.angles(), level=level,
+                           t=0.0 if still else now)
+        side = min(self.width(), self.height())
+        painter = QPainter(self)
+        try:
+            paint_badge(painter, QPointF(self.width() / 2, self.height() / 2), badge_scale(side / 2 - 0.5, BADGE_MINI),
+                        frame, self._badge_layers, self.devicePixelRatioF() or 1.0, tier=BADGE_MINI,
+                        glow_share=self.glow_share())
+            if self._recording:
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                r = BADGE_RINGS[BADGE_MINI][0].r * badge_scale(side / 2 - 0.5, BADGE_MINI)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(_pen(_rgba(QColor(holo.ALERT), 0.9), 1.5))
+                painter.drawEllipse(QPointF(self.width() / 2, self.height() / 2), r, r)
+        finally:
+            painter.end()
+
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         now = self._now()
         still = _still()
+        if self.badge_shown():
+            self._paint_badge(now, still)
+            return
         speed = 360.0 / (THINK_TURN_CALM_S if holo.motion_level() == holo.MOTION_CALM else THINK_TURN_S)
         if self._base == THINKING and not still:
             if self._frozen is not None:
@@ -2217,6 +2334,439 @@ class MiniOrb(_OrbBase):
                            recording=self._recording, glow_share=self.glow_share())
         finally:
             painter.end()
+
+
+# --------------------------------------------------------------------------
+# The canvas's badge (PLAN-canvas part 4, checkpoint 2)
+# --------------------------------------------------------------------------
+# While Home is the canvas (holo.canvas_look), the rings that live outside it - the desktop HUD's, the toast's and the
+# second screen's - wear the canvas orb's flat JARVIS badge (board.js: the rings turned to face you and clicked shut,
+# the name in the middle): the dashed far ring, the amber needs-you arc on it, the tick ring, the turning arcs, the
+# thick main ring with its glow, the inner ring and the name with its glow, in the canvas orb's own units (RINGS in
+# board.js). States as the canvas draws them: listening - the tick ring follows the mic; thinking - the arcs turn fast
+# against each other; speaking - the main ring pulses with the voice; needs you - the amber arc turns on the outer ring
+# and the light behind goes amber; waiting - the ticks breathe; muted - dim with a slash; offline voice - steel.
+# Cheap to draw: the still parts (the far ring, the main ring and its glow, the inner ring, the name, the light behind)
+# are pixmaps made once per size; a frame blits them and strokes the few turning arcs and the ticks. The turns are
+# slower on the second screen and at rest (they are drawn at 10 fps there; BADGE_PACE). OLED care (the second
+# screen): no glow at all and nothing brighter than OLED_INK.
+
+BADGE_FULL, BADGE_COMPACT, BADGE_MINI = "full", "compact", "mini"
+BADGE_NEEDS_MS = 50            # the amber arc turns at 20 fps (the rest of the frame clock's rules hold)
+BADGE_NAME = "JARVIS"
+BADGE_NAME_PX = 37.0           # the name's size, its tracking (board.js nameSprite) ...
+BADGE_NAME_TRACK = 3.3 / 37.0
+BADGE_NAME_MIN = 9.0           # ... never under 9 px ...
+BADGE_NAME_FILL = 0.86         # ... and at most this share of the opening it sits in
+BADGE_BLOOM_R = 191.0          # the soft light behind (board.js: 382 at the canvas's size)
+BADGE_REACH = {BADGE_FULL: 222.0, BADGE_COMPACT: 200.0, BADGE_MINI: 170.0}   # units from the centre it may draw
+# (rest, active): the share of the canvas's turn the badge turns at (the second screen draws at 10 fps; the HUD at
+# 10 fps at rest and 30 while active; the toast is still at rest, 15 fps active)
+BADGE_PACE = {BADGE_FULL: (0.15, 0.5), BADGE_COMPACT: (0.35, 1.0), BADGE_MINI: (0.35, 0.6)}
+BADGE_RATES = {                # board.js RATES: each ring's turn, as a rate of its own, in each state
+    IDLE: {"ticks": 1.0, "arc": 1.0, "front": 1.0, "front2": 1.0},
+    LISTENING: {"ticks": 0.5, "arc": 0.55, "front": 0.6, "front2": 0.6},
+    THINKING: {"ticks": -11.0, "arc": 3.4, "front": -4.5, "front2": 3.0},
+    SPEAKING: {"ticks": 1.4, "arc": 1.5, "front": 1.3, "front2": 1.4},
+    NEEDS: {"ticks": 0.8, "arc": 0.8, "front": 0.8, "front2": 0.8},
+    WAITING: {"ticks": 0.45, "arc": 0.4, "front": 0.4, "front2": 0.4},
+}
+BADGE_INKS = {                 # board.js INKS: Jarvis's cyan, the offline voice's steel
+    "live": {"c": (53, 211, 240), "hi": (143, 235, 255), "tick": (191, 244, 255), "white": (242, 253, 255),
+             "amber": (245, 177, 74)},
+    "steel": {"c": (143, 169, 179), "hi": (180, 198, 204), "tick": (195, 210, 214), "white": (226, 234, 237),
+              "amber": (245, 177, 74)},
+}
+
+
+@dataclass(frozen=True)
+class BadgeRing:
+    """One ring of the badge, in the canvas orb's units: its radius, line, colour key, strength, arcs (degrees,
+    clockwise from 3 o'clock; none: the whole ring), ticks (and their half length), dash, its own turn (degrees a
+    second), the glow along an arc (its reach and strength) and a whole ring's glow (``halo``: (offset, strength))."""
+
+    name: str
+    r: float
+    w: float
+    key: str
+    alpha: float = 1.0
+    arcs: tuple[tuple[float, float], ...] = ()
+    ticks: int = 0
+    tick: float = 6.0
+    dash: tuple[float, float] | None = None
+    turn: float = 0.0
+    glow: float = 0.0
+    power: float = 0.0
+    halo: tuple[tuple[float, float], ...] = ()
+    halo_key: str = ""
+
+
+_HALO_MAIN = ((-34.0, 0.0), (-26.0, 0.05), (-18.0, 0.16), (-10.0, 0.36), (-4.0, 0.62), (4.0, 0.74), (10.0, 0.52),
+              (19.0, 0.28), (29.0, 0.13), (39.0, 0.05), (50.0, 0.0))
+_HALO_INNER = ((-15.0, 0.0), (-9.0, 0.12), (-4.0, 0.34), (-1.0, 0.6), (1.0, 0.72), (5.0, 0.42), (11.0, 0.16),
+               (19.0, 0.0))
+_HALO_MINI = ((-20.0, 0.0), (-12.0, 0.16), (-5.0, 0.5), (4.0, 0.7), (10.0, 0.4), (18.0, 0.12), (26.0, 0.0))
+_NEED_ARC = ((-150.0, -30.0),)
+
+
+def _badge_rings(outer: float, ticks: int, *, dash: bool) -> tuple[BadgeRing, ...]:
+    """The canvas's rings (board.js RINGS, back to front), the far ring and its amber arc at ``outer``."""
+    return (
+        BadgeRing("far", outer, 1.5, "hi", 0.55 if dash else 0.4, dash=(4.0, 4.0) if dash else None),
+        BadgeRing("need", outer, 3.5, "amber", arcs=_NEED_ARC, turn=138.0, glow=16.0, power=0.9),
+        BadgeRing("ticks", 178.0, 2.4, "tick", ticks=ticks, turn=9.0),
+        BadgeRing("arc", 163.5, 3.0, "c", arcs=((-135.0, -45.0),), turn=51.4, glow=14.0, power=0.5),
+        BadgeRing("main", 131.0, 8.0, "c", halo=_HALO_MAIN),
+        BadgeRing("inner", 97.0, 2.0, "white", halo=_HALO_INNER, halo_key="hi"),
+        BadgeRing("front", 111.5, 3.0, "white", arcs=((135.0, 405.0),), turn=32.7, glow=14.0, power=0.75,
+                  halo_key="hi"),
+        BadgeRing("front2", 149.2, 1.5, "hi", arcs=((-135.0, -45.0), (45.0, 135.0)), turn=-60.0, glow=10.0,
+                  power=0.7),
+    )
+
+
+# Each form's rings: the first is always the far ring (the recording ring takes its place). Full (the second screen,
+# 200 px and over): the canvas's own. Compact (the HUD's 92 px): the far ring solid and brought in to 192, 48 ticks.
+# Mini (the toast): the far ring, its arc, 36 ticks and the main ring round the name - the rest would be noise there.
+BADGE_RINGS: dict[str, tuple[BadgeRing, ...]] = {
+    BADGE_FULL: _badge_rings(214.0, 72, dash=True),
+    BADGE_COMPACT: _badge_rings(192.0, 48, dash=False),
+    BADGE_MINI: (
+        BadgeRing("far", 160.0, 1.5, "hi", 0.45),
+        BadgeRing("need", 160.0, 4.0, "amber", arcs=_NEED_ARC, turn=138.0, glow=10.0, power=0.9),
+        BadgeRing("ticks", 146.0, 2.4, "tick", ticks=36, tick=5.0, turn=9.0),
+        BadgeRing("main", 131.0, 8.0, "c", halo=_HALO_MINI),
+    ),
+}
+_BADGE_TURNS = {"need": 138.0, "ticks": 9.0, "arc": 51.4, "front": 32.7, "front2": -60.0}
+_STILL_RINGS = ("far", "main", "inner")        # the pixmaps; every other ring turns and is stroked each frame
+
+
+def badge_scale(room: float, tier: str) -> float:
+    """Pixels per badge unit for a badge whose reach fills ``room`` px from its centre."""
+    return max(0.01, float(room)) / BADGE_REACH[tier]
+
+
+def _badge_state(look: str) -> tuple[str, bool]:
+    """(the canvas's state word, muted) for a ring look: typing and the offline voice are the canvas's idle (the
+    canvas never shows LISTENING while the owner types); muted is idle, dim, with the slash."""
+    if look == MUTED:
+        return IDLE, True
+    if look in (TYPING, OFFLINE):
+        return IDLE, False
+    return (look if look in BADGE_RATES else IDLE), False
+
+
+def _badge_inks(offline: bool, oled: bool) -> dict[str, QColor]:
+    inks = {key: QColor(*rgb) for key, rgb in BADGE_INKS["steel" if offline else "live"].items()}
+    if oled:                                   # OLED care: nothing brighter than OLED_INK
+        cap = QColor(holo.OLED_INK)
+        inks["white"] = cap
+        inks["tick"] = cap
+    return inks
+
+
+@dataclass(frozen=True)
+class BadgeFrame:
+    """What one badge frame shows: the ring look, the offline voice, each turning ring's angle, the level (the mic's
+    while listening, the voice's while speaking), the clock its breathing reads, OLED care and motion off."""
+
+    look: str
+    offline: bool = False
+    spin: tuple[tuple[str, float], ...] = ()
+    level: float = 0.0
+    t: float = 0.0
+    oled: bool = False
+    still: bool = False
+
+
+def badge_frame(frame: OrbFrame, offline: bool) -> BadgeFrame:
+    return BadgeFrame(look=frame.look, offline=offline, spin=frame.spin, level=frame.level, t=frame.t,
+                      oled=frame.oled, still=_still())
+
+
+class BadgeMotion:
+    """The badge's turning rings: each at its state's rate (eased, so a change of state never jumps), at the form's
+    pace (BADGE_PACE), 1.6 times slower when calm; with motion off every ring stands at its own place (angle 0); a
+    frozen clock (stills, the second screen's deep dim) keeps them where they are."""
+
+    def __init__(self) -> None:
+        self._spin = {name: 0.0 for name in _BADGE_TURNS}
+        self._rate: dict[str, float] = {}
+
+    def angles(self) -> tuple[tuple[str, float], ...]:
+        return tuple(sorted(self._spin.items()))
+
+    def advance(self, look: str, dt: float, *, tier: str, still: bool, frozen: bool, calm: bool,
+                pace: float = 1.0) -> None:
+        if still:
+            self._spin = {name: 0.0 for name in _BADGE_TURNS}
+            self._rate.clear()
+            return
+        if frozen or dt <= 0.0:
+            return
+        state, muted = _badge_state(look)
+        rates = BADGE_RATES[WAITING] if muted else BADGE_RATES[state]
+        rest, active = BADGE_PACE[tier]
+        share = active if state in ACTIVE_STATES and not muted else rest
+        slow = CALM_STRETCH if calm else 1.0
+        blend = 1.0 - math.exp(-dt / 0.22)
+        for name, turn in _BADGE_TURNS.items():
+            want = 1.0 if name == "need" else rates.get(name, 1.0)
+            rate = self._rate.get(name, want)
+            rate += (want - rate) * blend
+            self._rate[name] = rate
+            self._spin[name] = (self._spin[name] + turn * rate * share * pace * dt / slow) % 360.0
+
+
+class BadgeLayers:
+    """The badge's still parts as pixmaps, made once per size, colour and form (at most ``LIMIT``)."""
+
+    LIMIT = 16
+
+    def __init__(self) -> None:
+        self._cache: OrderedDict[tuple, QPixmap] = OrderedDict()
+        self.builds = 0
+
+    def get(self, key: tuple, width: float, height: float, dpr: float,
+            draw: Callable[[QPainter], None]) -> QPixmap:
+        """The pixmap for ``key`` (``width`` x ``height`` px at ``dpr``; ``draw`` paints it about its centre)."""
+        pixmap = self._cache.get(key)
+        if pixmap is not None:
+            self._cache.move_to_end(key)
+            return pixmap
+        self.builds += 1
+        pixmap = QPixmap(max(1, math.ceil(width * dpr)), max(1, math.ceil(height * dpr)))
+        pixmap.setDevicePixelRatio(dpr)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            painter.translate(width / 2.0, height / 2.0)
+            draw(painter)
+        finally:
+            painter.end()
+        self._cache[key] = pixmap
+        while len(self._cache) > self.LIMIT:
+            self._cache.popitem(last=False)
+        return pixmap
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+
+@lru_cache(maxsize=64)
+def _badge_path(tier: str, name: str) -> QPainterPath:
+    """A ring's line in its own units (made once): its arcs, its whole circle or its ticks."""
+    ring = next(ring for ring in BADGE_RINGS[tier] if ring.name == name)
+    path = QPainterPath()
+    if ring.ticks:
+        for i in range(ring.ticks):
+            angle = 2.0 * math.pi * i / ring.ticks
+            c, s = math.cos(angle), math.sin(angle)
+            path.moveTo((ring.r - ring.tick) * c, (ring.r - ring.tick) * s)
+            path.lineTo((ring.r + ring.tick) * c, (ring.r + ring.tick) * s)
+        return path
+    box = QRectF(-ring.r, -ring.r, 2 * ring.r, 2 * ring.r)
+    if not ring.arcs:
+        path.addEllipse(box)
+        return path
+    for start, end in ring.arcs:                # clockwise on screen: Qt's arcs count the other way
+        path.arcMoveTo(box, -start)
+        path.arcTo(box, -start, -(end - start))
+    return path
+
+
+def _badge_pen(color: QColor, width: float, k: float, *, cap: Qt.PenCapStyle = Qt.PenCapStyle.FlatCap,
+               dash: tuple[float, float] | None = None) -> QPen:
+    """A pen of ``width`` badge units, never thinner than one pixel at ``k`` px a unit."""
+    units = max(width, 1.0 / max(k, 1e-6))
+    pen = QPen(color, units)
+    pen.setCapStyle(cap)
+    if dash is not None:
+        pen.setDashPattern([max(0.1, dash[0] / units), max(0.1, dash[1] / units)])
+    return pen
+
+
+def _paint_halo(painter: QPainter, ring: BadgeRing, color: QColor) -> None:
+    """A whole ring's glow: one fill of the band around its line with a radial gradient (board.js haloFill)."""
+    first, last = ring.halo[0][0], ring.halo[-1][0]
+    inner, outer = max(0.0, ring.r + first), ring.r + last
+    gradient = QRadialGradient(QPointF(0.0, 0.0), outer)
+    for offset, strength in ring.halo:
+        gradient.setColorAt(max(0.0, min(1.0, (ring.r + offset) / outer)), _rgba(color, strength))
+    gradient.setColorAt(0.0, _rgba(color, 0.0))
+    band = QPainterPath()
+    band.addEllipse(QPointF(0.0, 0.0), outer, outer)
+    band.addEllipse(QPointF(0.0, 0.0), inner, inner)
+    band.setFillRule(Qt.FillRule.OddEvenFill)
+    painter.fillPath(band, QBrush(gradient))
+
+
+def _badge_name_font(k: float, tier: str) -> QFont:
+    """The name's face (the canvas's display face, 600) at its size: the canvas's, never under BADGE_NAME_MIN px, and
+    no wider than BADGE_NAME_FILL of the opening it sits in (the inner ring, or the main ring on the toast)."""
+    from . import hud
+
+    rings = {ring.name: ring for ring in BADGE_RINGS[tier]}
+    holder = rings.get("inner") or rings["main"]
+    opening = 2.0 * (holder.r - holder.w / 2.0) * k * BADGE_NAME_FILL
+    px = max(BADGE_NAME_MIN, BADGE_NAME_PX * k)
+    for _ in range(3):
+        font = hud.display_font(max(1, round(px)), 600, BADGE_NAME_TRACK)
+        width = QFontMetricsF(font).horizontalAdvance(BADGE_NAME)
+        if width <= opening or px <= 7.0:
+            return font
+        px = max(7.0, px * opening / width)
+    return hud.display_font(max(1, round(px)), 600, BADGE_NAME_TRACK)
+
+
+def _name_layer(layers: BadgeLayers, k: float, tier: str, dpr: float, inks: dict[str, QColor], ink_id: str,
+                oled: bool) -> QPixmap:
+    font = _badge_name_font(k, tier)
+    metrics = QFontMetricsF(font)
+    width = metrics.horizontalAdvance(BADGE_NAME)
+    pad = 0.0 if oled else font.pixelSize() * 0.9
+    w, h = width + 2 * pad + 4, metrics.height() + 2 * pad + 4
+
+    def draw(painter: QPainter) -> None:
+        path = QPainterPath()
+        path.addText(0.0, 0.0, font, BADGE_NAME)
+        box = path.boundingRect()
+        path.translate(-box.center())
+        if not oled:                           # the mock's two text shadows: soft strokes, widest first
+            size = font.pixelSize()
+            for reach, strength, key in ((0.9, 0.07, "c"), (0.62, 0.1, "c"), (0.38, 0.16, "hi"), (0.2, 0.26, "hi"),
+                                         (0.09, 0.4, "hi")):
+                pen = QPen(_rgba(inks[key], strength), size * reach)
+                pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+                pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                painter.strokePath(path, pen)
+        painter.fillPath(path, inks["white"])
+
+    return layers.get(("name", tier, round(k, 4), font.pixelSize(), ink_id, oled), w, h, dpr, draw)
+
+
+def paint_badge(painter: QPainter, center: QPointF, k: float, b: BadgeFrame, layers: BadgeLayers, dpr: float = 1.0,
+                *, tier: str = BADGE_COMPACT, glow_share: float = 1.0) -> None:
+    """The badge centred at ``center``, ``k`` px a unit (see the section's comment). ``layers`` holds the still
+    parts; ``glow_share`` scales the light behind (a lit frame on the board halves it). ``painter``'s state is kept."""
+    state, muted = _badge_state(b.look)
+    inks = _badge_inks(b.offline, b.oled)
+    ink_id = "steel" if b.offline else "live"
+    rings = BADGE_RINGS[tier]
+    spin = dict(b.spin)
+    still = b.still
+    breath = 0.5 if still else 0.5 + 0.5 * math.sin(2 * math.pi * b.t / 2.6)
+    slow_breath = 0.5 if still else 0.5 + 0.5 * math.sin(2 * math.pi * b.t / 5.2)
+    dimmed = 0.38 if muted else 1.0
+    level = max(0.0, min(1.0, b.level))
+    reach = BADGE_REACH[tier] * k
+    side = 2.0 * math.ceil(reach + 2.0)
+    key = (tier, round(k, 4), ink_id, b.oled)
+    painter.save()
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        base = painter.transform()             # the caller's (the second screen's drift, paint_into's origin)
+
+        def blit(pixmap: QPixmap, opacity: float, grow: float = 1.0) -> None:
+            if opacity <= 0.003:
+                return
+            w = pixmap.width() / pixmap.devicePixelRatio() * grow
+            h = pixmap.height() / pixmap.devicePixelRatio() * grow
+            painter.setOpacity(min(1.0, opacity))
+            painter.drawPixmap(QRectF(center.x() - w / 2, center.y() - h / 2, w, h), pixmap, QRectF(pixmap.rect()))
+            painter.setOpacity(1.0)
+
+        # the soft light behind it (amber while something needs the owner)
+        if not b.oled:
+            amber = state == NEEDS and not muted
+            radius = min(BADGE_BLOOM_R * k, reach)
+
+            def bloom(p: QPainter) -> None:
+                light = QRadialGradient(QPointF(0.0, 0.0), radius)
+                light.setColorAt(0.0, _rgba(inks["amber" if amber else "c"], 0.2 if amber else 0.3))
+                light.setColorAt(0.62, _rgba(inks["c"], 0.09))
+                light.setColorAt(1.0, _rgba(inks["c"], 0.0))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QBrush(light))
+                p.drawEllipse(QPointF(0.0, 0.0), radius, radius)
+
+            pixmap = layers.get(("bloom", amber, *key), 2 * radius + 2, 2 * radius + 2, dpr, bloom)
+            blit(pixmap, dimmed * (0.72 + 0.2 * slow_breath) * max(0.0, min(1.0, glow_share)))
+
+        def still_layer(name: str, part: str) -> QPixmap:
+            ring = next(ring for ring in rings if ring.name == name)
+
+            def draw(p: QPainter) -> None:
+                p.scale(k, k)
+                if part == "halo":
+                    _paint_halo(p, ring, inks[ring.halo_key or ring.key])
+                else:
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.setPen(_badge_pen(_rgba(inks[ring.key], ring.alpha), ring.w, k, dash=ring.dash))
+                    p.drawPath(_badge_path(tier, name))
+
+            return layers.get((name, part, *key), side, side, dpr, draw)
+
+        painter.translate(center)
+        painter.scale(k, k)
+        face = painter.transform()
+        for ring in rings:
+            alpha = dimmed
+            if ring.name in _STILL_RINGS:
+                painter.setTransform(base)
+                if ring.name == "main":
+                    grow, lift = 1.0, 1.0 + 0.5 * breath           # the breath
+                    if state == SPEAKING:                           # the main ring pulses with his voice
+                        grow, lift = 1.0 + level * 0.055, 0.75 + 0.85 * level
+                    if not b.oled:
+                        blit(still_layer("main", "halo"), alpha * 0.7 * lift, grow)
+                    blit(still_layer("main", "line"), alpha, grow)
+                else:
+                    if ring.halo and not b.oled:
+                        blit(still_layer(ring.name, "halo"), alpha)
+                    blit(still_layer(ring.name, "line"), alpha)
+                painter.setTransform(face)
+                continue
+            grow = 1.0
+            if ring.name == "need":
+                if state != NEEDS or muted:
+                    continue
+            elif ring.name == "ticks":
+                if state == LISTENING:                              # the tick ring follows the microphone
+                    grow = 1.0 + level * 0.13
+                    alpha *= 0.55 + 0.45 * level
+                elif state == WAITING and not still:
+                    alpha *= 0.45 + 0.55 * slow_breath
+            painter.setTransform(face)
+            painter.scale(grow, grow)
+            painter.rotate(spin.get(ring.name, 0.0))
+            path = _badge_path(tier, ring.name)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            if ring.glow and not b.oled:                            # the glow along the arc: two soft strokes
+                glow_ink = inks[ring.halo_key or ring.key]
+                for extra, strength in ((ring.glow * 1.6, 0.1), (ring.glow * 0.7, 0.22)):
+                    painter.setPen(_badge_pen(_rgba(glow_ink, strength * ring.power * alpha), ring.w + extra, k,
+                                              cap=Qt.PenCapStyle.RoundCap))
+                    painter.drawPath(path)
+            painter.setPen(_badge_pen(_rgba(inks[ring.key], ring.alpha * alpha), ring.w, k, dash=ring.dash))
+            painter.drawPath(path)
+        # the name, in the middle
+        painter.setTransform(base)
+        blit(_name_layer(layers, k, tier, dpr, inks, ink_id, b.oled), 0.6 if muted else 1.0)
+        # muted: a slash across it
+        if muted:
+            painter.setTransform(face)
+            painter.rotate(-45.0)
+            length = min(180.0, BADGE_REACH[tier] - 4.0)
+            for width, strength in ((10.0, 0.18), (3.0, 1.0)):
+                painter.setPen(_badge_pen(_rgba(inks["white"], 0.9 * strength), width, k))
+                painter.drawLine(QPointF(-length, 0.0), QPointF(length, 0.0))
+    finally:
+        painter.restore()
 
 
 def ground_painter(cache: holo.GroundCache) -> Callable[[QPainter, QWidget], None]:
