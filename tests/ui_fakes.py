@@ -25,7 +25,7 @@ from PySide6.QtCore import QCoreApplication, QEvent, QObject, Signal
 from PySide6.QtWidgets import QApplication
 
 from briefing_reader import config as config_module
-from briefing_reader import hud, ui
+from briefing_reader import holo, hud, ui
 from briefing_reader.actions import ActionStore
 from briefing_reader.ask import planner as ask_planner
 from briefing_reader.ask.planner import AskPlanner, ClaudeEngine, GoogleSources
@@ -711,6 +711,7 @@ class AppHarness:
             c._closing.set()
             c._calendar_worker.stop()
         c.state = ui.STATE_QUITTING
+        holo.set_canvas_look(False)   # (canvas part 4: the look is the app's; the next test's app starts without it)
         for window in (c._live_window, c.window):
             if window is not None:
                 window.hide()

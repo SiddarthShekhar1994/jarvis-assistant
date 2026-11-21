@@ -348,7 +348,12 @@ class GroupButton(QAbstractButton):
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = QRectF(self.rect()).adjusted(3.5, 2.5, -3.5, -2.5)
             on = self.isChecked()
-            if on:
+            if holo.canvas_look():                # part 4: a lit square row, the canvas frame's edge
+                if on:
+                    holo.paint_canvas_frame(painter, rect, holo.CANVAS_SELECTED)
+                elif self.underMouse():
+                    painter.fillRect(rect, holo.alpha(holo.HOLO, 0.06))
+            elif on:
                 painter.setPen(QPen(holo.LINE, 1.0))
                 painter.setBrush(QColor(holo.TILE_FOCUS))
                 painter.drawRoundedRect(rect, holo.RADIUS_BUTTON, holo.RADIUS_BUTTON)

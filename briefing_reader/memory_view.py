@@ -89,11 +89,15 @@ def question_text(note: str) -> str:
 
 
 class PanelFrame(QWidget):
-    """The quiet panel (spec 5, information look): ``tile`` fill, a 1 px ``line-faint`` border, radius 10."""
+    """The quiet panel (spec 5, information look): ``tile`` fill, a 1 px ``line-faint`` border, radius 10. The canvas
+    look: a canvas frame (square, the bright edge and its inner glow, corner ticks)."""
 
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         painter = QPainter(self)
         try:
+            if holo.canvas_look():
+                holo.paint_canvas_frame(painter, QRectF(self.rect()), holo.CANVAS_PANEL)
+                return
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
             painter.setPen(QPen(holo.LINE_FAINT, 1.0))
@@ -113,7 +117,7 @@ class Rule(QWidget):
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         painter = QPainter(self)
         try:
-            painter.fillRect(self.rect(), holo.LINE_FAINT)
+            painter.fillRect(self.rect(), holo.CANVAS_LINE if holo.canvas_look() else holo.LINE_FAINT)
         finally:
             painter.end()
 

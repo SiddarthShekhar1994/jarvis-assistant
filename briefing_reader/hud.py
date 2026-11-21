@@ -532,8 +532,39 @@ QScrollArea#hudScroll { background: transparent; border: none; }
 """
 
 
+# The canvas look (PLAN-canvas part 4; holo.set_canvas_look): the native widgets keep being native, in the canvas's
+# black with its square bright edges and its glow's cyan (tooltips, menus, scroll bars, plain push buttons, fields).
+_CANVAS_STYLESHEET = """
+QToolTip {
+    color: #CFE6EB; background-color: #000000; border: 1px solid rgba(175, 240, 255, 204); border-radius: 1px;
+}
+QScrollBar:vertical { width: 6px; margin: 2px 1px 2px 0px; }
+QScrollBar::handle:vertical { background: rgba(143, 235, 255, 90); min-height: 28px; border-radius: 0px; }
+QScrollBar::handle:vertical:hover { background: rgba(175, 240, 255, 200); }
+QScrollBar:horizontal { height: 6px; }
+QScrollBar::handle:horizontal { background: rgba(143, 235, 255, 90); min-width: 28px; border-radius: 0px; }
+QScrollBar::handle:horizontal:hover { background: rgba(175, 240, 255, 200); }
+QMenu { background-color: #000000; border: 1px solid rgba(175, 240, 255, 204); border-radius: 1px; }
+QMenu::item:selected { background-color: rgba(53, 211, 240, 40); color: #FFFFFF; }
+QMenu::separator { background: rgba(143, 235, 255, 77); }
+QPushButton {
+    color: #D8F3F8; background-color: rgba(53, 211, 240, 10); border: 1px solid rgba(143, 235, 255, 178);
+    border-radius: 1px; padding: 6px 14px; font-family: "JetBrains Mono"; font-size: 11px; font-weight: 600;
+}
+QPushButton:hover { color: #FFFFFF; border-color: #FFFFFF; background-color: rgba(53, 211, 240, 31); }
+QPushButton:pressed { background-color: rgba(53, 211, 240, 51); }
+QPushButton:focus { border-color: #8FEBFF; }
+QPushButton:disabled { color: rgba(207, 230, 235, 110); border-color: rgba(143, 235, 255, 70); }
+QPushButton:checked { color: #FFFFFF; border-color: #FFFFFF; background-color: rgba(53, 211, 240, 46); }
+QComboBox, QLineEdit, QPlainTextEdit, QSpinBox {
+    selection-background-color: rgba(53, 211, 240, 82); selection-color: #FFFFFF;
+}
+"""
+
+
 def stylesheet() -> str:
-    """The application stylesheet (tooltips, scroll bars, menus, text browsers)."""
+    """The application stylesheet (tooltips, scroll bars, menus, text browsers; the canvas look's rules after them
+    while it is on)."""
     tokens = {
         "TEXT_BODY": TEXT_BODY, "TEXT_BRIGHT": TEXT_BRIGHT,
         "TIP_BORDER": _qss_color(rgba(ACCENT, 0.35)), "HANDLE": _qss_color(rgba(ACCENT, 0.22)),
@@ -543,6 +574,8 @@ def stylesheet() -> str:
     text = _STYLESHEET
     for name in sorted(tokens, key=len, reverse=True):
         text = text.replace("@" + name, tokens[name])
+    if _holo().canvas_look():
+        text += _CANVAS_STYLESHEET
     return text
 
 
@@ -12906,7 +12939,7 @@ class HudWindowFrame(QWidget):
         dpr = self.devicePixelRatioF()
         center = self._glow_center()
         anchor_key = None if center is None else (round(center.x()), round(center.y()))
-        key = (self.width(), self.height(), dpr, anchor_key)
+        key = (self.width(), self.height(), dpr, anchor_key, _holo().canvas_look())
         if self._cache is None or key != self._cache_key:
             self._cache = self._render_ground(dpr, center)
             self._cache_key = key

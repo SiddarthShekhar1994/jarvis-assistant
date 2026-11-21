@@ -165,13 +165,18 @@ class FindButton(QAbstractButton):
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-            radius = rect.height() / 2
-            if self._hover:
+            canvas = holo.canvas_look()            # part 4: the canvas's ask line (a square thin outline)
+            radius = 1.0 if canvas else rect.height() / 2
+            if self._hover and not canvas:
                 painter.setPen(QPen(holo.alpha(holo.HOLO, 0.10), 4.0))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawRoundedRect(rect.adjusted(2, 2, -2, -2), radius - 2, radius - 2)
-            painter.setPen(QPen(QColor(holo.HOLO) if self._hover else holo.LINE_STRONG, 1.0))
-            painter.setBrush(holo.alpha(holo.TILE, 0.72))
+            if canvas:
+                painter.setPen(QPen(holo.CANVAS_EDGE_HI if self._hover else QColor(143, 235, 255, 150), 1.0))
+                painter.setBrush(QColor(0, 0, 0, 160))
+            else:
+                painter.setPen(QPen(QColor(holo.HOLO) if self._hover else holo.LINE_STRONG, 1.0))
+                painter.setBrush(holo.alpha(holo.TILE, 0.72))
             painter.drawRoundedRect(rect, radius, radius)
             glyph = QRectF(0, 0, 18, 18)
             if self._compact:

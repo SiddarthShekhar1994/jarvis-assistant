@@ -1999,6 +1999,9 @@ class Drawer(QWidget):
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         painter = QPainter(self)
         try:
+            if holo.canvas_look():                 # part 4: a canvas frame, its right edge off the side
+                holo.paint_canvas_frame(painter, QRectF(self.rect()).adjusted(0, 0, 12, 0), holo.CANVAS_DRAWER)
+                return
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = QRectF(self.rect()).adjusted(0.5, 0.5, 8.0, -0.5)      # square right edge (off the side)
             path = QPainterPath()

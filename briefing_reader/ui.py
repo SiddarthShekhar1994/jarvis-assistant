@@ -3270,6 +3270,7 @@ class ReadingView(QWidget):
                 self._canvas_page.set_side_tile(None)
                 self._canvas_page.set_board(None)
         self.dock.setVisible(not on)
+        holo.set_canvas_look(on)                # part 4: every other screen wears the canvas's frame style
         self._sync_canvas_home()
         self._sync_canvas_chrome()
         self._sync_side()

@@ -203,6 +203,9 @@ class _Tile(QWidget):
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         painter = QPainter(self)
         try:
+            if holo.canvas_look():                # part 4: a canvas frame whose edge takes the row's tone (no bar)
+                holo.paint_canvas_frame(painter, QRectF(self.rect()), holo.canvas_tone_frame(self._bar))
+                return
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
             painter.setPen(QPen(holo.LINE_FAINT, 1.0))
