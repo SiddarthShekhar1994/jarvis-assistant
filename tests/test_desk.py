@@ -336,9 +336,7 @@ class DeskFormsTests(DeskApp):
         board.closeRequested.emit(frame_id)
         board.pinRequested.emit(frame_id, True)
         board.bringBackRequested.emit(frame_id)
-        board.retryRequested.emit(frame_id)
-        for word in ("frameFocused", "openRequested", "closeRequested", "pinRequested", "bringBackRequested",
-                     "retryRequested"):
+        for word in ("frameFocused", "openRequested", "closeRequested", "pinRequested", "bringBackRequested"):
             self.assertEqual(desk.counts[f"request:{word}"], 1, word)    # part 5b gives them their work
         self.assertTrue(self.reading.desk_shown())                        # and nothing else changed
 
@@ -363,6 +361,126 @@ class DeskFormsTests(DeskApp):
         self.assertFalse(self.reading.desk_shown())
         self.reading._set_moment("")                                      # noqa: SLF001
         self.assertTrue(self.reading.desk_shown())
+
+
+class DeskFinishTests(DeskApp):
+    """Canvas part 5A: the final review's integration 0, 1 and 3 on the desk (Home when the canvas can't be: the
+    page could not start, or it stopped for good)."""
+
+    @staticmethod
+    def offer():
+        from briefing_reader import offer_view
+
+        return offer_view.OfferInfo(7, "prep", "prep:7", "Meeting at 2:00", "Prepare for Design review",
+                                    "Prepare brief")
+
+    def chip_words(self) -> str:
+        chip = self.reading.side_chip
+        return chip.text() if chip.isVisible() else ""
+
+    def check_side(self, words: str, resolve) -> None:
+        reading = self.reading
+        self.assertTrue(reading.desk_shown())
+        self.assertEqual(self.chip_words(), words)                         # the tile's own words, on the desk
+        row = reading.side_chip.parentWidget().layout()
+        shown = [row.itemAt(i).widget() for i in range(row.count())
+                 if row.itemAt(i).widget() is not None and row.itemAt(i).widget().isVisible()]
+        self.assertIs(shown[0], reading.side_chip)                         # placed first
+        reading.side_chip.setFocus()
+        QTest.keyClick(reading.side_chip, Qt.Key.Key_Space)               # its click (or Enter, or Space)
+        settle()
+        self.assertFalse(reading.desk_shown())                             # Home's stage, as Ctrl+B folds it ...
+        self.assertTrue(reading.stage.side_tile().isVisible())             # ... with the tile
+        self.assertFalse(reading.side_chip.isVisible())
+        resolve()
+        settle()
+        self.assertTrue(reading.desk_shown())                              # answered: the desk is back
+        self.assertEqual(self.chip_words(), "")
+
+    def test_an_offer_while_the_desk_shows_has_its_chip_and_the_desk_comes_back(self) -> None:
+        self.make()
+        DeskFormsTests.put_demo(self)
+        self.reading.set_offers([self.offer()])
+        settle()
+        self.assertTrue(self.reading.desk_shown())                         # the board never gives way on its own
+        self.check_side("Prepare for Design review", lambda: self.reading._on_offer_not_now(7))   # noqa: SLF001
+
+    def test_each_error_kind_while_the_desk_shows(self) -> None:
+        self.make()
+        DeskFormsTests.put_demo(self)
+        reading = self.reading
+        mail = f"{ui.ERROR_MAIL}a1"
+        refused = ui.states_view.ErrorInfo(mail, "Not sent", ui.MAIL_REFUSED_SENTENCE.format(what="reply"),
+                                           ui.states_view.RETRY_TEXT)
+        cases = (
+            ("Couldn't load your briefing.", lambda: reading._set_error(ui.ERROR_BRIEFING, ui.BRIEFING_ERROR),
+             lambda: reading._set_error(ui.ERROR_BRIEFING, None)),
+            ("Claude Code isn't signed in.", lambda: reading.set_ask_signed_out(True),
+             lambda: reading.set_ask_signed_out(False)),
+            ("Gmail refused the reply.", lambda: reading._set_error(mail, refused),
+             lambda: reading._set_error(mail, None)),
+        )
+        for words, post, resolve in cases:
+            with self.subTest(error=words):
+                post()
+                settle()
+                self.check_side(words, resolve)
+
+    def test_the_header_s_note_is_greyed_only_while_the_tile_shows(self) -> None:
+        self.make()
+        DeskFormsTests.put_demo(self)
+        reading = self.reading
+        reading.set_service_note("notion", hud.STATUS_ERROR, "Notion did not answer")
+        reading._set_error(ui.ERROR_BRIEFING, ui.BRIEFING_ERROR)          # noqa: SLF001
+        settle()
+        notes = {name: status for name, status, _tip in reading.header.service_notes()}
+        self.assertEqual(notes.get("notion"), hud.STATUS_ERROR)            # the desk hides the tile: the note says it
+        reading.side_chip.click()
+        settle()
+        notes = {name: status for name, status, _tip in reading.header.service_notes()}
+        self.assertNotEqual(notes.get("notion"), hud.STATUS_ERROR)        # the tile says it now
+
+    def test_the_toast_s_prepare_brief_lands_on_the_stage_with_the_tile(self) -> None:
+        self.make()
+        DeskFormsTests.put_demo(self)
+        self.reading.set_offers([self.offer()])
+        settle()
+        self.reading.set_tab(ui.SCREEN_APPROVALS)
+        self.c._on_toast_action(ui.TOAST_PREP)                             # noqa: SLF001
+        settle()
+        self.assertEqual(self.reading.current_tab(), ui.SCREEN_HOME)
+        self.assertFalse(self.reading.desk_shown())
+        self.assertIs(self.reading.stage.side_tile(), self.reading.offer_tile)
+        self.assertTrue(self.reading.offer_tile.isVisible())
+
+    def test_forming_and_folding_the_desk_keeps_the_keyboard_in_the_ask_bar(self) -> None:
+        self.make()
+        reading = self.reading
+        self.window.activateWindow()
+        QApplication.setActiveWindow(self.window)
+        reading.command_bar.focus_input()
+        settle()
+        field = reading.command_bar.input
+        self.assertIs(QApplication.focusWidget(), field)
+        DeskFormsTests.put_demo(self)                                      # the first frames: the desk forms
+        self.assertTrue(reading.desk_shown())
+        self.assertIs(QApplication.focusWidget(), field)
+        for folded in (True, False):
+            QTest.keyClick(field, Qt.Key.Key_B, Qt.KeyboardModifier.ControlModifier)
+            settle()
+            self.assertEqual(reading.desk_shown(), not folded)
+            self.assertIs(QApplication.focusWidget(), field)
+
+    def test_the_desk_s_ring_shows_a_recording(self) -> None:
+        self.make()
+        self.reading.set_recording("0:12")                                 # a meeting records before the desk is made
+        DeskFormsTests.put_demo(self)
+        orb = self.reading.desk_page().head.orb
+        self.assertTrue(orb.is_recording())
+        self.reading.set_recording("")
+        self.assertFalse(orb.is_recording())
+        self.reading.set_recording("0:40")
+        self.assertTrue(orb.is_recording())
 
 
 class DeskGeometryAppTests(DeskApp):

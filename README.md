@@ -77,15 +77,16 @@ your own scheduled routine (see
   window of its own, for a second screen. It only shows, and only on screen:
   nothing of it is saved or logged. See
   [LIVE: watch Jarvis work](#live-watch-jarvis-work).
-- **A board beside the conversation.** When an answer has something to show,
-  Home becomes a desk: the conversation on the left and a board of frames on
-  the right - the mail he read, your day, to-dos, a page picture, and the
-  tables, charts, timelines and worked maths an answer brings. While he
-  speaks, the frame each sentence is about lights up. The board only shows:
-  it never approves or sends anything, and nothing on it is saved. Jarvis can
-  also show himself on a second monitor, with mail text hidden there, and a
-  few soft sounds mark moments such as a frame landing. See
-  [The look](#the-look-the-hologram).
+- **Home is a canvas.** Home is one black canvas with Jarvis's orb in it.
+  When an answer has something to show, frames come up across the canvas -
+  the mail he read, your day, to-dos, a page picture, and the tables, charts,
+  timelines and worked maths an answer brings - and the orb moves to its
+  corner. At rest a small "Now" group shows what waits for your OK, today, your
+  to-dos and your agents. While he speaks, the frame a sentence is about
+  brightens. Frames only show: they never approve or send anything, and
+  nothing on them is saved. Jarvis can also show himself on a second monitor,
+  with mail text hidden there, and a few soft sounds mark moments such as a
+  frame landing. See [The look](#the-look-the-canvas).
 - **Web research.** Start a request with `web:` (or let the planner hand it
   over) to look something up on the web: a separate Claude Code run whose
   only tools are web search and web fetch, and which gets your words and
@@ -150,9 +151,10 @@ your own scheduled routine (see
   [Catch-up and the hotkey](#catch-up-and-the-hotkey) and
   [Start menu shortcut](#start-menu-shortcut).
 
-The assistant screen is a calm hologram: a dark, frameless window with Jarvis's
-orb in the middle (beside the board, while it holds something) and a rail of
-screens at its left edge (see [The look](#the-look-the-hologram)).
+The assistant screen is one black canvas that fills the window: Jarvis's orb in
+the middle (in its corner while frames are up), his frames across the screen,
+and small controls in the corners for the other screens (see
+[The look](#the-look-the-canvas)).
 
 ## How it stays safe
 
@@ -215,7 +217,7 @@ screens at its left edge (see [The look](#the-look-the-hologram)).
   anything, and a waiting reply's chip only opens its card on Approvals. The
   second-screen display never shows mail text, a web research's answer, a
   search, your question or what Jarvis says ([The
-  look](#the-look-the-hologram), [Privacy and cost](#privacy-and-cost)).
+  look](#the-look-the-canvas), [Privacy and cost](#privacy-and-cost)).
 - **Mail Jarvis reads on his own is headers only (sender, recipients, subject,
   date), from the last 14 days, on this PC; never the text, never saved, never
   sent anywhere**, but for the standing agents and rules you set up (the next
@@ -423,9 +425,9 @@ Built: **Visual snapshots in LIVE** - see [Pictures in LIVE](#pictures-in-live);
 meeting) - see [Meetings](#meetings-recording-and-summaries);
 **Standing agents and rules** - see
 [Standing agents and rules](#standing-agents-and-rules);
-**The new look** (the ring, the board of frames beside the conversation, the
-second-screen display and the soft sounds) - see
-[The look](#the-look-the-hologram).
+**The canvas** (Home as one black canvas with the orb, frames across the screen,
+the "Now" group, the second-screen display and the soft sounds) - see
+[The look](#the-look-the-canvas).
 
 Planned for later versions; none of these is built yet, and all of them will
 keep the same rules (they propose, your click approves, and what they did
@@ -486,7 +488,7 @@ accounts and trusted domains back to their defaults. Then rerun
 from) and point your Start menu shortcut's **Start in** at it.
 
 **The rest of this README is the reference:** [Requirements](#requirements)
-and [Setup](#setup), [the look](#the-look-the-hologram),
+and [Setup](#setup), [the look](#the-look-the-canvas),
 [using it](#using-it), [Calendar actions](#calendar-actions) and the other
 cards, [Ask Jarvis](#ask-jarvis-optional) and [web research](#web-research),
 the [proposal](#proposed-actions-format) and [deadline](#deadlines-format)
@@ -1015,150 +1017,161 @@ cd "<project folder>"
    alone; see "Disconnecting" in step 8 and
    [Logs and saved files](#logs-and-saved-files).
 
-## The look (the hologram)
+## The look (the canvas)
 
-The assistant screen is a hologram on a near-black ground with a faint cyan
-grid. One thing is bright on each screen (the orb, the card that waits, the
-line being read); the rest stays quiet. Colours mean one thing each: cyan is
-Jarvis (and a fresh, NEW briefing), amber only something that waits for your
-decision, coral only a failure or a NEW RECIPIENT, mint "it's done" and steel
-"off" (muted, the Windows voice, undone). Three fonts (see [Fonts](#fonts)):
-Chakra Petch for the J.A.R.V.I.S. wordmark and headings, Sora for text and
-JetBrains Mono for labels and times. Technical readouts (planner runs, runs
-left, seconds, sizes) never appear on Home or the screens' tiles: LIVE keeps
-them.
+Home is one black canvas that fills the window, with Jarvis's orb in it.
+There is no sidebar and no chat column: what Jarvis shows you comes up as
+frames across the canvas, and small controls sit in its corners. Colours mean
+one thing each: cyan is Jarvis, amber only something that waits for your
+decision, coral only a failure, mint "it's done" and steel "off" (muted, the
+Windows voice). Three fonts (see [Fonts](#fonts)): Chakra Petch for the
+wordmark and headings, Sora for text and JetBrains Mono for labels and times.
+Technical readouts (planner runs, seconds, sizes) never appear on the canvas:
+LIVE keeps them.
 
-- **Frameless window.** The header is the title bar: drag it to move the
-  window. At its left the J.A.R.V.I.S. wordmark and the **state word** with its
-  dot: STANDBY, LISTENING, THINKING, SPEAKING, NEEDS YOU (amber), PAUSED,
-  MUTED, OFFLINE VOICE, QUIET HOURS UNTIL 8:00 AM (steel), WAITING FOR THE AM
-  BRIEFING. At its right the **clock** (time and date, such as 9:51 AM over
-  MON 12 OCT; `[display] clock = "24h"` shows 21:51), which opens the Day
-  view; the **mute** button (**Ctrl+M**; pressed, struck through and steel
-  while Jarvis's own voice is muted; see [Jarvis talks](#jarvis-talks));
-  **minimize** (the window goes to its taskbar button; click that button, the
-  tray icon or press the hotkey to bring it back); and **close**, which is the
-  same as Done. The window stays on top of other windows.
-- **Services in the header.** A service that is not OK shows as its name with
-  a dot after the state word (**NOTION**, **VOICE**, **CALENDAR**, **CLAUDE**;
-  steel while it may pass, coral for an error), with the details as its
-  tooltip; nothing shows while every service is fine, and nothing shows twice:
-  the Windows voice is the OFFLINE VOICE state, and a briefing that could not
-  load or Claude Code not signed in are error tiles (see [States](#states)).
-  The small classic prompt keeps its earlier header with three chips instead:
-  **notion** (grey: checking, green: loaded, amber: retrying, red: error),
-  **voice** (grey: no audio yet, green: online voice, amber: the Windows
-  voice, red: no speech could be generated) and **calendar** (green: signed in
-  to Google, amber: not signed in yet, grey: turned off or not set up).
-- **The orb** in the middle of Home is Jarvis's ring: a band of light segments
-  round a fixed sight, with corner brackets. It shows the same state as the
-  header word, and each look keeps a shape of its own at every size (also the
-  36 px one in the Dock and the toast, which has no word beside it), so none
-  relies on colour alone. At rest it lies tipped back and breathes (STANDBY).
-  While you talk to him (the talk key or "Hey Jarvis") it swings level to face
-  you, a crosshair appears, its brackets close round it like a sight locking
-  on, and the band lights up with your voice from the first sound; while you
-  type it only leans towards you. While he thinks a white head with a tail
-  races round it; while he speaks the band reaches out with his voice; while
-  something waits for you it shows an amber arc and amber segments; muted it
-  turns steel, nearly edge-on and struck through; on the Windows voice its
-  sight is dashed and its core flat; while he waits for a briefing the band
-  is dark but for one slow scanner. A meeting being recorded adds a coral
-  ring, quiet hours dim it to 70 %, and while a frame on the board is lit its
-  glow halves (one thing bright at a time). A failure never turns it red: the
-  failure is a tile beside it. It moves only while the window is visible and
-  not minimized (and not while the PC is locked), slower after two quiet
-  minutes, and holds one still pose per look with motion off.
+- **The window.** Jarvis opens maximised; **F11** (or the canvas's
+  full-screen control) gives true full screen and back. It is a normal Windows
+  window: it has its taskbar button with Jarvis's icon (click it to minimise
+  and restore), Alt+Tab and Win+Tab show it, **Win+Up** maximises it without
+  covering the taskbar, **Win+Down** restores and then minimises it,
+  **Win+Left** and **Win+Right** snap it, and Alt+F4 closes it as Close does.
+  Drag the top band (the wordmark's row) to move it: drag it to the top edge to
+  maximise, to a side to snap, or down from maximised to restore;
+  double-click the band to maximise or restore it; right-click it, or press
+  Alt+Space, for the system menu. Hovering the maximise button at the top right
+  shows Windows 11's Snap Layouts. The edges resize it. It is no longer always
+  on top of other windows.
+- **The orb** is a set of glowing rings on one axis, drawn by the canvas
+  itself. Each state moves in its own way: waiting, a slow precession like
+  breathing; listening, the rings lean toward you and the tick ring follows
+  your voice; thinking, the rings counter-spin faster; speaking, the main ring
+  pulses with his voice; needs you, an amber arc sweeps the outer ring; muted,
+  dim and struck through; on the Windows voice, steel. While he speaks (and a
+  moment after) it turns to face you and closes into a round JARVIS badge.
+  While frames are on the canvas it moves to the bottom-right corner, and it
+  comes back to the centre when the canvas is cleared. With Windows' "Show
+  animations" off (or `[ui] motion = "off"`) it cuts between its states with a
+  short fade and nothing turns; `"calm"` makes it slower and gentler.
+- **The corners.** Top left: the J.A.R.V.I.S. wordmark, the **state word**
+  (STANDBY, LISTENING, THINKING, SPEAKING, NEEDS YOU in amber, MUTED ...), a
+  Send's hold with **Undo**, and the date and time, which open the Day view.
+  Top right: **History** (the Transcript), **Now**, **Tidy**, **Clear view**,
+  **Pinned** and **Show board** (each only while it can work), then
+  **Briefing**, **Approvals** with its count, **Follow-ups**, **Meetings**,
+  **Agents**, **Live**, **Memory**, **Settings**, **Desktop**, and minimise,
+  maximise and close; in a narrow window the rest go under **More**. Bottom
+  left: the microphone's level, **Mute**, "Hey Jarvis" (below) and, while a
+  meeting records, REC with **Stop**. Bottom centre: what Jarvis says, as a
+  caption, over a slim ask line (type, or hold the talk key and talk; Ctrl+K
+  goes to it). A button shows only while pressing it works, and each one does
+  exactly what the same control does elsewhere in Jarvis.
+- **"Hey Jarvis" and "can't hear you".** At the bottom left, a small dot, then
+  HEY JARVIS and its state: **Listening** (cyan, the dot breathes),
+  **Paused** (grey) or **Can't hear you** (amber). Jarvis can't hear you when
+  "Hey Jarvis"'s microphone gives only silence (or is a virtual microphone),
+  or when your last talk got nothing at all from it. A note then says "Jarvis
+  can't hear you. The microphone is <its name>. Pick yours in Settings >
+  Meetings." with **Pick a microphone**, which opens Settings at Meetings.
+  Jarvis never picks a microphone for you and never changes Windows' default.
+- **The other screens** (Briefing, Approvals, Follow-ups, Meetings, Agents,
+  Live, Memory, Settings, History) open over the canvas in its frame style,
+  with **Back** at their top left; **Esc** goes back too, and Ctrl+1 to Ctrl+9
+  still open them. The plan and the brief open the same way.
+- **The badge elsewhere.** The desktop HUD, the toast and the second screen
+  draw the orb as the same flat JARVIS badge, in every state (the amber arc of
+  needs you too), and the HUD's bar, chips, result cards and keycaps and the
+  toast are square frames in the canvas's style. Briefing's and the plan's
+  rings wear the badge too.
 
-### The desk and the board
+### Frames on the canvas
 
-When Jarvis has something to show you, Home becomes a desk: the conversation
-on the left, with the orb at its head, and a board of frames on the right.
-With nothing on the board, Home looks as it always has, with a **Board**
-button in the header (**Ctrl+B**; dimmed while the board is empty) and, until
-you have seen the board three times, one line under the greeting: "When I
-find something to show you, it appears beside our conversation."
-
-- **The desk forms** with an answer's first frame: the orb flies to the top of
-  the conversation column, the board slides in, and the column shows your
-  requests and his answers (his newest in larger type, its times in cyan and
-  what waits on you in amber; older ones above it, under a fade). An answer
-  that put frames up ends with "4 frames on the board", which scrolls the
-  board to them. **Ctrl+B** or the Board button folds the desk away (Home's
-  stage comes back, with a "9 on the board" chip that brings it back); from
-  another screen they bring you to Home with the board. In a small window
-  (under 1,024 px wide, the Dock folded) the column keeps the last exchange,
-  with **Earlier** for the rest (the Transcript drawer).
-- **Frames.** Each answer's frames come up together as one group, headed by
-  its time and topic, the newest group on top. In a group, what waits on you
-  comes first, then the frames in the order Jarvis speaks of them, and nothing
-  moves after that. Each frame draws in as an outline, then fills. Frames are
-  made from what Jarvis already has: your day (a bar from 8 to 18 with a "now"
-  line, the events as rows, the next one "IN 19 MIN", free time dashed), a
-  mail thread he read (the sender, the time and three lines of its text, with
-  an amber "Reply waits on Approvals" when he drafted a reply for your OK),
-  your follow-ups, to-dos (waiting, done or open), a page picture from web
-  research (only a picture: it opens nothing), web research's answer with its
-  sources, a web search's results, and the tables, charts, timelines and maths
-  of an Ask's answer ([below](#tables-charts-timelines-and-maths-from-ask)).
-  Every word in a frame is shown as plain text. A frame that waits on you is
-  amber, with a diamond and rounder corners, so waiting is a shape as well as
-  a colour.
-- **The bar and the index strip.** The board's bar says how many frames are
-  on it and how many wait on you, with **All | Pinned** and **Clear**. The
-  narrow strip at its right edge has a small button per frame, in board order
-  (a waiting one with an amber diamond); a click scrolls to that frame. "7
-  MORE BELOW", under a small arrow, shows whenever frames below are not fully
-  in view.
-- **Older answers fold.** When a new answer lands, the unpinned frames of
-  older answers fold to one-line rows with one fact each ("REPLY WAITS", "3
-  EVENTS · NEXT 10:00 AM"); a click or Enter opens one again where it is.
-- **Pin, close, Clear.** **P** (or a frame's pin) keeps a frame and its place,
-  six at most. **Delete** (or its close) leaves a "Closed: ..." row with
-  **Bring back** for 8 seconds. **Clear** takes every unpinned frame away,
-  with "Board cleared · 8 FRAMES · Bring back" for 8 seconds; with nothing
-  left, Home's stage comes back. The board holds at most 24 frames in 8
-  groups: past that, the oldest group without a pin leaves whole. Frames last
-  for the session: they are never saved, and Jarvis starts with an empty
-  board.
-- **Reading is safe.** While you read the board (the pointer over it, the
-  keyboard in it, or a scroll or key in it in the last 8 seconds), a new
-  answer does not move it: "New answer above · Show" appears, and the answer
-  lands on **Show** or after 8 quiet seconds.
+- **The "Now" group.** At the start (and whenever you bring it back with
+  **Now**), a few resting frames come up: **Waits for your OK** (only while
+  something waits; each card's kind and title, and its button opens
+  Approvals), **Today** (your day, or "Nothing booked today"), your
+  **To-dos** (when there are some) and **Agents** (your standing agents, each
+  with its state and what it last did; its button opens Agents). They are
+  kept current while they show: a frame that changes glows once, and one whose
+  source has nothing left goes. A later answer always takes the first places.
+- **A task card first.** While Jarvis works on a request, a card says what he
+  is doing in his own words ("Reading your calendar"), a timer, the steps and
+  sources so far, and **Stop** (exactly the ask line's own cancel). When the
+  answer brings frames, the card shrinks to the head of its group.
+- **Frames.** Each answer's frames come up together as one group, the newest
+  answer top left, on a grid that fills the canvas: your day (a bar with a
+  "now" line, the events, the next one "IN 19 MIN"), a mail thread he read
+  (with an amber "Reply waits on Approvals" when he drafted a reply for your
+  OK), to-dos, follow-ups, a page picture from web research (only a picture:
+  it opens nothing), web research's answer with its sources, a web search's
+  results, a big number for a change, and the tables, charts, timelines and
+  maths of an Ask's answer
+  ([below](#tables-charts-timelines-and-maths-from-ask)). A frame boots: its
+  outline draws itself, a scan line wipes down, the heading decodes, numbers
+  count up. What waits on you is amber, with corner ticks. A frame that could
+  not be made shows its warning and why, in coral. Every word in a frame is
+  plain text. What cannot fit folds to a tile (its title and one fact),
+  oldest answer first; nothing scrolls off and nothing is cut.
+- **Tidy, Clear view, pin, close.** **Tidy** packs the frames again (it shows
+  only after a close left a gap). **Clear view** folds every unpinned frame to
+  a line drawn into the orb, with "Board cleared · Bring back" for a few
+  seconds. **P** (or a frame's pin) keeps a frame and its place, six at most;
+  **Delete** (or its close) leaves "Closed: ..." with **Bring back** for 8
+  seconds. At most 24 frames in 8 groups: past that, the oldest group without a
+  pin leaves whole. Frames last for the session: they are never saved.
+- **Reading is safe.** While the pointer is over the frames (or the keyboard is
+  in them, or you scrolled there in the last 8 seconds), a new answer does not
+  move them: "New answer above · Show" appears, and it lands on **Show** or
+  after 8 quiet seconds.
 - **Open big** (**Enter**, a double click or a frame's open-big button): the
-  frame grows over both columns, the ask bar stays live under it, and the Dock
-  and the header dim. **Esc** (or a click beside it) puts it back. A long
-  table or working that does not fit scrolls inside it, with the mouse wheel
-  or the keys (Up, Down, Page Up, Page Down, Space, Shift+Space, Home, End),
-  and a fade at the cut edge shows there is more.
-- **While Jarvis speaks**, the frame each sentence is about lights up:
-  brackets at its corners, and a thin cue line from that sentence in the
-  conversation to the frame. Only a sentence that names a frame by its own
-  words (its title, a sender, an event) lights it; otherwise nothing is lit.
-  When a later answer brings a frame that is already on the board (the same
-  thread, day, page, list or table) with something new in it, that frame
-  updates where it is and says CHANGED.
-- **Nothing on the board acts.** It never approves, sends or undoes anything.
+  frame grows over the canvas; **Esc** puts it back. A long table or working
+  scrolls inside it.
+- **While Jarvis speaks**, the frame a sentence names (by its title, a
+  sender, an event) brightens. When a later answer brings a frame that is
+  already up (the same thread, day, page, list or table) with something new in
+  it, that frame updates where it is and says CHANGED.
+- **Nothing on the canvas acts.** No frame approves, sends or undoes anything.
   A waiting reply's amber chip (or **Ctrl+3**) only opens its card on
   Approvals, where you decide as always.
-- **The keyboard.** **F6** (Shift+F6 back) moves between the ask bar, the
-  conversation, the board and its index strip. In the board, Up and Down move
-  between frames (Left and Right within a pair), Home and End go to the first
-  and the last, Tab reaches a frame's buttons, Enter opens big, P pins, Delete
-  closes, and Esc leaves open big or goes back to the ask bar. Space scrolls
-  the board and never plays the briefing, and Jarvis's own keys (Ctrl+1 to
-  Ctrl+9, Ctrl+K, Ctrl+M, Ctrl+B and the rest) keep working with the keyboard
-  in it.
-- **Window sizes.** Small frames (to-dos, timelines, charts, maths) pair side
-  by side once the board is wide enough (from a window of about 1,200 px) and
-  go three across from about 1,490 px. A window too small for the board shows
-  it as a drawer instead.
+- **The keyboard.** **F6** (Shift+F6 back) moves between the ask line, the
+  frames and the corners. Among the frames the arrows move by where they are,
+  Home and End go to the first and the last, Tab reaches a frame's buttons,
+  Enter opens big, P pins, Delete closes and Esc goes back to the ask line.
+  Jarvis's own keys (Ctrl+1 to Ctrl+9, Ctrl+K, Ctrl+M, Ctrl+B and the rest)
+  keep working there.
 - **On the HUD** ([Jarvis on your desktop](#jarvis-on-your-desktop-the-hud)) a
-  "9 on the board" chip brings Jarvis back with the board.
-- **If the board can't start** on this PC, a tile says "The board can't start
-  on this PC. Answers still show here as text." and the frames show as plain
-  read-only tiles under it (see [Troubleshooting](#troubleshooting)).
-  `[look] board = false` keeps Home exactly as it was, with no board at all.
+  "9 on the board" chip brings Jarvis back with his frames.
+
+### If the canvas can't start: the hologram and the desk
+
+The canvas is a page Jarvis draws in a locked-down web view (see
+[Privacy and cost](#privacy-and-cost)). If that can't start on this PC, or it
+stops for good, Home goes back to the earlier hologram look, and
+`[look] board = false` keeps that look with no frames at all:
+
+- **The window and the header.** A frameless window with a header for a title
+  bar (drag it to move the window): the wordmark, the state word, a note for a
+  service that is not OK (**NOTION**, **VOICE**, **CALENDAR**, **CLAUDE**,
+  with the details as its tooltip), the clock (which opens the Day view),
+  **mute** (**Ctrl+M**), minimise and close. The Dock on the left edge opens
+  the screens ([Using it](#using-it)).
+- **The ring.** Jarvis's ring in the middle of Home shows the same state as the
+  header word, each look with a shape of its own at every size (also the
+  36 px one in the Dock and the LIVE pop-out), so none relies on colour alone:
+  it swings level to face you while you talk, a white head races round it
+  while he thinks, its band reaches out with his voice while he speaks, an
+  amber arc shows while something waits, steel and struck through while muted.
+  A meeting being recorded adds a coral ring and quiet hours dim it. A failure
+  never turns it red: the failure is a tile beside it.
+- **The desk.** With frames to show, Home becomes a desk: the conversation on
+  the left with the ring at its head, and the frames on the right as plain
+  read-only tiles under the line "The board can't start on this PC. Answers
+  still show here as text." A turn's "4 frames on the board" scrolls the tiles
+  to its answer. **Ctrl+B** folds the desk away and back. While an offer's or
+  an error's tile waits (a briefing that could not load, Claude Code not
+  signed in, Gmail refusing a reply), the desk's chips start with an amber chip
+  in the tile's own words: it shows Home's stage with the tile, and the desk
+  comes back once you have answered or dismissed it. The header's note for
+  that service is greyed only while the tile is in sight.
 
 ### Tables, charts, timelines and maths from Ask
 
@@ -1185,7 +1198,10 @@ for reading across a desk, the orb in its live look, the state word, the clock
 and the date, your next event ("In 19 minutes · video call"), what waits on you
 ("Waiting on Approvals, on the main screen"), whether a briefing is ready, how
 many frames are on the board, and the board's first nine frames as outline
-tiles. It is only for glancing at: it takes no clicks and never the keyboard,
+tiles. With the canvas this wall wears its style: the orb is the flat JARVIS
+badge, and the tiles are square, with a thin cyan edge and no glow (true black
+stays black); what waits on you is amber with two corner ticks. It is only for
+glancing at: it takes no clicks and never the keyboard,
 it never makes a sound, and nothing on it can be approved or opened. It never
 shows mail text ("Mail text hidden on this screen": senders and subjects
 show), the text of a web research's answer (its sources show), web searches,
@@ -1202,8 +1218,10 @@ page), from what his main window shows.
 
 ### Soft sounds
 
-A few moments have a soft sound, which Jarvis makes himself when he starts (no
-sound files come with him): when he hears you (the talk key or "Hey Jarvis"),
+A few moments have a soft sound, which Jarvis makes himself (no sound files
+come with him): he writes them once to the data folder the first time they are
+on, and a normal start after that makes nothing; while they are off nothing is
+made at all, and turning them on makes them then. The moments: when he hears you (the talk key or "Hey Jarvis"),
 when a request has had no answer after a moment, when a frame lands on the
 board and when a group of frames has settled, when something new waits for
 your OK, when a frame changes, when an approved card is done or has failed,
@@ -1222,7 +1240,7 @@ it keeps its own sound and rules.
 **Opening Jarvis.** The Start menu shortcut (see
 [Start menu shortcut](#start-menu-shortcut)), the hotkey (**Ctrl+Alt+J**) and
 `py -3.13 -m briefing_reader --open` (or no option at all) open the assistant
-screen at the bottom right, in front, with the command bar ready when
+screen in front (the canvas opens maximised), with the ask line ready when
 [Ask Jarvis](#ask-jarvis-optional) is on. Jarvis says one short greeting picked
 at random for the time of day ("Good morning, sir.", "Evening, sir. What can I
 do for you?", "At your service, sir."), never the one you heard last; when a
@@ -1239,8 +1257,10 @@ greeting was more than 2 minutes ago. Without sound (muted, `[assistant]
 speak = false`, no voice available) the same words are shown in the JARVIS
 tab; `[assistant] greet = false` turns the greeting off.
 
-**The Dock and the screens.** The Dock on the window's left edge opens the
-screens: each one with its glyph and its name (Home, Briefing, Approvals, Live,
+**The screens.** On the canvas the screens are the buttons at its top right
+(see [The look](#the-look-the-canvas)), each opening over the canvas with
+**Back**. In the hologram look (when the canvas can't start, or with
+`[look] board = false`) the Dock on the window's left edge opens them: each one with its glyph and its name (Home, Briefing, Approvals, Live,
 Memory, Follow-ups, and Settings at the bottom), its count or its cyan NEW dot,
 and a glowing cyan rail that slides to the screen you are on. In a narrow window
 (under about 1,000 px wide) it folds to glyphs only: hover a glyph, or Tab to
@@ -1268,8 +1288,9 @@ the J.A.R.V.I.S. name types in. None of it waits: you can click and type at
 once. `[ui] motion = "calm"` makes it slower and gentler, `"off"` turns these
 effects off, and so does turning off "Show animations in Windows".
 
-- **Home** (**Ctrl+1**; the Dock's glyph is Jarvis's small orb) is Jarvis
-  himself: the large orb in the middle shows what he is doing, the same word
+- **Home** (**Ctrl+1**) is Jarvis himself. On the canvas it is as
+  [The look](#the-look-the-canvas) describes; in the hologram look (below) the
+  large orb in the middle shows what he is doing, the same word
   sits in the header, and what he says appears under the orb a few words at a
   time (at most 14 words a page). Below them: one quiet
   chip and the command bar (**Ctrl+Space** from any screen). The chip is, first
@@ -1459,12 +1480,14 @@ itself, and none adds a new moment when he speaks or shows something):
   offer flashes the taskbar button, Jarvis also shows his own small window at
   the bottom right of the screen: the small orb, one line ("Your AM briefing is
   ready, sir." / "Project Development check-in in 15 minutes, sir.") and ONE
-  button. It never takes the focus (what you type keeps going where it went),
+  button; with the canvas, the orb is its flat JARVIS badge and the toast a
+  square canvas frame. It never takes the focus (what you type keeps going where it went),
   it is not a Windows notification (nothing lands in Windows' notification
   history), it hides after 8 seconds (pointing at it pauses that) and it is
   posted nowhere else. **View** opens the Briefing screen; **Prepare brief**
-  opens Home with the offer's tile, which still needs its own click: the toast
-  never reads, prepares or sends anything.
+  opens Home with the offer's tile (also when Home was the desk: Home's stage
+  shows it), which still needs its own click: the toast never reads, prepares
+  or sends anything.
 - **Offline voice.** When his usual voice can't speak - the local voice is not
   downloaded or can't run, or the online one cannot be reached - and the Windows
   voice speaks instead (see [Offline fallback](#offline-fallback)), the header
@@ -1847,14 +1870,19 @@ To turn them off, in `config.toml`:
   and search snippets out of the pictures (their headers and result titles
   still show).
 
-The first page picture of a session starts a web engine inside Jarvis: the
-window may pause for a second or a few. The engine then stays loaded (about
-50-80 MB of memory, no extra process, no CPU) until Jarvis closes. It is part
-of PySide6 (6.8 or newer); without it the step says "Picture unavailable".
-That first picture also starts Jarvis's network gate: a small proxy on this PC
-(127.0.0.1, a free port) that the hidden window must use. It too stays until
-Jarvis closes; any program on this PC that finds it reaches through it only
-what the window may: public https servers, under the same rules.
+The web engine these pictures use is already running: it starts with the
+window, for the canvas (Home's page), and stays loaded until Jarvis closes. It
+is part of PySide6 (6.8 or newer); without it the step says "Picture
+unavailable" (and Home is the hologram look). The hidden window must use
+Jarvis's network gate: a small proxy on this PC (127.0.0.1, a free port). When
+no page picture and no agent page can be asked for in this run (`[live]`
+page pictures off and the agent off), there is no gate at all: the engine
+starts with a dead proxy address. Otherwise the gate starts with the canvas but
+**sealed** (it refuses every connection), and only the first page picture (or
+agent page) about to be taken opens it; the canvas itself needs no network.
+Once open it stays until Jarvis closes; any program on this PC that finds it
+reaches through it only what the window may: public https servers, under the
+same rules.
 
 ### Plan my day
 
@@ -2548,7 +2576,10 @@ card is as it was.
 
 The window folds into the orb, the orb flies to the top of your screen and a
 slim command bar opens with chips under it ("Briefing ready", "2 need your
-OK", REC while a meeting records). A chip, **Bring Jarvis back** (also in the
+OK", REC while a meeting records). With the canvas, the orb there is its flat
+JARVIS badge (every state, and the amber arc of needs you), and the bar, its
+chips, its result cards and the keycaps of the HUD key are square canvas
+frames. A chip, **Bring Jarvis back** (also in the
 tray menu) or the window key bring the window back on that screen. The window is
 only hidden meanwhile, never closed. The HUD never takes your typing by itself:
 only the HUD key or a click in its bar gives the bar the keyboard, and Enter or
@@ -3346,8 +3377,9 @@ reads only mail headers, never while hidden or minimized; see
 
 ### Talk to Jarvis (the talk key)
 
-Off until you turn it on (below). Tap **Ctrl+Alt+Space**, say what you want, and
-Jarvis takes it after about half a second of quiet: "what's on my calendar
+Off until you turn it on (below). Tap the **talk key**, say what you want, and
+Jarvis takes it after about half a second of quiet (the key is `[talk] key` in
+`config.toml`; Settings > Talk shows yours, on its **Talk key** row): "what's on my calendar
 today", "plan my day", "remember my exam is on the 14th". Tap the key again to
 end sooner, or press Esc to cancel (while he listens, Esc works wherever you
 are, as it does while he tidies files). What he heard goes in exactly as if you
@@ -3371,7 +3403,11 @@ as typed words do, and "stop" stops it.
   (`[talk] keep_warm_minutes`), so the next one starts at once; the first after
   a while takes a few seconds while it loads.
 - **The microphone** is the one picked in Settings > Meetings, else the Windows
-  default. When you tap, Jarvis stops talking and the briefing pauses (playing
+  default. On some PCs the Windows default is a virtual microphone (one an
+  audio app added) that gives only silence: pick your real one in Settings >
+  Meetings. When a talk gets nothing at all from the microphone, the canvas
+  says "Jarvis can't hear you" with **Pick a microphone** (see
+  [The look](#the-look-the-canvas)). When you tap, Jarvis stops talking and the briefing pauses (playing
   or about to play on), so neither is heard; neither resumes by itself.
 - **Turning it on.** Install the two add-ons yourself (Jarvis never runs pip;
   Settings > Talk shows the command), click Download in Settings > Talk, add
@@ -3401,7 +3437,9 @@ your click). "Hey Jarvis" itself is taken off the front.
   click Download (about 3.7 MB from GitHub; see the licence below). It needs
   talking set up first ([Talk to Jarvis](#talk-to-jarvis-the-talk-key)): it
   uses the same add-ons, the same speech model and the same microphone (the
-  one picked in Settings > Meetings, else the Windows default). Nothing new to
+  one picked in Settings > Meetings, else the Windows default, which on some
+  PCs is a virtual microphone that gives only silence: pick your real one in
+  Settings > Meetings). Nothing new to
   install: its runtime, onnxruntime, comes with faster-whisper.
 - **While Jarvis runs.** It listens while his window is open, minimized or on
   your desktop, and stops when you close him, so minimize him rather than
@@ -3415,9 +3453,10 @@ your click). "Hey Jarvis" itself is taken off the front.
   and listens again a moment after. Saying "Hey Jarvis" while he speaks does
   nothing: tap the talk key to interrupt him. While he is in control on your
   desktop it is ignored, as the talk key is.
-- **What shows it.** A small HEY JARVIS mark in his window's header and on the
-  desktop HUD (cyan while it listens, dim while paused, amber when it can't
-  hear you), a dot on his tray icon with the same words in its tooltip, and
+- **What shows it.** A small HEY JARVIS mark at the canvas's bottom left (in
+  the hologram look, in the header) and on the desktop HUD (cyan while it
+  listens, dim while paused, amber when it can't hear you; on the canvas
+  "Can't hear you" also brings the note with **Pick a microphone**), a dot on his tray icon with the same words in its tooltip, and
   Windows' own microphone icon in the taskbar. Settings > Talk says exactly
   what it is doing and which microphone it listens to.
 - **Sensitivity** (Settings > Talk): *Fewer false wakes*, *Balanced* (the
@@ -5000,7 +5039,7 @@ log. Changes apply the next time the app starts.
 | `[standing] open_when_closed` | `true` | `false`: a check never opens a closed Jarvis; what it found waits for your next open. |
 | `[standing] timeout_seconds` | `120` | One standing run may take this long (30-600); then it is stopped. |
 | `[look] sounds` | `"soft"` | The [soft sounds](#soft-sounds): `"soft"` or `"off"` (`true` / `false` mean `"soft"` / `"off"`). `"off"` here wins: Settings > Look then says they are off in config.toml and has no button for them. With `"soft"`, Settings > Look can turn them off on this PC. The "Hey Jarvis" chime keeps its own rules either way. |
-| `[look] board` | `true` | The [board](#the-desk-and-the-board) beside the conversation. `false`: Home is exactly as it was before the board (no Board button, no hint line, no desk), the board's web view is never made, and the second screen shows only its counts. |
+| `[look] board` | `true` | Home as the [canvas](#the-look-the-canvas), with its [frames](#frames-on-the-canvas) (Settings > Look calls it "Home as the canvas"). `false`: Home is the hologram look as it was before the board (no frames, no Board button, no hint line, no desk), the web view is never made, and the second screen shows only its counts. |
 | `[look] second_screen` | `false` | [Jarvis on your second screen](#jarvis-on-your-second-screen), by default. Once you use its switch in Settings > Look, your choice there wins over this key on this PC (it is kept in `assistant.json`). |
 
 The offline voice uses the same `rate` and `volume`: the rate scales Windows'
@@ -5321,7 +5360,7 @@ started one". Never a job's name, your sentence, a filter, a report, a
 subject, a sender, an address or a label. The background check writes to the
 same log file, one line at a time, so the app can still rotate it.
 
-The [board](#the-desk-and-the-board) logs only kinds, counts, frame ids (the
+The [board](#frames-on-the-canvas) logs only kinds, counts, frame ids (the
 app's own numbers, such as `f3`), durations and reason words: "Board: made and
 starting", "Board: page ready in 420 ms", "Board: ready 640 ms after it
 started", "Board: an answer put up 5 frame(s) in 3 ms", "Board: 1 frame(s)
@@ -5329,7 +5368,8 @@ changed", "Board: frame f3 open big" and "... back on the board", "Board:
 cleared (1 frame(s) kept)", "Board: a pin was refused (6 pinned at most)",
 "Board: a parked answer landed", "Board: a message was refused (size)", "Board:
 a request of the page was dropped (layout, rate)", "Board: the page's renderer
-stopped (crashed); loading the board again (1 of 3)", "Board: it can't start on
+stopped (crashed); loading the board again (1 of 2)" (a third stop shows the
+read-only tiles), "Board: it can't start on
 this PC (no_engine)" (no_engine, no_scheme, no_ready, load_failed, crashed,
 sandbox, ...), "Board: read-only tiles in its place (no_engine)" and, only when
 something was blocked, "Board: closed (requests blocked: file 1)"; the page's
@@ -5343,7 +5383,10 @@ battery_saver, full_screen), "Second screen: folded to its strip (watch)",
 "Second screen: back in full" and, if Windows refuses to leave it out of
 screenshots, "Second screen: Windows did not leave it out of capture (...); it
 shows anyway"; never a frame's words, an event's title, a sender or an
-address. The [soft sounds](#soft-sounds) log "Sounds: 9 built in 0.04 s" and,
+address. The [soft sounds](#soft-sounds) log "Sounds: 13 ready, 0 built in
+0.00 s" at a normal start (13 files: the nine moments, the frame's sound in four
+steps; "13 ready, 13 built in" about half a second the first time, nothing while they are
+off) and,
 with `--debug`, each sound left unplayed with its event and one word ("Sounds:
 settled held (speaking)": muted, quiet hours, speaking, hidden, ...);
 Settings > Look logs "Look: sounds turned off on this PC".
@@ -5363,7 +5406,7 @@ Other files in `%LOCALAPPDATA%\briefing-reader`:
 | `research\` | The empty folder Claude Code runs in for web research; research refuses to run while anything is in it. |
 | `runstate.json` | Per scheduled briefing: when it was first shown, when it was announced (`announced_at`) and first viewed (`viewed_at`), when and how a classic prompt was answered (read, dismissed, done), and (the productivity bundle) when the plan offer was posted for it (`plan_offered_at`) and when its day was planned (`planned_at`; an evening "plan tomorrow" marks tomorrow's AM slot), kept for 14 days. The catch-up task uses it, and it keeps a briefing from being announced twice; see [Catch-up and the hotkey](#catch-up-and-the-hotkey). Safe to delete (a briefing may then be announced once more). |
 | `assistant.json` | Whether Jarvis's voice is muted, the ids of the last 5 greetings (so the next one differs), whether the briefings an older version read through its prompt were taken as viewed (done once, at the first start after the update, so they are not announced again), and, once you used it, where the LIVE pop-out window was and whether it was open, and `prod_hint_shown` once the "minimize instead of Done" hint was shown, and `followups_off` while the follow-up list is turned off on this PC, and `desktop_turned_on` (with `desktop_consent_version`, the card's version) once you turned [Jarvis on your desktop](#jarvis-on-your-desktop-the-hud) on, and `look`: whether you turned the soft sounds off or the second screen on or off in Settings > Look, and how many times the empty board's hint line was shown. Never any text. Safe to delete. |
-| `sounds\` | The [soft sounds](#soft-sounds), `sound_<name>_v<n>.wav` (nine short tones), made by Jarvis at his start and written once (again only when their recipe changes). Nothing is ever recorded. Safe to delete: they are made again. The board itself writes nothing to disk: its frames last for the session only. |
+| `sounds\` | The [soft sounds](#soft-sounds), `sound_<name>_v<n>.wav` (13 short tones: the nine moments, the frame's sound in four steps), made by Jarvis the first time the sounds are on and written once (again only when a file is missing or their recipe changes; nothing while the sounds are off). Nothing is ever recorded. Safe to delete: they are made again. The board itself writes nothing to disk: its frames last for the session only. |
 | `desktop\` | Jarvis on your desktop's own records, on this PC only: `journal\<run id>.jsonl`, for each NEEDS YOUR OK card you clicked, every file it moved, copied, renamed, zipped or put in the Recycle Bin with its old and new path (Undo needs them; never logged, never sent to Claude; kept 30 days); `timers.json`, your running timers and reminders and their labels (so a restart keeps them); `focus.json` while focus mode runs. Safe to delete (Undo of those changes goes with it). |
 | `instant.json` | The weather town you set by saying or typing "my town is ..." ([Instant answers](#instant-answers)): the place Jarvis found, as shown, and its coordinates. Never logged. "Forget my town" clears it; safe to delete. |
 | `wake.json`, `wake_chime.wav` | ["Hey Jarvis"](#hey-jarvis-the-wake-word): whether you turned it on, its sensitivity and today's two counts (wakes, and wakes that heard nothing) - no audio, words or device names; and the chime, a tone Jarvis makes himself. Deleting `wake.json` turns "Hey Jarvis" off. The wake model's files are in `models\openwakeword-hey-jarvis-v0.1\`. |
@@ -5510,9 +5553,11 @@ a private window without your cookies or sign-ins (the site sees your IP
 address, as with any visit; its ads and analytics run as on any visit, and
 nothing of it is kept). That window reaches only public IPv4 addresses on the
 https port, checked where each name actually leads, never this PC or your
-local network, through Jarvis's network gate: a proxy on 127.0.0.1 that stays
-open from the first page picture until Jarvis closes (any program on this PC
-could use it too, to reach public https servers only). Email, calendar and
+local network, through Jarvis's network gate: a proxy on 127.0.0.1, sealed
+(refusing everything) until the first page picture or agent page is about to
+be taken and open from then until Jarvis closes (any program on this PC could
+use it too, to reach public https servers only); with page pictures and the
+agent off there is no gate at all. Email, calendar and
 search pictures are drawn from what Jarvis already has and send nothing.
 `[live] page_snapshots = false` (or `[live] text = false`) stops the page
 visits; see [Pictures in LIVE](#pictures-in-live).
@@ -5545,8 +5590,9 @@ cards with their drafts) stays on this PC for 7 days (`standing_runs\`), and
 **Clear** on the Agents screen deletes it. **Pause all** stops everything at
 once. See [Standing agents and rules](#standing-agents-and-rules).
 
-**The board.** It is one web view inside Jarvis's window, on the web engine
-LIVE's page pictures use, and it only shows what Jarvis hands it. It never
+**The canvas (the board).** Home's canvas - the orb, the corners and the
+frames - is one web view inside Jarvis's window, on the web engine LIVE's page
+pictures use, and it only shows what Jarvis hands it. It never
 goes online: its page and its few files (its script, its style and the three
 fonts) come from an address scheme of its own inside the app, no web page or
 outside script, style or font is ever loaded, every other address is refused,
@@ -5556,9 +5602,16 @@ cache, no cookies, nothing written to disk. It can't open windows, download,
 use the clipboard or ask for the microphone, camera, location or
 notifications. What it can tell Jarvis is a short list of requests about the
 frames he gave it (focus, pin, close, open big, bring back, show its card on
-Approvals); anything else is dropped and counted, and nothing on it approves,
-sends or undoes anything. Its engine starts with your first Ask, never with
-Jarvis. Frames last for the session and are never saved. While a frame is open
+Approvals) and the fixed words of its corner buttons (each one does what the
+same control does elsewhere in Jarvis); anything else is dropped and counted,
+and nothing on it approves, sends or undoes anything. It never receives or
+sends what you type: the ask line is Jarvis's own control over it. Its engine
+starts with the window. It never opens Jarvis's network gate: with page
+pictures and the agent off there is no gate at all, and otherwise the gate
+stays sealed until the first page picture or agent page (see
+[Pictures in LIVE](#pictures-in-live)). No attribute of its page holds a word
+of your data (a frame's title or a fact is text; the buttons are named by
+reference to it). Frames last for the session and are never saved. While a frame is open
 big, the conversation column behind it is a picture Jarvis makes of his own
 window's column (from its own pixels, never a screen capture), held in memory
 only.
@@ -6007,9 +6060,10 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
   type "environment variables": your account's or the system's) and restart
   Jarvis. **"... the private window could not be started"**: the log's
   "Page snapshots: ..." line says why; the next page tries again.
-- **The board says "The board can't start on this PC. Answers still show here
-  as text."**: its web view could not start here, so the frames show as plain
-  read-only tiles in its place (its bar says READ-ONLY; the answers are whole
+- **Home is the hologram look, not the canvas, and the board says "The board
+  can't start on this PC. Answers still show here as text."**: the canvas's web
+  view could not start here (or stopped for good), so Home goes back to the
+  hologram look and the frames show as plain read-only tiles (its bar says READ-ONLY; the answers are whole
   in the conversation, and nothing else changes). The log's "Board: it can't
   start on this PC (...)" line says why: `no_engine` (this PySide6 has no web
   engine: `py -3.13 -m pip install --upgrade PySide6`, 6.8 or newer),
@@ -6018,13 +6072,13 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
   `engine_failed`, `no_ready` or `load_failed` (the engine or its page did not
   come up in time), or `crashed` (its renderer kept stopping). Restart Jarvis
   to try again.
-- **Turning the board off**: **Ctrl+B** (or the header's Board button) folds
-  it away for now. `[look] board = false` in `config.toml`, then a restart,
-  keeps Home exactly as it was: no Board button, no hint line, no desk, and
-  the board's web engine never starts.
-- **Jarvis takes more memory once the board is up**: the board's web view
-  runs one more process of the web engine (a renderer), started with your
-  first Ask of a session, never with Jarvis, and kept until he closes. Measured
+- **Turning the canvas off**: **Ctrl+B** folds the frames away for now.
+  `[look] board = false` in `config.toml`, then a restart, keeps Home the
+  hologram look as it was: no frames, no Board button, no hint line, no desk,
+  and the web engine never starts for it.
+- **Jarvis takes more memory with the canvas**: the canvas's web view runs one
+  more process of the web engine (a renderer), started with the window and
+  kept until he closes. Measured
   offscreen with 19 frames on the board: the renderer about 45 MB of private
   memory (105 to 120 MB working set, at 100 % and 150 % scaling), and about
   25 MB more in Jarvis's own process for the engine. `[look] board = false`
@@ -6035,7 +6089,13 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
   second monitor: it hides while the PC is locked, the display is off,
   battery saver is on or a full-screen app runs on that monitor, and comes back
   when that ends; the log's "Second screen: hidden (...)" line says which.
-- **Nothing moves on the board** (frames appear at once, no outline draws in,
+- **"Jarvis can't hear you" on the canvas**: the microphone Jarvis listens to
+  gave him nothing at all. That is the one picked in Settings > Meetings, else
+  the Windows default, which on some PCs is a virtual microphone (one an audio
+  app added) that gives only silence. Press **Pick a microphone** (it opens
+  Settings at Meetings) and pick your real microphone; the note goes once you
+  pick another one, or after the next talk that hears you.
+- **Nothing moves on the canvas** (frames appear at once, no outline draws in,
   the orb holds still): motion follows `[ui] motion` and Windows' "Show
   animations" setting (Settings > Accessibility > Visual effects > Animation
   effects). With animations off, or `motion = "off"`, everything is there at
@@ -6395,6 +6455,10 @@ briefing_reader/board/        the board: its own address scheme (scheme), the me
                               (glance); board/assets: its page, style and script
 briefing_reader/desk_view.py  Home as a desk: its geometry, the conversation column and its ring head, the cue line's native part, the hint line
 briefing_reader/desk_ui.py    the desk's controller: makes and feeds the board, its ways, parking
+briefing_reader/canvas_ui.py  Home as the canvas: starts its page with the window, tells it the orb and the corners, takes its buttons' words
+briefing_reader/canvas_view.py  the canvas's native half: the ask line, the caption and the one tile over the page
+briefing_reader/canvas_now.py  the resting "Now" group: what waits for your OK, today, to-dos and agents, kept current
+briefing_reader/window_chrome.py  the canvas window's Windows behaviour: snap, Win+arrows, the taskbar, Snap Layouts, the system menu
 briefing_reader/desk_cue.py   the lit frame and its cue line while Jarvis speaks
 briefing_reader/desk_big.py   open big
 briefing_reader/second_screen.py  the second-screen display, when it hides, and the broker of "the other screen"

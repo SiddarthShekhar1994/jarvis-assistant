@@ -532,8 +532,7 @@ def main(case: str) -> dict[str, Any]:
         board.setGeometry(0, 0, 503, 700)
         board.ready.connect(lambda: seen.append(["ready"]))
         board.unavailable.connect(lambda why: seen.append(["unavailable", why]))
-        for name in ("frameFocused", "openRequested", "closeRequested", "bringBackRequested", "retryRequested",
-                     "approvalsRequested"):
+        for name in ("frameFocused", "openRequested", "closeRequested", "bringBackRequested", "approvalsRequested"):
             getattr(board, name).connect(lambda frame_id, n=name: seen.append([n, frame_id]))
         board.pinRequested.connect(lambda frame_id, on: seen.append(["pinRequested", frame_id, on]))
         board.layoutChanged.connect(lambda _layout: seen.append(["layoutChanged"]))
@@ -695,7 +694,8 @@ def main(case: str) -> dict[str, Any]:
                               main_world(board, f"document.getElementById('title-s{index}').closest('.frame')"
                                                 ".style.getPropertyValue('--i')")] for index in range(7)]
         pump(1.5)
-        # The states, as the owner meets them: waits, failed (Try again), empty, then closing and Bring back.
+        # The states, as the owner meets them: waits, failed (its warning, no button: canvas part 5A), empty, then
+        # closing and Bring back.
         board.apply(text_frame("w1", waits="Reply waits on Approvals"))
         board.apply(text_frame("x1", status="failed", status_text="Google Calendar didn't answer."))
         board.apply(text_frame("e1", status="empty", status_text="Nothing unread, sir.", status_meta="Checked 9:44 AM"))
@@ -703,12 +703,13 @@ def main(case: str) -> dict[str, Any]:
         report["states"] = {
             "waits": [styled("w1", "", "borderTopLeftRadius"), styled("w1", ".f-wait", "display")],
             "failed": [styled("x1", "", "backgroundColor"), main_world(
-                board, "document.getElementById('title-x1').closest('.frame').querySelector('.f-act').textContent")],
+                board, "document.getElementById('title-x1').closest('.frame').querySelector('.f-fail').textContent"),
+                main_world(board, "document.getElementById('title-x1').closest('.frame')"
+                                  ".querySelectorAll('.f-body button').length")],
             "empty": main_world(board, "document.getElementById('title-e1').closest('.frame').querySelector('.f-checked')"
                                        ".textContent"),
         }
         main_world(board, "document.getElementById('title-w1').closest('.frame').querySelector('.f-wait').click(); 1")
-        main_world(board, "document.getElementById('title-x1').closest('.frame').querySelector('.f-act').click(); 1")
         main_world(board, "document.getElementById('title-m1').closest('.frame').focus(); 1")
         pump(0.3)
         report["focused"] = {"keys": styled("m1", ".f-keys", "display"), "meta": styled("m1", ".f-meta", "display"),
@@ -1264,11 +1265,17 @@ def desk_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> d
 _WAYS_PAGE = r"""JSON.stringify((function () {
   function words(node) { return node ? node.innerText.replace(/\s+/g, ' ').trim() : ''; }
   function frameOf(node) { return node && node.closest ? node.closest('.frame') : null; }
+  function named(n) {                     // the accessible name: by reference (canvas part 5A), else its label
+    var ids = n.getAttribute('aria-labelledby');
+    if (!ids) { return n.getAttribute('aria-label') || ''; }
+    return ids.split(' ').map(function (id) { var el = document.getElementById(id); return el ? el.textContent : ''; })
+      .join(' ').replace(/\s+/g, ' ').trim();
+  }
   var root = document.getElementById('board'), box = root.getBoundingClientRect();
   var list = document.querySelector('#strip .s-list'), brace = list.querySelector('.ix-brace');
   var strip = Array.prototype.filter.call(list.children, function (n) { return n !== brace; }).map(function (n) {
     var pip = n.querySelector('.ix-pip');
-    return {cls: n.className, label: n.getAttribute('aria-label') || '', top: n.offsetTop, height: n.offsetHeight,
+    return {cls: n.className, label: named(n), top: n.offsetTop, height: n.offsetHeight,
             pip: pip ? getComputedStyle(pip).display : '', tab: n.tabIndex, border: getComputedStyle(n).borderTopStyle};
   });
   var frames = Array.prototype.map.call(root.querySelectorAll('.frame'), function (f) {
@@ -1291,7 +1298,7 @@ _WAYS_PAGE = r"""JSON.stringify((function () {
           cleared: row.classList.contains('shown') ? words(row) : '',
           active: active && active !== document.body ? active.className : '',
           activeId: frameOf(active) ? frameOf(active).querySelector('.f-title').id.slice(6) : '',
-          activeIx: active && active.classList && active.classList.contains('ix') ? active.getAttribute('aria-label') : '',
+          activeIx: active && active.classList && active.classList.contains('ix') ? named(active) : '',
           groups: Array.prototype.map.call(root.querySelectorAll('.group'), function (g) {
             return {cls: g.className, display: getComputedStyle(g).display, time: g.querySelector('.g-time').textContent}; }),
           bar: words(document.getElementById('bar')), clearDisabled: document.querySelector('#bar .b-clear').disabled,
@@ -3226,7 +3233,15 @@ _TYPED_PAGE = r"""JSON.stringify((function (markers) {
   var parts = function (sel) {
     return Array.prototype.map.call(document.querySelectorAll(sel), function (el) { return el.textContent; });
   };
-  return {frames: found, scripts: document.scripts.length, pwned: typeof window.pwned,
+  // Canvas part 5A (the final review's ship-gate 2): no attribute ANYWHERE under the board, the strip or the big layer
+  // holds a word of the data - the strip's buttons and the satellites' too, not only the frames' bodies.
+  var everywhere = [];
+  document.querySelectorAll('#board, #board *, #strip, #strip *, #big, #big *').forEach(function (el) {
+    Array.prototype.forEach.call(el.attributes, function (a) {
+      markers.forEach(function (m) { if (a.value.indexOf(m) >= 0) { everywhere.push(el.tagName + ' ' + a.name); } });
+    });
+  });
+  return {frames: found, everywhere: everywhere, scripts: document.scripts.length, pwned: typeof window.pwned,
           links: document.querySelectorAll('#board a, #board img, #board iframe, #board script, #board style').length,
           fracTop: parts('#board .mx-frac > .mx-top'), fracBottom: parts('#board .mx-frac > .mx-bot'),
           sup: parts('#board .mx-sup'), rad: parts('#board .mx-rad'), idx: parts('#board .mx-idx'),
@@ -4161,6 +4176,32 @@ def _canvas2_put(board: Any, frames: list[dict[str, Any]], group: str = "g1", pi
     board.apply({"type": "desk", "state": "enter"})
 
 
+_SETTLED = r"""JSON.stringify((function () {
+  var look = board.layout();
+  return look ? {settled: look.settled, win: look.win} : null;
+})())"""
+
+
+def _canvas2_settled(board: Any, main_world: Any, pump: Any, size: tuple[int, int], least: float = 0.22,
+                     limit: float = 8.0) -> bool:
+    """Canvas part 5A (a flake seen once under the full suite's load: 6 frames read as folded at 1280x800): wait for
+    the page's layout to have settled for ``size`` - its window that size, no pack waiting, the last pack made for
+    this room - and twice in a row, never a fixed time alone. False when it never settled within ``limit`` s."""
+    pump(least)
+    deadline = time.monotonic() + limit
+    calm = 0
+    while time.monotonic() < deadline:
+        state = json.loads(main_world(board, _SETTLED) or "null")
+        if state and state.get("settled") and list(state["win"]) == list(size):
+            calm += 1
+            if calm >= 2:
+                return True
+        else:
+            calm = 0
+        pump(0.05)
+    return False
+
+
 def canvas_layout_case(make: Any, wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> dict[str, Any]:
     """The canvas's layout in the real page: 1, 3, 6, 9, 12 and 24 frames at 900x600, 1280x800, 1920x1080 and
     2560x1440 (the same page, resized: it packs again), then each kind with long words at 1280x800 and 1920x1080."""
@@ -4179,8 +4220,8 @@ def canvas_layout_case(make: Any, wait_until: Any, pump: Any, main_world: Any, s
         for size in CANVAS2_SIZES:
             host.resize(*size)
             board.setGeometry(0, 0, *size)
-            pump(0.22)
-            report["sizes"][f"{count}@{size[0]}x{size[1]}"] = look()
+            settled = _canvas2_settled(board, main_world, pump, size)
+            report["sizes"][f"{count}@{size[0]}x{size[1]}"] = dict(look(), settled=settled)
     # each kind with long words
     report["long"] = {}
     for size in ((1280, 800), (1920, 1080)):
@@ -4732,6 +4773,14 @@ def canvas_resting_case(make: Any, wait_until: Any, pump: Any, main_world: Any, 
     pump(0.5)
     report["short"] = resting()
     report["short_look"] = look()
+    # part 5A: the same two at 1920x1080, where a grid row is tallest (part 3's leftover: a row of empty room)
+    host.resize(1920, 1080)
+    board.setGeometry(0, 0, 1920, 1080)
+    _canvas2_settled(board, main_world, pump, (1920, 1080))
+    report["short_look_1920"] = look()
+    host.resize(*CANVAS3_SIZE)
+    board.setGeometry(0, 0, *CANVAS3_SIZE)
+    _canvas2_settled(board, main_world, pump, CANVAS3_SIZE)
     # ---- a day with nothing booked: as tall as its words, beside frames of a row's height -----------------------------
     board.apply({"type": "clear"})
     nothing = {"type": "frame", "id": "d1", "kind": "calendar", "title": "Today", "meta": "Tue Nov 17",

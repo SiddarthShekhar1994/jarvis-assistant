@@ -126,6 +126,32 @@ class FileTests(unittest.TestCase):
         sounds.build_files(self.folder)
         self.assertEqual(paths[HEARD].stat().st_mtime_ns, stamp)
 
+    # The final review's resilience 4 (canvas part 5A): a normal start renders nothing.
+
+    def test_each_file_s_size_is_known_from_its_recipe(self) -> None:
+        for name, recipe in RECIPES.items():
+            with self.subTest(sound=name):
+                self.assertEqual(sounds.file_size(recipe), len(sounds.wav_bytes(sounds.render(recipe))))
+
+    def test_a_second_start_renders_nothing_and_a_wrong_size_is_rendered_again(self) -> None:
+        first: list[str] = []
+        paths = sounds.build_files(self.folder, rendered=first)
+        self.assertEqual(sorted(first), sorted(RECIPES))                  # 13: the nine moments, the frame's four
+        self.assertEqual(len(first), 13)
+        again: list[str] = []
+        real = sounds.render
+        calls: list[int] = []
+        sounds.render = lambda recipe: (calls.append(1), real(recipe))[1]
+        try:
+            sounds.build_files(self.folder, rendered=again)
+            self.assertEqual((again, calls), ([], []))                    # nothing rendered at all
+            paths[HEARD].write_bytes(b"cut short")
+            sounds.build_files(self.folder, rendered=again)
+        finally:
+            sounds.render = real
+        self.assertEqual((again, len(calls)), ([HEARD], 1))
+        self.assertEqual(paths[HEARD].stat().st_size, sounds.file_size(RECIPES[HEARD]))
+
 
 class BoardTests(unittest.TestCase):
     def make(self, **kw) -> tuple[SoundBoard, RecordingPlayer, FakeClock]:

@@ -237,6 +237,7 @@ class _Frame:
     sent_picture: str = ""
     key: str = ""                  # its source (part 5c): a later answer built from it builds this frame again
     changed: bool = False          # it was built again and said something else: CHANGED stays
+    passing: bool = False          # canvas part 5A: a resting frame kept current - its light plays, no tag stays
 
     def shown(self) -> tuple[dict[str, Any], dict[str, Any] | None, str]:
         """(the frame message, its picture message or None, the card go_approvals opens): a merged frame is the mail as
@@ -254,6 +255,15 @@ class _Frame:
 
     def waits(self) -> bool:
         return any(part.frame.get("waits") for part in self.parts.values())
+
+    def trim(self) -> None:
+        """Only the parts shown() can use stay: the newest read one and the newest waiting one (the final review's
+        resilience 0: a frame built again by many answers - a page read again and again - never keeps each build)."""
+        parts = sorted(self.parts.values(), key=lambda part: part.seq)
+        keep = [part for part in parts if not part.frame.get("waits")][-1:] + \
+            [part for part in parts if part.frame.get("waits")][-1:]
+        if len(keep) < len(parts):
+            self.parts = {part.source: part for part in sorted(keep, key=lambda part: part.seq)}
 
 
 @dataclass
@@ -349,6 +359,26 @@ class BoardFeed:
         """The frames sent again with "changed" (built again, saying something else) since the last call."""
         found, self._just_changed = list(dict.fromkeys(self._just_changed)), []
         return [frame_id for frame_id in found if frame_id in self._frames]
+
+    def passing(self) -> bool:
+        """A resting frame kept current still carries the CHANGED of its last change (pass_changed ends it)."""
+        return any(frame.passing for frame in self._frames.values())
+
+    def pass_changed(self) -> list[dict[str, Any]]:
+        """Canvas part 5A (part 3's leftover): a resting frame kept current ("again") keeps no CHANGED tag once its
+        light has played - it is sent again without it. An answer's frame built again keeps its tag, as before."""
+        out: list[dict[str, Any]] = []
+        for frame in self._frames.values():
+            if not frame.passing:
+                continue
+            frame.passing = False
+            frame.changed = False
+            shown = self._shown(frame)
+            text = _same(shown)
+            if text != frame.sent:
+                frame.sent = text
+                out.append(shown)
+        return out
 
     def parked_groups(self) -> list[str]:
         """The groups parked out of sight (they came while the owner read the board), oldest first."""
@@ -515,8 +545,10 @@ class BoardFeed:
         before = frame.shown()[0] if again and frame.parts else None
         self._seq += 1
         frame.parts[source] = _Part(source, frame_message, picture, str(approvals or ""), self._seq)
+        frame.trim()
         if before is not None and before.get("status", "ok") == "ok" and self._seen(frame)                 and substance(frame.shown()[0]) != substance(before):
             frame.changed = True                   # part 3B: a resting frame kept current says something else
+            frame.passing = True                   # ... its light plays; the tag goes again (pass_changed)
             self._just_changed.append(frame.id)
             self._counts["changed"] += 1
         if merge and not frame.merge:
@@ -571,9 +603,11 @@ class BoardFeed:
                 return []
         elif before.get("status", "ok") == "ok" and not not_ready and self._seen(frame):
             frame.changed = True                   # (also to a final "empty": the list was emptied)
+            frame.passing = False                  # an answer built it again: its tag stays
             self._just_changed.append(frame.id)
             self._counts["changed"] += 1
         self._counts["rebuilt"] += 1
+        frame.trim()                               # the builds shown() can no longer use go
         out: list[dict[str, Any]] = []
         shown = self._shown(frame)
         text = _same(shown)

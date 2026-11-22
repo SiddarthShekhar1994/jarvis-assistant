@@ -1097,6 +1097,7 @@ ERROR_MAIL = "mail:"                    # + the card's action id: Gmail refused 
 BRIEFING_ERROR = states_view.ErrorInfo(ERROR_BRIEFING, "Not loaded", "Couldn't load your briefing.",
                                        states_view.RETRY_TEXT)
 SIGN_IN_SENTENCE = "Claude Code isn't signed in."
+SIDE_CHIP_CAP = 44                      # the desk's side chip: the tile's words, cut to this many characters
 SIGN_IN_HELP = "Sign Claude Code in to your claude.ai plan, then ask again."
 MAIL_REFUSED_SENTENCE = "Gmail refused the {what}."
 
@@ -1599,6 +1600,13 @@ class ReadingView(QWidget):
         self.briefing_chip.clicked.connect(lambda: self.set_tab(SCREEN_BRIEFING))
         self.approvals_chip = holo.ActionChip(needs_ok_chip(1), holo.CHIP_AMBER)
         self.approvals_chip.clicked.connect(lambda: self.set_tab(SCREEN_APPROVALS))
+        # The desk hides Home's stage, and with it the offer's or the error's tile: while one waits, the desk's chips
+        # row starts with an amber chip in the tile's own words, and it shows the stage with the tile (the final
+        # review's integration 0). Only the desk shows it.
+        self.side_chip = holo.ActionChip("", holo.CHIP_AMBER)
+        self.side_chip.clicked.connect(self.show_side_tile)
+        self.side_chip.hide()
+        self._side_folded = False                 # the desk folded for the side tile: it comes back once that goes
         # An open offer is ONE amber tile bottom-right of the orb (round 2, part 3a): its commit hands the
         # offer's own link to the app (homeLink), exactly what a click on its Transcript link does; Not now
         # puts it away on Home only. The answer just given (cyan chip) opens its moment or the Transcript.
@@ -1668,6 +1676,7 @@ class ReadingView(QWidget):
         chips = QHBoxLayout(self._chip_row)
         chips.setContentsMargins(0, 0, 0, 0)
         chips.addStretch(1)
+        chips.addWidget(self.side_chip)
         for chip in self._home_chips():
             chips.addWidget(chip)
         chips.addWidget(self.waiting_readout)
@@ -2147,6 +2156,8 @@ class ReadingView(QWidget):
         self._sync_side()
         self._sync_service_notes()
         self._sync_look()
+        self._sync_chip()                        # the desk's side chip says it (or goes)
+        self._sync_side_fold()
 
     def errors(self) -> list[states_view.ErrorInfo]:
         """The errors waiting on Home, the one shown first."""
@@ -2228,9 +2239,16 @@ class ReadingView(QWidget):
             if only and name != only:
                 continue
             replaced = ((name == "voice" and status == hud.STATUS_WARN and self._offline_voice)
-                        or (name == "notion" and ERROR_BRIEFING in self._errors)
-                        or (name == ASK_CHIP and ERROR_SIGN_IN in self._errors))
+                        or (name == "notion" and self._error_tile_says(ERROR_BRIEFING))
+                        or (name == ASK_CHIP and self._error_tile_says(ERROR_SIGN_IN)))
             self.header.set_service(name, hud.STATUS_OFF if replaced else status, tooltip)
+
+    def _error_tile_says(self, key: str) -> bool:
+        """Home's error tile shows this error now (so the header's note need not say it): it is the first error, no
+        offer's tile is in its place, and the desk does not hide the stage (the final review's integration 0)."""
+        errors = self.errors()
+        return (bool(errors) and errors[0].key == key and self.offer_tile.info() is None
+                and (self._canvas or not self._desk_shown))
 
     def set_offers(self, offers: Sequence[offer_view.OfferInfo]) -> None:
         """The open offers, oldest first (the productivity bundle). Those not put away with Not now count as
@@ -2247,7 +2265,9 @@ class ReadingView(QWidget):
         if len(waiting) != self._offers:
             self._offers = len(waiting)
             self._sync_look()
+        self._sync_service_notes()               # an offer's tile in the error tile's place
         self._sync_chip()
+        self._sync_side_fold()
 
     def _on_offer_not_now(self, offer_id: int) -> None:
         """Not now: the offer leaves Home (its tile, the question, the needs you); the Transcript keeps its
@@ -2587,16 +2607,21 @@ class ReadingView(QWidget):
         """The desk's chips row: the amber chip first, then the answer just given and Briefing ready, whatever the
         caption does (the turns say what Jarvis says there); the compact column shows only the first."""
         needs_ok = self._pending + self._desktop_waiting
-        due = ((self.approvals_chip, needs_ok > 0, needs_ok_chip(needs_ok)),
+        side = self.side_words()
+        due = ((self.side_chip, bool(side), side),
+               (self.approvals_chip, needs_ok > 0, needs_ok_chip(needs_ok)),
                (self.answer_chip, bool(self._answer[0]), self._answer[0]),
                (self.briefing_chip, self._new_briefing, self.briefing_chip.text()))
-        room = 1 if self.desk_compact() else len(due)
+        # The side tile's chip takes a place of its own: with it, the row keeps to two chips (the column's width).
+        room = 1 if self.desk_compact() else 2 if side else len(due)
         was_shown = not self.briefing_chip.isHidden()
         for chip, wanted, text in due:
             shown = wanted and room > 0
             room -= 1 if shown else 0
             if shown and chip.text() != text:
                 chip.setText(text)
+                if chip is self.side_chip:
+                    chip.setAccessibleName(f"{text}: show it on Home")
                 chip.updateGeometry()
             chip.setVisible(shown)
         self.waiting_readout.setVisible(False)
@@ -2604,10 +2629,49 @@ class ReadingView(QWidget):
         if not self.briefing_chip.isHidden() and not was_shown:
             self.briefing_chip.start_ping()
 
+    def side_words(self) -> str:
+        """The words of Home's side tile while one waits - the open offer's title, else the first error's sentence,
+        as the tile shows them (cut to SIDE_CHIP_CAP) -, else ""."""
+        info = self.offer_tile.info()
+        errors = self.errors()
+        words = info.title if info is not None else errors[0].sentence if errors else ""
+        words = " ".join(str(words or "").split())
+        return words if len(words) <= SIDE_CHIP_CAP else words[:SIDE_CHIP_CAP - 3].rstrip() + "..."
+
+    def show_side_tile(self) -> None:
+        """The desk's side chip (and the toast's Prepare brief): Home's stage with the offer's or the error's tile,
+        exactly as Ctrl+B folds the desk; the desk comes back once the tile is answered or dismissed and frames are
+        still on the board (_sync_side_fold). Nothing on the canvas (its tile is on it) or while no tile waits."""
+        if self._canvas or not self.side_words():
+            return
+        if self._screen != SCREEN_HOME:
+            self.set_tab(SCREEN_HOME)
+        self.close_moment()
+        if not self._desk_shown:
+            return
+        had_keys = _holds_focus(self.side_chip)
+        self._board_folded = True
+        self._side_folded = True
+        self._sync_desk(fly=False)
+        tile = self.stage.side_tile()
+        if had_keys and tile is not None:
+            first = next((button for button in tile.findChildren(QAbstractButton) if button.isVisible()), None)
+            (first or tile).setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _sync_side_fold(self) -> None:
+        """The tile the side chip showed was answered or dismissed: the desk comes back (frames still on the board)."""
+        if self._side_folded and not self.side_words():
+            self._side_folded = False
+            if self._board_folded and not self._canvas:
+                self._board_folded = False
+                self._sync_desk(fly=False)
+
     def _sync_chip(self) -> None:
         """At most one quiet chip at rest and none while an offer's amber tile waits (one focal point): the
         answer just given (cyan: Plan ready / Brief ready), Briefing ready (cyan) before N need your OK
         (amber); the Dock carries the last two as well. On the desk: _sync_desk_chips."""
+        if not self._desk_shown or self._canvas:
+            self.side_chip.setVisible(False)     # only the desk hides the stage's tile
         if self._canvas:
             self._sync_canvas_chips()
             return
@@ -2894,6 +2958,7 @@ class ReadingView(QWidget):
             page.head.orb.set_glow_share(self.glow_share())     # part 5c: a lit frame halves its glow too
             if self._ground_painter is not None:
                 page.head.orb.set_ground(self._ground_painter)
+            page.head.orb.set_recording(bool(self._recording))   # a meeting that records already: its coral ring
             self._home_switch.addWidget(page)
             self._desk = page
             self._sync_desk_turns()
@@ -2964,6 +3029,7 @@ class ReadingView(QWidget):
         while the board is empty."""
         if not self._board_on or self._board_count == 0:
             return
+        self._side_folded = False                # the owner folds or unfolds it: the side chip's fold is theirs now
         if self._canvas:                         # the canvas: the board's box folds away and comes back
             if self._screen != SCREEN_HOME or self._moment:
                 self._board_folded = False
@@ -3015,6 +3081,20 @@ class ReadingView(QWidget):
             self._desk_shown = bool(shown)
             self.deskShown.emit(bool(shown))
             return
+        # The command bar and the chips change parents as the desk forms or folds, and Qt takes the keyboard from a
+        # widget it reparents: whichever of them had it gets it back after the switch (the final review's int. 1).
+        bar_focus = _holds_focus(self.command_bar)
+        chip_focus = next((chip for chip in self._chip_row.findChildren(QWidget) if chip is QApplication.focusWidget()),
+                          None)
+        self._show_desk_now(shown, fly=fly)
+        self._sync_service_notes()               # the stage's error tile in or out of sight
+        if bar_focus:
+            self.command_bar.focus_input()
+        elif chip_focus is not None and chip_focus.isVisible():
+            chip_focus.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.deskShown.emit(shown)
+
+    def _show_desk_now(self, shown: bool, *, fly: bool) -> None:
         if shown:
             desk = self.desk()
             flight = fly and self._screen == SCREEN_HOME and self.stage.isVisible() and self.isVisible()
@@ -3036,7 +3116,6 @@ class ReadingView(QWidget):
             self._desk_shown = False
             self._move_home_parts(False)
             self._home_switch.setCurrentWidget(self._home_stage_page)
-        self.deskShown.emit(shown)
 
     def _fly_ring(self, pixmap: QPixmap, start: QRectF) -> None:
         """The ring flies from the stage to the column head (420 ms ease-out-expo; calm x1.6; off: it is there)."""
@@ -3080,6 +3159,8 @@ class ReadingView(QWidget):
             chip_slot.addWidget(row)
             chips.removeWidget(self.approvals_chip)
             chips.insertWidget(1, self.approvals_chip)          # the amber chip first (DESIGN-SPEC 2.1)
+            chips.removeWidget(self.side_chip)
+            chips.insertWidget(1, self.side_chip)               # ... after the side tile's, which goes first of all
             chips.setStretch(0, 0)                              # from the column's left edge
         else:
             holder = self._command_holder.layout()
@@ -3611,6 +3692,8 @@ class ReadingView(QWidget):
             badge.setVisible(recording)
         self.hero.set_recording(recording)
         self.briefing_orb.set_recording(recording)
+        if self._desk is not None:               # the desk's ring is Home's ring while it shows (final review, int. 3)
+            self._desk.head.orb.set_recording(recording)
         self.dock.set_recording(recording)
         self.meetings_stage.set_recording(recording)
         self.header._fit_notes()
@@ -6487,12 +6570,14 @@ class AppController(QObject):
             screen = {TOAST_VIEW: SCREEN_BRIEFING, TOAST_PREP: SCREEN_HOME, TOAST_AGENTS: SCREEN_AGENTS}.get(key)
             if self.desktop.leave_hud(screen) and key == TOAST_PREP:
                 reading.close_moment()
+                reading.show_side_tile()               # the stage with the tile, also over the desk
             return
         if key == TOAST_VIEW:
             reading.set_tab(SCREEN_BRIEFING)
         elif key == TOAST_PREP:
             reading.set_tab(SCREEN_HOME)
             reading.close_moment()
+            reading.show_side_tile()                   # the stage with the prep offer's tile, also over the desk
         elif key == TOAST_AGENTS:
             reading.set_tab(SCREEN_AGENTS)
         force_foreground(self.window)

@@ -200,19 +200,30 @@ def file_name(name: str) -> str:
     return f"sound_{name}_v{RECIPE_VERSION}.wav"
 
 
-def build_files(folder: Path) -> dict[str, Path]:
+WAV_HEADER = 44                   # a 48 kHz mono 16-bit WAV file's header (the wave module's), before the samples
+
+
+def file_size(recipe: Recipe) -> int:
+    """The size of ``recipe``'s WAV file, known without rendering it: the header and two bytes a sample."""
+    return WAV_HEADER + 2 * int(round(recipe.length_ms * RATE / 1000.0))
+
+
+def build_files(folder: Path, *, rendered: list[str] | None = None) -> dict[str, Path]:
     """Every sound written to ``folder`` (only where missing or a different size), older versions removed; the
-    paths by name. Raises OSError when the folder cannot be written."""
+    paths by name. A sound is rendered only when its file of this recipe version is missing or not the size its recipe
+    gives (the final review's resilience 4: a normal start renders nothing); ``rendered`` collects the names it did.
+    Raises OSError when the folder cannot be written."""
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     paths: dict[str, Path] = {}
     keep = set()
     for name, recipe in RECIPES.items():
-        data = wav_bytes(render(recipe))
         path = folder / file_name(name)
         keep.add(path.name)
-        if not path.is_file() or path.stat().st_size != len(data):
-            path.write_bytes(data)
+        if not path.is_file() or path.stat().st_size != file_size(recipe):
+            path.write_bytes(wav_bytes(render(recipe)))
+            if rendered is not None:
+                rendered.append(name)
         paths[name] = path
     for old in folder.glob("sound_*_v*.wav"):     # only Jarvis's own sounds, of another recipe version
         if old.name not in keep:
@@ -292,15 +303,20 @@ class SoundBoard(QObject):
         thread = threading.Thread(target=self._build, name="jarvis-sounds", daemon=True)
         thread.start()
 
+    def can_start(self) -> bool:
+        """``start`` would build now: not started yet, and not under the test guard."""
+        return not self._started and not self._guard
+
     def _build(self) -> None:
         began = time.monotonic()
+        rendered: list[str] = []
         try:
-            paths = build_files(self._folder)
+            paths = build_files(self._folder, rendered=rendered)
         except Exception as exc:  # noqa: BLE001 - no sounds this run; Jarvis works as before
             logger.info("Sounds: not built (%s)", type(exc).__name__)
             paths = None
         else:
-            logger.info("Sounds: %d built in %.2f s", len(paths), time.monotonic() - began)
+            logger.info("Sounds: %d ready, %d built in %.2f s", len(paths), len(rendered), time.monotonic() - began)
         self._built.emit(paths)
 
     def _on_built(self, paths: object) -> None:

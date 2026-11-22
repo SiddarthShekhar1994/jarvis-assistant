@@ -276,6 +276,72 @@ class HudAndToastTests(LookCase):
         self.assertGreater(new.pixelColor(0, 0).alpha(), 200)                  # square, its tick on the corner
         self.assertGreater(new.pixelColor(toast.width() // 2, 0).blue(), 150)
 
+    # Canvas part 5A: the HUD's result cards and the HUD key's keycaps (part 4's leftovers).
+
+    def card(self, tone: str) -> hud_overlay.ResultCard:
+        card = hud_overlay.ResultCard(native=hud_overlay.NoNative())
+        self.addCleanup(card.deleteLater)
+        card.set_content(hud_overlay.CardContent("FILE WORD DOCUMENT", "Essay draft.docx", "Documents", tone=tone))
+        return card
+
+    def test_a_result_card_is_a_square_opaque_canvas_frame_and_its_glow_goes_square(self) -> None:
+        card = self.card(hud_overlay.TONE_CYAN)
+        old = rendered(card)
+        self.assertEqual(card.glow().radius, hud_overlay.CARD_RADIUS)
+        self.on()
+        card.update()
+        new = rendered(card)
+        self.assertLess(old.pixelColor(1, 1).alpha(), 60)                     # the rounded corner
+        self.assertEqual(new.pixelColor(1, 1).alpha(), 255)                    # square and opaque
+        self.assertEqual(card.glow().radius, holo.CANVAS_RADIUS)
+        self.assertGreater(new.pixelColor(card.width() // 2, 0).blue(), 150)   # the frames' bright edge
+        inside = [new.pixelColor(x, y) for x in range(2, card.width() - 2, 9) for y in range(2, card.height() - 2, 9)]
+        self.assertTrue(all(color.alpha() == 255 for color in inside))         # a window that takes clicks: opaque
+        holo.set_canvas_look(False)
+        card.update()
+        self.assertEqual(rendered(card), old)                                  # off: exactly as before
+
+    def test_an_amber_card_keeps_its_amber_edge(self) -> None:
+        card = self.card(hud_overlay.TONE_AMBER)
+        self.on()
+        new = rendered(card)
+        self.assertTrue(amberish(new.pixelColor(card.width() // 2, 0)))
+        self.assertFalse(amberish(rendered(self.card(hud_overlay.TONE_CYAN)).pixelColor(card.width() // 2, 0)))
+
+    def test_briefing_s_and_the_plan_s_120_px_rings_wear_the_badge_in_the_look(self) -> None:
+        # Canvas part 5A: part 4's leftover rings, where the badge fits their box (its compact form).
+        from briefing_reader import briefing_view, plan_view
+
+        def button(text: str):
+            return briefing_view.TransportButton(text, holo.GO)
+
+        briefing = briefing_view.BriefingStage(hud.SpeechLabel(), button("Play"), button("Skip"),
+                                               holo.HoloButton("Everything"), button("Notion"),
+                                               briefing_view.SectionsButton())
+        plan = plan_view.PlanStage()
+        for stage in (briefing, plan):
+            self.addCleanup(stage.deleteLater)
+            with self.subTest(stage=type(stage).__name__):
+                orb = stage.orb
+                self.assertTrue(orb.badge_form())
+                self.assertFalse(orb.badge_shown())                            # without the look: the old ring
+                self.on()
+                self.assertTrue(orb.badge_shown())
+                self.assertEqual(orb.badge_tier(), "compact")
+                holo.set_canvas_look(False)
+
+    def test_the_hud_key_s_keycaps_are_square(self) -> None:
+        caps = hud_overlay._KeyCaps("Ctrl+Space")                              # noqa: SLF001
+        self.addCleanup(caps.deleteLater)
+        caps.resize(caps.sizeHint())
+        old = rendered(caps)
+        self.on()
+        new = rendered(caps)
+        self.assertLess(old.pixelColor(0, 0).alpha(), 40)                     # the rounded corner
+        self.assertGreater(new.pixelColor(0, 0).alpha(), 40)                  # a square cap's corner
+        holo.set_canvas_look(False)
+        self.assertEqual(rendered(caps), old)
+
 
 if __name__ == "__main__":
     unittest.main()

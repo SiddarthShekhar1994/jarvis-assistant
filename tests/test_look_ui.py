@@ -200,6 +200,28 @@ class SwitchTests(ControllerTestCase):
         controller.set_sounds_on(True)
         self.assertTrue(controller.sounds_on())
 
+    def test_sounds_off_build_nothing_and_turning_them_on_builds_them(self) -> None:
+        # The final review's resilience 4 (canvas part 5A): no build and no player while the sounds are off.
+        from unittest import mock
+
+        host = FakeHost(self.root)
+        host._prefs.set_sounds_off(True)                  # off on this PC (Settings > Look) before the start
+        with mock.patch.object(sounds.SoundBoard, "start") as start:
+            controller = look_ui.LookController(host, test_guard=False)
+            self.assertEqual(start.call_count, 0)
+            self.assertFalse(controller.sounds.ready)     # no player either
+            controller.set_sounds_on(True)
+            self.assertEqual(start.call_count, 1)         # built now
+            controller.set_sounds_on(False)
+            controller.set_sounds_on(True)
+            self.assertEqual(start.call_count, 2)         # (SoundBoard.start itself builds once)
+        with mock.patch.object(sounds.SoundBoard, "start") as start:
+            look_ui.LookController(FakeHost(self.root / "config_off", sounds_value="off"), test_guard=False)
+            self.assertEqual(start.call_count, 0)         # config.toml's off: never built
+        with mock.patch.object(sounds.SoundBoard, "start") as start:
+            look_ui.LookController(FakeHost(self.root / "on"), test_guard=False)
+            self.assertEqual(start.call_count, 1)         # on: built at start, as before
+
     def test_config_off_wins(self) -> None:
         controller, host, player = self.make(sounds_value="off")
         controller.set_sounds_on(True)

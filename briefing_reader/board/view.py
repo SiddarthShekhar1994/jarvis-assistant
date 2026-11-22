@@ -8,7 +8,7 @@ its place when it can't be.
                           queued until the page is ready), set_motion(level). Out: one typed signal per request the page
                           made and Python accepted - ready, layoutChanged(BoardLayout), frameFocused(id),
                           openRequested(id), closeRequested(id), pinRequested(id, on), bringBackRequested(id),
-                          retryRequested(id), approvalsRequested(id). When the web engine is missing (no QtWebEngine 6.8+,
+                          approvalsRequested(id). When the web engine is missing (no QtWebEngine 6.8+,
                           no scheme), refuses to start (a sandbox turned off, unsafe flags), the page does not say it is
                           ready within READY_TIMEOUT_MS, or its renderer stops more than MAX_RESTARTS times, it shows
                           BoardFallback by itself and emits unavailable(reason): no web view and no renderer are left.
@@ -500,7 +500,6 @@ class BoardView(QWidget):
     closeRequested = Signal(str)
     pinRequested = Signal(str, bool)
     bringBackRequested = Signal(str)
-    retryRequested = Signal(str)
     approvalsRequested = Signal(str)
     # Part 5b: the bar's Clear, the cleared row's Bring back, the pill's Show, the owner at the board (the pointer over
     # it, the focus in it), and the keyboard focus out of it (Esc, F6: "ask" / "conversation").
@@ -546,6 +545,7 @@ class BoardView(QWidget):
         self._bar: dict[str, Any] | None = None
         self._bar_widget: BoardBar | None = None
         self._tiles: GlanceTiles | None = None
+        self._tiles_area: QScrollArea | None = None
         self._queue: deque[str] = deque()
         self._motion = holo.motion_level()
         self._counts: Counter[str] = Counter()
@@ -673,6 +673,8 @@ class BoardView(QWidget):
             self._counts[f"tiles:{checked.type}"] += 1
             if checked.type in ("frame", "remove", "clear", "picture", "group", "remove_group", "bar", "cleared"):
                 self._show_tiles()
+            elif checked.type == "reveal":
+                self._reveal_tiles(checked.group_id)
             return True
         self._counts[f"sent:{checked.type}"] += 1
         if self._phase == _READY:
@@ -754,6 +756,19 @@ class BoardView(QWidget):
         shown += [frame for frame_id, frame in self._frames.items()
                   if frame_id not in placed and frame_id not in self._cleared]
         return shown, headers
+
+    def _reveal_tiles(self, group_id: str) -> None:
+        """A turn's "N frames on the board" over the read-only tiles (the final review's resilience 5): the tiles
+        scroll so that group's header is at the top (as far as they can scroll); nothing when it shows no tile."""
+        tiles, area = self._tiles, self._tiles_area
+        if tiles is None or area is None or not (_alive(tiles) and _alive(area)):
+            return
+        heads = tiles.head_rects()
+        first = next((frame_id for frame_id in heads if self._frame_group.get(frame_id) == group_id), "")
+        if not first:
+            return
+        bar = area.verticalScrollBar()
+        bar.setValue(max(bar.minimum(), min(bar.maximum(), int(heads[first].top()))))
 
     def _show_tiles(self) -> None:
         """The read-only tiles show the frames as they are now (with their groups' headers); the fallback tile says
@@ -1039,8 +1054,6 @@ class BoardView(QWidget):
             self.pinRequested.emit(request.frame_id, request.on)
         elif kind == "bring_back":
             self.bringBackRequested.emit(request.frame_id)
-        elif kind == "retry":
-            self.retryRequested.emit(request.frame_id)
         elif kind == "go_approvals":
             self.approvalsRequested.emit(request.frame_id)
         elif kind == "clear":
@@ -1157,6 +1170,7 @@ class BoardView(QWidget):
         area.viewport().setAutoFillBackground(False)
         area.setStyleSheet("QScrollArea#boardTiles { background: transparent; border: none; }")
         self._tiles = GlanceTiles(area)
+        self._tiles_area = area
         area.setWidget(self._tiles)
         self._tiles.setAutoFillBackground(False)    # setWidget turned it on: the window's ground shows between tiles
         box_layout.addWidget(area, 1)

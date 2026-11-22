@@ -381,7 +381,8 @@ class ShellTests(BoardProbeCase):
     def test_waits_failed_empty_focused_closed_and_brought_back(self) -> None:
         report = self.report("shell")
         self.assertEqual(report["states"], {"waits": ["12px", "inline-flex"],          # radius 12: a shape cue
-                                            "failed": ["rgb(23, 15, 18)", "Try again"],  # TILE_ALERT
+                                            # TILE_ALERT, its warning and NO button (canvas part 5A: no Try again)
+                                            "failed": ["rgb(23, 15, 18)", "Google Calendar didn't answer.", 0],
                                             "empty": "Checked 9:44 AM"})
         focused = report["focused"]
         self.assertEqual((focused["keys"], focused["meta"], focused["controls"]), ("flex", "none", "flex"))
@@ -391,7 +392,7 @@ class ShellTests(BoardProbeCase):
         self.assertEqual(report["closed"]["row"].split("\n"), ["Closed: Frame m1", "Bring back"])
         self.assertNotIn("closed", report["brought_back"])
         # Each control asked the app, by its own typed signal.
-        self.assertEqual(report["seen"], [["ready"], ["approvalsRequested", "w1"], ["retryRequested", "x1"],
+        self.assertEqual(report["seen"], [["ready"], ["approvalsRequested", "w1"],
                                           ["closeRequested", "m1"], ["bringBackRequested", "m1"]])
 
     def test_titles_wrap_and_no_text_is_cut_in_a_narrow_board(self) -> None:
@@ -1267,6 +1268,7 @@ class TypedFramesTests(BoardProbeCase):
         self.assertEqual(page["pwned"], "undefined")                            # no script of theirs ran
         self.assertEqual(page["links"], 0)                                      # no link, picture, frame, script
         self.assertEqual(page["scripts"], 2)                                    # board.js and qwebchannel.js only
+        self.assertEqual(page["everywhere"], [])                                # canvas part 5A: the strip too
         for frame_id, sent in report["sent"].items():
             with self.subTest(frame=frame_id, kind=sent["kind"]):
                 shown = page["frames"][frame_id]
@@ -1697,6 +1699,8 @@ class CanvasLayoutTests(BoardProbeCase):
 
     def test_a_few_frames_are_all_whole_and_room_decides_how_many_fold(self) -> None:
         layouts = self.layouts()
+        for name, look in layouts.items():
+            self.assertTrue(look["settled"], name)                         # part 5A: read once the layout settled
         for size in ("1280x800", "1920x1080", "2560x1440"):
             for count in (1, 3, 6):
                 self.assertEqual(layouts[f"{count}@{size}"]["tiles"], 0, f"{count}@{size}")
@@ -2207,6 +2211,20 @@ class CanvasRestingTests(BoardProbeCase):
         self.assertEqual(report["now_pressed"], "Now")
         self.assertEqual(report["went_now"][-1], "now")
         self.assertNotIn("Now", report["row_without_now"])
+
+    def test_a_short_resting_frame_is_only_as_tall_as_what_it_holds(self) -> None:
+        # Canvas part 5A (part 3's leftover): one waiting card, one agent - never a whole row of empty room.
+        report = self.resting()
+        for name in ("short_look", "short_look_1920"):
+            look = report[name]
+            self.assertEqual((look["overlaps"], look["outside"], look["on_orb"], look["lost"]), ([], [], [], []),
+                             name)
+        look = report["short_look_1920"]                                    # a grid row is tallest here (276 px)
+        grid, area = look["grid"], look["area"]
+        row = (area[3] - (grid["rows"] - 1) * grid["gap"]) / grid["rows"]
+        boxes = {item["id"]: item["box"] for item in look["items"]}
+        for frame_id in ("r1", "r2"):                                       # less than a whole row each
+            self.assertLess(boxes[frame_id][3], row - grid["gap"], f"{frame_id} {row:.0f}")
 
     def test_a_day_with_nothing_booked_is_only_as_tall_as_its_words(self) -> None:
         report = self.resting()

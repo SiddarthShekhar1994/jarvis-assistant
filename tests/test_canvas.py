@@ -1689,6 +1689,23 @@ class RestingGroupTests(CanvasApp):
         now.refresh()                                                     # the same again: nothing is sent
         self.assertEqual(len(board.of_type("frame")), before)
 
+    def test_a_resting_frame_s_changed_tag_goes_once_its_light_has_played(self) -> None:
+        # Canvas part 5A (part 3's leftover): the CHANGED tag stayed after a count changed.
+        self.make(resting=True, lines=CARDS)
+        board = self.started()
+        desk, now = self.c.look.desk, self.canvas().now
+        _group, kinds, _frames = self.group()
+        frame_id = kinds["approvals"]["id"]
+        self.reading.set_desktop_waiting(3)
+        now.refresh()
+        settle(2)
+        self.assertTrue([m for m in board.of_type("frame") if m["id"] == frame_id][-1]["changed"])
+        self.assertTrue(desk._pass_timer.isActive())                      # noqa: SLF001 - its light plays first
+        desk._pass_timer.timeout.emit()                                    # noqa: SLF001 - (as CHANGED_PASS_MS on)
+        settle(2)
+        self.assertFalse([m for m in board.of_type("frame") if m["id"] == frame_id][-1]["changed"])   # no tag left
+        self.assertFalse(desk.feed.passing())
+
     def test_a_source_with_nothing_left_takes_its_frame_away(self) -> None:
         self.make(resting=True, lines=CARDS)
         board = self.started()

@@ -11,7 +11,7 @@ In (app -> page): check_message(message, known, groups=()) -> Checked
         frame    {"id", "kind", "title", "meta", "body", "status", "status_text", "status_meta", "waits", "changed",
                   "pinned", "closed"}: adds a frame (it draws in) or updates the one with that id in place. "body" is the
                   kind's own (KINDS: one checker per kind, as the page has one renderer per kind); "status" ok / failed
-                  (status_text says what failed; the page offers Try again) / empty (status_text, status_meta "Checked
+                  (status_text says what failed: its warning, no button) / empty (status_text, status_meta "Checked
                   9:44 AM"); "waits" the words of its amber chip ("" = it waits on nothing).
                   The bodies (DESIGN-SPEC 3.3; every string capped, every list at most ROWS_CAP rows, no other key):
                     text         {"text", "rows"?: [{"lead", "text", "meta"}]}        (rows only when given)
@@ -124,7 +124,7 @@ Out (page -> app): check_request(kind, payload, known) -> Request
     kind one of REQUEST_KINDS; payload a small JSON object (at most PAYLOAD_CAP characters, no NaN or Infinity) of that
     kind's fields only; every frame id one the app sent (``known``):
         ready {"v"?} | layout {"frames": [{"id", "top", "height"}, ...], "scrolling"} | pin {"id", "on"}
-        | focus, open, close, bring_back, retry, go_approvals {"id"}
+        | focus, open, close, bring_back, go_approvals {"id"}   (canvas part 5A: no retry - no frame offers it)
       Part 5b:
         clear {}          the bar's Clear (the app takes every unpinned frame away, for CLEAR_S with Bring back)
         restore {}        the cleared row's Bring back
@@ -259,9 +259,9 @@ CALENDAR_STATES = ("", "past", "now", "next", "free", "new", "struck", "today")
 SPAN_KINDS = ("busy", "next", "free")
 TODO_STATES = ("open", "waits", "done")
 MOTION_LEVELS = ("lively", "calm", "off")
-REQUEST_KINDS = ("ready", "layout", "focus", "open", "close", "pin", "bring_back", "retry", "go_approvals",
+REQUEST_KINDS = ("ready", "layout", "focus", "open", "close", "pin", "bring_back", "go_approvals",
                  "clear", "restore", "show_new", "reading", "focus_out", "landed", "big", "go", "chrome")
-_ID_KINDS = frozenset({"focus", "open", "close", "bring_back", "retry", "go_approvals"})
+_ID_KINDS = frozenset({"focus", "open", "close", "bring_back", "go_approvals"})
 _BARE_KINDS = frozenset({"clear", "restore", "show_new"})     # a payload of no field at all
 _ID = re.compile(r"[A-Za-z0-9_-]{1,%d}" % ID_CAP)
 _BASE64 = re.compile(r"[A-Za-z0-9+/]*={0,2}")

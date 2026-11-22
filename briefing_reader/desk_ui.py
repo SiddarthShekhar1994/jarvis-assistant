@@ -16,8 +16,8 @@ brought back), Clear (every unpinned frame out of sight with Bring back for CLEA
 folds through ReadingView.set_board_count), restore (that Bring back), show_new and reading (parking: a group that comes
 while the owner reads the board - the pointer over it, the focus in it, a scroll or key in it within QUIET_S - parks
 under the pill "New answer above · Show" and lands after QUIET_S quiet seconds or on Show; only then do older groups
-fold), focus_out (Esc and F6 back to the ask bar or the conversation); F6 into the board (``focus_board``). Focus and
-retry are counted only.
+fold), focus_out (Esc and F6 back to the ask bar or the conversation); F6 into the board (``focus_board``). Focus is
+counted only (canvas part 5A: a failed frame offers no Try again, and the page has no retry request).
 
 Part 5c (DESIGN-SPEC 1, 3.4, 3.5, 7): ``cue`` (desk_cue.CueController: while Jarvis speaks, the frame the sentence names
 is lit, every ring's glow halves, and the cue line runs to it; ``on_speech`` / ``on_muted`` from the app), ``big``
@@ -94,6 +94,7 @@ from .text_prep import format_time
 
 logger = logging.getLogger(__name__)
 
+CHANGED_PASS_MS = 2500            # a resting frame kept current: its CHANGED tag goes this long after its light starts
 ANSWERS_KEPT = 16                 # the answers whose late pictures may still join their group
 HINT_SESSIONS = 3                 # empty Home's hint line until the owner has seen the board this many times
 
@@ -248,6 +249,10 @@ class DeskController(QObject):
         self._land_timer = QTimer(self)     # a parked answer lands when the owner has been quiet QUIET_S
         self._land_timer.setSingleShot(True)
         self._land_timer.timeout.connect(self._schedule_landing)
+        self._pass_timer = QTimer(self)     # canvas part 5A: a resting frame's CHANGED goes once its light has played
+        self._pass_timer.setSingleShot(True)
+        self._pass_timer.setInterval(CHANGED_PASS_MS)
+        self._pass_timer.timeout.connect(lambda: self._send(self.feed.pass_changed()))
         self.counts: Counter[str] = Counter()
         self.first_frame_ms: list[int] = []     # answer -> its first frame sent, ms (measured, not assumed)
         reading = self.reading
@@ -298,8 +303,7 @@ class DeskController(QObject):
         view.ready.connect(self._on_ready)
         view.unavailable.connect(self._on_unavailable)
         view.approvalsRequested.connect(self._on_go_approvals)
-        for name in ("frameFocused", "retryRequested"):
-            getattr(view, name).connect(lambda _frame_id, word=name: self._count_request(word))
+        view.frameFocused.connect(lambda _frame_id: self._count_request("frameFocused"))
         view.openRequested.connect(self._on_open)
         view.layoutChanged.connect(self._on_layout)
         view.frameLanded.connect(self._on_landed)
@@ -454,8 +458,13 @@ class DeskController(QObject):
 
     def _reading_now(self) -> bool:
         """The owner reads the board: the desk shows (Home, unfolded, the window not minimised) and the page says the
-        pointer is over it, the focus in it, or there was a scroll or a key in it within QUIET_S."""
+        pointer is over it, the focus in it, or there was a scroll or a key in it within QUIET_S. Never while the
+        page is not up (it fell back to the read-only tiles, or it loads again after its renderer stopped): only a page
+        that is up reports that the owner left it (the final review's resilience 1)."""
         reading = self.reading
+        board = self.board
+        if board is None or not shiboken6.isValid(board) or not board.is_ready():
+            return False
         if not reading.desk_shown() or not reading.isVisible():
             return False
         window = reading.window()
@@ -527,11 +536,13 @@ class DeskController(QObject):
         keys_here = bool(self.big.state()) and self._keys_in_board()
         self.big.end_now()
         self.cue.reset_page()
+        self._watch.reset()                      # the old page's last "reading" report ended with it
         self._send(self.feed.resend())
         if self.reading.desk_shown():
             self._send([{"type": "desk", "state": "enter"}])
         if keys_here:
             self.focus_board("board")
+        self._schedule_landing()                 # what parked meanwhile lands (nobody reads the new page yet)
 
     def _keys_in_board(self) -> bool:
         """The window's keyboard focus is in the board's view."""
@@ -544,7 +555,9 @@ class DeskController(QObject):
         self.counts[f"fallback:{reason}"] += 1
         self.big.end_now()
         self.cue.clear()
+        self._watch.reset()                      # the dead page can never say the owner left it
         logger.info("Board: read-only tiles in its place (%s)", reason)
+        self._land()                             # a parked answer shows as read-only tiles
 
     def _send(self, messages: list[dict[str, Any]]) -> None:
         board = self.board
@@ -567,6 +580,8 @@ class DeskController(QObject):
             self.sound("on_frame_changed")       # the page runs its one light (calm: the badge only, no light)
         if changed:
             logger.info("Board: %d frame(s) changed", len(changed))
+        if self.feed.passing() and not self._pass_timer.isActive():
+            self._pass_timer.start()             # a resting frame's light plays (quietly), then its tag goes
         self.cue.refresh()
         self.big.check()
         self._look_call("on_board_changed", self.feed)    # part 7: the board as it is now, to the second screen
@@ -1035,6 +1050,7 @@ class DeskController(QObject):
         """Jarvis closes: the board's page, renderer and profile go now."""
         self._due_timer.stop()
         self._land_timer.stop()
+        self._pass_timer.stop()
         self.cue.shutdown()
         self.big.shutdown()
         canvas = self.canvas

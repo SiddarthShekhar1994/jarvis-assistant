@@ -319,5 +319,82 @@ class FeedTests(unittest.TestCase):
         self.assertIn("briefing_reader.board.feed", sys.modules)
 
 
+class RebuiltPartsTests(unittest.TestCase):
+    """The final review's resilience 0 (canvas part 5A): a frame built again by many answers keeps only what it
+    shows - never every earlier build (a page's picture each time)."""
+
+    KEY = "page:https://status.example.org/"
+
+    @staticmethod
+    def src(seed: int) -> str:
+        return protocol.PICTURE_PREFIX + f"QUJD{seed:06d}"
+
+    @staticmethod
+    def page_frame(frame_id: str) -> dict:
+        return {"type": "frame", "id": frame_id, "kind": "picture", "title": "status.example.org", "meta": "9:41 AM",
+                "body": {"caption": "status.example.org"}}
+
+    def test_a_page_read_again_50_times_keeps_one_part_and_the_newest_picture(self) -> None:
+        feed = BoardFeed()
+        first = ""
+        for answer in range(1, 52):
+            source = f"step:{answer}"              # each read is a new LIVE step
+            frame_id = feed.frame_id(answer, source, "", self.KEY)
+            first = first or frame_id
+            self.assertEqual(frame_id, first)      # the same frame, built again
+            feed.put(answer, source, [self.page_frame(frame_id),
+                                      {"type": "picture", "id": frame_id, "src": self.src(answer)}],
+                     when="9:41 AM", key=self.KEY)
+            if answer == 1:
+                feed.pin(frame_id, True)
+        held = feed._frames[first]                 # noqa: SLF001 - what the feed keeps for it
+        self.assertLessEqual(len(held.parts), 2)
+        self.assertEqual(feed.picture_message(first)["src"], self.src(51))
+
+    def test_a_merged_frame_keeps_its_mail_and_its_waiting_reply(self) -> None:
+        feed = BoardFeed()
+        page = Page()
+        frame_id = feed.frame_id("a1", "mail:t1", "mail:work:t1")
+        put(feed, page, "a1", "mail:t1", "Budget", merge="mail:work:t1")
+        put(feed, page, "a1", "card:r1", "Budget", merge="mail:work:t1", waits="Reply waits")
+        put(feed, page, "a1", "mail:t1b", "Budget again", merge="mail:work:t1")
+        held = feed._frames[frame_id]              # noqa: SLF001
+        self.assertEqual(sorted(held.parts), ["card:r1", "mail:t1b"])
+        shown = held.shown()[0]
+        self.assertEqual((shown["title"], shown["waits"]), ("Budget again", "Reply waits"))
+
+
+class PassingChangedTests(unittest.TestCase):
+    """Canvas part 5A (part 3's leftover): a resting frame kept current ("again") plays its changed light, and its
+    CHANGED tag goes again afterwards; an answer's frame built again keeps its tag."""
+
+    def test_a_resting_frame_s_tag_goes_once_its_light_has_played(self) -> None:
+        feed = BoardFeed()
+        frame_id = feed.frame_id("now", "todos")
+        feed.put("now", "todos", [frame(frame_id, "To-dos", text="One to-do.")], when="9:41 AM")
+        self.assertFalse(feed.passing())
+        out = feed.put("now", "todos", [frame(frame_id, "To-dos", text="Two to-dos.")], when="9:41 AM", again=True)
+        sent = [message for message in out if message.get("type") == "frame"]
+        self.assertTrue(sent and sent[-1]["changed"])                     # the light (and, for now, the tag)
+        self.assertEqual(feed.take_changed(), [frame_id])
+        self.assertTrue(feed.passing())
+        passed = feed.pass_changed()
+        self.assertEqual([(message["id"], message["changed"]) for message in passed], [(frame_id, False)])
+        self.assertFalse(feed.passing())
+        self.assertEqual(feed.pass_changed(), [])                         # once
+
+    def test_an_answer_that_builds_it_again_keeps_its_tag(self) -> None:
+        feed = BoardFeed()
+        key = "todos"
+        first = feed.frame_id("a1", "s1", "", key)
+        feed.put("a1", "s1", [frame(first, "To-dos", text="One to-do.")], when="9:41 AM", key=key)
+        again = feed.frame_id("a2", "s2", "", key)
+        self.assertEqual(again, first)
+        out = feed.put("a2", "s2", [frame(first, "To-dos", text="Two to-dos.")], when="9:42 AM", key=key)
+        self.assertTrue([message for message in out if message.get("type") == "frame"][-1]["changed"])
+        self.assertFalse(feed.passing())
+        self.assertEqual(feed.pass_changed(), [])                         # its tag stays, as before
+
+
 if __name__ == "__main__":
     unittest.main()

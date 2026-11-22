@@ -199,6 +199,51 @@ def shape_radius(radius: float) -> float:
     """A HUD shape's corner: as designed, or the canvas's square corner while Home is the canvas."""
     return holo.CANVAS_RADIUS if holo.canvas_look() else radius
 
+
+def paint_card_frame(painter: QPainter, rect: QRectF, fill: Any, border: Any, ink: Any, tone: str, *,
+                     scan: bool = True, brackets: bool = True) -> None:
+    """A result card's frame (canvas part 5A): the hologram's rounded tile - its fill, scan lines, outline and brackets
+    - or, while Home is the canvas, a square canvas frame in the page's frame style: opaque (a window that takes clicks
+    never paints alpha), the frames' edge with the inner glow and corner ticks; amber only for what waits, coral for
+    what failed (their two ticks), the done green as a quiet edge."""
+    if holo.canvas_look():
+        amber, coral, done = tone == TONE_AMBER, tone == TONE_CORAL, tone == TONE_DONE
+        base = _CANVAS_FILL_AMBER if amber else _CANVAS_FILL_ALERT if coral else _CANVAS_FILL
+        glow = holo.CANVAS_GLOW_AMBER if amber else (255, 107, 94) if coral else holo.CANVAS_GLOW
+        edge = (QColor(holo.CANVAS_AMBER) if amber else holo.alpha(holo.ALERT, 0.75) if coral
+                else holo.alpha(holo.OK, 0.5) if done else holo.CANVAS_EDGE)
+        painter.save()
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+            painter.fillRect(rect, base)
+            holo.paint_canvas_glow(painter, rect.adjusted(1, 1, -1, -1), glow, 0.4 if done else 1.0)
+            painter.setPen(QPen(edge, 1.0))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(rect.adjusted(0.5, 0.5, -0.5, -0.5))
+            if brackets and not done:
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                if amber or coral:
+                    holo.paint_canvas_ticks(painter, rect, QColor(holo.CANVAS_AMBER_HI if amber else holo.ALERT_HI),
+                                            holo.BRACKETS_DIAGONAL)
+                else:
+                    holo.paint_canvas_ticks(painter, rect, QColor(255, 255, 255, 150))
+        finally:
+            painter.restore()
+        return
+    path = QPainterPath()
+    path.addRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), CARD_RADIUS, CARD_RADIUS)
+    painter.fillPath(path, QColor(fill))
+    if scan:
+        painter.save()
+        painter.setClipPath(path)
+        painter.fillRect(rect, holo.scan_brush(holo.SCAN_AMBER if tone == TONE_AMBER else holo.SCAN))
+        painter.restore()
+    painter.setPen(QPen(border, 1.0))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawPath(path)
+    if brackets:
+        holo.paint_brackets(painter, rect, ink, leg=CARD_BRACKET, radius=CARD_RADIUS, width=2.0)
+
 # The chips (under the bar) and the button beside it.
 CHIP_BRIEFING = "briefing"
 CHIP_APPROVALS = "approvals"
@@ -533,13 +578,21 @@ class _KeyCaps(QWidget):
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             painter.setFont(self._font)
             x = 0.0
+            canvas = holo.canvas_look()      # canvas part 5A: square caps in the frames' quiet edge
+            line = holo.CANVAS_LINE if canvas else holo.alpha(holo.HOLO, 0.28)
             for key in self._keys:
                 cap = QRectF(x, 0, self._cap_width(key), self.HEIGHT)
-                painter.setPen(QPen(holo.alpha(holo.HOLO, 0.28), 1.0))
+                painter.setPen(QPen(line, 1.0))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawRoundedRect(cap.adjusted(0.5, 0.5, -0.5, -1.5), 5, 5)
-                painter.fillRect(QRectF(cap.left() + 3, cap.bottom() - 2, cap.width() - 6, 1.5),
-                                 holo.alpha(holo.HOLO, 0.28))         # the keycap's 2 px bottom edge
+                if canvas:
+                    painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+                    painter.drawRect(cap.adjusted(0.5, 0.5, -0.5, -1.5))
+                    painter.fillRect(QRectF(cap.left() + 1, cap.bottom() - 2, cap.width() - 2, 1.0), line)
+                    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                else:
+                    painter.drawRoundedRect(cap.adjusted(0.5, 0.5, -0.5, -1.5), 5, 5)
+                    painter.fillRect(QRectF(cap.left() + 3, cap.bottom() - 2, cap.width() - 6, 1.5),
+                                     line)                    # the keycap's 2 px bottom edge
                 painter.setPen(QColor(holo.INK_3))
                 painter.drawText(cap.adjusted(0, 0, 0, -1), int(Qt.AlignmentFlag.AlignCenter), key)
                 x += cap.width() + self.GAP
@@ -1955,7 +2008,7 @@ class ResultCard(_OverlayWindow):
         """Its outer shadow and glow (global; Switch.dc.html .glass, amber for a decision): the DecorLayer under it
         paints them, this window never does."""
         tone = TONE_AMBER if self._content.tone == TONE_AMBER else TONE_CYAN
-        return Glow(self.geometry(), CARD_RADIUS, GLOW_CARD, tone)
+        return Glow(self.geometry(), shape_radius(CARD_RADIUS), GLOW_CARD, tone)
 
     def moveEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().moveEvent(event)
@@ -2123,18 +2176,7 @@ class ResultCard(_OverlayWindow):
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = QRectF(self.rect())
-            edge = rect.adjusted(0.5, 0.5, -0.5, -0.5)
-            path = QPainterPath()
-            path.addRoundedRect(edge, CARD_RADIUS, CARD_RADIUS)
-            painter.fillPath(path, QColor(fill))
-            painter.save()
-            painter.setClipPath(path)
-            painter.fillRect(rect, holo.scan_brush(holo.SCAN_AMBER if tone == TONE_AMBER else holo.SCAN))
-            painter.restore()
-            painter.setPen(QPen(border, 1.0))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawPath(path)
-            holo.paint_brackets(painter, rect, ink, leg=CARD_BRACKET, radius=CARD_RADIUS, width=2.0)
+            paint_card_frame(painter, rect, fill, border, ink, tone)
             align = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             kicker = self.row_rect("kicker")
             dot = QPointF(kicker.left() + 3, kicker.center().y())
@@ -2288,7 +2330,7 @@ class _TickBox(QAbstractButton):
                 painter.setOpacity(0.45)
             painter.setPen(QPen(QColor(holo.AMBER), 1.5))
             painter.setBrush(QColor(holo.AMBER) if self.isChecked() else Qt.BrushStyle.NoBrush)
-            painter.drawRoundedRect(box.adjusted(0.75, 0.75, -0.75, -0.75), 5, 5)
+            painter.drawRoundedRect(box.adjusted(0.75, 0.75, -0.75, -0.75), shape_radius(5), shape_radius(5))
             if self.isChecked():
                 holo.paint_icon(painter, box.adjusted(3, 3, -3, -3), "check", holo.AMBER_INK, stroke=2.4)
         finally:
@@ -2640,17 +2682,7 @@ class DesktopCard(ResultCard):
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = QRectF(self.rect())
-            path = QPainterPath()
-            path.addRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), CARD_RADIUS, CARD_RADIUS)
-            painter.fillPath(path, QColor(fill))
-            painter.save()
-            painter.setClipPath(path)
-            painter.fillRect(rect, holo.scan_brush(holo.SCAN_AMBER if tone == TONE_AMBER else holo.SCAN))
-            painter.restore()
-            painter.setPen(QPen(border, 1.0))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawPath(path)
-            holo.paint_brackets(painter, rect, ink, leg=CARD_BRACKET, radius=CARD_RADIUS, width=2.0)
+            paint_card_frame(painter, rect, fill, border, ink, tone)
             align = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             kicker = self.row_rect("kicker")
             dot = QPointF(kicker.left() + 3, kicker.top() + 7)
@@ -2892,7 +2924,7 @@ class PlanPanel(_OverlayWindow):
 
     def glow(self) -> Glow:
         tone = TONE_AMBER if self._content.tone == TONE_AMBER else TONE_CYAN
-        return Glow(self.geometry(), CARD_RADIUS, GLOW_CARD, tone)
+        return Glow(self.geometry(), shape_radius(CARD_RADIUS), GLOW_CARD, tone)
 
     def cut_texts(self) -> list[str]:
         """Words it cuts now: its header or its activity line (a row's third line goes on purpose, with an ellipsis)."""
@@ -2913,12 +2945,7 @@ class PlanPanel(_OverlayWindow):
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = QRectF(self.rect())
-            path = QPainterPath()
-            path.addRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), CARD_RADIUS, CARD_RADIUS)
-            painter.fillPath(path, QColor(fill))
-            painter.setPen(QPen(border, 1.0))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawPath(path)
+            paint_card_frame(painter, rect, fill, border, ink, tone, scan=False, brackets=False)
             pad_v, pad_h = PANEL_PAD
             align = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             painter.setFont(self._head_font)
@@ -3365,17 +3392,7 @@ class TaskCard(ResultCard):
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = QRectF(self.rect())
-            path = QPainterPath()
-            path.addRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), CARD_RADIUS, CARD_RADIUS)
-            painter.fillPath(path, QColor(fill))
-            painter.save()
-            painter.setClipPath(path)
-            painter.fillRect(rect, holo.scan_brush(holo.SCAN_AMBER if tone == TONE_AMBER else holo.SCAN))
-            painter.restore()
-            painter.setPen(QPen(border, 1.0))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawPath(path)
-            holo.paint_brackets(painter, rect, ink, leg=CARD_BRACKET, radius=CARD_RADIUS, width=2.0)
+            paint_card_frame(painter, rect, fill, border, ink, tone)
             align = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             kicker = self.row_rect("kicker")
             dot = QPointF(kicker.left() + 3, kicker.center().y())

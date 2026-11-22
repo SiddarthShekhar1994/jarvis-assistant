@@ -248,8 +248,14 @@ class LookController(QObject):
         if self.second is not None and self.panel is not None:
             self.panel.secondScreenToggled.connect(self.set_second_screen_on)
             self.second.availabilityChanged.connect(self._on_screens)
-        if start_sounds:
-            self.sounds.start()
+        self._start_sounds = bool(start_sounds)
+        self._start_sounds_if_on()
+
+    def _start_sounds_if_on(self) -> None:
+        """The sounds are built (and their player made) only while they are on: off at start, nothing is built until
+        Settings > Look turns them on (the final review's resilience 4)."""
+        if self._start_sounds and self.sounds.can_start() and self.sounds_on():
+            self.sounds.start()          # (nothing is read before it can build: never under the test guard)
 
     def _make_desk(self) -> Any:
         """The board on Home (desk_ui.DeskController) while ``[look] board`` is on and a board can be here; None with
@@ -335,6 +341,8 @@ class LookController(QObject):
         saved = bool(store is not None and store.set_sounds_off(not on))
         self._save_problem = "" if saved else SAVE_FAILED_TEXT
         logger.info("Look: sounds turned %s on this PC%s", "on" if on else "off", "" if saved else " (not saved)")
+        if on:
+            self._start_sounds_if_on()           # built now, the first time they are on in this run
         self._sync_panel()
         return saved
 

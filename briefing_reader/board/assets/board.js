@@ -2,7 +2,7 @@
    createElement, every word is set with textContent and every listener with addEventListener: no markup is ever read,
    no address is ever opened. The app sends board.apply(<JSON text>), checked in Python first and checked here again;
    the page answers on its web channel with bridge.post(kind, <JSON text>), the short list Python accepts (ready, layout,
-   focus, open, close, pin, bring_back, retry, go_approvals, clear, restore, show_new, reading, focus_out, landed, big,
+   focus, open, close, pin, bring_back, go_approvals, clear, restore, show_new, reading, focus_out, landed, big,
    go). The canvas (PLAN-canvas part 1): the same page is Home itself - the orb and the corners' controls under the
    board (makeCanvas, at the first orb or canvas message; a board beside a conversation has none of it). Part 2: on
    the canvas the frames are laid out over the whole screen on a 12-column grid (packCanvas), in the mock's glowing
@@ -86,7 +86,7 @@
   var FIGURE_TEXT = /^[+\-−]?[$€£]?[0-9][0-9,.]*[kMBT%]?$/;     // a big number's figure (board.protocol's)
   var SVG = 'http://www.w3.org/2000/svg';
   var WORDS = {
-    changed: 'Changed', tryAgain: 'Try again', bringBack: 'Bring back', closed: 'Closed: ',
+    changed: 'Changed', bringBack: 'Bring back', closed: 'Closed: ',
     keysFirst: 'Enter open big · P pin', keysSecond: 'Del close · Esc ask bar', dot: '·',
     approvalsKey: 'Ctrl 3', pin: 'Pin', unpin: 'Unpin', openBig: 'Open big', close: 'Close',
     waits: 'Waits', done: 'Done', pictureOnly: 'Picture only', unread: 'Unread',
@@ -1205,6 +1205,18 @@
     rec.satFactWords = make('span', 's-words');
     rec.satNote = make('span', 's-note');      // the 7th pin's note, in the fact's place while folded
     rec.satFact.append(glyph('diamond', 's-dia', true), rec.satFactWords, rec.satNote);
+    // Its name is its own words plus the page's ", show it in full": named by reference, so no attribute ever holds
+    // a word of the data (the final review's ship-gate 2).
+    rec.satTitle.id = 'sat-t-' + id;
+    rec.satFactWords.id = 'sat-f-' + id;
+    rec.satNote.id = 'sat-n-' + id;
+    var showMore = make('span', '', WORDS.showMore);
+    showMore.id = 'sat-m-' + id;
+    showMore.hidden = true;
+    rec.satButton.appendChild(showMore);
+    rec.satButton.setAttribute('aria-labelledby', ['sat-t-', 'sat-f-', 'sat-n-', 'sat-m-'].map(function (part) {
+      return part + id;
+    }).join(' '));
     rec.satButton.append(rec.satGlyphBox, rec.satTitle, rec.satFact);
     art.appendChild(rec.satButton);
     updatePinned(rec, false);
@@ -1219,11 +1231,11 @@
     }
     KINDS[message.kind](make('div'), message);  // the kind's data is checked all the same
     if (message.status === 'failed') {
+      // Its warning and note only: nothing here can read its source again (the final review's ship-gate 1, decided:
+      // no control that does nothing - the old "Try again" was only counted).
       var row = make('div', 'f-fail');
       row.append(glyph('warning'), make('p', 'f-words t-body-sm', message.status_text));
-      var retry = button('f-act alert', '', function () { post('retry', {id: message.id}); });
-      retry.append(glyph('replay'), make('span', '', WORDS.tryAgain));
-      body.append(row, retry);
+      body.append(row);
     } else {
       var empty = make('div', 'f-empty');
       var column = make('div');
@@ -1262,7 +1274,6 @@
     rec.fact = message.fact === undefined ? '' : message.fact;
     rec.satTitle.textContent = message.title;
     rec.satFactWords.textContent = rec.fact;
-    rec.satButton.setAttribute('aria-label', message.title + (rec.fact ? ', ' + rec.fact : '') + WORDS.showMore);
     updatePinned(rec, message.pinned);
     rec.data = message;
     rec.rev += 1;                              // (the canvas measures it again)
@@ -2044,12 +2055,20 @@
   }
 
   function labelIndex(rec) {
-    var title = rec.data ? rec.data.title : '';
-    var name = (KIND_WORDS[rec.kind] || KIND_WORDS.text) + ': ' + title;
-    if (rec.data && rec.data.waits) {
-      name += WORDS.waitsOnYou;
+    // Its name: the page's own words (new answer, the kind) + the frame's own title element + "waits on you", named by
+    // reference, so no attribute ever holds a word of the data (the final review's ship-gate 2).
+    if (!rec.ixLead) {
+      rec.ixLead = make('span', '');
+      rec.ixLead.id = 'ix-k-' + rec.id;
+      rec.ixLead.hidden = true;
+      rec.ixTail = make('span', '');
+      rec.ixTail.id = 'ix-w-' + rec.id;
+      rec.ixTail.hidden = true;
+      rec.ix.append(rec.ixLead, rec.ixTail);
+      rec.ix.setAttribute('aria-labelledby', 'ix-k-' + rec.id + ' title-' + rec.id + ' ix-w-' + rec.id);
     }
-    rec.ix.setAttribute('aria-label', (parked(rec) ? WORDS.newAnswer : '') + name);
+    rec.ixLead.textContent = (parked(rec) ? WORDS.newAnswer : '') + (KIND_WORDS[rec.kind] || KIND_WORDS.text) + ':';
+    rec.ixTail.textContent = rec.data && rec.data.waits ? WORDS.waitsOnYou : '';
     if (rec.ixKind !== rec.kind) {             // the kind's glyph (the diamond pip after it stays)
       var fresh = glyph(GLYPHS[rec.kind] || 'read-all');
       if (rec.ixGlyph) {
@@ -4575,7 +4594,7 @@
                     tidyAll: 'Tidy: put every frame back in its place',
                     pinnedOnly: 'Show the pinned frames only'};
   var lay = {timer: 0, mode: '', cells: new Map(), heads: new Map(), m: null, untidy: false, hold: 0, formTimer: 0,
-             over: 0, packs: 0, heads_made: 0, adopted: 0};
+             over: 0, packs: 0, heads_made: 0, adopted: 0, packedAt: null};
   var placed = new WeakMap();                  // an element -> the box it was last given (px, in the board's own box)
   var card = null;                             // the task card while Jarvis works (makeHead's parts)
 
@@ -4739,6 +4758,8 @@
     });
   }
 
+  var SHORT_KINDS = {approvals: true, agents: true, todos: true};   // part 5A: as tall as their rows
+
   function frameLines(rec, m, headed) {        // the lines a frame takes: a row at least, more for what it holds
     var most = Math.min(m.rows, m.rows >= 4 ? 3 : 2) * m.sub;      // (its group's head over it counted)
     if (rec.kind === 'picture' && rec.data && rec.data.status === 'ok') {
@@ -4749,8 +4770,11 @@
       need += HEAD_H + HEAD_GAP;
     }
     // Part 3B: a frame that says there is nothing ("Nothing booked today", an emptied list) is only as tall as its
-    // words, never a row of empty box.
-    var least = rec.data && rec.data.status === 'empty' ? 1 : m.sub;
+    // words, never a row of empty box. Part 5A: so are a failed frame (its warning and why: nothing else) and the
+    // lists that may hold a line or two - "Waits for your OK", Agents and To-dos (part 3's leftover: a short one kept
+    // a whole row of empty room at its foot).
+    var least = rec.data && (rec.data.status === 'empty' || rec.data.status === 'failed' || SHORT_KINDS[rec.kind])
+      ? 1 : m.sub;
     return clamp(Math.ceil((need + m.gap - 1) / (m.subH + m.gap)), least, most);
   }
 
@@ -5017,6 +5041,7 @@
     if (!canvas || !root) {
       return;
     }
+    lay.packedAt = [root.clientWidth, root.clientHeight];   // part 5A: the room the last pack was for (probes wait on it)
     // Part 3: the task card takes no part in the frames' pack (it never makes them jump, and never makes Tidy show):
     // it keeps the mock's size and takes a free place of its own (applyPack: cardGridBox).
     var list = packItems();
@@ -5695,6 +5720,8 @@
       grid: m ? {span: m.span, rows: m.rows, sub: m.sub, tile: m.tile, tight: m.tight, gap: m.gap} : null,
       orb: [Math.round(window.innerWidth - CORNER_INSET - reach), Math.round(window.innerHeight - CORNER_INSET - reach)],
       items: items, heads: heads, untidy: lay.untidy, over: lay.over, packs: lay.packs, filter: filter,
+      settled: !lay.timer && !!lay.packedAt && lay.packedAt[0] === root.clientWidth
+        && lay.packedAt[1] === root.clientHeight,       // part 5A: no pack waits and the last was for this room
       top: canvas ? {row: box(canvas.tr), tl: box(canvas.tl), folded: canvas.folded.slice(), more: !canvas.more.hidden,
                      menu: canvas.menu && !canvas.menu.hidden ? box(canvas.menu) : null,
                      twins: Array.from(canvas.twins.values()).filter(function (twin) { return !twin.hidden; })

@@ -220,10 +220,13 @@ class RequestTests(unittest.TestCase):
         # shapes); part 5c added landed and big on purpose (tests/test_board_lit.py checks them); the canvas (part 1)
         # added go on purpose (tests/test_canvas.py checks its fixed list of words and that an unknown one is refused);
         # the window brief added chrome on purpose (tests/test_window_native.py checks its fields and hostile shapes).
+        # Canvas part 5A took retry out on purpose: a failed frame offers no Try again (nothing re-reads it).
         self.assertEqual(protocol.REQUEST_KINDS, ("ready", "layout", "focus", "open", "close", "pin", "bring_back",
-                                                  "retry", "go_approvals", "clear", "restore", "show_new", "reading",
+                                                  "go_approvals", "clear", "restore", "show_new", "reading",
                                                   "focus_out", "landed", "big", "go", "chrome"))
-        for kind in ("focus", "open", "close", "bring_back", "retry", "go_approvals"):
+        with self.assertRaises(protocol.Refused):
+            protocol.check_request("retry", '{"id":"f1"}', self.known)
+        for kind in ("focus", "open", "close", "bring_back", "go_approvals"):
             self.assertEqual(protocol.check_request(kind, '{"id":"f1"}', self.known), protocol.Request(kind, "f1"))
         self.assertEqual(protocol.check_request("pin", '{"id":"f2","on":true}', self.known),
                          protocol.Request("pin", "f2", on=True))
@@ -743,20 +746,19 @@ class ViewTests(unittest.TestCase):
     def test_each_request_the_page_makes_is_its_own_typed_signal(self) -> None:
         host, board = self.make(start_delay_ms=10 ** 6)
         seen: list[tuple] = []
-        for name in ("frameFocused", "openRequested", "closeRequested", "bringBackRequested", "retryRequested",
-                     "approvalsRequested"):
+        for name in ("frameFocused", "openRequested", "closeRequested", "bringBackRequested", "approvalsRequested"):
             getattr(board, name).connect(lambda frame_id, n=name: seen.append((n, frame_id)))
         board.pinRequested.connect(lambda frame_id, on: seen.append(("pinRequested", frame_id, on)))
         board.layoutChanged.connect(lambda layout: seen.append(("layoutChanged", layout)))
         board.ready.connect(lambda: seen.append(("ready",)))
-        for kind in ("focus", "open", "close", "bring_back", "retry", "go_approvals"):
+        for kind in ("focus", "open", "close", "bring_back", "go_approvals"):
             board._on_request(protocol.Request(kind, "f1"))              # noqa: SLF001 - as the bridge delivers
         board._on_request(protocol.Request("pin", "f1", on=True))        # noqa: SLF001
         board._on_request(protocol.Request("layout", places=(("f1", 3, 4),), scrolling=True))  # noqa: SLF001
         board._on_request(protocol.Request("ready"))                     # noqa: SLF001 - not while it loads: dropped
         self.assertEqual(seen, [
             ("frameFocused", "f1"), ("openRequested", "f1"), ("closeRequested", "f1"), ("bringBackRequested", "f1"),
-            ("retryRequested", "f1"), ("approvalsRequested", "f1"), ("pinRequested", "f1", True),
+            ("approvalsRequested", "f1"), ("pinRequested", "f1", True),
             ("layoutChanged", view.BoardLayout((("f1", 3, 4),), True))])
         self.assertEqual(board.counts()["dropped:ready_again"], 1)
 

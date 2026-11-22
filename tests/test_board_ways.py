@@ -600,6 +600,38 @@ class ViewTests(unittest.TestCase):
             board.apply(message)
         self.assertEqual([tile["title"] for tile in board.tiles().frames()], ["Parked", "Kept"])
 
+    def test_a_turn_s_token_scrolls_the_read_only_tiles_to_its_group(self) -> None:
+        # The final review's resilience 5 (canvas part 5A): "reveal" over the tiles scrolls to that group's header.
+        host = QWidget()
+        self.addCleanup(host.deleteLater)
+        host.resize(480, 420)
+        board = board_fakes.fallback_factory([])(host)
+        self.addCleanup(board.shutdown)
+        board.setGeometry(0, 0, 480, 420)
+        host.show()
+        board.start()
+        settle()
+        feed, page = BoardFeed(), Page()
+        sent: list[dict] = []
+        for answer in (1, 2, 3):
+            for index in range(3):
+                sent += put(feed, page, answer, f"s{answer}{index}", f"Answer {answer} frame {index}")
+        for message in sent:
+            board.apply(message)
+        settle(3)
+        area = board._tiles_area                                              # noqa: SLF001
+        bar = area.verticalScrollBar()
+        self.assertGreater(bar.maximum(), 0)                                  # taller than the board
+        self.assertEqual(bar.value(), 0)
+        oldest = feed.group_for(1)                                            # drawn last: at the bottom
+        self.assertTrue(board.apply({"type": "reveal", "group": oldest}))
+        heads = board.tiles().head_rects()
+        top = int(heads[feed.frame_id(1, "s10")].top())
+        self.assertEqual(bar.value(), min(bar.maximum(), top))
+        self.assertGreater(bar.value(), 0)
+        self.assertTrue(board.apply({"type": "reveal", "group": feed.group_for(3)}))   # the newest: at the top
+        self.assertEqual(bar.value(), 0)
+
 
 # --------------------------------------------------------------------------
 # The controller with the stand-in board
@@ -883,6 +915,39 @@ class ParkingAppTests(WaysApp):
         self.clock.now += 1
         self.desk._schedule_landing()                                         # noqa: SLF001
         self.assertEqual(self.board().parked_groups(), [])
+
+    # The final review's resilience 1 (canvas part 5A): a dead page's last "reading" report never parks what follows.
+
+    def test_a_fallback_after_a_reading_report_lands_what_parked_and_parks_nothing_after(self) -> None:
+        self.make()
+        self.answer(1, "Today")
+        board = self.board()
+        board.request("reading", pointer=True, focus=False)                  # the pointer over the board ...
+        self.answer(2, "Parked one")
+        self.assertTrue(self.desk.feed.parked_groups())
+        board._fall_back("crashed")                                           # noqa: SLF001 - ... then it stops
+        settle()
+        self.assertEqual(self.desk.feed.parked_groups(), [])                  # it landed, as a read-only tile
+        self.assertFalse(self.desk._reading_now())                           # noqa: SLF001
+        self.answer(3, "Later answer")
+        self.assertEqual(self.desk.feed.parked_groups(), [])                  # never parked
+        titles = [tile["title"] for tile in board.tiles().frames()]
+        self.assertIn("Parked one", titles)
+        self.assertIn("Later answer", titles)
+
+    def test_a_page_that_comes_back_forgets_the_old_page_s_reading_report(self) -> None:
+        self.make()
+        self.answer(1, "Today")
+        board = self.board()
+        board.request("reading", pointer=True, focus=False)
+        board._phase = view._LOADING                                          # noqa: SLF001 - its renderer stopped
+        self.answer(2, "While it reloads")
+        self.assertEqual(self.desk.feed.parked_groups(), [])                  # no page up: nobody reads it
+        board.say_ready()                                                      # the page is back
+        settle()
+        self.assertEqual(self.desk.feed.parked_groups(), [])
+        self.answer(3, "After it came back")
+        self.assertEqual(self.desk.feed.parked_groups(), [])                  # the old report ended with its page
 
 
 class KeyboardTests(WaysApp):

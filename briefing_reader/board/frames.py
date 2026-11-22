@@ -14,7 +14,7 @@ raises for odd data; only a frame id that is not one raises ValueError (the call
         data: URL: as it is when it already is a JPEG of at most PICTURE_WIDTH px and protocol.PICTURE_BYTES, else
         re-encoded; when even that does not fit, no picture message, the frame says so and ``refused`` counts it);
         KIND_SEARCH -> text (the query as the title, the results as rows: title and host). A picture that is not ready
-        -> the frame in its failed (unavailable: the page offers Try again) or empty (on its way, not kept) state, with
+        -> the frame in its failed (unavailable: its warning, no button) or empty (on its way, not kept) state, with
         the picture's own note, and Built's ``not_ready`` set.
     from_research(answer, *, frame_id, title="")
         a web research answer (ask.research.ResearchAnswer): the answer as text, its sources as rows (title and host,
@@ -271,7 +271,7 @@ _STATE_WORDS = {live.PICTURE_UNAVAILABLE: "Picture unavailable", live.PICTURE_DR
 
 
 def _not_ready(picture: Any, kind: str, frame_id: str, title: str) -> dict[str, Any]:
-    """The frame in its failed (unavailable: Try again re-reads it) or empty (on its way, not kept) state, saying the
+    """The frame in its failed (unavailable: no button re-reads it) or empty (on its way, not kept) state, saying the
     picture's own note."""
     state = getattr(picture, "state", "")
     note = clean(getattr(picture, "note", "") or _STATE_WORDS.get(state, "Picture unavailable"), protocol.WORDS_CAP)
