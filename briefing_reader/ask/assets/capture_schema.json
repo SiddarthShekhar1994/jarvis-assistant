@@ -1,0 +1,182 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "JarvisCapture",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "say",
+    "question",
+    "items"
+  ],
+  "properties": {
+    "say": {
+      "type": "string",
+      "maxLength": 300,
+      "description": "Write this first. One or two short sentences for the owner: what you found. No links, ids or addresses."
+    },
+    "question": {
+      "type": "string",
+      "maxLength": 300,
+      "description": "One question when you cannot tell what to list (else empty). With a question, items may be empty."
+    },
+    "items": {
+      "type": "array",
+      "maxItems": 30,
+      "description": "Each event (a repeating one once, with its repeat) or to-do the capture holds, in the order it gives them.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "title",
+          "date",
+          "start",
+          "end",
+          "all_day_end",
+          "where",
+          "notes",
+          "repeat",
+          "skip_dates",
+          "due",
+          "page",
+          "quote"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "event",
+              "todo"
+            ]
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+            "description": "Short, in the capture's words (no link)."
+          },
+          "date": {
+            "type": "string",
+            "maxLength": 10,
+            "description": "An event's (first) day, YYYY-MM-DD. Empty for a to-do."
+          },
+          "start": {
+            "type": "string",
+            "maxLength": 5,
+            "description": "HH:MM (24-hour), empty for an all-day event."
+          },
+          "end": {
+            "type": "string",
+            "maxLength": 5,
+            "description": "HH:MM (24-hour), empty when the capture gives none."
+          },
+          "all_day_end": {
+            "type": "string",
+            "maxLength": 10,
+            "description": "The last day of an all-day event over several days, YYYY-MM-DD; else empty."
+          },
+          "where": {
+            "type": "string",
+            "maxLength": 200,
+            "description": "The place as written; empty when none. No link."
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 300,
+            "description": "A few words worth keeping; else empty. No link."
+          },
+          "repeat": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "freq",
+              "interval",
+              "days",
+              "day_of_month",
+              "until",
+              "count"
+            ],
+            "description": "How the event repeats. freq \"none\" for a one-off.",
+            "properties": {
+              "freq": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "daily",
+                  "weekly",
+                  "monthly",
+                  "yearly"
+                ]
+              },
+              "interval": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 52,
+                "description": "1 = every week (month ...), 2 = every other one."
+              },
+              "days": {
+                "type": "array",
+                "maxItems": 7,
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "MO",
+                    "TU",
+                    "WE",
+                    "TH",
+                    "FR",
+                    "SA",
+                    "SU"
+                  ]
+                },
+                "description": "The weekdays of a weekly repeat; else empty."
+              },
+              "day_of_month": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 31,
+                "description": "A monthly or yearly repeat: the day number the capture names (3 for 'the 3rd of each month'); 0 when it names none."
+              },
+              "until": {
+                "type": "string",
+                "maxLength": 10,
+                "description": "The last day it may happen, YYYY-MM-DD; else empty."
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 400,
+                "description": "How many times in all; 0 when not said."
+              }
+            }
+          },
+          "skip_dates": {
+            "type": "array",
+            "maxItems": 40,
+            "items": {
+              "type": "string",
+              "maxLength": 10
+            },
+            "description": "Days a repeating event does not happen (holidays, breaks), YYYY-MM-DD."
+          },
+          "due": {
+            "type": "string",
+            "maxLength": 16,
+            "description": "A to-do's due day, YYYY-MM-DD or YYYY-MM-DD HH:MM. Empty for an event."
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 999,
+            "description": "The PDF page it is on (the n of <page n=...>); 0 when not a PDF."
+          },
+          "quote": {
+            "type": "string",
+            "maxLength": 120,
+            "description": "The few words of the capture this item comes from."
+          }
+        }
+      }
+    }
+  }
+}

@@ -154,6 +154,8 @@ from ..live import (
     ASK_CHECKS,
     ASK_VALIDATE,
     CALENDAR_READ,
+    CAPTURE_INPUT,
+    CAPTURE_VALIDATE,
     DESKTOP_FIND,
     DESKTOP_PLAN,
     DESKTOP_STEP,
@@ -246,11 +248,11 @@ from .stream import (
 )
 from .usage import KIND_RESEARCH, USAGE_FILE, CapCheck, UsageLog
 from .validate import LINE_CARD, LINE_OVER_CAP, LINE_REFUSED, LINE_REPEAT, Cards, keep_valid, to_cards
-from . import dayplan, desktop_mode, meeting_summary, modes, prep
+from . import capture_read, dayplan, desktop_mode, meeting_summary, modes, prep
 from ..desktop import executor as desktop_executor
 from ..desktop import validate as desktop_validate
-from .modes import (MODE_DESKTOP, MODE_KINDS, MODE_MAX_LINES, MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP,
-                    MODE_USAGE, ModeInputs, ModeRequest)
+from .modes import (MODE_CAPTURE, MODE_DESKTOP, MODE_KINDS, MODE_MAX_LINES, MODE_MEETING, MODE_NUDGE, MODE_PLAN,
+                    MODE_PREP, MODE_USAGE, ModeInputs, ModeRequest)
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +283,12 @@ AUTH_FRESH_S = 5.0        # run() trusts an auth status this recent; older, it a
 MEETING_TIMEOUT_S = 480.0
 NO_TRANSCRIPT = "no_transcript"   # a meeting summary with no transcript to read (AskOutcome.kind)
 NO_TRANSCRIPT_MESSAGE = "There is no transcript to summarise; nothing was proposed"
+# A capture with pictures needs a Claude Code that takes stream-json input (the pictures go in its message): without
+# one the capture is refused before anything starts (AskOutcome.kind).
+NO_PICTURE_INPUT = "no_picture_input"
+NO_PICTURE_INPUT_MESSAGE = "This Claude Code can't take pictures, so nothing was read; text and calendar files still work"
+NOTHING_TO_READ = "nothing_to_read"
+NOTHING_TO_READ_MESSAGE = "There was nothing Jarvis could read in it; nothing was sent"
 OVERAGE_PAUSE = timedelta(hours=5)   # the pause after an extra-usage signal that names no reset time
 
 DISABLED_MESSAGE = "Ask Jarvis is off ([ask] enabled = false in config.toml)"
@@ -497,21 +505,23 @@ class ClaudeEngine:
         return replace(go(None, fill_again), start=START_FELL_BACK)
 
     def mode_argv(self, ready: Readiness, mode: str, *, allow_remember: bool = False,
-                  allow_agent: bool = False) -> list[str]:
+                  allow_agent: bool = False, pictures: bool = False) -> list[str]:
         """A planner mode's command line: Ask's exactly, but its own system prompt and schema (only a desktop request's
-        streams and can be started ahead: the others have no words to show early and keep plain stdin). ``allow_agent``:
-        a desktop run while the agent is on, which may hand the request to a task."""
+        streams and can be started ahead: the others have no words to show early and keep plain stdin; a capture with
+        ``pictures`` streams too, as its pictures go in the stream-json message). ``allow_agent``: a desktop run while
+        the agent is on, which may hand the request to a task."""
         assert ready.exe is not None
         allow_agent = allow_agent and mode == MODE_DESKTOP
         return cli.build_argv(ready.exe.path, model=self.ask.model, max_turns=self.ask.max_turns,
                               schema=cli.mode_schema_text(mode, allow_remember=allow_remember, allow_agent=allow_agent),
                               hardened=ready.hardened,
                               prompt_file=cli.DESKTOP_PROMPT_FILE_AGENT if allow_agent else cli.MODE_PROMPTS[mode],
-                              streaming=ready.streaming and mode == MODE_DESKTOP)
+                              streaming=ready.streaming and (mode == MODE_DESKTOP or mode == MODE_CAPTURE and pictures))
 
     def run_mode(self, prompt: str, mode: str, *, cancel: threading.Event | None = None,
                  progress: Callable[[str, Any], None] | None = None, capture: bool = False,
-                 allow_remember: bool = False, allow_agent: bool = False) -> RunResult:
+                 allow_remember: bool = False, allow_agent: bool = False,
+                 images: Sequence[tuple[str, bytes]] = ()) -> RunResult:
         """One run of a planner mode (ask.modes: "plan", "prep") after preflight(): the same Claude
         Code, clean environment, empty work folder, deny-all settings, flags and checks as run()
         (stream.check_init / check_event), with the mode's own prompt and schema (never gmail_search
@@ -527,12 +537,19 @@ class ClaudeEngine:
             return RunResult(failure=failure(CANCELLED, "cancel"))
         env = cli.clean_env(self._env_source())
         # Mail, the summary's own notes, or names other people wrote on the desktop: never "remember".
-        if mode in (MODE_PREP, MODE_NUDGE, MODE_MEETING, MODE_DESKTOP):
+        if mode in (MODE_PREP, MODE_NUDGE, MODE_MEETING, MODE_DESKTOP, MODE_CAPTURE):
             allow_remember = False
         allow_agent = allow_agent and mode == MODE_DESKTOP
         extra = {"allow_agent": True} if allow_agent else {}
+        if mode == MODE_CAPTURE and images:
+            extra["pictures"] = True
         argv = self.mode_argv(ready, mode, allow_remember=allow_remember, **extra)
-        if mode == MODE_PREP:
+        if mode == MODE_CAPTURE:     # a capture: the meeting's timeout, its own strict reader, its pictures
+            result = run_cli(self.runner, argv, prompt, env=env, cwd=self.work_folder,
+                             timeout_s=max(float(self.ask.timeout_seconds), MEETING_TIMEOUT_S),
+                             read=capture_read.read_capture_result, cancel=cancel, clock=self._clock,
+                             progress=progress, capture=capture, images=tuple(images))
+        elif mode == MODE_PREP:
             result = run_cli(self.runner, argv, prompt, env=env, cwd=self.work_folder,
                              timeout_s=float(self.ask.timeout_seconds),
                              read=lambda event, init: prep.read_prep_result(event, init), cancel=cancel,
@@ -1245,7 +1262,8 @@ class AskPlanner:
              number: int = 1, search_words: str = "", allow_web: bool = False, web_words: str = "",
              allow_remember: bool = False, mode: str = "",
              on_words: Callable[[str, bool], None] | None = None, slot: str = "",
-             allow_agent: bool = False, allow_standing: bool = False) -> RunResult:
+             allow_agent: bool = False, allow_standing: bool = False,
+             images: Sequence[tuple[str, bytes]] = ()) -> RunResult:
         """One planner run, counted when it starts (``mode``: a planner mode's run, ClaudeEngine.run_mode,
         counted as that mode's bundle kind): the send, never a process started ahead's start. ``on_words`` and
         ``slot``: ClaudeEngine.run's."""
@@ -1276,6 +1294,8 @@ class AskPlanner:
                 extra["allow_agent"] = True
             if allow_standing:        # the same
                 extra["allow_standing"] = True
+            if images:                # the same (a capture's pictures)
+                extra["images"] = tuple(images)
             if on_words is not None:  # the same
                 extra["on_words"] = on_words
             if slot and getattr(self.engine, "prestart", None) is not None:   # the same
@@ -1700,6 +1720,8 @@ class AskPlanner:
                 outcome = self._meeting(request, inputs or ModeInputs(), page_ids, cancel, on_stage, task)
             elif request.mode == MODE_DESKTOP:
                 outcome = self._desktop(request, cancel, on_stage, task)
+            elif request.mode == MODE_CAPTURE:
+                outcome = self._capture(request, cancel, on_stage, task)
             else:
                 outcome = AskOutcome(False, "error", "Jarvis can't do that kind of request yet; nothing was proposed")
         except Exception as exc:  # noqa: BLE001 - a mode run must never take the app down
@@ -1874,6 +1896,58 @@ class AskPlanner:
                   "free minutes": dayplan.free_minutes(slots), "to-dos": len(inputs.todos),
                   "deadlines": len(inputs.deadlines), "memory": index.memory_notes}
         return DryRun(prompt, argv, ready, counts, MailReport(), note=note)
+
+    # ---- a capture (build plan item 3) ----------------------------------------------------------
+
+    def _capture(self, request: ModeRequest, cancel: threading.Event | None, on_stage: Callable[[str], None],
+                 live: LiveTask = NO_TASK) -> AskOutcome:
+        """A capture's reading (ask.capture_read): the checks, pictures refused before anything starts when this
+        Claude Code can't take them, one run, its answer read strictly, then Jarvis's checks of each item. Nothing is
+        added here: the app builds the cards (capture.summarize) and the owner approves each one."""
+        job = request.payload
+        if not isinstance(job, capture_read.CaptureJob):
+            return AskOutcome(False, "error", "Jarvis can't do that kind of request yet; nothing was proposed")
+        refusal = self._refusal(live)
+        if refusal is not None:
+            logger.info("Capture %s: no run (%s)", job.capture_id, refusal.kind)
+            return replace(refusal, target=job.capture_id)
+        step = live.step(CAPTURE_INPUT, "What you dropped in")
+        if job.pictures and not getattr(self.engine.readiness(), "streaming", False):
+            step.done(STATUS_BLOCKED, summary=NO_PICTURE_INPUT_MESSAGE)
+            logger.info("Capture %s: no run (%s)", job.capture_id, NO_PICTURE_INPUT)
+            return AskOutcome(False, NO_PICTURE_INPUT, NO_PICTURE_INPUT_MESSAGE, target=job.capture_id)
+        if not job.pictures and not any(page.text.strip() for page in job.pages):
+            step.done(STATUS_BLOCKED, summary=NOTHING_TO_READ_MESSAGE)
+            logger.info("Capture %s: no run (%s)", job.capture_id, NOTHING_TO_READ)
+            return AskOutcome(False, NOTHING_TO_READ, NOTHING_TO_READ_MESSAGE, target=job.capture_id)
+        on_stage(STAGE_CONTEXT)
+        zone = self.sources.time_zone()
+        now = self.clock()
+        wall = dayplan.to_wall(now, zone) if zone else now
+        wall = wall.replace(tzinfo=None) if wall.tzinfo is not None else wall
+        prompt = capture_read.build_prompt(wall, zone, job)
+        _capture_input(step, job, prompt)
+        logger.info("Capture %s: reading a %s (%s, %d page(s), %d picture(s), %d characters)", job.capture_id,
+                    job.kind, capture_read.size_bucket(job.size), job.page_count, len(job.images()), len(prompt))
+        on_stage(STAGE_PLANNING)
+        result = self._run(prompt, allow_search=False, cancel=cancel, live=live, number=1, mode=MODE_CAPTURE,
+                           images=job.images())
+        del prompt
+        answer = result.answer
+        if result.failure is not None or not isinstance(answer, capture_read.CaptureAnswer):
+            failed = result.failure
+            kind = failed.kind if failed else "error"
+            logger.info("Capture %s: run %s", job.capture_id, kind)
+            return AskOutcome(False, kind, failed.message if failed else "", runs=1 if result.started else 0,
+                              init=result.init, stats=(result.stats,) if result.started else (),
+                              target=job.capture_id)
+        items, counts = capture_read.items_from(answer, job, wall)
+        _capture_validated(live, counts)
+        logger.info("Capture %s: %d item(s) listed, %d kept, %d past, %d refused, %d far away", job.capture_id,
+                    counts.items, counts.kept, counts.past, counts.refused, counts.far)
+        return AskOutcome(True, "ok", "", say=answer.say, question=answer.question, runs=1, init=result.init,
+                          stats=(result.stats,), brief=(tuple(items), counts), refused=counts.refused,
+                          mode=MODE_CAPTURE, target=job.capture_id)
 
     # ---- a meeting's summary (meetings part 2) -------------------------------------------------
 
@@ -3251,7 +3325,7 @@ def _validated(live: LiveTask, cards: Cards, index: ContextIndex, max_cards: int
 NO_MAIL_WORDS = "no - a day plan never reads mail"
 NO_WEB_WORDS = "no - a day plan never uses the web"
 MODE_RUN_WORDS = {MODE_PLAN: "day plan", MODE_PREP: "meeting brief", MODE_NUDGE: "follow-up draft",
-                  MODE_MEETING: "meeting summary", MODE_DESKTOP: "desktop plan"}
+                  MODE_MEETING: "meeting summary", MODE_DESKTOP: "desktop plan", MODE_CAPTURE: "capture"}
 FREE_TITLE = "Your free time"
 
 
@@ -3656,6 +3730,37 @@ def _meeting_input(step: LiveStep, turns: Sequence[Any], labels: Mapping[str, An
     step.done(STATUS_OK, summary=f"{_count_words(len(turns), 'turn')}, {_count_words(len(labels), 'guest')}")
 
 
+def _capture_input(step: LiveStep, job: Any, prompt: str) -> None:
+    """A capture's input: its kind, size and pages, how many pictures (never its name or a picture; its text only in
+    the run's own stdin block, marked as written by other people)."""
+    if step is NO_STEP:
+        return
+    step.field("Kind", job.kind)
+    step.field("Size", capture_read.size_bucket(job.size))
+    if job.page_count:
+        step.field("Pages", str(job.page_count))
+    step.field("Pictures", f"{len(job.images())}, sent inside the message (no file path)")
+    step.field("Given", "its name, and its text or pictures, marked as written by other people")
+    step.field("Not given", "mail, your notes, your calendar, the folder it is in on this PC")
+    step.field("Input", f"{len(prompt):,} characters")
+    step.done(STATUS_OK, summary=f"{job.kind}, {_count_words(len(job.images()), 'picture')}")
+
+
+@_quiet()
+def _capture_validated(live: LiveTask, counts: Any) -> None:
+    """"Checking what was found": counts only."""
+    step = live.step(CAPTURE_VALIDATE, "Checking what was found")
+    if step is NO_STEP:
+        return
+    step.field("Listed", str(counts.items))
+    step.field("Kept", str(counts.kept))
+    step.field("Past (left out)", str(counts.past))
+    step.field("Refused", str(counts.refused))
+    if counts.far:
+        step.field("Over a year away", str(counts.far))
+    step.done(STATUS_OK, summary=f"{counts.kept} kept")
+
+
 @_quiet()
 def _meeting_validated(live: LiveTask, answer: Any, summary: Any, cards: Cards, notes_dropped: int,
                        hour24: bool, job: Any = None) -> None:
@@ -3704,6 +3809,8 @@ def _mode_target(request: ModeRequest) -> Any:
     job = request.payload
     if request.mode == MODE_DESKTOP:
         return job.run_id if isinstance(job, desktop_mode.DesktopJob) else None
+    if request.mode == MODE_CAPTURE:
+        return job.capture_id if isinstance(job, capture_read.CaptureJob) else None
     if request.mode != MODE_MEETING:
         return None
     return job.meeting_id if isinstance(job, meeting_summary.MeetingJob) else None

@@ -143,12 +143,12 @@ from .ask import desktop_mode
 from .ask import planner as ask_planner
 from .ask import prestart as ask_prestart
 from .ask.context import COMMAND_CAP, MEMORY_PROMPT_CAP, conversation_exchanges, kept_lines
-from .ask.modes import (MODE_DESKTOP, MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_TASKS, MODE_TITLES,
-                        ORIGIN_AUTO, ORIGIN_CHOICE, ORIGIN_TYPED, ModeInputs, ModeRequest)
+from .ask.modes import (MODE_CAPTURE, MODE_DESKTOP, MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_TASKS,
+                        MODE_TITLES, ORIGIN_AUTO, ORIGIN_CHOICE, ORIGIN_TYPED, ModeInputs, ModeRequest)
 from .ask.research import forced_question
 from .ask.research_validate import NO_ANSWER, cards_words, source_card_ids
-from .ask.routes import (MEMORY_ROUTES, NO_ROUTE, ROUTE_DESKTOP, ROUTE_FOLLOWUPS, ROUTE_PLAN, ROUTE_PREP, ROUTE_STANDING,
-                         RouteFlags, route)
+from .ask.routes import (MEMORY_ROUTES, NO_ROUTE, ROUTE_CAPTURE, ROUTE_DESKTOP, ROUTE_FOLLOWUPS, ROUTE_PLAN, ROUTE_PREP,
+                         ROUTE_STANDING, RouteFlags, route)
 from .ask.stream import CANCELLED, LIMIT, RESEARCH_CAP
 from .config import Config
 from .desktop import executor as desktop_executor
@@ -431,6 +431,7 @@ class AskController(QObject):
     memoryRequested = Signal(object, str)
     followupsRequested = Signal(str)
     standingRequested = Signal(str, str)   # [standing]: ("agent" | "rule" | "run", the owner's words or a job's name)
+    captureRequested = Signal(str)          # build plan item 3: "capture: <text>" (the text after the colon)
     sayWritten = Signal(int, int, str, str, bool, bool)
     askStopping = Signal(int)
 
@@ -715,6 +716,11 @@ class AskController(QObject):
                 self.bar.take_request(text)
                 self.followupsRequested.emit(text)
                 return
+            if found.kind == ROUTE_CAPTURE:
+                logger.info("Ask: a typed %s shortcut", found.kind)
+                self.bar.take_request(text)
+                self.captureRequested.emit(found.payload)
+                return
             if found.kind == ROUTE_STANDING:
                 # "agent: ..." / "rule: ..." (set up from the owner's own sentence) or "run <name>": the app's.
                 logger.info("Ask: a typed %s shortcut (%s)", found.kind, found.part)
@@ -836,7 +842,8 @@ class AskController(QObject):
         # A mode's notes are the newest that fit (it has no command to pick them by); a summary or a desktop
         # plan gets none.
         task = _mode_task(self.live, request, words, kind=kind,
-                          memory=None if request.mode in (MODE_MEETING, MODE_DESKTOP) else self._memory_given(""))
+                          memory=None if request.mode in (MODE_MEETING, MODE_DESKTOP, MODE_CAPTURE)
+                          else self._memory_given(""))
         last, lines = self._typed_lines          # a desktop request typed here: its line breaks, for a task (agent on)
         running = _Running(self._seq, threading.Event(), self._monotonic(), task=task, kind=kind,
                            typed=request.typed_route, mode=request.mode, words=words if request.typed_route else "",

@@ -280,12 +280,13 @@ import dataclasses
 import html
 import logging
 import math
+import os
 import re
 import time
 import weakref
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -7451,11 +7452,33 @@ CANCEL_BUTTON_TEXT = "Cancel"
 _PROMPT_GLYPH = "\u203a"    # single right-pointing angle quotation mark
 
 
+@dataclass(frozen=True)
+class PastedCapture:
+    """What a paste hands Capture (build plan item 3): a picture (``image``, a QImage), copied files (``paths``) or
+    text (``text``, Ctrl+Shift+V). Never logged; repr names the kind only."""
+
+    kind: str                        # "picture" | "files" | "text"
+    image: Any = field(default=None, repr=False, compare=False)
+    paths: tuple[str, ...] = field(default=(), repr=False)
+    text: str = field(default="", repr=False)
+
+
+def _real_clipboard() -> Any:
+    """The system clipboard's contents (QMimeData); None while the tests run (they hand their own)."""
+    if os.environ.get("JARVIS_DESKTOP_TEST_GUARD", "") == "1":
+        return None
+    clipboard = QApplication.clipboard()
+    return clipboard.mimeData() if clipboard is not None else None
+
+
 class _CommandInput(QLineEdit):
     """The bar's text field: frameless (the field around it is painted), plain text. Esc is the
-    bar's (``escapePressed``); Enter submits (``returnPressed``)."""
+    bar's (``escapePressed``); Enter submits (``returnPressed``). Capture (build plan item 3): Ctrl+V of a
+    picture or of copied files, and Ctrl+Shift+V of text, emit ``capturePasted(PastedCapture)`` instead of
+    pasting (nothing is read yet: the tray waits for Read it); a plain text Ctrl+V pastes as ever."""
 
     escapePressed = Signal()
+    capturePasted = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -7474,13 +7497,48 @@ class _CommandInput(QLineEdit):
         self.setPalette(palette)
         self.setStyleSheet("QLineEdit { background: transparent; border: none; padding: 0px; }")
         self.setAccessibleName("Ask Jarvis")
+        self.clipboard_mime: Any = _real_clipboard     # () -> QMimeData | None (the tests hand their own)
+        self.capture_on = False      # a capture controller listens (capture_ui): only then does a paste become one
 
     def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         if event.key() == Qt.Key.Key_Escape and event.modifiers() == Qt.KeyboardModifier.NoModifier:
             event.accept()
             self.escapePressed.emit()
             return
+        shifted = (event.key() == Qt.Key.Key_V and event.modifiers()
+                   == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier))
+        if self.capture_on and (shifted or event.matches(QKeySequence.StandardKey.Paste)):
+            pasted = self._capture_paste(shifted)
+            if pasted is not None:
+                event.accept()
+                self.capturePasted.emit(pasted)
+                return
         super().keyPressEvent(event)
+
+    def _capture_paste(self, shifted: bool) -> PastedCapture | None:
+        """The clipboard as a capture: Ctrl+Shift+V its text; Ctrl+V copied local files, or a picture when the clipboard
+        holds no text. None for a Ctrl+V with text (it pastes as ever - also when a spreadsheet or slide put a picture
+        beside the text) or an empty clipboard."""
+        try:
+            mime = self.clipboard_mime()
+        except Exception:  # noqa: BLE001 - an unreadable clipboard pastes nothing new
+            return None
+        if mime is None:
+            return None
+        if shifted:
+            text = mime.text() if mime.hasText() else ""
+            return PastedCapture("text", text=text) if text.strip() else None
+        if mime.hasUrls():
+            paths = tuple(url.toLocalFile() for url in mime.urls() if url.isLocalFile() and url.toLocalFile())
+            if paths:
+                return PastedCapture("files", paths=paths)
+        if mime.hasText() and mime.text().strip():
+            return None                                  # text pastes as ever, whatever else came with it
+        if mime.hasImage():
+            image = QImage(mime.imageData())
+            if not image.isNull():
+                return PastedCapture("picture", image=image)
+        return None
 
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
@@ -7861,6 +7919,10 @@ def quiet_readouts(text: str) -> str:
     return " ".join(_READOUT_GROUP.sub(drop, text or "").split())
 
 
+TRAY_READ_TEXT = "Read it"
+TRAY_REMOVE_TEXT = "Remove"
+
+
 class CommandBar(QWidget):
     """Ask Jarvis's typed command bar: the field and its Ask button, then a status line (the
     planner's answer, what Jarvis is doing, or why nothing was proposed) and a meta line with an
@@ -7896,6 +7958,9 @@ class CommandBar(QWidget):
     statusDismissed = Signal()   # Esc in an empty field while nothing runs: put the last answer away
     statusChanged = Signal(str, str)   # the status line's text and tone (the hologram Home's thinking line)
     typingChanged = Signal(bool)       # the owner types in the field (focused, with text, nothing running)
+    capturePasted = Signal(object)     # build plan item 3: the field's capture paste (PastedCapture)
+    trayRead = Signal(str)             # the capture tray's Read it, or Enter while it shows: the words typed with it
+    trayRemoved = Signal()             # the capture tray's Remove: nothing was read
 
     _STATUS_LINES = 2
 
@@ -7938,8 +8003,33 @@ class CommandBar(QWidget):
         self.link_button = HudButton("", LINK, compact=True)
         self.link_button.set_link_color(ACCENT)
         self.link_button.hide()
+        # Build plan item 3: the capture tray, one line above the field ("syllabus.pdf · PDF · 3 pages", Read it,
+        # Remove), shown only while something dropped or pasted waits; nothing is read before Read it or Enter.
+        self.tray = QWidget(self)
+        self.tray.setObjectName("captureTray")
+        self.tray_label = _ClampedLabel(mono_font(11, 500, 0.04), TEXT_SOFT, max_lines=1)
+        self.tray_label.setObjectName("captureTrayLabel")
+        from . import holo   # (holo imports this module: on use)
+
+        # The app's own buttons: they wear the canvas look while it is on (holo.button_look), the hologram's else.
+        self.tray_read = holo.HoloButton(TRAY_READ_TEXT, holo.GO, size=holo.SIZE_SM)
+        self.tray_read.setAccessibleName(TRAY_READ_TEXT)
+        self.tray_read.setToolTip("Read what you dropped in (Enter); your words go along with it")
+        self.tray_remove = holo.HoloButton(TRAY_REMOVE_TEXT, holo.GHOST, size=holo.SIZE_SM)
+        self.tray_remove.setAccessibleName(TRAY_REMOVE_TEXT)
+        self.tray_remove.setToolTip("Put it away: nothing is read")
+        tray_row = QHBoxLayout(self.tray)
+        tray_row.setContentsMargins(2, 0, 0, 2)
+        tray_row.setSpacing(10)
+        tray_row.addWidget(self.tray_label, 1, Qt.AlignmentFlag.AlignVCenter)
+        tray_row.addWidget(self.tray_read, 0, Qt.AlignmentFlag.AlignVCenter)
+        tray_row.addWidget(self.tray_remove, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.tray.hide()
+        self.tray_read.clicked.connect(self._on_tray_read)
+        self.tray_remove.clicked.connect(self._on_tray_remove)
         self.input.returnPressed.connect(self._on_return)
         self.input.escapePressed.connect(self._on_escape)
+        self.input.capturePasted.connect(self.capturePasted)
         self.input.textChanged.connect(self._sync_typing)
         self.input.installEventFilter(self)
         self.button.clicked.connect(self._on_button)
@@ -7964,9 +8054,35 @@ class CommandBar(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
+        layout.addWidget(self.tray)
         layout.addLayout(row)
         layout.addLayout(self._status_row)
         layout.addLayout(self._meta_row)
+
+    # ---- the capture tray (build plan item 3) ----
+
+    def set_tray(self, text: str) -> None:
+        """Show the capture tray with ``text`` (what waits: its label, kind and pages; never read yet)."""
+        self.tray_label.set_full_text(" ".join(str(text or "").split()))
+        self.tray.show()
+
+    def clear_tray(self) -> None:
+        self.tray.hide()
+        self.tray_label.set_full_text("")
+
+    def tray_active(self) -> bool:
+        return not self.tray.isHidden()
+
+    def _on_tray_read(self) -> None:
+        if self._running or not self.tray_active():
+            return
+        self.trayRead.emit(self.text())
+
+    def _on_tray_remove(self) -> None:
+        if not self.tray_active():
+            return
+        self.clear_tray()
+        self.trayRemoved.emit()
 
     def set_holo(self, on: bool = True) -> None:
         """The hologram Home's bar (HOLOGRAM_SPEC 11.3): a pill with the Ask glyph, the input and the
@@ -8012,8 +8128,8 @@ class CommandBar(QWidget):
         self._hud = True
         self.field.set_hud(self.send_button, trailing)
         self.input.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
-        for widget in (self.send_button, self.link_button, self.button):
-            widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        for widget in (self.send_button, self.link_button, self.button, self.tray, self.tray_read, self.tray_remove):
+            widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)      # the capture tray too: the HUD takes no focus
         self._sync_send()
         self._show_link()
 
@@ -8034,6 +8150,9 @@ class CommandBar(QWidget):
         layout = self.layout()
         if isinstance(layout, QBoxLayout):
             layout.setDirection(QBoxLayout.Direction.BottomToTop if on else QBoxLayout.Direction.TopToBottom)
+            # The capture tray stays right above the ask line: drawn bottom to top, it follows the line's row.
+            layout.removeWidget(self.tray)
+            layout.insertWidget(1 if on else 0, self.tray)
         self._status_row.setContentsMargins(*((2, 0, 2, 0) if on else (16, 0, 16, 0)))
         if not on:
             self.input._canvas_placeholder = ""
@@ -8240,6 +8359,9 @@ class CommandBar(QWidget):
         """What Enter in the field does (the Find list's "Ask Jarvis: ..." too): ``submitted(text)``, unless the
         field is empty or a request runs."""
         text = self.text()
+        if not self._running and self.tray_active():
+            self.trayRead.emit(text)       # Enter with the capture tray up is its Read it (the words go along)
+            return
         if self._running or not text:
             return
         self.submitted.emit(text)
@@ -9331,6 +9453,7 @@ LIVE_TAG_COLORS = {
     live_events.TASK_NUDGE: AMBER_HOVER, live_events.TASK_MEETING: PEACH,
     live_events.TASK_DESKTOP: ACCENT,           # cyan: Jarvis pointing at something on the desktop - never amber
     live_events.TASK_AGENT: ACCENT,             # cyan: Jarvis at work on a task
+    live_events.TASK_CAPTURE: ACCENT,           # cyan: Jarvis reading what the owner dropped in
 }
 LIVE_TEXT_MAX_PX = 320          # an open text block grows to this height, then scrolls
 LIVE_FIELD_LABEL_PX = 104       # the field labels' column ...

@@ -83,7 +83,7 @@ PROBE = Path(__file__).with_name("board_probe.py")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CASES = ("lockdown", "control", "media", "keys", "fallback", "shell", "kinds", "desk", "desk_x15", "ways", "lit", "big",
          "big_x15", "expiry", "reduced", "typed", "canvas", "canvas_layout", "canvas_ways", "canvas_fixes",
-         "canvas_resting", "canvas_hear", "canvas_5b")
+         "canvas_resting", "canvas_hear", "canvas_5b", "capture")
 # Round 5: what each probe's engine is told of reduced motion (tests/board_probe.py NO_REDUCED_MOTION, REDUCED_MOTION).
 NO_REDUCED_MOTION = "--force-prefers-no-reduced-motion"
 REDUCED_MOTION = "--force-prefers-reduced-motion"
@@ -2433,3 +2433,32 @@ class Canvas5BTests(BoardProbeCase):
         self.assertEqual(report["blocked"], {})
         self.assertEqual(list(report["allowed"]), ["jarvis-board"])
         self.assertEqual(report["messages_refused"], {})
+
+
+class CaptureFrameTests(BoardProbeCase):
+    """Build plan item 3: the Capture frame in the real canvas page."""
+
+    def test_every_word_is_text_and_each_row_shows_its_state(self) -> None:
+        report = self.report("capture")
+        self.assertTrue(report["ready"])
+        self.assertTrue(report["applied"])
+        rendered = report["rendered"]
+        self.assertEqual(rendered["markup"], 0)
+        self.assertFalse(rendered["attrs"])
+        self.assertEqual(rendered["pwned"], "undefined")
+        for word in ("Capture \u00b7 fall-term.ics", "Chem lab ‹img src=x onerror=window.pwned=21›",
+                     "Essay draft ‹script›window.pwned=22‹/script›", "weekly on Tue and Thu until May 1, 2027",
+                     "Jarvis can't add this repeat: it is set in another time zone", "Orientation",
+                     "3 wait on Approvals"):
+            self.assertIn(word, rendered["text"])
+        self.assertEqual([row.split()[1] for row in rendered["rows"]],
+                         ["waits", "waits", "waits", "cant_add", "on_calendar", "past"])
+        self.assertEqual(rendered["states"], ["Waits", "Waits", "Waits", "Can't add", "On your calendar", "Past"])
+        self.assertEqual(rendered["marks"], 4)                       # three diamonds and one check
+        self.assertEqual(report["sent"]["waits"], "3 wait on Approvals")
+
+    def test_a_body_that_does_not_fit_is_refused_by_the_page_and_the_protocol(self) -> None:
+        report = self.report("capture")
+        self.assertEqual(report["page_refuses"], [False] * 8)
+        self.assertEqual(report["protocol_refuses"], [True] * 8)
+        self.assertEqual(report["bad_frames"], 0)

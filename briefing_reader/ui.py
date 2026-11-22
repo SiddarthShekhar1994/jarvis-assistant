@@ -136,6 +136,7 @@ from . import pictures as _pictures
 from .actions import (
     CALENDAR,
     CANCEL,
+    DECIDED_STATUSES,
     DONE_TEXT,
     EMAIL,
     MAX_RECIPIENTS,
@@ -146,6 +147,7 @@ from .actions import (
     SEND_TEXT,
     SOURCE_ASK,
     SOURCE_BRIEFING,
+    SOURCE_CAPTURE,
     SOURCE_STANDING,
     STANDING_MODES,
     STATUS_CREATED,
@@ -199,9 +201,9 @@ from .agenda import (
 )
 from .ask import desktop_mode
 from .ask.dayplan import PART_DAY, hours_text
-from .ask.modes import (MODE_DESKTOP, MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_TITLES, ORIGIN_BRIEF,
-                        ORIGIN_CHOICE, ORIGIN_LIST, ORIGIN_OFFER, ORIGIN_TYPED, ModeInputs, ModeRequest, block_line,
-                        todo_facts)
+from .ask.modes import (MODE_CAPTURE, MODE_DESKTOP, MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_TITLES,
+                        ORIGIN_BRIEF, ORIGIN_CHOICE, ORIGIN_LIST, ORIGIN_OFFER, ORIGIN_TYPED, ModeInputs, ModeRequest,
+                        block_line, todo_facts)
 from .ask.routes import ROUTE_MEMORY_FORGET, ROUTE_MEMORY_SAVE, ROUTE_MEMORY_SHOW, RouteFlags
 from .ask.validate import ALREADY_LISTED
 from .config import CONFIG_FILE_NAME, DEFAULT_ACCOUNT, PROJECT_ROOT, AgendaConfig, Config
@@ -245,6 +247,7 @@ from .gcal import (
     CalendarNotSignedIn,
     CalendarSetupError,
     GoogleCalendar,
+    local_timezone,
     wall_in_zone,
 )
 from .google_auth import (
@@ -5221,7 +5224,13 @@ UNDO_UNKNOWN_NOTE = "Undo may or may not have gone through - Retry checks the ev
 UNDO_GONE_SUB = {CALENDAR: "removed from your calendar", TODO: "removed from your calendar",
                  RSVP: "your answer is back as it was", MOVE: "back at its old time"}
 # The NEEDS YOUR OK group headers, in the order the groups are shown (_merged_actions).
-_GROUP_TITLES = {SOURCE_ASK: "Ask", SOURCE_STANDING: "Agents", SOURCE_BRIEFING: "Briefing"}
+_GROUP_TITLES = {SOURCE_ASK: "Ask", SOURCE_CAPTURE: "Capture", SOURCE_STANDING: "Agents",
+                 SOURCE_BRIEFING: "Briefing"}
+# Build plan item 3: the capture cards kept on screen (captures.json keeps them across a restart: capture_store); the
+# oldest that is not on its way goes first.
+_CAPTURE_CARDS_MAX = 100
+CAPTURE_SOURCE_TEXT = "Source"        # a capture card's tool: its kept copy in Jarvis's own viewer
+CAPTURE_LIST_PAGES = 40               # a capture's duplicate check reads up to 40 pages of 50 events
 _ASK_CARDS_MAX = 16                    # Ask cards kept (this run, memory only); the oldest go first
 # Standing agents' and rules' cards kept on screen (loaded from their run files of the last days, which keep
 # them across a restart); the oldest that is not on its way goes first.
@@ -6044,6 +6053,8 @@ def _card_options(action: ProposedAction, view: CardView) -> dict[str, Any]:
     options: dict[str, Any] = {"approve_text": view.approve_text or "Approve", "body": view.body,
                                "open_text": view.open_text, "copy_text": view.copy_text,
                                "title_lines": 2 if action.structured else 0, "deny_text": view.deny_text}
+    if action.source == SOURCE_CAPTURE:
+        options["open_text"] = CAPTURE_SOURCE_TEXT     # its kept copy in Jarvis's own viewer (never a link)
     if action.sends_mail:
         # A Reply / Email: FROM and the recipients' chips, the text as sent (line breaks kept,
         # links highlighted, 10 lines), Edit; the right-hand button reads Send, Retry or Done.
@@ -6510,6 +6521,7 @@ class AppController(QObject):
         self.wake: Any = self._create_wake()            # "Hey Jarvis" (wake_ui) beside the talk, or None without it
         self.voice_download: Any = self._create_voice_settings()   # [voice] engine "local": Settings > Voice's part
         self.standing: Any = self._create_standing()    # [standing]: the Agents screen and its cards, or None
+        self.capture: Any = self._create_capture()      # build plan item 3: drops, pastes and the CAPTURE cards
         self.window.reading.set_find_actions(self.productivity is not None)   # offers' links in the Find list
         # Jarvis's own voice: silent unless injected; start() builds the real one ([assistant] speak).
         self._voice_injected = voice_factory is not None
@@ -6683,8 +6695,8 @@ class AppController(QObject):
     def _init_action_state(self) -> None:
         self._actions: list[ProposedAction] = []   # the cards shown: ASK + AGENTS + BRIEFING (_merged_actions)
         # One list per source (memory only; the decisions are saved by id like every card's).
-        self._source_lists: dict[str, list[ProposedAction]] = {SOURCE_ASK: [], SOURCE_STANDING: [],
-                                                               SOURCE_BRIEFING: []}
+        self._source_lists: dict[str, list[ProposedAction]] = {SOURCE_ASK: [], SOURCE_CAPTURE: [],
+                                                               SOURCE_STANDING: [], SOURCE_BRIEFING: []}
         self._ask_busy = False                     # an Ask is planning (the orb says PLANNING)
         self._autoplay = True                      # the reading starts playing once it is shown (not --ask)
         self._reading_settled = False              # this reading answered its scheduled slot (Read now, Play)
@@ -7647,7 +7659,8 @@ class AppController(QObject):
         self._set_actions(self._merged_actions())
 
     def _merged_actions(self) -> list[ProposedAction]:
-        """ASK first, then AGENTS (standing agents' and rules'), then BRIEFING. A card whose id the briefing
+        """ASK first, then CAPTURE (build plan item 3), then AGENTS (standing agents' and rules'), then BRIEFING. A
+        card whose id the briefing
         also has is information only ("Already in your list under BRIEFING"): the briefing's card stays the one
         to decide (the same id is the same proposal and has one decision); a standing card whose id an Ask card
         has already is left out."""
@@ -7655,7 +7668,7 @@ class AppController(QObject):
         page_ids = {action.id for action in briefing}
         merged: list[ProposedAction] = []
         seen: set[str] = set()
-        for source in (SOURCE_ASK, SOURCE_STANDING):
+        for source in (SOURCE_ASK, SOURCE_CAPTURE, SOURCE_STANDING):
             for action in self._source_lists.get(source, ()):
                 if action.id in page_ids and not action.error:
                     action = with_error(action, ALREADY_LISTED_TEXT)
@@ -7726,6 +7739,37 @@ class AppController(QObject):
         if refused:
             logger.warning("Standing: %d card(s) of another source refused", refused)
         self._set_source(SOURCE_STANDING, fresh)
+
+    def _take_capture_cards(self, pairs: Sequence[tuple[str, ProposedAction]]) -> None:
+        """Build plan item 3: the capture cards (capture_ui: every kept capture's cards, from captures.json) replace the
+        earlier ones; a card in its hidden hold, queued or on its way keeps its content (and stays even when the new
+        list leaves it out); at most _CAPTURE_CARDS_MAX stay, the oldest that is not on its way going first. A card of
+        another source or mode is refused here (logged by count)."""
+        old = {action.id: action for action in self._source_lists[SOURCE_CAPTURE]}
+        fresh: list[ProposedAction] = []
+        refused = 0
+        groups: dict[str, list[ProposedAction]] = {}
+        for capture_id, card in pairs:
+            groups.setdefault(capture_id, []).append(card)
+        ordered = [card for capture_id in reversed(list(groups)) for card in groups[capture_id]]
+        for card in ordered:                                      # the newest capture first, each in its own order
+            if card.source != SOURCE_CAPTURE or card.mode != MODE_CAPTURE:
+                refused += 1
+                continue
+            if card.id in self._jobs and card.id in old:
+                card = old[card.id]
+            if all(card.id != kept.id for kept in fresh):
+                fresh.append(card)
+        fresh_ids = {card.id for card in fresh}
+        fresh += [action for action in old.values() if action.id in self._jobs and action.id not in fresh_ids]
+        while len(fresh) > _CAPTURE_CARDS_MAX:
+            victim = next((action for action in reversed(fresh) if action.id not in self._jobs), None)
+            if victim is None:
+                break
+            fresh.remove(victim)
+        if refused:
+            logger.warning("Capture: %d card(s) of another source refused", refused)
+        self._set_source(SOURCE_CAPTURE, fresh)
 
     def _replaceable_nudge_card(self, action: ProposedAction, thread: tuple[str, str]) -> bool:
         """An unedited, undecided nudge card of ``thread`` (account, thread id), not held or on its way: what
@@ -7837,6 +7881,8 @@ class AppController(QObject):
                 label = f"{_MODE_TITLES.get(page_action.mode) or _GROUP_TITLES[SOURCE_ASK]} {DOT} {label}"
             elif page_action.source == SOURCE_STANDING:
                 label = f"{_STANDING_TITLES.get(page_action.mode) or _GROUP_TITLES[SOURCE_STANDING]} {DOT} {label}"
+            elif page_action.source == SOURCE_CAPTURE:
+                label = f"{_GROUP_TITLES[SOURCE_CAPTURE]} {DOT} {label}"
             reading.add_action_card(action.id, label, view.title, _card_detail(action, view, today),
                                     view.decidable, **_card_options(action, view))
             self._show_card_state(action.id)   # also sets the note (warnings) while it waits
@@ -8901,6 +8947,11 @@ class AppController(QObject):
         (actions.web_link_allowed), never a local or private address, checked again here."""
         action = self._action(action_id)
         if action is None or self.state == STATE_QUITTING:
+            return
+        if action.source == SOURCE_CAPTURE:
+            # Build plan item 3: a capture card's Source - the kept copy in Jarvis's own viewer, never a link or app.
+            if getattr(self, "capture", None) is not None:
+                self.capture.show_source(action_id)
             return
         link = action.link or (self._google_link(action_id) if action.changes_event else "")
         if not link:
@@ -10023,7 +10074,7 @@ class AppController(QObject):
         self._ask_busy = bool(busy)
         if not busy:
             self._ack_timer.stop()
-        if busy and self.ask is not None and self.ask.running_mode in (MODE_MEETING, MODE_DESKTOP):
+        if busy and self.ask is not None and self.ask.running_mode in (MODE_MEETING, MODE_DESKTOP, MODE_CAPTURE):
             # A meeting summary runs in the background, a desktop request on the HUD (its caption says what Jarvis
             # is doing): nothing pauses or is said.
             self._update_reading_controls()
@@ -10054,8 +10105,8 @@ class AppController(QObject):
         if self.ask is None or self.ask.running_mode != MODE_MEETING:
             self._end_say_stream()              # a new request: what the last answer was still saying goes
         self._ask_desktop = bool(self.ask is not None and self.ask.running_mode == MODE_DESKTOP)
-        if self.ask is not None and self.ask.running_mode in (MODE_MEETING, MODE_DESKTOP):
-            # A meeting summary the owner asked for (the start card's tick, or Summarise), or a desktop request on the
+        if self.ask is not None and self.ask.running_mode in (MODE_MEETING, MODE_DESKTOP, MODE_CAPTURE):
+            # A capture's reading (its Capture frame answers), a meeting summary the owner asked for (the start card's tick, or Summarise), or a desktop request on the
             # HUD (its caption answers): no YOU entry, the screen stays where the owner is; LIVE has its steps.
             self._ask_task_id = self.ask.task_id
             return
@@ -10307,6 +10358,10 @@ class AppController(QObject):
             return
         if getattr(outcome, "mode", "") == MODE_DESKTOP:
             self._on_desktop_outcome(outcome)
+            return
+        if getattr(outcome, "mode", "") == MODE_CAPTURE:
+            if getattr(self, "capture", None) is not None:
+                self.capture.on_outcome(outcome)
             return
         self._offer_running = 0
         if outcome.ok and getattr(outcome, "agent_task", "") and self._task_cant_start(outcome):
@@ -15615,6 +15670,74 @@ class AppController(QObject):
             self._activation_while_waiting(LAUNCH_OPEN, None)
         else:
             self._open_activation(ask=False)
+
+    # ---- capture (build plan item 3) ----------------------------------------------------------------------
+
+    def _create_capture(self) -> Any:
+        """capture_ui.CaptureController: drops on the window, the ask line's capture paste and "capture:", the tray,
+        the CAPTURE cards (kept in captures.json, loaded now) and the Source viewer. A picture, PDF or text needs Ask;
+        a calendar file or link never goes to Claude. None when it can't start (logged by the error's type)."""
+        try:
+            from . import capture_ui
+            from .capture_store import CaptureStore
+
+            controller = capture_ui.CaptureController(
+                self.window.reading.command_bar, self.window, store=CaptureStore(self.config.data_dir),
+                data_dir=self.config.data_dir, submit_mode=self.ask.submit_mode if self.ask is not None else None,
+                ask_enabled=lambda: self.ask is not None and bool(self.config.ask.enabled),
+                decided=self._store.is_decided, decided_at=self._capture_decided_at,
+                take_cards=self._take_capture_cards, show_frame=self._show_capture_frame,
+                events=self._capture_events, zone=local_timezone, now=self._now, status=self._capture_status,
+                parent=self)
+            if self.ask is not None:
+                self.ask.captureRequested.connect(controller.typed)
+            controller.load()
+            return controller
+        except Exception as exc:  # noqa: BLE001 - Jarvis runs on without capture
+            logger.warning("Capture: not started (%s)", type(exc).__name__)
+            return None
+
+    def _capture_decided_at(self, card_id: str) -> Any:
+        entry = self._store.get(card_id) or {}
+        if entry.get("status") not in DECIDED_STATUSES:
+            return None
+        try:
+            moment = datetime.fromisoformat(str(entry.get("at", "")))
+        except ValueError:
+            return None
+        return moment if moment.tzinfo is not None else moment.astimezone()
+
+    def _capture_events(self, start: datetime, end: datetime) -> Any:
+        """One read of the personal calendar for a capture's duplicate check (never a sign-in: list_events raises
+        first); None when it can't be read (the cards are still made)."""
+        calendar = self._calendars.get(DEFAULT_ACCOUNT)
+        if calendar is None:
+            return None
+        start, end = (moment if moment.tzinfo is not None else moment.astimezone() for moment in (start, end))
+        try:
+            checked = getattr(calendar, "list_events_checked", None)
+            if checked is None:
+                return calendar.list_events(start, end)
+            events, complete = checked(start, end, max_pages=CAPTURE_LIST_PAGES)
+        except CalendarError as exc:
+            logger.info("Capture: the calendar was not read (%s)", type(exc).__name__)
+            return None
+        if not complete:
+            # More events than one read takes: some could be missed, so the check says it did not check.
+            logger.info("Capture: the calendar has more events than one read takes; not checked")
+            return None
+        return events
+
+    def _show_capture_frame(self, summary: Any, approvals: str, words: str) -> None:
+        desk = getattr(getattr(self, "look", None), "desk", None)
+        if desk is not None:
+            desk.on_capture(summary, approvals=approvals, words=words)
+
+    def _capture_status(self, text: str, tone: str) -> None:
+        if self.ask is not None:
+            self.ask.show_note(text, tone)
+        else:
+            self.window.reading.command_bar.set_status(text, tone)
 
     # ---- standing agents and rules ([standing]) ------------------------------------------------------------
 

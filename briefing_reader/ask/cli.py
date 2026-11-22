@@ -42,6 +42,7 @@ holds the Windows user name).
 
 from __future__ import annotations
 
+import base64
 import ctypes
 import json
 import logging
@@ -80,6 +81,9 @@ NUDGE_PROMPT_FILE = ASSETS / "nudge_prompt.md"    # follow-ups: a drafted reply 
 NUDGE_SCHEMA_FILE = ASSETS / "nudge_schema.json"
 MEETING_PROMPT_FILE = ASSETS / "meeting_prompt.md"    # meetings: a recorded meeting's summary
 MEETING_SCHEMA_FILE = ASSETS / "meeting_schema.json"
+# Capture (build plan item 3): what a picture, PDF or text holds, as items Jarvis makes cards of (ask.capture_read).
+CAPTURE_PROMPT_FILE = ASSETS / "capture_prompt.md"
+CAPTURE_SCHEMA_FILE = ASSETS / "capture_schema.json"
 # Jarvis on your desktop (P1.7): a desktop request's plan of refs (ask.desktop_mode; its skills grow per phase).
 DESKTOP_PROMPT_FILE = ASSETS / "desktop_prompt.md"
 DESKTOP_SCHEMA_FILE = ASSETS / "desktop_schema.json"
@@ -109,9 +113,11 @@ _PLAIN_HOST_RE = re.compile(r"[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+")     
 # is.
 PRIVATE_RUN_ENV = {"DISABLE_TELEMETRY": "1", "DISABLE_ERROR_REPORTING": "1"}
 MODE_PROMPTS = {"plan": PLAN_PROMPT_FILE, "prep": PREP_PROMPT_FILE, "nudge": NUDGE_PROMPT_FILE,
-                "meeting": MEETING_PROMPT_FILE, "desktop": DESKTOP_PROMPT_FILE}
+                "meeting": MEETING_PROMPT_FILE, "desktop": DESKTOP_PROMPT_FILE, "capture": CAPTURE_PROMPT_FILE}
 MODE_SCHEMAS = {"plan": PLAN_SCHEMA_FILE, "prep": PREP_SCHEMA_FILE, "nudge": NUDGE_SCHEMA_FILE,
-                "meeting": MEETING_SCHEMA_FILE, "desktop": DESKTOP_SCHEMA_FILE}
+                "meeting": MEETING_SCHEMA_FILE, "desktop": DESKTOP_SCHEMA_FILE, "capture": CAPTURE_SCHEMA_FILE}
+# The pictures a stream-json message may carry (a capture's): PNG or JPEG only, base64 in image content blocks.
+IMAGE_MEDIA_TYPES = frozenset({"image/png", "image/jpeg"})
 
 SOURCE_ENV = "JARVIS_CLAUDE_EXE"
 SOURCE_PATH = "PATH"
@@ -368,9 +374,21 @@ def holds_stdin(argv: Sequence[str]) -> bool:
     return INPUT_FORMAT_FLAG in argv
 
 
-def stream_message(prompt: str) -> str:
-    """``prompt`` as the one stream-json user message a run with STREAM_FLAGS reads from stdin (one line, ASCII)."""
-    return json.dumps({"type": "user", "message": {"role": "user", "content": prompt}}) + "\n"
+def stream_message(prompt: str, images: Sequence[tuple[str, bytes]] = ()) -> str:
+    """``prompt`` as the one stream-json user message a run with STREAM_FLAGS reads from stdin (one line, ASCII).
+    ``images`` (a capture's pictures: (media type, bytes), PNG or JPEG only, else ValueError) go first as base64
+    image content blocks, then the prompt as the text block; without pictures the content is the prompt string, as
+    ever. No file path, no link: the pictures' bytes only."""
+    if not images:
+        return json.dumps({"type": "user", "message": {"role": "user", "content": prompt}}) + "\n"
+    content: list[dict[str, Any]] = []
+    for media_type, data in images:
+        if media_type not in IMAGE_MEDIA_TYPES or not isinstance(data, (bytes, bytearray)) or not data:
+            raise ValueError("not a PNG or JPEG picture")
+        content.append({"type": "image", "source": {"type": "base64", "media_type": media_type,
+                                                    "data": base64.b64encode(bytes(data)).decode("ascii")}})
+    content.append({"type": "text", "text": prompt})
+    return json.dumps({"type": "user", "message": {"role": "user", "content": content}}) + "\n"
 
 
 def build_research_argv(exe: Path | str, *, model: str, max_turns: int, schema: str, hardened: bool,

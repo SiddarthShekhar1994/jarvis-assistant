@@ -508,6 +508,8 @@ GOOD = {
     "mail_list": {"rows": [{"sender": "City Hack", "time": "YESTERDAY", "subject": "Registration closes Friday",
                             "meta": "", "unread": True}]},
     "todos": {"rows": [{"text": "Book the dentist", "meta": "5D", "state": "open"}]},
+    "capture": {"rows": [{"text": "Chem lab", "meta": "Tue Dec 1", "state": "waits", "detail": "weekly on Tue"}],
+                "note": ""},                                            # build plan item 3
     "picture": {"caption": "city-hack.example.org"},
 }
 
@@ -522,7 +524,8 @@ class KindCheckerTests(unittest.TestCase):
         self.assertEqual(set(protocol.KINDS), {"text", "calendar", "mail_thread", "mail_list", "todos", "picture",
                                                "table", "chart", "timeline", "maths",    # part 6's (test_ask_frames)
                                                "number",                                 # the canvas, part 2 (test_canvas)
-                                               "approvals", "agents"})                   # part 3B (test_canvas)
+                                               "approvals", "agents",                    # part 3B (test_canvas)
+                                               "capture"})                               # build plan item 3
         for kind, body in GOOD.items():
             checked = protocol.check_message(message(kind, body))
             self.assertEqual(json.loads(checked.text)["body"], body, kind)

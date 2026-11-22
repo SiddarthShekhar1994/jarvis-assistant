@@ -100,7 +100,12 @@ SIGN_IN_SUCCESS_MESSAGE = "Jarvis is connected to Google Calendar. You can close
 EVENT_FOOTER = "Added by Jarvis from your Daily Briefing."
 # The footer of an event by the card's mode (actions.ProposedAction.mode): a day plan's blocks say so.
 PLAN_EVENT_FOOTER = "Added by Jarvis from your day plan."
-EVENT_FOOTERS = {"": EVENT_FOOTER, "plan": PLAN_EVENT_FOOTER}
+# ... and a capture's events (a picture, PDF, text or calendar file the owner read in).
+CAPTURE_EVENT_FOOTER = "Added by Jarvis from a capture."
+EVENT_FOOTERS = {"": EVENT_FOOTER, "plan": PLAN_EVENT_FOOTER, "capture": CAPTURE_EVENT_FOOTER}
+# The private extended property a captured event carries: its capture UID (ProposedAction.uid), so a later capture
+# of the same file knows it is on the calendar already.
+CAPTURE_UID_PROPERTY = "jarvisCaptureUid"
 DEFAULT_EVENT_MINUTES = 60
 NO_TITLE = "(No title)"
 NOT_SIGNED_IN_MESSAGE = "Not signed in to Google Calendar"
@@ -134,6 +139,8 @@ _NOT_SENT_NAMES = frozenset({"ServerNotFoundError", "TransportError"})
 # actions.py writes "until <date>" on a timed event as the end of that day in UTC.
 _END_OF_DAY_UNTIL_RE = re.compile(r"UNTIL=(\d{8})T235959Z")
 _RULE_PREFIXES = ("RRULE:", "EXRULE:", "RDATE", "EXDATE")
+# A capture's EXDATE of a timed series in the calendar's wall time (no zone, no "Z"): sent with the calendar's TZID.
+_FLOATING_EXDATE_RE = re.compile(r"EXDATE:\d{8}T\d{6}(?:,\d{8}T\d{6})*")
 # "Europe/Berlin", "America/Argentina/Buenos_Aires", "Etc/GMT+5", "UTC"
 _IANA_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_+\-]*(?:/[A-Za-z0-9_+\-]+)*")
 _local_timezone: str | None = None
@@ -225,6 +232,8 @@ class CalendarEvent:
     calendar_id: str = "primary"
     declined: bool = False
     free: bool = False
+    ical_uid: str = ""       # the event's iCalUID ("" when Google sent none)
+    capture_uid: str = ""    # CAPTURE_UID_PROPERTY of an event Jarvis added from a capture ("" for others)
 
     @property
     def all_day(self) -> bool:
@@ -894,10 +903,17 @@ class GoogleCalendar:
         CalendarError (say, an unknown id) is skipped with a warning when
         another one answered; sign-in and setup problems always raise.
         """
+        return self.list_events_checked(start, end, calendar_ids)[0]
+
+    def list_events_checked(self, start: datetime, end: datetime, calendar_ids: Sequence[str] | str = ("primary",),
+                            *, max_pages: int = _MAX_LIST_PAGES) -> tuple[list[CalendarEvent], bool]:
+        """list_events, reading up to ``max_pages`` pages of each calendar, and whether every event of the span was
+        read (False: a page was left; a capture's duplicate check then says it did not check)."""
         ids = _calendar_ids(calendar_ids)
+        complete = True
         with self._guarded():
             if not ids or _as_aware(end) <= _as_aware(start):
-                return []
+                return [], True
             service = self._get_service(interactive=False)
             time_min, time_max = _rfc3339(start), _rfc3339(end)
             events: list[CalendarEvent] = []
@@ -905,7 +921,8 @@ class GoogleCalendar:
             failures: list[CalendarError] = []
             for calendar_id in ids:
                 try:
-                    items = self._list_calendar(service, calendar_id, time_min, time_max)
+                    items, whole = self._list_calendar(service, calendar_id, time_min, time_max, max_pages)
+                    complete = complete and whole
                 except (CalendarAuthError, CalendarSetupError):
                     raise
                 except CalendarError as exc:
@@ -920,14 +937,14 @@ class GoogleCalendar:
             events.sort(key=_event_sort_key)
             logger.debug("Google Calendar: %d event(s) from %d calendar(s)", len(events),
                          len(ids) - len(failures))
-            return events
+            return events, complete
 
     def _list_calendar(self, service: Any, calendar_id: str, time_min: str,
-                       time_max: str) -> list[dict]:
-        """Every events.list item of one calendar (up to _MAX_LIST_PAGES pages)."""
+                       time_max: str, max_pages: int = _MAX_LIST_PAGES) -> tuple[list[dict], bool]:
+        """Every events.list item of one calendar (up to ``max_pages`` pages), and whether none was left."""
         items: list[dict] = []
         page_token: str | None = None
-        for _ in range(_MAX_LIST_PAGES):
+        for _ in range(max(1, int(max_pages))):
             query: dict[str, Any] = {
                 "calendarId": calendar_id, "timeMin": time_min, "timeMax": time_max,
                 "singleEvents": True, "orderBy": "startTime", "maxResults": _LIST_PAGE_SIZE,
@@ -941,7 +958,7 @@ class GoogleCalendar:
             page_token = page.get("nextPageToken")
             if not page_token:
                 break
-        return items
+        return items, not page_token
 
     def list_event_briefs(self, start: datetime, end: datetime,
                           calendar_ids: Sequence[str] | str = ("primary",)) -> list[EventBrief]:
@@ -1367,14 +1384,33 @@ def build_event_body(action: ProposedAction, time_zone: str, *, footer: str = EV
         last = action.all_day_end if action.all_day_end and action.all_day_end >= first else first
         body["start"] = {"date": first.isoformat()}
         body["end"] = {"date": (last + timedelta(days=1)).isoformat()}   # Google's end is exclusive
-    rule = action.rrule.strip()
-    if rule:
+    recurrence = _recurrence(action, time_zone)
+    if recurrence:
+        body["recurrence"] = recurrence
+    uid = str(getattr(action, "uid", "") or "").strip()
+    if uid:
+        body["extendedProperties"] = {"private": {CAPTURE_UID_PROPERTY: uid}}
+    return body
+
+
+def _recurrence(action: ProposedAction, time_zone: str) -> list[str]:
+    """``action.rrule`` as the insert's recurrence list: one line per rule, the first an RRULE (its prefix added when
+    it has none, as before), every other line an RRULE, EXRULE, RDATE or EXDATE (_RULE_PREFIXES; anything else is
+    refused: CalendarError). A timed event's end-of-day UNTIL moves to local time (_localize_until); a floating
+    EXDATE of a timed event ("EXDATE:20261020T150000", the calendar's wall time) is sent in ``time_zone``."""
+    lines = [line.strip() for line in action.rrule.splitlines() if line.strip()]
+    rules: list[str] = []
+    for index, rule in enumerate(lines):
         if not rule.upper().startswith(_RULE_PREFIXES):
+            if index:
+                raise CalendarError("This proposal has a repeat Jarvis can't send")
             rule = "RRULE:" + rule
         if action.start is not None:
             rule = _localize_until(rule)
-        body["recurrence"] = [rule]
-    return body
+            if time_zone and _FLOATING_EXDATE_RE.fullmatch(rule):
+                rule = f"EXDATE;TZID={time_zone}:{rule[len('EXDATE:'):]}"
+        rules.append(rule)
+    return rules
 
 
 def _wall_time(moment: datetime) -> str:
@@ -1526,6 +1562,8 @@ def _event_from(item: dict, calendar_id: str) -> CalendarEvent | None:
         "calendar_id": calendar_id,
         "declined": own is not None and own.get("responseStatus") == "declined",
         "free": item.get("transparency") == "transparent",
+        "ical_uid": str(item.get("iCalUID") or "") if isinstance(item.get("iCalUID"), str) else "",
+        "capture_uid": _capture_uid(item),
     }
     if start.get("dateTime"):
         begin = _parse_instant(start.get("dateTime"))
@@ -1541,6 +1579,14 @@ def _event_from(item: dict, calendar_id: str) -> CalendarEvent | None:
     after = _parse_day(end.get("date"))   # exclusive
     last = after - timedelta(days=1) if after is not None and after > first else first
     return CalendarEvent(all_day_start=first, all_day_end=last, **fields)
+
+
+def _capture_uid(item: dict) -> str:
+    """The event's CAPTURE_UID_PROPERTY ("" when it has none)."""
+    extended = item.get("extendedProperties")
+    private = extended.get("private") if isinstance(extended, dict) else None
+    value = private.get(CAPTURE_UID_PROPERTY) if isinstance(private, dict) else None
+    return value.strip() if isinstance(value, str) else ""
 
 
 def _brief_from(item: dict, calendar_id: str) -> EventBrief | None:

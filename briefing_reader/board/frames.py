@@ -24,6 +24,11 @@ raises for odd data; only a frame id that is not one raises ValueError (the call
         is done when ``statuses`` (action id -> actions.STATUS_*, as actions.ActionStore keeps them) says so, else open;
         a dismissed one is left out - and each deadline (agenda.Deadline) not already one of them, open; due words from
         agenda.due_label; done ones last
+    from_capture(summary, *, frame_id)
+        what a capture found (capture.Summary, build plan item 3): "Capture · term.ics", a row per item - WAITS
+        (amber: it waits on Approvals), ON YOUR CALENDAR, DECIDED, PAST or CAN'T ADD (with its reason) - the new
+        ones first, the counts as the meta, the note ("Not checked against your calendar") and the amber chip
+        "N wait on Approvals" (its go_approvals opens Approvals; it approves nothing)
     from_followups(items, *, frame_id, now=None)
         follow-ups (followups.FollowupItem) as a mail list: sender, subject, WAITING / OWED as the row's meta, the age
         ("20h", "3d": followups.age_words) as its time when ``now`` is given
@@ -76,8 +81,13 @@ _KIND_FOR = {pictures.KIND_EMAIL: "mail_thread", pictures.KIND_OUTGOING: "mail_t
              pictures.KIND_WEEK: "calendar", pictures.KIND_PAGE: "picture", pictures.KIND_SEARCH: "text"}
 _EMPTY_BODIES: dict[str, dict[str, Any]] = {
     "mail_thread": {"sender": "", "time": "", "text": ""}, "calendar": {"rows": []}, "picture": {"caption": ""},
-    "text": {"text": ""}, "todos": {"rows": []}, "mail_list": {"rows": []},
+    "text": {"text": ""}, "todos": {"rows": []}, "mail_list": {"rows": []}, "capture": {"rows": [], "note": ""},
 }
+CAPTURE_TITLE = "Capture"
+CAPTURE_EMPTY = "Nothing to add: no events or to-dos found."
+CAPTURE_WAITS = "{count} wait on Approvals"
+CAPTURE_WAIT_ONE = "1 waits on Approvals"
+_CAPTURE_ORDER = {"waits": 0, "cant_add": 1, "on_calendar": 2, "decided": 3, "past": 4}
 _SURROGATE_RE = re.compile("[\ud800-\udfff]")
 _PART_ESCAPE_RE = re.compile(r"<(?:U(?:\+[0-9A-F]{0,6})?)?$")    # the start of a "<U+202E>" a cut would split
 _ADDRESSED_RE = re.compile(r"(.+?) <[^<>\s]+@[^<>\s]+>")
@@ -675,6 +685,44 @@ def from_todos(todos: Iterable[Any], deadlines: Iterable[Any], *, frame_id: str,
     return Built((_frame(frame_id, "todos", TODOS_TITLE, meta=meta, body={"rows": _capped(rows, _todo_more)}),))
 
 
+def _capture_more(count: int) -> dict[str, Any]:
+    return {"text": "", "meta": _more_words(count), "state": "past", "detail": ""}
+
+
+def from_capture(summary: Any, *, frame_id: str) -> Built:
+    """What a capture found (see the module doc). Every word is cleaned and cut; the rows keep the summary's order
+    within each state, the new ones first."""
+    frame_id = _check_id(frame_id)
+    label = clean(getattr(summary, "label", "") or "", protocol.TITLE_CAP)
+    title = f"{CAPTURE_TITLE}{DOT}{label}" if label else CAPTURE_TITLE
+    rows: list[tuple[int, int, dict[str, Any]]] = []
+    for index, row in enumerate(getattr(summary, "rows", ()) or ()):
+        state = getattr(row, "status", "")
+        if state not in protocol.CAPTURE_STATES:
+            continue
+        detail = getattr(row, "reason", "") if state == "cant_add" else getattr(row, "repeat", "")
+        detail = clean(detail or "", protocol.WORDS_CAP)
+        rows.append((_CAPTURE_ORDER[state], index,
+                     {"text": clean(getattr(row, "title", "") or pictures.NO_TITLE, protocol.TITLE_CAP),
+                      "meta": clean(getattr(row, "when", "") or "", protocol.META_CAP), "state": state,
+                      "detail": detail}))
+    rows.sort(key=lambda item: (item[0], item[1]))
+    shown = [row for _order, _index, row in rows]
+    counts = getattr(summary, "counts", {}) or {}
+    note = clean(getattr(summary, "note", "") or "", protocol.WORDS_CAP)
+    waits = sum(1 for row in shown if row["state"] == "waits")
+    if not shown:
+        return Built((_frame(frame_id, "capture", title, status="empty",
+                             status_text=note or CAPTURE_EMPTY),))
+    parts = [f"{counts.get('found', len(shown))} found"]
+    if waits:
+        parts.append(f"{waits} new")
+    meta = DOT.join(parts)
+    chip = (CAPTURE_WAIT_ONE if waits == 1 else CAPTURE_WAITS.format(count=waits)) if waits else ""
+    return Built((_frame(frame_id, "capture", title, meta=meta, waits=chip,
+                         body={"rows": _capped(shown, _capture_more), "note": note}),))
+
+
 def from_followups(items: Iterable[Any], *, frame_id: str, now: datetime | None = None) -> Built:
     """Follow-ups as a mail list (see the module doc), in the order given (the app gives the waiting ones first)."""
     frame_id = _check_id(frame_id)
@@ -708,4 +756,4 @@ def from_followups(items: Iterable[Any], *, frame_id: str, now: datetime | None 
 
 __all__ = ["Built", "DOT", "ELLIPSIS", "FOLLOWUPS_TITLE", "FREE_TITLE", "MORE", "PICTURE_WIDTH", "REDIRECTED",
            "RESEARCH_TITLE", "TODOS_EMPTY", "TODOS_TITLE", "TOO_BIG", "WAITS_EMAIL", "WAITS_REPLY", "board_jpeg", "clean",
-           "clean_text", "cut", "cut_host", "from_followups", "from_picture", "from_research", "from_todos", "jpeg_size"]
+           "clean_text", "cut", "cut_host", "from_capture", "from_followups", "from_picture", "from_research", "from_todos", "jpeg_size"]

@@ -112,6 +112,10 @@ DEFAULT_DURATION = timedelta(minutes=60)
 SOURCE_BRIEFING = "briefing"
 SOURCE_ASK = "ask"
 SOURCE_STANDING = "standing"
+# A capture (briefing_reader.capture): a picture, PDF, text or calendar file the owner dropped or pasted and then
+# clicked "Read it" on. Its cards have mode MODE_CAPTURE.
+SOURCE_CAPTURE = "capture"
+MODE_CAPTURE = "capture"
 # A standing card's mode (ProposedAction.mode): which kind of standing job proposed it.
 MODE_STANDING_AGENT = "standing-agent"
 MODE_STANDING_RULE = "standing-rule"
@@ -198,6 +202,9 @@ class ProposedAction:
     ``mode`` marks a card of the productivity bundle's planner modes ("plan":
     a day plan's time block; later "prep" / "nudge"); ``serves`` is a plan
     block's Todo card (that card's id; memory only). Neither is part of the id.
+    ``uid`` is a captured event's UID (the calendar file's own, else one Jarvis
+    made): written into the event as a private property, so a later capture of
+    the same file finds it. Not part of the id.
     """
 
     id: str
@@ -225,6 +232,7 @@ class ProposedAction:
     web: bool = False                          # a web research card: its link follows the web rule
     mode: str = ""                             # MODE_PLAN ("plan"), STANDING_MODES, ...; "" for others; not in the id
     serves: str = ""                           # a plan block: the id of the Todo card it serves (memory only)
+    uid: str = ""                              # a captured event's own UID (an .ics UID or Jarvis's); not in the id
 
     @property
     def decidable(self) -> bool:
@@ -343,7 +351,7 @@ class ProposedAction:
         if self.kind != CALENDAR:
             return _describe_structured(self, today)
         parts = _describe_when(self, today)
-        repeat = _repeat_words(self.repeat, today, spoken=False)
+        repeat = self.repeat if self.mode == MODE_CAPTURE else _repeat_words(self.repeat, today, spoken=False)
         return _SEPARATOR.join(part for part in (*parts, repeat) if part)
 
     def spoken(self, today: date | None = None) -> str:
@@ -357,7 +365,8 @@ class ProposedAction:
         if self.kind != CALENDAR:
             return _spoken_structured(self, today)
         title = _spoken_title(self.title)
-        repeat = _repeat_words(self.repeat, today, spoken=True)
+        repeat = (self.repeat.replace(_SEPARATOR, ", ") if self.mode == MODE_CAPTURE
+                  else _repeat_words(self.repeat, today, spoken=True))
         return ", ".join(part for part in (title, *_spoken_when(self, today), repeat) if part)
 
 
@@ -477,6 +486,17 @@ def _iso(value: date | datetime | None) -> str:
 def _make_action(kind: str, raw: str, **fields: Any) -> ProposedAction:
     action = ProposedAction(id="", kind=kind, raw=raw, **fields)
     return replace(action, id=_action_id(action))
+
+
+def make_calendar(title: str, *, start: datetime | None = None, end: datetime | None = None,
+                  all_day_start: date | None = None, all_day_end: date | None = None, repeat: str = "",
+                  rrule: str = "", where: str = "", notes: str = "", raw: str = "") -> ProposedAction:
+    """A Calendar proposal Jarvis builds himself (a capture's): its id is made the way a Calendar line's is
+    (kind, title, start, end, all-day, rrule), so the same event captured, asked or briefed has one id and one
+    decision. ``raw`` is the text the card keeps (a Calendar line; "Calendar: <title>" when empty)."""
+    return _make_action(CALENDAR, raw or f"Calendar: {title}", title=title, start=start, end=end,
+                        all_day_start=all_day_start, all_day_end=all_day_end, repeat=repeat, rrule=rrule,
+                        where=where, notes=notes)
 
 
 _KIND_NAMES = {CALENDAR: "Calendar", REPLY: "Reply", EMAIL: "Email", RSVP: "RSVP", MOVE: "Move",
@@ -2269,6 +2289,14 @@ def copied_text(action: ProposedAction) -> str:
 CALENDAR_TARGET = "Personal calendar"
 
 
+def capture_origin(action: ProposedAction) -> str:
+    """A capture card's source words ("From syllabus.pdf, p. 2": the end of its notes); "" for every other card."""
+    if action.source != SOURCE_CAPTURE or not action.notes:
+        return ""
+    origin = action.notes.rsplit(" - ", 1)[-1]
+    return origin if origin.startswith("From ") else ""
+
+
 def card_view(action: ProposedAction, today: date) -> CardView:
     """Kind label, texts and buttons of ``action``'s card (README: "Other proposals")."""
     label = kind_label(action)
@@ -2284,6 +2312,7 @@ def card_view(action: ProposedAction, today: date) -> CardView:
         parts = [action.describe(today)]
         if action.where and "://" not in action.where:
             parts.append(action.where)
+        parts.append(capture_origin(action))     # a capture's "From syllabus.pdf, p. 2" (build plan item 3)
         parts.append(CALENDAR_TARGET)            # canvas part 5B (the walk's 21): which calendar it goes to
         return CardView(label, title, _SEPARATOR.join(part for part in parts if part),
                         approve_text=approve_label(action), decidable=True)
@@ -2292,6 +2321,8 @@ def card_view(action: ProposedAction, today: date) -> CardView:
     if not action.decidable:   # a Reply the briefing says was sent already
         return CardView(label, title, ALREADY_REPLIED, open_text=open_text(action))
     detail = action.describe(today)
+    if action.source == SOURCE_CAPTURE:
+        detail = _SEPARATOR.join(part for part in (detail, capture_origin(action)) if part)
     notes = list(action.warnings[:_MAX_WARNINGS_SHOWN])
     if action.web and action.link and idn_host(action.link):
         # In the detail, above Open page (the note is drawn below Deny / Done).

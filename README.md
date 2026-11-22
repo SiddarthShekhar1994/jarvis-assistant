@@ -425,6 +425,8 @@ Built: **Visual snapshots in LIVE** - see [Pictures in LIVE](#pictures-in-live);
 meeting) - see [Meetings](#meetings-recording-and-summaries);
 **Standing agents and rules** - see
 [Standing agents and rules](#standing-agents-and-rules);
+**Capture** (screenshots, PDFs, pasted text and calendar files into events and
+to-dos) - see [Capture](#capture-pictures-pdfs-text-and-calendar-files);
 **The canvas** (Home as one black canvas with the orb, frames across the screen,
 the "Now" group, the second-screen display and the soft sounds) - see
 [The look](#the-look-the-canvas).
@@ -433,10 +435,6 @@ Planned for later versions; none of these is built yet, and all of them will
 keep the same rules (they propose, your click approves, and what they did
 shows, in LIVE or, for standing jobs, on the Agents screen):
 
-- **Capture**: screenshots, PDFs, pasted text and calendar files (.ics,
-  webcal) become events and to-dos, each linked to where it came from and
-  each a card for your click; a whole repeating series comes in on one
-  Approve, and a calendar file skips what is already on your calendar.
 - **Mail extras**: a reply editor you revise in plain words ("shorter, and
   warmer"), help with unsubscribing that reads a mail's List-Unsubscribe
   header and asks you first, and approve-all for a batch of cards.
@@ -3080,6 +3078,93 @@ window on it (on screen and in memory only; it never opens LIVE by itself). **Lo
 ids, kinds, counts, states, reason codes and durations only - never your words, a search, an
 address, a page's words, a file name, a tool's arguments or a token.
 
+### Capture: pictures, PDFs, text and calendar files
+
+Drop a screenshot, a photo, a PDF, a text file or a calendar file (`.ics`) on
+Jarvis, and the events and to-dos in it become cards for your OK, each linked
+to where it came from. A class that meets every Tuesday and Thursday is **one**
+card: its whole series goes onto your calendar with one Approve and comes off
+again with one Undo.
+
+**Ways in**
+
+- **Drop** a file on the Jarvis window (a picture `.png .jpg .jpeg .gif .webp
+  .bmp`, a `.pdf`, an `.ics` or a `.txt`), or drag text or a calendar link
+  (`webcal://...`, or an `https://` link that ends in `.ics`) onto it.
+- **Ctrl+V** in the ask line with a picture or copied files on the clipboard.
+  **Ctrl+Shift+V** captures copied text (a plain **Ctrl+V** of text still
+  types it, as ever - also when a spreadsheet or a slide put a picture of it
+  beside the text).
+- **Type** `capture:` and the text ("capture: Lab report due Friday 5 PM").
+
+A drop or a paste only puts it in the **tray**, one line above the ask line
+("syllabus.pdf · PDF · 120 KB", **Read it**, **Remove**). Nothing is read,
+sent or fetched until you click **Read it** (or press **Enter**); words you
+type in the ask line then go along as yours ("only the exam dates").
+
+**What Read it does**
+
+- A **calendar file** is read on this PC and never goes to Claude.
+- A **calendar link** is fetched **once**, on that click: `webcal` is read as
+  `https`, only `https`, only a public web host - its name and every address
+  it leads to (every redirect checked, at most 3) - at most 2 MB, in at most 10
+  seconds for the whole fetch, with no proxy or saved password from this PC's
+  settings. It is a one-time import, not a subscription; the tray names the
+  host before you click.
+- A **picture, PDF or text** is read by Claude, as one Ask run (it counts
+  under Ask's caps): a PDF's text is read on this PC page by page, and only
+  the pages without a text layer go as pictures; pictures go inside the
+  message itself, never as a file path, and Claude has no tools. What Claude
+  reads there is treated as other people's words: data, never instructions.
+  If your Claude Code can't take pictures, a picture is refused before
+  anything starts. Claude only lists what it finds; Jarvis checks every date
+  and builds every card and every repeat rule himself. A monthly or yearly
+  repeat is added only when the capture names its day ("the 3rd of each
+  month": "monthly on the 3rd"); otherwise its card has no Approve and says
+  so.
+
+Then a **Capture frame** goes up on the board ("Capture · term.ics"): a row
+per item that **WAITS** for your OK (amber), is **ON YOUR CALENDAR** already,
+was **DECIDED** before, is **PAST**, or that Jarvis **CAN'T ADD** (and why).
+Its amber chip opens Approvals; it approves nothing.
+
+**In Approvals** (Ctrl+3) the cards are under **CAPTURE**: an event or a whole
+series has **Approve** (your personal calendar, with Undo), a to-do has **Deny**
+and **Done** and joins To-dos and Plan my day. Each card says where it came from
+("From syllabus.pdf, p. 2", also in the event's description), and its
+**Source** opens the kept copy in Jarvis's own viewer: the picture, the PDF page
+or the text, read only. **Clear capture** there takes away its waiting cards and
+the kept copy at once.
+
+**Duplicates and the past.** Jarvis reads your personal calendar once over the
+coming months (never a sign-in) and skips what is already there: by the
+calendar file's own id (an event Jarvis added from a capture carries it too),
+by title and start (a series: an occurrence on its days at the same time), and
+by what you already decided. Skipped items are listed on the frame, never
+dropped silently; when the calendar can't be read, the cards are still made
+and the frame says "Not checked against your calendar" (also when the coming
+months hold more events than one read takes). Past events, finished
+series and cancelled entries get no card (they are counted). An event over a
+year away is shown with "check the year" and no Approve.
+
+**Time zones.** A one-off event in another time zone is moved to your
+calendar's time. A repeating event set in another time zone, in UTC or in a
+zone Jarvis can't tell gets a card without Approve that says so ("Jarvis
+can't add this repeat").
+
+**Limits** (not settings): at most 50 cards per capture ("later ones not
+shown") and 100 capture cards kept; at most 30 items from one Claude reading,
+5 pictures, 20 PDF pages or 40,000 characters; files and fetched calendars at
+most 2 MB; a calendar file at most 500 entries.
+
+**What stays on this PC.** The kept copy (`captures\<id>\source.<ext>` in the
+data folder) and `captures.json` (the cards: titles, times, places) stay on
+this PC. A capture goes 30 days after it was made, or 7 days after its last
+card was decided. Files named like passwords or keys, files outside the types
+above and anything inside Jarvis's own data folder are refused. Logs hold
+counts, kinds, sizes, durations and reason words only - never a file name, a
+title, a link or a host.
+
 ### Standing agents and rules
 
 Some jobs come round again and again: "every weekday at 7:30, tell me what in
@@ -5428,6 +5513,7 @@ Other files in `%LOCALAPPDATA%\briefing-reader`:
 | `conversation.json` | The last 24 hours of the conversation (at most 100 entries: your requests, Jarvis's answers and results as the Transcript showed them, each with its time; never your memory lines), shown again at a start and given to Ask as `<conversation>` (a web research's question and answer are marked and never given; see [Ask remembers the conversation](#ask-remembers-the-conversation)). Written by the app a moment after the conversation changes and when it closes; older entries leave it at the start and within the hour after they turn a day old. **Clear conversation** in the Transcript deletes it; you can delete it yourself while Jarvis is closed. A broken file is ignored and replaced. Never logged. |
 | `memory.json` | The productivity bundle's memory ([Memory](#memory-the-memory-tab)): **the only file with your own text** - your notes, typed or suggestions you kept, each with an id, TOLD or SUGGESTED and when it was made or changed; and, for suggestions you dismissed, a short hash of each word (not the sentence; a common word or a name could be guessed from its hash). Written only by the app (the command line reads it without changing it). Delete it (also while Jarvis runs: the next Ask, MEMORY and any change take the file as it is), or delete the notes in MEMORY, to forget everything. If it can't be read, Jarvis never overwrites it (MEMORY says so). |
 | `standing.json` | The [standing agents and rules](#standing-agents-and-rules) as you set them up: each one's name, your own words or sentence, its filters, when it runs, what it may line up, its tidy-up (and its label's id and name), its status and cap, its dry run's counts and the Google account ids Turn on recorded. Written only by the app, on your clicks. A damaged file, or one a newer version wrote, is kept read only: nothing runs and nothing is saved over it (the Agents screen says so). Delete it to remove every agent and rule. |
+| `captures.json`, `captures\<id>\source.<ext>` | [Capture](#capture-pictures-pdfs-text-and-calendar-files): each capture's label, counts and cards (titles, times, places, where it came from) and the kept copy of what you dropped in. Written only by the app. A capture goes 30 days after it was made, or 7 days after its last card was decided; **Clear capture** removes one at once. A damaged file, or one a newer version wrote, is kept read only. |
 | `standing_app.json` | The app's side of them: your yes on their consent card (and on each account's tidy-up card), Pause all, the cards you withdrew, the receipts you undid, when you last cleared and which runs were told. Ids and times only. |
 | `standing_state.json` | The background check's own state: per job its last run and its last time slot, per job and account the Gmail ids it saw and how far it has read, what it proposed (stable keys, so nothing is proposed twice), a hold after a plan limit, the last check (and the last one the scheduled task started), the runs not told yet and an account it could not read. Written only by the check; no subject, sender or text. |
 | `standing_runs\` | One file per run (`<date>-<time>-<id>.json`), written once: an agent's report, the run's cards (with a draft and its recipients) and its receipts (each matched mail's sender, subject and Gmail ids, the values a rule found, each tidy-up with the labels before and after). Private: they hold what was written from your mail. Kept `[standing] keep_days` (7) days, then deleted by the check; **Clear** on the Agents screen deletes them at once (a run with a card still waiting keeps its file until you decide that card). |
@@ -6488,6 +6574,13 @@ briefing_reader/standing/     Standing agents and rules (no Qt): definitions che
 briefing_reader/standing_setup.py  setting a job up in the app: the setup run, a rule's dry run, Turn on's checks, the cards' words
 briefing_reader/standing_ui.py  standing agents and rules in the app: their cards, the Agents screen's controller, the spoken line, a Reply checked again at the click, the tidy-up's Undo and sign-in
 briefing_reader/standing_view.py  the Agents screen (Ctrl+9): status line, AGENTS, RULES, ACTIVITY, REPORTS
+briefing_reader/capture.py     Capture's core: a series and its rule, a found item as a card, the duplicate check and the frame's rows
+briefing_reader/capture_store.py  captures.json and the kept copies of what was captured
+briefing_reader/capture_files.py  pictures, PDFs and text read on this PC for a capture
+briefing_reader/capture_net.py    a calendar link fetched once, on Read it
+briefing_reader/capture_ui.py     drops, the tray, Read it, the CAPTURE cards and the Source viewer
+briefing_reader/ics.py         calendar files read with the standard library
+briefing_reader/ask/capture_read.py  a capture read by Claude: the stdin, the strict answer, Jarvis's checks of each item
 fonts/                        Chakra Petch, Sora and JetBrains Mono fonts with their OFL licences
 tests/                        unit tests and saved fake Notion pages (tests/fixtures); board_probe.py runs the real board in a process of its own
 config.toml                   voice, prompt, polling, section, calendar, actions, schedule, hotkey, agenda, display, Ask, web research, assistant, LIVE, productivity and look settings

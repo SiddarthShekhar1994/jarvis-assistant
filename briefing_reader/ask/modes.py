@@ -72,20 +72,24 @@ MODE_MEETING = "meeting"
 # Jarvis on your desktop (P1.7): a desktop request the owner typed (ask.desktop_mode). Claude only plans: its answer
 # is one JSON plan of refs, never card lines (MODE_KINDS empty), which desktop.validate checks. Counts as an Ask run.
 MODE_DESKTOP = "desktop"
+# Capture (build plan item 3): a picture, PDF or text the owner dropped or pasted and clicked "Read it" on
+# (ask.capture_read). Claude only lists items; Jarvis builds every card. Counts as an Ask run.
+MODE_CAPTURE = "capture"
+ORIGIN_CAPTURE = "capture"
 ORIGIN_OFFER, ORIGIN_TYPED, ORIGIN_CHOICE, ORIGIN_LIST, ORIGIN_BRIEF = "offer", "typed", "choice", "list", "brief"
 # A summary runs only when the owner asked for it: ORIGIN_AUTO - his own "summarise it" tick on that meeting's
 # start card (unticked every time), once the transcript is ready; ORIGIN_SUMMARISE - his click on Summarise.
 ORIGIN_AUTO, ORIGIN_SUMMARISE = "auto", "summarise"
 MODE_KINDS = {MODE_PLAN: frozenset({CALENDAR}), MODE_PREP: frozenset({REPLY}), MODE_NUDGE: frozenset({REPLY}),
-              MODE_MEETING: frozenset({EMAIL}), MODE_DESKTOP: frozenset()}
+              MODE_MEETING: frozenset({EMAIL}), MODE_DESKTOP: frozenset(), MODE_CAPTURE: frozenset({CALENDAR, TODO})}
 # A desktop plan has no lines: at most this many steps (desktop_schema.json's steps maxItems).
-MODE_MAX_LINES = {MODE_PLAN: 8, MODE_PREP: 2, MODE_NUDGE: 1, MODE_MEETING: 3, MODE_DESKTOP: 12}
+MODE_MAX_LINES = {MODE_PLAN: 8, MODE_PREP: 2, MODE_NUDGE: 1, MODE_MEETING: 3, MODE_DESKTOP: 12, MODE_CAPTURE: 30}
 MODE_TASKS = {MODE_PLAN: live.TASK_PLAN, MODE_PREP: live.TASK_PREP, MODE_NUDGE: live.TASK_NUDGE,
-              MODE_MEETING: live.TASK_MEETING, MODE_DESKTOP: live.TASK_DESKTOP}
+              MODE_MEETING: live.TASK_MEETING, MODE_DESKTOP: live.TASK_DESKTOP, MODE_CAPTURE: live.TASK_CAPTURE}
 MODE_USAGE = {MODE_PLAN: usage.KIND_PLAN_DAY, MODE_PREP: usage.KIND_PREP, MODE_NUDGE: usage.KIND_NUDGE,
-              MODE_MEETING: usage.KIND_PLAN, MODE_DESKTOP: usage.KIND_PLAN}
+              MODE_MEETING: usage.KIND_PLAN, MODE_DESKTOP: usage.KIND_PLAN, MODE_CAPTURE: usage.KIND_PLAN}
 MODE_TITLES = {MODE_PLAN: "Plan", MODE_PREP: "Prep", MODE_NUDGE: "Nudge", MODE_MEETING: "Meeting",
-               MODE_DESKTOP: "Desktop"}
+               MODE_DESKTOP: "Desktop", MODE_CAPTURE: "Capture"}
 FIXED_COMMANDS: dict[Any, str] = {
     MODE_PLAN: "Plan the day in <day> for the owner: propose time blocks inside <free> for what needs time in "
                "<todos> and <briefing>, as Calendar lines, or ask one question.",
@@ -107,6 +111,9 @@ FIXED_COMMANDS: dict[Any, str] = {
                   "<files>, <apps> and <sites>, only opening, showing and finding, and moving, copying, renaming, "
                   "new folders, zips and putting files in the Recycle Bin as his own words ask, or ask one "
                   "question.",
+    # A capture: what the owner dropped in. His typed words, if any, follow ("The owner's words: ...").
+    MODE_CAPTURE: "List the events and to-dos that <capture> and the pictures hold, as items (a repeating event as "
+                  "one item with its repeat), or ask one question.",
 }
 OWNER_WORDS = "The owner's words: "
 OWNER_WORDS_CAP = 300

@@ -22,6 +22,11 @@ In (app -> page): check_message(message, known, groups=()) -> Checked
                     mail_thread  {"sender", "time", "text"}       (the text clamped to 3 lines by the page's style only)
                     mail_list    {"rows": [{"sender", "time", "subject", "meta", "unread"}]}
                     todos        {"rows": [{"text", "meta", "state" open / waits / done}]}
+                    capture      {"rows": [{"text", "meta", "state" CAPTURE_STATES, "detail"}], "note"}   (build plan
+                                  item 3: what a capture found - each item WAITS, ON YOUR CALENDAR, DECIDED, PAST or
+                                  CAN'T ADD; "meta" its day and time, "detail" a second line (WORDS_CAP: a series' repeat
+                                  words, a can't-add row's reason; never on the "+N MORE" row); "note" WORDS_CAP, ""
+                                  none ("Not checked against your calendar"); every key present in every row)
                     picture      {"caption"}                      (its JPEG comes in its own picture message)
                   Part 6, Ask's typed frames (board.ask_frames; every key present, every list 1 to its cap, every
                   number finite and under NUMBER_LIMIT, never a boolean):
@@ -263,6 +268,7 @@ FOCUS_OUT = ("ask", "conversation")                  # focus_out's "to"
 CALENDAR_STATES = ("", "past", "now", "next", "free", "new", "struck", "today")
 SPAN_KINDS = ("busy", "next", "free")
 TODO_STATES = ("open", "waits", "done")
+CAPTURE_STATES = ("waits", "on_calendar", "decided", "past", "cant_add")
 MOTION_LEVELS = ("lively", "calm", "off")
 REQUEST_KINDS = ("ready", "layout", "focus", "open", "close", "pin", "bring_back", "go_approvals",
                  "clear", "restore", "show_new", "reading", "focus_out", "landed", "big", "go", "chrome")
@@ -503,6 +509,23 @@ def _todos_body(body: Any) -> dict[str, Any]:
     return {"rows": _rows(fields.get("rows", []), _todo_row)}
 
 
+def _capture_row(value: Any) -> dict[str, Any]:
+    keys = ("text", "meta", "state", "detail")
+    fields = _fields(value, keys, keys)
+    state = _choice(fields["state"], CAPTURE_STATES)
+    detail = _text(fields["detail"], WORDS_CAP)
+    text = _text(fields["text"], TITLE_CAP)
+    if detail and not text:
+        raise Refused(R_SHAPE)
+    return {"text": text, "meta": _text(fields["meta"], META_CAP), "state": state, "detail": detail}
+
+
+def _capture_body(body: Any) -> dict[str, Any]:
+    """What a capture found (build plan item 3): a row per item with its state, a can't-add row's reason, the note."""
+    fields = _fields(body, ("rows", "note"), ("rows", "note"))
+    return {"rows": _rows(fields["rows"], _capture_row), "note": _text(fields["note"], WORDS_CAP)}
+
+
 def _picture_body(body: Any) -> dict[str, Any]:
     """A page picture: its caption (the host, as words) under the JPEG of its own picture message; it never navigates."""
     fields = _fields(body, ("caption",))
@@ -670,7 +693,7 @@ def _agents_body(body: Any) -> dict[str, Any]:
 
 KINDS: dict[str, Callable[[Any], dict[str, Any]]] = {
     "text": _text_body, "calendar": _calendar_body, "mail_thread": _mail_thread_body, "mail_list": _mail_list_body,
-    "todos": _todos_body, "picture": _picture_body,
+    "todos": _todos_body, "picture": _picture_body, "capture": _capture_body,
     "table": _table_body, "chart": _chart_body, "timeline": _timeline_body, "maths": _maths_body,
     "number": _number_body,
     "approvals": _approvals_body, "agents": _agents_body,

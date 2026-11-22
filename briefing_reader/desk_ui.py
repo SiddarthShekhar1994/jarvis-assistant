@@ -933,6 +933,27 @@ class DeskController(QObject):
         self.feed.set_turn(answer.key, self._answer_entry())
         self._sync_counts()
 
+    def on_capture(self, summary: Any, *, approvals: str = "", words: str = "") -> str:
+        """Build plan item 3: what a capture found as a Capture frame (board.frames.from_capture), in an answer's group
+        of its own; its amber chip's go_approvals opens Approvals at ``approvals`` (the first card that waits) and
+        approves nothing. Returns the frame's id ("" when nothing went up). The log says counts only."""
+        self._synthetic -= 1
+        answer = _Answer(self._synthetic, str(words or ""), format_time(self._now(), hour24=self._hour24()), done=True,
+                         say="", topic="Capture")
+        self._answers[answer.key] = answer
+        while len(self._answers) > ANSWERS_KEPT:
+            self._answers.pop(next(iter(self._answers)))
+        made: list[str] = []
+
+        def build(frame_id: str) -> Any:
+            made.append(frame_id)
+            return board_frames.from_capture(summary, frame_id=frame_id)
+
+        self._put(answer, [("capture", build, "", approvals, "")])
+        self._sync_counts()
+        logger.info("Board: a capture's frame went up (%d row(s))", len(getattr(summary, "rows", ()) or ()))
+        return made[0] if made else ""
+
     def _card_entries(self, outcome: Any) -> list[tuple[Any, ...]]:
         """The answer's cards that wait on Approvals: a Reply or Email as the mail it sends (a reply merges with the
         thread it answers), a calendar card's change on its day."""

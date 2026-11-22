@@ -252,6 +252,30 @@ button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 }
 .td-row.done .td-meta { color: var(--ok); }
 
+/* capture (build plan item 3): a row per item found - WAITS an amber diamond (it waits on Approvals), ON YOUR CALENDAR
+   a mint check, DECIDED and PAST quiet, CAN'T ADD its reason on the second line; the note last */
+.cp-row {
+  display: grid; grid-template-columns: 16px minmax(0, 1fr) fit-content(36%); column-gap: 10px;
+  align-items: start; padding: 7px 0; border-top: 1px solid var(--line-faint);
+}
+.f-body > .cp-row:first-child { border-top: 0; padding-top: 0; }
+.cp-box { display: grid; place-items: center; width: 14px; height: 18px; }
+.cp-mark { width: 13px; height: 13px; }
+.cp-row.waits .cp-mark { color: var(--amber); }
+.cp-row.on_calendar .cp-mark { width: 12px; height: 12px; color: var(--ok); stroke-width: 2.4; }
+.cp-main { display: grid; row-gap: 2px; min-width: 0; }
+.cp-text { color: var(--ink-1); font: 400 13px/18px var(--font-body); overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.cp-when { color: var(--ink-3); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.cp-detail { color: var(--ink-3); font: 400 12px/17px var(--font-body); overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.cp-state { color: var(--ink-3); text-align: right; padding-top: 2px; }
+.cp-row.waits .cp-text { color: var(--amber-tx); }
+.cp-row.waits .cp-state { color: var(--amber); }
+.cp-row.on_calendar .cp-state { color: var(--ok); }
+.cp-row.past .cp-text, .cp-row.decided .cp-text { color: var(--ink-3); }
+.cp-row.past .cp-when, .cp-row.decided .cp-when, .cp-row.past .cp-state, .cp-row.decided .cp-state { color: var(--ink-4); }
+.cp-row.cant_add .cp-detail { color: var(--ink-2); }
+.cp-note { margin: 8px 0 0; color: var(--ink-3); font: 400 12px/17px var(--font-body); }
+
 /* picture: the app's JPEG (80 % until focused or lit), its host as a caption and PICTURE ONLY: it never navigates */
 .pic-slot:empty { display: none; }
 .pic-slot .f-pic { margin-top: 0; }
@@ -1277,6 +1301,8 @@ button.c-clock:focus-visible, :root.keys button.c-clock:focus { outline: 2px sol
 :root.canvas .ml-subject { font: 400 13px/19px var(--font-body); }
 :root.canvas .td-box { border-radius: 1px; border-width: 1px; border-color: var(--ink-4); }
 :root.canvas .td-row.waits .td-text { color: #FFE2B0; }
+:root.canvas .cp-text { font: 400 13px/19px var(--font-body); }
+:root.canvas .cp-row.waits .cp-text { color: #FFE2B0; }
 :root.canvas .ch-bars { gap: 9px 12px; }
 :root.canvas .ch-l { color: var(--ink-2); font: 400 13px/19px var(--font-body); }
 :root.canvas .ch-tr { height: 12px; border-radius: 0; background: #0B1B20; }

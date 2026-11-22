@@ -110,6 +110,7 @@ MESSAGES = {
 OVERAGE = "overage"           # AskFailure.detail: Claude Code said this run uses extra usage
 REJECTED = "rejected"         # AskFailure.detail: Claude Code said the plan's limit is reached
 PRESTART_DIED = "prestart_died"   # AskFailure.detail: a process started ahead ended before any output (run cold)
+PICTURES_NEED_STREAM = "pictures_need_stream"   # AskFailure.detail: pictures without a stream-json command line (not sent)
 NO_INIT = "no_init"           # AskFailure.detail: no init event in time
 # How a run's process came (RunResult.start; the per-Ask log line says it).
 START_AHEAD = "prestarted"
@@ -1082,7 +1083,7 @@ def run_cli(runner: Runner, argv: Sequence[str], prompt: str, *, env: Mapping[st
             now: Callable[[], datetime] = lambda: datetime.now().astimezone(),
             progress: Progress | None = None, capture: bool = False,
             watch: Callable[[Mapping[str, Any]], None] | None = None, process: Process | None = None,
-            after_start: Callable[[], None] | None = None) -> RunResult:
+            after_start: Callable[[], None] | None = None, images: Sequence[tuple[str, bytes]] = ()) -> RunResult:
     """Start the CLI with ``prompt`` on stdin and read its events until the result, a guard trip
     or stop, the timeout or Cancel (the process is killed then). Never raises for the CLI's
     behaviour. ``init_check`` checks the first event (InitSummary, or GuardTrip / RunStop),
@@ -1090,10 +1091,16 @@ def run_cli(runner: Runner, argv: Sequence[str], prompt: str, *, env: Mapping[st
     event. ``progress`` / ``capture``: see the module docs (neither changes the run). ``watch`` hears
     every stream_event that passed the checks (a callback that raises changes nothing). ``process``: a CLI
     started ahead of this question gets the prompt instead of a new one; ``after_start``: called once the prompt
-    is on its way (either way)."""
+    is on its way (either way). ``images``: a capture's pictures, which only a stream-json command line can carry
+    (cli.stream_message); with any other one the run is refused before it starts (nothing is sent)."""
     started = clock()
     stream_input = holds_stdin(argv)
-    payload = stream_message(prompt) if stream_input else prompt
+    if images and not stream_input:
+        return RunResult(failure=failure(ERROR, PICTURES_NEED_STREAM))
+    try:
+        payload = stream_message(prompt, images) if stream_input else prompt
+    except ValueError:
+        return RunResult(failure=failure(ERROR, PICTURES_NEED_STREAM))
     ahead = process is not None
     if process is not None:
         if not process.send(payload):   # it ended while it waited: nothing was sent

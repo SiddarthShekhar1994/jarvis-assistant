@@ -52,6 +52,9 @@ ROUTE_NONE, ROUTE_MEMORY_SAVE, ROUTE_MEMORY_FORGET, ROUTE_MEMORY_SHOW, ROUTE_PLA
     "none", "memory_save", "memory_forget", "memory_show", "plan", "prep", "followups")
 ROUTE_DESKTOP = "desktop"
 ROUTE_STANDING = "standing"
+# Build plan item 3: "capture: <text>" - the text as a capture (the app reads it as soon as it is typed: the Enter
+# is the click). Route.payload is the text after the colon. Always on (a capture needs Ask on, as every Claude run).
+ROUTE_CAPTURE = "capture"
 STANDING_AGENT, STANDING_RULE, STANDING_RUN = "agent", "rule", "run"
 MEMORY_ROUTES = frozenset({ROUTE_MEMORY_SAVE, ROUTE_MEMORY_FORGET, ROUTE_MEMORY_SHOW})
 # The parts of a day a plan route names (the same words as ask.dayplan.PART_*).
@@ -101,6 +104,7 @@ _PREP_RE = _pattern(r"(?:prep|prepare)\s+me(?:\s+(?:for|on)\s+(?P<target>\S.*))?
                     r"|my\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?(?:\s+(?:meeting|call))?)"
                     r"|meeting\s+prep")
 _STANDING_RE = _pattern(r"(?P<kind>agent|rule)\s*:\s*(?P<words>\S.*)")
+_CAPTURE_RE = re.compile(r"capture\s*:\s*(?P<words>\S.*)", re.IGNORECASE | re.DOTALL)
 _RUN_RE = _pattern(r"run\s+(?:my\s+|the\s+)?(?P<name>\S.*?)(?:\s+now)?")
 _FOLLOWUPS_RE = _pattern(r"(?:show\s+(?:me\s+)?)?(?:my\s+)?follow[- ]?ups?\??|any\s+follow[- ]?ups\??"
                          r"|what(?:'s|\s+is)\s+waiting\s+on\s+me\??|what\s+am\s+i\s+waiting\s+(?:on|for)\??"
@@ -122,6 +126,9 @@ def route(text: str, flags: RouteFlags) -> Route:
     text = " ".join(str(text or "").split())
     if not text:
         return NO_ROUTE
+    match = _CAPTURE_RE.fullmatch(text)
+    if match:
+        return Route(ROUTE_CAPTURE, match.group("words").strip())
     if flags.standing:
         found = _standing_route(text, flags.standing_names)
         if found is not NO_ROUTE:

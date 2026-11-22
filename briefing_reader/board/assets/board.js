@@ -32,6 +32,7 @@
   var CALENDAR_STATES = ['', 'past', 'now', 'next', 'free', 'new', 'struck', 'today'];
   var SPAN_KINDS = ['busy', 'next', 'free'];
   var TODO_STATES = ['open', 'waits', 'done'];
+  var CAPTURE_STATES = ['waits', 'on_calendar', 'decided', 'past', 'cant_add'];   // board.protocol.CAPTURE_STATES
   var MOTIONS = {lively: 1, calm: 1.6, off: 0};
   var MAX_FRAMES = 24;
   var MAX_PINS = 6;                            // a 7th pin says why in the frame's meta (board.protocol.MAX_PINS)
@@ -104,10 +105,14 @@
   // Each kind's glyph (holo's icons, drawn by tokens.css) and its name (the index strip's accessible names).
   var GLYPHS = {text: 'read-all', calendar: 'calendar', mail_thread: 'mail', mail_list: 'inbox', todos: 'todos',
                 picture: 'image', table: 'table', chart: 'chart', timeline: 'timeline', maths: 'maths',
-                number: 'chart', approvals: 'diamond', agents: 'board'};
+                number: 'chart', approvals: 'diamond', agents: 'board', capture: 'calendar'};
   var KIND_WORDS = {text: 'Answer', calendar: 'Calendar', mail_thread: 'Mail', mail_list: 'Mail list',
                     todos: 'To-dos', picture: 'Picture', table: 'Table', chart: 'Chart', timeline: 'Timeline',
-                    maths: 'Maths', number: 'Number', approvals: 'Waits for your OK', agents: 'Agents'};
+                    maths: 'Maths', number: 'Number', approvals: 'Waits for your OK', agents: 'Agents',
+                    capture: 'Capture'};
+  // A capture's row states in words (build plan item 3): the non-colour cue of each.
+  var CAPTURE_WORDS = {waits: 'Waits', on_calendar: 'On your calendar', decided: 'Decided', past: 'Past',
+                       cant_add: "Can't add"};
 
   // The renderer table: one function per kind (DESIGN-SPEC 3.3). Each checks the frame's body as board.protocol does
   // (its keys, types, caps and lists) and throws on anything it can't show - the message is then dropped and nothing
@@ -306,6 +311,46 @@
       line.append(box, make('span', 'td-text', row.text), make('span', 'td-meta t-badge', state));
       body.appendChild(line);
     });
+  };
+
+  // A capture (build plan item 3): what was found, a row each - WAITS (amber diamond: it waits on Approvals), ON YOUR
+  // CALENDAR (a check), DECIDED, PAST or CAN'T ADD - its day and time, and a second line (a series' repeat, a can't-add
+  // reason); the note last. Every word as text; the frame's amber chip opens Approvals and approves nothing.
+  KINDS.capture = function (body, frame) {
+    var data = frame.body;
+    if (!onlyKeys(data, ['rows', 'note']) || !('rows' in data) || !('note' in data) || !words(data.note, CAPS.status_text)) {
+      throw new TypeError('capture');
+    }
+    var rows = rowsOf(data, ['text', 'meta', 'state', 'detail'], function (row) {
+      return words(row.text, CAPS.title) && words(row.meta, CAPS.meta) && words(row.detail, CAPS.status_text)
+        && CAPTURE_STATES.indexOf(row.state) >= 0 && (row.text || !row.detail);
+    });
+    rows.forEach(function (row) {
+      if (!row.text) {
+        body.appendChild(more(row.meta));
+        return;
+      }
+      var line = make('div', 'cp-row ' + row.state);
+      var box = make('i', 'cp-box');
+      if (row.state === 'waits') {
+        box.appendChild(glyph('diamond', 'cp-mark', true));
+      } else if (row.state === 'on_calendar') {
+        box.appendChild(glyph('check', 'cp-mark'));
+      }
+      var main = make('span', 'cp-main');
+      main.appendChild(make('span', 'cp-text', row.text));
+      if (row.meta) {
+        main.appendChild(make('span', 'cp-when t-badge', row.meta));
+      }
+      if (row.detail) {
+        main.appendChild(make('span', 'cp-detail', row.detail));
+      }
+      line.append(box, main, make('span', 'cp-state t-badge', CAPTURE_WORDS[row.state]));
+      body.appendChild(line);
+    });
+    if (data.note) {
+      body.appendChild(make('p', 'cp-note', data.note));
+    }
   };
 
   KINDS.picture = function (body, frame) {
@@ -4804,7 +4849,7 @@
     });
   }
 
-  var SHORT_KINDS = {approvals: true, agents: true, todos: true};   // part 5A: as tall as their rows
+  var SHORT_KINDS = {approvals: true, agents: true, todos: true, capture: true};   // part 5A: as tall as their rows
 
   function frameLines(rec, m, headed) {        // the lines a frame takes: a row at least, more for what it holds
     var most = Math.min(m.rows, m.rows >= 4 ? 3 : 2) * m.sub;      // (its group's head over it counted)

@@ -2648,8 +2648,10 @@ class WebCardTests(unittest.TestCase):
         self.assertTrue(actions.restrict(web, {OPEN}, actions.SOURCE_ASK).web)
         self.assertTrue(actions.restrict(web, {TODO}, actions.SOURCE_ASK).web)   # refused, still web
         self.assertTrue(dataclasses.replace(web, title="x").web)
-        # web, then the planner modes' mode and serves (memory only, never in the id) come last.
-        self.assertEqual([field.name for field in dataclasses.fields(ProposedAction)][-3:], ["web", "mode", "serves"])
+        # web, then the planner modes' mode and serves (memory only, never in the id), then a capture's uid (never in
+        # the id either) come last.
+        self.assertEqual([field.name for field in dataclasses.fields(ProposedAction)][-4:],
+                         ["web", "mode", "serves", "uid"])
 
     def test_a_web_open_card(self) -> None:
         card = self.web_open()

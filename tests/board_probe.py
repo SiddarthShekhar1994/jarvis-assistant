@@ -1034,6 +1034,8 @@ def main(case: str) -> dict[str, Any]:
         report.update(typed_case(make, wait_until, pump, main_world, settle_end))
     elif case == "canvas":
         report.update(canvas_case(make, wait_until, pump, main_world, settle_end))
+    elif case == "capture":
+        report.update(capture_case(make, wait_until, pump, main_world, settle_end))
     elif case == "canvas_layout":
         report.update(canvas_layout_case(make, wait_until, pump, main_world, settle_end))
     elif case == "canvas_ways":
@@ -5206,6 +5208,96 @@ def shown_typed(body: Any) -> list[str]:
     elif isinstance(body, str) and body:
         found.append(body)
     return found
+
+
+def capture_summary() -> Any:
+    """Build plan item 3: a made-up capture's summary (hostile words among it), as capture.summarize makes it."""
+    from datetime import date, datetime
+
+    from briefing_reader import capture
+    from briefing_reader.gcal import CalendarEvent
+
+    items = [
+        capture.CapturedItem("event", "Chem lab <img src=x onerror=window.pwned=21>", start=datetime(2026, 12, 1, 15),
+                             end=datetime(2026, 12, 1, 16, 30),
+                             series=capture.Series("WEEKLY", by_day=("TU", "TH"), until=date(2027, 5, 1),
+                                                   exdates=(datetime(2026, 12, 3, 15),))),
+        capture.CapturedItem("event", "Midterm exam", start=datetime(2026, 12, 10, 9), end=datetime(2026, 12, 10, 11)),
+        capture.CapturedItem("todo", "Essay draft <script>window.pwned=22</script>", due=date(2026, 12, 4)),
+        capture.CapturedItem("event", "Study group", start=datetime(2026, 12, 2, 18), end=datetime(2026, 12, 2, 19)),
+        capture.CapturedItem("event", "Berlin office hours", start=datetime(2026, 12, 3, 9),
+                             series=capture.Series("WEEKLY"), problem=capture.CANT_REPEAT_ZONE),
+    ]
+    past = [capture.CapturedItem("event", "Orientation", start=datetime(2026, 9, 1, 10))]
+    events = [CalendarEvent("Study group", start=datetime(2026, 12, 2, 18).astimezone())]
+    return capture.summarize("fall-term.ics", "ics", items, past=past, events=events, decided=lambda _id: False,
+                             zone="", today=date(2026, 11, 22))
+
+
+def capture_case(make: Any, wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> dict[str, Any]:
+    """Build plan item 3: the Capture frame in the real canvas page - every word as text, its rows' states, the amber
+    chip; the page refuses a capture body that does not fit; stills when CAPTURE_STILLS names a folder."""
+    from briefing_reader.board import frames, protocol
+
+    report: dict[str, Any] = {}
+    host, board = make(canvas=True)
+    host.resize(1389, 868)
+    board.setGeometry(0, 0, 1389, 868)
+    host.show()
+    wait_until(board.is_ready, 40)
+    report["ready"] = board.is_ready()
+    board.set_motion("off")
+    built = frames.from_capture(capture_summary(), frame_id="cap1")
+    report["sent"] = json.loads(protocol.check_message(built.frame, set()).text)
+    report["applied"] = board.apply(built.frame)
+    pump(1.5)
+    report["rendered"] = json.loads(main_world(board, CAPTURE_LOOK))
+    stills = os.environ.get("CAPTURE_STILLS", "")
+    if stills:
+        host.grab().save(str(Path(stills) / "capture-frame-1389x868.png"))
+        host.resize(1920, 1080)
+        board.setGeometry(0, 0, 1920, 1080)
+        pump(1.5)
+        host.grab().save(str(Path(stills) / "capture-frame-1920x1080.png"))
+    base = {"type": "frame", "id": "bad", "kind": "capture", "title": "Bad", "meta": "", "status": "ok",
+            "status_text": "", "status_meta": "", "waits": "", "changed": False, "pinned": False, "closed": False}
+    row = {"text": "x", "meta": "", "state": "waits", "detail": ""}
+    bad = [
+        dict(base, body={"rows": [dict(row, state="approved")], "note": ""}),
+        dict(base, body={"rows": [dict(row, html="<b>")], "note": ""}),
+        dict(base, body={"rows": [{"text": "x", "meta": "", "state": "waits"}], "note": ""}),
+        dict(base, body={"rows": [dict(row, text="", detail="why")], "note": ""}),
+        dict(base, body={"rows": [row] * 9, "note": ""}),
+        dict(base, body={"rows": [row], "note": "x" * 161}),
+        dict(base, body={"rows": [row]}),
+        dict(base, body={"rows": [row], "note": "", "link": "https://example.org"}),
+    ]
+    report["page_refuses"] = [main_world(board, f"board.apply({json.dumps(json.dumps(item))})") for item in bad]
+    refused = []
+    for item in bad:
+        try:
+            protocol.check_message(item, set())
+            refused.append(False)
+        except protocol.Refused:
+            refused.append(True)
+    report["protocol_refuses"] = refused
+    report["bad_frames"] = main_world(board, "document.querySelectorAll('#title-bad').length")
+    settle_end(report, board)
+    return report
+
+
+CAPTURE_LOOK = """JSON.stringify((function () {
+    var f = document.getElementById('title-cap1').closest('.frame');
+    var made = 'a, script, iframe, style, object, embed, form, link, base, img, u';
+    return {text: f.textContent, classes: f.className, markup: f.querySelectorAll(made).length,
+            rows: Array.from(f.querySelectorAll('.cp-row')).map(function (r) { return r.className; }),
+            states: Array.from(f.querySelectorAll('.cp-state')).map(function (r) { return r.textContent; }),
+            details: Array.from(f.querySelectorAll('.cp-detail')).map(function (r) { return r.textContent; }),
+            marks: f.querySelectorAll('.cp-mark').length, note: (f.querySelector('.cp-note') || {}).textContent || '',
+            attrs: Array.from(f.querySelectorAll('*')).some(function (el) {
+              return Array.from(el.attributes).some(function (a) { return /pwned|onerror/.test(a.value); }); }),
+            pwned: typeof window.pwned};
+  })())"""
 
 
 if __name__ == "__main__":
