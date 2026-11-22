@@ -90,10 +90,13 @@ from .actions import (
     STATUS_SENT,
     STATUS_UNKNOWN,
     TODO,
+    UNSUBSCRIBE,
+    UNSUBSCRIBE_ONE_CLICK,
     EditInvalid,
     ProposedAction,
     edit_action,
     edit_mail,
+    link_host,
     mail_problem,
     open_text,
     sent_text,
@@ -1745,15 +1748,107 @@ def recipient_history(config: Config) -> RecipientHistory:
     return RecipientHistory(config.data_dir / RECIPIENTS_FILE)
 
 
+class UnsubscribeBackend:
+    """An Unsubscribe card's one call (mail extras): ONE POST to the list's own server by its List-Unsubscribe header
+    (unsubscribe.one_click; RFC 8058). It needs no Google sign-in or scope: the card was built from a message Gmail
+    verified. Only run_action's "running" path at the end of its hidden hold calls it; never retried. Logged by
+    action id, kind, alias, the method word, the HTTP status and the duration only."""
+
+    name = BACKEND_GOOGLE
+    KINDS = frozenset({UNSUBSCRIBE})
+
+    def __init__(self, *, post: Callable[..., int] | None = None, resolve: Callable[[str], list[str]] | None = None
+                 ) -> None:
+        self._post = post
+        self._resolve = resolve
+
+    def handles(self, action: ProposedAction) -> bool:
+        return action.kind in self.KINDS
+
+    def readiness(self, action: ProposedAction) -> str:
+        """"" when the card's link may take the POST now (checked again: https, a public host by name, port 443)."""
+        from . import unsubscribe
+
+        if action.field("method") != UNSUBSCRIBE_ONE_CLICK or unsubscribe.url_problem(action.field("url")):
+            return UNSUBSCRIBE_LINK_NOTE
+        return ""
+
+    def signed_in(self, action: ProposedAction) -> bool:
+        return True   # no Google call: the POST goes to the list's own server
+
+    def prepare(self, action: ProposedAction, *, on_stage: OnStage = _no_stage) -> None:
+        return None
+
+    def sign_in(self, alias: str, *, on_stage: OnStage = _no_stage) -> None:
+        return None
+
+    def peek(self, action: ProposedAction) -> EventDetails:
+        raise ExecError(NO_EVENT_MESSAGE)
+
+    def preview(self, action: ProposedAction) -> Payload:
+        """What execute() sends, exactly (no network)."""
+        from . import unsubscribe
+
+        fields = (Field("To", f"the list's server ({link_host(action.field('url'))})"),
+                  Field("Request", "POST, once - never retried, no redirect followed", mono=True),
+                  Field("Content-Type", unsubscribe.CONTENT_TYPE, mono=True),
+                  Field("Account", action.account))
+        return Payload("Will send exactly this", fields, "Body", unsubscribe.ONE_CLICK_VALUE)
+
+    def execute(self, action: ProposedAction, *, on_stage: OnStage = _no_stage,
+                interactive: bool = True, live: LiveTask | None = None) -> ExecResult:
+        """The one POST (run_action's "running" path only: ``interactive`` must be False)."""
+        from . import unsubscribe
+
+        if interactive:
+            raise ExecError(HOLD_ONLY_MESSAGE)
+        reason = self.readiness(action)
+        if reason:
+            raise ExecError(reason)
+        on_stage(STAGE_WORKING)
+        call = _call_step(live or NO_TASK, "The list's server: unsubscribe (one POST, never retried)",
+                          "POST " + unsubscribe.ONE_CLICK_VALUE)
+        extra: dict[str, Any] = {}
+        if self._post is not None:
+            extra["post"] = self._post
+        if self._resolve is not None:
+            extra["resolve"] = self._resolve
+        done = unsubscribe.one_click(action.field("url"), **extra)
+        logger.info("Unsubscribe action %s (%s, %s): %s %s (HTTP %d, %d ms)", action.id, action.kind,
+                    logged_alias(action.account), UNSUBSCRIBE_ONE_CLICK, done.outcome, done.status, done.ms)
+        if done.outcome == unsubscribe.DONE:
+            if call is not NO_STEP:
+                call.field("Answer", f"HTTP {done.status}", mono=True)
+                call.done(STATUS_OK, status_text="SENT")
+            return ExecResult(STATUS_SENT, "", sent_text(action))
+        message = UNSUBSCRIBE_FAILED_WORDS.get(done.reason, UNSUBSCRIBE_FAILED_WORDS[""])
+        unknown = done.outcome == unsubscribe.UNKNOWN
+        _call_failed(call, NO_STEP, message, status=done.status or None, unknown=unknown)
+        raise ExecError(message, outcome=OUTCOME_UNKNOWN if unknown else OUTCOME_FAILED, status=done.status or None)
+
+
+UNSUBSCRIBE_LINK_NOTE = "This unsubscribe link is not one Jarvis may use - open the email instead"
+UNSUBSCRIBE_FAILED_WORDS = {
+    "": "The list's server did not take the request",
+    "refused": "Jarvis won't send to that address - nothing was sent",
+    "not_confirmed": "The list's server sent Jarvis to another page instead of confirming - open the email",
+    "rejected": "The list's server refused the request",
+    "server_error": "The list's server had a problem - it may or may not have taken it",
+    "no_answer": "The list's server did not answer in time - it may or may not have taken it",
+}
+
+
 def build_executor(config: Config, calendars: Mapping[str, Any], senders: Mapping[str, Any] | None = None, *,
                    history: RecipientHistory | None = None,
                    now: Callable[[], datetime] | None = None) -> Executor:
     """The Executor of the app: Google Calendar for ``calendars`` and Gmail for ``senders``,
-    ``[actions] trusted_domains`` and the recipient history (default: recipient_history(config))."""
+    ``[actions] trusted_domains`` and the recipient history (default: recipient_history(config)), and an Unsubscribe
+    card's one POST (UnsubscribeBackend)."""
     if history is None:
         history = recipient_history(config)
     backends: list[Any] = [CalendarBackend(calendars, now=now)]
     backends.append(GmailBackend(senders or {}, history=history, trusted_domains=config.actions.trusted_domains))
+    backends.append(UnsubscribeBackend())
     return Executor(backends, config.accounts)
 
 

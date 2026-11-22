@@ -76,20 +76,27 @@ MODE_DESKTOP = "desktop"
 # (ask.capture_read). Claude only lists items; Jarvis builds every card. Counts as an Ask run.
 MODE_CAPTURE = "capture"
 ORIGIN_CAPTURE = "capture"
+# Mail extras (part 2): the Edit dialog's Rewrite - one draft rewritten in the owner's plain words (RevisionJob). Its
+# answer is a message text, never a card line (MODE_KINDS empty); nothing is kept before Save. Counts as an Ask run.
+MODE_REVISE = "revise"
 ORIGIN_OFFER, ORIGIN_TYPED, ORIGIN_CHOICE, ORIGIN_LIST, ORIGIN_BRIEF = "offer", "typed", "choice", "list", "brief"
 # A summary runs only when the owner asked for it: ORIGIN_AUTO - his own "summarise it" tick on that meeting's
 # start card (unticked every time), once the transcript is ready; ORIGIN_SUMMARISE - his click on Summarise.
 ORIGIN_AUTO, ORIGIN_SUMMARISE = "auto", "summarise"
 MODE_KINDS = {MODE_PLAN: frozenset({CALENDAR}), MODE_PREP: frozenset({REPLY}), MODE_NUDGE: frozenset({REPLY}),
-              MODE_MEETING: frozenset({EMAIL}), MODE_DESKTOP: frozenset(), MODE_CAPTURE: frozenset({CALENDAR, TODO})}
+              MODE_MEETING: frozenset({EMAIL}), MODE_DESKTOP: frozenset(), MODE_CAPTURE: frozenset({CALENDAR, TODO}),
+              MODE_REVISE: frozenset()}
 # A desktop plan has no lines: at most this many steps (desktop_schema.json's steps maxItems).
-MODE_MAX_LINES = {MODE_PLAN: 8, MODE_PREP: 2, MODE_NUDGE: 1, MODE_MEETING: 3, MODE_DESKTOP: 12, MODE_CAPTURE: 30}
+MODE_MAX_LINES = {MODE_PLAN: 8, MODE_PREP: 2, MODE_NUDGE: 1, MODE_MEETING: 3, MODE_DESKTOP: 12, MODE_CAPTURE: 30,
+                  MODE_REVISE: 0}
 MODE_TASKS = {MODE_PLAN: live.TASK_PLAN, MODE_PREP: live.TASK_PREP, MODE_NUDGE: live.TASK_NUDGE,
-              MODE_MEETING: live.TASK_MEETING, MODE_DESKTOP: live.TASK_DESKTOP, MODE_CAPTURE: live.TASK_CAPTURE}
+              MODE_MEETING: live.TASK_MEETING, MODE_DESKTOP: live.TASK_DESKTOP, MODE_CAPTURE: live.TASK_CAPTURE,
+              MODE_REVISE: live.TASK_REVISE}
 MODE_USAGE = {MODE_PLAN: usage.KIND_PLAN_DAY, MODE_PREP: usage.KIND_PREP, MODE_NUDGE: usage.KIND_NUDGE,
-              MODE_MEETING: usage.KIND_PLAN, MODE_DESKTOP: usage.KIND_PLAN, MODE_CAPTURE: usage.KIND_PLAN}
+              MODE_MEETING: usage.KIND_PLAN, MODE_DESKTOP: usage.KIND_PLAN, MODE_CAPTURE: usage.KIND_PLAN,
+              MODE_REVISE: usage.KIND_PLAN}
 MODE_TITLES = {MODE_PLAN: "Plan", MODE_PREP: "Prep", MODE_NUDGE: "Nudge", MODE_MEETING: "Meeting",
-               MODE_DESKTOP: "Desktop", MODE_CAPTURE: "Capture"}
+               MODE_DESKTOP: "Desktop", MODE_CAPTURE: "Capture", MODE_REVISE: "Revise"}
 FIXED_COMMANDS: dict[Any, str] = {
     MODE_PLAN: "Plan the day in <day> for the owner: propose time blocks inside <free> for what needs time in "
                "<todos> and <briefing>, as Calendar lines, or ask one question.",
@@ -114,6 +121,9 @@ FIXED_COMMANDS: dict[Any, str] = {
     # A capture: what the owner dropped in. His typed words, if any, follow ("The owner's words: ...").
     MODE_CAPTURE: "List the events and to-dos that <capture> and the pictures hold, as items (a repeating event as "
                   "one item with its repeat), or ask one question.",
+    # A revise: the owner's words follow ("The owner's words: ..."): they say how to change it.
+    MODE_REVISE: "Rewrite the message in <draft> as the owner's words say; keep its meaning, its people and its "
+                 "sign-off unless they ask otherwise.",
 }
 OWNER_WORDS = "The owner's words: "
 OWNER_WORDS_CAP = 300
@@ -632,6 +642,56 @@ def check_nudge(card: ProposedAction, target: ThreadTarget, thread: MailThread |
                 owner_words: str = "", own: Collection[str] = ()) -> str:
     """NudgeCheck for one card: "" or the reason it is information only."""
     return NudgeCheck(target, thread, notes, owner_words=owner_words, own=own)(card)
+
+
+# --------------------------------------------------------------------------
+# A draft rewritten in the owner's words (mail extras, part 2)
+# --------------------------------------------------------------------------
+
+REVISE_DRAFT_CAP = 5000
+REVISE_SUBJECT_CAP = 200
+
+
+@dataclass(frozen=True)
+class RevisionJob:
+    """One Rewrite of the Edit dialog: its card (``action_id``, ``kind`` reply / email), the subject and the message as
+    the dialog shows them now (``draft``), and their digest (the dialog takes the answer back only while it still shows
+    exactly them). Memory only; the repr holds sizes."""
+
+    action_id: str
+    kind: str
+    subject: str = field(repr=False)
+    draft: str = field(repr=False)
+    digest: str = ""
+
+    def __repr__(self) -> str:
+        return f"RevisionJob({self.kind}, {len(self.subject)}/{len(self.draft)} characters)"
+
+
+def _draft_text(text: str, cap: int = REVISE_DRAFT_CAP) -> str:
+    """The message as data with its line breaks kept: each line through data() (no way to open or close a block),
+    blank lines kept as one, at most ``cap`` characters."""
+    lines = [data(line) for line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    out: list[str] = []
+    for line in lines:
+        if line or (out and out[-1]):
+            out.append(line)
+    joined = "\n".join(out).strip("\n")
+    return joined if len(joined) <= cap else joined[:cap - 3].rstrip() + "..."
+
+
+def build_revise_prompt(now: datetime, owner: str, job: RevisionJob, words: str, zone: str = "") -> str:
+    """A revise run's stdin: <now> <owner> <draft subject="..."> (the message, lines kept) and <command> (the fixed
+    words, then "The owner's words: ..." through data()). No thread, notes, accounts or search: only the draft and the
+    owner's words."""
+    subject = data(job.subject, REVISE_SUBJECT_CAP).replace('"', "'")
+    command = FIXED_COMMANDS[MODE_REVISE]
+    said = data(words, OWNER_WORDS_CAP)
+    if said:
+        command += f"\n{OWNER_WORDS}{said}"
+    blocks = [f"<now>\n{now_line(now, zone)}\n</now>", f"<owner>{data(owner)}</owner>",
+              f'<draft subject="{subject}">\n{_draft_text(job.draft)}\n</draft>', f"<command>\n{command}\n</command>"]
+    return "\n".join(blocks) + "\n"
 
 
 # --------------------------------------------------------------------------

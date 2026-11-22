@@ -1258,7 +1258,8 @@ class StructuredDetectionTests(unittest.TestCase):
                 self.assertEqual(action.error, "")
                 self.assertTrue(action.decidable)
                 self.assertEqual(action.raw, line)
-        self.assertEqual(STRUCTURED_KINDS, frozenset(LABELS))
+        # Mail extras: an Unsubscribe line is read too, but never as a working card (tests/test_unsubscribe.py).
+        self.assertEqual(STRUCTURED_KINDS, frozenset(LABELS) | {actions.UNSUBSCRIBE})
 
     def test_free_text_lines_stay_as_before(self) -> None:
         for line, kind in (("Reply: Carol about the draft", REPLY), ("Reply: x=1 is wrong", REPLY),
@@ -2196,9 +2197,11 @@ class CarriedOutKindsTests(unittest.TestCase):
     with no countdown: the calendar kinds at once (Undo reverses them), the others after a hidden hold."""
 
     def test_carried_kinds(self) -> None:
-        self.assertEqual(actions.CARRIED_KINDS, frozenset({CALENDAR, TODO, RSVP, MOVE, CANCEL, REPLY, EMAIL}))
+        # Mail extras: an Unsubscribe tells the list's server once, after the same hidden hold.
+        self.assertEqual(actions.CARRIED_KINDS, frozenset({CALENDAR, TODO, RSVP, MOVE, CANCEL, REPLY, EMAIL,
+                                                           actions.UNSUBSCRIBE}))
         self.assertEqual(actions.UNDO_KINDS, frozenset({CALENDAR, TODO, RSVP, MOVE}))
-        self.assertEqual(actions.HOLD_KINDS, frozenset({CANCEL, REPLY, EMAIL}))
+        self.assertEqual(actions.HOLD_KINDS, frozenset({CANCEL, REPLY, EMAIL, actions.UNSUBSCRIBE}))
         self.assertEqual(actions.UNDO_KINDS | actions.HOLD_KINDS, actions.CARRIED_KINDS)
         self.assertFalse(actions.UNDO_KINDS & actions.HOLD_KINDS)
         for action in (example("RSVP"), example("Move"), example("Todo"), parse_action_line(CHESS)):

@@ -31,6 +31,7 @@ from typing import Any
 from ..ask.mail import CUT_MARK, MailMessage, MailPerson, thread_from_api
 from ..desktop import guard
 from ..desktop import service as desktop_service
+from ..unsubscribe import dmarc_passed   # Gmail's verdict (it lives there: unsubscribing reads it too)
 from .filters import watch_query
 
 logger = logging.getLogger(__name__)
@@ -38,7 +39,6 @@ logger = logging.getLogger(__name__)
 OVERLAP_S = 120                  # Gmail's after: is looked at this much earlier than the mark (late arrivals)
 LIST_MAX = 100                   # ids one check lists (gmail.WATCH_PAGE_MAX): more new mail than this at once is a flood
 _GMAIL_ID_RE = re.compile(r"[0-9A-Za-z_-]{6,64}")
-_DMARC_RE = re.compile(r"\bdmarc=(\w+)", re.IGNORECASE)
 _SKIP_LABELS = frozenset({"DRAFT", "SPAM", "TRASH"})
 
 
@@ -78,24 +78,6 @@ class Batch:
 
     def __repr__(self) -> str:
         return f"Batch({len(self.refs)} new, {self.more} more, baseline {self.baseline}, full {self.full})"
-
-
-def _header(headers: Any, name: str) -> str:
-    for entry in headers if isinstance(headers, list) else ():
-        if isinstance(entry, dict) and str(entry.get("name", "")).casefold() == name:
-            value = entry.get("value")
-            return value if isinstance(value, str) else ""
-    return ""
-
-
-def dmarc_passed(headers: Any) -> bool:
-    """Gmail's own verdict: the FIRST Authentication-Results header (Gmail puts its own on top; a sender may add
-    others below) is mx.google.com's and says dmarc=pass."""
-    first = _header(headers, "authentication-results")
-    if not first.strip().casefold().startswith("mx.google.com"):
-        return False
-    found = _DMARC_RE.search(first)
-    return bool(found) and found.group(1).casefold() == "pass"
 
 
 def ref_from(data: Any, account: str) -> MailRef | None:

@@ -6316,6 +6316,28 @@ DUPLICATE_ERROR = "{address} is already a recipient"
 NOT_AN_ADDRESS_ERROR = "\"{text}\" is not an email address"
 TOO_MANY_ERROR = "At most {count} recipients in To and Cc together"
 REPLY_SUBJECT_NOTE = "A reply keeps the subject of its thread"
+# Mail extras (part 2): the Edit dialog's revise row (a Reply / Email, while Ask is on).
+REVISE_MAX = 300
+REVISE_CAPTION = "Change it in your words"
+REVISE_HINT = "e.g. warmer, and say I'll send it Friday"
+REVISE_TEXT = "Rewrite"
+REVISE_STOP_TEXT = "Stop"
+REVISE_PUT_BACK_TEXT = "Put back"
+REVISE_IDLE_NOTE = "Jarvis rewrites only the message, from it and your words; nothing is kept until Save."
+REVISE_RUNNING_NOTE = "Jarvis is rewriting the message..."
+REVISE_OFFERED_NOTE = "Rewritten by Jarvis: read it before you Save. Rewrite again, or Put back."
+REVISE_PUT_BACK_NOTE = "Put back as it was."
+
+
+class _ReviseLine(QLineEdit):
+    """The revise row's words: Enter asks for the Rewrite and goes no further (it never saves the dialog)."""
+
+    def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.returnPressed.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 MESSAGE_CAPTION = "Message (sent exactly as written)"
 NOT_ADDED_ERROR = "\"{text}\" in {name} was not added - click Add (or press Enter in that field), or clear it"
 OWN_ROW_ERROR = "{address} is the sending account itself - Remove it: Jarvis never sends to it"
@@ -6659,6 +6681,8 @@ class EditDialog(QDialog):
     """
 
     saved = Signal(str, object)
+    reviseRequested = Signal(str, str, str)    # action id, the owner's words, the message as it is now
+    reviseStopped = Signal(str)
     WIDTH = 420
     MAIL_WIDTH = 480
     _MESSAGE_HEIGHT = 150   # the message editor: at least this tall, and as tall as the whole message
@@ -6673,7 +6697,8 @@ class EditDialog(QDialog):
                  classify: Callable[[str], str] | None = None,
                  normalize: Callable[[str], str] | None = None,
                  find_links: Callable[[str], Sequence[tuple[int, int]]] | None = None,
-                 banner: str = "", max_recipients: int = 5, parent: QWidget | None = None) -> None:
+                 banner: str = "", max_recipients: int = 5, revise: bool = False,
+                 parent: QWidget | None = None) -> None:
         flags = Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint
         super().__init__(parent, flags)
         if kind not in EDIT_KINDS:
@@ -6681,6 +6706,14 @@ class EditDialog(QDialog):
         self.action_id = action_id
         self.kind = kind
         self.mail = kind in EDIT_MAIL_KINDS
+        self.revise = bool(revise) and self.mail     # the revise row: a Reply / Email while Ask is on
+        self._revising = False
+        self._before_rewrite: str | None = None      # the message as it was before the last Rewrite (Put back)
+        self._offered = ""                           # the text the last Rewrite offered
+        self.revise_edit: QLineEdit | None = None
+        self.revise_button: HudButton | None = None
+        self.put_back_button: HudButton | None = None
+        self.revise_note: QLabel | None = None
         self._notify = notify
         self._answer = answer if answer in dict(_EDIT_ANSWERS) else "yes"
         self._classify = classify or (lambda _address: RECIPIENT_KNOWN)
@@ -6877,6 +6910,118 @@ class EditDialog(QDialog):
         body.addWidget(self.links_label)
         self.body_edit.textChanged.connect(self._update_links)
         self._update_links()
+        if self.revise:
+            self._build_revise(body)
+
+    def _build_revise(self, body: QVBoxLayout) -> None:
+        """The revise row under the message: the owner's words (one line, REVISE_MAX characters), Rewrite (Stop while
+        it runs), Put back (after a Rewrite) and a status line. It changes only the message, never the recipients or
+        the subject; nothing is kept until Save."""
+        body.addWidget(self._caption(REVISE_CAPTION))
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        self.revise_edit = _ReviseLine(self)
+        self.revise_edit.setMaxLength(REVISE_MAX)
+        self.revise_edit.setPlaceholderText(REVISE_HINT)
+        self.revise_edit.setFont(body_font(13))
+        self.revise_edit.setAccessibleName(REVISE_CAPTION)
+        self.revise_button = HudButton(REVISE_TEXT, SECONDARY, compact=True)
+        self.revise_button.setAutoDefault(False)
+        self.revise_button.setAccessibleDescription("Jarvis rewrites the message from it and your words; nothing is sent")
+        self.put_back_button = HudButton(REVISE_PUT_BACK_TEXT, SECONDARY, compact=True)
+        self.put_back_button.setAutoDefault(False)
+        self.put_back_button.setAccessibleDescription("The message as it was before the rewrite")
+        self.put_back_button.hide()
+        row.addWidget(self.revise_edit, 1)
+        row.addWidget(self.revise_button)
+        row.addWidget(self.put_back_button)
+        body.addLayout(row)
+        self.revise_note = make_label(REVISE_IDLE_NOTE, mono_font(10), TEXT_DIM, wrap=True)
+        body.addWidget(self.revise_note)
+        self.revise_edit.textChanged.connect(self._sync_revise)
+        self.revise_edit.returnPressed.connect(self._on_revise)
+        self.revise_button.clicked.connect(self._on_revise)
+        self.put_back_button.clicked.connect(self._on_put_back)
+        self._sync_revise()
+
+    def revise_words(self) -> str:
+        return " ".join(self.revise_edit.text().split()) if self.revise_edit is not None else ""
+
+    def _sync_revise(self) -> None:
+        if self.revise_button is None:
+            return
+        if self._revising:
+            self.revise_button.setText(REVISE_STOP_TEXT)
+            self.revise_button.setEnabled(True)
+        else:
+            self.revise_button.setText(REVISE_TEXT)
+            self.revise_button.setEnabled(bool(self.revise_words()))
+
+    def _on_revise(self) -> None:
+        if self.revise_edit is None:
+            return
+        if self._revising:
+            self.reviseStopped.emit(self.action_id)
+            return
+        words = self.revise_words()
+        if not words:
+            return
+        self.reviseRequested.emit(self.action_id, words, self.body_edit.toPlainText())
+
+    def is_revising(self) -> bool:
+        return self._revising
+
+    def set_revising(self, on: bool) -> None:
+        """While a Rewrite runs: the words and the message are read only and Rewrite reads Stop."""
+        if self.revise_edit is None:
+            return
+        self._revising = bool(on)
+        self.revise_edit.setReadOnly(self._revising)
+        self.body_edit.setReadOnly(self._revising)
+        if self._revising:
+            self.show_revise_note(REVISE_RUNNING_NOTE)
+        self._sync_revise()
+
+    def offer_rewrite(self, text: str) -> None:
+        """Jarvis's rewrite replaces the message (the old one is kept for Put back) and must be read again (whole_seen
+        starts over). Nothing is kept until Save."""
+        if self.revise_edit is None:
+            return
+        self.set_revising(False)
+        if self._before_rewrite is None:
+            self._before_rewrite = self.body_edit.toPlainText()
+        self._offered = str(text)
+        self.body_edit.setPlainText(self._offered)
+        self._seen_all = False
+        self.put_back_button.show()
+        self.show_revise_note(REVISE_OFFERED_NOTE, warn=True)
+        self._relayout()
+
+    def _on_put_back(self) -> None:
+        if self._before_rewrite is None or self._revising:
+            return
+        self.body_edit.setPlainText(self._before_rewrite)
+        self._before_rewrite = None
+        self._offered = ""
+        self._seen_all = False
+        self.put_back_button.hide()
+        self.show_revise_note(REVISE_PUT_BACK_NOTE)
+        self._relayout()
+
+    def rewrite_kept(self) -> bool:
+        """The message is a rewrite Jarvis offered (not put back), as offered or changed by hand since."""
+        return self._before_rewrite is not None and bool(self._offered)
+
+    def show_revise_note(self, text: str, *, warn: bool = False) -> None:
+        """The revise row's status line (plain text; amber when it needs the owner)."""
+        if self.revise_note is None:
+            return
+        self.revise_note.setText(text or REVISE_IDLE_NOTE)
+        set_label_color(self.revise_note, AMBER if warn else TEXT_DIM)
+        self._relayout()
+
+    def revise_note_text(self) -> str:
+        return self.revise_note.text() if self.revise_note is not None else ""
 
     def _check_address(self, text: str) -> tuple[str, str]:
         """(address, RECIPIENT_*) for an address typed into To or Cc, or ValueError with why not."""
@@ -7006,8 +7151,10 @@ class EditDialog(QDialog):
         subject, the message, Cancel, Save."""
         if not self.mail or self.to_list is None or self.cc_list is None:
             return
+        revise = ([self.revise_edit, self.revise_button, self.put_back_button]
+                  if self.revise_edit is not None else [])
         chain = (self.to_list.focus_chain() + self.cc_list.focus_chain()
-                 + [self.subject_edit, self.body_edit, self.cancel_button, self.save_button])
+                 + [self.subject_edit, self.body_edit, *revise, self.cancel_button, self.save_button])
         for first, second in zip(chain, chain[1:]):
             QWidget.setTabOrder(first, second)
 
@@ -7420,6 +7567,187 @@ class NudgeWordsDialog(QDialog):
             self.move(center.x() - self.width() // 2, center.y() - self.height() // 2)
         super().open()
         self.input.setFocus(Qt.FocusReason.OtherFocusReason)
+
+
+BATCH_TITLE = "Add these {count} to your calendar?"
+BATCH_FOOTER = ("Nobody is invited or told. Each one can be undone on its card for 10 minutes. Replies, emails, "
+                "invitations, moves, cancels, unsubscribes and plan blocks never go in Add all: each waits for its "
+                "own click.")
+BATCH_EXCLUDED = "{count} other card{s} wait{v} for {their} own click."
+BATCH_CANCEL_TEXT = "Cancel"
+BATCH_ADD_TEXT = "Add {count}"
+
+
+class BatchConfirmDialog(QDialog):
+    """Add all's one more confirm (mail extras, part 1): "Add these N to your calendar?", one row per card with exactly
+    what it adds (its title, then when / where / which calendar, as the card says it), how many other cards wait for
+    their own click, the footer, then Cancel and "Add N".
+
+    Window-modal, opened with ``open()``, in the Edit dialog's style (the canvas look's buttons while it is on). No
+    button has the focus and none is a default: Enter does nothing. "Add N" emits ``confirmed(digest)`` (the digest of
+    the rows shown: the app checks the list again) and closes; Cancel or Esc emits ``cancelled`` and closes. Nothing
+    here adds anything. Every text is plain text."""
+
+    confirmed = Signal(str)
+    cancelled = Signal()
+    WIDTH = 480
+    _MIN_WIDTH = 320
+    _SCREEN_MARGIN = 16
+    _ROWS_MAX = 360
+
+    def __init__(self, rows: Sequence[Any], excluded_count: int = 0, parent: QWidget | None = None) -> None:
+        flags = Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint
+        super().__init__(parent, flags)
+        from . import batch
+
+        holo = _holo()
+        self.rows = tuple(rows)
+        self.digest = batch.digest(self.rows)
+        self._answered = False
+        count = len(self.rows)
+        title = BATCH_TITLE.format(count=count)
+        self.setWindowModality(Qt.WindowModality.WindowModal)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setWindowTitle(title)
+        self.setAccessibleName(title)
+        self.panel = ChamferPanel("Add all", "PERSONAL CALENDAR", variant=PANEL_AMBER, border_alpha=0.5,
+                                  padding=(18, 14, 18, 16), spacing=8)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)   # _fit sets the size
+        outer.addWidget(self.panel)
+        layout = self.panel.body_layout
+        self.title_label = _BreakableLabel(title, body_font(15, 600), AMBER_TEXT, min_word=0)
+        layout.addWidget(self.title_label)
+        # The rows scroll on a short screen (or a long list), so the buttons stay on screen.
+        self.rows_scroll = QScrollArea(self)
+        content = _transparent_scroll(self.rows_scroll)
+        listed = QVBoxLayout(content)
+        listed.setContentsMargins(0, 2, 0, 2)
+        listed.setSpacing(10)
+        self.row_labels: list[tuple[QLabel, QLabel]] = []
+        for row in self.rows:
+            item = QVBoxLayout()
+            item.setSpacing(2)
+            head = _PlainWrapLabel(f"{row.kind}: {row.title}", body_font(13, 600), TEXT_BRIGHT)
+            detail = _PlainWrapLabel(row.detail, mono_font(10), TEXT_SOFT)
+            item.addWidget(head)
+            item.addWidget(detail)
+            listed.addLayout(item)
+            self.row_labels.append((head, detail))
+        listed.addStretch(1)
+        self.rows_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        layout.addWidget(self.rows_scroll)
+        others = max(0, int(excluded_count))
+        self.excluded_label = make_label(
+            BATCH_EXCLUDED.format(count=others, s="" if others == 1 else "s", v="s" if others == 1 else "",
+                                  their="its" if others == 1 else "their"),
+            mono_font(10), TEXT_MUTED, wrap=True)
+        self.excluded_label.setVisible(others > 0)
+        layout.addWidget(self.excluded_label)
+        self.footer_label = make_label(BATCH_FOOTER, mono_font(10), TEXT_DIM, wrap=True)
+        layout.addWidget(self.footer_label)
+        buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 6, 0, 0)
+        buttons.setSpacing(8)
+        buttons.addStretch(1)
+        self.cancel_button = holo.HoloButton(BATCH_CANCEL_TEXT, holo.GHOST, size=holo.SIZE_SM)
+        self.add_button = holo.HoloButton(BATCH_ADD_TEXT.format(count=count), holo.AMBER_COMMIT, size=holo.SIZE_SM)
+        self.add_button.setAccessibleDescription("Adds each one to your personal calendar, one at a time")
+        buttons.addWidget(self.cancel_button)
+        buttons.addWidget(self.add_button)
+        layout.addLayout(buttons)
+        self.cancel_button.clicked.connect(self.reject)
+        self.add_button.clicked.connect(self._on_add)
+        self.rejected.connect(self._on_rejected)
+        self.setFixedWidth(self.WIDTH)
+
+    def _on_add(self) -> None:
+        if self._answered:
+            return
+        self._answered = True
+        self.confirmed.emit(self.digest)
+        self.accept()
+
+    def _on_rejected(self) -> None:
+        if not self._answered:
+            self._answered = True
+            self.cancelled.emit()
+
+    def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            event.accept()   # Enter adds nothing (no default button)
+            return
+        super().keyPressEvent(event)
+
+    def _area(self) -> QRect | None:
+        parent = self.parentWidget()
+        screen = (parent.window().screen() if parent is not None else self.screen()) or QApplication.primaryScreen()
+        return screen.availableGeometry() if screen is not None else None
+
+    def _layout_height(self, width: int) -> int:
+        if self.panel.layout() is not None:
+            self.panel.layout().invalidate()
+        self.panel.updateGeometry()
+        layout = self.layout()
+        layout.invalidate()
+        layout.activate()
+        return max(layout.totalHeightForWidth(width) if layout.hasHeightForWidth()
+                   else layout.totalSizeHint().height(), layout.totalMinimumSize().height())
+
+    def _rows_height(self, width: int) -> int:
+        """The rows' natural height at the panel's inner width (each label wrapped as it will show)."""
+        inner = max(1, width - 36 - 12)   # the panel's side padding, and room for a scroll bar
+        content = self.rows_scroll.widget()
+        content.resize(inner, max(1, content.height()))
+        listed = content.layout()
+        listed.invalidate()
+        listed.activate()
+        total = 0
+        for head, detail in self.row_labels:
+            total += head.heightForWidth(inner) + 2 + detail.heightForWidth(inner) + listed.spacing()
+        margins = listed.contentsMargins()
+        return total + margins.top() + margins.bottom()
+
+    def _fit(self) -> None:
+        """Its width (narrower on a narrow screen); the rows as tall as they are, up to _ROWS_MAX and what the screen
+        leaves, so the buttons are always on screen."""
+        self.ensurePolished()
+        area = self._area()
+        margin = self._SCREEN_MARGIN
+        width = self.WIDTH
+        if area is not None:
+            width = max(self._MIN_WIDTH, min(self.WIDTH, area.width() - 2 * margin))
+        if self.minimumWidth() != width or self.maximumWidth() != width:
+            self.setFixedWidth(width)
+        self.rows_scroll.setFixedHeight(0)
+        chrome = self._layout_height(width)
+        room = area.height() - 2 * margin if area is not None else 1 << 20
+        wanted = min(self._rows_height(width), self._ROWS_MAX)
+        self.rows_scroll.setFixedHeight(max(48, min(wanted, room - chrome)))
+        self.resize(width, self._layout_height(width))
+
+    def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().showEvent(event)
+        self._fit()
+
+    def open(self) -> None:  # noqa: D102 - QDialog.open, centred over the parent window
+        self._fit()
+        area = self._area()
+        parent = self.parentWidget()
+        if parent is not None:
+            window = parent.window()
+            center = window.mapToGlobal(QPoint(window.width() // 2, window.height() // 2))
+            x, y = center.x() - self.width() // 2, center.y() - self.height() // 2
+        else:
+            x, y = self.x(), self.y()
+        if area is not None:
+            margin = self._SCREEN_MARGIN
+            x = max(area.left(), min(x, area.right() + 1 - margin - self.width()))
+            y = max(area.top(), min(y, area.bottom() + 1 - margin - self.height()))
+        self.move(x, y)
+        super().open()
+        self.setFocus(Qt.FocusReason.OtherFocusReason)   # no button has the focus: Enter adds nothing
 
 
 def _short_text(text: str, limit: int) -> str:
@@ -9454,6 +9782,7 @@ LIVE_TAG_COLORS = {
     live_events.TASK_DESKTOP: ACCENT,           # cyan: Jarvis pointing at something on the desktop - never amber
     live_events.TASK_AGENT: ACCENT,             # cyan: Jarvis at work on a task
     live_events.TASK_CAPTURE: ACCENT,           # cyan: Jarvis reading what the owner dropped in
+    live_events.TASK_REVISE: ACCENT,            # cyan: a draft rewritten in the owner's words (the Edit dialog)
 }
 LIVE_TEXT_MAX_PX = 320          # an open text block grows to this height, then scrolls
 LIVE_FIELD_LABEL_PX = 104       # the field labels' column ...

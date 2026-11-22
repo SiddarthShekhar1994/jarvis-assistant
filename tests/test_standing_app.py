@@ -689,6 +689,22 @@ class ReplyCheckTests(_Base):
         self.send()
         self.assertTrue(wait_for(lambda: self.c._send_hold is not None, 5.0))
 
+    def test_a_check_that_passes_during_add_all_waits_for_another_click(self) -> None:
+        """Mail extras fix round 1 (medium 4): while the check runs, Add all waits; a check that passes while Add all
+        (or its confirm, or a dialog) is on starts no Send hold beside it: the card asks for another click."""
+        pending: list = []
+        self.s.thread_runner = pending.append
+        self.send()
+        self.assertTrue(self.c._batch_blocked())                        # Add all waits for the check
+        self.c._batch = ui._Batch(ids=["a-card"])
+        try:
+            pending.pop()()
+            settle()
+        finally:
+            self.c._batch = None
+        self.assertIsNone(self.c._send_hold)
+        self.assertEqual(self.c._hints.get(self.card_id), standing_ui.REPLY_AGAIN_NOTE)
+
 
 class RecipientCheckTests(unittest.TestCase):
 

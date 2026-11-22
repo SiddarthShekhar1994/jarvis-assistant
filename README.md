@@ -429,15 +429,15 @@ meeting) - see [Meetings](#meetings-recording-and-summaries);
 to-dos) - see [Capture](#capture-pictures-pdfs-text-and-calendar-files);
 **The canvas** (Home as one black canvas with the orb, frames across the screen,
 the "Now" group, the second-screen display and the soft sounds) - see
-[The look](#the-look-the-canvas).
+[The look](#the-look-the-canvas);
+**Mail extras** (rewrite a draft in your own words, unsubscribe help that asks
+first, and Add all for calendar cards) - see
+[Mail extras](#mail-extras-rewrite-unsubscribe-and-add-all).
 
 Planned for later versions; none of these is built yet, and all of them will
 keep the same rules (they propose, your click approves, and what they did
 shows, in LIVE or, for standing jobs, on the Agents screen):
 
-- **Mail extras**: a reply editor you revise in plain words ("shorter, and
-  warmer"), help with unsubscribing that reads a mail's List-Unsubscribe
-  header and asks you first, and approve-all for a batch of cards.
 - **Documents and datasheets** beside the chat: documents written with you,
   and tables with typed columns that Jarvis fills (a standing agent's report
   could land there too).
@@ -4226,6 +4226,66 @@ every address new again.
   again by itself, and one click sends at most one message: look in that
   account's Sent mail first, then click **Retry** or **Deny**.
 
+### Mail extras: rewrite, unsubscribe and add all
+
+Three helpers around your cards. Each one only prepares or lists; nothing goes
+out before your own click on that card, as everywhere else.
+
+**Rewrite a draft in your words.** Click **Edit** on a Reply or Email card
+(while Ask is on). Under the message there is a line, "Change it in your
+words": type how to change it ("warmer, and say I'll send it Friday") and
+click **Rewrite** (or press Enter there). Jarvis asks Claude once, showing it
+only that message and your words: no thread, no notes, no search, no web. The
+answer replaces only the message in the dialog; the recipients and the subject
+never change. Read it, **Rewrite** again, or **Put back** the message as it
+was. Nothing is kept until **Save**, and Send works as before. A rewrite you
+saved is read whole in the Edit dialog before it can be sent, even when it
+fits on the card. While it runs, the words and the message are read only and
+the button reads **Stop**; closing the dialog stops it too. Jarvis holds a
+rewrite back when it adds an email address or a link that is in neither the
+message nor your words, has hidden characters, or is empty or too long; a
+question back or a failure is said in Jarvis's own words in the dialog. Each
+Rewrite counts as one Ask run.
+
+**Unsubscribe from a list.** In the ask line: "unsubscribe me from the Acme
+deals emails". Ask reads the matching mail as usual, and Claude may only name
+a message Jarvis showed it whose own List-Unsubscribe header Jarvis read; it
+never writes the link or the address. Jarvis then builds the card from that
+header himself, and only for a sender Gmail verified (its DMARC check passed):
+
+- **UNSUBSCRIBE** card (the list supports one-click unsubscribe): "One-click,
+  the list's host, the account". **Unsubscribe** shows UNSUBSCRIBED with
+  **Undo** at once; after the same short hidden hold as a Send, Jarvis tells
+  the list's own server once (one web request, never retried, no redirect
+  followed, no cookies). Undo works only until it goes. A server that does not
+  answer clearly turns the card UNKNOWN: Jarvis never tries again by itself.
+- An **Email** card to the list's own address (when the list takes email):
+  the usual Reply / Email rules, with that address as a NEW RECIPIENT to tick
+  and the note "An unsubscribe request to the list's own address".
+- An **Open** card for the list's page, when that is all it offers.
+- Information only, with the reason, when Gmail could not verify the sender
+  (mark it as spam in Gmail instead) or the message names no usable way.
+
+No new Google permission is needed: reading mail stays read only, an email
+goes out through the usual send, and the one-click request needs no Google
+sign-in at all. Read receipts are not built: Jarvis's mail stays plain text
+and asks for none.
+
+**Add all for calendar cards.** On Approvals (Ctrl+3), while at least two
+cards would each add an event or a to-do's block to your personal calendar, a
+bar over the cards reads **Add all N to calendar...**. It opens a list of
+exactly what each card adds (title, time, place, calendar) with **Cancel** and
+**Add N**; no button is focused, so Enter adds nothing. **Add N** checks the
+list again (if anything changed: "The list changed - check it again") and then
+adds the cards one at a time, each through its own Approve path, with every
+card locked meanwhile ("Adding 2 of 5..." with **Stop**). It stops at the first
+card that fails or is unknown, at Stop, at a sign-in or when Jarvis closes;
+each added card keeps its own **Undo** for 10 minutes, and one ACTIVITY row
+says how far it got ("Added 3 of 5; stopped: failed"). Replies, emails,
+invitations, moves, cancels, unsubscribes, day plan blocks and cards with an
+amber note never go in Add all: each waits for its own click. Voice, Ask, the
+canvas and the desktop HUD never start it.
+
 ## Ask Jarvis (optional)
 
 Type a request ("move my project sync to Friday and tell Ana") and Jarvis lines
@@ -6581,6 +6641,9 @@ briefing_reader/capture_net.py    a calendar link fetched once, on Read it
 briefing_reader/capture_ui.py     drops, the tray, Read it, the CAPTURE cards and the Source viewer
 briefing_reader/ics.py         calendar files read with the standard library
 briefing_reader/ask/capture_read.py  a capture read by Claude: the stdin, the strict answer, Jarvis's checks of each item
+briefing_reader/batch.py       Add all: which calendar cards may go together, the confirm list and its check
+briefing_reader/unsubscribe.py  a message's List-Unsubscribe header read, the method chosen, the one-click request
+briefing_reader/ask/revise.py  a draft rewritten in your words: the strict answer and Jarvis's check of it
 fonts/                        Chakra Petch, Sora and JetBrains Mono fonts with their OFL licences
 tests/                        unit tests and saved fake Notion pages (tests/fixtures); board_probe.py runs the real board in a process of its own
 config.toml                   voice, prompt, polling, section, calendar, actions, schedule, hotkey, agenda, display, Ask, web research, assistant, LIVE, productivity and look settings

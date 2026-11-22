@@ -2069,7 +2069,10 @@ class StandingController(QObject):
         action = host._current(action_id)
         if (action is None or host._store.is_decided(action_id) or action_id in host._jobs
                 or host.state != _reading_state() or host._send_hold is not None
+                or getattr(host, "_batch", None) is not None or getattr(host, "_batch_dialog", None) is not None
+                or getattr(host, "_dialog", None) is not None or host._jobs
                 or time.monotonic() - clicked > REPLY_RESUME_S):
+            # (mail extras: never a Send hold beside Add all, its confirm, an open dialog or another card's call)
             host._hint(action_id, REPLY_AGAIN_NOTE)
             return
         host._hint(action_id, "")

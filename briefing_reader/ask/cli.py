@@ -84,6 +84,8 @@ MEETING_SCHEMA_FILE = ASSETS / "meeting_schema.json"
 # Capture (build plan item 3): what a picture, PDF or text holds, as items Jarvis makes cards of (ask.capture_read).
 CAPTURE_PROMPT_FILE = ASSETS / "capture_prompt.md"
 CAPTURE_SCHEMA_FILE = ASSETS / "capture_schema.json"
+REVISE_PROMPT_FILE = ASSETS / "revise_prompt.md"     # mail extras: a draft rewritten in the owner's words
+REVISE_SCHEMA_FILE = ASSETS / "revise_schema.json"
 # Jarvis on your desktop (P1.7): a desktop request's plan of refs (ask.desktop_mode; its skills grow per phase).
 DESKTOP_PROMPT_FILE = ASSETS / "desktop_prompt.md"
 DESKTOP_SCHEMA_FILE = ASSETS / "desktop_schema.json"
@@ -113,9 +115,11 @@ _PLAIN_HOST_RE = re.compile(r"[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+")     
 # is.
 PRIVATE_RUN_ENV = {"DISABLE_TELEMETRY": "1", "DISABLE_ERROR_REPORTING": "1"}
 MODE_PROMPTS = {"plan": PLAN_PROMPT_FILE, "prep": PREP_PROMPT_FILE, "nudge": NUDGE_PROMPT_FILE,
-                "meeting": MEETING_PROMPT_FILE, "desktop": DESKTOP_PROMPT_FILE, "capture": CAPTURE_PROMPT_FILE}
+                "meeting": MEETING_PROMPT_FILE, "desktop": DESKTOP_PROMPT_FILE, "capture": CAPTURE_PROMPT_FILE,
+                "revise": REVISE_PROMPT_FILE}
 MODE_SCHEMAS = {"plan": PLAN_SCHEMA_FILE, "prep": PREP_SCHEMA_FILE, "nudge": NUDGE_SCHEMA_FILE,
-                "meeting": MEETING_SCHEMA_FILE, "desktop": DESKTOP_SCHEMA_FILE, "capture": CAPTURE_SCHEMA_FILE}
+                "meeting": MEETING_SCHEMA_FILE, "desktop": DESKTOP_SCHEMA_FILE, "capture": CAPTURE_SCHEMA_FILE,
+                "revise": REVISE_SCHEMA_FILE}
 # The pictures a stream-json message may carry (a capture's): PNG or JPEG only, base64 in image content blocks.
 IMAGE_MEDIA_TYPES = frozenset({"image/png", "image/jpeg"})
 

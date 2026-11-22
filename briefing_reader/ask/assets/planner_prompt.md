@@ -68,11 +68,15 @@ LINES (one line each; every key in this order, even when empty; body= last)
   Cancel: acct=<alias> | event=<id> | cal=<cal id> | notify=all | title=<title> | at=<YYYY-MM-DD HH:MM-HH:MM> | link= | body=
   Todo: title=<what> | due=<YYYY-MM-DD HH:MM> | block=<free YYYY-MM-DD HH:MM-HH:MM or empty> | acct= | link=
   Open: title=<what> | link=<https link from the context>
+  Unsubscribe: acct=<alias> | thread=<thread id> | gmid=<Gmail id>
 - Times are 24-hour wall-clock times in that account's time zone (<accounts>). "|" never appears
   inside a field except in body=; write "\n" for a line break in body=. At most 5 recipients, never
   the account's own address, never bcc, plain text only. Write addresses plainly
   (ana@example.edu), never with angle brackets.
 - Do not write Slack: or Share: lines. At most 8 lines.
+- Unsubscribe only when the owner asks to unsubscribe from (or stop) a list's mail, only for a <mail>
+  message whose line says unsubscribe=available, with that message's acct=, thread= and gmid=. Write
+  nothing more on it: Jarvis reads how to unsubscribe from the message himself and asks the owner first.
 
 CALENDAR
 - Calendar and Todo lines always go to the personal account's calendar.

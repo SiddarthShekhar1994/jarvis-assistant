@@ -164,6 +164,9 @@ class ContextIndex:
     # casefolded address -> the names the calendar or the briefing gave it (never a name from mail)
     names: dict[str, set[str]] = field(default_factory=dict)
     command: str = ""
+    # (account, Gmail id) -> (thread id, unsubscribe.ListHeader) of a shown message whose own List-Unsubscribe header
+    # Jarvis read (mail extras): the only messages an Unsubscribe line may name
+    lists: dict[tuple[str, str], tuple[str, Any]] = field(default_factory=dict)
     memory_notes: int = 0                           # notes given in <memory>
     conversation: int = 0                           # earlier exchanges given in <conversation>
 
@@ -503,6 +506,8 @@ def _message_header(message: MailMessage) -> str:
              f"cc={_more(_people_text(message.cc), message.cc_more)}"]
     if message.reply_to:
         parts.append(f"reply_to={_people_text(message.reply_to)}")
+    if getattr(message, "unsubscribe", None) is not None:
+        parts.append("unsubscribe=available")   # never the link or the address: Jarvis reads them himself
     return " | ".join(parts)
 
 
@@ -525,6 +530,8 @@ def index_thread(index: ContextIndex, thread: MailThread) -> None:
     ids = index.threads.setdefault((thread.account, thread.thread_id), set())
     for message in thread.messages:
         ids.add("gmid:" + message.gmail_id)
+        if getattr(message, "unsubscribe", None) is not None:
+            index.lists[(thread.account, message.gmail_id)] = (thread.thread_id, message.unsubscribe)
         if message.message_id:
             ids.add(f"<{message.message_id}>")
         for person in message.people():

@@ -154,6 +154,9 @@ class MailMessage:
     labels: frozenset[str] = field(default=frozenset(), repr=False, compare=False)
     auto: bool = field(default=False, repr=False, compare=False)
     listy: bool = field(default=False, repr=False, compare=False)
+    # Mail extras: what its List-Unsubscribe header offers (unsubscribe.ListHeader; None without one). Read from the
+    # message's own headers only; memory only, never shown to the planner but as "unsubscribe=available".
+    unsubscribe: Any = field(default=None, repr=False, compare=False)
 
     def people(self) -> tuple[MailPerson, ...]:
         found = ((self.sender,) if self.sender else ()) + self.reply_to + self.to + self.cc
@@ -590,6 +593,18 @@ def list_mail(list_id: str, unsubscribe: str, precedence: str) -> bool:
     return str(precedence or "").strip().casefold() in ("bulk", "list", "junk")
 
 
+def _list_header(headers: Any) -> Any:
+    """The message's List-Unsubscribe reading (unsubscribe.read_headers), None when it has no such header or one that
+    can't be read (never raises: the thread, the standing watch and the agent's search go on without it)."""
+    try:
+        from ..unsubscribe import read_headers
+
+        header = read_headers(headers)
+    except Exception:  # noqa: BLE001 - nothing offered; the message reads as ever
+        return None
+    return header if header.present else None
+
+
 def thread_from_api(data: Any, account: str) -> MailThread | None:
     """A users.threads.get answer (format=full) -> MailThread (messages oldest first), None when it
     is not one. Only From, To, Cc, Reply-To, Subject and Message-ID headers are kept."""
@@ -631,7 +646,8 @@ def thread_from_api(data: Any, account: str) -> MailThread | None:
             to_more=to_more, cc_more=cc_more, labels=frozenset(label for label in labels if isinstance(label, str)),
             auto=auto_submitted(_header(headers, "auto-submitted")),
             listy=list_mail(_header(headers, "list-id"), _header(headers, "list-unsubscribe"),
-                            _header(headers, "precedence"))))
+                            _header(headers, "precedence")),
+            unsubscribe=_list_header(headers)))
     subject = next((message.subject for message in reversed(messages) if message.subject), "")
     return MailThread(account, data["id"], subject, tuple(messages), left_out=left_out)
 

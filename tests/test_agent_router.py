@@ -29,7 +29,7 @@ PLAIN = {"say": "It's at two.", "question": "", "lines": []}
 # "frames" (tests/test_ask_frames.py holds their words and fields), and part 6's fixes (2026-11-16), which tell the
 # model a table's cells are text, a figure too ("3,400"): in the FRAMES section and in the rows' description, so a
 # numeric cell no longer costs a schema retry. Off, not a word of the agent reaches them.
-OFF_FILES = {cli.PROMPT_FILE: "a78ad47d0a720369c2641315a06ed087937bb716570cb898b622d5156222c329",
+OFF_FILES = {cli.PROMPT_FILE: "f8c1dbf39e7f9264cc5c136c1734acbac78d146fed5ed7adefba370f0fd90a2d",   # mail extras: Unsubscribe
              cli.DESKTOP_PROMPT_FILE: "1f599172c03bf2f631b984cbaa58947a4a3873d8fdfedbde022074ca9f541521",
              cli.SCHEMA_FILE: "6a4ceb66202d0e53ef9f3d437623f691dea9b8a5ea515084ecc9959c5309f811",
              cli.DESKTOP_SCHEMA_FILE: "a7f840a4251b93d04fb0b5f2c6e9131c52e43c6528421b3e098c71caa8890b84"}
@@ -46,7 +46,7 @@ ON_SCHEMAS = {(False, False): (3695, "719fee874b5e4b3c43d0298f0925c924679b8adcad
               (True, False): (4191, "97261e145609f975bc2e911a8f63e5cce0f4545bbaa4526cbd119a84ddee0c50"),
               (True, True): (4878, "92be9be5c32948474c436be1019deb016e8be936ee7dc62618e835cbbe1e1813")}
 ON_DESKTOP_SCHEMA = (2743, "f9e3f8f1e7462fc1e8cd2efbed0944bbc138c22f340690c2fc6cab51c289c682")
-ON_PROMPTS = {cli.PROMPT_FILE_AGENT: "2e7e47d27f125f70cc1f418ec63c6fad5a6c7c72e541e53231b5044ccbec35f9",
+ON_PROMPTS = {cli.PROMPT_FILE_AGENT: "779f6d074bb57bf4bc62afd0cece0a8884593fa407c77ae79addc6c3fe89557a",   # mail extras
               cli.DESKTOP_PROMPT_FILE_AGENT: "5fe066bb75bc6b46a9247ab2e7ba9ecd0ef11dd8f7f42e51a54d2c491109911f"}
 
 

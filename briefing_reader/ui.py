@@ -123,7 +123,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import (alive, approvals_view, brief_view, briefing_view, context_view, find_view, followups_view, live_view,
+from . import (alive, approvals_view, batch, brief_view, briefing_view, context_view, find_view, followups_view, live_view,
                meetings_view, memory_view, offer_view, plan_view, settings_view, standing_view, states_view,
                transcript_view, voice_fx)
 from . import canvas_view, desk_view
@@ -160,10 +160,12 @@ from .actions import (
     STATUS_SENT,
     STATUS_UNKNOWN,
     TODO,
+    UNSUBSCRIBE,
     MODE_STANDING_AGENT,
     MODE_STANDING_RULE,
     CLOSED_FIRST_CANCEL_MESSAGE,
     CLOSED_FIRST_MESSAGE,
+    CLOSED_FIRST_UNSUBSCRIBE_MESSAGE,
     UNDO_INTERRUPTED,
     UNDO_INTERRUPTED_NOTE,
     ActionStore,
@@ -201,9 +203,10 @@ from .agenda import (
 )
 from .ask import desktop_mode
 from .ask.dayplan import PART_DAY, hours_text
-from .ask.modes import (MODE_CAPTURE, MODE_DESKTOP, MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_TITLES,
-                        ORIGIN_BRIEF, ORIGIN_CHOICE, ORIGIN_LIST, ORIGIN_OFFER, ORIGIN_TYPED, ModeInputs, ModeRequest,
-                        block_line, todo_facts)
+from .ask.modes import (MODE_CAPTURE, MODE_DESKTOP, MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_REVISE,
+                        MODE_TITLES, ORIGIN_BRIEF, ORIGIN_CHOICE, ORIGIN_LIST, ORIGIN_OFFER, ORIGIN_TYPED, ModeInputs,
+                        ModeRequest, RevisionJob, block_line, todo_facts)
+from .ask.planner import REVISE_HELD, REVISE_QUESTION
 from .ask.routes import ROUTE_MEMORY_FORGET, ROUTE_MEMORY_SAVE, ROUTE_MEMORY_SHOW, RouteFlags
 from .ask.validate import ALREADY_LISTED
 from .config import CONFIG_FILE_NAME, DEFAULT_ACCOUNT, PROJECT_ROOT, AgendaConfig, Config
@@ -212,6 +215,7 @@ from .conversation import recent as recent_turns
 from .executor import (
     DISCONNECT_FAILED_MESSAGE,
     NEW_RECIPIENT_NOTE,
+    UNSUBSCRIBE_LINK_NOTE,
     STAGE_SIGNED_IN,
     STAGE_SIGNIN,
     STAGE_WORKING,
@@ -5384,6 +5388,28 @@ _DECISION_CLICK_GUARD_S = 1.0
 # While an approval (or a Connect sign-in) runs, the other cards are locked.
 LOCK_TIP = "Finishing the previous approval..."
 SIGN_IN_LOCK_TIP = "Finishing the Google sign-in..."
+# While Add all runs (mail extras, part 1): every card is locked, one card at a time goes through its own path.
+BATCH_LOCK_TIP = "Adding the list, one card at a time..."
+BATCH_CHANGED_TEXT = "The list changed - check it again"
+# The Edit dialog's Rewrite (mail extras, part 2): Jarvis's own words in its status line (never the model's).
+REVISE_REQUEST_WORDS = "Rewrite the message"
+REVISE_CARD_BUSY_NOTE = "This card is already being carried out or decided; nothing was changed."
+REVISE_OFF_NOTE = "Rewrite needs Ask, which is off."
+REVISE_BUSY_NOTE = "Jarvis is busy with another request; Rewrite again when it's done."
+REVISE_NOT_STARTED_NOTE = "Jarvis couldn't start the rewrite now; the ask line says why."
+REVISE_STOPPED_NOTE = "Stopped; the message is as it was."
+REVISE_CHANGED_NOTE = "The message changed while Jarvis worked, so his rewrite was dropped. Rewrite again."
+REVISE_QUESTION_NOTE = "Jarvis wasn't sure what to change. Try saying it another way."
+REVISE_FAILED_NOTE = "Jarvis couldn't rewrite it this time{why}; the message is as it was."
+REVISE_HELD_NOTES = {
+    "": "Jarvis held the rewrite back; the message is as it was.",
+    "empty": "Jarvis's rewrite came back empty; the message is as it was.",
+    "too_long": "Jarvis's rewrite was too long; the message is as it was.",
+    "new_address": ("Jarvis held the rewrite back: it had an email address that is in neither the message nor your "
+                    "words."),
+    "new_link": "Jarvis held the rewrite back: it had a link that is in neither the message nor your words.",
+    "control": "Jarvis held the rewrite back: it had hidden characters.",
+}
 _LOCKED_MESSAGE = "Ignored an approval click: the previous approval is still running"
 _SIGN_IN_LOCKED_MESSAGE = "Ignored an approval click: the Google sign-in is still running"
 
@@ -5878,6 +5904,8 @@ _CalendarWorker = _ActionWorker   # its name before it also answered, moved and 
 
 def closed_first_text(action: ProposedAction) -> str:
     """What a card says when Jarvis closed before its hold could go out (nothing was sent)."""
+    if action.kind == UNSUBSCRIBE:
+        return CLOSED_FIRST_UNSUBSCRIBE_MESSAGE
     return CLOSED_FIRST_CANCEL_MESSAGE if action.kind == CANCEL else CLOSED_FIRST_MESSAGE
 
 
@@ -6096,6 +6124,19 @@ class _SendHold:
 
 
 @dataclasses.dataclass
+class _Batch:
+    """Add all while it runs (mail extras, part 1): the confirmed cards' ids in card order, carried out one at a time
+    through the card's own path. Memory only."""
+
+    ids: list[str]
+    rows: dict[str, Any] = dataclasses.field(default_factory=dict)   # id -> the confirmed batch.Row (what it adds)
+    added: int = 0
+    index: int = 0               # the next card to start
+    current: str = ""            # the card being added now ("" between two cards)
+    stop: bool = False           # the owner's Stop: it ends after the card being added now
+
+
+@dataclasses.dataclass
 class _UndoOffer:
     """A calendar change Jarvis made (an added event or block, an answer, a move) whose card offers Undo:
     for UNDO_WINDOW_S or until the card is cleared. Memory only."""
@@ -6108,6 +6149,14 @@ class _UndoOffer:
     note: str = ""               # why the last Undo did not go through (its Undo then says Retry)
 
 
+def _couldnt_words(action: ProposedAction) -> str:
+    """"Couldn't move Project sync"; an Unsubscribe's own title reads on ("Couldn't unsubscribe from Acme Deals")."""
+    title = _kind_title(action)
+    if action.kind == UNSUBSCRIBE and title[:1].isupper():
+        return f"Couldn't {title[:1].lower()}{title[1:]}"
+    return f"Couldn't {_VERBS.get(action.kind, 'do')} {title}"
+
+
 def _action_phrase(action: ProposedAction) -> str:
     """"Accept Speaker series", "Move Project sync", "Cancel Study group", "Add Project sync",
     "Add a block for Problem set 3", or a Reply's / Email's subject (activity rows)."""
@@ -6116,7 +6165,7 @@ def _action_phrase(action: ProposedAction) -> str:
         return f"Add {title}"
     if action.kind == TODO:
         return f"Add a block for {title}"
-    if action.kind in (REPLY, EMAIL):
+    if action.kind in (REPLY, EMAIL, UNSUBSCRIBE):   # an Unsubscribe's title says it ("Unsubscribe from Acme Deals")
         return _kind_title(action)
     if action.kind == RSVP:
         verb = {"yes": "Accept", "no": "Decline", "maybe": "Answer maybe to"}.get(action.field("answer"), "Answer")
@@ -6705,6 +6754,8 @@ class AppController(QObject):
         self._jobs: dict[str, str] = {}            # action id -> _STAGE_* while held, queued, running or undoing
         self._running: dict[str, tuple[ProposedAction, bool]] = {}   # id -> (what was sent, writes_running)
         self._send_hold: _SendHold | None = None   # at most one: the other cards are locked meanwhile
+        self._batch: _Batch | None = None          # Add all while it runs (every card locked meanwhile)
+        self._batch_dialog: hud.BatchConfirmDialog | None = None
         self._hold_ends: list[threading.Event] = []   # a hold's call queued at its end: set when it is over
         self._undos: dict[str, _UndoOffer] = {}    # action id -> the Undo its card offers (calendar changes)
         self._result_notes: dict[str, str] = {}    # action id -> why its Undo left the change as it is
@@ -6732,6 +6783,11 @@ class AppController(QObject):
         # Reply / Email id -> _review_digest of the subject and message the Edit dialog showed whole, RSVP id ->
         # of its note (this run, memory only): the click skips the review only while the card still says exactly that.
         self._reviewed: dict[str, str] = {}
+        # Mail extras (part 2): the Edit dialog's Rewrite on its way ((card id, digest of what the dialog showed)), and
+        # the cards whose saved message is a rewrite (Send opens the dialog to read it whole first).
+        self._revise_run: tuple[str, str] | None = None
+        self._revise_asking = False    # a Rewrite's Ask run was started and has not ended (its cancel says nothing)
+        self._rewritten: set[str] = set()
         self._connect_mail = False                 # the queued / running sign-in is a Reply / Email's Send
         self._read_slot: str | None = None         # the scheduled slot this reading settled
         # The day plan (the productivity bundle; memory only): Todo card id -> the day a created plan
@@ -6812,6 +6868,8 @@ class AppController(QObject):
         # Only while a Send's or Cancel's hidden hold runs (it goes on when minimised or locked).
         self._send_hold_timer = self._make_timer(self._on_send_hold_tick, single_shot=False,
                                                  interval_ms=_HOLD_TICK_MS)
+        # Add all: the pause between one card's result and the next card's start.
+        self._batch_timer = self._make_timer(self._batch_step, single_shot=True, interval_ms=batch.STEP_GAP_MS)
         # Only while a card offers Undo (it goes after UNDO_WINDOW_S).
         self._undo_timer = self._make_timer(self._on_undo_tick, single_shot=False, interval_ms=_UNDO_TICK_MS)
         # The opening greeting waits at most this long for the first fetch answer.
@@ -6855,6 +6913,8 @@ class AppController(QObject):
         reading.done.connect(self.done)
         reading.sectionClicked.connect(self.jump_to_section)
         reading.approveClicked.connect(self.approve_action)
+        reading.approvals_stage.batchRequested.connect(self.request_batch)
+        reading.approvals_stage.batchStopRequested.connect(self.stop_batch)
         reading.denyClicked.connect(self.deny_action)
         reading.lockedClicked.connect(self._on_locked_click)
         reading.openLink.connect(self.open_action_link)
@@ -8123,7 +8183,7 @@ class AppController(QObject):
         """Edit and Sign in open a dialog or the browser: only while nothing else runs (no hold,
         job or sign-in on any card), so nothing ever covers a held card's Undo."""
         return (self.state != STATE_QUITTING and not self._jobs and self._send_hold is None
-                and not self._connect_running and not self._store.is_decided(action_id))
+                and not self._connect_running and self._batch is None and not self._store.is_decided(action_id))
 
     def _copy_label(self, action: ProposedAction) -> str:
         """The tools row's Copy: a Move's or Cancel's note (never sent); an RSVP's note too when
@@ -8243,6 +8303,7 @@ class AppController(QObject):
         self.window.reading.set_pending(pending, total)
         self._look_call("on_pending", pending)          # the soft "waits on you" when a new card waits
         self._sync_mail_cards()
+        self._sync_batch_bar()
         self._update_service_chips()
         self._render_followups()   # a row whose reply card waits reads "draft waiting" (R31)
 
@@ -8277,6 +8338,8 @@ class AppController(QObject):
         """Why the cards are locked ("" when they are not)."""
         if self._connect_running:
             return SIGN_IN_LOCK_TIP
+        if self._batch is not None:
+            return BATCH_LOCK_TIP
         return LOCK_TIP if self._jobs else ""
 
     def _sync_card_locks(self) -> None:
@@ -8288,11 +8351,15 @@ class AppController(QObject):
             action = self._action(card.action_id)
             if card.actionable and action is not None and action.editable:
                 card.set_edit_enabled(self._tools_enabled(card.action_id))   # never a dialog beside Undo
+        self._sync_batch_bar()   # Add all waits while anything else runs
 
     def _locked_out(self, action_id: str) -> bool:
         """True (and logged, without titles) for an Approve / Deny on a locked card."""
         if self._connect_running:
             logger.info(_SIGN_IN_LOCKED_MESSAGE)
+            return True
+        if self._batch is not None:
+            logger.info("Ignored an approval click: Add all is running")
             return True
         if self._jobs and action_id not in self._jobs:
             logger.info(_LOCKED_MESSAGE)
@@ -8303,6 +8370,194 @@ class AppController(QObject):
         """A click on a dimmed Deny / Approve: ignored, but it counts for the 1 s guard."""
         if not self._decision_click_too_soon() and not self._locked_out(action_id):
             logger.info(_LOCKED_MESSAGE)
+
+    # ---- Add all (mail extras, part 1): own-calendar adds, one confirm, one card at a time -----------------
+
+    def _batch_candidates(self) -> list[ProposedAction]:
+        """The cards Add all would add now (batch.eligible), as their cards show them."""
+        if self.state == STATE_QUITTING or not self.config.calendar.enabled:
+            return []
+        alias = DEFAULT_ACCOUNT
+        signed_in = self._account_signed_in(alias)
+        confirmed = (not self._account_unconfirmed(alias) and not self._account_unknown(alias)
+                     and not self._pending_account(alias))
+        pending = self._pending_actions()
+        reading = self.window.reading
+        noted, tried = set(), set()
+        for action in pending:
+            card = reading.action_card(action.id)
+            if card is None or card.note():
+                noted.add(action.id)   # an amber note (or no card to show it): it waits for its own click
+            if (self._store.get(action.id) or {}).get("status") in (STATUS_FAILED, STATUS_UNKNOWN):
+                tried.add(action.id)
+        decided = {action.id for action in self._actions if self._store.is_decided(action.id)}
+        return batch.eligible(pending, decided=decided, jobs=set(self._jobs), signed_in=signed_in,
+                              confirmed=confirmed, now=self._plan_now_wall(), noted=noted, tried=tried)
+
+    def _batch_blocked(self) -> bool:
+        """Something else runs (an approval, a hold, a sign-in, a dialog): the bar waits."""
+        standing = getattr(self, "standing", None)
+        checking = bool(getattr(standing, "_reply_checking", None)) if standing is not None else False
+        return bool(self._jobs or self._send_hold is not None or self._connect_running
+                    or self._dialog is not None or self._account_dialog is not None
+                    or self._batch_dialog is not None or self.state == STATE_QUITTING
+                    or checking)   # a standing Reply read again may start its Send hold when it passes
+
+    def _sync_batch_bar(self) -> None:
+        """Approvals' batch bar: "Add all N to calendar..." while N >= 2 cards could go together and nothing else
+        runs; "Adding 2 of 5..." with Stop while a batch runs; hidden else."""
+        stage = getattr(self.window.reading, "approvals_stage", None)
+        if stage is None:
+            return
+        run = self._batch
+        if run is not None:
+            shown = min(run.index, len(run.ids)) or 1
+            text = "Stopping..." if run.stop else f"Adding {shown} of {len(run.ids)}..."
+            stage.set_batch(len(run.ids), approvals_view.BATCH_RUNNING, text)
+            return
+        count = 0 if self._batch_blocked() else len(self._batch_candidates())
+        stage.set_batch(count, approvals_view.BATCH_IDLE if count >= batch.MIN_BATCH else approvals_view.BATCH_HIDDEN)
+
+    def request_batch(self) -> None:
+        """The bar's "Add all N to calendar...": the confirm dialog lists exactly what each card adds. Only this
+        click opens it (never voice, Ask, the canvas or the HUD); nothing is added before its "Add N"."""
+        if self._decision_click_too_soon() or self._batch is not None or self._batch_blocked():
+            return
+        listed = self._batch_candidates()
+        if len(listed) < batch.MIN_BATCH:
+            self._sync_batch_bar()
+            return
+        rows = batch.rows(listed, self._now().date())
+        others = max(0, len(self._pending_actions()) - len(listed))
+        dialog = hud.BatchConfirmDialog(rows, others, parent=self.window)
+        dialog.confirmed.connect(self._on_batch_confirmed)
+        dialog.finished.connect(self._on_batch_dialog_closed)
+        self._batch_dialog = dialog
+        logger.info("Add all: listing %d card(s) (%d other(s) wait for their own click)", len(rows), others)
+        self._sync_batch_bar()
+        dialog.open()
+
+    def _on_batch_dialog_closed(self, _result: int = 0) -> None:
+        dialog, self._batch_dialog = self._batch_dialog, None
+        if dialog is not None:
+            dialog.deleteLater()
+        self._sync_batch_bar()
+
+    def _on_batch_confirmed(self, shown: str) -> None:
+        """"Add N": the list is made again now; it goes only when it is exactly the one the dialog showed."""
+        self._batch_dialog = None
+        if self._batch is not None or self._batch_blocked():
+            logger.info("Add all: something else started before the confirm; nothing added")
+            self._activity(hud.TAG_WAIT, BATCH_CHANGED_TEXT, "ADD ALL")
+            self._sync_batch_bar()
+            return
+        listed = self._batch_candidates()
+        confirmed = batch.rows(listed, self._now().date())
+        if not listed or batch.digest(confirmed) != shown:
+            logger.info("Add all: the list changed before the confirm; nothing added")
+            self._activity(hud.TAG_WAIT, BATCH_CHANGED_TEXT, "ADD ALL")
+            self._sync_batch_bar()
+            return
+        self._decision_clicked_at = self._click_now()   # a second click right after never decides a card
+        self._batch = _Batch(ids=[action.id for action in listed], rows={row.action_id: row for row in confirmed})
+        logger.info("Add all: adding %d card(s), one at a time", len(listed))
+        self._sync_card_locks()
+        self._batch_step()
+
+    def stop_batch(self) -> None:
+        """The bar's Stop: the batch ends after the card being added now (each added card keeps its Undo)."""
+        run = self._batch
+        if run is None or run.stop:
+            return
+        run.stop = True
+        logger.info("Add all: Stop")
+        if not run.current:
+            self._batch_timer.stop()
+            self._end_batch(batch.REASON_STOPPED)
+            return
+        self._sync_batch_bar()
+
+    def _batch_step(self) -> None:
+        """The next card of the batch, through the card's own path (_carry_out), after the same checks as its own
+        click; anything else that started meanwhile, or a card that no longer goes, ends the batch."""
+        run = self._batch
+        if run is None:
+            return
+        run.current = ""
+        if self.state == STATE_QUITTING:
+            self._end_batch(batch.REASON_QUIT)
+            return
+        if run.stop:
+            self._end_batch(batch.REASON_STOPPED)
+            return
+        if self._send_hold is not None:
+            self._end_batch(batch.REASON_HOLD)
+            return
+        if self._connect_running or self._signing_in():
+            self._end_batch(batch.REASON_SIGN_IN)
+            return
+        if run.index >= len(run.ids):
+            self._end_batch(batch.REASON_DONE)
+            return
+        if self._jobs:
+            self._end_batch(batch.REASON_CHANGED)
+            return
+        action_id = run.ids[run.index]
+        if action_id not in {action.id for action in self._batch_candidates()}:
+            self._end_batch(batch.REASON_CHANGED)
+            return
+        action = self._current(action_id)
+        if action is None or batch.rows([action], self._now().date())[0] != run.rows.get(action_id):
+            # Not exactly what the confirm listed (its place or notes changed too, which the id leaves out).
+            self._end_batch(batch.REASON_CHANGED)
+            return
+        if self._start_calendar() is None or self._executor.readiness(action):
+            self._end_batch(batch.REASON_NOT_READY)
+            return
+        run.index += 1
+        run.current = action_id
+        self._sync_batch_bar()
+        self._carry_out(action)
+        if action_id not in self._jobs:   # the worker was gone or Jarvis is closing: nothing started
+            run.current = ""
+            self._end_batch(batch.REASON_NOT_READY)
+
+    def _batch_result(self, action_id: str, result: Any, error: Any, status: str) -> None:
+        """A batch card's result: on to the next one after a short pause, or the end (failed, unknown, sign-in)."""
+        run = self._batch
+        if run is None or action_id != run.current:
+            return
+        run.current = ""
+        ok = result is not None and error is None
+        reason = batch.stop_reason(status) if ok else (
+            batch.REASON_UNKNOWN if status == STATUS_UNKNOWN else batch.REASON_FAILED)
+        problem = getattr(error, "problem", "") or ""
+        if problem in _SIGN_IN_PROBLEMS or problem == PROBLEM_CONFIRM:
+            reason = batch.REASON_SIGN_IN
+        if ok and not reason:
+            run.added += 1
+        if reason:
+            self._end_batch(reason)
+            return
+        if run.stop:
+            self._end_batch(batch.REASON_STOPPED)
+            return
+        self._sync_batch_bar()
+        self._batch_timer.start()
+
+    def _end_batch(self, reason: str) -> None:
+        """The batch is over: one activity row ("Added 3 of 5; stopped: failed"), the cards unlock."""
+        run, self._batch = self._batch, None
+        self._batch_timer.stop()
+        if run is None:
+            return
+        total = len(run.ids)
+        batch.log_end(run.added, total, reason)
+        if self.state != STATE_QUITTING:
+            self._activity(hud.TAG_STOP if reason else hud.TAG_DONE, batch.summary(run.added, total, reason),
+                           f"ADD ALL {DOT} GOOGLE CALENDAR")
+            self._sync_card_locks()
+            self._refresh_actions_ui()
 
     # ---- the day plan's cards (the productivity bundle) -----------------------------------------
 
@@ -8441,6 +8696,9 @@ class AppController(QObject):
             return
         if action.kind == TODO and action.block_event() is None:
             return
+        if action.kind == UNSUBSCRIBE:
+            self._approve_unsubscribe(action)
+            return
         card = self.window.reading.action_card(action_id)
         worker = self._start_calendar()
         if worker is None or self._executor.readiness(action):
@@ -8526,12 +8784,27 @@ class AppController(QObject):
             return   # a standing Reply's thread is read again first; Send goes on by itself when it passes
         self._start_send_hold(action, sender=mail.sender)
 
+    def _approve_unsubscribe(self, action: ProposedAction) -> None:
+        """Unsubscribe (mail extras): the card's link is checked again (a public https host, the one-click link Jarvis
+        read from the message itself); then UNSUBSCRIBED with Undo at once while the one POST waits the hidden hold
+        (the same hold as a Send: Undo during it sends nothing, its end makes exactly one call, quitting sends it)."""
+        url = action.field("url")
+        reason = "" if web_link_allowed(url) else UNSUBSCRIBE_LINK_NOTE
+        reason = reason or self._executor.readiness(action)
+        if not reason and self._start_calendar() is None:
+            reason = CALENDAR_SETUP_NOTE
+        if reason:
+            logger.info("Unsubscribe %s: not started (the link or the setup)", action.id)
+            self._hint(action.id, reason)
+            return
+        self._start_send_hold(action)
+
     def _unread(self, action: ProposedAction) -> bool:
         """A Reply / Email whose card does not show all of its subject or message (cut at the card's
         width, or more lines than the card has) and whose Edit dialog has not shown exactly this
         subject and message whole yet: Send opens the dialog to read it first."""
         card = self.window.reading.action_card(action.id)
-        cut = body_needs_review(action) or card is None or card.mail_cut()
+        cut = body_needs_review(action) or card is None or card.mail_cut() or action.id in self._rewritten
         return cut and self._reviewed.get(action.id) != _review_digest(action.title, action.body)
 
     def _note_unread(self, action: ProposedAction) -> bool:
@@ -8792,7 +9065,7 @@ class AppController(QObject):
         if (now - offer.shown) * 1000 < QApplication.doubleClickInterval():
             logger.info("Ignored an Undo click right after the approval")
             return
-        if self._jobs or self._connect_running or self._send_hold is not None:
+        if self._jobs or self._connect_running or self._send_hold is not None or self._batch is not None:
             logger.info(_LOCKED_MESSAGE)
             return
         worker = self._calendar_worker
@@ -9047,9 +9320,9 @@ class AppController(QObject):
         Save keeps the changes on the card (memory only, same id); nothing is sent."""
         if self.state == STATE_QUITTING or self._dialog is not None or self._account_dialog is not None:
             return
-        if self._send_hold is not None or self._jobs or self._connect_running:
+        if self._send_hold is not None or self._jobs or self._connect_running or self._batch is not None:
             # The dialog is window-modal: beside another card's hold it would cover that card's Undo
-            # while the hold runs out.
+            # while the hold runs out (and Add all locks every card while it runs).
             logger.info("Ignored Edit of action %s: another card's approval or sign-in is running", action_id)
             return
         action = self._current(action_id)
@@ -9093,8 +9366,10 @@ class AppController(QObject):
                                 sender=mail.from_text.removeprefix("From: "), to=to, cc=cc, body=action.body,
                                 classify=lambda address: self._recipient_state(mail, address),
                                 normalize=email_address, find_links=body_links, banner=banner,
-                                max_recipients=MAX_RECIPIENTS, parent=self.window)
+                                max_recipients=MAX_RECIPIENTS, revise=self._revise_on(), parent=self.window)
         dialog.saved.connect(self._on_edit_saved)
+        dialog.reviseRequested.connect(self._on_revise_requested)
+        dialog.reviseStopped.connect(self._on_revise_stopped)
         dialog.finished.connect(self._on_edit_closed)
         self._dialog = dialog
         logger.info("Edit action %s (%s)", action.id, action.kind)
@@ -9151,6 +9426,10 @@ class AppController(QObject):
             self._edits.pop(action_id, None)
         else:
             self._edits[action_id] = edit
+        if getattr(dialog, "rewrite_kept", None) is not None and dialog.rewrite_kept():
+            self._rewritten.add(action_id)   # Jarvis wrote this message: Send reads it whole first
+        elif page.sends_mail:
+            self._rewritten.discard(action_id)
         dialog.accept()
         self._hints.pop(action_id, None)
         card = self.window.reading.action_card(action_id)
@@ -9171,6 +9450,7 @@ class AppController(QObject):
 
     def _on_edit_closed(self, _result: int = 0) -> None:
         dialog, self._dialog = self._dialog, None
+        self._cancel_revise("closed")
         if dialog is not None:
             if dialog.mail and dialog.whole_seen():
                 # What the dialog showed whole (saved or not): Send needs no review while the card
@@ -9182,6 +9462,102 @@ class AppController(QObject):
             dialog.deleteLater()
         if self.state != STATE_QUITTING:
             self._sync_card_locks()
+
+    # ---- the Edit dialog's Rewrite (mail extras, part 2) -------------------------------------------------
+
+    def _revise_on(self) -> bool:
+        """The Edit dialog has its revise row: Ask is on (a Rewrite is an Ask run)."""
+        return self.ask is not None and bool(getattr(self.config.ask, "enabled", False))
+
+    def _on_revise_requested(self, action_id: str, words: str, draft: str) -> None:
+        """Rewrite: one Ask run that sees only this message and the owner's words. Nothing changes until its answer is
+        offered in this dialog, and nothing is kept until Save."""
+        dialog = self._dialog
+        if dialog is None or dialog.action_id != action_id or self.state == STATE_QUITTING:
+            return
+        action = self._current(action_id)
+        if (action is None or not action.sends_mail or action_id in self._jobs
+                or self._store.is_decided(action_id)):
+            dialog.show_revise_note(REVISE_CARD_BUSY_NOTE, warn=True)
+            return
+        if self.ask is None or not self._revise_on():
+            dialog.show_revise_note(REVISE_OFF_NOTE, warn=True)
+            return
+        if self.ask.busy or self._revise_run is not None:
+            dialog.show_revise_note(REVISE_BUSY_NOTE, warn=True)
+            return
+        subject = str(dialog.values().get("subject", ""))
+        digest = _review_digest(subject, draft)
+        job = RevisionJob(action_id, action.kind, subject, draft, digest)
+        request = ModeRequest(MODE_REVISE, ORIGIN_CHOICE, typed=words, target=action_id, payload=job)
+        if not self.ask.submit_mode(request, REVISE_REQUEST_WORDS):
+            dialog.show_revise_note(REVISE_NOT_STARTED_NOTE, warn=True)
+            return
+        self._revise_run = (action_id, digest)
+        self._revise_asking = True
+        dialog.set_revising(True)
+        logger.info("Revise %s: asked (%d word character(s), %d message character(s))", action_id, len(words),
+                    len(draft))
+
+    def _on_revise_stopped(self, action_id: str) -> None:
+        """Stop in the dialog: the run is cancelled; the message stays as it was."""
+        run = self._revise_run
+        if run is None or run[0] != action_id:
+            return
+        self._cancel_revise("stopped")
+        dialog = self._dialog
+        if dialog is not None and dialog.action_id == action_id:
+            dialog.set_revising(False)
+            dialog.show_revise_note(REVISE_STOPPED_NOTE)
+
+    def _cancel_revise(self, why: str) -> None:
+        run, self._revise_run = self._revise_run, None
+        if run is None:
+            return
+        if self.ask is not None and self.ask.busy and self.ask.running_mode == MODE_REVISE:
+            self.ask.cancel()
+        logger.info("Revise %s: %s", run[0], why)
+
+    def _on_revise_outcome(self, outcome: Any) -> None:
+        """A Rewrite's answer: offered in the same dialog while it still shows exactly what was sent (else dropped);
+        a question back or a failure in Jarvis's own words (the model's say and question are never shown)."""
+        run, self._revise_run = self._revise_run, None
+        self._revise_asking = False
+        dialog = self._dialog
+        brief = getattr(outcome, "brief", None)
+        digest, reason = brief if isinstance(brief, tuple) and len(brief) == 2 else ("", "")
+        if (run is None or dialog is None or dialog.action_id != run[0] or getattr(outcome, "target", None) != run[0]
+                or digest != run[1]):
+            logger.info("Revise: an answer for a dialog that is gone or changed was dropped")
+            if run is not None and dialog is not None and dialog.action_id == run[0]:
+                # Its own dialog still waits (Jarvis was busy, stopped by an error, or the answer names nothing):
+                # the row is free again and says so in Jarvis's own words.
+                message = (getattr(outcome, "message", "") or "").strip()
+                dialog.set_revising(False)
+                dialog.show_revise_note(REVISE_FAILED_NOTE.format(why=f" ({message.rstrip('.')})" if message else ""),
+                                        warn=True)
+            return
+        values = dialog.values()
+        if _review_digest(str(values.get("subject", "")), str(values.get("body", ""))) != digest:
+            dialog.set_revising(False)
+            dialog.show_revise_note(REVISE_CHANGED_NOTE, warn=True)
+            logger.info("Revise %s: the message changed meanwhile; the answer was dropped", run[0])
+            return
+        revised = getattr(outcome, "revised", "")
+        if outcome.ok and revised:
+            dialog.offer_rewrite(revised)
+            logger.info("Revise %s: offered (%d character(s))", run[0], len(revised))
+            return
+        dialog.set_revising(False)
+        if outcome.ok and outcome.kind == REVISE_QUESTION:
+            dialog.show_revise_note(REVISE_QUESTION_NOTE, warn=True)
+        elif outcome.ok and outcome.kind == REVISE_HELD:
+            dialog.show_revise_note(REVISE_HELD_NOTES.get(reason, REVISE_HELD_NOTES[""]), warn=True)
+        else:
+            message = (outcome.message or "").strip()
+            dialog.show_revise_note(REVISE_FAILED_NOTE.format(why=f" ({message.rstrip('.')})" if message else ""),
+                                    warn=True)
+        logger.info("Revise %s: not offered (%s)", run[0], outcome.kind)
 
     # ---- results from the action worker ------------------------------------------------------------
 
@@ -9327,6 +9703,7 @@ class AppController(QObject):
             # A sign-in during the run bound an account you have not confirmed (nothing was
             # changed): ask now, so the next click goes ahead.
             self._ask_account(account_of(action), card_id=action_id)
+        self._batch_result(action_id, result, error, status)
 
     def _calendar_result(self, action_id: str, action: ProposedAction | None, result: ExecResult | None,
                          error: ExecError | None, status: str, *, saved: bool = False) -> None:
@@ -9398,7 +9775,7 @@ class AppController(QObject):
         if status == STATUS_UNKNOWN:
             self._activity(hud.TAG_WAIT, f"Unknown: {_action_phrase(action)}", UNKNOWN_CARD_TEXT)
         else:
-            self._activity(hud.TAG_STOP, f"Couldn't {_VERBS.get(action.kind, 'do')} {_kind_title(action)}",
+            self._activity(hud.TAG_STOP, _couldnt_words(action),
                            _short(message))
         self._request_peeks([action], force=True)   # Google's view now, before any Retry
 
@@ -10074,7 +10451,7 @@ class AppController(QObject):
         self._ask_busy = bool(busy)
         if not busy:
             self._ack_timer.stop()
-        if busy and self.ask is not None and self.ask.running_mode in (MODE_MEETING, MODE_DESKTOP, MODE_CAPTURE):
+        if busy and self.ask is not None and self.ask.running_mode in (MODE_MEETING, MODE_DESKTOP, MODE_CAPTURE, MODE_REVISE):
             # A meeting summary runs in the background, a desktop request on the HUD (its caption says what Jarvis
             # is doing): nothing pauses or is said.
             self._update_reading_controls()
@@ -10105,7 +10482,7 @@ class AppController(QObject):
         if self.ask is None or self.ask.running_mode != MODE_MEETING:
             self._end_say_stream()              # a new request: what the last answer was still saying goes
         self._ask_desktop = bool(self.ask is not None and self.ask.running_mode == MODE_DESKTOP)
-        if self.ask is not None and self.ask.running_mode in (MODE_MEETING, MODE_DESKTOP, MODE_CAPTURE):
+        if self.ask is not None and self.ask.running_mode in (MODE_MEETING, MODE_DESKTOP, MODE_CAPTURE, MODE_REVISE):
             # A capture's reading (its Capture frame answers), a meeting summary the owner asked for (the start card's tick, or Summarise), or a desktop request on the
             # HUD (its caption answers): no YOU entry, the screen stays where the owner is; LIVE has its steps.
             self._ask_task_id = self.ask.task_id
@@ -10194,6 +10571,16 @@ class AppController(QObject):
         if self._ask_task_id:
             self._snapshots_call("cancel_task", self._ask_task_id)   # its queued and running pictures stop
         if self.state == STATE_QUITTING:
+            return
+        if self._revise_asking:
+            # A Rewrite's run (Stop, closing the dialog, or Esc in the ask line): no conversation entry; the dialog's
+            # row is free again.
+            self._revise_asking = False
+            run, self._revise_run = self._revise_run, None
+            dialog = self._dialog
+            if dialog is not None and run is not None and dialog.action_id == run[0] and dialog.is_revising():
+                dialog.set_revising(False)
+                dialog.show_revise_note(REVISE_STOPPED_NOTE)
             return
         meetings = getattr(self, "meetings", None)
         if meetings is not None and meetings.summary_running():
@@ -10362,6 +10749,9 @@ class AppController(QObject):
         if getattr(outcome, "mode", "") == MODE_CAPTURE:
             if getattr(self, "capture", None) is not None:
                 self.capture.on_outcome(outcome)
+            return
+        if getattr(outcome, "mode", "") == MODE_REVISE:
+            self._on_revise_outcome(outcome)
             return
         self._offer_running = 0
         if outcome.ok and getattr(outcome, "agent_task", "") and self._task_cant_start(outcome):
@@ -16308,6 +16698,8 @@ class AppController(QObject):
             self._on_shutdown()
         flushed = self._flush_send_hold()   # before the worker stops: the owner already saw "Sent"
         self.state = STATE_QUITTING
+        if self._batch is not None:
+            self._end_batch(batch.REASON_QUIT)   # Add all ends here: the card on its way finishes as any card's would
         self._closing.set()
         for timer in (self._ignore_timer, self._tick_timer, self._snooze_timer, self._note_timer,
                       self._recheck_timer, self._agenda_timer, self._send_hold_timer, self._undo_timer,

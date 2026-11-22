@@ -101,14 +101,16 @@ TASK_DESKTOP = "desktop"          # a desktop request (Jarvis on your desktop): 
                                   # path). Never amber; never opens LIVE by itself (the HUD shows; SPEC 10.1)
 TASK_CAPTURE = "capture"          # a capture's reading (a picture, PDF or text): its kind, size and pages, the planner
                                   # run, what was found (counts); never the file's name or text outside the stdin block
+TASK_REVISE = "revise"            # a draft rewritten in the owner's plain words (the Edit dialog's Rewrite): the draft's
+                                  # size, the planner run, what came back (sizes); never opens LIVE by itself
 TASK_AGENT = "agent"              # a task Jarvis works through (agent_ui): one step per tool call. Never opens LIVE by
                                   # itself; memory only, as every task here (SPEC D11)
 TASK_KINDS = (TASK_ASK, TASK_ACTION, TASK_BRIEFING, TASK_BACKGROUND, TASK_WEB, TASK_MEMORY, TASK_PLAN, TASK_PREP,
-              TASK_OWN_READS, TASK_NUDGE, TASK_MEETING, TASK_DESKTOP, TASK_AGENT, TASK_CAPTURE)
+              TASK_OWN_READS, TASK_NUDGE, TASK_MEETING, TASK_DESKTOP, TASK_AGENT, TASK_CAPTURE, TASK_REVISE)
 TASK_TAGS = {TASK_ASK: "ASK", TASK_ACTION: "ACTION", TASK_BRIEFING: "BRIEFING", TASK_BACKGROUND: "BACKGROUND",
              TASK_WEB: "WEB", TASK_MEMORY: "MEMORY", TASK_PLAN: "PLAN", TASK_PREP: "PREP", TASK_OWN_READS: "READS",
              TASK_NUDGE: "NUDGE", TASK_MEETING: "MEETING", TASK_DESKTOP: "DESKTOP", TASK_AGENT: "TASK",
-             TASK_CAPTURE: "CAPTURE"}
+             TASK_CAPTURE: "CAPTURE", TASK_REVISE: "REVISE"}
 # Tasks that open the LIVE view by themselves ([live] auto_open) and set the tab's dot.
 ATTENTION_KINDS = frozenset({TASK_ASK, TASK_ACTION, TASK_WEB, TASK_PLAN, TASK_PREP, TASK_NUDGE})
 COMPACT_KINDS = frozenset({TASK_BRIEFING, TASK_BACKGROUND, TASK_MEMORY, TASK_OWN_READS})

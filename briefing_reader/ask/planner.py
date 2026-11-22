@@ -247,12 +247,13 @@ from .stream import (
     run_planner,
 )
 from .usage import KIND_RESEARCH, USAGE_FILE, CapCheck, UsageLog
-from .validate import LINE_CARD, LINE_OVER_CAP, LINE_REFUSED, LINE_REPEAT, Cards, keep_valid, to_cards
-from . import capture_read, dayplan, desktop_mode, meeting_summary, modes, prep
+from .validate import (LINE_CARD, LINE_OVER_CAP, LINE_REFUSED, LINE_REPEAT, PLAIN_ASK_KINDS, Cards, keep_valid,
+                       to_cards)
+from . import capture_read, dayplan, desktop_mode, meeting_summary, modes, prep, revise
 from ..desktop import executor as desktop_executor
 from ..desktop import validate as desktop_validate
 from .modes import (MODE_CAPTURE, MODE_DESKTOP, MODE_KINDS, MODE_MAX_LINES, MODE_MEETING, MODE_NUDGE, MODE_PLAN,
-                    MODE_PREP, MODE_USAGE, ModeInputs, ModeRequest)
+                    MODE_PREP, MODE_REVISE, MODE_USAGE, ModeInputs, ModeRequest)
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +261,10 @@ STAGE_CONTEXT = "context"          # reading the calendar (and named briefing th
 STAGE_PLANNING = "planning"        # the first planner run
 STAGE_MAIL = "mail"                # running the search the planner asked for
 STAGE_PLANNING_AGAIN = "planning_again"   # the second run, with the mail
+# A revise's outcome kinds besides "ok" and the failures: a question back (never shown: Jarvis says it in his own
+# words), a rewrite Jarvis held back (its message is the reason word, revise.REVISE_*).
+REVISE_QUESTION = "revise_question"
+REVISE_HELD = "revise_held"
 STAGE_RESEARCH = "research"        # the web research run
 STAGE_DAY = "day"                  # a day plan: reading the day being planned
 STAGE_PREP_MAIL = "prep_mail"      # a meeting brief: Jarvis's own searches and reads of the guests' threads
@@ -537,7 +542,7 @@ class ClaudeEngine:
             return RunResult(failure=failure(CANCELLED, "cancel"))
         env = cli.clean_env(self._env_source())
         # Mail, the summary's own notes, or names other people wrote on the desktop: never "remember".
-        if mode in (MODE_PREP, MODE_NUDGE, MODE_MEETING, MODE_DESKTOP, MODE_CAPTURE):
+        if mode in (MODE_PREP, MODE_NUDGE, MODE_MEETING, MODE_DESKTOP, MODE_CAPTURE, MODE_REVISE):
             allow_remember = False
         allow_agent = allow_agent and mode == MODE_DESKTOP
         extra = {"allow_agent": True} if allow_agent else {}
@@ -554,6 +559,10 @@ class ClaudeEngine:
                              timeout_s=float(self.ask.timeout_seconds),
                              read=lambda event, init: prep.read_prep_result(event, init), cancel=cancel,
                              clock=self._clock, progress=progress, capture=capture)
+        elif mode == MODE_REVISE:   # a rewritten message, read strictly (revise.read_revise_result)
+            result = run_cli(self.runner, argv, prompt, env=env, cwd=self.work_folder,
+                             timeout_s=float(self.ask.timeout_seconds), read=revise.read_revise_result,
+                             cancel=cancel, clock=self._clock, progress=progress, capture=capture)
         elif mode == MODE_MEETING:   # a long transcript: a longer timeout, its own strict reader
             result = run_cli(self.runner, argv, prompt, env=env, cwd=self.work_folder,
                              timeout_s=max(float(self.ask.timeout_seconds), MEETING_TIMEOUT_S),
@@ -1005,6 +1014,9 @@ class AskOutcome:
     # (board.ask_frames.AskFrame: table, chart, timeline, maths), checked strictly. Shown, never logged but as counts.
     topic: str = field(default="", repr=False)
     frames: tuple[Any, ...] = field(default=(), repr=False, compare=False)
+    # Mail extras (part 2): a revise run's rewritten message text, checked (revise.check_revision), offered in the Edit
+    # dialog that asked (``brief`` holds that request's digest). Never logged, never spoken, never kept before Save.
+    revised: str = field(default="", repr=False)
 
     def summary(self) -> str:
         """For the log: kinds and counts only."""
@@ -1722,6 +1734,8 @@ class AskPlanner:
                 outcome = self._desktop(request, cancel, on_stage, task)
             elif request.mode == MODE_CAPTURE:
                 outcome = self._capture(request, cancel, on_stage, task)
+            elif request.mode == MODE_REVISE:
+                outcome = self._revise(request, cancel, on_stage, task)
             else:
                 outcome = AskOutcome(False, "error", "Jarvis can't do that kind of request yet; nothing was proposed")
         except Exception as exc:  # noqa: BLE001 - a mode run must never take the app down
@@ -1948,6 +1962,53 @@ class AskPlanner:
         return AskOutcome(True, "ok", "", say=answer.say, question=answer.question, runs=1, init=result.init,
                           stats=(result.stats,), brief=(tuple(items), counts), refused=counts.refused,
                           mode=MODE_CAPTURE, target=job.capture_id)
+
+    # ---- a draft rewritten in the owner's words (mail extras, part 2) ----------------------------
+
+    def _revise(self, request: ModeRequest, cancel: threading.Event | None, on_stage: Callable[[str], None],
+                live: LiveTask = NO_TASK) -> AskOutcome:
+        """The Edit dialog's Rewrite: the checks (Ask on, the caps, Claude Code ready), one run that sees only the draft
+        and the owner's words (no thread, notes, search or web), its answer read strictly and then Jarvis's own check
+        (revise.check_revision). Nothing is kept or sent here: the dialog offers the text, the owner saves it."""
+        job = request.payload
+        if not isinstance(job, modes.RevisionJob):
+            return AskOutcome(False, "error", "Jarvis can't do that kind of request yet; nothing was proposed")
+        refusal = self._refusal(live)
+        if refusal is not None:
+            logger.info("Revise %s: no run (%s)", job.action_id, refusal.kind)
+            return replace(refusal, target=job.action_id, brief=(job.digest, ""))
+        words = request.typed
+        on_stage(STAGE_CONTEXT)
+        zone = self.sources.time_zone()
+        now = self.clock()
+        wall = dayplan.to_wall(now, zone) if zone else now
+        wall = wall.replace(tzinfo=None) if wall.tzinfo is not None else wall
+        prompt = modes.build_revise_prompt(wall, self._owner(), job, words, zone)
+        logger.info("Revise %s: a %s of %d character(s), %d word character(s)", job.action_id, job.kind,
+                    len(job.draft), len(words))
+        on_stage(STAGE_PLANNING)
+        result = self._run(prompt, allow_search=False, cancel=cancel, live=live, number=1, mode=MODE_REVISE)
+        del prompt
+        answer = result.answer
+        if result.failure is not None or not isinstance(answer, revise.ReviseAnswer):
+            failed = result.failure
+            kind = failed.kind if failed else "error"
+            logger.info("Revise %s: run %s", job.action_id, kind)
+            return AskOutcome(False, kind, failed.message if failed else "", runs=1 if result.started else 0,
+                              init=result.init, stats=(result.stats,) if result.started else (),
+                              target=job.action_id, brief=(job.digest, ""))
+        if answer.question or not answer.body.strip():
+            logger.info("Revise %s: a question back", job.action_id)
+            return AskOutcome(True, REVISE_QUESTION, "", question=answer.question, runs=1, init=result.init,
+                              stats=(result.stats,), target=job.action_id, brief=(job.digest, ""))
+        reason = revise.check_revision(answer.body, job.draft, words)
+        if reason:
+            logger.info("Revise %s: held back (%s)", job.action_id, reason)
+            return AskOutcome(True, REVISE_HELD, "", runs=1, init=result.init, stats=(result.stats,),
+                              target=job.action_id, brief=(job.digest, reason), refused=1)
+        logger.info("Revise %s: a rewrite of %d character(s)", job.action_id, len(answer.body))
+        return AskOutcome(True, "ok", "", say=answer.say, runs=1, init=result.init, stats=(result.stats,),
+                          target=job.action_id, brief=(job.digest, ""), revised=answer.body)
 
     # ---- a meeting's summary (meetings part 2) -------------------------------------------------
 
@@ -2735,7 +2796,7 @@ class AskPlanner:
                 runs: int, stats: tuple[RunStats, ...], init: InitSummary | None, mail: MailReport, search: str,
                 search_account: str, live: LiveTask = NO_TASK, suggested: tuple[str, str] = ("", "")) -> AskOutcome:
         cards: Cards = to_cards(plan.lines, index, now=now, link_hosts=self.config.actions.link_hosts,
-                                page_ids=page_ids, max_cards=self.config.ask.max_cards)
+                                page_ids=page_ids, max_cards=self.config.ask.max_cards, kinds=PLAIN_ASK_KINDS)
         _validated(live, cards, index, self.config.ask.max_cards, self._hour24(), suggested)
         message_parts = list(notes)
         if cards.dropped:
@@ -3325,7 +3386,8 @@ def _validated(live: LiveTask, cards: Cards, index: ContextIndex, max_cards: int
 NO_MAIL_WORDS = "no - a day plan never reads mail"
 NO_WEB_WORDS = "no - a day plan never uses the web"
 MODE_RUN_WORDS = {MODE_PLAN: "day plan", MODE_PREP: "meeting brief", MODE_NUDGE: "follow-up draft",
-                  MODE_MEETING: "meeting summary", MODE_DESKTOP: "desktop plan", MODE_CAPTURE: "capture"}
+                  MODE_MEETING: "meeting summary", MODE_DESKTOP: "desktop plan", MODE_CAPTURE: "capture",
+                  MODE_REVISE: "rewrite"}
 FREE_TITLE = "Your free time"
 
 
@@ -3811,6 +3873,8 @@ def _mode_target(request: ModeRequest) -> Any:
         return job.run_id if isinstance(job, desktop_mode.DesktopJob) else None
     if request.mode == MODE_CAPTURE:
         return job.capture_id if isinstance(job, capture_read.CaptureJob) else None
+    if request.mode == MODE_REVISE:
+        return job.action_id if isinstance(job, modes.RevisionJob) else None
     if request.mode != MODE_MEETING:
         return None
     return job.meeting_id if isinstance(job, meeting_summary.MeetingJob) else None
