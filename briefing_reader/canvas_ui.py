@@ -44,10 +44,22 @@ The window brief:
   paused or can't hear you (wake_ui.WakeController.hearing: its listener gets nothing from its microphone), and the
   note "Jarvis can't hear you" - also when the last talk got nothing at all from the microphone (talk_ui
   .TalkController.unheard) - with the microphone's name (on screen only, never logged) and its one button
-  "mic_settings": Settings at Meetings, where a microphone is picked (``open_mic_settings``; nothing is picked for the
-  owner and the Windows default is never changed);
+  "mic_settings": Settings at Talk with its Microphone row in view and the keyboard on it (``open_mic_settings``;
+  part 5B: Settings > Talk is there whenever talking or "Hey Jarvis" is; nothing is picked for the owner and the
+  Windows default is never changed);
 * the page's top band for Windows' hit-test (its "chrome" request) goes to the window (ui.BriefingWindow
   .set_page_chrome), and Windows' own maximise button's hover (the window's maxHoverChanged) to the page.
+
+Canvas part 5B:
+
+* the offer's or the error's tile (canvas_view.CanvasPage's side tile) is told to the page as the canvas message's
+  "side" (its box): the page keeps every frame clear of it, and it hides while a frame is open big;
+* the corner's clock is the canvas's own: read on the minute (``_minute``), while the window is up;
+* the ask line names the real talk key: "Type, or tap <key> and talk" ([talk] key), "Type to ask" without talking;
+* Esc in the empty ask line leaves full screen (the window's own F11 state);
+* every word sent is cut by the page's units (board.frames.cut: never inside a surrogate pair);
+* the 500 ms sync and the Now group's timer rest while the window is not on the screen (minimised, hidden), and start
+  again with a sync at once when it is back.
 
 Logs: reason words, counts and durations only.
 """
@@ -68,6 +80,7 @@ from . import canvas_view
 from .canvas_now import NowController
 from . import dock as dock_mod
 from . import orb as orb_mod
+from .board import frames as board_frames
 from .board import protocol
 
 logger = logging.getLogger(__name__)
@@ -76,13 +89,14 @@ START_AFTER_MS = 60               # the board starts this long after the window 
 SYNC_MS = 500                     # the corners and the orb are compared with what the page has this often ...
 LEVEL_MS = 50                     # ... and the levels this often while he listens or speaks
 BADGE_LINGER_MS = 2600            # the badge stays this long after he stops speaking
-PLACEHOLDER_TALK = "Type, or hold the key and talk"
-PLACEHOLDER_TYPE = "Type a request"
+PLACEHOLDER_TALK = "Type, or tap {key} and talk"   # part 5B: the real talk key ([talk] key), tapped not held
+PLACEHOLDER_TALK_ANY = "Type, or tap the talk key and talk"   # (no key set in [talk] key)
+PLACEHOLDER_TYPE = "Type to ask"
 TASK_TITLE = "Working on it"      # the task card's heading while he works (the answer's topic takes its place)
 TASK_STARTING = "Starting"
 TASK_STOPPING = "Stopping"
 TASK_GRACE_S = 1.5                # a request that ended without an answer's hook: its card goes this long after
-MIC_GROUP = "meetings"            # Settings > Meetings (meetings_ui.SETTINGS_KEY): where a microphone is picked
+MIC_GROUP = "talk"                # Settings > Talk (talk_ui.SETTINGS_KEY): where a microphone is picked (part 5B)
 
 # A page button's word -> the Dock's slot it presses.
 _SCREEN_SLOTS = {"briefing": dock_mod.BRIEFING, "approvals": dock_mod.APPROVALS, "followups": dock_mod.FOLLOWUPS,
@@ -132,18 +146,26 @@ class CanvasController(QObject):
         self._start_timer.setSingleShot(True)
         self._start_timer.setInterval(START_AFTER_MS)
         self._start_timer.timeout.connect(self._start_board)
+        self._minute = QTimer(self)                     # part 5B: the corner's clock, on the minute (window up)
+        self._minute.setSingleShot(True)
+        self._minute.timeout.connect(self._on_minute)
         reading = self.reading
         reading.set_canvas(True)
         self._sync_placeholder()
         reading.glanceChanged.connect(self.sync)
         reading.deskShown.connect(self._on_desk_shown)
         reading.tabChanged.connect(self._on_tab)
+        page = reading.canvas_page() if hasattr(reading, "canvas_page") else None
+        if page is not None and hasattr(page, "sideChanged"):
+            page.sideChanged.connect(self.sync)       # part 5B: the side tile came, went or changed size
+        bar = reading.command_bar
+        if hasattr(bar, "statusDismissed"):
+            bar.statusDismissed.connect(self._on_empty_escape)   # part 5B: Esc in the empty ask line
         self.window.visibilityChanged.connect(self._on_visibility)
         self.window.activeChanged.connect(lambda _active: self.sync())     # away or back: the orb's rate at rest
         hover = getattr(self.window, "maxHoverChanged", None)
         if hover is not None:
             hover.connect(self._on_max_hover)            # the window brief: Windows' maximise button hovered
-        self._sync_timer.start()
         self._on_visibility()
 
     # ---- the page's start: with the window ---------------------------------------------------------------------
@@ -152,12 +174,56 @@ class CanvasController(QObject):
         window = self.window
         return bool(_alive(window) and window.isVisible() and not window.isMinimized() and window.is_reading_view())
 
+    def _window_shown(self) -> bool:
+        """The window is on the screen (shown, not minimised) - whatever view it shows."""
+        window = self.window
+        return bool(_alive(window) and window.isVisible() and not window.isMinimized())
+
     def _on_visibility(self) -> None:
-        if not self._started and not self._fallen and self._window_up():
+        up = self._window_up()
+        if not self._started and not self._fallen and up:
             self._start_timer.start()
+        self._rest(not self._window_shown())
         self._sync_timers()
-        if self._window_up():
+        if up:
             self.focus_ask()
+
+    def _rest(self, resting: bool) -> None:
+        """The resilience review's L3: while the window is not on the screen (minimised, hidden: the desktop HUD) the
+        500 ms sync, the clock's minute and the Now group's timer rest; when it is back they start with a sync at
+        once. (Another view in the window keeps the sync: the reading view coming up has no window event of its own.)"""
+        if self._fallen:
+            return
+        if resting:
+            self._sync_timer.stop()
+            self._minute.stop()
+            self.now.rest(True)
+            return
+        was = self._sync_timer.isActive()
+        if not was:
+            self._sync_timer.start()
+        self._arm_minute()
+        self.now.rest(False)
+        if not was:
+            self.sync()
+
+    def _arm_minute(self) -> None:
+        """Part 5B (the walk's 2): the corner's clock is read again now and on the next minute - its own timer, never
+        the hidden native header's (which stops while it is hidden)."""
+        header = self.reading.header
+        refresh = getattr(header, "refresh_clock", None)
+        now = refresh() if callable(refresh) else None
+        if now is None:
+            self._minute.start(60_000)
+            return
+        ms_left = (60 - now.second) * 1000 - now.microsecond // 1000
+        self._minute.start(max(250, ms_left + 50))
+
+    def _on_minute(self) -> None:
+        if self._fallen or not self._window_shown():
+            return
+        self._arm_minute()
+        self.sync()
 
     def _start_board(self) -> None:
         if self._started or self._fallen:
@@ -207,6 +273,7 @@ class CanvasController(QObject):
         self._level_timer.stop()
         self._linger.stop()
         self._start_timer.stop()
+        self._minute.stop()
         self.now.shutdown()
         logger.info("Canvas: Home goes back to its native ring (%s)", reason)
         if _alive(self.reading):
@@ -266,8 +333,8 @@ class CanvasController(QObject):
         except Exception:  # noqa: BLE001 - unknown: here
             return False
 
-    def buttons(self) -> list[str]:
-        """The page's buttons that can work now, in the protocol's order."""
+    def buttons(self, heard: tuple[str, bool, str] | None = None) -> list[str]:
+        """The page's buttons that can work now, in the protocol's order (``heard``: hearing() as just read)."""
         reading = self.reading
         slots = set(reading.dock.visible_slots())
         shown = {"history", "briefing", "approvals", "settings", "minimize", "maximize", "close", "day"}
@@ -280,12 +347,12 @@ class CanvasController(QObject):
             shown.add("board")
         if self.now.can_show():
             shown.add("now")                     # part 3B: the resting group back, only while it is not up
-        if self.hearing()[1] and self._mic_group():
-            shown.add("mic_settings")            # the window brief: the can't-hear note's Settings > Meetings
+        if (heard if heard is not None else self.hearing())[1] and self._mic_group():
+            shown.add("mic_settings")            # the window brief: the can't-hear note's Settings > Talk (part 5B)
         return [word for word in protocol.CANVAS_BUTTONS if word in shown]
 
     def _mic_group(self) -> bool:
-        """Settings > Meetings is there (its microphone picker): the can't-hear note's button can work."""
+        """Settings > Talk is there (its Microphone row): the can't-hear note's button can work."""
         try:
             return MIC_GROUP in self.reading.settings_page.group_buttons
         except Exception:  # noqa: BLE001 - unknown: no button
@@ -313,7 +380,7 @@ class CanvasController(QObject):
             if unheard is not None:
                 deaf, mic = True, str(unheard)
         state = state if state in protocol.HEAR_STATES else "other"
-        return state, deaf, (str(mic or "")[:protocol.MIC_CAP] if deaf else "")
+        return state, deaf, (board_frames.cut(str(mic or ""), protocol.MIC_CAP) if deaf else "")
 
     def canvas_message(self) -> dict[str, Any]:
         reading = self.reading
@@ -324,17 +391,25 @@ class CanvasController(QObject):
             rec = f"Rec {elapsed}" + (f" · {warning}" if warning else "")
         _sentence, wake_look = reading.wake_state()
         wake_words = reading.wake_words()                 # part 3: its few words, whole (never a cut sentence)
-        hear, deaf, mic = self.hearing()                  # the window brief: HEY JARVIS's state, can't hear you
+        heard = self.hearing()                             # the window brief: HEY JARVIS's state, can't hear you
+        hear, deaf, mic = heard                            # (read once a sync: the resilience review's L3)
         from .wake_ui import LOOK_OFF
 
-        return {"type": "canvas", "clock": f"{date_text} · {time_text}"[:protocol.CLOCK_CAP],
-                "word": str(reading.state_word() or "")[:protocol.STATE_WORD_CAP],
+        cut = board_frames.cut                             # part 5B: cut by the page's units, never inside a pair
+        return {"type": "canvas", "clock": cut(f"{date_text} · {time_text}", protocol.CLOCK_CAP),
+                "word": cut(str(reading.state_word() or ""), protocol.STATE_WORD_CAP),
                 "tone": reading.header.state_tone(),
                 "approvals": max(0, min(protocol.APPROVALS_MAX, reading.needs_ok_count())),
-                "buttons": self.buttons(), "briefing_new": bool(reading.is_new_briefing()),
-                "hold": str(reading.hold_word() or "")[:protocol.HOLD_CAP], "rec": rec[:protocol.REC_CAP],
-                "wake": str(wake_words or "")[:protocol.WAKE_CAP] if wake_look != LOOK_OFF else "",
-                "meter": self._has_meter(), "hear": hear, "deaf": deaf, "mic": mic}
+                "buttons": self.buttons(heard), "briefing_new": bool(reading.is_new_briefing()),
+                "hold": cut(str(reading.hold_word() or ""), protocol.HOLD_CAP), "rec": cut(rec, protocol.REC_CAP),
+                "wake": cut(str(wake_words or ""), protocol.WAKE_CAP) if wake_look != LOOK_OFF else "",
+                "meter": self._has_meter(), "hear": hear, "deaf": deaf, "mic": mic, "side": self._side()}
+
+    def _side(self) -> list[int]:
+        """Part 5B: the side tile's box ([width, height] px; [0, 0] none) - the page keeps its frames clear of it."""
+        page = self.reading.canvas_page() if hasattr(self.reading, "canvas_page") else None
+        box = page.side_box() if page is not None and hasattr(page, "side_box") else (0, 0)
+        return [max(0, min(protocol.SIDE_MAX, int(box[0]))), max(0, min(protocol.SIDE_MAX, int(box[1])))]
 
     def _has_meter(self) -> bool:
         """The app measures the microphone's input (the talk key's listening or "Hey Jarvis"): else no meter."""
@@ -407,9 +482,20 @@ class CanvasController(QObject):
             else:
                 self._level_timer.stop()
 
+    def placeholder(self) -> str:
+        """Part 5B (the walk's 5): the ask line says how to ask - the real talk key, tapped ("Type, or tap Ctrl+Alt+T
+        and talk"); "Type to ask" while talking is off. Ctrl+K stays the line's own cue at its right."""
+        if getattr(self.host, "talk", None) is None:
+            return PLACEHOLDER_TYPE
+        key = str(getattr(getattr(getattr(self.host, "config", None), "talk", None), "key", "") or "")
+        if not key:
+            return PLACEHOLDER_TALK_ANY
+        from .hotkey import describe_combo
+
+        return PLACEHOLDER_TALK.format(key=describe_combo(key))
+
     def _sync_placeholder(self) -> None:
-        talk = getattr(self.host, "talk", None) is not None
-        self.reading.command_bar.set_canvas_placeholder(PLACEHOLDER_TALK if talk else PLACEHOLDER_TYPE)
+        self.reading.command_bar.set_canvas_placeholder(self.placeholder())
 
     # ---- the desk's changes, the screens ---------------------------------------------------------------------
 
@@ -503,7 +589,7 @@ class CanvasController(QObject):
         else:
             words = ask_ui.STAGE_TEXTS.get(stage, TASK_STARTING).rstrip(". ")
         title = ask_ui.MODE_STATUS.get(mode, TASK_TITLE).rstrip(". ")
-        return title[:protocol.TOPIC_CAP], words[:protocol.TASK_WORDS_CAP]
+        return board_frames.cut(title, protocol.TOPIC_CAP), board_frames.cut(words, protocol.TASK_WORDS_CAP)
 
     def task_message(self) -> dict[str, Any] | None:
         """The card while the request runs (None: no card)."""
@@ -641,10 +727,16 @@ class CanvasController(QObject):
         return True
 
     def open_mic_settings(self) -> None:
-        """The can't-hear note's button: Settings (the Dock's own button) at Meetings, where a microphone is picked.
-        Nothing is picked for the owner and the Windows default is never changed."""
-        self.reading.dock.activate(_SCREEN_SLOTS["settings"])
-        self.reading.settings_page.select_group(MIC_GROUP)
+        """The can't-hear note's button: Settings (the Dock's own button) at Talk, with its Microphone row scrolled into
+        view and the keyboard on its Change button (part 5B). Nothing is picked for the owner and the Windows default
+        is never changed."""
+        reading = self.reading
+        reading.dock.activate(_SCREEN_SLOTS["settings"])
+        settings = reading.settings_page
+        settings.select_group(MIC_GROUP)
+        row = getattr(getattr(self.host, "talk", None), "mic_row", None)
+        if row is not None and hasattr(settings, "reveal"):
+            settings.reveal(row, getattr(row, "change_button", None))
 
     # ---- the window brief: Windows' hit-test of the page's top band -------------------------------------------
 
@@ -661,13 +753,22 @@ class CanvasController(QObject):
         if board is not None and not self._fallen and board.apply({"type": "chrome", "hover": bool(hover)}):
             self.counts["sent:chrome"] += 1
 
+    def _on_empty_escape(self) -> None:
+        """Part 5B (the walk's 11): Esc in the empty ask line on the canvas leaves full screen (F11 goes back too)."""
+        window = self.window
+        if self._fallen or not self.reading.canvas_shown() or not _alive(window):
+            return
+        leave = getattr(window, "leave_fullscreen", None)
+        if callable(leave) and leave():
+            self.counts["fullscreen:esc"] += 1
+
     # ---- teardown ----------------------------------------------------------------------------------------------
 
     def shutdown(self) -> None:
-        for timer in (self._sync_timer, self._level_timer, self._linger, self._start_timer):
+        for timer in (self._sync_timer, self._level_timer, self._linger, self._start_timer, self._minute):
             timer.stop()
         self.now.shutdown()
 
 
-__all__ = ["BADGE_LINGER_MS", "CanvasController", "LEVEL_MS", "PLACEHOLDER_TALK", "PLACEHOLDER_TYPE", "START_AFTER_MS",
-           "SYNC_MS"]
+__all__ = ["BADGE_LINGER_MS", "CanvasController", "LEVEL_MS", "PLACEHOLDER_TALK", "PLACEHOLDER_TALK_ANY",
+           "PLACEHOLDER_TYPE", "START_AFTER_MS", "SYNC_MS"]

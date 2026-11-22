@@ -351,7 +351,9 @@ def private_frame(frame: Mapping[str, Any]) -> dict[str, Any]:
     this screen"; a text frame's title and source rows stay), a mail list's rows with no field but the ones it shows
     (sender, time, subject, meta, unread); part 3B's resting frames as counts only - "waits for your OK" with no card
     (no kind, no title: its count stays), Agents with no name and no times (each agent's state and its count of
-    proposals that wait stay, and the counts in all); everything else as it is."""
+    proposals that wait stay, and the counts in all); a to-dos frame's rows that wait for the owner's OK with no title
+    (canvas part 5B, the ship-gate review's 1: its state stays - "WAITS" -, its words go, as on "waits for your OK");
+    everything else as it is."""
     copy = dict(frame)
     body = frame.get("body")
     if not isinstance(body, Mapping):
@@ -364,6 +366,12 @@ def private_frame(frame: Mapping[str, Any]) -> dict[str, Any]:
         copy["body"] = body
     elif kind == "approvals":
         copy["body"] = {"count": body.get("count"), "rows": []}
+    elif kind == "todos":
+        rows = body.get("rows")
+        body = dict(body)
+        body["rows"] = [dict(row, text=_HIDDEN_TEXT) if row.get("state") == "waits" else dict(row)
+                        for row in rows if isinstance(row, Mapping)] if isinstance(rows, list) else []
+        copy["body"] = body
     elif kind == "agents":
         rows = body.get("rows")
         copy["body"] = {"rows": [{"name": "", "state": row.get("state"), "last": "", "came": -1, "next": "",

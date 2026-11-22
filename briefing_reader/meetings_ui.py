@@ -182,6 +182,8 @@ class MeetingsController(QObject):
         reading.recordMeeting.connect(lambda: self.open_start_card())
         reading.stopRecording.connect(self.stop)
         reading.tabChanged.connect(self._on_tab_changed)
+        # Canvas part 5B: the microphones "Hey Jarvis"'s listener heard nothing from this session (the app sets it)
+        self.silent_mics: Callable[[], Any] = lambda: ()
         self.settings_panel = meetings_view.MeetingsSettingsPanel()
         self.settings_panel.microphonePicked.connect(lambda name: self.pick_devices(microphone=name))
         self.settings_panel.callAudioPicked.connect(lambda name: self.pick_devices(call_audio=name))
@@ -873,8 +875,12 @@ class MeetingsController(QObject):
                 call_default = getattr(backend.default_output(), "name", "")
             except Exception as exc:  # noqa: BLE001 - shown as none found
                 logger.info("Meetings: the devices could not be listed (%s)", type(exc).__name__)
+        try:
+            silent = list(self.silent_mics())       # part 5B: heard silent this session (on screen only)
+        except Exception:  # noqa: BLE001 - unknown: none marked
+            silent = []
         self.settings_panel.set_devices((self.prefs.microphone, mic_default, mic_choices),
-                                        (self.prefs.call_audio, call_default, call_choices))
+                                        (self.prefs.call_audio, call_default, call_choices), silent=silent)
         self._sync_missing()
 
     # ---- closing ------------------------------------------------------------------------------------------

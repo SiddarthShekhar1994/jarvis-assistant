@@ -2859,8 +2859,11 @@ class ReadingView(QWidget):
         return orb_mod.LIT_GLOW if self._frame_lit else 1.0
 
     def set_board_big(self, big: bool) -> None:
-        """A frame is open big (part 5c): the board's view covers the conversation, so F6 skips it."""
+        """A frame is open big (part 5c): the board's view covers the conversation, so F6 skips it. On the canvas the
+        offer's or the error's tile hides meanwhile: it never covers the big frame (canvas part 5B)."""
         self._board_big = bool(big)
+        if self._canvas_page is not None:
+            self._canvas_page.set_side_covered(self._board_big and self._canvas)
 
     def board_big(self) -> bool:
         return self._board_big
@@ -3380,21 +3383,26 @@ class ReadingView(QWidget):
         """Home's page in canvas mode: the canvas, or - a moment (the plan, the brief) - Home's own stage page over
         it, the ask line with it. Off: Home's stage page (the desk forms as before)."""
         on_canvas = self._canvas and not self._moment
-        self._place_canvas_bar(on_canvas)
+        had_keys = self._place_canvas_bar(on_canvas)
         if self._canvas_page is None:
             return
         if on_canvas:
             self._home_switch.setCurrentWidget(self._canvas_page)
         elif self._home_switch.currentWidget() is self._canvas_page:
             self._home_switch.setCurrentWidget(self._home_stage_page)
+        if had_keys and self.command_bar.isVisibleTo(self):
+            self.command_bar.focus_input()       # part 5B (the integration review's 2): it keeps the keyboard it had
         self._sync_canvas_chrome()
 
-    def _place_canvas_bar(self, on_canvas: bool) -> None:
-        """The ask line: on the canvas in its canvas look, or back in Home's own holder as the hologram pill."""
+    def _place_canvas_bar(self, on_canvas: bool) -> bool:
+        """The ask line: on the canvas in its canvas look, or back in Home's own holder as the hologram pill. True when
+        it had the keyboard as it moved (a new parent drops the focus: the caller gives it back once the page it went
+        to shows - canvas part 5B, the integration review's 2)."""
         bar = self.command_bar
         if on_canvas == self._canvas_bar:
-            return
+            return False
         self._canvas_bar = on_canvas
+        had_keys = _holds_focus(bar)
         if on_canvas and self._canvas_page is not None:
             bar.set_canvas_said(self.caption_said)       # part 3: never what the caption carries, twice
             bar.set_canvas(True)
@@ -3405,6 +3413,7 @@ class ReadingView(QWidget):
             bar.setMaximumWidth(holo.COMMAND_MAX_WIDTH + 2 * 4)
             self._command_holder.layout().insertWidget(1, bar, 1000)
             bar.show()
+        return had_keys
 
     def _sync_canvas_chrome(self) -> None:
         """Canvas mode: the header shows on every screen but Home (and over a moment), with Back at its left."""
@@ -4186,6 +4195,11 @@ class ReadingView(QWidget):
             event.accept()                       # the canvas: Esc on a screen opened over it goes back to it
             self.go_home()
             return
+        if self._canvas and event.key() == Qt.Key.Key_Escape and event.modifiers() == Qt.KeyboardModifier.NoModifier:
+            leave = getattr(self.window(), "leave_fullscreen", None)
+            if callable(leave) and leave():      # part 5B: on the canvas itself, Esc leaves full screen
+                event.accept()
+                return
         super().keyPressEvent(event)
 
     def _auto_scroll(self, block: QTextBlock) -> None:
@@ -4584,8 +4598,17 @@ class BriefingWindow(hud.HudWindowFrame):
 
     def _on_canvas(self, on: bool) -> None:
         """Canvas mode went on: an ordinary window (never always on top), F11 for full screen. Off (the page could
-        not start): the window stays as the owner has it."""
+        not start, or stopped for good): out of full screen and maximised - the old look has no way back from either -
+        at the old look's own size (canvas part 5B, the integration review's 1)."""
         self._full_shortcut.setEnabled(bool(on))
+        if not on and self._filled():
+            self.setWindowState(self.windowState() & ~(Qt.WindowState.WindowMaximized
+                                                       | Qt.WindowState.WindowFullScreen))
+            self._before_full = Qt.WindowState.WindowNoState
+            if self.is_reading_view():
+                room = self._screen_room()
+                minimum = READING_MIN_SIZE.boundedTo(room)
+                self._apply_size(READING_SIZE.boundedTo(room).expandedTo(minimum), minimum)
         if on and bool(self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint):
             shown = self.isVisible()
             self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
@@ -4626,6 +4649,15 @@ class BriefingWindow(hud.HudWindowFrame):
         else:
             self._before_full = state & Qt.WindowState.WindowMaximized
             self.setWindowState((state & ~Qt.WindowState.WindowMaximized) | Qt.WindowState.WindowFullScreen)
+
+    def leave_fullscreen(self) -> bool:
+        """Esc on the canvas (part 5B, the walk's 11): out of full screen, back to what the window was before F11. False
+        when it was not full screen (Esc then does what it did)."""
+        state = self.windowState()
+        if not self.canvas_window() or not state & Qt.WindowState.WindowFullScreen:
+            return False
+        self.setWindowState((state & ~Qt.WindowState.WindowFullScreen) | self._before_full)
+        return True
 
     def toggle_maximized(self) -> None:
         """The page's maximise button (canvas mode): maximised, or the window's own size again (out of full screen
@@ -6537,9 +6569,23 @@ class AppController(QObject):
         if self._toast_window is None:
             self._toast_window = states_view.Toast()
             self._toast_window.actionClicked.connect(self._on_toast_action)
+            self._toast_window.avoid = self._toast_avoid     # part 5B: never over the canvas's orb
             if getattr(self, "desktop", None) is not None:
                 self.desktop.set_toast(self._toast_window)    # the desktop HUD keeps it under its bar
         return self._toast_window
+
+    def _toast_avoid(self) -> Any:
+        """Canvas part 5B (the walk's 22): while Jarvis's window shows the canvas, its orb's corner on the screen (global
+        px) - the toast goes above it; None otherwise."""
+        window = self.window
+        reading = window.reading
+        page = reading.canvas_page() if hasattr(reading, "canvas_page") else None
+        if page is None or not window.isVisible() or window.isMinimized() or not reading.canvas_shown():
+            return None
+        from . import canvas_view
+
+        box = canvas_view.orb_corner(page.width(), page.height())
+        return QRect(page.mapToGlobal(box.topLeft()), box.size())
 
     def _post_toast(self, line: str, action: str, key: str) -> None:
         """Jarvis's own toast (never a Windows notification, never the focus), only where the app already
@@ -15652,7 +15698,32 @@ class AppController(QObject):
             visibility.connect(self._talk_visibility)
         reading.settings_page.add_group(talk_ui.SETTINGS_KEY, talk_ui.SETTINGS_TITLE, note=talk_ui.SETTINGS_NOTE,
                                         how=talk_ui.SETTINGS_HOW, rows=controller.settings_rows, extra=panel)
+        # Canvas part 5B: Settings > Talk's Microphone row - the same saved pick as Settings > Meetings' (one setting:
+        # either row changes it, both show it), listed whenever Settings > Talk opens
+        controller.mic_picker = getattr(self, "_pick_microphone", None)
+        group_changed = getattr(reading.settings_page, "groupChanged", None)
+        if group_changed is not None:
+            group_changed.connect(lambda key: controller.refresh_mic_row() if key == talk_ui.SETTINGS_KEY else None)
+        meetings = getattr(self, "meetings", None)
+        if meetings is not None:
+            meetings.devicesPicked.connect(controller.refresh_mic_row)
+            meetings.silent_mics = controller.silent_names
         return controller
+
+    def _pick_microphone(self, name: str) -> None:
+        """Canvas part 5B: a microphone picked in Settings > Talk ("" follows the Windows default). Saved where Settings >
+        Meetings keeps it (one setting): through the meetings controller when [meetings] is on (it saves, shows it and
+        tells "Hey Jarvis"), else straight into the same file and "Hey Jarvis"'s listener moves to it. Nothing else."""
+        meetings = getattr(self, "meetings", None)
+        if meetings is not None:
+            meetings.pick_devices(microphone=name)
+            return
+        from . import meetings as meetings_mod
+
+        meetings_mod.DevicePrefs(meetings_mod.meetings_root(self.config)).set(microphone=name)
+        wake = getattr(self, "wake", None)
+        if wake is not None:
+            wake.mic_picked()
 
     # ---- "Hey Jarvis" (wake_ui) -----------------------------------------------------------------------------------
 
@@ -15672,6 +15743,7 @@ class AppController(QObject):
         settings = self.window.reading.settings_page
         controller.attach_panel(panel, refresh=settings.refresh)
         talk.extra_rows = controller.settings_rows
+        talk.silent_mics = controller.silent_mics       # part 5B: "(silent)" in the microphone lists
         controller.changed.connect(self._on_wake_changed)
         recording = getattr(getattr(self, "meetings", None), "recordingChanged", None)
         if recording is not None:

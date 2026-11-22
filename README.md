@@ -1029,8 +1029,8 @@ wordmark and headings, Sora for text and JetBrains Mono for labels and times.
 Technical readouts (planner runs, seconds, sizes) never appear on the canvas:
 LIVE keeps them.
 
-- **The window.** Jarvis opens maximised; **F11** (or the canvas's
-  full-screen control) gives true full screen and back. It is a normal Windows
+- **The window.** Jarvis opens maximised; **F11** gives true full screen and
+  back, and **Esc** on the canvas also leaves full screen. It is a normal Windows
   window: it has its taskbar button with Jarvis's icon (click it to minimise
   and restore), Alt+Tab and Win+Tab show it, **Win+Up** maximises it without
   covering the taskbar, **Win+Down** restores and then minimises it,
@@ -1040,7 +1040,8 @@ LIVE keeps them.
   double-click the band to maximise or restore it; right-click it, or press
   Alt+Space, for the system menu. Hovering the maximise button at the top right
   shows Windows 11's Snap Layouts. The edges resize it. It is no longer always
-  on top of other windows.
+  on top of other windows. The close button at the top right closes Jarvis, and
+  "Hey Jarvis" stops with him; minimise him to keep him listening.
 - **The orb** is a set of glowing rings on one axis, drawn by the canvas
   itself. Each state moves in its own way: waiting, a slow precession like
   breathing; listening, the rings lean toward you and the tick ring follows
@@ -1062,17 +1063,25 @@ LIVE keeps them.
   maximise and close; in a narrow window the rest go under **More**. Bottom
   left: the microphone's level, **Mute**, "Hey Jarvis" (below) and, while a
   meeting records, REC with **Stop**. Bottom centre: what Jarvis says, as a
-  caption, over a slim ask line (type, or hold the talk key and talk; Ctrl+K
-  goes to it). A button shows only while pressing it works, and each one does
-  exactly what the same control does elsewhere in Jarvis.
+  caption, over a slim ask line. The line names your talk key ("Type, or tap
+  Ctrl+Alt+T and talk", with the key `[talk] key` sets), or says "Type to ask"
+  while talking is off; the CTRL K cue at its right is the key that puts you in
+  it. A button shows only while pressing it works, and each one does exactly
+  what the same control does elsewhere in Jarvis.
+- **An offer or a problem** (Plan my day, a briefing that could not load ...)
+  shows as one amber tile at the top left of the frames' area, with its own
+  buttons (Not now, Plan my day, or the problem's action). Frames are placed
+  around it, never under it, and it steps aside while a frame is open big.
 - **"Hey Jarvis" and "can't hear you".** At the bottom left, a small dot, then
   HEY JARVIS and its state: **Listening** (cyan, the dot breathes),
+  **Hearing you** (while he listens to what you say after "Hey Jarvis"),
   **Paused** (grey) or **Can't hear you** (amber). Jarvis can't hear you when
   "Hey Jarvis"'s microphone gives only silence (or is a virtual microphone),
   or when your last talk got nothing at all from it. A note then says "Jarvis
   can't hear you. The microphone is <its name>. Pick yours in Settings >
-  Meetings." with **Pick a microphone**, which opens Settings at Meetings.
-  Jarvis never picks a microphone for you and never changes Windows' default.
+  Talk." with **Pick a microphone**, which opens Settings at Talk with its
+  **Microphone** row in view. Jarvis never picks a microphone for you and never
+  changes Windows' default.
 - **The other screens** (Briefing, Approvals, Follow-ups, Meetings, Agents,
   Live, Memory, Settings, History) open over the canvas in its frame style,
   with **Back** at their top left; **Esc** goes back too, and Ctrl+1 to Ctrl+9
@@ -3402,10 +3411,14 @@ as typed words do, and "stop" stops it.
   many characters). The model stays loaded for 10 minutes after a talk
   (`[talk] keep_warm_minutes`), so the next one starts at once; the first after
   a while takes a few seconds while it loads.
-- **The microphone** is the one picked in Settings > Meetings, else the Windows
-  default. On some PCs the Windows default is a virtual microphone (one an
-  audio app added) that gives only silence: pick your real one in Settings >
-  Meetings. When a talk gets nothing at all from the microphone, the canvas
+- **The microphone** is the one picked on Settings > Talk's **Microphone**
+  row, else the Windows default. It is one setting with Settings > Meetings'
+  "Microphone (You)" (when meetings are on): either row changes it, and it is
+  the microphone for talking, "Hey Jarvis" and meetings. On some PCs the Windows
+  default is a virtual microphone (one an audio app added) that gives only
+  silence: pick your real one there. A microphone "Hey Jarvis" heard nothing
+  from is marked "(silent)" in the list. When a talk gets nothing at all from
+  the microphone, the canvas
   says "Jarvis can't hear you" with **Pick a microphone** (see
   [The look](#the-look-the-canvas)). When you tap, Jarvis stops talking and the briefing pauses (playing
   or about to play on), so neither is heard; neither resumes by itself.
@@ -3437,9 +3450,9 @@ your click). "Hey Jarvis" itself is taken off the front.
   click Download (about 3.7 MB from GitHub; see the licence below). It needs
   talking set up first ([Talk to Jarvis](#talk-to-jarvis-the-talk-key)): it
   uses the same add-ons, the same speech model and the same microphone (the
-  one picked in Settings > Meetings, else the Windows default, which on some
+  one picked in Settings > Talk, else the Windows default, which on some
   PCs is a virtual microphone that gives only silence: pick your real one in
-  Settings > Meetings). Nothing new to
+  Settings > Talk). Nothing new to
   install: its runtime, onnxruntime, comes with faster-whisper.
 - **While Jarvis runs.** It listens while his window is open, minimized or on
   your desktop, and stops when you close him, so minimize him rather than
@@ -6090,11 +6103,12 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
   battery saver is on or a full-screen app runs on that monitor, and comes back
   when that ends; the log's "Second screen: hidden (...)" line says which.
 - **"Jarvis can't hear you" on the canvas**: the microphone Jarvis listens to
-  gave him nothing at all. That is the one picked in Settings > Meetings, else
+  gave him nothing at all. That is the one picked in Settings > Talk, else
   the Windows default, which on some PCs is a virtual microphone (one an audio
   app added) that gives only silence. Press **Pick a microphone** (it opens
-  Settings at Meetings) and pick your real microphone; the note goes once you
-  pick another one, or after the next talk that hears you.
+  Settings at Talk, on its Microphone row) and pick your real microphone; the
+  note goes once you pick another one, after the next talk that hears you, or
+  once "Hey Jarvis" hears on that microphone.
 - **Nothing moves on the canvas** (frames appear at once, no outline draws in,
   the orb holds still): motion follows `[ui] motion` and Windows' "Show
   animations" setting (Settings > Accessibility > Visual effects > Animation
@@ -6166,11 +6180,11 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
   Jarvis listened to. A virtual one (Steam Streaming Microphone, Oculus Virtual
   Audio Device, a virtual cable) is silent unless its app runs, and Windows
   sometimes makes one the default: pick your real microphone in Settings >
-  Meetings > Microphone (talk uses the same choice), or make it the default
+  Talk > Microphone (meetings use the same choice), or make it the default
   input in Windows Settings > System > Sound.
 - **"Hey Jarvis" does nothing**: Settings > Talk's "Hey Jarvis" row says why
   (and the HEY JARVIS mark turns amber). "a virtual microphone": pick your real
-  one in Settings > Meetings > Microphone, as for the talk key; "paused": he is
+  one in Settings > Talk > Microphone, as for the talk key; "paused": he is
   speaking, a meeting records, or focus mode is on; "needs the wake model":
   click Download. It works only while Jarvis runs: minimize him rather than
   closing him. If he still misses you, try Sensitivity > Hears more.

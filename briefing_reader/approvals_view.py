@@ -200,7 +200,9 @@ class QueueTile(QAbstractButton):
 
 
 class _DecidedToggle(QAbstractButton):
-    """``Decided today`` and its count (Chakra 13 / 500, ink-4, 34 high): opens and closes the list."""
+    """``Decided today`` and its count (Chakra 13 / 500, ink-4, 34 high): opens and closes the list. Canvas part 5B
+    (the walk's 13): a chevron says open or closed, and while nothing was decided today it is no button at all (not
+    enabled, no pointer, no hover, not reached by Tab) - a click never shows nothing."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -215,6 +217,11 @@ class _DecidedToggle(QAbstractButton):
     def set_count(self, count: int) -> None:
         self._count = max(0, int(count))
         self.setAccessibleName(f"{DECIDED_TITLE}, {self._count}")
+        works = self._count > 0
+        if works != self.isEnabled():
+            self.setEnabled(works)
+            self.setFocusPolicy(Qt.FocusPolicy.TabFocus if works else Qt.FocusPolicy.NoFocus)
+            self.setCursor(Qt.CursorShape.PointingHandCursor if works else Qt.CursorShape.ArrowCursor)
         self.update()
 
     def count(self) -> int:
@@ -242,13 +249,24 @@ class _DecidedToggle(QAbstractButton):
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = QRectF(self.rect())
-            if self.underMouse():
+            hot = self.underMouse() and self.isEnabled()
+            if hot:
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(holo.alpha(holo.INK_1, 0.06))
                 painter.drawRoundedRect(rect, holo.RADIUS_BUTTON_SM, holo.RADIUS_BUTTON_SM)
-            painter.setPen(QColor(holo.INK_1 if self.underMouse() else holo.INK_4))
-            painter.setFont(hud.display_font(13, 500, 0.04))
+            ink = holo.INK_1 if hot else holo.INK_4
             inner = rect.adjusted(8, 0, -8, 0)
+            if self.isEnabled():                 # the chevron: right while closed, down while open
+                box = QRectF(inner.left(), rect.center().y() - 6, 12, 12)
+                painter.save()
+                painter.translate(box.center())
+                painter.rotate(90 if self.isChecked() else 0)
+                painter.translate(-box.center())
+                holo.paint_icon(painter, box, "chevron", QColor(ink), stroke=2.0)
+                painter.restore()
+                inner = inner.adjusted(18, 0, 0, 0)
+            painter.setPen(QColor(ink))
+            painter.setFont(hud.display_font(13, 500, 0.04))
             painter.drawText(inner, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), self.text())
             painter.setFont(hud.mono_font(11, 400, 0.12))
             painter.drawText(inner, int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter), str(self._count))

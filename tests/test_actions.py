@@ -2138,10 +2138,12 @@ class CardViewTests(unittest.TestCase):
     def test_calendar_and_legacy_cards(self) -> None:
         self.assertEqual(card_view(parse_action_line(CHESS), TODAY),
                          CardView("calendar", "Chess Club Weekly Meeting",
-                                  f"Fri Oct 9{DOT}3:00-4:00 PM{DOT}weekly until Dec 11", approve_text="Approve",
+                                  f"Fri Oct 9{DOT}3:00-4:00 PM{DOT}weekly until Dec 11{DOT}Personal calendar",
+                                  approve_text="Approve",
                                   decidable=True))
         self.assertEqual(card_view(parse_action_line(FILM), TODAY).detail,
-                         f"Tue Oct 6{DOT}5:00-6:00 PM{DOT}Central Library, Media Lab")
+                         f"Tue Oct 6{DOT}5:00-6:00 PM{DOT}Central Library, Media Lab{DOT}Personal calendar")
+        # (canvas part 5B, the walk's 21: a calendar card says which calendar it goes to)
         self.assertEqual(card_view(parse_action_line("Reply: Carol about the draft"), TODAY),
                          CardView("reply", "Carol about the draft", "Information only"))
         self.assertEqual(card_view(parse_action_line("Nothing needs your OK today."), TODAY),

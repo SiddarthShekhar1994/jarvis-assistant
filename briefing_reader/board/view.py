@@ -73,7 +73,8 @@ logger = logging.getLogger(__name__)
 
 START_DELAY_MS = 300          # after start() (the first show): the window paints before Chromium starts
 READY_TIMEOUT_MS = 10_000     # the page says it is ready within this, from its load, else the fallback
-MAX_RESTARTS = 2              # renderer stops the board loads the page again after, before it falls back
+MAX_RESTARTS = 2              # renderer stops the board loads the page again after, before it falls back ...
+RESTARTS_FORGIVEN_S = 600.0   # ... counted again from none once the page has been ready this long (canvas part 5B)
 QUEUE_CAP = 64                # messages kept while the page is not ready yet (the oldest go first)
 POSTS_PER_S = 40              # requests of the page a second, at most ...
 LAYOUTS_PER_S = 12            # ... layout ones among them (the page sends at most 10; a little slack for timing)
@@ -555,6 +556,7 @@ class BoardView(QWidget):
         self._served: Counter[str] = Counter()
         self._logged: set[str] = set()
         self._restarts = 0
+        self._ready_since: float | None = None      # when the page last came ready (the restarts' count resets after)
         self._load_pending = False
         self._began = 0.0
         self._was_ready = False
@@ -1017,6 +1019,11 @@ class BoardView(QWidget):
             return
         word = str(getattr(status, "name", "") or "").replace("TerminationStatus", "").casefold() or "stopped"
         self._counts["renderer_stopped"] += 1
+        since = self._ready_since
+        if self._phase == _READY and since is not None and time.monotonic() - since >= RESTARTS_FORGIVEN_S:
+            self._restarts = 0                       # the resilience review's L4: ready for 10 minutes - a stop now is
+            self._counts["restarts_forgiven"] += 1   # not one of a run of them
+        self._ready_since = None
         self._restarts += 1
         if self._restarts > MAX_RESTARTS:
             self._fall_back(CRASHED)
@@ -1084,6 +1091,7 @@ class BoardView(QWidget):
         again = self._was_ready
         self._phase = _READY
         self._was_ready = True
+        self._ready_since = time.monotonic()
         logger.info("Board: page ready in %d ms%s", took, " (after its renderer stopped)" if again else "")
         self._run(protocol.check_message({"type": "motion", "level": self._motion}).text)
         while self._queue:

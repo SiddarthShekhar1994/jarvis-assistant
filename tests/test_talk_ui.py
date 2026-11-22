@@ -307,14 +307,14 @@ class TalkControllerTests(unittest.TestCase):
         self.assertIn("Steam Streaming Microphone", said)
         self.assertIn("virtual microphone", said)
         self.assertIn("the Windows default", said)
-        self.assertIn("Settings > Meetings > Microphone", said)
+        self.assertIn("Settings > Talk > Microphone", said)                # (part 5B: Settings > Talk has it)
         self.assertNotIn("Steam", "\n".join(logs.output))             # a device's name is never logged
         self.assertIn("(a virtual microphone)", "\n".join(logs.output))
-        row = dict(controller.settings_rows())["Microphone"]
+        row = dict(controller.settings_rows())["Last talk used"]             # (part 5B: the picker is "Microphone")
         self.assertTrue(row.startswith("Microphone (Steam Streaming Microphone) (the Windows default) - a virtual"))
         self.assertEqual(talk_ui.muted_text("Microphone (FIFINE K678 Microphone)", False),
                          "I heard nothing at all from \u201cMicrophone (FIFINE K678 Microphone)\u201d (picked in "
-                         "Settings > Meetings): is it muted?")
+                         "Settings > Talk): is it muted?")
         self.assertEqual(talk_ui.muted_text(""), talk_ui.MUTED)
         for name, virtual in (("Headset Microphone (Oculus Virtual Audio Device)", True), ("CABLE Output (VB-Audio)", True),
                               ("Stereo Mix (Realtek Audio)", True), ("Microphone (FIFINE K678 Microphone)", False),

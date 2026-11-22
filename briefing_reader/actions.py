@@ -2264,6 +2264,11 @@ def copied_text(action: ProposedAction) -> str:
     return _COPIED_TEXTS.get(action.kind, "Copied the text")
 
 
+# Where an approved Calendar card's event goes: always the personal account's calendar (executor.account_of), said in
+# the words the day picture's chip uses ("PERSONAL CALENDAR").
+CALENDAR_TARGET = "Personal calendar"
+
+
 def card_view(action: ProposedAction, today: date) -> CardView:
     """Kind label, texts and buttons of ``action``'s card (README: "Other proposals")."""
     label = kind_label(action)
@@ -2279,6 +2284,7 @@ def card_view(action: ProposedAction, today: date) -> CardView:
         parts = [action.describe(today)]
         if action.where and "://" not in action.where:
             parts.append(action.where)
+        parts.append(CALENDAR_TARGET)            # canvas part 5B (the walk's 21): which calendar it goes to
         return CardView(label, title, _SEPARATOR.join(part for part in parts if part),
                         approve_text=approve_label(action), decidable=True)
     if not action.structured:

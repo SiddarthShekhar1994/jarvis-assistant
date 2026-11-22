@@ -195,6 +195,14 @@ def answer_nccalcsize(calc_valid: bool, address: int, work: tuple[int, int, int,
     return 0
 
 
+def proposed_rect(calc_valid: bool, address: int) -> tuple[int, int, int, int] | None:
+    """WM_NCCALCSIZE's proposed window rect (rgrc[0], or the RECT itself), physical px; None without one."""
+    if not address:
+        return None
+    rect = NCCALCSIZE_PARAMS.from_address(address).rgrc[0] if calc_valid else RECT.from_address(address)
+    return rect.left, rect.top, rect.right, rect.bottom
+
+
 def _signed16(value: int) -> int:
     value &= 0xFFFF
     return value - 0x10000 if value & 0x8000 else value
@@ -221,6 +229,8 @@ class Win32:
         user32.IsZoomed.argtypes = [wintypes.HWND]
         user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
         user32.MonitorFromWindow.restype = wintypes.HANDLE
+        user32.MonitorFromRect.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+        user32.MonitorFromRect.restype = wintypes.HANDLE
         user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
         user32.ScreenToClient.argtypes = [wintypes.HWND, ctypes.POINTER(POINT)]
         user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(POINT)]
@@ -257,6 +267,24 @@ class Win32:
             _fields_ = [("cbSize", ctypes.c_ulong), ("rcMonitor", RECT), ("rcWork", RECT), ("dwFlags", ctypes.c_ulong)]
 
         handle = self._user32.MonitorFromWindow(hwnd, 2)          # MONITOR_DEFAULTTONEAREST
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(MONITORINFO)
+        if not handle or not self._user32.GetMonitorInfoW(handle, ctypes.byref(info)):
+            return None
+        m, w = info.rcMonitor, info.rcWork
+        return (m.left, m.top, m.right, m.bottom), (w.left, w.top, w.right, w.bottom)
+
+    def monitor_at(self, rect: tuple[int, int, int, int]) -> tuple[tuple[int, int, int, int],
+                                                                    tuple[int, int, int, int]] | None:
+        """(the monitor's box, its work area) of the monitor a proposed window rect is on (MonitorFromRect, the nearest),
+        physical px; None if unknown. Canvas part 5B (the resilience review's M1): mid-move, MonitorFromWindow still
+        names the monitor the window is leaving."""
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_ulong), ("rcMonitor", RECT), ("rcWork", RECT), ("dwFlags", ctypes.c_ulong)]
+
+        box = RECT(*rect)
+        handle = self._user32.MonitorFromRect(ctypes.byref(box), 2)    # MONITOR_DEFAULTTONEAREST
         info = MONITORINFO()
         info.cbSize = ctypes.sizeof(MONITORINFO)
         if not handle or not self._user32.GetMonitorInfoW(handle, ctypes.byref(info)):
@@ -377,7 +405,11 @@ class NativeChrome:
         if kind == WM_NCCALCSIZE:
             work = None
             if api.is_zoomed(hwnd):
-                screens = api.monitor(hwnd)
+                # part 5B (the resilience review's M1): the monitor the proposed rect is on - mid-move (Win+Shift+Right
+                # while maximised) the window's own is still the one it leaves, and its work area cut it to 8 px
+                proposed = proposed_rect(bool(wparam), lparam)
+                at = getattr(api, "monitor_at", None)
+                screens = at(proposed) if callable(at) and proposed is not None else api.monitor(hwnd)
                 work = screens[1] if screens is not None else None
             return True, answer_nccalcsize(bool(wparam), lparam, work)
         if kind == WM_GETMINMAXINFO:

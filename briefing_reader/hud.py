@@ -2630,6 +2630,13 @@ class HeaderBar(QWidget):
     def clock_running(self) -> bool:
         return self._clock_timer.isActive()
 
+    def refresh_clock(self) -> Any:
+        """The clock read again now, whether the header shows or not (canvas part 5B: the canvas's corner reads it on
+        its own minute while this header is hidden); returns the time read."""
+        now = self._now()
+        self._clock.set_now(now)
+        return now
+
     def _tick(self) -> None:
         now = self._now()
         self._clock.set_now(now)
@@ -7665,9 +7672,16 @@ class _CommandField(QWidget):
         painter.drawText(QRectF(rect.left() + 14, rect.top(), 80, rect.height()),
                          int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), self.CANVAS_LABEL.upper())
         if self.canvas_hint_shown():
+            # canvas part 5B (the walk's 5): CTRL K is the focus key's own cue - a keycap of its own, visibly apart from
+            # the line's words (which name the talk key)
+            hint = self.CANVAS_HINT.upper()
+            width = math.ceil(QFontMetricsF(font).horizontalAdvance(hint)) + 12
+            cap = QRectF(rect.right() - 12 - width, rect.center().y() - 9, width, 18)
+            painter.setPen(QPen(rgba(self.CANVAS_LINE, 0.32), 1.0))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(cap.adjusted(0.5, 0.5, -0.5, -0.5), 2, 2)
             painter.setPen(QColor(self.CANVAS_DIM))
-            painter.drawText(QRectF(rect.right() - 94, rect.top(), 80, rect.height()),
-                             int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter), self.CANVAS_HINT.upper())
+            painter.drawText(cap, int(Qt.AlignmentFlag.AlignCenter), hint)
 
     def mousePressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         self.line_edit.setFocus(Qt.FocusReason.MouseFocusReason)   # a click beside the text
@@ -9226,7 +9240,8 @@ MEMORY_DELETED_TEXT = "Deleted."
 MEMORY_NOT_SENT_TEXT = "SENT WHEN RELEVANT"
 MEMORY_NOT_SENT_TIP = ("Past the 8 KB of notes your Claude gets with each request: sent only with a request that "
                        "shares its words, names or places")
-MEMORY_EMPTY_TEXT = 'No notes yet. Add one above, or type "remember that ..." in the bar.'
+# (canvas part 5B, the walk's 10: the box this screen has - the header's "Find or ask anything" - by its own words)
+MEMORY_EMPTY_TEXT = 'No notes yet. Add one above, or type "remember that ..." in Find or ask anything, at the top.'
 MEMORY_FILTER_TEXT = 'Showing notes with "{words}"'
 MEMORY_READ_ONLY_TEXT = ("memory.json can't be read, so Jarvis won't change it. Fix or delete the file, then "
                          "restart Jarvis.")

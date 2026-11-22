@@ -46,7 +46,8 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from PySide6.QtCore import QRectF, QSize, Qt, Signal
+import shiboken6
+from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFontMetricsF, QPainter, QPen
 from PySide6.QtWidgets import (QAbstractButton, QGridLayout, QHBoxLayout, QLabel, QScrollArea, QSizePolicy,
                                QVBoxLayout, QWidget)
@@ -527,6 +528,20 @@ class SettingsStage(QWidget):
         self.scroll.verticalScrollBar().setValue(0)
         if changed:
             self.groupChanged.emit(key)
+
+    def reveal(self, widget: QWidget, focus: QWidget | None = None) -> None:
+        """Canvas part 5B: ``widget`` (a row of the open group) scrolled into view, and the keyboard to ``focus`` (else
+        to it) - once the group is laid out, so it holds on a short window too (1120 x 700)."""
+        def show() -> None:
+            if not shiboken6.isValid(widget) or not widget.isVisibleTo(self):
+                return
+            self.scroll.widget().layout().activate()
+            self.scroll.ensureWidgetVisible(widget, 0, 48)
+            target = focus if focus is not None and shiboken6.isValid(focus) else widget
+            target.setFocus(Qt.FocusReason.TabFocusReason)    # (its focus ring shows: the keyboard is there)
+
+        show()
+        QTimer.singleShot(0, self, show)          # (and again after the layout the group's fill asked for)
 
     def current_group(self) -> str:
         return self._group

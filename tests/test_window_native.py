@@ -493,7 +493,7 @@ class WakeHearingTests(unittest.TestCase):
         controller.set_on(False)
         self.assertEqual(controller.hearing(), (wake_ui.HEAR_OFF, ""))
         self.assertEqual((wake_ui.HEAR_OFF, wake_ui.HEAR_LISTENING, wake_ui.HEAR_PAUSED, wake_ui.HEAR_CANT_HEAR,
-                          wake_ui.HEAR_OTHER), protocol.HEAR_STATES)
+                          wake_ui.HEAR_OTHER, wake_ui.HEAR_HEARING), protocol.HEAR_STATES)   # (part 5B: + hearing)
 
 
 class TalkUnheardTests(unittest.TestCase):
@@ -548,8 +548,9 @@ class FakeTalkUnheard:
 
 
 class CanvasHearingTests(test_canvas.CanvasApp):
-    def meetings_group(self) -> None:
-        self.reading.settings_page.add_group("meetings", "Meetings", note="", how="", rows=lambda: [])
+    def talk_group(self) -> None:
+        # canvas part 5B: the microphone is picked in Settings > Talk (there whenever talking or "Hey Jarvis" is)
+        self.reading.settings_page.add_group("talk", "Talk", note="", how="", rows=lambda: [])
 
     def test_the_badges_state_and_the_note_reach_the_page(self) -> None:
         self.make()
@@ -567,7 +568,7 @@ class CanvasHearingTests(test_canvas.CanvasApp):
         canvas.sync()
         sent = self.last("canvas")
         self.assertEqual((sent["hear"], sent["deaf"], sent["mic"]), ("cant_hear", True, STEAM))
-        self.assertNotIn("mic_settings", sent["buttons"])                 # no Settings > Meetings here: no button
+        self.assertNotIn("mic_settings", sent["buttons"])                 # no Settings > Talk here: no button
         self.c.wake = FakeWake("listening")
         self.c.talk = FakeTalkUnheard("Desk mic")                          # the last talk got nothing at all
         canvas.sync()
@@ -577,11 +578,11 @@ class CanvasHearingTests(test_canvas.CanvasApp):
         canvas.sync()
         self.assertEqual((self.last("canvas")["deaf"], self.last("canvas")["mic"]), (False, ""))
 
-    def test_the_notes_button_opens_settings_at_meetings_and_only_while_it_can(self) -> None:
+    def test_the_notes_button_opens_settings_at_talk_and_only_while_it_can(self) -> None:
         self.make()
         self.started()
         canvas = self.canvas()
-        self.meetings_group()
+        self.talk_group()
         self.assertFalse(canvas.on_go("mic_settings"))                     # nothing to say: no button
         self.c.wake = FakeWake("cant_hear", STEAM)
         canvas.sync()
@@ -589,12 +590,12 @@ class CanvasHearingTests(test_canvas.CanvasApp):
         self.assertTrue(canvas.on_go("mic_settings"))
         settle(4)
         self.assertEqual(self.reading.current_tab(), ui.SCREEN_SETTINGS)
-        self.assertEqual(self.reading.settings_page.current_group(), "meetings")
+        self.assertEqual(self.reading.settings_page.current_group(), "talk")
 
     def test_the_microphones_name_is_never_logged(self) -> None:
         self.make()
         self.started()
-        self.meetings_group()
+        self.talk_group()
         logger = logging.getLogger("briefing_reader")
         with self.assertLogs("briefing_reader", logging.DEBUG) as logs:
             logger.debug("(a line, so the capture is never empty)")

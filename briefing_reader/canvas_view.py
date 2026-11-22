@@ -6,7 +6,10 @@ with the orb and the corners' controls drawn in it (board/assets) - and three na
                               * a column at the bottom centre, bottom up: the ask line (hud.CommandBar in its canvas
                                 look, BAR_WIDTH wide), what Jarvis says (home.CaptionView in its canvas type) and the
                                 chip row (a task's chip and its Stop, a timer, the answer just given);
-                              * ONE tile at the left (an open offer's, else an error's), as beside the old ring.
+                              * ONE tile at the left (an open offer's, else an error's), at the top of the frames'
+                                area in a holder of its own: the page is told its box (``side_box``, canvas_ui's
+                                "side") and never puts a frame, the task card or a group's head under it; while a
+                                frame is open big the holder hides (``set_side_covered``): it never covers it.
                             Until the page is up it is plain black with the ask line: the window shows at once and the
                             canvas takes over when its page is ready, with nothing flashing (the view's own ground is
                             the same black).
@@ -24,7 +27,7 @@ from __future__ import annotations
 from typing import Any
 
 import shiboken6
-from PySide6.QtCore import QEvent, QRect, Qt, QTimer
+from PySide6.QtCore import QEvent, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
@@ -37,8 +40,10 @@ BAR_WIDTH = 524               # the ask line: the mock's 520 px and its halo
 COLUMN_WIDTH = 640            # the caption's width (the mock's ``.cap`` box)
 COLUMN_GAP = 10               # between the caption and the ask line
 COLUMN_HEIGHT = 196           # room for the chip row, two caption lines, a status line and the ask line
-SIDE_TOP = 132                # the one tile at the left: under the corner's rows
-SIDE_WIDTH = 290
+ORB_CORNER_INSET = 112        # the orb's centre in its corner, from the page's bottom right (board.js CORNER_INSET) ...
+ORB_CORNER_REACH = 104        # ... and its reach from there, glow included (the toast keeps clear of it)
+SIDE_TOP = 64                 # the one tile at the left: at the top of the frames' area (the page's BOARD_TOP) ...
+SIDE_WIDTH = 290              # ... this wide at least (its buttons' words always whole: ``fit_width``)
 
 _SPEAKING = "speaking"
 
@@ -51,6 +56,12 @@ def orb_form(state: str, frames: bool, lingering: bool = False) -> str:
     if state == _SPEAKING or lingering:
         return "badge"
     return "rings"
+
+
+def orb_corner(width: int, height: int) -> QRect:
+    """The orb's box in its corner on a page ``width`` x ``height`` (page px; canvas part 5B: what the toast avoids)."""
+    side = 2 * ORB_CORNER_REACH
+    return QRect(width - ORB_CORNER_INSET - ORB_CORNER_REACH, height - ORB_CORNER_INSET - ORB_CORNER_REACH, side, side)
 
 
 def orb_levels(mic: float | None, voice: float | None) -> tuple[int, int]:
@@ -77,10 +88,24 @@ class _Column(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
 
 
+class _SideHolder(QWidget):
+    """The tile's own holder: see-through; hidden while a frame is open big (the tile never covers it)."""
+
+    def __init__(self, page: "CanvasPage") -> None:
+        super().__init__(page)
+        self.setObjectName("canvasSide")
+        self._page = page
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+
+    def place_side_tile(self) -> None:          # (states_view.ErrorTile asks its parent after its help folds)
+        self._page.place_side_tile()
+
+
 class CanvasPage(QWidget):
     """See the module doc."""
 
     is_canvas = True
+    sideChanged = Signal()                       # the tile's box changed (shown, gone, resized): the page is told
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -89,6 +114,10 @@ class CanvasPage(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._board: QWidget | None = None
         self._side: QWidget | None = None
+        self._side_covered = False
+        self._side_sent: tuple[int, int] = (0, 0)
+        self.side_holder = _SideHolder(self)
+        self.side_holder.hide()
         self.column = _Column(self)
         layout = QVBoxLayout(self.column)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -150,28 +179,69 @@ class CanvasPage(QWidget):
         row.show()
 
     def set_side_tile(self, tile: QWidget | None) -> None:
-        """The one tile at the left (an offer's, an error's): placed under the corner's rows; None: none."""
+        """The one tile at the left (an offer's, an error's), in its holder at the top of the frames' area; None:
+        none."""
         if self._side is not None and self._side is not tile and shiboken6.isValid(self._side):
             self._side.removeEventFilter(self)
         self._side = tile
         if tile is not None:
-            if tile.parentWidget() is not self:
-                tile.setParent(self)             # (a new parent hides it; its owner shows it when it has something)
+            if tile.parentWidget() is not self.side_holder:
+                tile.setParent(self.side_holder)     # (a new parent hides it; its owner shows it when it has something)
             tile.installEventFilter(self)
         self.place_side_tile()
 
     def side_tile(self) -> QWidget | None:
         return self._side
 
+    def _side_width(self, tile: QWidget) -> int:
+        """SIDE_WIDTH, or what its buttons need to stay whole (``fit_width``), never wider than the page's room."""
+        fit = getattr(tile, "fit_width", None)
+        need = int(fit()) if callable(fit) else 0
+        return max(1, min(max(SIDE_WIDTH, need), max(1, self.width() - 2 * EDGE)))
+
     def place_side_tile(self) -> None:
         tile = self._side
-        if tile is None or not shiboken6.isValid(tile):
+        holder = self.side_holder
+        if tile is None or not shiboken6.isValid(tile) or tile.parentWidget() is not holder:
+            holder.hide()
+            self._say_side()
             return
-        width = max(200, min(SIDE_WIDTH, self.width() // 2 - COLUMN_WIDTH // 2 - 2 * EDGE))
+        width = self._side_width(tile)
         height = tile.heightForWidth(width) if tile.hasHeightForWidth() else tile.sizeHint().height()
         height = max(1, min(height, self.height() - SIDE_TOP - COLUMN_HEIGHT))
-        tile.setGeometry(EDGE, SIDE_TOP, width, height)
-        tile.raise_()
+        holder.setGeometry(EDGE, SIDE_TOP, width, height)
+        tile.setGeometry(0, 0, width, height)
+        holder.setVisible(not tile.isHidden() and not self._side_covered)
+        holder.raise_()
+        self._say_side()
+
+    def side_box(self) -> tuple[int, int]:
+        """(width, height) of the tile the page must keep its frames clear of, in px from the frames' area's top left;
+        (0, 0) while no tile shows (also while it is covered by open big: its room is kept)."""
+        tile = self._side
+        if tile is None or not shiboken6.isValid(tile) or tile.parentWidget() is not self.side_holder:
+            return 0, 0
+        if tile.isHidden():
+            return 0, 0
+        geometry = self.side_holder.geometry()
+        return max(0, geometry.width()), max(0, geometry.height())
+
+    def set_side_covered(self, covered: bool) -> None:
+        """A frame is open big (True): the tile's holder hides - it never covers the big frame - and comes back
+        after."""
+        covered = bool(covered)
+        if covered != self._side_covered:
+            self._side_covered = covered
+            self.place_side_tile()
+
+    def side_covered(self) -> bool:
+        return self._side_covered
+
+    def _say_side(self) -> None:
+        box = self.side_box()
+        if box != self._side_sent:
+            self._side_sent = box
+            self.sideChanged.emit()
 
     # ---- geometry --------------------------------------------------------------------------------------------------
 
@@ -192,7 +262,7 @@ class CanvasPage(QWidget):
     # ---- Qt --------------------------------------------------------------------------------------------------------
 
     def eventFilter(self, watched: Any, event: Any) -> bool:  # noqa: N802 - Qt override
-        if watched is self._side and event.type() in (QEvent.Type.Show, QEvent.Type.LayoutRequest):
+        if watched is self._side and event.type() in (QEvent.Type.Show, QEvent.Type.Hide, QEvent.Type.LayoutRequest):
             QTimer.singleShot(0, self._place_if_valid)
         return super().eventFilter(watched, event)
 

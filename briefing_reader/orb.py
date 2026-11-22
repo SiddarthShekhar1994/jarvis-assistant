@@ -2530,7 +2530,10 @@ class BadgeLayers:
 
     def get(self, key: tuple, width: float, height: float, dpr: float,
             draw: Callable[[QPainter], None]) -> QPixmap:
-        """The pixmap for ``key`` (``width`` x ``height`` px at ``dpr``; ``draw`` paints it about its centre)."""
+        """The pixmap for ``key`` (``width`` x ``height`` px at ``dpr``; ``draw`` paints it about its centre). The device
+        pixel ratio is part of the key (canvas part 5B, the resilience review's L1: a window moved to a screen of another
+        scale gets sharp pixmaps, never the other screen's)."""
+        key = (*key, round(float(dpr), 3))
         pixmap = self._cache.get(key)
         if pixmap is not None:
             self._cache.move_to_end(key)

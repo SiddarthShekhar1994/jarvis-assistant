@@ -88,7 +88,7 @@
   var WORDS = {
     changed: 'Changed', bringBack: 'Bring back', closed: 'Closed: ',
     keysFirst: 'Enter open big · P pin', keysSecond: 'Del close · Esc ask bar', dot: '·',
-    approvalsKey: 'Ctrl 3', pin: 'Pin', unpin: 'Unpin', openBig: 'Open big', close: 'Close',
+    approvalsKey: 'Ctrl 3', pin: 'Pin', unpin: 'Unpin', openBig: 'Open big', close: 'Close', frameWord: ' frame',
     waits: 'Waits', done: 'Done', pictureOnly: 'Picture only', unread: 'Unread',
     board: 'Board', frame: ' frame', frames: ' frames', waitsCount: ' waits', all: 'All', pinned: 'Pinned',
     clear: 'Clear', show: 'Show', newAbove: 'New answer above', moreBelow: ' more below', boardCleared: 'Board cleared',
@@ -1165,6 +1165,7 @@
     openBig.appendChild(glyph('expand'));
     var closer = button('f-icon', WORDS.close, function () { close(rec); });
     closer.appendChild(glyph('close'));
+    rec.closer = closer;                       // (part 5B: named for its frame's kind once it has one - fill)
     controls.append(rec.pinButton, openBig, closer);
     head.append(rec.glyph, rec.heading, rec.tag, rec.pinMark, rec.meta, rec.note, controls);
     art.appendChild(head);
@@ -1259,6 +1260,10 @@
       rec.satGlyph.replaceWith(satMark);
       rec.satGlyph = satMark;
       rec.kind = message.kind;
+      // part 5B: "Close Table frame" - the page's own word for the kind, never a word of the data (the window's
+      // own close is "Close Jarvis")
+      rec.closer.setAttribute('aria-label', WORDS.close + ' ' + (KIND_WORDS[message.kind] || KIND_WORDS.text)
+        + WORDS.frameWord);
     }
     rec.heading.textContent = message.title;
     rec.meta.textContent = message.meta;
@@ -1825,6 +1830,12 @@
       signOfReading();                         // (a key on one of the canvas's corner buttons is not the board's)
     }
     var key = event.key;
+    if (key === 'Escape' && canvas && canvas.menu && !canvas.menu.hidden) {
+      toggleMore(false);                       // part 5B: Esc closes More's list first
+      canvas.more.focus({preventScroll: true});
+      event.preventDefault();
+      return;
+    }
     if (big && (big.state === 'wait' || big.state === 'open')) {
       if (key === 'Escape') {
         shrink(true);                          // Esc leaves open big first (the board again; the next Esc: the ask bar)
@@ -2902,6 +2913,7 @@
         node.inert = !!on;
       }
     });
+    scheduleChrome();                          // part 5B: the top band is all the page's while big (and back after)
   }
 
   function bigHasFocus() {                     // the keyboard is the big frame's: in its layer, or on nothing while the
@@ -3185,16 +3197,18 @@
   var CANVAS_BUTTONS = ['history', 'board', 'briefing', 'approvals', 'followups', 'meetings', 'agents', 'live',
                         'memory', 'settings', 'desktop', 'minimize', 'maximize', 'close', 'mute', 'day', 'now',
                         'mic_settings'];
-  var CANVAS_CAPS = {clock: 40, word: 40, hold: 24, rec: 40, wake: 32, approvals: 999, level: 100, mic: 60};
+  var CANVAS_CAPS = {clock: 40, word: 40, hold: 24, rec: 40, wake: 32, approvals: 999, level: 100, mic: 60,
+                     side: 4000};
   // The window brief: "Hey Jarvis" on the canvas - listening, paused, can't hear you (its mark and the page's own word),
   // or "other" (the app's few words, as before) - and the note when Jarvis can't hear the owner.
-  var HEAR_STATES = ['', 'listening', 'paused', 'cant_hear', 'other'];
-  var HEAR_WORDS = {listening: 'Listening', paused: 'Paused', cant_hear: 'Can\u2019t hear you'};
+  var HEAR_STATES = ['', 'listening', 'paused', 'cant_hear', 'other', 'hearing'];
+  // (part 5B: "hearing" - a talk "Hey Jarvis" started is listening to the owner now)
+  var HEAR_WORDS = {listening: 'Listening', paused: 'Paused', cant_hear: 'Can\u2019t hear you', hearing: 'Hearing you'};
   var DEAF_WORDS = {
     head: 'Jarvis can\u2019t hear you.', lead: 'The microphone is ', end: '.',
-    pick: 'Pick yours in Settings\u00a0>\u00a0Meetings.',          // (no break inside "Settings > Meetings")
-    pickAny: 'Pick your microphone in Settings\u00a0>\u00a0Meetings.', button: 'Pick a microphone',
-    buttonAll: 'Pick a microphone: open Settings, Meetings'
+    pick: 'Pick yours in Settings\u00a0>\u00a0Talk.',              // (no break inside "Settings > Talk")
+    pickAny: 'Pick your microphone in Settings\u00a0>\u00a0Talk.', button: 'Pick a microphone',
+    buttonAll: 'Pick a microphone: open Settings, Talk'
   };
   // The window brief: the page's top band for Windows' hit-test (its controls' boxes; the maximise button's), sent when
   // it changes, at most every CHROME_MS (and checked again every CHROME_CHECK_MS: a font or a fold can move a button).
@@ -3204,7 +3218,10 @@
     briefing: 'Briefing', approvals: 'Approvals', followups: 'Follow-ups', meetings: 'Meetings', agents: 'Agents',
     live: 'Live', memory: 'Memory', settings: 'Settings', desktop: 'Desktop', mute: 'Mute', unmute: 'Unmute',
     undo: 'Undo', stop: 'Stop', level: 'Lvl ', db: ' dB', micIdle: 'Mic idle',
-    orb: 'Jarvis', minimize: 'Minimise the window', maximize: 'Maximise or restore the window', close: 'Close',
+    orb: 'Jarvis', minimize: 'Minimise the window', maximize: 'Maximise or restore the window',
+    // part 5B: the window's close quits Jarvis - said where it is pressed (minimise keeps "Hey Jarvis" listening)
+    close: 'Close Jarvis: \u201cHey Jarvis\u201d stops (minimise keeps him listening)',
+    closeTip: 'Closes Jarvis: \u201cHey Jarvis\u201d stops. Minimise keeps him listening.',
     clearAll: 'Clear view: take away every unpinned frame', boardBack: 'Show the board again',
     desktopSwitch: 'Jarvis on your desktop', day: 'Today and deadlines', briefingNew: 'Briefing, ready',
     approvalsWait: ' waiting', more: 'More', moreAll: 'More buttons', now: 'Now', heyJarvis: 'Hey Jarvis',
@@ -4181,8 +4198,12 @@
     buttons.minimize = iconButton('minimize', 'minimize', CANVAS_WORDS.minimize);
     buttons.maximize = iconButton('maximize', 'window', CANVAS_WORDS.maximize);
     buttons.close = iconButton('close', 'close', CANVAS_WORDS.close);
+    buttons.close.classList.add('c-close');
+    // part 5B: its tip says it too, drawn by the page (its own words, as text; no title attribute) under the button
+    var closeTip = make('span', 'c-tip', CANVAS_WORDS.closeTip);
+    closeTip.setAttribute('aria-hidden', 'true');      // (the button's own name says it to a screen reader)
     var windowGroup = make('div', 'c-group');     // the switch and the window's own three stay together on a row
-    windowGroup.append(rule2, buttons.desktop, buttons.minimize, buttons.maximize, buttons.close);
+    windowGroup.append(rule2, buttons.desktop, buttons.minimize, buttons.maximize, buttons.close, closeTip);
     tr.appendChild(windowGroup);
 
     // bottom left: the microphone's level and Mute, "Hey Jarvis", REC and its Stop
@@ -4233,7 +4254,7 @@
       levelWords: levelWords, wake: wake, rec: rec, more: moreButton, menu: null, twins: new Map(), folded: [],
       hear: hear, hearWord: hearWord, note: note, noteLead: noteLead, noteName: noteName, noteEnd: noteEnd,
       notePick: notePick,
-      stopRec: stopRec, form: '', orbState: '', muted: false, level: -1, hasMeter: false, shown: []
+      stopRec: stopRec, form: '', orbState: '', muted: false, level: -1, hasMeter: false, shown: [], side: [0, 0]
     };
     // More's list: over the frames (outside the canvas's layer, which the board is drawn over), each folded button's
     // twin - pressing it presses the button itself
@@ -4358,6 +4379,10 @@
       }
     });
     var mx = c.buttons.maximize;
+    if (bigLayer && bigLayer.parentNode) {     // part 5B: open big - its backdrop covers the band: all the page's
+      return {w: Math.round(window.innerWidth), bar: BOARD_TOP, holes: [[0, 0, Math.round(window.innerWidth), BOARD_TOP]],
+              max: []};
+    }
     return {w: Math.round(window.innerWidth), bar: BOARD_TOP, holes: holes.slice(0, CHROME_HOLES),
             max: shownNode(mx) && !mx.classList.contains('folded') ? chromeBox(mx) : []};
   }
@@ -4429,11 +4454,14 @@
     var hearState = message && message.hear !== undefined ? message.hear : '';
     var deaf = message && message.deaf !== undefined ? message.deaf : false;
     var mic = message && message.mic !== undefined ? message.mic : '';
-    if (HEAR_STATES.indexOf(hearState) < 0 || typeof deaf !== 'boolean' || !words(mic, CANVAS_CAPS.mic)) {
+    var side = message && message.side !== undefined ? message.side : [0, 0];
+    if (HEAR_STATES.indexOf(hearState) < 0 || typeof deaf !== 'boolean' || !words(mic, CANVAS_CAPS.mic)
+        || !list(side, 2) || side.length !== 2 || !whole(side[0], 0, CANVAS_CAPS.side)
+        || !whole(side[1], 0, CANVAS_CAPS.side)) {
       return drop('shape');
     }
     if (!onlyKeys(message, ['type', 'clock', 'word', 'tone', 'approvals', 'buttons', 'briefing_new', 'hold', 'rec',
-                            'wake', 'meter', 'hear', 'deaf', 'mic'])
+                            'wake', 'meter', 'hear', 'deaf', 'mic', 'side'])
         || !words(message.clock, CANVAS_CAPS.clock) || !words(message.word, CANVAS_CAPS.word)
         || CANVAS_TONES.indexOf(message.tone) < 0 || !whole(message.approvals, 0, CANVAS_CAPS.approvals)
         || !list(message.buttons, CANVAS_BUTTONS.length) || typeof message.briefing_new !== 'boolean'
@@ -4449,6 +4477,13 @@
     }
     var c = makeCanvas();
     c.shown = shown.slice();
+    // part 5B: the offer's or the error's tile at the top left of the frames' area (the app's own widget): no frame,
+    // no task card and no group's head goes under it; a change packs everything again
+    var sideNow = side[0] > 0 && side[1] > 0 ? [side[0], side[1]] : [0, 0];
+    if (sideNow[0] !== c.side[0] || sideNow[1] !== c.side[1]) {
+      c.side = sideNow;
+      schedulePack('full');
+    }
     Object.keys(c.buttons).forEach(function (word) {
       c.buttons[word].hidden = shown.indexOf(word) < 0;
     });
@@ -4476,11 +4511,12 @@
     c.stopRec.hidden = !message.rec;
     // "Hey Jarvis": its mark and the page's own word for listening, paused and can't hear you (amber); else its few
     // words as the app gives them (the window brief)
-    var badge = hearState === 'listening' || hearState === 'paused' || hearState === 'cant_hear';
+    var badge = hearState === 'listening' || hearState === 'paused' || hearState === 'cant_hear'
+      || hearState === 'hearing';
     c.wake.textContent = badge ? '' : message.wake;
     c.wake.hidden = badge || !message.wake;
     c.hear.hidden = !badge;
-    ['listening', 'paused', 'cant_hear'].forEach(function (name) {
+    ['listening', 'paused', 'cant_hear', 'hearing'].forEach(function (name) {
       c.hear.classList.toggle('s-' + name, name === hearState);
     });
     c.hearWord.textContent = badge ? HEAR_WORDS[hearState] : '';
@@ -4645,15 +4681,24 @@
     return found;
   }
 
-  function blockedCells(m) {                   // the orb's corner: no frame is ever placed over it
+  function sideBox() {                         // part 5B: the app's side tile, in the board's own box (null: none)
+    var side = canvas ? canvas.side : null;
+    return side && side[0] > 0 && side[1] > 0 ? {x: 0, y: 0, w: side[0], h: side[1]} : null;
+  }
+
+  function blockedCells(m) {                   // the orb's corner and the side tile: no frame is ever placed over them
     var occ = new Uint8Array(GRID_COLS * m.lines);
     var box = root.getBoundingClientRect(), places = orbPlaces();
     var reach = STAGE * CORNER_SCALE * clamp(places.fit, 0.8, 1) * 0.36 + 16;
     var left = window.innerWidth - CORNER_INSET - reach - box.left;
     var top = window.innerHeight - CORNER_INSET - reach - box.top;
+    var side = sideBox();
     for (var line = 0; line < m.lines; line += 1) {
       for (var col = 0; col < GRID_COLS; col += 1) {
         if ((col + 1) * m.unit - m.gap > left && (line + 1) * (m.subH + m.gap) - m.gap > top) {
+          occ[line * GRID_COLS + col] = 1;
+        }
+        if (side && col * m.unit < side.w + m.gap && line * (m.subH + m.gap) < side.h + m.gap) {
           occ[line * GRID_COLS + col] = 1;
         }
       }
@@ -4680,9 +4725,10 @@
     }
   }
 
-  function firstFit(occ, m, cw, ch, step) {    // the first free place in reading order, from the top left
-    for (var cy = 0; cy + ch <= m.lines; cy += step) {
-      for (var cx = 0; cx + cw <= GRID_COLS; cx += 1) {
+  function firstFit(occ, m, cw, ch, step, from) {   // the first free place in reading order, from the top left
+    var startY = from ? from.cy : 0;               // (part 5B: or from ``from`` on - never before it)
+    for (var cy = startY; cy + ch <= m.lines; cy += step) {
+      for (var cx = from && cy === from.cy ? from.cx : 0; cx + cw <= GRID_COLS; cx += 1) {
         var cell = {cx: cx, cy: cy, cw: cw, ch: ch};
         if (cellsFree(occ, cell)) {
           takeCells(occ, cell);
@@ -4799,7 +4845,8 @@
 
   function tryPack(list, m, folded, withCard, lenient) {
     var occ = blockedCells(m), cells = new Map(), heads = new Map(), headed = new Set(), ok = true, over = 0;
-    if (withCard) {
+    var after = null;                          // part 5B: the last frame's place - the next goes at or after it, so a
+    if (withCard) {                            // group's frames stay together and in their order
       var spot = firstFit(occ, m, m.span, m.sub, 1);
       if (!spot) {
         return null;
@@ -4813,11 +4860,12 @@
       }
       var head = !!rec.group && !headed.has(rec.group);
       var cols = frameCols(rec, m);
-      var cell = firstFit(occ, m, cols, frameLines(rec, m, head), 1);
+      var cell = firstFit(occ, m, cols, frameLines(rec, m, head), 1, after);
       if (!cell) {
         ok = false;
         return;
       }
+      after = {cy: cell.cy, cx: cell.cx};
       if (head) {                              // its group's head tile takes the top of its place
         headed.add(rec.group);
         heads.set(rec.group, rec.el);
@@ -5149,6 +5197,9 @@
     var reach = STAGE * CORNER_SCALE * clamp(places.fit, 0.8, 1) * 0.36 + 16;
     taken.push({x: window.innerWidth - CORNER_INSET - reach - area.left, y: window.innerHeight - CORNER_INSET - reach - area.top,
                 w: m.w, h: m.h});
+    if (sideBox()) {
+      taken.push(sideBox());                   // part 5B: never under the side tile
+    }
     function free(x, y) {
       return x >= 0 && y >= 0 && x + width <= m.w + 0.5 && y + height <= m.h + 0.5 && taken.every(function (t) {
         var g = m.gap - 0.5;                   // (half a pixel: the grid's own places are not whole numbers)

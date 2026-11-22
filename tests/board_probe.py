@@ -132,6 +132,11 @@ Cases:
                one button (a real press posts "mic_settings"), clear of the frames and the ask line; hostile names as
                text, nothing in an attribute; hostile messages refused by the page; the top band the page reports for
                Windows' hit-test (after a resize and with More's list open too) and the maximise button's hover
+    canvas_5b  canvas part 5B at 1389x868: the side tile's box ("side") kept clear by every frame and the task card;
+               two groups' frames in board order on the grid, never back into an earlier hole; a frame's close named
+               for its kind and the window's close for Jarvis; Esc closing More's list; open big's card opaque and the
+               top band all the page's while it is up; "Hearing you"; the note's "Settings > Talk"; a frame clicked
+               looking otherwise than one at rest
 
 Qt runs offscreen and Chromium's proxy is a dead address (snapshots.OFFLINE_FLAGS, as the board's engine always runs in a
 test): nothing can reach the network whatever the page does. No window is shown on the real screen. Chromium's
@@ -1039,6 +1044,8 @@ def main(case: str) -> dict[str, Any]:
         report.update(canvas_resting_case(make, wait_until, pump, main_world, settle_end))
     elif case == "canvas_hear":
         report.update(canvas_hear_case(make, wait_until, pump, main_world, settle_end))
+    elif case == "canvas_5b":
+        report.update(canvas_5b_case(make, wait_until, pump, main_world, settle_end))
     elif case == "reduced":
         # The page's own reduced motion, Chromium told reduced motion (REDUCED_MOTION): lively plays as off.
         host, board = make()
@@ -5013,6 +5020,176 @@ def canvas_hear_case(make: Any, wait_until: Any, pump: Any, main_world: Any, set
     report["requests"] = board.bridge_counts() if hasattr(board, "bridge_counts") else {}
     settle_end(report, board)
     return report
+
+
+CANVAS5B_ORDER = r"""JSON.stringify((function () {
+  var look = board.layout(), cells = {};
+  look.items.forEach(function (item) { cells[item.id] = item; });
+  return Array.prototype.map.call(document.querySelectorAll('#board .frame'), function (el) {
+    var id = (el.getAttribute('aria-labelledby') || '').replace('title-', '');
+    var item = cells[id] || {};
+    return {id: id, group: item.group || '', cell: item.cell || null, box: item.box || null, kind: item.kind || ''};
+  });
+})())"""
+CANVAS5B_NAMES = r"""JSON.stringify((function () {
+  var closes = Array.prototype.map.call(document.querySelectorAll('#board .frame .f-ctl button'), function (b) {
+    return b.getAttribute('aria-label');
+  }).filter(function (label) { return label && label.indexOf('Close') === 0; });
+  var win = Array.prototype.filter.call(document.querySelectorAll('#canvas .c-tr button'), function (b) {
+    return (b.getAttribute('aria-label') || '').indexOf('Close Jarvis') === 0;
+  })[0];
+  var tip = document.querySelector('#canvas .c-tip');
+  return {frames: closes, window: win ? {label: win.getAttribute('aria-label'), title: win.getAttribute('title'),
+                                         tip: tip ? tip.textContent : null,
+                                         tip_hidden: tip ? tip.getAttribute('aria-hidden') : null} : null};
+})())"""
+CANVAS5B_MENU = r"""JSON.stringify((function () {
+  var menu = document.getElementById('c-menu');
+  return {open: !!menu && !menu.hidden};
+})())"""
+CANVAS5B_ESC = r"""(function () {
+  var more = Array.prototype.filter.call(document.querySelectorAll('#canvas .c-tr button'), function (b) {
+    return b.textContent === 'More';
+  })[0];
+  (more || document.body).dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+  return 'esc';
+})()"""
+CANVAS5B_BIG = r"""JSON.stringify((function () {
+  var card = document.querySelector('#big .big-card');
+  return card ? {bg: getComputedStyle(card).backgroundColor} : null;
+})())"""
+CANVAS5B_HEAR = r"""JSON.stringify((function () {
+  var hear = document.querySelector('#canvas .c-hear'), note = document.querySelector('#canvas .c-note-text');
+  return {hear: hear && !hear.hidden ? {text: hear.textContent, cls: hear.className} : null,
+          note: note && !note.closest('.c-note').hidden ? note.textContent : null};
+})())"""
+CANVAS5B_FOCUS = r"""JSON.stringify((function () {
+  var all = document.querySelectorAll('#board .frame:not(.waits)');
+  var one = all[0], other = all[1];
+  document.documentElement.classList.remove('keys');
+  one.focus({preventScroll: true});
+  var a = getComputedStyle(one), b = getComputedStyle(other);
+  return {focused: {bg: a.backgroundColor, outline: a.outlineStyle, width: a.outlineWidth},
+          rest: {bg: b.backgroundColor, outline: b.outlineStyle, width: b.outlineWidth}};
+})())"""
+
+
+def canvas_5b_case(make: Any, wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> dict[str, Any]:
+    """Canvas part 5B in the real page at the owner's 1389x868 (see the module doc's "canvas_5b")."""
+    from PySide6.QtCore import Qt
+
+    report: dict[str, Any] = {}
+    host, board = _canvas2_start(make, wait_until, pump, CANVAS3_SIZE)
+    report["ready"] = board.is_ready()
+    board.set_motion("off")
+    reports: list[Any] = []
+    board.chromeReported.connect(reports.append)
+    base = {"type": "canvas", "clock": "Tue 17 Nov · 9:41 AM", "word": "Standby", "tone": "holo", "approvals": 0,
+            "buttons": CANVAS_BUTTONS, "briefing_new": False, "hold": "", "rec": "", "wake": "", "meter": True}
+    # two groups, as an answer and the resting group under it: their frames in board order on the grid - the
+    # answer's third frame a wide table (twice the columns), which leaves a hole at the top right a later frame fits
+    from briefing_reader.board import ask_frames
+
+    wide = ask_frames.check_frame({
+        "kind": "table", "title": "Budget by line", "unit": "USD", "changed": 1, "change": "+500 Software",
+        "source": "Dana's mail", "columns": ["Line", "Friday", "Today", "Change"],
+        "rows": [["Travel", 1200, 1200, 0], ["Software", 2900, 3400, 500]]})
+    made = canvas2_frames(7)
+    wide_frame = dict(ask_frames.build(wide, frame_id="w1").messages[0], type="frame", id="w1")
+    frames = [made[0], made[1], wide_frame, made[4], made[2]]
+    _canvas2_put(board, frames[:3], group="g1")
+    board.apply({"type": "group", "id": "g2", "time": "9:42 AM", "topic": "Now", "frames": [], "older": False,
+                 "below": True})
+    for frame in frames[3:]:
+        board.apply(dict(frame, group="g2"))
+    board.apply({"type": "group", "id": "g2", "time": "9:42 AM", "topic": "Now",
+                 "frames": [frame["id"] for frame in frames[3:]], "older": False, "below": True})
+    board.apply({"type": "bar", "frames": len(frames), "waits": 0, "pinned": 0, "compact": False})
+    _canvas2_settled(board, main_world, pump, CANVAS3_SIZE)
+    report["order"] = json.loads(main_world(board, CANVAS5B_ORDER))
+    report["names"] = json.loads(main_world(board, CANVAS5B_NAMES))
+    # the side tile: [300, 180] at the top left of the frames' area
+    report["sent_side"] = board.apply(dict(base, side=[300, 180]))
+    pump(0.3)
+    _canvas2_settled(board, main_world, pump, CANVAS3_SIZE)
+    report["side_layout"] = board_layout(board, main_world)
+    board.apply({"type": "task", "state": "working", "title": "Working on it", "words": "Reading your mail",
+                 "seconds": 3, "steps": 1, "sources": 0, "frames": 0, "group": "", "stop": True})
+    pump(0.4)
+    _canvas2_settled(board, main_world, pump, CANVAS3_SIZE)
+    report["side_card"] = board_layout(board, main_world)
+    board.apply({"type": "task", "state": "gone"})
+    board.apply(dict(base, side=[0, 0]))
+    pump(0.4)
+    _canvas2_settled(board, main_world, pump, CANVAS3_SIZE)
+    report["no_side_layout"] = board_layout(board, main_world)
+    # a frame clicked (focused by the pointer) against one at rest - the view has the keyboard, as in the app
+    host.activateWindow()
+    board.web_view().setFocus(Qt.FocusReason.MouseFocusReason)
+    pump(0.3)
+    report["page_focus"] = main_world(board, "String(document.hasFocus())")
+    report["focus"] = json.loads(main_world(board, CANVAS5B_FOCUS))
+    report["close_tip"] = json.loads(main_world(board, r"""JSON.stringify((function () {
+      var tip = document.querySelector('#canvas .c-tip'), close = document.querySelector('#canvas .c-close');
+      var before = getComputedStyle(tip).visibility;
+      document.documentElement.classList.add('keys');
+      close.focus({preventScroll: true});
+      var after = getComputedStyle(tip).visibility, r = tip.getBoundingClientRect();
+      close.blur();
+      document.documentElement.classList.remove('keys');
+      return {before: before, after: after, box: [r.left, r.top, r.right, r.bottom], win: window.innerWidth};
+    })())"""))
+    # More's list and Esc
+    board.apply(dict(base))
+    host.resize(1180, 800)
+    board.setGeometry(0, 0, 1180, 800)
+    pump(0.8)
+    report["more_pressed"] = main_world(board, CANVAS3_PRESS_MORE)
+    pump(0.3)
+    report["menu_before"] = json.loads(main_world(board, CANVAS5B_MENU))
+    main_world(board, CANVAS5B_ESC)
+    pump(0.3)
+    report["menu_after"] = json.loads(main_world(board, CANVAS5B_MENU))
+    host.resize(*CANVAS3_SIZE)
+    board.setGeometry(0, 0, *CANVAS3_SIZE)
+    pump(0.8)
+    # open big: the card opaque, the top band all the page's
+    count = len(reports)
+    board.apply({"type": "big", "state": "open", "id": frames[0]["id"], "x": 0, "y": 0, "w": CANVAS3_SIZE[0],
+                 "h": CANVAS3_SIZE[1]})
+    pump(1.4)
+    report["big"] = json.loads(main_world(board, CANVAS5B_BIG))
+    last = reports[-1] if len(reports) > count else None
+    report["big_chrome"] = None if last is None else {"holes": [list(h) for h in last.holes], "max": list(last.maximize),
+                                                       "bar": last.bar, "w": last.width}
+    board.apply({"type": "big", "state": "close", "id": ""})
+    pump(1.4)
+    last = reports[-1] if reports else None
+    report["after_big_chrome"] = None if last is None else {"holes": len(last.holes), "max": list(last.maximize)}
+    # HEY JARVIS "Hearing you"; the note's Settings > Talk
+    report["sent_hearing"] = board.apply(dict(base, hear="hearing", wake="Hey Jarvis heard you"))
+    pump(0.3)
+    report["hearing"] = json.loads(main_world(board, CANVAS5B_HEAR))
+    board.apply(dict(base, hear="cant_hear", deaf=True, mic="Microphone (Steam Streaming Microphone)",
+                     buttons=CANVAS_BUTTONS + ["mic_settings"]))
+    pump(0.3)
+    report["deaf"] = json.loads(main_world(board, CANVAS5B_HEAR))
+    tries = {"side_short": dict(base, side=[300]), "side_negative": dict(base, side=[-1, 10]),
+             "side_big": dict(base, side=[4001, 10]), "side_float": dict(base, side=[1.5, 10]),
+             "hear_bad": dict(base, hear="heard")}
+    report["page_refused"] = {name: main_world(board, f"String(board.apply({json.dumps(json.dumps(message))}))")
+                              for name, message in tries.items()}
+    counts = board.counts()
+    report["blocked"] = counts.get("blocked", {})
+    report["allowed"] = counts.get("allowed", {})
+    report["messages_refused"] = {key: value for key, value in counts.items() if key.startswith("refused:")}
+    report["console"] = {key: value for key, value in counts.items() if key.startswith("console:")}
+    settle_end(report, board)
+    return report
+
+
+def board_layout(board: Any, main_world: Any) -> dict[str, Any]:
+    return json.loads(main_world(board, "JSON.stringify(board.layout())"))
 
 
 def shown_typed(body: Any) -> list[str]:

@@ -206,6 +206,7 @@ class _Answer:
     say: str = ""
     plan: str = ""                  # a day plan's answer: the part it plans ("day", "morning" ...; its day pictures' key)
     topic: str = ""                 # part 6: Ask's topic, the group's header words ("" - its first frame's title)
+    cited: int = 0                  # part 5B: the sources its research frame lists (the group's count never says fewer)
 
     def __repr__(self) -> str:      # ids and counts only
         return f"_Answer(key={self.key}, pending={len(self.pending)}, done={self.done})"
@@ -749,6 +750,8 @@ class DeskController(QObject):
         answer.pending.clear()
         if not planned:
             entries += self._calendar_entries(answer, outcome, words)
+        report = getattr(outcome, "research", None)
+        answer.cited = len(tuple(getattr(report, "sources", ()) or ())) if report is not None else 0
         entries += self._research_entries(outcome)
         entries += self._frame_entries(outcome)
         if not planned:
@@ -902,9 +905,10 @@ class DeskController(QObject):
 
     def answer_sources(self, task_id: int = 0) -> int:
         """How many sources Jarvis read for an answer so far: its LIVE task's pictures (a mail thread, a page, a
-        web search, a day)."""
+        web search, a day) - and once it is done, never fewer than its research frame lists (canvas part 5B, the walk's
+        15: the group's head said "1 source" over a frame of 2)."""
         answer = self._answers.get(int(task_id or 0) or self._current)
-        return len(answer.seen) if answer is not None else 0
+        return max(len(answer.seen), answer.cited) if answer is not None else 0
 
     def on_instant_answer(self, reply: Any, words: str) -> None:
         """Part 6: Jarvis's own instant answer (instant.InstantReply). A sum whose working has a step between the sum as

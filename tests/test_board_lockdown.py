@@ -83,7 +83,7 @@ PROBE = Path(__file__).with_name("board_probe.py")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CASES = ("lockdown", "control", "media", "keys", "fallback", "shell", "kinds", "desk", "desk_x15", "ways", "lit", "big",
          "big_x15", "expiry", "reduced", "typed", "canvas", "canvas_layout", "canvas_ways", "canvas_fixes",
-         "canvas_resting", "canvas_hear")
+         "canvas_resting", "canvas_hear", "canvas_5b")
 # Round 5: what each probe's engine is told of reduced motion (tests/board_probe.py NO_REDUCED_MOTION, REDUCED_MOTION).
 NO_REDUCED_MOTION = "--force-prefers-no-reduced-motion"
 REDUCED_MOTION = "--force-prefers-reduced-motion"
@@ -91,6 +91,8 @@ REDUCED_MOTION = "--force-prefers-reduced-motion"
 # out here so a dropped or misspelled switch fails the test whatever devices this PC has plugged in.
 FAKE_MEDIA_DEVICES = "--use-fake-device-for-media-stream"
 REPORTS: dict[str, dict] = {}
+# Canvas part 5B (the walk's 4): the window's close says it closes Jarvis and that "Hey Jarvis" stops
+CLOSE_JARVIS = "Close Jarvis: \u201cHey Jarvis\u201d stops (minimise keeps him listening)"
 FAILURES: dict[str, str] = {}
 WINDOW_KEYS = ["Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+6", "Ctrl+7", "Ctrl+8", "Ctrl+9", "Ctrl+,",
                "Ctrl+K", "Ctrl+Space", "Ctrl+M", "Ctrl+B"]
@@ -1591,7 +1593,7 @@ class CanvasProbeTests(BoardProbeCase):
         self.assertEqual(report["pressed"], [
             "Undo", "Tue 17 Nov · 9:41 AM", "History", "Briefing", "Approvals", "Follow-ups", "Meetings", "Agents",
             "Live", "Memory", "Settings", "More", "Desktop", "Minimise the window", "Maximise or restore the window",
-            "Close", "Mute", "Stop"])
+            CLOSE_JARVIS, "Mute", "Stop"])                               # (part 5B: the window's close names Jarvis)
         self.assertEqual(report["went"], ["undo", "day", "history", "briefing", "approvals", "followups", "meetings",
                                           "agents", "live", "memory", "settings", "desktop", "minimize", "maximize",
                                           "close", "mute", "stop_rec"])
@@ -2042,7 +2044,7 @@ class CanvasFixesTests(BoardProbeCase):
             self.assertGreaterEqual(row["row"][0], row["tl"][0] + row["tl"][2] + 20, name)   # clear of the top left
             self.assertEqual(row["row"][0] + row["row"][2], row["win"][0] - 28, name)
             self.assertLessEqual(row["tl"][1] + row["tl"][3], 64, name)
-            for word in ("Approvals 12", "Minimise the window", "Maximise or restore the window", "Close"):
+            for word in ("Approvals 12", "Minimise the window", "Maximise or restore the window", CLOSE_JARVIS):
                 self.assertIn(word, row["shown"], name)                    # never folded
         tidy = report["row_tidy"]
         for word in ("Tidy", "Clear view", "Pinned 1", "More"):
@@ -2050,7 +2052,7 @@ class CanvasFixesTests(BoardProbeCase):
         self.assertEqual(sorted(tidy["shown"] + [item["text"] for item in tidy["items"]]),
                          sorted(["History", "Tidy", "Clear view", "Pinned 1", "Briefing", "Approvals 12", "Follow-ups",
                                  "Meetings", "Agents", "Live", "Memory", "Settings", "More", "Desktop",
-                                 "Minimise the window", "Maximise or restore the window", "Close"]))   # ... or under More
+                                 "Minimise the window", "Maximise or restore the window", CLOSE_JARVIS]))   # or More
         self.assertNotIn("More", report["row_1920x1080"]["shown"])         # room for all: no More
         self.assertEqual(report["row_1920x1080"]["layout"]["top"]["folded"], [])
 
@@ -2274,15 +2276,15 @@ class CanvasHearTests(BoardProbeCase):
         report = self.hear()
         note = report["cant_hear"]["note"]
         self.assertEqual(note["text"], "Jarvis can\u2019t hear you. The microphone is " + self.STEAM
-                         + ". Pick yours in Settings\u00a0>\u00a0Meetings.")
+                         + ". Pick yours in Settings\u00a0>\u00a0Talk.")          # (part 5B: Talk)
         self.assertEqual(note["head"], "rgb(255, 208, 138)")                   # its first words amber
         self.assertEqual((note["button"]["text"], note["button"]["cls"]), ("Pick a microphone", ["c-btn", "need"]))
         self.assertFalse(note["cut"])
         self.assertEqual(report["talk_deaf"]["note"]["text"],
-                         "Jarvis can\u2019t hear you. The microphone is Desk mic. Pick yours in Settings\u00a0>\u00a0Meetings.")
+                         "Jarvis can\u2019t hear you. The microphone is Desk mic. Pick yours in Settings\u00a0>\u00a0Talk.")
         self.assertIsNone(report["talk_deaf"]["hear"])                         # "Hey Jarvis" off: the note alone
         self.assertEqual(report["no_name"]["note"]["text"],
-                         "Jarvis can\u2019t hear you. Pick your microphone in Settings\u00a0>\u00a0Meetings.")
+                         "Jarvis can\u2019t hear you. Pick your microphone in Settings\u00a0>\u00a0Talk.")
         self.assertIsNone(report["no_button"]["note"]["button"])               # a button only while it can work
         self.assertEqual((report["pressed"], report["went"]), ("Pick a microphone", ["mic_settings"]))
 
@@ -2345,6 +2347,89 @@ class CanvasHearTests(BoardProbeCase):
 
     def test_nothing_asks_the_network_and_nothing_was_refused(self) -> None:
         report = self.hear()
+        self.assertEqual(report["blocked"], {})
+        self.assertEqual(list(report["allowed"]), ["jarvis-board"])
+        self.assertEqual(report["messages_refused"], {})
+
+
+class Canvas5BTests(BoardProbeCase):
+    """Canvas part 5B in the real engine at the owner's 1389x868 (tests/board_probe.py "canvas_5b")."""
+
+    def five(self) -> dict:
+        report = self.report("canvas_5b")
+        self.assertTrue(report["ready"])
+        return report
+
+    @staticmethod
+    def overlaps(a, b) -> bool:
+        return a[0] < b[0] + b[2] and b[0] < a[0] + a[2] and a[1] < b[1] + b[3] and b[1] < a[1] + a[3]
+
+    def test_no_frame_no_head_and_no_task_card_goes_under_the_side_tile(self) -> None:
+        report = self.five()
+        self.assertTrue(report["sent_side"])
+        side = [28, 64, 300, 180]                                          # the tile: EDGE, BOARD_TOP, its box
+        for name in ("side_layout", "side_card"):
+            look = report[name]
+            for item in look["items"]:
+                if item["shown"]:
+                    self.assertFalse(self.overlaps(item["box"], side), f"{name} {item['id']} {item['box']}")
+            for head in look["heads"]:
+                self.assertFalse(self.overlaps(head["box"], side), f"{name} head {head['box']}")
+        self.assertFalse(self.overlaps(report["side_card"]["card"]["box"], side))
+        firsts = [item["box"] for item in report["no_side_layout"]["items"] if item["shown"]]
+        self.assertTrue(any(self.overlaps(box, side) for box in firsts))     # (without it a frame is there)
+
+    def test_a_groups_frames_stay_together_in_their_order(self) -> None:
+        report = self.five()
+        cells = [(item["cell"][1], item["cell"][0]) for item in report["order"] if item["kind"] == "full"]
+        self.assertEqual(cells, sorted(cells))                             # never back into an earlier hole
+        groups = [item["group"] for item in report["order"]]
+        self.assertEqual(groups, sorted(groups))                           # (g1's, then g2's)
+
+    def test_a_frames_close_is_named_for_its_kind_and_the_windows_for_jarvis(self) -> None:
+        report = self.five()
+        self.assertEqual(report["names"]["frames"], ["Close Mail frame", "Close Calendar frame", "Close Table frame",
+                                                     "Close To-dos frame", "Close Chart frame"])
+        window = report["names"]["window"]
+        self.assertEqual(window["label"], "Close Jarvis: “Hey Jarvis” stops (minimise keeps him listening)")
+        self.assertIsNone(window["title"])                                 # no title attribute (the lockdown) ...
+        self.assertEqual(window["tip"], "Closes Jarvis: “Hey Jarvis” stops. Minimise keeps him listening.")
+        self.assertEqual(window["tip_hidden"], "true")                     # ... its own tip, drawn by the page
+        tip = report["close_tip"]
+        self.assertEqual((tip["before"], tip["after"]), ("hidden", "visible"))   # shown on focus (and hover)
+        self.assertLessEqual(tip["box"][2], tip["win"])                    # whole on screen
+
+    def test_esc_closes_mores_list(self) -> None:
+        report = self.five()
+        self.assertEqual(report["more_pressed"], "More")
+        self.assertTrue(report["menu_before"]["open"])
+        self.assertFalse(report["menu_after"]["open"])
+
+    def test_open_big_is_opaque_and_the_whole_top_band_is_the_pages(self) -> None:
+        report = self.five()
+        self.assertIn(report["big"]["bg"], ("rgb(3, 10, 13)", "rgb(14, 9, 3)"))   # no alpha: the frames never read through
+        self.assertEqual(report["big_chrome"], {"holes": [[0, 0, 1389, 64]], "max": [], "bar": 64, "w": 1389})
+        self.assertGreater(report["after_big_chrome"]["holes"], 1)         # back: the buttons again
+        self.assertTrue(report["after_big_chrome"]["max"])
+
+    def test_hearing_you_and_the_notes_settings_talk(self) -> None:
+        report = self.five()
+        self.assertTrue(report["sent_hearing"])
+        self.assertEqual(report["hearing"]["hear"]["text"], "Hey JarvisHearing you")
+        self.assertIn("s-hearing", report["hearing"]["hear"]["cls"])
+        self.assertIn("Pick yours in Settings > Talk.", report["deaf"]["note"])
+
+    def test_a_frame_clicked_looks_otherwise_than_one_at_rest(self) -> None:
+        report = self.five()
+        self.assertEqual(report["page_focus"], "true")
+        focused, rest = report["focus"]["focused"], report["focus"]["rest"]
+        self.assertNotEqual(focused["bg"], rest["bg"])
+        self.assertEqual(focused["outline"], "solid")
+        self.assertEqual(rest["outline"], "none")
+
+    def test_hostile_side_and_hear_are_refused_and_nothing_asks_the_network(self) -> None:
+        report = self.five()
+        self.assertEqual(set(report["page_refused"].values()), {"false"})
         self.assertEqual(report["blocked"], {})
         self.assertEqual(list(report["allowed"]), ["jarvis-board"])
         self.assertEqual(report["messages_refused"], {})

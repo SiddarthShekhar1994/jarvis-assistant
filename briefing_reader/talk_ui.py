@@ -8,12 +8,12 @@ with nothing going in. Before the microphone opens, the add-ons and the speech m
 is said on the bar with its fix, and nothing opens.
 
 A talk: Jarvis comes forward in the mode he is in (``bring_forward``), stops talking and pauses a playing briefing
-(``before_talk``); the microphone opens (talk.TalkSession: the one picked in Settings > Meetings, else the Windows
-default); the orb listens (``set_look``) with the microphone's level (``set_level``) and the bar says so
-(``show_status``). When it ends, the microphone closes at once; the audio (memory only) goes to the warm speech
-process (talk_speech.SpeechClient) on a worker thread, and the words go in through ``submit``
-(AskController.submit_spoken: the same routes and gates as typed words, so cards still need a click - voice never
-approves or undoes). Logs hold kinds, counts and times only: never what was said.
+(``before_talk``); the microphone opens (talk.TalkSession: the one picked in Settings > Talk - the same setting as
+Settings > Meetings' - else the Windows default); the orb listens (``set_look``) with the microphone's level
+(``set_level``) and the bar says so (``show_status``). When it ends, the microphone closes at once; the audio
+(memory only) goes to the warm speech process (talk_speech.SpeechClient) on a worker thread, and the words go in
+through ``submit`` (AskController.submit_spoken: the same routes and gates as typed words, so cards still need a
+click - voice never approves or undoes). Logs hold kinds, counts and times only: never what was said.
 
 "Hey Jarvis" (wake_ui, owner decisions 2026-11-12) starts the same talk through :meth:`TalkController.listen_from_wake`
 on the listener's audio instead of a microphone of its own: 5 s to start the request; a request said in the same
@@ -25,7 +25,9 @@ Settings > Talk (:class:`TalkSettingsPanel`, :meth:`TalkController.settings_rows
 it is downloaded (Download, only on the owner's click: meeting_speech.ModelDownloader into its own folder), the
 add-ons and the command that installs them (the owner runs it; Jarvis never runs pip). The key's row also says when
 the hotkey agent - another process - last found it held by another program (hotkey.key_taken: the agent's status
-file in the data folder, statuses only).
+file in the data folder, statuses only). Canvas part 5B: its Microphone row (``mic_row``: meetings_view.DeviceRow, the
+same saved pick as Settings > Meetings' "Microphone (You)" - the app's ``mic_picker`` saves it -, the microphones heard
+silent this session marked "(silent)"; never logged); nothing is picked for the owner.
 """
 
 from __future__ import annotations
@@ -43,6 +45,7 @@ from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QVBoxLayout, QW
 
 from . import hud, talk
 from .hotkey import describe_combo, key_taken
+from .meetings_view import MIC_NOTE, DeviceRow
 
 # Settings > Talk's key row when the hotkey agent found the talk key held by another program.
 KEY_TAKEN_TEXT = "{key} - another program has it; choose another [talk] key in config.toml"
@@ -72,13 +75,14 @@ def muted_text(name: str = "", follows_default: bool = False) -> str:
     says when it is a virtual one, and where another is picked."""
     if not name:
         return MUTED
-    where = "the Windows default" if follows_default else "picked in Settings > Meetings"
+    where = "the Windows default" if follows_default else "picked in Settings > Talk"
     if talk.virtual_microphone(name):
         return (f"I heard nothing: \u201c{name}\u201d ({where}) is a virtual microphone, silent unless its app runs. "
-                "Pick your real one in Settings > Meetings > Microphone.")
+                "Pick your real one in Settings > Talk > Microphone.")
     return (f"I heard nothing at all from \u201c{name}\u201d ({where}): is it muted?"
-            + (" Another can be picked in Settings > Meetings > Microphone." if follows_default else ""))
+            + (" Another can be picked in Settings > Talk > Microphone." if follows_default else ""))
 CANCELLED = "Cancelled."
+LISTENING_TEXT = "Listening: tap {key} to end, Esc to cancel."   # (whole on the canvas's one status line)
 WAKE_NOTHING = "I didn't hear a request."      # a talk "Hey Jarvis" started that heard nothing (a false wake, often)
 # How a talk "Hey Jarvis" started ended (wakeTalkEnded): what was heard went in / nothing was heard / Esc or Stop /
 # the microphone or the understanding failed.
@@ -128,6 +132,9 @@ class TalkSettingsPanel(QWidget):
         self.pip.setWordWrap(True)
         self.pip.setFont(hud.mono_font(11))
         self.pip.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        # Canvas part 5B: the microphone, first - the one setting Settings > Meetings' "Microphone (You)" also shows
+        self.mic_row = DeviceRow("Microphone", note=MIC_NOTE)
+        layout.addWidget(self.mic_row)
         for widget in (self.status, self.download, self.addons, self.pip):
             layout.addWidget(widget)
 
@@ -230,6 +237,11 @@ class TalkController(QObject):
         self._global_esc.connect(self.cancel, Qt.ConnectionType.QueuedConnection)
         self._chime = chime or (lambda: None)       # "Hey Jarvis": the soft sound as he starts listening (wake_ui)
         self.extra_rows: Callable[[], list[tuple[str, str]]] | None = None    # Settings > Talk's "Hey Jarvis" rows
+        # Canvas part 5B: Settings > Talk's Microphone row - the app saves a pick (``mic_picker``; else the saved pick
+        # is written here) and says which microphones were heard silent this session (``silent_mics``)
+        self.mic_picker: Callable[[str], Any] | None = None
+        self.silent_mics: Callable[[], Any] = lambda: ()
+        self._prefs_root = lambda: meetings.meetings_root(config)
         self._wake_talk = False                     # the talk under way (or being understood) "Hey Jarvis" started
         self._chime_timer = QTimer(self)
         self._chime_timer.setSingleShot(True)
@@ -278,6 +290,18 @@ class TalkController(QObject):
             return None
         name, picked = unheard
         return name if self._picked() == picked else None
+
+    def wake_listening(self) -> bool:
+        """Canvas part 5B: a talk "Hey Jarvis" started listens to the owner now (HEY JARVIS reads "Hearing you")."""
+        return self._state == LISTENING and self._wake_talk
+
+    def clear_unheard(self, name: str | None = None) -> bool:
+        """The last talk's "can't hear you" no longer holds (the resilience review's L2): "Hey Jarvis"'s listener hears
+        on that microphone now, or it is gone. ``name`` None: whatever it was. True when it was cleared."""
+        if self._unheard is None or (name is not None and self._unheard[0] != str(name)):
+            return False
+        self._unheard = None
+        return True
 
     def _picked(self) -> str:
         try:
@@ -355,8 +379,8 @@ class TalkController(QObject):
         self._began = self._clock()
         try:
             self._set_state(LISTENING)
-            self._show(f"Listening... tap {self._key} again when you're done, or Esc to cancel.", hud.TONE_WORKING,
-                       hud_text="Listening...")
+            # part 5B (the walk's 8): words short enough for the canvas's one status line, never cut mid-sentence
+            self._show(LISTENING_TEXT.format(key=self._key), hud.TONE_WORKING, hud_text="Listening...")
             self._watch_escape(True)
             self._esc_armed = bool(self._stopkeys.arm(self._global_esc.emit))
             self._timer.start()
@@ -552,7 +576,59 @@ class TalkController(QObject):
         self._panel = panel
         self._refresh_settings = refresh or (lambda: None)
         panel.downloadClicked.connect(self.download)
+        panel.mic_row.picked.connect(self.pick_microphone)
         self._show_panel()
+
+    # ---- canvas part 5B: Settings > Talk's Microphone row ----------------------------------------------------------
+
+    @property
+    def mic_row(self) -> Any:
+        return self._panel.mic_row if self._panel is not None else None
+
+    def refresh_mic_row(self) -> None:
+        """The row as it is now: the saved pick, the Windows default's name and the microphones connected (listed, never
+        opened), those heard silent this session marked. A "can't hear you" whose microphone is gone is cleared."""
+        row = self.mic_row
+        if row is None:
+            return
+        default, choices = "", []
+        backend = None
+        try:
+            backend, _missing = self._backend_loader()
+            if backend is not None:
+                choices = [str(getattr(device, "name", "") or "") for device in backend.inputs()]
+                default = str(getattr(backend.default_input(), "name", "") or "")
+        except Exception as exc:  # noqa: BLE001 - shown as none found
+            logger.info("Talk: the microphones could not be listed (%s)", type(exc).__name__)
+        finally:
+            self._close_backend(backend)
+        if choices and self._unheard is not None and self._unheard[0] and self._unheard[0] not in choices:
+            self.clear_unheard()                      # its microphone is gone: nothing to say about it now
+        row.set_state(self._picked(), default, [name for name in choices if name], silent=self.silent_names())
+
+    def silent_names(self) -> list[str]:
+        """The microphones heard silent this session: the last talk's (nothing at all from it) and the listener's."""
+        names: list[str] = []
+        if self._unheard is not None and self._unheard[0]:
+            names.append(self._unheard[0])
+        try:
+            names += [str(name) for name in self.silent_mics() if name]
+        except Exception:  # noqa: BLE001 - unknown: none more
+            pass
+        return names
+
+    def pick_microphone(self, name: str) -> None:
+        """The owner picked a microphone in the row ("" follows the Windows default): the app saves it - the same
+        setting Settings > Meetings shows -, then the row shows it."""
+        name = str(name or "")
+        if self.mic_picker is not None:
+            self.mic_picker(name)
+        else:
+            from . import meetings
+
+            meetings.DevicePrefs(self._prefs_root()).set(microphone=name)
+        logger.info("Talk: a microphone was picked in Settings > Talk")
+        self.refresh_mic_row()
 
     def settings_rows(self) -> list[tuple[str, str]]:
         missing = [name for name in (self._audio_missing(), self._speech_missing()) if name]
@@ -572,7 +648,7 @@ class TalkController(QObject):
                 ("Speech model", model),
                 ("Runs on", runs_on),
                 ("Add-ons", "installed" if not missing else "missing: " + ", ".join(missing)),
-                ("Microphone", self._microphone_row()),
+                ("Last talk used", self._microphone_row()),
                 ("Quiet that ends a talk", f"{self._cfg.quiet_ms} ms"),
                 ("Model kept loaded", f"{self._cfg.keep_warm_minutes} min after a talk")]
         if self.extra_rows is not None:
@@ -585,10 +661,10 @@ class TalkController(QObject):
     def _microphone_row(self) -> str:
         """Settings > Talk's microphone row: the one the last talk used, flagged when virtual; before a talk, the rule."""
         if self._last_mic is None:
-            return "the one picked in Settings > Meetings, else the Windows default"
+            return "no talk yet: the microphone picked below, else the Windows default"
         name, follows = self._last_mic
-        where = "the Windows default" if follows else "picked in Settings > Meetings"
-        flag = " - a virtual microphone, silent unless its app runs: pick your real one in Settings > Meetings" \
+        where = "the Windows default" if follows else "picked below"
+        flag = " - a virtual microphone, silent unless its app runs: pick your real one below" \
             if talk.virtual_microphone(name) else ""
         return f"{name} ({where}){flag}"
 

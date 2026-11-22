@@ -506,7 +506,7 @@ class ControllerTests(unittest.TestCase):
                 self.assertIn(words, text)
                 self.assertEqual(look, wake_ui.LOOK_PROBLEM)
                 if state == "virtual_mic":
-                    self.assertIn("Settings > Meetings > Microphone", text)
+                    self.assertIn("Settings > Talk > Microphone", text)       # (part 5B: Settings > Talk has it)
                     self.assertIn(STEAM, text)
 
     def test_a_newly_picked_microphone_reaches_the_listener(self) -> None:

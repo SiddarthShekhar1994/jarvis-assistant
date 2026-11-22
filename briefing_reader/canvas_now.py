@@ -22,6 +22,11 @@ like any other group; while it is not on the canvas (cleared, closed, made room 
 while answers are on the board goes under them (feed ``below``): it never takes an answer's best places; an answer
 that comes later is the newest, and the Now group's frames fold as any older group's do.
 
+Canvas part 5B: an answer that shows today's calendar (same kind, same day) takes the group's day frame away while
+it is on the canvas (the walk's 6: Today twice) - it comes back once that answer's frame is gone; the group goes up
+as soon as something is there when it was never up this session (the resilience review's M2); its timer rests while
+the window is not up (``rest``; the review's L3).
+
 Logs: counts and kinds only.
 """
 
@@ -65,6 +70,11 @@ def quiet_day(built: Any, frame_id: str) -> Any:
     return board_frames.Built((board_frames._frame(  # noqa: SLF001 - the builders' own frame shape
         frame_id, "calendar", str(frame.get("title", DAY_TITLE)), meta=date_words, status="empty",
         status_text=NOTHING_BOOKED),))
+
+
+def _day_words(frame: dict[str, Any]) -> str:
+    """A calendar frame's day: its meta's first part ("MON NOV 23"), as the builders word it; "" none."""
+    return str(frame.get("meta", "")).split(board_frames.DOT)[0].strip().casefold()
 
 
 def _alive(item: Any) -> bool:
@@ -154,7 +164,32 @@ class NowController(QObject):
             built = board_frames.from_picture(picture, frame_id=frame_id, now=now, hour24=hour24, title=DAY_TITLE)
             return quiet_day(built, frame_id)
 
+        if self._answer_shows_day(build("now-day")):
+            return None                                 # part 5B: an answer shows today already - never twice
         return build
+
+    def _answer_shows_day(self, built: Any) -> bool:
+        """An answer's frame on the canvas is the same kind and the same day as the group's day frame (its date words,
+        the meta's first part): the group's copy goes while that one shows."""
+        frame = built.frame if built is not None else None
+        if not frame or frame.get("kind") != "calendar":
+            return False
+        day = _day_words(frame)
+        if not day:
+            return False
+        feed = self._feed()
+        mine = self._group()
+        for frame_id in feed.frame_ids():
+            group = feed.group_of(frame_id)
+            if not group or group == mine or feed.is_parked(group):
+                continue
+            flags = feed.flags(frame_id)
+            if flags.get("closed") or flags.get("cleared"):
+                continue
+            other = feed.frame_message(frame_id) or {}
+            if other.get("kind") == "calendar" and _day_words(other) == day:
+                return True
+        return False
 
     def _todos(self) -> Callable[[str], Any] | None:
         from . import actions
@@ -238,9 +273,25 @@ class NowController(QObject):
         logger.info("Now: up with %d frame(s)", len(self._ids))
         return bool(self._ids)
 
+    def rest(self, resting: bool) -> None:
+        """The window is not up (True): the timer rests; up again: it runs, with a refresh at once."""
+        if not self._started:
+            return
+        if resting:
+            self._timer.stop()
+        elif not self._timer.isActive():
+            self._timer.start()
+            self.refresh()
+
     def refresh(self) -> None:
-        """While the group is on the canvas: each source as it is now (see the module doc)."""
-        if not self._started or self.canvas.fallen() or not self.on_canvas() or self._feed().clearing():
+        """While the group is on the canvas: each source as it is now (see the module doc). Never up yet this session
+        (nothing was there when the page came up): it goes up as soon as something is (the resilience review's M2)."""
+        if not self._started or self.canvas.fallen() or self._feed().clearing():
+            return
+        if not self._answer:
+            self.show()
+            return
+        if not self.on_canvas():
             return
         feed = self._feed()
         on_board = set(feed.frame_ids())

@@ -958,6 +958,9 @@ body.dim #canvas { opacity: .2; }
   animation: c-lamp calc(2400ms * var(--k)) ease-in-out infinite;
 }
 .c-hear.s-listening .c-hear-word { color: var(--c-hi); }
+/* part 5B: "Hearing you" - a talk "Hey Jarvis" started listens to the owner now: the lamp lit and steady */
+.c-hear.s-hearing .c-hear-dot { background: var(--c-hi); opacity: 1; box-shadow: 0 0 7px 2px rgba(var(--g), .85); }
+.c-hear.s-hearing .c-hear-word { color: var(--c-white); }
 .c-hear.s-cant_hear .c-hear-dot { background: var(--c-amber); opacity: 1; box-shadow: 0 0 6px 1px rgba(245, 177, 74, .7); }
 .c-hear.s-cant_hear .c-hear-word { color: var(--c-amber); }
 @keyframes c-lamp { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
@@ -997,7 +1000,18 @@ body.dim #canvas { opacity: .2; }
 .c-menu[hidden] { display: none; }
 .c-menu .c-btn { text-align: left; }
 .c-rule { width: 1px; height: 18px; margin: 0 5px; background: rgba(var(--g-hi), .3); }
-.c-group { display: flex; align-items: center; gap: 7px; }
+.c-group { display: flex; align-items: center; gap: 7px; position: relative; }
+/* part 5B: the window's close says what it does where it is pressed - a small tip under it on hover and focus */
+.c-tip {
+  position: absolute; right: 0; top: calc(100% + 8px); z-index: 30; visibility: hidden; opacity: 0;
+  padding: 6px 9px; max-width: 260px; white-space: normal; text-align: left;
+  font: 400 12px/16px var(--font-body); letter-spacing: 0; color: var(--c-ink);
+  background: rgba(2, 8, 11, .96); border: 1px solid rgba(var(--g-hi), .45); border-radius: 1px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .55); pointer-events: none;
+  transition: opacity calc(120ms * var(--k)) var(--ease-out);
+}
+.c-btn.c-close:hover ~ .c-tip, .c-btn.c-close:focus-visible ~ .c-tip,
+:root.keys .c-btn.c-close:focus ~ .c-tip { visibility: visible; opacity: 1; transition-delay: calc(350ms * var(--k)); }
 .c-clock { color: var(--c-dim); }
 button.c-clock { padding: 3px 0; border-bottom: 1px solid transparent; }
 button.c-clock:hover { color: var(--c-white); border-bottom-color: rgba(var(--g-hi), .5); }
@@ -1014,6 +1028,9 @@ button.c-clock:focus-visible, :root.keys button.c-clock:focus { outline: 2px sol
 
 /* ---- open big on the canvas: the card over the whole canvas but the corners' rows and the ask line ---- */
 :root.canvas .frame.big-card { inset: 58px var(--edge) 150px var(--edge); }
+/* part 5B: open big's ground hides the frames behind it: the card is opaque (the rest stays dimmed to 20 %) */
+:root.canvas .frame.big-card { background-color: #030A0D; }
+:root.canvas .frame.big-card.waits { background-color: #0E0903; }
 
 /* ==== The canvas, part 2 (PLAN-canvas part 2): frames across the screen. <body> is the whole area between the top
    controls and the caption's strip; board.js places every frame in it on a 12-column grid (packCanvas: left, top,
@@ -1091,6 +1108,10 @@ button.c-clock:focus-visible, :root.keys button.c-clock:focus { outline: 2px sol
 :root.canvas #board .frame:hover::after, :root.canvas #board .frame:focus-within::after { opacity: .7; }
 :root.canvas .frame:focus-visible, :root.canvas .frame:has(button:focus-visible),
 :root.canvas.keys .frame:focus, :root.canvas.keys .frame:has(button:focus) { outline: 2px solid var(--focus); outline-offset: 4px; }
+/* part 5B: a frame clicked (focused by the pointer) looks otherwise than one only hovered - its ground a step lighter
+   and a thin ring outside its edge, where it was clicked */
+:root.canvas #board .frame:not(.sat):focus { background-color: var(--tile-focus); outline: 1px solid rgba(var(--g-hi), .6); outline-offset: 3px; }
+:root.canvas #board .frame.waits:not(.sat):focus { background-color: var(--tile-amber-lit); outline-color: rgba(var(--ga), .7); }
 
 :root.canvas .f-head {
   flex: none; align-items: baseline; column-gap: 12px; row-gap: 3px; min-height: 22px; margin-bottom: 9px;

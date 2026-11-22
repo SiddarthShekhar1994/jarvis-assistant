@@ -92,7 +92,11 @@ In (app -> page): check_message(message, known, groups=()) -> Checked
                  (HEAR_STATES: "Hey Jarvis" listening, paused, can't hear you, "other" - its few words in "wake" -
                  or "" off), "deaf" (Jarvis can't hear the owner: the note "Jarvis can't hear you" with what to do)
                  and "mic" (the microphone's name for that note, at most MIC_CAP; shown on screen, never logged); the
-                 button "mic_settings" (the note's one button: Settings > Meetings, where a microphone is picked)
+                 button "mic_settings" (the note's one button: Settings > Talk, where a microphone is picked).
+                 Canvas part 5B: + "side" ([width, height] in px, each 0 to SIDE_MAX: the offer's or the error's tile
+                 at the top left of the frames' area - the page keeps every frame, the task card and every group's
+                 head clear of it; [0, 0] none) and the HEY JARVIS state "hearing" (a talk "Hey Jarvis" started is
+                 listening: the page's own words "Hearing you")
         chrome   {"hover"}: the window brief - the pointer is on the maximise button, which Windows hit-tests as its
                  own (HTMAXBUTTON: Snap Layouts), so the page lights it as if it were hovered
       The canvas, part 2 (frames across the screen):
@@ -232,7 +236,8 @@ CANVAS_TONES = ("holo", "amber", "steel")
 CANVAS_BUTTONS = ("history", "board", "briefing", "approvals", "followups", "meetings", "agents", "live", "memory",
                   "settings", "desktop", "minimize", "maximize", "close", "mute", "day", "now", "mic_settings")
 # The window brief: "Hey Jarvis" on the canvas (wake_ui.WakeController.hearing) and the can't-hear note's microphone.
-HEAR_STATES = ("", "listening", "paused", "cant_hear", "other")
+HEAR_STATES = ("", "listening", "paused", "cant_hear", "other", "hearing")
+SIDE_MAX = 4000                  # px: the side tile's box at most (canvas part 5B)
 MIC_CAP = 60                     # a microphone's name ("Microphone (Steam Streaming Microphone)")
 # The window brief: the page's top band for Windows' hit-test (its controls' boxes, the maximise button's).
 CHROME_HOLES = 40
@@ -818,11 +823,11 @@ def _canvas(value: dict[str, Any]) -> dict[str, Any]:
     """The canvas's corners (part 1): words the page sets as text, a count, and which of its own buttons show (words
     of CANVAS_BUTTONS, each once). A button's label is never among them."""
     fields = _fields(value, ("type", "clock", "word", "tone", "approvals", "buttons", "briefing_new", "hold", "rec",
-                             "wake", "meter", "hear", "deaf", "mic"), ("type", "buttons"))
+                             "wake", "meter", "hear", "deaf", "mic", "side"), ("type", "buttons"))
     buttons = [_choice(item, CANVAS_BUTTONS) for item in _list(fields["buttons"], len(CANVAS_BUTTONS))]
     if len(set(buttons)) != len(buttons):
         raise Refused(R_FIELD)
-    return {"type": "canvas", "clock": _text(fields.get("clock", ""), CLOCK_CAP),
+    clean = {"type": "canvas", "clock": _text(fields.get("clock", ""), CLOCK_CAP),
             "word": _text(fields.get("word", ""), STATE_WORD_CAP),
             "tone": _choice(fields.get("tone", "holo"), CANVAS_TONES),
             "approvals": _number(fields.get("approvals", 0), 0, APPROVALS_MAX), "buttons": buttons,
@@ -831,6 +836,17 @@ def _canvas(value: dict[str, Any]) -> dict[str, Any]:
             "wake": _text(fields.get("wake", ""), WAKE_CAP), "meter": _flag(fields.get("meter", False)),
             "hear": _choice(fields.get("hear", ""), HEAR_STATES), "deaf": _flag(fields.get("deaf", False)),
             "mic": _text(fields.get("mic", ""), MIC_CAP)}
+    if "side" in fields:
+        clean["side"] = _side(fields["side"])
+    return clean
+
+
+def _side(value: Any) -> list[int]:
+    """The side tile's box (canvas part 5B): [width, height], whole numbers 0 to SIDE_MAX."""
+    pair = _list(value, 2)
+    if len(pair) != 2:
+        raise Refused(R_SHAPE)
+    return [_number(pair[0], 0, SIDE_MAX), _number(pair[1], 0, SIDE_MAX)]
 
 
 def _task(value: dict[str, Any], groups: Collection[str]) -> tuple[dict[str, Any], str]:

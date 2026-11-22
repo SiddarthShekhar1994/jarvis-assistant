@@ -372,14 +372,20 @@ class PrivacyTests(unittest.TestCase):
         agents = resting.from_agents([resting.AgentLine(f"Sweep {mark_agent}", "on", last=f"8 {mark_when}", came=2,
                                                         next=f"9 {mark_when}", waits=2),
                                       resting.AgentLine(f"Digest {mark_agent}", "paused")], frame_id="r2").messages[0]
-        markers = (mark_card, mark_kind, mark_agent, mark_when)
+        # Canvas part 5B (the ship-gate review's 1): the Now group's to-dos frame - a row that waits for the owner's
+        # OK is the same card's title: it never reaches the wall either (its state does)
+        mark_todo = "zq7waitingtodo"
+        todos = {"type": "frame", "id": "r3", "kind": "todos", "title": "To-dos", "meta": "2 · 1 waits",
+                 "body": {"rows": [{"text": f"Print {mark_todo}", "meta": "", "state": "waits"},
+                                   {"text": "Buy milk", "meta": "Due today", "state": "open"}]}}
+        markers = (mark_card, mark_kind, mark_agent, mark_when, mark_todo)
         for marker in markers:
-            self.assertIn(marker, json.dumps([approvals, agents]))                # the board's frames have them ...
+            self.assertIn(marker, json.dumps([approvals, agents, todos]))         # the board's frames have them ...
         rig = Rig(self)
-        rig.feed = demo_feed([(approvals, ""), (agents, "")])
+        rig.feed = demo_feed([(approvals, ""), (agents, ""), (todos, "")])
         rig.c.on_board(rig.feed)
         held = json.dumps(rig.c.state.tiles)
-        self.assertEqual([tile["kind"] for tile in rig.c.state.tiles], ["approvals", "agents"])
+        self.assertEqual([tile["kind"] for tile in rig.c.state.tiles], ["approvals", "agents", "todos"])
         for marker in markers:
             self.assertNotIn(marker, held)                                        # ... the display never holds them
         tiles = {tile["kind"]: tile["body"] for tile in rig.c.state.tiles}
@@ -391,7 +397,8 @@ class PrivacyTests(unittest.TestCase):
             self.assertFalse(any(marker in text for text in texts), marker)      # ... nor draws them
         self.assertIn("3 wait for your OK", texts)                                # the counts stay
         self.assertIn("2 agents · 2 proposals wait", texts)
-        for frame in (approvals, agents):                                         # (private_frame by itself too)
+        self.assertEqual([row["state"] for row in tiles["todos"]["rows"]], ["waits", "open"])   # its states stay
+        for frame in (approvals, agents, todos):                                  # (private_frame by itself too)
             private = ss.private_frame(frame)
             self.assertFalse(any(marker in json.dumps(private) for marker in markers))
 

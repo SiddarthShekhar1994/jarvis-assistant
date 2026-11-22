@@ -342,6 +342,10 @@ class ErrorTile(QWidget):
     def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
         return QSize(offer_view.TILE_MIN, self.height_for(offer_view.TILE_MIN))
 
+    def fit_width(self) -> int:
+        """The narrowest width at which its one button shows whole (canvas part 5B)."""
+        return self.action_button.sizeHint().width() + 2 * holo.TILE_PAD[1] - 2 * holo.HoloButton.MARGIN
+
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
         self._place_button()
@@ -444,6 +448,9 @@ class Toast(QWidget):
         self._remaining_ms = TOAST_MS
         self._started = 0.0
         self._hovered = False
+        # Canvas part 5B (the walk's 22): a box on the screen it never covers (the canvas's orb in its corner while
+        # Jarvis's window shows it): () -> QRect | None, global px. The app sets it.
+        self.avoid: Any = None
         self.mini = orb_mod.MiniOrb(self, ring_color=holo.RAISED)
         self.mini.set_badge_form(True)
         self.action_button = holo.HoloButton("", holo.GO, size=holo.SIZE_SM, parent=self)
@@ -498,12 +505,22 @@ class Toast(QWidget):
         return self.isVisible() and not self._timer.isActive() and self._hovered
 
     def place(self) -> None:
-        """Bottom-right of the primary screen's work area (above the taskbar)."""
+        """Bottom-right of the primary screen's work area (above the taskbar) - above the box ``avoid`` gives when it
+        would cover it (canvas part 5B: the canvas's orb in its corner)."""
         screen = QGuiApplication.primaryScreen()
         if screen is None:
             return
         area: QRect = screen.availableGeometry()
-        self.move(area.right() + 1 - TOAST_MARGIN - self.width(), area.bottom() + 1 - TOAST_MARGIN - self.height())
+        x = area.right() + 1 - TOAST_MARGIN - self.width()
+        y = area.bottom() + 1 - TOAST_MARGIN - self.height()
+        try:
+            avoid = self.avoid() if callable(self.avoid) else None
+        except Exception:  # noqa: BLE001 - unknown: its own corner
+            avoid = None
+        spot = QRect(x, y, self.width(), self.height())
+        if isinstance(avoid, QRect) and not avoid.isEmpty() and spot.intersects(avoid):
+            y = max(area.top(), avoid.top() - TOAST_MARGIN - self.height())
+        self.move(x, y)
 
     def dismiss(self) -> None:
         self._timer.stop()
