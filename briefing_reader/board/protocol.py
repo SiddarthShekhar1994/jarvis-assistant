@@ -88,7 +88,13 @@ In (app -> page): check_message(message, known, groups=()) -> Checked
                  while pressing it works), "Briefing ready", a Send's hold word ("Sent": its Undo shows), REC's words
                  (its Stop shows), "Hey Jarvis"'s badge and whether the microphone's meter shows. Every label of a
                  button is the page's own; none comes from here. Part 3B: "now" - the resting group "Now" can come
-                 back (its corner button shows only while the group is not on the canvas)
+                 back (its corner button shows only while the group is not on the canvas). The window brief: + "hear"
+                 (HEAR_STATES: "Hey Jarvis" listening, paused, can't hear you, "other" - its few words in "wake" -
+                 or "" off), "deaf" (Jarvis can't hear the owner: the note "Jarvis can't hear you" with what to do)
+                 and "mic" (the microphone's name for that note, at most MIC_CAP; shown on screen, never logged); the
+                 button "mic_settings" (the note's one button: Settings > Meetings, where a microphone is picked)
+        chrome   {"hover"}: the window brief - the pointer is on the maximise button, which Windows hit-tests as its
+                 own (HTMAXBUTTON: Snap Layouts), so the page lights it as if it were hovered
       The canvas, part 2 (frames across the screen):
         frame    + the kind "number" {"figure", "text", "source"}: a big number the app builds from a chart's or a
                  table's change - the figure large ("+500": NUMBER_TEXT_CAP at most, a signed number's words), what it
@@ -139,6 +145,10 @@ Out (page -> app): check_request(kind, payload, known) -> Request
       The canvas, part 2:
         go {"to": "tidy"}                       the corner's Tidy: the page packed its frames again (counted)
         go {"to": "stop"}                       the task card's Stop: the app's own Stop of the running request
+      The window brief:
+        chrome {"w", "bar", "holes", "max"}     where the page's top band is, for Windows' hit-test: the view's width
+                          the page measured, the band's height, the boxes in it that are the page's own controls
+                          ([x, y, w, h] each, at most CHROME_HOLES) and the maximise button's box ([] none)
     Anything else is refused. A log line may carry kind_word(kind) and the reason word, never the payload.
 """
 
@@ -206,7 +216,7 @@ MATHS_OPS = {"+": (2, 8), "-": (1, 2), "*": (2, 8), "/": (2, 2), "=": (2, 4), "f
              "root": (1, 2), "()": (1, 1), "or": (2, 4)}
 
 MESSAGE_TYPES = ("frame", "lit", "remove", "clear", "motion", "picture", "group", "remove_group", "bar", "desk",
-                 "reveal", "cleared", "focus_part", "backdrop", "big", "orb", "canvas", "task")
+                 "reveal", "cleared", "focus_part", "backdrop", "big", "orb", "canvas", "task", "chrome")
 # The canvas, part 1: the orb's states (the native ring's looks: orb.IDLE ...), its three forms, its levels' range, the
 # corners' words' caps and tones, the page's own buttons the app may show, and the words a button may send back.
 ORB_STATES = ("idle", "listening", "thinking", "speaking", "needs", "waiting")
@@ -220,7 +230,13 @@ WAKE_CAP = 32                    # "Not listening: add-on missing" (wake_ui.SHOR
 APPROVALS_MAX = 999
 CANVAS_TONES = ("holo", "amber", "steel")
 CANVAS_BUTTONS = ("history", "board", "briefing", "approvals", "followups", "meetings", "agents", "live", "memory",
-                  "settings", "desktop", "minimize", "maximize", "close", "mute", "day", "now")
+                  "settings", "desktop", "minimize", "maximize", "close", "mute", "day", "now", "mic_settings")
+# The window brief: "Hey Jarvis" on the canvas (wake_ui.WakeController.hearing) and the can't-hear note's microphone.
+HEAR_STATES = ("", "listening", "paused", "cant_hear", "other")
+MIC_CAP = 60                     # a microphone's name ("Microphone (Steam Streaming Microphone)")
+# The window brief: the page's top band for Windows' hit-test (its controls' boxes, the maximise button's).
+CHROME_HOLES = 40
+CHROME_BAR_MAX = 400             # px: the band's height at most
 GO_WORDS = (*CANVAS_BUTTONS, "undo", "stop_rec", "drag", "tidy", "stop")
 # The canvas, part 2: the task card's states, its words' caps and its counts' range.
 TASK_STATES = ("working", "done", "gone")
@@ -244,7 +260,7 @@ SPAN_KINDS = ("busy", "next", "free")
 TODO_STATES = ("open", "waits", "done")
 MOTION_LEVELS = ("lively", "calm", "off")
 REQUEST_KINDS = ("ready", "layout", "focus", "open", "close", "pin", "bring_back", "retry", "go_approvals",
-                 "clear", "restore", "show_new", "reading", "focus_out", "landed", "big", "go")
+                 "clear", "restore", "show_new", "reading", "focus_out", "landed", "big", "go", "chrome")
 _ID_KINDS = frozenset({"focus", "open", "close", "bring_back", "retry", "go_approvals"})
 _BARE_KINDS = frozenset({"clear", "restore", "show_new"})     # a payload of no field at all
 _ID = re.compile(r"[A-Za-z0-9_-]{1,%d}" % ID_CAP)
@@ -306,6 +322,10 @@ class Request:
     focused: bool = False
     to: str = ""
     step: str = ""
+    width: int = 0                                   # chrome: the view's width the page measured (px) ...
+    bar: int = 0                                     # ... its top band's height ...
+    holes: tuple[tuple[int, int, int, int], ...] = ()     # ... its own controls' boxes there ...
+    maximize: tuple[int, ...] = ()                   # ... and the maximise button's box (() none)
 
 
 def kind_word(kind: Any) -> str:
@@ -798,7 +818,7 @@ def _canvas(value: dict[str, Any]) -> dict[str, Any]:
     """The canvas's corners (part 1): words the page sets as text, a count, and which of its own buttons show (words
     of CANVAS_BUTTONS, each once). A button's label is never among them."""
     fields = _fields(value, ("type", "clock", "word", "tone", "approvals", "buttons", "briefing_new", "hold", "rec",
-                             "wake", "meter"), ("type", "buttons"))
+                             "wake", "meter", "hear", "deaf", "mic"), ("type", "buttons"))
     buttons = [_choice(item, CANVAS_BUTTONS) for item in _list(fields["buttons"], len(CANVAS_BUTTONS))]
     if len(set(buttons)) != len(buttons):
         raise Refused(R_FIELD)
@@ -808,7 +828,9 @@ def _canvas(value: dict[str, Any]) -> dict[str, Any]:
             "approvals": _number(fields.get("approvals", 0), 0, APPROVALS_MAX), "buttons": buttons,
             "briefing_new": _flag(fields.get("briefing_new", False)),
             "hold": _text(fields.get("hold", ""), HOLD_CAP), "rec": _text(fields.get("rec", ""), REC_CAP),
-            "wake": _text(fields.get("wake", ""), WAKE_CAP), "meter": _flag(fields.get("meter", False))}
+            "wake": _text(fields.get("wake", ""), WAKE_CAP), "meter": _flag(fields.get("meter", False)),
+            "hear": _choice(fields.get("hear", ""), HEAR_STATES), "deaf": _flag(fields.get("deaf", False)),
+            "mic": _text(fields.get("mic", ""), MIC_CAP)}
 
 
 def _task(value: dict[str, Any], groups: Collection[str]) -> tuple[dict[str, Any], str]:
@@ -883,6 +905,9 @@ def check_message(message: Any, known: Collection[str] = (), groups: Collection[
         clean = _canvas(message)
     elif kind == "task":
         clean, group_id = _task(message, groups)
+    elif kind == "chrome":
+        fields = _fields(message, ("type", "hover"), ("type", "hover"))
+        clean = {"type": "chrome", "hover": _flag(fields["hover"])}
     else:   # motion
         fields = _fields(message, ("type", "level"), ("type", "level"))
         clean = {"type": "motion", "level": _choice(fields["level"], MOTION_LEVELS)}
@@ -907,6 +932,31 @@ def _place(value: Any, low: int) -> int:
     if type(value) is not int or not low <= value <= PLACE_LIMIT:
         raise Refused(R_SHAPE)
     return value
+
+
+def _box(value: Any) -> tuple[int, int, int, int]:
+    """[x, y, w, h]: whole px, the place inside BIG_LIMIT and a size of at least 0."""
+    if type(value) is not list or len(value) != 4:
+        raise Refused(R_SHAPE)
+    for item in value:
+        if type(item) is not int or not 0 <= item <= BIG_LIMIT:
+            raise Refused(R_SHAPE)
+    return value[0], value[1], value[2], value[3]
+
+
+def _chrome_request(value: Any) -> Request:
+    """The page's top band for Windows' hit-test (the window brief): the width it measured, the band's height, its
+    controls' boxes (at most CHROME_HOLES) and the maximise button's box ([] none)."""
+    fields = _fields(value, ("w", "bar", "holes", "max"), ("w", "bar", "holes", "max"))
+    width, bar = fields["w"], fields["bar"]
+    if type(width) is not int or not 0 <= width <= BIG_LIMIT or type(bar) is not int or not 0 <= bar <= CHROME_BAR_MAX:
+        raise Refused(R_SHAPE)
+    holes = fields["holes"]
+    if type(holes) is not list or len(holes) > CHROME_HOLES:
+        raise Refused(R_SHAPE)
+    box = fields["max"]
+    maximize: tuple[int, ...] = () if box == [] else _box(box)
+    return Request("chrome", width=width, bar=bar, holes=tuple(_box(item) for item in holes), maximize=maximize)
 
 
 def check_request(kind: Any, payload: Any, known: Collection[str]) -> Request:
@@ -962,6 +1012,8 @@ def check_request(kind: Any, payload: Any, known: Collection[str]) -> Request:
     if kind == "go":
         fields = _fields(value, ("to",), ("to",))
         return Request("go", to=_choice(fields["to"], GO_WORDS))
+    if kind == "chrome":
+        return _chrome_request(value)
     if kind not in _ID_KINDS:
         raise Refused(R_KIND)
     fields = _fields(value, ("id",), ("id",))

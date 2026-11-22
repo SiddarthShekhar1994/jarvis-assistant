@@ -218,10 +218,11 @@ class RequestTests(unittest.TestCase):
     def test_the_list_of_requests(self) -> None:
         # Part 5b added clear .. focus_out on purpose (tests/test_board_ways.py checks each of them and their hostile
         # shapes); part 5c added landed and big on purpose (tests/test_board_lit.py checks them); the canvas (part 1)
-        # added go on purpose (tests/test_canvas.py checks its fixed list of words and that an unknown one is refused).
+        # added go on purpose (tests/test_canvas.py checks its fixed list of words and that an unknown one is refused);
+        # the window brief added chrome on purpose (tests/test_window_native.py checks its fields and hostile shapes).
         self.assertEqual(protocol.REQUEST_KINDS, ("ready", "layout", "focus", "open", "close", "pin", "bring_back",
                                                   "retry", "go_approvals", "clear", "restore", "show_new", "reading",
-                                                  "focus_out", "landed", "big", "go"))
+                                                  "focus_out", "landed", "big", "go", "chrome"))
         for kind in ("focus", "open", "close", "bring_back", "retry", "go_approvals"):
             self.assertEqual(protocol.check_request(kind, '{"id":"f1"}', self.known), protocol.Request(kind, "f1"))
         self.assertEqual(protocol.check_request("pin", '{"id":"f2","on":true}', self.known),

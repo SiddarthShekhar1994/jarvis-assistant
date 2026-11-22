@@ -38,6 +38,17 @@ Part 2 (frames across the screen):
 * the orb goes back to the centre once Clear view left nothing on the canvas, also while its Bring back is still
   offered (``form``: the corner only while frames show).
 
+The window brief:
+
+* HEY JARVIS on the canvas (``hearing``; the canvas message's "hear", "deaf" and "mic"): "Hey Jarvis" listening,
+  paused or can't hear you (wake_ui.WakeController.hearing: its listener gets nothing from its microphone), and the
+  note "Jarvis can't hear you" - also when the last talk got nothing at all from the microphone (talk_ui
+  .TalkController.unheard) - with the microphone's name (on screen only, never logged) and its one button
+  "mic_settings": Settings at Meetings, where a microphone is picked (``open_mic_settings``; nothing is picked for the
+  owner and the Windows default is never changed);
+* the page's top band for Windows' hit-test (its "chrome" request) goes to the window (ui.BriefingWindow
+  .set_page_chrome), and Windows' own maximise button's hover (the window's maxHoverChanged) to the page.
+
 Logs: reason words, counts and durations only.
 """
 
@@ -71,6 +82,7 @@ TASK_TITLE = "Working on it"      # the task card's heading while he works (the 
 TASK_STARTING = "Starting"
 TASK_STOPPING = "Stopping"
 TASK_GRACE_S = 1.5                # a request that ended without an answer's hook: its card goes this long after
+MIC_GROUP = "meetings"            # Settings > Meetings (meetings_ui.SETTINGS_KEY): where a microphone is picked
 
 # A page button's word -> the Dock's slot it presses.
 _SCREEN_SLOTS = {"briefing": dock_mod.BRIEFING, "approvals": dock_mod.APPROVALS, "followups": dock_mod.FOLLOWUPS,
@@ -128,6 +140,9 @@ class CanvasController(QObject):
         reading.tabChanged.connect(self._on_tab)
         self.window.visibilityChanged.connect(self._on_visibility)
         self.window.activeChanged.connect(lambda _active: self.sync())     # away or back: the orb's rate at rest
+        hover = getattr(self.window, "maxHoverChanged", None)
+        if hover is not None:
+            hover.connect(self._on_max_hover)            # the window brief: Windows' maximise button hovered
         self._sync_timer.start()
         self._on_visibility()
 
@@ -160,6 +175,9 @@ class CanvasController(QObject):
         view.ready.connect(self._on_ready)
         view.unavailable.connect(self._on_unavailable)
         view.goRequested.connect(self.on_go)
+        chrome = getattr(view, "chromeReported", None)
+        if chrome is not None:
+            chrome.connect(self._on_chrome)              # the window brief: the top band for Windows' hit-test
         if not self._started:
             self._started = True                 # an Ask got there first: the board is starting already
             self._began = self._clock()
@@ -262,7 +280,40 @@ class CanvasController(QObject):
             shown.add("board")
         if self.now.can_show():
             shown.add("now")                     # part 3B: the resting group back, only while it is not up
+        if self.hearing()[1] and self._mic_group():
+            shown.add("mic_settings")            # the window brief: the can't-hear note's Settings > Meetings
         return [word for word in protocol.CANVAS_BUTTONS if word in shown]
+
+    def _mic_group(self) -> bool:
+        """Settings > Meetings is there (its microphone picker): the can't-hear note's button can work."""
+        try:
+            return MIC_GROUP in self.reading.settings_page.group_buttons
+        except Exception:  # noqa: BLE001 - unknown: no button
+            return False
+
+    def hearing(self) -> tuple[str, bool, str]:
+        """The window brief: (the HEY JARVIS state - board.protocol.HEAR_STATES -, Jarvis can't hear the owner, the
+        microphone's name for the note). Can't hear: "Hey Jarvis"'s listener gets nothing from its microphone (one that
+        gives only silence, or a virtual one), or the last talk ended with nothing at all from it (its level at zero)
+        and no microphone was picked since. The name is shown on screen only: it is never logged."""
+        state, mic = "", ""
+        wake = getattr(self.host, "wake", None)
+        if wake is not None:
+            try:
+                state, mic = wake.hearing()
+            except Exception:  # noqa: BLE001 - unknown: as off
+                state, mic = "", ""
+        deaf = state == "cant_hear"
+        talk = getattr(self.host, "talk", None)
+        if not deaf and talk is not None:
+            try:
+                unheard = talk.unheard()
+            except Exception:  # noqa: BLE001 - unknown: heard
+                unheard = None
+            if unheard is not None:
+                deaf, mic = True, str(unheard)
+        state = state if state in protocol.HEAR_STATES else "other"
+        return state, deaf, (str(mic or "")[:protocol.MIC_CAP] if deaf else "")
 
     def canvas_message(self) -> dict[str, Any]:
         reading = self.reading
@@ -273,6 +324,7 @@ class CanvasController(QObject):
             rec = f"Rec {elapsed}" + (f" · {warning}" if warning else "")
         _sentence, wake_look = reading.wake_state()
         wake_words = reading.wake_words()                 # part 3: its few words, whole (never a cut sentence)
+        hear, deaf, mic = self.hearing()                  # the window brief: HEY JARVIS's state, can't hear you
         from .wake_ui import LOOK_OFF
 
         return {"type": "canvas", "clock": f"{date_text} · {time_text}"[:protocol.CLOCK_CAP],
@@ -282,7 +334,7 @@ class CanvasController(QObject):
                 "buttons": self.buttons(), "briefing_new": bool(reading.is_new_briefing()),
                 "hold": str(reading.hold_word() or "")[:protocol.HOLD_CAP], "rec": rec[:protocol.REC_CAP],
                 "wake": str(wake_words or "")[:protocol.WAKE_CAP] if wake_look != LOOK_OFF else "",
-                "meter": self._has_meter()}
+                "meter": self._has_meter(), "hear": hear, "deaf": deaf, "mic": mic}
 
     def _has_meter(self) -> bool:
         """The app measures the microphone's input (the talk key's listening or "Hey Jarvis"): else no meter."""
@@ -582,9 +634,32 @@ class CanvasController(QObject):
             reading.command_bar.cancelRequested.emit()     # exactly the ask line's own Cancel
         elif word == "now":
             self.now.show()                                # part 3B: the resting group back
+        elif word == "mic_settings":
+            self.open_mic_settings()                       # the window brief: Settings > Meetings
         # ("tidy": the page packed its frames again by itself - counted above, nothing more to do here)
         self.sync()
         return True
+
+    def open_mic_settings(self) -> None:
+        """The can't-hear note's button: Settings (the Dock's own button) at Meetings, where a microphone is picked.
+        Nothing is picked for the owner and the Windows default is never changed."""
+        self.reading.dock.activate(_SCREEN_SLOTS["settings"])
+        self.reading.settings_page.select_group(MIC_GROUP)
+
+    # ---- the window brief: Windows' hit-test of the page's top band -------------------------------------------
+
+    def _on_chrome(self, request: Any) -> None:
+        """The page said where its top band's controls are (board.protocol "chrome"): the window's hit-test uses it."""
+        window = self.window
+        if _alive(window) and hasattr(window, "set_page_chrome"):
+            window.set_page_chrome(request)
+            self.counts["chrome:report"] += 1
+
+    def _on_max_hover(self, hover: bool) -> None:
+        """Windows' own maximise button is under the pointer (or not): the page lights its button as hovered."""
+        board = self._board()
+        if board is not None and not self._fallen and board.apply({"type": "chrome", "hover": bool(hover)}):
+            self.counts["sent:chrome"] += 1
 
     # ---- teardown ----------------------------------------------------------------------------------------------
 

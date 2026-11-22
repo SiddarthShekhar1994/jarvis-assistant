@@ -127,6 +127,11 @@ Cases:
                frames keep their places); the corner's "Now" shown only while the app says so, a press posting "now";
                a day with nothing booked ("empty") only as tall as its words;
                hostile bodies put into board.apply directly refused by the page
+    canvas_hear  the window brief at 1389x868: HEY JARVIS listening, paused and can't hear you (amber only then), the
+               app's few words for the other problems, the can't-hear note with the microphone's name as text and its
+               one button (a real press posts "mic_settings"), clear of the frames and the ask line; hostile names as
+               text, nothing in an attribute; hostile messages refused by the page; the top band the page reports for
+               Windows' hit-test (after a resize and with More's list open too) and the maximise button's hover
 
 Qt runs offscreen and Chromium's proxy is a dead address (snapshots.OFFLINE_FLAGS, as the board's engine always runs in a
 test): nothing can reach the network whatever the page does. No window is shown on the real screen. Chromium's
@@ -1031,6 +1036,8 @@ def main(case: str) -> dict[str, Any]:
         report.update(canvas_fixes_case(make, wait_until, pump, main_world, settle_end))
     elif case == "canvas_resting":
         report.update(canvas_resting_case(make, wait_until, pump, main_world, settle_end))
+    elif case == "canvas_hear":
+        report.update(canvas_hear_case(make, wait_until, pump, main_world, settle_end))
     elif case == "reduced":
         # The page's own reduced motion, Chromium told reduced motion (REDUCED_MOTION): lively plays as off.
         host, board = make()
@@ -4801,6 +4808,160 @@ def canvas_resting_case(make: Any, wait_until: Any, pump: Any, main_world: Any, 
     report["allowed"] = counts.get("allowed", {})
     report["messages_refused"] = {key: value for key, value in counts.items() if key.startswith("refused:")}
     report["console"] = {key: value for key, value in counts.items() if key.startswith("console:")}
+    settle_end(report, board)
+    return report
+
+
+# ---- the window brief: HEY JARVIS's states and the can't-hear note in the real page, and the top band the page
+# reports for Windows' hit-test ------------------------------------------------------------------------------------
+
+HEAR_LOOK = r"""JSON.stringify((function () {
+  function box(n) { var r = n.getBoundingClientRect(); return [Math.round(r.left), Math.round(r.top),
+                                                               Math.round(r.width), Math.round(r.height)]; }
+  var canvas = document.getElementById('canvas');
+  var hear = canvas.querySelector('.c-hear'), note = canvas.querySelector('.c-note');
+  var word = canvas.querySelector('.c-hear-word'), wake = canvas.querySelector('.c-bl .c-wake');
+  var button = Array.prototype.filter.call(note.querySelectorAll('button'), function (b) { return !b.hidden; })[0];
+  var bl = canvas.querySelector('.c-bl');
+  var attrs = [];
+  Array.prototype.forEach.call(bl.querySelectorAll('*'), function (n) {
+    for (var j = 0; j < n.attributes.length; j += 1) { attrs.push(n.attributes[j].name + '=' + n.attributes[j].value); }
+  });
+  var shownText = function (n) { return n && !n.hidden && n.getClientRects().length ? n.textContent : ''; };
+  return {
+    hear: hear.hidden ? null : {text: hear.textContent, cls: hear.className.split(' ').sort(), box: box(hear),
+                                color: getComputedStyle(word).color,
+                                dot: getComputedStyle(hear.querySelector('.c-hear-dot')).backgroundColor,
+                                cut: hear.scrollWidth > hear.clientWidth + 1},
+    wake: shownText(wake),
+    note: note.hidden ? null : {text: Array.prototype.filter.call(note.querySelector('p').children, function (n) {
+                                  return !n.hidden && n.tagName === 'SPAN'; }).map(function (n) { return n.textContent; }).join(''),
+                                box: box(note), head: getComputedStyle(note.querySelector('.c-note-head')).color,
+                                button: button ? {text: button.textContent, label: button.getAttribute('aria-label'),
+                                                  box: box(button), cls: button.className.split(' ').sort()} : null,
+                                cut: note.scrollWidth > note.clientWidth + 1},
+    bl: box(bl), area_bottom: Math.round(document.body.getBoundingClientRect().bottom), win: [innerWidth, innerHeight],
+    ask_left: Math.round(innerWidth / 2 - 260),
+    attrs: attrs, foreign: bl.querySelectorAll('img, script, iframe, a, style, link, object, embed, form, input, b').length,
+    pwned: typeof window.pwned
+  };
+})())"""
+
+HEAR_PRESS = r"""(function () {
+  var b = Array.prototype.filter.call(document.querySelectorAll('#canvas .c-note button'), function (n) {
+    return !n.hidden; })[0];
+  if (!b) { return ''; }
+  b.click();
+  return b.textContent;
+})()"""
+
+CHROME_PAGE = r"""JSON.stringify((function () {
+  function box(n) { var r = n.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; }
+  var c = document.getElementById('canvas');
+  var max = c.querySelector('[aria-label="Maximise or restore the window"]');
+  return {look: board.chrome(), max: box(max), hot: max.classList.contains('hot'),
+          maxBorder: getComputedStyle(max).borderTopColor,
+          buttons: Array.prototype.filter.call(c.querySelectorAll('.c-tl button, .c-tr button'), function (b) {
+            return !b.hidden && b.getClientRects().length > 0; }).map(box),
+          wordmark: box(c.querySelector('.c-word'))};
+})())"""
+
+
+def canvas_hear_case(make: Any, wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> dict[str, Any]:
+    """The window brief in the real page at the owner's 1389x868: HEY JARVIS's three states (its mark, the page's own
+    word, amber only for can't hear you), the app's few words for the other problems, the can't-hear note with the
+    microphone's name as text and its one button (a real press posts its word), the note clear of the frames and the
+    ask line; hostile names shown as text with nothing of them in an attribute; hostile hear / deaf / mic / chrome
+    messages refused by the page; the top band the page reports (its width, the band, its buttons as holes, the
+    maximise button's box), again after a resize and with More's list open; the maximise button's hover lit by the
+    app's chrome message."""
+    report: dict[str, Any] = {}
+    host, board = _canvas2_start(make, wait_until, pump, CANVAS3_SIZE)
+    report["ready"] = board.is_ready()
+    board.set_motion("off")
+    went: list[str] = []
+    board.goRequested.connect(went.append)
+    reports: list[Any] = []
+    board.chromeReported.connect(reports.append)
+    base = {"type": "canvas", "clock": "Tue 17 Nov · 9:41 AM", "word": "Standby", "tone": "holo", "approvals": 0,
+            "buttons": CANVAS_BUTTONS, "briefing_new": False, "hold": "", "rec": "", "wake": "", "meter": True}
+
+    def look() -> dict[str, Any]:
+        return json.loads(main_world(board, HEAR_LOOK))
+
+    steam = "Microphone (Steam Streaming Microphone)"
+    states = {
+        "listening": dict(base, wake="Listening for Hey Jarvis", hear="listening"),
+        "paused": dict(base, wake="Hey Jarvis paused", hear="paused"),
+        "cant_hear": dict(base, wake="Listening: mic gives silence", hear="cant_hear", deaf=True, mic=steam,
+                          buttons=CANVAS_BUTTONS + ["mic_settings"]),
+        "other": dict(base, wake="Not listening: mic busy", hear="other"),
+        "talk_deaf": dict(base, wake="", hear="", deaf=True, mic="Desk mic", buttons=CANVAS_BUTTONS + ["mic_settings"]),
+        "no_name": dict(base, wake="", hear="", deaf=True, mic="", buttons=CANVAS_BUTTONS + ["mic_settings"]),
+        "no_button": dict(base, wake="Listening: mic gives silence", hear="cant_hear", deaf=True, mic=steam),
+        "hostile": dict(base, wake="Listening: mic gives silence", hear="cant_hear", deaf=True,
+                        mic="<img src=x onerror=pwned=41>\u202eevil", buttons=CANVAS_BUTTONS + ["mic_settings"]),
+        "off": dict(base),
+    }
+    report["sent"] = {}
+    for name, message in states.items():
+        report["sent"][name] = board.apply(message)
+        pump(0.3)
+        report[name] = look()
+    board.apply(states["cant_hear"])
+    pump(0.3)
+    report["pressed"] = main_world(board, HEAR_PRESS)
+    pump(0.3)
+    report["went"] = list(went)
+    # with frames up: the note stays clear of the frames' area
+    _canvas2_put(board, canvas2_frames(6))
+    board.apply({"type": "orb", "state": "idle", "form": "corner", "muted": False, "offline": False, "dim": False,
+                 "level": 0, "voice": 0})
+    pump(0.5)
+    report["with_frames"] = look()
+    # hostile messages straight into the page
+    tries = {
+        "hear": dict(states["listening"], hear="deaf"),
+        "deaf": dict(states["cant_hear"], deaf="yes"),
+        "mic": dict(states["cant_hear"], mic="x" * 61),
+        "mic_type": dict(states["cant_hear"], mic=["x"]),
+        "chrome_extra": {"type": "chrome", "hover": True, "x": 1},
+        "chrome_flag": {"type": "chrome", "hover": 1},
+    }
+    report["page_refused"] = {name: main_world(board, f"String(board.apply({json.dumps(json.dumps(message))}))")
+                              for name, message in tries.items()}
+    # the top band the page reports
+    pump(1.3)
+    report["chrome_reports"] = len(reports)
+    last = reports[-1] if reports else None
+    report["chrome"] = None if last is None else {"w": last.width, "bar": last.bar, "holes": [list(h) for h in last.holes],
+                                                  "max": list(last.maximize)}
+    report["chrome_page"] = json.loads(main_world(board, CHROME_PAGE))
+    board.apply({"type": "chrome", "hover": True})
+    pump(0.2)
+    report["hover_on"] = json.loads(main_world(board, CHROME_PAGE))
+    board.apply({"type": "chrome", "hover": False})
+    pump(0.2)
+    report["hover_off"] = json.loads(main_world(board, CHROME_PAGE))
+    count = len(reports)
+    host.resize(1280, 800)
+    board.setGeometry(0, 0, 1280, 800)
+    pump(0.8)
+    report["resized"] = {"new": len(reports) - count, "w": reports[-1].width if reports else 0,
+                         "page": json.loads(main_world(board, CHROME_PAGE))}
+    count = len(reports)
+    report["more_pressed"] = main_world(board, CANVAS3_PRESS_MORE)
+    pump(0.5)
+    report["more_open"] = {"new": len(reports) - count, "holes": [list(h) for h in reports[-1].holes] if reports else [],
+                           "menu": json.loads(main_world(board, r"""JSON.stringify((function () {
+      var m = document.getElementById('c-menu'); var r = m.getBoundingClientRect();
+      return m.hidden ? null : [r.left, r.top, r.right, r.bottom]; })())"""))}
+    counts = board.counts()
+    report["blocked"] = counts.get("blocked", {})
+    report["allowed"] = counts.get("allowed", {})
+    report["messages_refused"] = {key: value for key, value in counts.items() if key.startswith("refused:")}
+    report["console"] = {key: value for key, value in counts.items() if key.startswith("console:")}
+    report["requests"] = board.bridge_counts() if hasattr(board, "bridge_counts") else {}
     settle_end(report, board)
     return report
 

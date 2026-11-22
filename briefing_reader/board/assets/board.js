@@ -3164,8 +3164,22 @@
   var ORB_FORMS = ['rings', 'badge', 'corner'];
   var CANVAS_TONES = ['holo', 'amber', 'steel'];
   var CANVAS_BUTTONS = ['history', 'board', 'briefing', 'approvals', 'followups', 'meetings', 'agents', 'live',
-                        'memory', 'settings', 'desktop', 'minimize', 'maximize', 'close', 'mute', 'day', 'now'];
-  var CANVAS_CAPS = {clock: 40, word: 40, hold: 24, rec: 40, wake: 32, approvals: 999, level: 100};
+                        'memory', 'settings', 'desktop', 'minimize', 'maximize', 'close', 'mute', 'day', 'now',
+                        'mic_settings'];
+  var CANVAS_CAPS = {clock: 40, word: 40, hold: 24, rec: 40, wake: 32, approvals: 999, level: 100, mic: 60};
+  // The window brief: "Hey Jarvis" on the canvas - listening, paused, can't hear you (its mark and the page's own word),
+  // or "other" (the app's few words, as before) - and the note when Jarvis can't hear the owner.
+  var HEAR_STATES = ['', 'listening', 'paused', 'cant_hear', 'other'];
+  var HEAR_WORDS = {listening: 'Listening', paused: 'Paused', cant_hear: 'Can\u2019t hear you'};
+  var DEAF_WORDS = {
+    head: 'Jarvis can\u2019t hear you.', lead: 'The microphone is ', end: '.',
+    pick: 'Pick yours in Settings\u00a0>\u00a0Meetings.',          // (no break inside "Settings > Meetings")
+    pickAny: 'Pick your microphone in Settings\u00a0>\u00a0Meetings.', button: 'Pick a microphone',
+    buttonAll: 'Pick a microphone: open Settings, Meetings'
+  };
+  // The window brief: the page's top band for Windows' hit-test (its controls' boxes; the maximise button's), sent when
+  // it changes, at most every CHROME_MS (and checked again every CHROME_CHECK_MS: a font or a fold can move a button).
+  var CHROME_MS = 60, CHROME_CHECK_MS = 1000, CHROME_HOLES = 40, CHROME_PAD = 2;
   var CANVAS_WORDS = {
     name: 'JARVIS', wordmark: 'J.A.R.V.I.S.', history: 'History', clear: 'Clear view', board: 'Show board',
     briefing: 'Briefing', approvals: 'Approvals', followups: 'Follow-ups', meetings: 'Meetings', agents: 'Agents',
@@ -3174,7 +3188,7 @@
     orb: 'Jarvis', minimize: 'Minimise the window', maximize: 'Maximise or restore the window', close: 'Close',
     clearAll: 'Clear view: take away every unpinned frame', boardBack: 'Show the board again',
     desktopSwitch: 'Jarvis on your desktop', day: 'Today and deadlines', briefingNew: 'Briefing, ready',
-    approvalsWait: ' waiting', more: 'More', moreAll: 'More buttons', now: 'Now',
+    approvalsWait: ' waiting', more: 'More', moreAll: 'More buttons', now: 'Now', heyJarvis: 'Hey Jarvis',
     nowBack: 'Now: bring back the day, to-dos, what waits and your agents'
   };
   // Part 3: the top right row is ONE line at every width (it never wraps into the frames, and the frames' area never
@@ -3413,6 +3427,7 @@
     var on = open === undefined ? c.menu.hidden : !!open;
     on = on && !c.more.hidden;
     c.menu.hidden = !on;
+    scheduleChrome();
     c.more.setAttribute('aria-pressed', on ? 'true' : 'false');
     c.more.classList.toggle('on', on);
     if (!on) {
@@ -3450,6 +3465,7 @@
       setOrbBox(boxAround([{x: places.rest.x + o.x, y: places.rest.y + o.y, s: o.s}], o.fit));
     }
     wake();
+    scheduleChrome();                          // the window brief: the band's controls may have moved
   }
 
   // ---- its moves ----------------------------------------------------------------------------------------------------
@@ -4166,10 +4182,29 @@
     buttons.mute = canvasButton('mute', CANVAS_WORDS.mute, '');
     var wake = make('span', 'c-mono c-state c-wake');      // (part 3: its words whole, on two lines when narrow)
     wake.hidden = true;
+    // the window brief: HEY JARVIS's mark and its state (listening, paused, can't hear you) on a line of its own
+    var hear = make('span', 'c-hear');
+    hear.hidden = true;
+    var hearDot = make('i', 'c-hear-dot');
+    hearDot.setAttribute('aria-hidden', 'true');
+    var hearWord = make('span', 'c-mono c-hear-word');
+    hear.append(hearDot, make('span', 'c-mono c-hear-mark', CANVAS_WORDS.heyJarvis), hearWord);
+    // ... and the note when Jarvis can't hear the owner: what to do, with its one button (Settings > Meetings)
+    var note = make('div', 'c-note');
+    note.hidden = true;
+    note.setAttribute('role', 'status');
+    var noteText = make('p', 'c-note-text');
+    var noteLead = make('span', '', DEAF_WORDS.lead), noteName = make('span', 'c-note-name');
+    var noteEnd = make('span', '', DEAF_WORDS.end + ' '), notePick = make('span', '');
+    buttons.mic_settings = canvasButton('mic_settings', DEAF_WORDS.button, 'need');   // (at the end of its words:
+    buttons.mic_settings.setAttribute('aria-label', DEAF_WORDS.buttonAll);             // the note stays low)
+    noteText.append(make('span', 'c-note-head', DEAF_WORDS.head + ' '), noteLead, noteName, noteEnd, notePick,
+                    buttons.mic_settings);
+    note.append(noteText);
     var rec = make('span', 'c-mono c-rec');
     rec.hidden = true;
     var stopRec = canvasButton('stop_rec', CANVAS_WORDS.stop, 'need');
-    bl.append(meter, levelWords, buttons.mute, wake, rec, stopRec);
+    bl.append(note, meter, levelWords, buttons.mute, wake, hear, rec, stopRec);
     el.append(tl, tr, bl);
 
     canvas = {
@@ -4177,6 +4212,8 @@
       state: state, hold: hold, undo: undo, clockText: clockText, clockButton: clockButton, buttons: buttons,
       clear: clear, tidy: tidyButton, pinned: pinnedButton, rules: [rule1, rule2], meter: meter, bars: bars,
       levelWords: levelWords, wake: wake, rec: rec, more: moreButton, menu: null, twins: new Map(), folded: [],
+      hear: hear, hearWord: hearWord, note: note, noteLead: noteLead, noteName: noteName, noteEnd: noteEnd,
+      notePick: notePick,
       stopRec: stopRec, form: '', orbState: '', muted: false, level: -1, hasMeter: false, shown: []
     };
     // More's list: over the frames (outside the canvas's layer, which the board is drawn over), each folded button's
@@ -4218,6 +4255,7 @@
     document.body.appendChild(menu);
     watchCanvasPointer();
     document.addEventListener('visibilitychange', wake);     // seen again: it moves again
+    setInterval(scheduleChrome, CHROME_CHECK_MS);            // (a font, a fold, an open big card: sent only if moved)
     placeCanvas();
     if (stripParts) {                          // (nothing is "above" on the canvas: a parked answer is just new)
       var pillWords = stripParts.pill.querySelector('.pill-words');
@@ -4251,6 +4289,76 @@
       c.levelWords.textContent = CANVAS_WORDS.level + MINUS + Math.round(60 - c.level / 100 * 50) + CANVAS_WORDS.db;
     } else {
       c.levelWords.textContent = CANVAS_WORDS.micIdle;
+    }
+  }
+
+  HANDLERS.chrome = function (message) {       // the window brief: the pointer on the maximise button (Windows' own)
+    if (!onlyKeys(message, ['type', 'hover']) || typeof message.hover !== 'boolean') {
+      return drop('shape');
+    }
+    if (canvas) {
+      canvas.buttons.maximize.classList.toggle('hot', message.hover);
+    }
+    return true;
+  };
+
+  // ---- the window brief: the top band for Windows' hit-test ----------------------------------------------------------
+  // The window is a Windows window with its caption hidden: Windows asks the app what each point of it is (the edges,
+  // the caption, the maximise button). The page's top band (the wordmark's row) is the caption, but for the page's own
+  // controls in it; the maximise button is Windows' own maximise button (Snap Layouts on hover). The page says where
+  // they are, in its own px, with the width it measured (the app uses it only while the view is that wide).
+
+  var chromeSent = '', chromeTimer = 0;
+
+  function chromeBox(node) {
+    var r = node.getBoundingClientRect();
+    var x = Math.max(0, Math.floor(r.left) - CHROME_PAD), y = Math.max(0, Math.floor(r.top) - CHROME_PAD);
+    return [x, y, Math.ceil(r.right) + CHROME_PAD - x, Math.ceil(r.bottom) + CHROME_PAD - y];
+  }
+
+  function shownNode(node) {
+    return !!node && !node.hidden && node.getClientRects().length > 0;
+  }
+
+  function chromeLook() {                      // the band as it is now ({w, bar, holes, max}; null: no canvas)
+    var c = canvas;
+    if (!c) {
+      return null;
+    }
+    var holes = [];
+    var nodes = Array.prototype.slice.call(c.tl.querySelectorAll('button'))
+      .concat(Array.prototype.slice.call(c.tr.querySelectorAll('button')));
+    nodes.forEach(function (node) {
+      if (node !== c.buttons.maximize && shownNode(node) && node.getBoundingClientRect().top < BOARD_TOP) {
+        holes.push(chromeBox(node));
+      }
+    });
+    [c.menu].concat(Array.prototype.slice.call(document.querySelectorAll('.frame.big-card'))).forEach(function (node) {
+      if (shownNode(node) && node.getBoundingClientRect().top < BOARD_TOP) {
+        holes.push(chromeBox(node));          // More's list, an open big card: over the band, the page's own
+      }
+    });
+    var mx = c.buttons.maximize;
+    return {w: Math.round(window.innerWidth), bar: BOARD_TOP, holes: holes.slice(0, CHROME_HOLES),
+            max: shownNode(mx) && !mx.classList.contains('folded') ? chromeBox(mx) : []};
+  }
+
+  function reportChrome() {
+    chromeTimer = 0;
+    var look = chromeLook();
+    if (!look) {
+      return;
+    }
+    var text = JSON.stringify(look);
+    if (text !== chromeSent) {
+      chromeSent = text;
+      post('chrome', look);
+    }
+  }
+
+  function scheduleChrome() {
+    if (canvas && !chromeTimer) {
+      chromeTimer = setTimeout(reportChrome, CHROME_MS);
     }
   }
 
@@ -4299,8 +4407,14 @@
   };
 
   HANDLERS.canvas = function (message) {
+    var hearState = message && message.hear !== undefined ? message.hear : '';
+    var deaf = message && message.deaf !== undefined ? message.deaf : false;
+    var mic = message && message.mic !== undefined ? message.mic : '';
+    if (HEAR_STATES.indexOf(hearState) < 0 || typeof deaf !== 'boolean' || !words(mic, CANVAS_CAPS.mic)) {
+      return drop('shape');
+    }
     if (!onlyKeys(message, ['type', 'clock', 'word', 'tone', 'approvals', 'buttons', 'briefing_new', 'hold', 'rec',
-                            'wake', 'meter'])
+                            'wake', 'meter', 'hear', 'deaf', 'mic'])
         || !words(message.clock, CANVAS_CAPS.clock) || !words(message.word, CANVAS_CAPS.word)
         || CANVAS_TONES.indexOf(message.tone) < 0 || !whole(message.approvals, 0, CANVAS_CAPS.approvals)
         || !list(message.buttons, CANVAS_BUTTONS.length) || typeof message.briefing_new !== 'boolean'
@@ -4341,8 +4455,23 @@
     c.rec.textContent = message.rec;
     c.rec.hidden = !message.rec;
     c.stopRec.hidden = !message.rec;
-    c.wake.textContent = message.wake;
-    c.wake.hidden = !message.wake;
+    // "Hey Jarvis": its mark and the page's own word for listening, paused and can't hear you (amber); else its few
+    // words as the app gives them (the window brief)
+    var badge = hearState === 'listening' || hearState === 'paused' || hearState === 'cant_hear';
+    c.wake.textContent = badge ? '' : message.wake;
+    c.wake.hidden = badge || !message.wake;
+    c.hear.hidden = !badge;
+    ['listening', 'paused', 'cant_hear'].forEach(function (name) {
+      c.hear.classList.toggle('s-' + name, name === hearState);
+    });
+    c.hearWord.textContent = badge ? HEAR_WORDS[hearState] : '';
+    // the note: "Jarvis can't hear you. The microphone is <its name>. Pick yours in Settings > Meetings." (the name on
+    // screen only, as text)
+    c.note.hidden = !deaf;
+    c.noteName.textContent = deaf ? mic : '';
+    c.noteLead.hidden = c.noteEnd.hidden = !(deaf && mic);
+    c.notePick.textContent = mic ? DEAF_WORDS.pick : DEAF_WORDS.pickAny;
+    c.buttons.mic_settings.hidden = !deaf || shown.indexOf('mic_settings') < 0;
     c.hasMeter = message.meter;
     c.meter.hidden = !message.meter;
     syncGoButtons();                           // part 3: the resting frames' buttons show only while theirs work
@@ -5680,6 +5809,9 @@
       },
       layout: function () {                    // the canvas's layout as it is now, in numbers (null: no canvas)
         return canvas ? layoutLook() : null;
+      },
+      chrome: function () {                    // the window brief: the top band as the page reports it (null: none)
+        return chromeLook();
       }
     }),
     writable: false, configurable: false, enumerable: false

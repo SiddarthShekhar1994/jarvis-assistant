@@ -198,6 +198,9 @@ class TalkController(QObject):
         self._clock = clock
         self._key = describe_combo(self._cfg.key) if self._cfg.key else "the talk key"
         self._last_mic: tuple[str, bool] | None = None        # the microphone the last talk opened (name, the default)
+        # The window brief: the last talk ended with nothing at all from the microphone (its level stayed at zero) -
+        # (its name, the microphone picked in Settings > Meetings then); None once a talk hears something.
+        self._unheard: tuple[str, str] | None = None
         self._address = str(getattr(getattr(config, "assistant", None), "address", "sir"))
         self._state = IDLE
         self._session: talk.TalkSession | None = None
@@ -264,6 +267,23 @@ class TalkController(QObject):
         if "audio_addon" in missing or "speech_addon" in missing:
             return "To talk to me, install the add-ons faster-whisper and PyAudioWPatch: Settings > Talk shows how."
         return f"To talk to me, download the speech model ({self._model.size_text}) in Settings > Talk."
+
+    def unheard(self) -> str | None:
+        """The window brief: the last talk ended with nothing at all from the microphone (a muted one, or a virtual one
+        that gives only silence) and no microphone was picked since: its name ("" unknown) for the canvas's "Jarvis
+        can't hear you" (on screen only, never logged). None: the last talk heard something, or a microphone was picked
+        in Settings > Meetings since."""
+        unheard = self._unheard
+        if unheard is None:
+            return None
+        name, picked = unheard
+        return name if self._picked() == picked else None
+
+    def _picked(self) -> str:
+        try:
+            return str(self._picked_mic() or "")
+        except Exception:  # noqa: BLE001 - unknown: the Windows default
+            return ""
 
     # ---- a talk ---------------------------------------------------------------------------------------------
 
@@ -401,6 +421,8 @@ class TalkController(QObject):
         if device:
             self._last_mic = (device, follows)
         speech_ms = session.endpointer.speech_frames * talk.FRAME_MS
+        if ended not in (talk.END_CANCEL, talk.END_DEVICE):
+            self._unheard = (device, self._picked()) if muted else None    # (the canvas's "can't hear you")
         session.forget()
         logger.info("Talk: ended (%s) after %d ms, %d ms of speech%s%s", ended,
                     int((self._clock() - self._began) * 1000), speech_ms,

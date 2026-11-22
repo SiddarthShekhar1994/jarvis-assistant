@@ -75,6 +75,8 @@ SHORT_SILENT = "Listening: mic gives silence"
 SHORT_NO_AUDIO = "Not listening: add-on missing"
 SHORT_RESTARTING = "Hey Jarvis restarting"
 SHORT_STARTING = "Hey Jarvis starting"
+# The window brief: "Hey Jarvis" on the canvas (WakeController.hearing; board.protocol.HEAR_STATES).
+HEAR_OFF, HEAR_LISTENING, HEAR_PAUSED, HEAR_CANT_HEAR, HEAR_OTHER = "", "listening", "paused", "cant_hear", "other"
 SHORT_WORDS = (SHORT_OFF, SHORT_SETUP, SHORT_STOPPED, SHORT_PAUSED, SHORT_LISTENING, SHORT_VIRTUAL, SHORT_NO_MIC,
                SHORT_BUSY, SHORT_SILENT, SHORT_NO_AUDIO, SHORT_RESTARTING, SHORT_STARTING)
 HOLD_TALK, HOLD_SPEAKING, HOLD_MEETING, HOLD_FOCUS = "talk", "speaking", "meeting", "focus"
@@ -823,6 +825,22 @@ class WakeController(QObject):
         """(what it is doing, in words; LOOK_*) for the marks, the tray and Settings."""
         text, _short, look = self._describe()
         return text, look
+
+    def hearing(self) -> tuple[str, str]:
+        """The window brief: "Hey Jarvis" for the canvas's HEY JARVIS - (HEAR_*, the microphone's name). HEAR_CANT_HEAR
+        while the listener gets nothing from its microphone (one that gives only silence, or a virtual one), with that
+        microphone's name (on screen only, never logged); HEAR_OTHER for the other problems (its few words are
+        short_status); HEAR_OFF while it is off."""
+        _text, short, look = self._describe()
+        if look == LOOK_OFF:
+            return HEAR_OFF, ""
+        if look == LOOK_LISTENING:
+            return HEAR_LISTENING, ""
+        if look == LOOK_PAUSED:
+            return HEAR_PAUSED, ""
+        if short in (SHORT_SILENT, SHORT_VIRTUAL):
+            return HEAR_CANT_HEAR, self._mic[0]
+        return HEAR_OTHER, ""
 
     def short_status(self) -> str:
         """The same in a few words (at most SHORT_CAP): the canvas's badge at the bottom left, which has no tooltip

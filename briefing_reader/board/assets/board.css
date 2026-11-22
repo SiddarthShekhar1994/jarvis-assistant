@@ -946,6 +946,31 @@ body.dim #canvas { opacity: .2; }
 .c-state.amber { color: var(--c-amber); }
 .c-state.steel { color: var(--c-dim); }
 .c-wake { white-space: normal; min-width: 0; }           /* "Hey Jarvis" in its few words: whole, wrapped if need be */
+/* The window brief: HEY JARVIS on a line of its own - a small lamp, the mark, the state: cyan listening (the lamp
+   breathes), steel paused, amber only when Jarvis can't hear the owner. */
+.c-hear { flex: 1 0 100%; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.c-hear[hidden], .c-note[hidden] { display: none; }
+.c-hear-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--c-dim); opacity: .7; }
+.c-hear-mark { color: var(--c-ink); }
+.c-hear-word { color: var(--c-dim); white-space: normal; }
+.c-hear.s-listening .c-hear-dot {
+  background: var(--c); opacity: 1; box-shadow: 0 0 6px 1px rgba(var(--g), .75);
+  animation: c-lamp calc(2400ms * var(--k)) ease-in-out infinite;
+}
+.c-hear.s-listening .c-hear-word { color: var(--c-hi); }
+.c-hear.s-cant_hear .c-hear-dot { background: var(--c-amber); opacity: 1; box-shadow: 0 0 6px 1px rgba(245, 177, 74, .7); }
+.c-hear.s-cant_hear .c-hear-word { color: var(--c-amber); }
+@keyframes c-lamp { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+/* ... and when Jarvis can't hear: what to do, in plain words, with its one button (over the meter's row) */
+.c-note { flex: 1 0 100%; order: -1; max-width: 372px; margin-bottom: 4px; }
+.c-note .c-btn { margin-left: 8px; vertical-align: 1px; }      /* its one button at the end of its words */
+.c-note-text {
+  margin: 0; font: 400 12.5px/18px var(--font-body); letter-spacing: 0; color: var(--c-ink); white-space: normal;
+  overflow-wrap: anywhere; text-wrap: pretty;
+}
+.c-note-head { font-weight: 600; color: var(--c-amber-hi); }
+.c-note-name { color: var(--c-white); unicode-bidi: plaintext; }
+.c-note span[hidden] { display: none; }
 .c-btn {
   font-weight: 600; color: #D8F3F8; background: rgba(var(--g), .04); border: 1px solid rgba(var(--g-hi), .7);
   padding: 5px 9px; border-radius: 1px; box-shadow: 0 0 8px rgba(var(--g), .25);
@@ -959,7 +984,7 @@ body.dim #canvas { opacity: .2; }
 .c-btn.new { background: rgba(var(--g), .16); border-color: var(--c-hi); color: #fff; }
 .c-btn.on { background: rgba(var(--g), .2); border-color: #fff; color: #fff; }
 .c-btn.quiet { border-color: rgba(var(--g-hi), .34); box-shadow: none; color: var(--c-ink); }
-.c-btn.quiet:hover { border-color: #fff; color: #fff; }
+.c-btn.quiet:hover, .c-btn.quiet.hot { border-color: #fff; color: #fff; }   /* (hot: Windows' own maximise hover) */
 .c-btn.icon { display: grid; place-items: center; width: 26px; height: 24px; padding: 0; }
 .c-btn.icon .glyph { width: 13px; height: 13px; }
 .c-btn[hidden], .c-mono[hidden], .c-rule[hidden], .c-meter[hidden], .c-btn.folded { display: none; }

@@ -79,6 +79,7 @@ from PySide6.QtCore import (
     QRect,
     QRectF,
     QSize,
+    QSizeF,
     Qt,
     QTimer,
     QUrl,
@@ -127,7 +128,7 @@ from . import (alive, approvals_view, brief_view, briefing_view, context_view, f
                transcript_view, voice_fx)
 from . import canvas_view, desk_view
 from . import dock as dock_mod
-from . import holo, home, hud
+from . import holo, home, hud, window_chrome
 from .board import view as board_view
 from . import live as _live
 from . import orb as orb_mod
@@ -4294,11 +4295,19 @@ class BriefingWindow(hud.HudWindowFrame):
     the owner made of it). F11 toggles full screen (``toggle_fullscreen``), ``toggle_maximized`` the page's
     maximise button, ``start_drag`` its wordmark. Maximised or full screen the frame has no margins and no cut
     corners; restored it has them again, and resizes down to READING_MIN_SIZE as before.
+
+    The window brief: in canvas mode on real Windows the window is an ordinary Windows window with its caption hidden
+    (window_chrome.NativeChrome: ``_sync_chrome`` sets the styles, ``nativeEvent`` hands it Windows' messages,
+    ``chrome_hit`` says what each point is - the edges, the page's top band as the caption but for its controls, the
+    page's maximise button as Windows' own -, ``set_page_chrome`` takes the page's report, ``maxHoverChanged`` lights
+    the page's maximise button). Off Windows, under the tests' offscreen platform and with the canvas off, nothing of it
+    runs.
     """
 
     closeRequested = Signal()
     visibilityChanged = Signal()   # shown, hidden, minimized or restored
     activeChanged = Signal(bool)   # the window became the active window (True) or stopped being it
+    maxHoverChanged = Signal(bool)     # the window brief: the pointer is on Windows' own maximise button (the page's)
 
     def __init__(self, short_minutes: int, long_minutes: int) -> None:
         super().__init__(margins=_PROMPT_MARGINS)
@@ -4350,6 +4359,9 @@ class BriefingWindow(hud.HudWindowFrame):
         self._full_shortcut.setEnabled(False)
         self._full_shortcut.activated.connect(self.toggle_fullscreen)
         self.reading.canvasChanged.connect(self._on_canvas)
+        # The window brief: in canvas mode on real Windows the window behaves as any Windows window (window_chrome).
+        self._chrome = window_chrome.NativeChrome(self)
+        self._page_chrome: Any = None         # the page's top band (board.protocol "chrome"), for Windows' hit-test
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt override
         event.ignore()   # the controller decides what closing means
@@ -4360,6 +4372,7 @@ class BriefingWindow(hud.HudWindowFrame):
         handle = self.windowHandle()
         if handle is not None:
             orb_mod.watch_input(handle)    # the owner's keys and mouse here end the orbs' deep idle
+        self._sync_chrome()                   # (a flag change made Qt set its own style again)
         self.visibilityChanged.emit()
 
     def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
@@ -4370,6 +4383,7 @@ class BriefingWindow(hud.HudWindowFrame):
         super().changeEvent(event)
         if event.type() == QEvent.Type.WindowStateChange:
             self._sync_frame()                # maximised or full screen: no margins, no cut corners
+            self._sync_chrome()               # out of full screen: Windows' own behaviour again
             self.visibilityChanged.emit()
         elif event.type() == QEvent.Type.ActivationChange:
             if self.isActiveWindow():
@@ -4377,7 +4391,8 @@ class BriefingWindow(hud.HudWindowFrame):
             self.activeChanged.emit(self.isActiveWindow())
 
     def nativeEvent(self, event_type: Any, message: Any) -> Any:  # noqa: N802 - Qt override
-        """WM_SETTINGCHANGE: Windows' animation setting may have changed (reduced motion, spec 12.9)."""
+        """WM_SETTINGCHANGE: Windows' animation setting may have changed (reduced motion, spec 12.9). The window brief:
+        in canvas mode Windows' window messages are answered by window_chrome.NativeChrome."""
         try:
             if bytes(event_type) == b"windows_generic_MSG" and _native_windows():
                 from ctypes import wintypes
@@ -4385,9 +4400,58 @@ class BriefingWindow(hud.HudWindowFrame):
                 msg = wintypes.MSG.from_address(int(message))
                 if msg.message == _WM_SETTINGCHANGE:
                     QTimer.singleShot(0, holo.refresh_reduced_motion)
+                answer = self._chrome.handle(msg)
+                if answer is not None:
+                    return answer
         except Exception:  # noqa: BLE001 - a message this cannot read changes nothing
             pass
         return super().nativeEvent(event_type, message)
+
+    # ---- the window brief: Windows' own window behaviour in canvas mode (window_chrome) ------------------------------
+
+    def _sync_chrome(self) -> None:
+        """The window has an ordinary Windows window's styles exactly while the canvas is what it shows (on real
+        Windows only; full screen: Qt holds the style and gives it back after)."""
+        if not _native_windows() or not self.testAttribute(Qt.WidgetAttribute.WA_WState_Created):
+            return
+        try:
+            full = bool(self.windowState() & Qt.WindowState.WindowFullScreen)
+            self._chrome.sync(int(self.winId()), self.canvas_window(), apply=not full)
+        except Exception as exc:  # noqa: BLE001 - the window stays as Qt has it
+            logger.debug("Window: the native frame was not set (%s)", type(exc).__name__)
+
+    def native_chrome(self) -> Any:
+        """window_chrome.NativeChrome of this window (its wish and its answers)."""
+        return self._chrome
+
+    def set_page_chrome(self, report: Any) -> None:
+        """The page's top band as it reported it (board.protocol's "chrome" Request): Windows' hit-test reads it."""
+        self._page_chrome = report
+
+    def chrome_hit(self, pos: QPointF) -> int:
+        """What the point ``pos`` (this window's px) is for Windows (window_chrome.hit_test): the edges while the window
+        is resizable and not maximised; on Home's canvas, the page's top band as the caption but for its own controls,
+        and its maximise button as Windows' own; on another screen, its header's empty part as the caption."""
+        child = self.childAt(pos.toPoint())
+        band = None
+        header = False
+        reading = self.reading
+        if self.canvas_window() and child is not None:
+            board = reading.board_view()
+            if board is not None and board.isVisible() and reading.canvas_shown() \
+                    and (child is board or board.isAncestorOf(child)):
+                origin = QPointF(board.mapTo(self, QPoint(0, 0)))
+                band = window_chrome.band_from(self._page_chrome, origin, board.width())
+            elif child is reading.header and reading.header.isVisible():
+                header = True
+        edges = bool(self._resizable) and not self._filled()
+        return window_chrome.hit_test(pos, QSizeF(self.size()), edges=edges, band=band, header=header)
+
+    def set_max_hover(self, hover: bool) -> None:
+        self.maxHoverChanged.emit(bool(hover))
+
+    def call_soon(self, fn: Callable[[], Any]) -> None:
+        QTimer.singleShot(0, self, fn)
 
     def _render_ground(self, dpr: float, center: QPointF | None) -> QPixmap:
         """The hologram ground behind the reading view (void, the triangle grid, the vignette), the
@@ -4445,6 +4509,7 @@ class BriefingWindow(hud.HudWindowFrame):
             if shown:
                 self.show()                   # (changing a flag hides a window; the app turns the canvas on before it shows)
         self._sync_frame()
+        self._sync_chrome()
 
     def canvas_window(self) -> bool:
         """The reading view shows in canvas mode: the window may be maximised and full screen."""
@@ -4545,6 +4610,7 @@ class BriefingWindow(hud.HudWindowFrame):
         self._cut = self._frame_cut
         self.layout().setContentsMargins(*_PROMPT_MARGINS)
         self.set_resizable(False)
+        self._sync_chrome()                   # the prompt: Qt's frameless window again
         self.set_glow_anchor(self.prompt.orb)
         self.fit_prompt(force=True)
 
@@ -4609,12 +4675,14 @@ class BriefingWindow(hud.HudWindowFrame):
         else:
             self.setMinimumSize(minimum)      # filling the screen already: only the minimum it resizes down to
             self.setMaximumSize(_QWIDGETSIZE_MAX, _QWIDGETSIZE_MAX)
+        self._sync_chrome()                   # (first: a maximise below asks Windows with the window's own styles)
         if self.reading.canvas_on() and not self._canvas_sized:
             # The canvas opens maximised (the app remembers no size between starts); after that the owner's own
             # size holds for the session.
             self._canvas_sized = True
             self.setWindowState(self.windowState() | Qt.WindowState.WindowMaximized)
         self._sync_frame()
+        self._sync_chrome()
         self.reading.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _screen_room(self) -> QSize:

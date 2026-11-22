@@ -26,7 +26,9 @@ its place when it can't be.
                           ``canvas=True`` (or set_canvas before it starts): the page is Home itself - an opaque black
                           ground, so nothing of the window shows through and nothing flashes while it loads; the orb
                           and canvas messages (the newest of each waits for the page, never the queue's room);
-                          goRequested(word) (a corner button of the page: board.protocol.GO_WORDS)
+                          goRequested(word) (a corner button of the page: board.protocol.GO_WORDS). The window
+                          brief: chromeReported(request) (the page's top band: its controls' boxes and the maximise
+                          button's, for Windows' hit-test) and the chrome message (the maximise button's hover)
     BoardBridge           the one object the page sees on its web channel: post(kind, payload), checked against
                           board.protocol (the kinds on the list, the frame ids the app sent); anything else dropped and
                           counted (a log line names the kind only when it is on the list, else "unknown")
@@ -513,6 +515,8 @@ class BoardView(QWidget):
     bigStep = Signal(str)
     # The canvas, part 1: a corner button of the page (a word of board.protocol.GO_WORDS).
     goRequested = Signal(str)
+    # The window brief: the page's top band for Windows' hit-test (a protocol.Request of kind "chrome").
+    chromeReported = Signal(object)
     unavailable = Signal(str)              # the reason word (no_engine, sandbox, unsafe_flags, no_ready, ...)
 
     def __init__(self, parent: QWidget | None = None, *, start_delay_ms: int = START_DELAY_MS,
@@ -673,7 +677,7 @@ class BoardView(QWidget):
         self._counts[f"sent:{checked.type}"] += 1
         if self._phase == _READY:
             self._run(checked.text)
-        elif checked.type in ("orb", "canvas", "task"):
+        elif checked.type in ("orb", "canvas", "task", "chrome"):
             self._latest[checked.type] = checked.text    # the newest of each: a level never takes a frame's room
         else:
             if len(self._queue) >= QUEUE_CAP:
@@ -1055,6 +1059,8 @@ class BoardView(QWidget):
             self.bigStep.emit(request.step)
         elif kind == "go":
             self.goRequested.emit(request.to)
+        elif kind == "chrome":
+            self.chromeReported.emit(request)
 
     def _on_ready(self) -> None:
         if self._phase != _LOADING or self._load_pending:

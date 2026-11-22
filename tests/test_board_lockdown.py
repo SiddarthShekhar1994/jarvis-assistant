@@ -83,7 +83,7 @@ PROBE = Path(__file__).with_name("board_probe.py")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CASES = ("lockdown", "control", "media", "keys", "fallback", "shell", "kinds", "desk", "desk_x15", "ways", "lit", "big",
          "big_x15", "expiry", "reduced", "typed", "canvas", "canvas_layout", "canvas_ways", "canvas_fixes",
-         "canvas_resting")
+         "canvas_resting", "canvas_hear")
 # Round 5: what each probe's engine is told of reduced motion (tests/board_probe.py NO_REDUCED_MOTION, REDUCED_MOTION).
 NO_REDUCED_MOTION = "--force-prefers-no-reduced-motion"
 REDUCED_MOTION = "--force-prefers-reduced-motion"
@@ -2216,3 +2216,117 @@ class CanvasRestingTests(BoardProbeCase):
         self.assertLess(boxes["d1"][3], 140)                                # short, never a row of empty box ...
         self.assertLess(boxes["d1"][3], boxes["r2"][3])                     # ... shorter than a frame with rows
         self.assertEqual((look["overlaps"], look["outside"], look["on_orb"], look["lost"]), ([], [], [], []))
+
+
+class CanvasHearTests(BoardProbeCase):
+    """The window brief in the real engine at the owner's 1389x868 (tests/board_probe.py "canvas_hear"): HEY JARVIS's
+    three states, amber only for can't hear you; the can't-hear note with the microphone's name as text and its one
+    button; hostile names and messages; the top band the page reports for Windows' hit-test and the maximise button's
+    hover."""
+
+    AMBER = "rgb(245, 177, 74)"
+    STEAM = "Microphone (Steam Streaming Microphone)"
+
+    def hear(self) -> dict:
+        report = self.report("canvas_hear")
+        self.assertTrue(report["ready"])
+        self.assertTrue(all(report["sent"].values()))
+        return report
+
+    def test_hey_jarvis_listening_paused_and_cant_hear_you_amber_only_then(self) -> None:
+        report = self.hear()
+        words = {"listening": "Listening", "paused": "Paused", "cant_hear": "Can\u2019t hear you"}
+        for state, word in words.items():
+            hear = report[state]["hear"]
+            self.assertEqual(hear["text"], "Hey Jarvis" + word, state)         # the mark and the page's own word
+            self.assertIn("s-" + state, hear["cls"])
+            self.assertFalse(hear["cut"], state)
+            self.assertEqual(hear["color"] == self.AMBER, state == "cant_hear", state)
+            self.assertEqual(hear["dot"] == self.AMBER, state == "cant_hear", state)
+            self.assertEqual(report[state]["wake"], "", state)                 # (the app's few words not twice)
+            self.assertLessEqual(hear["box"][0] + hear["box"][2], report[state]["ask_left"], state)
+        self.assertIsNone(report["other"]["hear"])                             # another problem: the app's words
+        self.assertEqual(report["other"]["wake"], "Not listening: mic busy")
+        self.assertIsNone(report["off"]["hear"])
+        self.assertIsNone(report["off"]["note"])
+        for state in ("listening", "paused", "other"):
+            self.assertIsNone(report[state]["note"], state)                    # no note while he can hear
+
+    def test_the_note_says_plainly_what_to_do_with_its_one_button(self) -> None:
+        report = self.hear()
+        note = report["cant_hear"]["note"]
+        self.assertEqual(note["text"], "Jarvis can\u2019t hear you. The microphone is " + self.STEAM
+                         + ". Pick yours in Settings\u00a0>\u00a0Meetings.")
+        self.assertEqual(note["head"], "rgb(255, 208, 138)")                   # its first words amber
+        self.assertEqual((note["button"]["text"], note["button"]["cls"]), ("Pick a microphone", ["c-btn", "need"]))
+        self.assertFalse(note["cut"])
+        self.assertEqual(report["talk_deaf"]["note"]["text"],
+                         "Jarvis can\u2019t hear you. The microphone is Desk mic. Pick yours in Settings\u00a0>\u00a0Meetings.")
+        self.assertIsNone(report["talk_deaf"]["hear"])                         # "Hey Jarvis" off: the note alone
+        self.assertEqual(report["no_name"]["note"]["text"],
+                         "Jarvis can\u2019t hear you. Pick your microphone in Settings\u00a0>\u00a0Meetings.")
+        self.assertIsNone(report["no_button"]["note"]["button"])               # a button only while it can work
+        self.assertEqual((report["pressed"], report["went"]), ("Pick a microphone", ["mic_settings"]))
+
+    def test_the_note_stays_clear_of_the_frames_and_the_ask_line(self) -> None:
+        report = self.hear()
+        for name in ("cant_hear", "talk_deaf", "no_name", "no_button", "with_frames"):
+            look = report[name]
+            self.assertGreaterEqual(look["bl"][1], look["area_bottom"], name)     # under the frames' area
+            self.assertLessEqual(look["bl"][0] + look["bl"][2], look["ask_left"], name)
+            box = look["note"]["box"]
+            if look["note"]["button"] is not None:
+                button = look["note"]["button"]["box"]
+                self.assertLessEqual(button[0] + button[2], box[0] + box[2], name)   # inside the note
+
+    def test_a_hostile_name_is_text_and_nothing_of_it_is_an_attribute(self) -> None:
+        report = self.hear()
+        hostile = report["hostile"]
+        self.assertIn("<img src=x onerror=pwned=41>\u202eevil", hostile["note"]["text"])
+        self.assertEqual((hostile["foreign"], hostile["pwned"]), (0, "undefined"))
+        for name in ("cant_hear", "hostile", "with_frames"):
+            for attr in report[name]["attrs"]:
+                for mark in ("img", "pwned", "onerror", "Steam", "evil"):
+                    self.assertNotIn(mark, attr, name)
+            names = {attr.split("=", 1)[0] for attr in report[name]["attrs"]}
+            self.assertLessEqual(names, {"class", "type", "role", "aria-label", "aria-hidden", "aria-pressed",
+                                         "hidden"}, name)
+        self.assertEqual(set(report["page_refused"].values()), {"false"})    # the page's own checks
+        self.assertEqual(report["console"], {"console:warning": len(report["page_refused"])})
+
+    def test_the_top_band_the_page_reports_for_windows_hit_test(self) -> None:
+        report = self.hear()
+        chrome = report["chrome"]
+        page = report["chrome_page"]
+        self.assertEqual((chrome["w"], chrome["bar"]), (1389, 64))
+        self.assertEqual(chrome, page["look"])                                 # what was sent is what is there
+        max_box = page["max"]                                                  # left, top, right, bottom
+        self.assertLessEqual(chrome["max"][0], max_box[0])
+        self.assertGreaterEqual(chrome["max"][0] + chrome["max"][2], max_box[2])
+        self.assertEqual(len(chrome["holes"]), len(page["buttons"]) - 1)       # every button but maximise is a hole
+        for (left, top, right, bottom), hole in zip([b for b in page["buttons"] if b != max_box], chrome["holes"]):
+            self.assertLessEqual(hole[0], left)
+            self.assertLessEqual(hole[1], top)
+            self.assertGreaterEqual(hole[0] + hole[2], right)
+            self.assertGreaterEqual(hole[1] + hole[3], bottom)
+        wordmark = page["wordmark"]
+        for hole in chrome["holes"]:                                           # the wordmark is the caption: drag
+            self.assertTrue(hole[0] >= wordmark[2] or hole[0] + hole[2] <= wordmark[0])
+        self.assertEqual((report["resized"]["new"], report["resized"]["w"]), (1, 1280))   # a resize: sent again
+        self.assertEqual(report["more_pressed"], "More")
+        menu = report["more_open"]["menu"]
+        self.assertEqual(report["more_open"]["new"], 1)
+        self.assertIn([round(menu[0]) - 2, round(menu[1]) - 2, round(menu[2]) - round(menu[0]) + 4,
+                       round(menu[3]) - round(menu[1]) + 4], report["more_open"]["holes"])   # More's list: the page's
+
+    def test_the_maximise_buttons_hover_is_lit_by_the_app(self) -> None:
+        report = self.hear()
+        self.assertTrue(report["hover_on"]["hot"])
+        self.assertEqual(report["hover_on"]["maxBorder"], "rgb(255, 255, 255)")
+        self.assertFalse(report["hover_off"]["hot"])
+
+    def test_nothing_asks_the_network_and_nothing_was_refused(self) -> None:
+        report = self.hear()
+        self.assertEqual(report["blocked"], {})
+        self.assertEqual(list(report["allowed"]), ["jarvis-board"])
+        self.assertEqual(report["messages_refused"], {})
