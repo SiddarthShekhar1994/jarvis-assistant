@@ -298,7 +298,7 @@ class TalkControllerTests(unittest.TestCase):
         from briefing_reader.meeting_audio import DeviceInfo
 
         devices = [DeviceInfo("1", "Microphone (Steam Streaming Microphone)", True),
-                   DeviceInfo("2", "Microphone (FIFINE K678 Microphone)")]
+                   DeviceInfo("2", "Microphone (USB Desk Microphone)")]
         controller = self.make(audio=bytes(16_000 * 2 * 9), devices=devices)
         with self.assertLogs("briefing_reader.talk_ui", logging.INFO) as logs:
             controller.toggle()
@@ -312,12 +312,12 @@ class TalkControllerTests(unittest.TestCase):
         self.assertIn("(a virtual microphone)", "\n".join(logs.output))
         row = dict(controller.settings_rows())["Last talk used"]             # (part 5B: the picker is "Microphone")
         self.assertTrue(row.startswith("Microphone (Steam Streaming Microphone) (the Windows default) - a virtual"))
-        self.assertEqual(talk_ui.muted_text("Microphone (FIFINE K678 Microphone)", False),
-                         "I heard nothing at all from \u201cMicrophone (FIFINE K678 Microphone)\u201d (picked in "
+        self.assertEqual(talk_ui.muted_text("Microphone (USB Desk Microphone)", False),
+                         "I heard nothing at all from \u201cMicrophone (USB Desk Microphone)\u201d (picked in "
                          "Settings > Talk): is it muted?")
         self.assertEqual(talk_ui.muted_text(""), talk_ui.MUTED)
         for name, virtual in (("Headset Microphone (Oculus Virtual Audio Device)", True), ("CABLE Output (VB-Audio)", True),
-                              ("Stereo Mix (Realtek Audio)", True), ("Microphone (FIFINE K678 Microphone)", False),
+                              ("Stereo Mix (Realtek Audio)", True), ("Microphone (USB Desk Microphone)", False),
                               ("Desktop Microphone (3- Microsoft LifeCam HD-5000)", False)):
             with self.subTest(name=name):
                 self.assertEqual(talk.virtual_microphone(name), virtual)

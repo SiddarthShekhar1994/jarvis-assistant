@@ -6177,8 +6177,8 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
   log, in a line starting with "Catch-up:". Check that "Briefing catch-up" exists
   in Task Scheduler (rerun `install-schedule.ps1`).
 - **Talk hears nothing** ("I heard nothing"): the message names the microphone
-  Jarvis listened to. A virtual one (Steam Streaming Microphone, Oculus Virtual
-  Audio Device, a virtual cable) is silent unless its app runs, and Windows
+  Jarvis listened to. A virtual one (the kind a game launcher, VR software or
+  a virtual cable adds) is silent unless its app runs, and Windows
   sometimes makes one the default: pick your real microphone in Settings >
   Talk > Microphone (meetings use the same choice), or make it the default
   input in Windows Settings > System > Sound.

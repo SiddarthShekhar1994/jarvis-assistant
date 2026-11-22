@@ -40,7 +40,7 @@ from tests.ui_fakes import fonts, settle
 _app: QApplication | None = None
 
 STEAM = "Microphone (Steam Streaming Microphone)"
-FIFINE = "Microphone (FIFINE K678 Microphone)"
+DESK = "Microphone (USB Desk Microphone)"
 TALK = '\n[talk]\nenabled = true\nkey = "ctrl+alt+t"\n'
 PLAN_OFFER = offer_view.OfferInfo(1, "plan", "offer:1", offer_view.PLAN_KICKER, offer_view.PLAN_TITLE, "Plan my day",
                                   (offer_view.PLAN_META,), "Shall I plan your day, sir?")
@@ -55,7 +55,7 @@ def setUpModule() -> None:
 class Devices:
     """The talk's device library as a stand-in: listed, never opened."""
 
-    def __init__(self, names=(STEAM, FIFINE)) -> None:
+    def __init__(self, names=(STEAM, DESK)) -> None:
         self.ins = [DeviceInfo(str(index), name, index == 0) for index, name in enumerate(names)]
 
     def inputs(self):
@@ -162,12 +162,12 @@ class MicrophoneTests(Fixes):
         self.reading.settings_page.select_group(talk_ui.SETTINGS_KEY)
         settle()
         self.assertEqual(row.value_label.text(), f"Follows the Windows default ({STEAM})")
-        self.assertEqual(row.menu_items(), [meetings_view.FOLLOW_DEFAULT, STEAM, FIFINE])
-        row.choose(FIFINE)                                                # the owner's pick, never Jarvis's
+        self.assertEqual(row.menu_items(), [meetings_view.FOLLOW_DEFAULT, STEAM, DESK])
+        row.choose(DESK)                                                # the owner's pick, never Jarvis's
         saved = meetings.DevicePrefs(meetings.meetings_root(self.c.config)).microphone
-        self.assertEqual(saved, FIFINE)
-        self.assertEqual(talk._picked(), FIFINE)
-        self.assertEqual(row.value_label.text(), FIFINE)
+        self.assertEqual(saved, DESK)
+        self.assertEqual(talk._picked(), DESK)
+        self.assertEqual(row.value_label.text(), DESK)
 
     def test_the_meetings_row_says_the_same_in_plain_words(self) -> None:
         panel = meetings_view.MeetingsSettingsPanel()
@@ -180,7 +180,7 @@ class MicrophoneTests(Fixes):
         talk.silent_mics = lambda: [STEAM]
         talk.refresh_mic_row()
         row = talk.mic_row
-        self.assertEqual(row.menu_items(), [meetings_view.FOLLOW_DEFAULT, STEAM + " (silent)", FIFINE])
+        self.assertEqual(row.menu_items(), [meetings_view.FOLLOW_DEFAULT, STEAM + " (silent)", DESK])
         picked: list[str] = []
         row.picked.disconnect()
         row.picked.connect(picked.append)

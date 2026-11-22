@@ -24,7 +24,7 @@ from briefing_reader import hud_overlay, talk_ui, ui, wake, wake_listen, wake_ui
 from briefing_reader.wake_ui import HandoffStream, WakeController, WakeStore
 
 APP = QApplication.instance() or QApplication([])
-MIC = "Microphone (FIFINE K678 Microphone)"
+MIC = "Microphone (USB Desk Microphone)"
 STEAM = "Microphone (Steam Streaming Microphone)"
 
 
@@ -575,7 +575,7 @@ class ControllerTests(unittest.TestCase):
             self.client.on_line({"state": "virtual_mic", "mic": STEAM, "default": True})
             self.heard()
             controller.shutdown()
-        self.assertFalse(any("FIFINE" in line or "Steam" in line for line in logs.output))
+        self.assertFalse(any("USB Desk" in line or "Steam" in line for line in logs.output))
 
 
 class AppHookTests(unittest.TestCase):
