@@ -1,7 +1,7 @@
 """The Dock (HOLOGRAM_SPEC section 11.1, labelled as in the approved motion prototype): the window's left edge.
 
 Slots, top to bottom: Home (the live mini orb), a hairline, Briefing, Approvals, Live, Memory,
-Follow-ups, Meetings, Agents (only while [standing] is on), a second hairline and Desktop (only while [desktop] is on),
+Follow-ups, Meetings, Agents (only while [standing] is on), Documents (only while [docs] is on), a second hairline and Desktop (only while [desktop] is on),
 flexible space, Settings. Desktop is
 not a screen but the switch to the HUD over the desktop (the approved Switch prototype): a dashed outline, and
 labelled a small HUD tag and "<HUD key> switches" under it; it never becomes current (like Settings).
@@ -25,8 +25,8 @@ Public API
 ==========
 
 Constants: slot keys ``HOME``, ``BRIEFING``, ``APPROVALS``, ``LIVE``, ``MEMORY``, ``FOLLOWUPS``,
-``MEETINGS``, ``AGENTS``, ``DESKTOP``, ``SETTINGS`` (``SLOTS`` in order), ``LABELS``, ``SHORTCUTS`` (Ctrl+1 .. Ctrl+9,
-Ctrl+,),
+``MEETINGS``, ``AGENTS``, ``DOCS``, ``DESKTOP``, ``SETTINGS`` (``SLOTS`` in order), ``LABELS``, ``SHORTCUTS`` (Ctrl+1 ..
+Ctrl+9, Ctrl+0 Documents, Ctrl+,),
 ``GLYPHS``; Live activity ``LIVE_IDLE``, ``LIVE_WORKING``, ``LIVE_HOLD``.
 
 ``Dock(parent=None, labelled=False)``
@@ -41,6 +41,7 @@ Ctrl+,),
     suggestion"), ``set_memory_new(bool)`` (a note was saved: "Memory, new"), ``set_followups(n)``,
     ``set_recording(bool)`` (a coral dot on Meetings while a meeting records: "Meetings, recording");
     ``set_agents_new(bool)`` (a cyan dot on Agents: a report or receipt came in since the screen was seen);
+    ``set_docs_waiting(n)`` (an amber dot on Documents: Jarvis's changes wait for Keep in n items: "3 waiting on you");
     ``set_hud_key(label)`` (the HUD key as people write it, "Ctrl+Alt+H": the labelled Desktop's hint and its
     description; "" none), ``hud_key()``, ``desktop_hint()`` (the hint row under Desktop);
     ``set_orb_look(base, muted=False, offline=False)`` for the Home slot's mini orb; ``button(key)``,
@@ -70,15 +71,18 @@ MEMORY = "memory"
 FOLLOWUPS = "followups"
 MEETINGS = "meetings"
 AGENTS = "agents"          # the standing agents and rules ([standing])
+DOCS = "documents"         # the documents and datasheets ([docs]; build plan item 5)
 DESKTOP = "desktop"        # not a screen: the switch to the HUD over the desktop ([desktop])
 SETTINGS = "settings"
-SLOTS = (HOME, BRIEFING, APPROVALS, LIVE, MEMORY, FOLLOWUPS, MEETINGS, AGENTS, DESKTOP, SETTINGS)
+SLOTS = (HOME, BRIEFING, APPROVALS, LIVE, MEMORY, FOLLOWUPS, MEETINGS, AGENTS, DOCS, DESKTOP, SETTINGS)
 LABELS = {HOME: "Home", BRIEFING: "Briefing", APPROVALS: "Approvals", LIVE: "Live", MEMORY: "Memory",
-          FOLLOWUPS: "Follow-ups", MEETINGS: "Meetings", AGENTS: "Agents", DESKTOP: "Desktop", SETTINGS: "Settings"}
+          FOLLOWUPS: "Follow-ups", MEETINGS: "Meetings", AGENTS: "Agents", DOCS: "Documents", DESKTOP: "Desktop",
+          SETTINGS: "Settings"}
 SHORTCUTS = {HOME: "Ctrl+1", BRIEFING: "Ctrl+2", APPROVALS: "Ctrl+3", LIVE: "Ctrl+4", MEMORY: "Ctrl+5",
-             FOLLOWUPS: "Ctrl+6", MEETINGS: "Ctrl+7", DESKTOP: "Ctrl+8", AGENTS: "Ctrl+9", SETTINGS: "Ctrl+,"}
+             FOLLOWUPS: "Ctrl+6", MEETINGS: "Ctrl+7", DESKTOP: "Ctrl+8", AGENTS: "Ctrl+9", DOCS: "Ctrl+0",
+             SETTINGS: "Ctrl+,"}
 GLYPHS = {BRIEFING: "briefing", APPROVALS: "approvals", LIVE: "live", MEMORY: "memory", FOLLOWUPS: "followups",
-          MEETINGS: "meetings", AGENTS: "agents", DESKTOP: "desktop", SETTINGS: "settings"}
+          MEETINGS: "meetings", AGENTS: "agents", DOCS: "documents", DESKTOP: "desktop", SETTINGS: "settings"}
 DESKTOP_TAG = "HUD"
 DESKTOP_HINT = "switches"
 DESKTOP_DESCRIPTION = "Switches Jarvis to the HUD over your desktop"
@@ -354,6 +358,8 @@ class DockButton(QAbstractButton):
             holo.paint_new_dot(painter, center, color=self._dot_color())
 
     def _dot_color(self) -> str:
+        if self._key == DOCS:                        # Jarvis's changes wait for Keep: amber, what needs the owner
+            return holo.AMBER
         return holo.ALERT if self._key == MEETINGS else holo.HOLO
 
 
@@ -535,6 +541,7 @@ class Dock(QWidget):
         self._memory_new = False
         self._recording = False
         self._agents_new = False
+        self._docs_waiting = 0
         self._hud_key = ""
         self._tip: DockTooltip | None = None
         self._tip_for: DockButton | None = None
@@ -562,6 +569,7 @@ class Dock(QWidget):
         # rail is exactly as before them.
         self._buttons[DESKTOP].hide()
         self._buttons[AGENTS].hide()
+        self._buttons[DOCS].hide()                    # [docs] shows it (docs_ui)
         self._sync_desktop_rows()
         self._slide_anim = QVariantAnimation(self)
         self._slide_anim.setStartValue(0.0)
@@ -779,6 +787,16 @@ class Dock(QWidget):
         self._buttons[AGENTS].set_dot(self._agents_new)
         self._update_name(AGENTS)
 
+    def set_docs_waiting(self, count: int) -> None:
+        """Jarvis's changes wait for Keep in ``count`` documents or sheets: an amber dot on Documents (never a ping)."""
+        self._docs_waiting = max(0, int(count))
+        self._buttons[DOCS].set_dot(self._docs_waiting > 0, ping=False)
+        self._buttons[DOCS].update()
+        self._update_name(DOCS)
+
+    def docs_waiting(self) -> int:
+        return self._docs_waiting
+
     def set_live_activity(self, activity: str) -> None:
         self._live = activity if activity in (LIVE_IDLE, LIVE_WORKING, LIVE_HOLD) else LIVE_IDLE
         self._buttons[LIVE].set_dot(self._live != LIVE_IDLE, ping=False)
@@ -818,6 +836,8 @@ class Dock(QWidget):
             return "recording"
         if key == AGENTS and self._agents_new:
             return "new"
+        if key == DOCS and self.docs_waiting():
+            return f"{self.docs_waiting()} waiting on you"
         return ""
 
     def accessible_name(self, key: str) -> str:
@@ -949,7 +969,7 @@ class Dock(QWidget):
     # ---- shortcuts -----------------------------------------------------------------------------
 
     def install_shortcuts(self, widget: QWidget) -> list[QShortcut]:
-        """Window-wide shortcuts (Ctrl+1 .. Ctrl+9, Ctrl+,) on ``widget`` that open visible slots."""
+        """Window-wide shortcuts (Ctrl+1 .. Ctrl+9, Ctrl+0, Ctrl+,) on ``widget`` that open visible slots."""
         shortcuts = []
         for key in SLOTS:
             shortcut = QShortcut(QKeySequence(SHORTCUTS[key]), widget)

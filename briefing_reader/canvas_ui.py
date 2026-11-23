@@ -100,8 +100,8 @@ MIC_GROUP = "talk"                # Settings > Talk (talk_ui.SETTINGS_KEY): wher
 
 # A page button's word -> the Dock's slot it presses.
 _SCREEN_SLOTS = {"briefing": dock_mod.BRIEFING, "approvals": dock_mod.APPROVALS, "followups": dock_mod.FOLLOWUPS,
-                 "meetings": dock_mod.MEETINGS, "agents": dock_mod.AGENTS, "live": dock_mod.LIVE,
-                 "memory": dock_mod.MEMORY, "settings": dock_mod.SETTINGS}
+                 "meetings": dock_mod.MEETINGS, "agents": dock_mod.AGENTS, "documents": dock_mod.DOCS,
+                 "live": dock_mod.LIVE, "memory": dock_mod.MEMORY, "settings": dock_mod.SETTINGS}
 _ORB_STATES = {orb_mod.IDLE: "idle", orb_mod.LISTENING: "listening", orb_mod.THINKING: "thinking",
                orb_mod.SPEAKING: "speaking", orb_mod.NEEDS: "needs", orb_mod.WAITING: "waiting"}
 

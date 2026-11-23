@@ -239,6 +239,8 @@ class Plan:
     # The new look, part 6: the answer's "topic" and "frames" as board.ask_frames checked them (an AskFrames; a frame
     # that fails is dropped there, never the plan). Shown on the board, never logged but as counts.
     frames: Any = field(default=None, repr=False, compare=False)
+    # Documents (build plan item 5): doc_job's (kind "doc" | "sheet", the name as written; acted on only when offered).
+    doc: tuple[str, str] = field(default=(), repr=False)
 
 
 @dataclass(frozen=True)
@@ -569,8 +571,13 @@ def _plan_from(data: Any, *, allow_search: bool, allow_web: bool = False, fallba
     kept = tuple(line.strip() for line in lines if line.strip())
     wanted = data.get("standing_job")
     standing = wanted["kind"] if isinstance(wanted, dict) and wanted.get("kind") in ("agent", "rule") else ""
+    wanted = data.get("doc_job")
+    doc: tuple[str, str] = ()
+    if isinstance(wanted, dict) and wanted.get("kind") in ("doc", "sheet") and isinstance(wanted.get("name", ""), str):
+        doc = (wanted["kind"], " ".join(str(wanted.get("name") or "").split())[:60])
     # Part 6: the topic and the typed frames, checked strictly; a frame that fails is dropped, never the plan.
-    return Plan(say, question, kept, search, fallback, web, remember, agent, standing, ask_frames.check_answer(data))
+    return Plan(say, question, kept, search, fallback, web, remember, agent, standing, ask_frames.check_answer(data),
+                doc=doc)
 
 
 def _fallback_plan(text: str, *, allow_search: bool, allow_web: bool = False,

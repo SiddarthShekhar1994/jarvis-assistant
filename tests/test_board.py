@@ -805,7 +805,7 @@ class KeyTests(unittest.TestCase):
     def test_the_window_s_keys(self) -> None:
         names = [QKeySequence(Qt.KeyboardModifier.ControlModifier | key).toString() for key in view.WINDOW_KEYS]
         self.assertEqual(names, ["Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+6", "Ctrl+7", "Ctrl+8",
-                                 "Ctrl+9", "Ctrl+,", "Ctrl+K", "Ctrl+Space", "Ctrl+M", "Ctrl+B"])
+                                 "Ctrl+9", "Ctrl+0", "Ctrl+,", "Ctrl+K", "Ctrl+Space", "Ctrl+M", "Ctrl+B"])
 
     def test_only_ctrl_and_one_of_them(self) -> None:
         ctrl, shift = Qt.KeyboardModifier.ControlModifier, Qt.KeyboardModifier.ShiftModifier

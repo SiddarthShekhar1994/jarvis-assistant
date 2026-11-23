@@ -39,6 +39,10 @@ AN AGENT ("agent")
   "notes": true when the owner's saved notes would help.
 - "proposes": the cards it may line up: "todo", "calendar", "reply".
 - "report": "every_run" or "when_needed".
+- "lands" (only when the owner asks for the reports to go into one of his documents or sheets): {"kind": "doc" |
+  "sheet", "name": its name as the owner says it, "columns": for a new sheet, at most 8 columns, each {"name",
+  "type": text | number | date | choice | checkbox | link, "choices"}}. A document gets each run's report as a
+  section; a sheet gets the rows each run finds. Everything it writes waits for the owner's Keep.
 
 BOTH
 - "name": a short name for the job (at most 40 characters). "say": one short sentence for the owner about what you

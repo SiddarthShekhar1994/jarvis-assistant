@@ -754,6 +754,114 @@ def from_followups(items: Iterable[Any], *, frame_id: str, now: datetime | None 
                          body={"rows": _capped(rows, _mail_more)}),))
 
 
+# --------------------------------------------------------------------------
+# Documents and datasheets (build plan item 5, part 3)
+# --------------------------------------------------------------------------
+
+DOC_WORD = "DOC"
+SHEET_WORD = "SHEET"
+NEW_WORD = "NEW"
+CHANGED_WORD = "CHANGED"
+DOC_EMPTY = "Nothing written yet."
+SHEET_NO_COLUMNS = "No columns yet."
+SHEET_NO_ROWS = "No rows yet."
+CHANGE_WAITS_ONE = "Change waits on you"
+CHANGES_WAIT = "{count} changes wait on you"
+ROW_WAITS_ONE = "1 row waits on you"
+ROWS_WAIT = "{count} rows wait on you"
+NEW_SECTION = "New section"
+
+
+def _count_words(count: int, one: str, many: str) -> str:
+    return f"{count:,} {one if count == 1 else many}"
+
+
+def _doc_waits(count: int) -> str:
+    if count <= 0:
+        return ""
+    return CHANGE_WAITS_ONE if count == 1 else CHANGES_WAIT.format(count=count)
+
+
+def from_doc(name: Any, text: Any, pending: Iterable[Any] = (), *, frame_id: str) -> Built:
+    """A document as a text frame: its name, "DOC · 1,240 WORDS", the start of its text without markdown, its headings
+    as rows (CHANGED where a change that waits names one, NEW for a section a change would add) and the amber chip
+    "Change waits on you" while changes wait. Every word cleaned and cut."""
+    from ..docs import model as doc_model
+
+    frame_id = _check_id(frame_id)
+    body_text = str(text or "") if isinstance(text, str) else ""
+    words = doc_model.word_count(body_text)
+    items = [item for item in pending or () if isinstance(item, dict)]
+    changed = {doc_model.fold(item.get("heading", "")) for item in items if item.get("op") == "replace"}
+    rows: list[dict[str, Any]] = []
+    for heading in doc_model.headings(body_text):
+        if heading.level > 2:
+            continue
+        rows.append({"lead": "", "text": clean(heading.title, protocol.TITLE_CAP),
+                     "meta": CHANGED_WORD if heading.key in changed else ""})
+    for item in items:
+        if item.get("op") != "add":
+            continue
+        found = doc_model.headings(str(item.get("text") or ""))
+        title = found[0].title if found else NEW_SECTION
+        rows.append({"lead": "", "text": clean(title, protocol.TITLE_CAP), "meta": NEW_WORD})
+    rows.sort(key=lambda row: 0 if row["meta"] else 1)
+    plain = clean_text(doc_model.plain_text(body_text), protocol.TEXT_CAP)
+    title = clean(name, protocol.TITLE_CAP) or "Document"
+    meta = f"{DOC_WORD}{DOT}" + _count_words(words, "WORD", "WORDS")
+    if not plain and not rows:
+        return Built((_frame(frame_id, "text", title, meta=meta, waits=_doc_waits(len(items)),
+                             body={"text": DOC_EMPTY}),))
+    body: dict[str, Any] = {"text": plain or DOC_EMPTY}
+    if rows:
+        body["rows"] = _capped(rows, _text_more)
+    return Built((_frame(frame_id, "text", title, meta=meta, waits=_doc_waits(len(items)), body=body),))
+
+
+def _sheet_waits(items: list[dict[str, Any]]) -> str:
+    counted = [item for item in items if item.get("kind") != "columns"]
+    if not counted:
+        return CHANGE_WAITS_ONE if items else ""
+    if all(item.get("kind") == "row" for item in counted):
+        return ROW_WAITS_ONE if len(counted) == 1 else ROWS_WAIT.format(count=len(counted))
+    return _doc_waits(len(counted))
+
+
+def from_sheet(name: Any, sheet: Any, *, frame_id: str) -> Built:
+    """A sheet as a table frame: its first 6 columns, at most 12 rows - the rows that wait for Keep first - the source
+    "SHEET · 42 ROWS" and the amber chip "3 rows wait on you" while rows wait (a sheet with no columns or rows yet: a
+    text frame that says so). Every cell cleaned and cut."""
+    from ..docs import model as doc_model
+
+    frame_id = _check_id(frame_id)
+    title = clean(name, protocol.TITLE_CAP) or "Sheet"
+    kept = list(getattr(sheet, "rows", ()) or ())
+    items = [item for item in getattr(sheet, "pending", ()) or () if isinstance(item, dict)]
+    columns = list(getattr(sheet, "columns", ()) or ())
+    for item in items:                               # a new sheet's columns wait with its first rows
+        if item.get("kind") == "columns":
+            for raw in item.get("columns") or ():
+                column = doc_model.column_from(raw)
+                if column is not None and column.id not in {c.id for c in columns}:
+                    columns.append(column)
+    source = f"{SHEET_WORD}{DOT}" + _count_words(len(kept), "ROW", "ROWS")
+    waits = _sheet_waits(items)
+    if not columns:
+        return Built((_frame(frame_id, "text", title, meta=source, waits=waits, body={"text": SHEET_NO_COLUMNS}),))
+    shown = columns[:protocol.TABLE_COLUMNS_CAP]
+    cells_of = [dict(item.get("cells") or {}) for item in items if item.get("kind") == "row"]
+    cells_of += [row.cells for row in kept]
+    if not cells_of:
+        return Built((_frame(frame_id, "text", title, meta=source, waits=waits, body={"text": SHEET_NO_ROWS}),))
+    rows = [[clean(doc_model.show_value(column, cells.get(column.id)), protocol.CELL_CAP) for column in shown]
+            for cells in cells_of[:protocol.TABLE_ROWS_CAP]]
+    body = {"columns": [clean(column.name, protocol.COLUMN_CAP) or "-" for column in shown], "rows": rows,
+            "unit": "", "changed": -1, "change": "", "source": cut(source, protocol.SOURCE_CAP)}
+    return Built((_frame(frame_id, "table", title, meta=_count_words(len(kept), "row", "rows"), waits=waits,
+                         body=body),))
+
+
 __all__ = ["Built", "DOT", "ELLIPSIS", "FOLLOWUPS_TITLE", "FREE_TITLE", "MORE", "PICTURE_WIDTH", "REDIRECTED",
            "RESEARCH_TITLE", "TODOS_EMPTY", "TODOS_TITLE", "TOO_BIG", "WAITS_EMAIL", "WAITS_REPLY", "board_jpeg", "clean",
-           "clean_text", "cut", "cut_host", "from_capture", "from_followups", "from_picture", "from_research", "from_todos", "jpeg_size"]
+           "clean_text", "cut", "cut_host", "from_capture", "from_doc", "from_followups", "from_picture", "from_research",
+           "from_sheet", "from_todos", "jpeg_size"]

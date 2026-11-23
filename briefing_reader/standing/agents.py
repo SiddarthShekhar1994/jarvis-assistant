@@ -17,7 +17,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
@@ -39,6 +39,31 @@ FIXED_COMMAND = ("Do the job below for the owner from <calendar>, <memory> and <
 MAX_LINES = 4
 REPORT_CAP = 3000
 SUMMARY_CAP = 120
+# Build plan item 5: an agent whose reports land in a sheet is shown its columns (never its rows) and may give rows.
+MAX_ROWS = 20
+CELL_CAP = 500
+SHEET_COMMAND = (" Its rows go into the sheet in <sheet>: give each new thing it found as one row in \"rows\", its "
+                 "cells in the columns' order, as text.")
+
+
+def rows_property(columns: int) -> dict[str, Any]:
+    """The schema's "rows" for a sheet of ``columns`` columns (at most MAX_ROWS rows)."""
+    return {"type": "array", "maxItems": MAX_ROWS,
+            "items": {"type": "array", "maxItems": max(1, columns),
+                      "items": {"type": "string", "maxLength": CELL_CAP}},
+            "description": "New rows for <sheet>, each a list of cells in its columns' order (empty: \"\")."}
+
+
+def sheet_block(name: str, columns: Sequence[Any]) -> str:
+    """<sheet name="..."> with its columns' names and types only: an agent never sees a sheet's rows (Jarvis removes
+    duplicates on this PC)."""
+    heads = []
+    for column in columns:
+        choices = getattr(column, "choices", ()) or ()
+        extra = f" ({', '.join(data(choice, 40) for choice in choices)})" if choices else ""
+        heads.append(f"{data(column.name, 40)} [{column.type}{extra}]")
+    title = data(name, 60).replace('"', "'")
+    return f'<sheet name="{title}">\ncolumns: ' + " | ".join(heads) + "\n</sheet>"
 
 
 @dataclass(frozen=True)
@@ -47,6 +72,7 @@ class AgentAnswer:
     summary: str
     needs_owner: bool
     lines: tuple[str, ...] = field(default=())
+    rows: tuple[tuple[str, ...], ...] = field(default=())   # a sheet's new rows (only when its run was offered them)
 
     def __repr__(self) -> str:
         return f"AgentAnswer({len(self.report)} chars, {len(self.lines)} line(s), needs {self.needs_owner})"
@@ -74,7 +100,7 @@ def _mail_header(number: int, item: Item) -> str:
 
 def agent_prompt(agent: Agent, items: Sequence[Item], events: Sequence[EventRow], notes: Sequence[str], *,
                  now: datetime, time_zone_name: str, own: Sequence[str],
-                 aliases: Sequence[str]) -> tuple[str, ContextIndex]:
+                 aliases: Sequence[str], sheet: tuple[str, Sequence[Any]] | None = None) -> tuple[str, ContextIndex]:
     index = ContextIndex(aliases=frozenset(aliases), own_addresses=frozenset(address.casefold() for address in own),
                          command=agent.words)
     blocks = [f"<now>{now.strftime('%A %Y-%m-%d %H:%M')} (time zone {data(time_zone_name, 60) or 'unknown'})</now>",
@@ -109,21 +135,37 @@ def agent_prompt(agent: Agent, items: Sequence[Item], events: Sequence[EventRow]
         blocks.append("<mail>No new mail for this job.</mail>")
     for address in own:
         index.add_address(address, SOURCE_OWNER)
-    blocks.append(f"<command>{FIXED_COMMAND}{data(agent.words, 600)}</command>")
+    command = FIXED_COMMAND
+    if sheet is not None:
+        blocks.append(sheet_block(sheet[0], sheet[1]))
+        command = FIXED_COMMAND.replace("The owner's own words", SHEET_COMMAND.strip() + " The owner's own words")
+    blocks.append(f"<command>{command}{data(agent.words, 600)}</command>")
     return "\n\n".join(blocks) + "\n", index
 
 
-def read_agent(event: Mapping[str, Any], init: Any) -> AgentAnswer | AskFailure:
+def agent_reader(columns: int) -> Callable[[Mapping[str, Any], Any], AgentAnswer | AskFailure]:
+    """read_agent for a run that was offered "rows" for a sheet of ``columns`` columns (0: none offered)."""
+    return lambda event, init: read_agent(event, init, columns=columns)
+
+
+def read_agent(event: Mapping[str, Any], init: Any, *, columns: int = 0) -> AgentAnswer | AskFailure:
     data_ = structured(event, init)
     if isinstance(data_, AskFailure):
         return data_
+    rows_ = data_.get("rows")
+    if rows_ is not None:
+        if (not columns or not isinstance(rows_, list) or len(rows_) > MAX_ROWS
+                or not all(isinstance(row, list) and len(row) <= columns
+                           and all(isinstance(cell, str) and len(cell) <= CELL_CAP for cell in row) for row in rows_)):
+            return failure(GARBLED, "shape")
+    rows = tuple(tuple(row) for row in rows_ or ())
     report, summary, needs = data_.get("report"), data_.get("summary"), data_.get("needs_owner")
     lines = data_.get("lines") or []
     if (not isinstance(report, str) or len(report) > REPORT_CAP or not isinstance(summary, str)
             or len(summary) > SUMMARY_CAP or not isinstance(needs, bool) or not isinstance(lines, list)
             or len(lines) > MAX_LINES or not all(isinstance(line, str) and len(line) <= 6000 for line in lines)):
         return failure(GARBLED, "shape")
-    return AgentAnswer(report.strip(), " ".join(summary.split()), needs, tuple(lines))
+    return AgentAnswer(report.strip(), " ".join(summary.split()), needs, tuple(lines), rows)
 
 
 def _sender_of(items: Sequence[Item], account: str, thread: str, msgid: str, gmid: str) -> str:

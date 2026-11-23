@@ -122,11 +122,16 @@ def check_revision(body: str, draft: str, words: str) -> str:
         return REVISE_TOO_LONG
     if _bad_character(body):
         return REVISE_CONTROL
-    seen = f"{draft or ''}\n{words or ''}"
-    # The draft and words as given and as the run saw them (data(): < > | shown as other characters), all NFKC, so a
+    return new_link_or_address(body, f"{draft or ''}\n{words or ''}")
+
+
+def new_link_or_address(text: str, seen: str) -> str:
+    """REVISE_NEW_ADDRESS / REVISE_NEW_LINK when ``text`` has an email address or a link that ``seen`` (what the run was
+    given) does not, else "" (shared with the documents' check, ask.docs_mode)."""
+    # What the run was given as given and as it saw it (data(): < > | shown as other characters), all NFKC, so a
     # full-width at sign or full stop is the address or link it looks like, and a link the run handed back as shown is known.
     known = unicodedata.normalize("NFKC", f"{seen}\n{seen.translate(_SHOWN)}")
-    text = unicodedata.normalize("NFKC", body)
+    text = unicodedata.normalize("NFKC", text)
     if _addresses(text) - _addresses(known):
         return REVISE_NEW_ADDRESS
     known_links = _links(known)
@@ -135,6 +140,11 @@ def check_revision(body: str, draft: str, words: str) -> str:
         if "/" in link or _host_of(link) not in known_hosts:   # a bare host of a link the draft has is that site
             return REVISE_NEW_LINK
     return ""
+
+
+def bad_character(text: str) -> bool:
+    """A control or invisible character other than a line break or a tab (shared with ask.docs_mode)."""
+    return _bad_character(text)
 
 
 def _host_of(link: str) -> str:

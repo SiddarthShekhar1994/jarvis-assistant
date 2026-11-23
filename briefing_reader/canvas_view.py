@@ -9,7 +9,13 @@ with the orb and the corners' controls drawn in it (board/assets) - and three na
                               * ONE tile at the left (an open offer's, else an error's), at the top of the frames'
                                 area in a holder of its own: the page is told its box (``side_box``, canvas_ui's
                                 "side") and never puts a frame, the task card or a group's head under it; while a
-                                frame is open big the holder hides (``set_side_covered``): it never covers it.
+                                frame is open big the holder hides (``set_side_covered``): it never covers it;
+                              * the document pane (build plan item 5) under that tile at the left, in a holder of its
+                                own (``set_doc_pane`` / ``show_doc_pane(wide)`` / ``hide_doc_pane``): 36 % of the page
+                                (DOC_MIN to DOC_MAX px), or the frames' whole area when ``wide``, from under the tile
+                                down to just above the ask column; the side box the page keeps clear is the union of
+                                the two; it hides while a frame is open big and never takes the keyboard from the ask
+                                line (nothing here gives it the focus).
                             Until the page is up it is plain black with the ask line: the window shows at once and the
                             canvas takes over when its page is ready, with nothing flashing (the view's own ground is
                             the same black).
@@ -44,6 +50,10 @@ ORB_CORNER_INSET = 112        # the orb's centre in its corner, from the page's 
 ORB_CORNER_REACH = 104        # ... and its reach from there, glow included (the toast keeps clear of it)
 SIDE_TOP = 64                 # the one tile at the left: at the top of the frames' area (the page's BOARD_TOP) ...
 SIDE_WIDTH = 290              # ... this wide at least (its buttons' words always whole: ``fit_width``)
+DOC_SHARE = 0.36              # the document pane: this share of the page wide ...
+DOC_MIN = 360                 # ... at least ...
+DOC_MAX = 640                 # ... at most (when it is not wide)
+DOC_GAP = 12                  # under the side tile, and above the ask column
 
 _SPEAKING = "speaking"
 
@@ -101,6 +111,16 @@ class _SideHolder(QWidget):
         self._page.place_side_tile()
 
 
+class _DocHolder(QWidget):
+    """The document pane's holder: see-through; hidden while a frame is open big."""
+
+    def __init__(self, page: "CanvasPage") -> None:
+        super().__init__(page)
+        self.setObjectName("canvasDoc")
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+
 class CanvasPage(QWidget):
     """See the module doc."""
 
@@ -118,6 +138,11 @@ class CanvasPage(QWidget):
         self._side_sent: tuple[int, int] = (0, 0)
         self.side_holder = _SideHolder(self)
         self.side_holder.hide()
+        self._doc: QWidget | None = None
+        self._doc_shown = False
+        self._doc_wide = False
+        self.doc_holder = _DocHolder(self)
+        self.doc_holder.hide()
         self.column = _Column(self)
         layout = QVBoxLayout(self.column)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -204,6 +229,7 @@ class CanvasPage(QWidget):
         holder = self.side_holder
         if tile is None or not shiboken6.isValid(tile) or tile.parentWidget() is not holder:
             holder.hide()
+            self._place_doc()
             self._say_side()
             return
         width = self._side_width(tile)
@@ -213,11 +239,10 @@ class CanvasPage(QWidget):
         tile.setGeometry(0, 0, width, height)
         holder.setVisible(not tile.isHidden() and not self._side_covered)
         holder.raise_()
+        self._place_doc()
         self._say_side()
 
-    def side_box(self) -> tuple[int, int]:
-        """(width, height) of the tile the page must keep its frames clear of, in px from the frames' area's top left;
-        (0, 0) while no tile shows (also while it is covered by open big: its room is kept)."""
+    def _tile_box(self) -> tuple[int, int]:
         tile = self._side
         if tile is None or not shiboken6.isValid(tile) or tile.parentWidget() is not self.side_holder:
             return 0, 0
@@ -225,6 +250,76 @@ class CanvasPage(QWidget):
             return 0, 0
         geometry = self.side_holder.geometry()
         return max(0, geometry.width()), max(0, geometry.height())
+
+    def side_box(self) -> tuple[int, int]:
+        """(width, height) of what the page must keep its frames clear of, in px from the frames' area's top left: the
+        tile and the document pane together; (0, 0) while neither shows (also while covered by open big: their room
+        is kept)."""
+        width, height = self._tile_box()
+        if self._doc_pane_up():
+            pane = self.doc_rect()
+            width = max(width, pane.right() + 1 - EDGE)
+            height = max(height, pane.bottom() + 1 - SIDE_TOP)
+        return max(0, width), max(0, height)
+
+    # ---- the document pane (build plan item 5) -----------------------------------------------------------------
+
+    def set_doc_pane(self, pane: QWidget | None) -> None:
+        """The document pane's widget (docs_ui's); None: none."""
+        self._doc = pane
+        if pane is not None and pane.parentWidget() is not self.doc_holder:
+            pane.setParent(self.doc_holder)
+        self._place_doc()
+        self._say_side()
+
+    def doc_pane(self) -> QWidget | None:
+        return self._doc
+
+    def show_doc_pane(self, wide: bool = False) -> None:
+        """The pane shows (``wide``: over the frames' whole area). It never takes the focus."""
+        self._doc_shown, self._doc_wide = True, bool(wide)
+        self._place_doc()
+        self._say_side()
+
+    def hide_doc_pane(self) -> None:
+        self._doc_shown = False
+        self._place_doc()
+        self._say_side()
+
+    def doc_pane_shown(self) -> bool:
+        return self._doc_pane_up() and not self.doc_holder.isHidden()
+
+    def doc_pane_wide(self) -> bool:
+        return self._doc_wide
+
+    def _doc_pane_up(self) -> bool:
+        pane = self._doc
+        return self._doc_shown and pane is not None and shiboken6.isValid(pane) and pane.parentWidget() is \
+            self.doc_holder
+
+    def doc_rect(self) -> QRect:
+        """Where the pane goes: under the side tile (when one shows) at the left, down to just above the ask column;
+        36 % of the page (DOC_MIN..DOC_MAX), or the frames' whole width when wide."""
+        room = max(1, self.width() - 2 * EDGE)
+        width = room if self._doc_wide else max(1, min(room, max(DOC_MIN, min(DOC_MAX, round(self.width() * DOC_SHARE)))))
+        _tile_w, tile_h = self._tile_box()
+        top = SIDE_TOP + (tile_h + DOC_GAP if tile_h else 0)
+        bottom = self.column_rect().top() - DOC_GAP
+        height = max(120, bottom - top)
+        return QRect(EDGE, top, width, height)
+
+    def _place_doc(self) -> None:
+        holder = self.doc_holder
+        if not self._doc_pane_up():
+            holder.hide()
+            return
+        rect = self.doc_rect()
+        holder.setGeometry(rect)
+        assert self._doc is not None
+        self._doc.setGeometry(0, 0, rect.width(), rect.height())
+        self._doc.show()
+        holder.setVisible(not self._side_covered)
+        holder.raise_()
 
     def set_side_covered(self, covered: bool) -> None:
         """A frame is open big (True): the tile's holder hides - it never covers the big frame - and comes back
@@ -257,7 +352,7 @@ class CanvasPage(QWidget):
             board.lower()
         self.column.setGeometry(self.column_rect())
         self.column.raise_()
-        self.place_side_tile()
+        self.place_side_tile()               # (and the document pane under it)
 
     # ---- Qt --------------------------------------------------------------------------------------------------------
 
@@ -286,5 +381,5 @@ class CanvasPage(QWidget):
             painter.end()
 
 
-__all__ = ["BAR_WIDTH", "BOTTOM", "COLUMN_HEIGHT", "COLUMN_WIDTH", "CanvasPage", "EDGE", "GROUND", "SIDE_TOP",
-           "SIDE_WIDTH", "orb_form", "orb_levels"]
+__all__ = ["BAR_WIDTH", "BOTTOM", "COLUMN_HEIGHT", "COLUMN_WIDTH", "CanvasPage", "DOC_MAX", "DOC_MIN", "DOC_SHARE",
+           "EDGE", "GROUND", "SIDE_TOP", "SIDE_WIDTH", "orb_form", "orb_levels"]

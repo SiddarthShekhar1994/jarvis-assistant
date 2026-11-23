@@ -505,10 +505,15 @@ class _Check:
         started = self.deps.clock()
         items = self.items(refs[:self.cfg.max_mail_per_run])
         aliases = sorted(getattr(self.config, "accounts", {}) or {"personal": None})
+        sheet = self.lands_sheet(agent)
         prompt, index = agents.agent_prompt(agent, items, events, notes, now=self.now,
-                                            time_zone_name=self.deps.time_zone_name, own=self.own(), aliases=aliases)
+                                            time_zone_name=self.deps.time_zone_name, own=self.own(), aliases=aliases,
+                                            **({"sheet": sheet} if sheet is not None else {}))
+        rows_extra = {"schema_extra": {"rows": agents.rows_property(len(sheet[1]))}} if sheet is not None else {}
         outcome = self.deps.engine.run(prompt, kind=KIND_AGENT, model=self.cfg.model,
-                                       timeout_s=self.cfg.timeout_seconds, read=agents.read_agent, cancel=self.cancel)
+                                       timeout_s=self.cfg.timeout_seconds,
+                                       read=agents.agent_reader(len(sheet[1])) if sheet is not None else agents.read_agent,
+                                       cancel=self.cancel, **rows_extra)
         self.note_limit(outcome)
         if outcome.failure is not None:
             self.write(agent, trigger=due_kind, status=RUN_FAILED, started=started, problem=outcome.failure.kind,
@@ -527,13 +532,32 @@ class _Check:
             self.keep_mark(agent.id, alias, batch)
         entry["last_run"] = stamp(self.now)
         answer = outcome.answer
-        self.write(agent, trigger=due_kind, status=RUN_OK, started=started, report=answer.report,
+        landing: dict[str, Any] = {}
+        if agent.lands and agent.lands[1]:
+            landing["lands"] = {"kind": agent.lands[0], "id": agent.lands[1]}
+            if sheet is not None:
+                landing["rows"] = [list(row) for row in getattr(answer, "rows", ())][:agents.MAX_ROWS]
+        self.write(agent, trigger=due_kind, status=RUN_OK, started=started, **landing, report=answer.report,
                    summary=answer.summary, needs_owner=agents.needs_owner(agent, answer, cards), cards=cards,
                    receipts=[{"id": f"{len(cards)}-{n}", "kind": "card", "card": item["id"], "title": "",
                               "card_kind": item["kind"]} for n, item in enumerate(cards)],
                    counts={"mails": len(items), "events": len(events), "cards": len(cards)})
         logger.info("Standing: agent %s ran (%s): %d mail(s), %d event(s), %d card(s)", agent.id, due_kind,
                     len(items), len(events), len(cards))
+
+    def lands_sheet(self, agent: Agent) -> tuple[str, list[Any]] | None:
+        """An agent landing in a sheet: (its name, its columns), read only from the docs folder (never a row; nothing
+        is ever written there by the runner). None: no sheet, or it can't be read."""
+        if not agent.lands or agent.lands[0] != "sheet" or not agent.lands[1]:
+            return None
+        from ..docs import store as docs_store
+
+        data_dir = getattr(self.config, "data_dir", None)
+        found = docs_store.read_columns(data_dir, agent.lands[1]) if data_dir is not None else None
+        if not found or not found[0]:
+            logger.info("Standing: agent %s: its sheet can't be read; no rows this run", agent.id)
+            return None
+        return agent.lands_name, found[0]
 
     def events(self, agent: Agent) -> list[agents.EventRow]:
         rows: list[agents.EventRow] = []

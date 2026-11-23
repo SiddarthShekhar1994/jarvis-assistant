@@ -116,6 +116,11 @@ UNDO_DELETE_LINK = "standing:undo-delete"
 INSTALLER_LINK = "standing:installer"
 CONSENT_LINK = "standing:consent"     # the consent card back after its Not now
 TIDY_LINK = "standing:tidy:"          # + the alias: a tidy-up's sign-in card back after its Not now
+DOCS_LINK = "standing:docs:"          # + an item's id: its Open (build plan item 5: an agent's rows wait there)
+DOCS_OPEN_TEXT = "Open"
+DOCS_OFF_TEXT = ("Documents are off on this PC ([docs] enabled = false), so Jarvis can't make where this agent "
+                 "writes; turn them on, or set it up without it")
+DOCS_NOT_MADE_TEXT = "Jarvis couldn't make the document or sheet this agent writes to; nothing was turned on"
 ANNOUNCE_KEY = "standing:"        # + the run id: the spoken line's key (KIND_NOTICE)
 
 # What the screen says.
@@ -230,6 +235,19 @@ class RunView:
     receipts: tuple[Mapping[str, Any], ...] = ()
     problem: str = ""
     counts: Mapping[str, Any] = field(default_factory=dict)
+    lands: tuple[str, str] = ()                                  # build plan item 5: where an agent's run landed
+    rows: tuple[tuple[str, ...], ...] = ()                       # ... and a sheet's rows, as the run gave them
+
+
+def _lands_of(record: Mapping[str, Any]) -> tuple[tuple[str, str], tuple[tuple[str, ...], ...]]:
+    lands = record.get("lands")
+    if not isinstance(lands, Mapping) or lands.get("kind") not in ("doc", "sheet") or not isinstance(
+            lands.get("id"), str):
+        return (), ()
+    raw = record.get("rows")
+    rows = tuple(tuple(str(cell)[:500] for cell in row[:20] if isinstance(cell, str)) for row in raw[:20]
+                 if isinstance(row, list)) if isinstance(raw, list) else ()
+    return (lands["kind"], lands["id"]), rows
 
 
 def run_view(record: Mapping[str, Any], name: str) -> RunView | None:
@@ -256,7 +274,8 @@ def run_view(record: Mapping[str, Any], name: str) -> RunView | None:
                    trigger=text("trigger", 20), origin=text("origin", 20), report=text("report", 4000),
                    summary=text("summary", 200), needs_owner=record.get("needs_owner") is True,
                    cards=items("cards"), receipts=items("receipts"), problem=text("problem", 40),
-                   counts=dict(counts) if isinstance(counts, Mapping) else {})
+                   counts=dict(counts) if isinstance(counts, Mapping) else {}, **dict(zip(("lands", "rows"),
+                                                                                       _lands_of(record))))
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -577,12 +596,43 @@ class StandingController(QObject):
         self.agents, self.rules = self.definitions.load()
         self.app_state.reload()
         self.runs = self._read_runs()
+        self._import_to_docs()
         self._sweep_cleared()
         self.host._take_standing_cards(self._cards())
         self._show()
         if announce:
             self._announce_new()
         self.changed.emit()
+
+    def _import_to_docs(self) -> None:
+        """Build plan item 5: the agents' runs that land in a document or a sheet, each taken in once (docs_ui: their
+        report or rows wait there for the owner's Keep)."""
+        docs = getattr(self.host, "docs", None)
+        if docs is None:
+            return
+        try:
+            docs.import_runs(self.runs, self._jobs())
+        except Exception as exc:  # noqa: BLE001 - the Agents screen goes on; the runs are taken in next time
+            logger.warning("Standing: runs not taken into documents (%s)", type(exc).__name__)
+
+    def _docs_notes(self) -> list[tuple[str, str, str]]:
+        """"12 rows wait in Internships" with Open, for each agent's document or sheet where its rows wait."""
+        docs = getattr(self.host, "docs", None)
+        if docs is None:
+            return []
+        notes: list[tuple[str, str, str]] = []
+        seen: set[str] = set()
+        for agent in self.agents:
+            if not agent.lands or not agent.lands[1] or agent.lands[1] in seen:
+                continue
+            seen.add(agent.lands[1])
+            info = docs.store.info(agent.lands[1])
+            if info is None or info.trashed or not info.pending:
+                continue
+            noun = ("row waits" if info.pending == 1 else "rows wait") if info.kind == "sheet" else (
+                "change waits" if info.pending == 1 else "changes wait")
+            notes.append((f"{info.pending} {noun} in {info.name}", DOCS_OPEN_TEXT, f"{DOCS_LINK}{info.id}"))
+        return notes
 
     def _read_runs(self) -> list[RunView]:
         now = self._now()
@@ -738,6 +788,7 @@ class StandingController(QObject):
         paused_all = self.app_state.paused_all
         consented = self.app_state.consented()
         meta, notes = self._status(now, state, today, paused_all, consented)
+        notes = [*notes, *self._docs_notes()]
         jobs_rows = []
         runs_by_job: dict[str, int] = {}
         for agent in self.agents:
@@ -1359,6 +1410,11 @@ class StandingController(QObject):
         self.reload(announce=False)
 
     def _on_link(self, link_id: str) -> None:
+        if link_id.startswith(DOCS_LINK):
+            docs = getattr(self.host, "docs", None)
+            if docs is not None:
+                docs.open(link_id[len(DOCS_LINK):], screen=True)
+            return
         if link_id == UNDO_DELETE_LINK or link_id.startswith(UNDO_DELETE_LINK + ":"):
             self.undo_delete(link_id.partition(":undo-delete:")[2] if ":undo-delete:" in link_id else "")
         elif link_id == INSTALLER_LINK:
@@ -1718,6 +1774,15 @@ class StandingController(QObject):
             else:
                 self._note(problem)
             return
+        landed = self._make_lands(job)
+        if isinstance(landed, str):
+            if on_card:
+                self._setup = replace(self._setup, note=landed)
+                self._show()
+            else:
+                self._note(landed)
+            return
+        job = landed
         try:
             on = with_status(replace(job, bindings=standing_setup.bindings_of(job, accounts)), STATUS_LIVE)
         except DefinitionError:
@@ -1731,6 +1796,19 @@ class StandingController(QObject):
         logger.info("Standing: %s %s turned on", job.kind, job_id)
         self.host._jarvis(f"{job.name} is on.", link=(VIEW_TEXT, VIEW_LINK), context=False)
         self.reload(announce=False)
+
+    def _make_lands(self, job: Agent | Rule) -> Agent | Rule | str:
+        """Turn on approves where an agent writes: a new document or sheet is made now (empty: what each run writes
+        waits in it for the owner's Keep). The job as it goes on, or why it can't."""
+        if not isinstance(job, Agent) or not job.lands or job.lands[1]:
+            return job
+        docs = getattr(self.host, "docs", None)
+        if docs is None:
+            return DOCS_OFF_TEXT
+        item_id = docs.make_for_agent(job.lands[0], job.lands_name, job.lands_columns)
+        if not item_id:
+            return DOCS_NOT_MADE_TEXT
+        return replace(job, lands=(job.lands[0], item_id), lands_columns=())
 
     def discard_setup(self) -> None:
         draft, self._setup = self._setup, None

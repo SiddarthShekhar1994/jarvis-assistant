@@ -96,10 +96,12 @@ NO_READY = "no_ready"         # the page did not say it was ready in time
 LOAD_FAILED = "load_failed"   # the page did not load
 CRASHED = "crashed"           # its renderer stopped more than MAX_RESTARTS times
 
-# The window's keys (the Dock's Ctrl+1 .. Ctrl+9 and Ctrl+, , Find Ctrl+K, Ask Ctrl+Space, mute Ctrl+M, the board's
-# Ctrl+B; Ctrl+8 is the Desktop switch): with the focus in the page they still go to the window.
+# The window's keys (the Dock's Ctrl+1 .. Ctrl+9, Ctrl+0 Documents and Ctrl+, , Find Ctrl+K, Ask Ctrl+Space, mute
+# Ctrl+M, the board's Ctrl+B; Ctrl+8 is the Desktop switch): with the focus in the page they still go to the window. The
+# page has no zoom keys of its own (nothing in it takes Ctrl+0), so Documents' Ctrl+0 reaches the window from it too.
 WINDOW_KEYS = (Qt.Key.Key_1, Qt.Key.Key_2, Qt.Key.Key_3, Qt.Key.Key_4, Qt.Key.Key_5, Qt.Key.Key_6, Qt.Key.Key_7,
-               Qt.Key.Key_8, Qt.Key.Key_9, Qt.Key.Key_Comma, Qt.Key.Key_K, Qt.Key.Key_Space, Qt.Key.Key_M, Qt.Key.Key_B)
+               Qt.Key.Key_8, Qt.Key.Key_9, Qt.Key.Key_0, Qt.Key.Key_Comma, Qt.Key.Key_K, Qt.Key.Key_Space, Qt.Key.Key_M,
+               Qt.Key.Key_B)
 _WINDOW_KEY_CODES = frozenset(int(key.value) for key in WINDOW_KEYS)
 # F6 (and Shift+F6 back) cycles the desk's parts: the ask bar, the conversation, the board and its index strip
 # (DESIGN-SPEC 3.6). The window's shortcut takes it from the page too; the page is told where the focus goes.

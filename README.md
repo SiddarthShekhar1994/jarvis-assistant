@@ -432,15 +432,15 @@ the "Now" group, the second-screen display and the soft sounds) - see
 [The look](#the-look-the-canvas);
 **Mail extras** (rewrite a draft in your own words, unsubscribe help that asks
 first, and Add all for calendar cards) - see
-[Mail extras](#mail-extras-rewrite-unsubscribe-and-add-all).
+[Mail extras](#mail-extras-rewrite-unsubscribe-and-add-all);
+**Documents and datasheets** (documents and typed tables on this PC that Jarvis
+and your standing agents write in, every change waiting for your Keep) - see
+[Documents and datasheets](#documents-and-datasheets).
 
 Planned for later versions; none of these is built yet, and all of them will
 keep the same rules (they propose, your click approves, and what they did
 shows, in LIVE or, for standing jobs, on the Agents screen):
 
-- **Documents and datasheets** beside the chat: documents written with you,
-  and tables with typed columns that Jarvis fills (a standing agent's report
-  could land there too).
 - **Radar**: ready-made standing agents for internships, hackathons,
   deadlines and subscriptions (renewals, trials that end) worth your
   attention.
@@ -3165,6 +3165,92 @@ above and anything inside Jarvis's own data folder are refused. Logs hold
 counts, kinds, sizes, durations and reason words only - never a file name, a
 title, a link or a host.
 
+### Documents and datasheets
+
+**Documents** (the Dock's Documents, **Ctrl+0**) keeps documents and
+datasheets on this PC: notes and plans you write, and tables with typed
+columns.
+
+- **New document** opens an empty one in **Edit**: what you type is markdown
+  (`# a heading`, `- a list`, `**bold**`). **Read** shows it as text, read
+  only: no web page, picture or file is ever loaded for it, HTML in it stays
+  plain text, and links are not clickable.
+- **New sheet** starts a table: **Add column** names a column and picks its
+  type - Text, Number, Date (written `2026-11-22` or `11/22/2026`), Choice (one
+  of the choices you list), Checkbox or Link. A value that doesn't fit its
+  column is refused with the reason ("That isn't a date"). **Add row** adds a
+  row; **Open link** opens the link in the selected cell, only when it passes
+  the same link check as a web research card.
+- What you type is yours and is saved as you go (a moment after you stop
+  typing, and when you leave the screen). **Ctrl+Z** undoes while you edit.
+- **Versions** lists what was kept before: one while you edit (at most every
+  two minutes), one before each Keep and Restore, and one when the file was
+  changed outside Jarvis. **Restore** brings one back (what was there becomes a
+  version first). Each document or sheet keeps 30 versions (4 MB at most).
+- **Delete** moves it to **Deleted** (with **Undo** at once, and **Restore** for
+  30 days; then it goes for good).
+- **Export .md** saves the kept text; **Export .csv** saves the kept rows
+  (UTF-8, each cell by its type; a cell that starts with `=`, `+`, `-` or `@`
+  gets a leading `'` so a spreadsheet never runs it as a formula, and the file
+  is marked as from the internet). You pick where; the picker starts in
+  `Jarvis\Exports` in your user folder. A folder OneDrive syncs is asked about
+  first: the file would leave this PC.
+
+**Jarvis writes in them (with Ask on).** Ask in the ask line ("add a budget
+section after Packing to my trip plan", "put Globex in my internships sheet")
+and Jarvis hands it to that document or sheet: the exact name, else the only one
+that shares a word with it (when two could be meant he asks which), else a new
+one. Or use the editor's own **Ask Jarvis to change this...** line. Either way
+one run sees only that document or sheet (as data: nothing in it is ever an
+instruction), the tables on the board, the conversation and the notes chosen as
+for any Ask - never your mail, calendar or the web - and your own words.
+
+What Jarvis writes **waits for you**: his changes sit in the document or sheet
+in amber ("2 changes wait on you"), each with what it removes struck through and
+what it adds in cyan, and **Keep**, **Discard** or **Keep all**; **Undo** follows
+until the next change. The list shows "N WAIT" and the Dock's Documents an amber
+dot. Nothing changes before your click, and voice never keeps anything. He only
+touches what he names: a section after a named heading (or at the end), a named
+heading's section (replaced or removed), new rows, or the cells of a named row.
+He never deletes a row or a column or changes a column's type; a new sheet gets
+its columns with its first rows. A change whose section has gone since offers
+**Add at the end**. Jarvis holds back an answer with a link or an email address
+that was not in what he was given, a heading, row or column that isn't there, a
+value of the wrong type or more than he may write at once (6 changes and 16,000
+characters for a document; 50 new rows and 50 cells for a sheet), and says why.
+
+**On the canvas.** An answer about a document or a sheet puts its frame on the
+board: a document's start and its headings (CHANGED or NEW where a change
+waits), a sheet's first rows (the waiting ones first), and the amber chip while
+changes wait. Opening the frame (Enter, a double click, its open button, or the
+chip) shows the item in a pane over the frames, with **Open in Documents** and
+**Close**; the pane never takes the keyboard from the ask line, and it steps
+aside while a frame is open big. After a Keep the frame is drawn again in its
+place. The canvas's top row has **Documents** too.
+
+**Standing agents write there too.** Set an agent up with where its reports go
+("every morning put new internships from my job mail in my Internships sheet").
+Its setup card says **Writes to:** - the document or sheet of that name, or a
+new one ("Internships (a new sheet: Company · Role · Deadline · Status)") that
+**Turn on** makes. Each run's report then waits in the document as a section
+("## Nov 22 · Internship watch"), or its rows wait in the sheet: an agent only
+adds; a row whose key column (the first, for a sheet it made) matches a kept
+row becomes cell changes, and one already there or waiting is dropped; a cell
+that doesn't fit its column is left empty. The agent is shown the sheet's
+columns, never its rows. The Agents screen says "3 rows wait in Internships"
+with **Open**. Nothing an agent writes is kept before your Keep; Pause all and
+the consent card still stop every run. Run files go after `[standing]
+keep_days`: Jarvis takes each run in when he next opens.
+
+**What stays on this PC.** Everything is kept in the `docs` folder of the data
+folder (`index.json`, a folder per document or sheet with its `doc.md` or
+`sheet.json`, its versions, and `trash`), never synced. A file Jarvis can't
+read safely (damaged, made by a newer Jarvis, or too large) is shown read
+only and never overwritten. The caps: 300 documents and sheets, 200,000
+characters a document, 20 columns and 2,000 rows a sheet, 500 characters a
+cell. Logs hold ids, kinds, counts, sizes and reason words only - never a
+name, a heading, a cell or a column's name.
+
 ### Standing agents and rules
 
 Some jobs come round again and again: "every weekday at 7:30, tell me what in
@@ -5162,6 +5248,8 @@ log. Changes apply the next time the app starts.
 | `[agent] max_turns`, `max_minutes` | `60`, `20` | A task's budget (5-1000 turns, 1-240 minutes of work); reaching one asks "Keep going?". |
 | `[agent] tasks_per_day` | `20` | How many tasks may start in 24 hours (1-200). |
 | `[agent] search_engine` | `"duckduckgo"` | Where his searches go first: `"duckduckgo"`, `"bing"` or `"google"`, then the others if a page gives nothing or shows a wall. The words of each search go there, and the Turn on card names it. |
+| `[docs] enabled` | `true` | [Documents and datasheets](#documents-and-datasheets): the Dock's Documents (Ctrl+0). `false`: none of it shows (what is kept in the data folder stays). The repository's `config.toml` has no `[docs]` table: these defaults hold until you add one. |
+| `[docs] export_folder` | `""` | Where an export's picker starts: `""` = `Jarvis\Exports` in your user folder, else a full folder path. A folder OneDrive syncs is asked about before a file is saved there. |
 | `[agent] workspace` | `""` | The tasks' folder: `""` = `Jarvis\Workspace` in your user folder, else a full folder path. Never under OneDrive: a task refuses to start there. |
 | `[agent] private` | `["calendar", "contacts", "memory", "mail", "files"]` | What a task may read of your things, when it needs them and only while it is connected. A shorter list narrows it (`"memory"` covers your notes and what you said before the task); an entry that is none of these grants nothing, and so does something that is not a list. |
 | `[agent] speak_private` | `false` | With `[voice] engine = "online"`: `true` also says aloud a task's line that may hold something private; such lines go to Microsoft's online voice. Off, they stay on screen. The voice made on this PC says them anyway. |
@@ -6639,6 +6727,12 @@ briefing_reader/capture_store.py  captures.json and the kept copies of what was 
 briefing_reader/capture_files.py  pictures, PDFs and text read on this PC for a capture
 briefing_reader/capture_net.py    a calendar link fetched once, on Read it
 briefing_reader/capture_ui.py     drops, the tray, Read it, the CAPTURE cards and the Source viewer
+briefing_reader/docs/model.py     documents and datasheets (no Qt): ids, the column types and their values, markdown sections and the one splice, the caps
+briefing_reader/docs/store.py     the docs folder (no Qt): index.json, doc.md, sheet.json, versions, the trash, read-only on damage, the export files
+briefing_reader/docs/proposals.py what Jarvis and agents propose in a document or sheet (no Qt): pending changes, the splice by heading, rows and cells, duplicates by key
+briefing_reader/ask/docs_mode.py  a document's or sheet's run: its answer read strictly and checked (headings, rows, columns, types, caps, no new link or address)
+briefing_reader/docs_view.py      the Documents screen: the list, the document editor (Read / Edit), the sheet editor (typed cells, Undo)
+briefing_reader/docs_ui.py        the Documents screen's controller: saving as you type, versions, Delete with Undo, Export through the picker
 briefing_reader/ics.py         calendar files read with the standard library
 briefing_reader/ask/capture_read.py  a capture read by Claude: the stdin, the strict answer, Jarvis's checks of each item
 briefing_reader/batch.py       Add all: which calendar cards may go together, the confirm list and its check

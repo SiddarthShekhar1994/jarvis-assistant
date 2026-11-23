@@ -143,8 +143,8 @@ from .ask import desktop_mode
 from .ask import planner as ask_planner
 from .ask import prestart as ask_prestart
 from .ask.context import COMMAND_CAP, MEMORY_PROMPT_CAP, conversation_exchanges, kept_lines
-from .ask.modes import (MODE_CAPTURE, MODE_DESKTOP, MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_REVISE,
-                        MODE_TASKS,
+from .ask.modes import (MODE_CAPTURE, MODE_DESKTOP, MODE_DOC, MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP,
+                        MODE_REVISE, MODE_TASKS,
                         MODE_TITLES, ORIGIN_AUTO, ORIGIN_CHOICE, ORIGIN_TYPED, ModeInputs, ModeRequest)
 from .ask.research import forced_question
 from .ask.research_validate import NO_ANSWER, cards_words, source_card_ids
@@ -196,7 +196,12 @@ _TIMED_STAGES = (ask_planner.STAGE_PLANNING, ask_planner.STAGE_PLANNING_AGAIN, a
 # A planner mode's status while it runs (with the seconds; the meta line says Esc cancels).
 MODE_STATUS = {MODE_PLAN: "Planning your day...", MODE_PREP: "Preparing your brief...",
                MODE_NUDGE: "Drafting a reply...", MODE_MEETING: "Writing the meeting summary...",
-               MODE_DESKTOP: "Planning...", MODE_REVISE: "Rewriting the message..."}
+               MODE_DESKTOP: "Planning...", MODE_REVISE: "Rewriting the message...",
+               MODE_DOC: "Writing in the document..."}
+# A document's or sheet's run (build plan item 5): where its changes are, in Jarvis's own words (his say stays beside them
+# in the conversation); a held-back answer says why (docs_mode.REASON_TEXT).
+DOC_DONE_TEXT = "Jarvis's changes wait in the document for your Keep."
+DOC_HANDOFF_TEXT = "Jarvis is writing in the document; his changes will wait for your Keep."
 # A revise (mail extras, part 2): the bar says only where its answer is, in Jarvis's own words (never the model's say or
 # question: the Edit dialog shows Jarvis's own note).
 REVISE_DONE_TEXT = "The rewrite is in the Edit dialog."
@@ -849,7 +854,7 @@ class AskController(QObject):
         # plan gets none.
         task = _mode_task(self.live, request, words, kind=kind,
                           memory=None if request.mode in (MODE_MEETING, MODE_DESKTOP, MODE_CAPTURE, MODE_REVISE)
-                          else self._memory_given(""))
+                          else self._memory_given(request.typed[:COMMAND_CAP] if request.mode == MODE_DOC else ""))
         last, lines = self._typed_lines          # a desktop request typed here: its line breaks, for a task (agent on)
         running = _Running(self._seq, threading.Event(), self._monotonic(), task=task, kind=kind,
                            typed=request.typed_route, mode=request.mode, words=words if request.typed_route else "",
@@ -1081,6 +1086,18 @@ class AskController(QObject):
         if getattr(outcome, "mode", "") == MODE_REVISE:
             return {ask_planner.REVISE_QUESTION: REVISE_QUESTION_TEXT,
                     ask_planner.REVISE_HELD: REVISE_HELD_TEXT}.get(outcome.kind, REVISE_DONE_TEXT)
+        if getattr(outcome, "doc_job", "") and outcome.ok:
+            return DOC_HANDOFF_TEXT     # Jarvis's own words: the document run follows with the owner's words
+        if getattr(outcome, "mode", "") == MODE_DOC and outcome.ok:
+            if outcome.kind == ask_planner.DOC_HELD:
+                from .ask.docs_mode import REASON_TEXT
+
+                brief = getattr(outcome, "brief", None)
+                reason = brief[1] if isinstance(brief, tuple) and len(brief) > 1 else ""
+                return REASON_TEXT.get(reason, "Jarvis held his changes back; nothing waits.")
+            if outcome.kind == ask_planner.DOC_QUESTION:
+                return outcome.question or outcome.say or NOTHING_TEXT
+            return " ".join(part for part in (outcome.say, DOC_DONE_TEXT) if part)
         if getattr(outcome, "note_kind", ""):
             return outcome.message
         parts = [part for part in (outcome.say, outcome.question) if part]
@@ -1103,11 +1120,12 @@ class AskController(QObject):
         there, in the final plan's words. A brief, a meeting's summary and a mode that did not run say what ``_answer``
         says: those are Jarvis's own words already."""
         mode = getattr(outcome, "mode", "")
-        if getattr(outcome, "note_kind", "") or mode in (MODE_DESKTOP, MODE_REVISE) or (mode in (MODE_PREP, MODE_MEETING)
+        if getattr(outcome, "note_kind", "") or mode in (MODE_DESKTOP, MODE_REVISE, MODE_DOC) or (mode in (MODE_PREP,
+                                                                                                    MODE_MEETING)
                                                                          and getattr(outcome, "brief", None) is not None):
             return self._answer(outcome)
-        if getattr(outcome, "agent_task", ""):
-            return self._answer(outcome)      # the task's spoken start: its work goes on from here
+        if getattr(outcome, "agent_task", "") or getattr(outcome, "doc_job", ""):
+            return self._answer(outcome)      # the task's spoken start (or a document's): its work goes on from here
         address = getattr(getattr(self.config, "assistant", None), "address", "sir")
         proposed = any(not card.error for card in outcome.cards)
         if written and not proposed and not getattr(outcome, "question", ""):

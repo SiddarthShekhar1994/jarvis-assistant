@@ -376,7 +376,23 @@ class DeskController(QObject):
 
     def _on_open(self, frame_id: str) -> None:
         self._count_request("openRequested")
+        if self._open_doc(frame_id):
+            return
         self.big.open(frame_id)
+
+    def _open_doc(self, frame_id: str) -> bool:
+        """Build plan item 5: a document's or sheet's frame opens the item itself (docs_ui: on the canvas the pane over
+        the frames' area, else the Documents screen), never open big."""
+        key = self.feed.key_of(frame_id)
+        kind, _sep, item_id = key.partition(":")
+        docs = getattr(self.host, "docs", None)
+        if kind not in ("doc", "sheet") or not item_id or docs is None:
+            return False
+        try:
+            docs.open(item_id, wide=True)
+        except Exception as exc:  # noqa: BLE001 - the frame stays as it is
+            logger.info("Board: a document's frame did not open (%s)", type(exc).__name__)
+        return True
 
     def _on_tab(self, index: int) -> None:
         if index != hud.TAB_JARVIS:
@@ -648,7 +664,11 @@ class DeskController(QObject):
         self._send([{"type": "reveal", "group": group}])
 
     def _on_go_approvals(self, frame_id: str) -> None:
-        """The amber chip's go_approvals: Approvals at that card (Ctrl+3's path); nothing else."""
+        """The amber chip's go_approvals: Approvals at that card (Ctrl+3's path); nothing else. A document's or sheet's
+        chip ("2 changes wait on you") opens the item where its changes wait (they are kept only by Keep there)."""
+        if self._open_doc(frame_id):
+            self.counts["go_approvals"] += 1
+            return
         action_id = self.feed.approvals_for(frame_id)
         self.counts["go_approvals"] += 1
         self.reading.open_card(action_id)
@@ -952,6 +972,30 @@ class DeskController(QObject):
         self._put(answer, [("capture", build, "", approvals, "")])
         self._sync_counts()
         logger.info("Board: a capture's frame went up (%d row(s))", len(getattr(summary, "rows", ()) or ()))
+        return made[0] if made else ""
+
+    def on_doc(self, key: str, build: Any, refresh: bool = False) -> str:
+        """Build plan item 5: a document's or sheet's frame (board.frames.from_doc / from_sheet), keyed ``key``
+        ("doc:<id>" / "sheet:<id>") so a later one redraws it in its place (its changed light when what it says
+        differs). ``refresh``: only when it is on the board already (after a Keep or an agent's rows). Returns the
+        frame's id ("" none). The log says the kind only."""
+        if refresh and not self.feed.holds(key):
+            return ""
+        self._synthetic -= 1
+        answer = _Answer(self._synthetic, "", format_time(self._now(), hour24=self._hour24()), done=True, say="",
+                         topic="Documents")
+        self._answers[answer.key] = answer
+        while len(self._answers) > ANSWERS_KEPT:
+            self._answers.pop(next(iter(self._answers)))
+        made: list[str] = []
+
+        def built(frame_id: str) -> Any:
+            made.append(frame_id)
+            return build(frame_id)
+
+        self._put(answer, [(key.partition(":")[0], built, "", "", key)])
+        self._sync_counts()
+        logger.info("Board: a %s frame %s", key.partition(":")[0], "drawn again" if refresh else "went up")
         return made[0] if made else ""
 
     def _card_entries(self, outcome: Any) -> list[tuple[Any, ...]]:

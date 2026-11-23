@@ -123,9 +123,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import (alive, approvals_view, batch, brief_view, briefing_view, context_view, find_view, followups_view, live_view,
-               meetings_view, memory_view, offer_view, plan_view, settings_view, standing_view, states_view,
-               transcript_view, voice_fx)
+from . import (alive, approvals_view, batch, brief_view, briefing_view, context_view, docs_view, find_view,
+               followups_view, live_view, meetings_view, memory_view, offer_view, plan_view, settings_view,
+               standing_view, states_view, transcript_view, voice_fx)
 from . import canvas_view, desk_view
 from . import dock as dock_mod
 from . import holo, home, hud, window_chrome
@@ -203,8 +203,8 @@ from .agenda import (
 )
 from .ask import desktop_mode
 from .ask.dayplan import PART_DAY, hours_text
-from .ask.modes import (MODE_CAPTURE, MODE_DESKTOP, MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_REVISE,
-                        MODE_TITLES, ORIGIN_BRIEF, ORIGIN_CHOICE, ORIGIN_LIST, ORIGIN_OFFER, ORIGIN_TYPED, ModeInputs,
+from .ask.modes import (MODE_CAPTURE, MODE_DESKTOP, MODE_DOC, MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP,
+                        MODE_REVISE, MODE_TITLES, ORIGIN_BRIEF, ORIGIN_CHOICE, ORIGIN_LIST, ORIGIN_OFFER, ORIGIN_TYPED, ModeInputs,
                         ModeRequest, RevisionJob, block_line, todo_facts)
 from .ask.planner import REVISE_HELD, REVISE_QUESTION
 from .ask.routes import ROUTE_MEMORY_FORGET, ROUTE_MEMORY_SAVE, ROUTE_MEMORY_SHOW, RouteFlags
@@ -1045,8 +1045,9 @@ SCREEN_FOLLOWUPS = 5
 SCREEN_SETTINGS = 6
 SCREEN_MEETINGS = 7                 # [meetings]: the recorded meetings and the start card
 SCREEN_AGENTS = 8                   # [standing]: the standing agents and rules, their receipts and reports
+SCREEN_DOCS = 9                     # [docs]: the documents and datasheets kept on this PC (build plan item 5)
 SCREENS = (SCREEN_HOME, SCREEN_BRIEFING, SCREEN_LIVE, SCREEN_MEMORY, SCREEN_APPROVALS, SCREEN_FOLLOWUPS,
-           SCREEN_SETTINGS, SCREEN_MEETINGS, SCREEN_AGENTS)
+           SCREEN_SETTINGS, SCREEN_MEETINGS, SCREEN_AGENTS, SCREEN_DOCS)
 # The motion prototype: the Dock shows each screen's name from this reading-view width (a window of about
 # 1,036 px: the main column keeps the 824 px of the smallest window), and folds to glyphs below it.
 DOCK_LABELS_FROM = holo.DOCK_WIDTH_LABELLED + 824
@@ -1059,7 +1060,7 @@ _FIND_ICONS = {dock_mod.HOME: "home", **dock_mod.GLYPHS}
 _SCREEN_SLOTS = {SCREEN_HOME: dock_mod.HOME, SCREEN_BRIEFING: dock_mod.BRIEFING, SCREEN_LIVE: dock_mod.LIVE,
                  SCREEN_MEMORY: dock_mod.MEMORY, SCREEN_APPROVALS: dock_mod.APPROVALS,
                  SCREEN_FOLLOWUPS: dock_mod.FOLLOWUPS, SCREEN_SETTINGS: dock_mod.SETTINGS,
-                 SCREEN_MEETINGS: dock_mod.MEETINGS, SCREEN_AGENTS: dock_mod.AGENTS}
+                 SCREEN_MEETINGS: dock_mod.MEETINGS, SCREEN_AGENTS: dock_mod.AGENTS, SCREEN_DOCS: dock_mod.DOCS}
 _SLOT_SCREENS = {slot: screen for screen, slot in _SCREEN_SLOTS.items()}
 _LIST_HEIGHT_MAX = 100_000          # ... whose cards take the screen's whole height
 # Statuses the Briefing screen's transport already says (its quiet line leaves them out).
@@ -1731,11 +1732,12 @@ class ReadingView(QWidget):
         self.meetings_stage.pageChanged.connect(self._schedule_moment_sync)
         self.meetings_stage.summaryLinkClicked.connect(self.homeLink)
         self.agents_stage = standing_view.AgentsStage()          # [standing] (standing_ui fills it)
+        self.docs_stage = docs_view.DocsStage()                  # [docs] (docs_ui fills it)
         self.home_screen = self._build_home()
         self._screens = _PageSwitch()
         for screen in (self.home_screen, self.briefing_screen, self.live_screen, self.memory_screen,
                        self.approvals_screen, self.followups_screen, self.settings_page, self.meetings_stage,
-                       self.agents_stage):
+                       self.agents_stage, self.docs_stage):
             self._screens.addWidget(screen)                   # in SCREENS order
         self._main = QWidget()
         column = QVBoxLayout(self._main)
@@ -3584,7 +3586,7 @@ class ReadingView(QWidget):
     def set_tab(self, index: int) -> None:
         """Open a screen while its Dock slot shows: SCREEN_HOME (hud.TAB_JARVIS), SCREEN_BRIEFING
         (hud.TAB_BRIEFING), SCREEN_LIVE (hud.TAB_LIVE), SCREEN_MEMORY (hud.TAB_MEMORY), SCREEN_APPROVALS,
-        SCREEN_FOLLOWUPS, SCREEN_SETTINGS, SCREEN_MEETINGS or SCREEN_AGENTS. While Jarvis is on the desktop HUD (``hold_screens``) the hidden
+        SCREEN_FOLLOWUPS, SCREEN_SETTINGS, SCREEN_MEETINGS, SCREEN_AGENTS or SCREEN_DOCS. While Jarvis is on the desktop HUD (``hold_screens``) the hidden
         window keeps its screen: the one asked for is only recorded, and the window comes back on it."""
         key = _SCREEN_SLOTS.get(index)
         if key is None or not self.dock.is_slot_visible(key):
@@ -3674,6 +3676,13 @@ class ReadingView(QWidget):
 
     def agents_available(self) -> bool:
         return self.dock.is_slot_visible(dock_mod.AGENTS)
+
+    def set_docs_available(self, available: bool) -> None:
+        """[docs] is on: the Dock's Documents slot (Ctrl+0) and its screen (hidden: Home when it was current)."""
+        self._set_slot_available(dock_mod.DOCS, SCREEN_DOCS, available)
+
+    def docs_available(self) -> bool:
+        return self.dock.is_slot_visible(dock_mod.DOCS)
 
     def set_desktop_available(self, available: bool, hud_key: str = "") -> None:
         """[desktop] is on: the Dock's Desktop (the switch to the HUD; ``hud_key`` as people write it, "Ctrl+Alt+H",
@@ -6571,6 +6580,7 @@ class AppController(QObject):
         self.voice_download: Any = self._create_voice_settings()   # [voice] engine "local": Settings > Voice's part
         self.standing: Any = self._create_standing()    # [standing]: the Agents screen and its cards, or None
         self.capture: Any = self._create_capture()      # build plan item 3: drops, pastes and the CAPTURE cards
+        self.docs: Any = self._create_docs()            # build plan item 5: [docs] documents and datasheets, or None
         self.window.reading.set_find_actions(self.productivity is not None)   # offers' links in the Find list
         # Jarvis's own voice: silent unless injected; start() builds the real one ([assistant] speak).
         self._voice_injected = voice_factory is not None
@@ -10729,6 +10739,10 @@ class AppController(QObject):
             return
         self._look_call("on_ask_answer")                 # the answer came: no thinking sound
         self._remember_ask_read(outcome)
+        self._note_doc_tables(outcome)                   # [docs]: the board's tables a document run may be given
+        if getattr(outcome, "mode", "") == MODE_DOC:
+            self._on_doc_outcome(outcome)
+            return
         if getattr(outcome, "mode", "") == MODE_PLAN:
             self._offer_running = 0
             self._on_plan_outcome(outcome)
@@ -10760,6 +10774,12 @@ class AppController(QObject):
         if outcome.ok and getattr(outcome, "agent_task", ""):
             self._activity(hud.TAG_ASK, "Handed to a task", f"{outcome.duration_ms / 1000:.1f} s")
             self._start_agent(outcome.agent_task)
+            return
+        if outcome.ok and getattr(outcome, "doc_job", "") and getattr(self, "docs", None) is not None:
+            # The owner's own words go to one document run (the name only finds the item, or names a new one).
+            self._activity(hud.TAG_ASK, "Handed to a document" if outcome.doc_job == "doc" else "Handed to a sheet",
+                           f"{outcome.duration_ms / 1000:.1f} s")
+            self.docs.from_words(outcome.doc_job, getattr(outcome, "doc_name", ""), getattr(outcome, "doc_words", ""))
             return
         if outcome.ok and getattr(outcome, "standing_job", "") and getattr(self, "standing", None) is not None:
             self._activity(hud.TAG_ASK, "Handed to the standing setup", f"{outcome.duration_ms / 1000:.1f} s")
@@ -16129,6 +16149,83 @@ class AppController(QObject):
         else:
             self.window.reading.command_bar.set_status(text, tone)
 
+    # ---- documents and datasheets ([docs]; build plan item 5) ----------------------------------------------------
+
+    def _create_docs(self) -> Any:
+        """[docs] on (the default): docs_ui.DocsController - the Dock's Documents (Ctrl+0) and its screen, kept in the
+        docs folder of the data folder. Off: None, and nothing of it shows. None also when it can't start (logged by
+        the error's type)."""
+        settings = getattr(self.config, "docs", None)
+        if not getattr(settings, "enabled", True):
+            return None
+        try:
+            from . import docs_ui
+            from .docs.store import DocsStore
+
+            self._doc_tables_seen: list[tuple[str, tuple[str, ...], tuple[tuple[str, ...], ...]]] = []
+            ask = self.ask
+            controller = docs_ui.DocsController(
+                self.window.reading, DocsStore(self.config.data_dir, clock=self._now),
+                export_folder=getattr(settings, "export_folder", ""),
+                submit_mode=ask.submit_mode if ask is not None else None,
+                ask_on=lambda: self.ask is not None and bool(self.config.ask.enabled),
+                conversation=self._conversation_turns, tables=lambda: tuple(self._doc_tables_seen),
+                status=self._docs_status, board=self._docs_frame, parent=self)
+            planner = getattr(ask, "planner", None) if ask is not None else None
+            if planner is not None:   # an Ask's first run may hand a request to a document or a sheet
+                planner.docs_allowed = lambda: not controller.store.read_only
+            return controller
+        except Exception as exc:  # noqa: BLE001 - Jarvis runs on without documents
+            logger.warning("Docs: not started (%s)", type(exc).__name__)
+            return None
+
+    def _docs_frame(self, key: str, build: Any, refresh: bool) -> None:
+        """A document's or sheet's frame on the board (desk_ui.on_doc), while the new look's board is there."""
+        desk = getattr(getattr(self, "look", None), "desk", None)
+        if desk is not None:
+            desk.on_doc(key, build, refresh)
+
+    def _docs_status(self, text: str) -> None:
+        """Jarvis's own words about a document request (a question back: which one?) on the ask line."""
+        if self.ask is not None:
+            self.ask.show_note(text, hud.TONE_WARN)
+        else:
+            self.window.reading.command_bar.set_status(text, hud.TONE_WARN)
+
+    def _note_doc_tables(self, outcome: Any) -> None:
+        """The tables an Ask answer put on the board (at most the last 3): what a document run may be given as
+        <tables> (titles, column words and cells only)."""
+        if getattr(self, "docs", None) is None:
+            return
+        from .board import ask_frames
+
+        found = []
+        for frame in getattr(outcome, "frames", ()) or ():
+            if isinstance(frame, ask_frames.AskFrame) and frame.kind == "table":
+                body = frame.body or {}
+                found.append((frame.title, tuple(str(c) for c in body.get("columns", ())),
+                              tuple(tuple(str(cell) for cell in row) for row in body.get("rows", ()))))
+        if found:
+            self._doc_tables_seen = (self._doc_tables_seen + found)[-3:]
+
+    def _on_doc_outcome(self, outcome: Any) -> None:
+        """A document run's outcome: its changes wait in the item (docs_ui); the conversation gets Jarvis's words
+        (his say and where the changes are, or why he held them back), never the changes themselves."""
+        from .ask_ui import AskController
+
+        if getattr(self, "docs", None) is not None:
+            self.docs.on_outcome(outcome)
+        if not outcome.ok:
+            return
+        count = len(getattr(getattr(outcome, "doc_proposal", None), "items", ()) or ())
+        if count:
+            sub = "1 change waits in Documents" if count == 1 else f"{count} changes wait in Documents"
+        else:
+            sub = "nothing waits"
+        self._jarvis(AskController._answer(outcome), tone=hud.TONE_DONE if count else hud.TONE_WARN, sub=sub)
+        self._activity(hud.TAG_ASK, "Document changes" if count else "No document changes",
+                       f"{outcome.duration_ms / 1000:.1f} s")
+
     # ---- standing agents and rules ([standing]) ------------------------------------------------------------
 
     def _create_standing(self) -> Any:
@@ -16682,6 +16779,8 @@ class AppController(QObject):
             self.meetings.shutdown()   # a recording stops and is saved; the pill goes
         if getattr(self, "standing", None) is not None:
             self.standing.shutdown()   # the folder check stops
+        if getattr(self, "docs", None) is not None:
+            self.docs.shutdown()       # what the owner typed and is not saved yet is saved now
         if getattr(self, "task_feed", None) is not None:
             self.task_feed.shutdown()  # the task's panel and cards: before the HUD's windows go
         if getattr(self, "desktop", None) is not None:

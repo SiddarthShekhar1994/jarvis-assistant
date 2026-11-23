@@ -249,11 +249,11 @@ from .stream import (
 from .usage import KIND_RESEARCH, USAGE_FILE, CapCheck, UsageLog
 from .validate import (LINE_CARD, LINE_OVER_CAP, LINE_REFUSED, LINE_REPEAT, PLAIN_ASK_KINDS, Cards, keep_valid,
                        to_cards)
-from . import capture_read, dayplan, desktop_mode, meeting_summary, modes, prep, revise
+from . import capture_read, dayplan, desktop_mode, docs_mode, meeting_summary, modes, prep, revise
 from ..desktop import executor as desktop_executor
 from ..desktop import validate as desktop_validate
-from .modes import (MODE_CAPTURE, MODE_DESKTOP, MODE_KINDS, MODE_MAX_LINES, MODE_MEETING, MODE_NUDGE, MODE_PLAN,
-                    MODE_PREP, MODE_REVISE, MODE_USAGE, ModeInputs, ModeRequest)
+from .modes import (MODE_CAPTURE, MODE_DESKTOP, MODE_DOC, MODE_KINDS, MODE_MAX_LINES, MODE_MEETING, MODE_NUDGE,
+                    MODE_PLAN, MODE_PREP, MODE_REVISE, MODE_USAGE, ModeInputs, ModeRequest)
 
 logger = logging.getLogger(__name__)
 
@@ -265,6 +265,10 @@ STAGE_PLANNING_AGAIN = "planning_again"   # the second run, with the mail
 # words), a rewrite Jarvis held back (its message is the reason word, revise.REVISE_*).
 REVISE_QUESTION = "revise_question"
 REVISE_HELD = "revise_held"
+# A document's or sheet's run (build plan item 5): a question back, or changes Jarvis held back (its brief holds the
+# reason word, docs_mode.DOC_*). Either way nothing waits in the item.
+DOC_QUESTION = "doc_question"
+DOC_HELD = "doc_held"
 STAGE_RESEARCH = "research"        # the web research run
 STAGE_DAY = "day"                  # a day plan: reading the day being planned
 STAGE_PREP_MAIL = "prep_mail"      # a meeting brief: Jarvis's own searches and reads of the guests' threads
@@ -411,13 +415,15 @@ class ClaudeEngine:
                          probe.agent_missing)
 
     def argv(self, ready: Readiness, *, allow_search: bool, allow_web: bool = False,
-             allow_remember: bool = False, allow_agent: bool = False, allow_standing: bool = False) -> list[str]:
+             allow_remember: bool = False, allow_agent: bool = False, allow_standing: bool = False,
+             allow_doc: bool = False) -> list[str]:
         assert ready.exe is not None
         extra = {"prompt_file": cli.PROMPT_FILE_AGENT} if allow_agent else {}   # off: the prompt file as ever
+        doc = {"allow_doc": True} if allow_doc else {}                            # off: the schema as ever
         return cli.build_argv(ready.exe.path, model=self.ask.model, max_turns=self.ask.max_turns,
                               schema=cli.schema_text(allow_search=allow_search, allow_web=allow_web,
                                                      allow_remember=allow_remember, allow_agent=allow_agent,
-                                                     allow_standing=allow_standing),
+                                                     allow_standing=allow_standing, **doc),
                               hardened=ready.hardened, streaming=ready.streaming, **extra)
 
     def preflight(self) -> tuple[Readiness, AskFailure | None]:
@@ -447,7 +453,7 @@ class ClaudeEngine:
             progress: Callable[[str, Any], None] | None = None, capture: bool = False,
             allow_web: bool = False, allow_remember: bool = False,
             on_words: Callable[[str, bool], None] | None = None, slot: str = "",
-            allow_agent: bool = False, allow_standing: bool = False) -> RunResult:
+            allow_agent: bool = False, allow_standing: bool = False, allow_doc: bool = False) -> RunResult:
         """One planner run with ``prompt`` on stdin, after preflight(). ``progress`` / ``capture``:
         stream.run_planner's (the LIVE view; neither changes the run). ``allow_web``: the run may
         hand the request to web research (planner run 1 only); ``allow_remember``: it may suggest
@@ -464,7 +470,8 @@ class ClaudeEngine:
             return RunResult(failure=failure(CANCELLED, "cancel"))
         env = cli.clean_env(self._env_source())
         argv = self.argv(ready, allow_search=allow_search, allow_web=allow_web, allow_remember=allow_remember,
-                         allow_agent=allow_agent, allow_standing=allow_standing)
+                         allow_agent=allow_agent, allow_standing=allow_standing,
+                         **({"allow_doc": True} if allow_doc else {}))
 
         def go(process: Any, after: Callable[[], None] | None) -> RunResult:
             return run_planner(self.runner, argv, prompt, env=env, cwd=self.work_folder,
@@ -542,7 +549,7 @@ class ClaudeEngine:
             return RunResult(failure=failure(CANCELLED, "cancel"))
         env = cli.clean_env(self._env_source())
         # Mail, the summary's own notes, or names other people wrote on the desktop: never "remember".
-        if mode in (MODE_PREP, MODE_NUDGE, MODE_MEETING, MODE_DESKTOP, MODE_CAPTURE, MODE_REVISE):
+        if mode in (MODE_PREP, MODE_NUDGE, MODE_MEETING, MODE_DESKTOP, MODE_CAPTURE, MODE_REVISE, MODE_DOC):
             allow_remember = False
         allow_agent = allow_agent and mode == MODE_DESKTOP
         extra = {"allow_agent": True} if allow_agent else {}
@@ -559,6 +566,10 @@ class ClaudeEngine:
                              timeout_s=float(self.ask.timeout_seconds),
                              read=lambda event, init: prep.read_prep_result(event, init), cancel=cancel,
                              clock=self._clock, progress=progress, capture=capture)
+        elif mode == MODE_DOC:      # a document's or sheet's changes, read strictly (docs_mode.read_doc_result)
+            result = run_cli(self.runner, argv, prompt, env=env, cwd=self.work_folder,
+                             timeout_s=float(self.ask.timeout_seconds), read=docs_mode.read_doc_result,
+                             cancel=cancel, clock=self._clock, progress=progress, capture=capture)
         elif mode == MODE_REVISE:   # a rewritten message, read strictly (revise.read_revise_result)
             result = run_cli(self.runner, argv, prompt, env=env, cwd=self.work_folder,
                              timeout_s=float(self.ask.timeout_seconds), read=revise.read_revise_result,
@@ -1017,9 +1028,18 @@ class AskOutcome:
     # Mail extras (part 2): a revise run's rewritten message text, checked (revise.check_revision), offered in the Edit
     # dialog that asked (``brief`` holds that request's digest). Never logged, never spoken, never kept before Save.
     revised: str = field(default="", repr=False)
+    # Documents (build plan item 5): a first run's hand-off to a document or sheet (its kind, the name as the planner
+    # wrote it, the owner's own words: docs_ui finds or makes the item, then one document run), and a document run's
+    # checked changes (docs_mode.DocProposal: they wait in the item for Keep). Never logged but as kinds and counts.
+    doc_job: str = ""
+    doc_name: str = field(default="", repr=False)
+    doc_words: str = field(default="", repr=False)
+    doc_proposal: Any = field(default=None, repr=False, compare=False)
 
     def summary(self) -> str:
         """For the log: kinds and counts only."""
+        if self.doc_job:
+            return f"{self.kind}: handed to a {self.doc_job}, {self.runs} run(s)"
         if self.agent_task:
             return f"{self.kind}: handed to a task, {self.runs} run(s), {self.duration_ms / 1000:.1f} s"
         if self.standing_job:
@@ -1275,7 +1295,7 @@ class AskPlanner:
              allow_remember: bool = False, mode: str = "",
              on_words: Callable[[str, bool], None] | None = None, slot: str = "",
              allow_agent: bool = False, allow_standing: bool = False,
-             images: Sequence[tuple[str, bytes]] = ()) -> RunResult:
+             images: Sequence[tuple[str, bytes]] = (), allow_doc: bool = False) -> RunResult:
         """One planner run, counted when it starts (``mode``: a planner mode's run, ClaudeEngine.run_mode,
         counted as that mode's bundle kind): the send, never a process started ahead's start. ``on_words`` and
         ``slot``: ClaudeEngine.run's."""
@@ -1291,7 +1311,7 @@ class AskPlanner:
             step.done(STATUS_BLOCKED, status_text="SKIPPED", summary=f"Not started: {refused.message}")
             return RunResult(failure=refused, started=False)
         _run_ready(step, self.engine, ready, allow_search, allow_web, allow_remember, mode=mode,
-                   allow_agent=allow_agent, allow_standing=allow_standing)
+                   allow_agent=allow_agent, allow_standing=allow_standing, allow_doc=allow_doc)
         run = self.usage.start(kind=MODE_USAGE[mode]) if mode else self.usage.start()
         result: RunResult | None = None
         try:
@@ -1306,6 +1326,8 @@ class AskPlanner:
                 extra["allow_agent"] = True
             if allow_standing:        # the same
                 extra["allow_standing"] = True
+            if allow_doc:             # the same
+                extra["allow_doc"] = True
             if images:                # the same (a capture's pictures)
                 extra["images"] = tuple(images)
             if on_words is not None:  # the same
@@ -1407,6 +1429,8 @@ class AskPlanner:
                 extra["allow_agent"] = True
             if self._standing_allowed():
                 extra["allow_standing"] = True
+            if self._docs_allowed():
+                extra["allow_doc"] = True
             argv = self.engine.argv(ready, allow_search=allow_search, **extra)
             pool.fill(prestart.SLOT_ASK, argv, cli.clean_env(self.engine._env_source()), self.engine.work_folder)
         except Exception as exc:  # noqa: BLE001 - only prepares the next request
@@ -1508,6 +1532,17 @@ class AskPlanner:
             return False, "no - the Ask limit leaves one run"
         return True, "yes"
 
+    def _docs_allowed(self) -> bool:
+        """May a first run hand the request to a document or a sheet? Only while [docs] is on and the app says so
+        (``docs_allowed``: its documents are there); never raises."""
+        check = getattr(self, "docs_allowed", None)
+        if check is None or not getattr(getattr(self.config, "docs", None), "enabled", True):
+            return False
+        try:
+            return check() is True
+        except Exception:  # noqa: BLE001 - unknown: no hand-off
+            return False
+
     def _standing_allowed(self) -> bool:
         """May a first run hand the request to the standing setup? Only while [standing] is on and the app says so
         (``standing_allowed``); never raises."""
@@ -1588,6 +1623,9 @@ class AskPlanner:
             logger.info("Ask: run 1 may hand the request to a task")
         allow_standing = self._standing_allowed()
         standing_extra = {"allow_standing": True} if allow_standing else {}   # off: the call exactly as before
+        allow_doc = self._docs_allowed()
+        if allow_doc:
+            standing_extra["allow_doc"] = True                                 # the same
         first = self._run(prompt, allow_search=allow_search, cancel=cancel, live=live, number=1, search_words=why_not,
                           allow_web=allow_web, web_words=web_words, allow_remember=allow_remember,
                           on_words=words(1, bool(ctx.mail)), slot=prestart.SLOT_ASK, allow_agent=allow_agent,
@@ -1616,6 +1654,12 @@ class AskPlanner:
             return AskOutcome(True, "ok", "", say=plan.say or with_address(STANDING_SETUP_WORDS, self._owner()),
                               runs=1, init=first.init, stats=(first.stats,), mail=report(ctx.mail),
                               standing_job=plan.standing, standing_words=command)
+        if (allow_doc and plan.doc and not plan.question
+                and not (plan.search is not None and allow_search)):
+            # The owner's own words go to the document's run, whatever the planner wrote; the name only finds the item.
+            logger.info("Docs: handed over by the planner (%s; %d line(s) left out)", plan.doc[0], len(plan.lines))
+            return AskOutcome(True, "ok", "", say=plan.say, runs=1, init=first.init, stats=(first.stats,),
+                              mail=report(ctx.mail), doc_job=plan.doc[0], doc_name=plan.doc[1], doc_words=command)
         if plan.web is not None and allow_web:
             if plan.search is not None and allow_search:   # mail first, as asked; the web another time
                 live.step(ASK_CHECKS, "Web research", status=STATUS_WARN, status_text="SKIPPED", summary=BOTH_MESSAGE)
@@ -1736,6 +1780,8 @@ class AskPlanner:
                 outcome = self._capture(request, cancel, on_stage, task)
             elif request.mode == MODE_REVISE:
                 outcome = self._revise(request, cancel, on_stage, task)
+            elif request.mode == MODE_DOC:
+                outcome = self._doc(request, cancel, on_stage, task)
             else:
                 outcome = AskOutcome(False, "error", "Jarvis can't do that kind of request yet; nothing was proposed")
         except Exception as exc:  # noqa: BLE001 - a mode run must never take the app down
@@ -2009,6 +2055,57 @@ class AskPlanner:
         logger.info("Revise %s: a rewrite of %d character(s)", job.action_id, len(answer.body))
         return AskOutcome(True, "ok", "", say=answer.say, runs=1, init=result.init, stats=(result.stats,),
                           target=job.action_id, brief=(job.digest, ""), revised=answer.body)
+
+    # ---- a document or a sheet (build plan item 5) ---------------------------------------------
+
+    def _doc(self, request: ModeRequest, cancel: threading.Event | None, on_stage: Callable[[str], None],
+             live: LiveTask = NO_TASK) -> AskOutcome:
+        """One run for a document or a sheet: the checks (Ask on, the caps, Claude Code ready), the run that sees only
+        that item (as data), the board's tables, the conversation, the notes chosen as for an Ask and the owner's words
+        (no mail, calendar, accounts or web), its answer read strictly, then Jarvis's own check (docs_mode). Nothing is
+        changed here: the changes wait in the item for the owner's Keep (docs_ui)."""
+        job = request.payload
+        if not isinstance(job, modes.DocJob):
+            return AskOutcome(False, "error", "Jarvis can't do that kind of request yet; nothing was proposed")
+        refusal = self._refusal(live)
+        if refusal is not None:
+            logger.info("Docs %s: no run (%s)", job.doc_id, refusal.kind)
+            return replace(refusal, target=job.doc_id, brief=(job.digest, ""))
+        words = request.typed
+        on_stage(STAGE_CONTEXT)
+        zone = self.sources.time_zone()
+        now = self.clock()
+        wall = dayplan.to_wall(now, zone) if zone else now
+        wall = wall.replace(tzinfo=None) if wall.tzinfo is not None else wall
+        notes = self._memory_notes()
+        prompt = modes.build_doc_prompt(wall, self._owner(), job, words, notes=notes, zone=zone)
+        logger.info("Docs %s: a %s run (%d stdin character(s), %d table(s), %d note(s))", job.doc_id, job.kind,
+                    len(prompt), len(job.tables), len(notes))
+        on_stage(STAGE_PLANNING)
+        result = self._run(prompt, allow_search=False, cancel=cancel, live=live, number=1, mode=MODE_DOC)
+        seen = prompt
+        del prompt
+        answer = result.answer
+        if result.failure is not None or not isinstance(answer, docs_mode.DocAnswer):
+            failed = result.failure
+            kind = failed.kind if failed else "error"
+            logger.info("Docs %s: run %s", job.doc_id, kind)
+            return AskOutcome(False, kind, failed.message if failed else "", runs=1 if result.started else 0,
+                              init=result.init, stats=(result.stats,) if result.started else (),
+                              target=job.doc_id, brief=(job.digest, ""))
+        if answer.question and answer.doc is None and answer.sheet is None:
+            logger.info("Docs %s: a question back", job.doc_id)
+            return AskOutcome(True, DOC_QUESTION, "", say=answer.say, question=answer.question, runs=1,
+                              init=result.init, stats=(result.stats,), target=job.doc_id, brief=(job.digest, ""))
+        made = now.isoformat(timespec="seconds")
+        proposal, reason = docs_mode.check_doc_answer(answer, job, words, seen, made)
+        if proposal is None:
+            logger.info("Docs %s: held back (%s)", job.doc_id, reason)
+            return AskOutcome(True, DOC_HELD, "", runs=1, init=result.init, stats=(result.stats,),
+                              target=job.doc_id, brief=(job.digest, reason), refused=1)
+        logger.info("Docs %s: %d change(s) wait for Keep", job.doc_id, len(proposal.items))
+        return AskOutcome(True, "ok", "", say=answer.say, question=answer.question, runs=1, init=result.init,
+                          stats=(result.stats,), target=job.doc_id, brief=(job.digest, ""), doc_proposal=proposal)
 
     # ---- a meeting's summary (meetings part 2) -------------------------------------------------
 
@@ -2827,12 +2924,13 @@ class AskPlanner:
             allow_web = self._web_allowed()[0] if ready.ok else False   # as planner run 1 would
             allow_agent = self._agent_allowed() if ready.ok else False  # the same
             allow_standing = self._standing_allowed() if ready.ok else False   # the same
+            doc = {"allow_doc": True} if ready.ok and self._docs_allowed() else {}   # the same
             extra = {"prompt_file": cli.PROMPT_FILE_AGENT} if allow_agent else {}
             argv = tuple(cli.build_argv(ready.exe.path, model=self.config.ask.model,
                                         max_turns=self.config.ask.max_turns,
                                         schema=cli.schema_text(allow_search=searchable, allow_web=allow_web,
                                                                allow_agent=allow_agent,
-                                                               allow_standing=allow_standing),
+                                                               allow_standing=allow_standing, **doc),
                                         hardened=ready.hardened, streaming=ready.streaming, **extra))
         return DryRun(prompt, argv, ready, index.counts(), report(ctx.mail))
 
@@ -3099,7 +3197,7 @@ def _run_step(live: LiveTask, model: str, prompt: str, number: int, search_words
 @_quiet()
 def _run_ready(step: LiveStep, engine: Any, ready: Readiness, allow_search: bool, allow_web: bool = False,
                allow_remember: bool = False, mode: str = "", allow_agent: bool = False,
-               allow_standing: bool = False) -> None:
+               allow_standing: bool = False, allow_doc: bool = False) -> None:
     if step is NO_STEP:
         return
     hardened = "hardened (--safe-mode --restricted)" if ready.hardened else "not hardened"
@@ -3114,6 +3212,8 @@ def _run_ready(step: LiveStep, engine: Any, ready: Readiness, allow_search: bool
         extra["allow_agent"] = True
     if allow_standing:
         extra["allow_standing"] = True
+    if allow_doc:
+        extra["allow_doc"] = True
     try:
         if mode:
             argv = engine.mode_argv(ready, mode, allow_remember=allow_remember,
@@ -3387,7 +3487,7 @@ NO_MAIL_WORDS = "no - a day plan never reads mail"
 NO_WEB_WORDS = "no - a day plan never uses the web"
 MODE_RUN_WORDS = {MODE_PLAN: "day plan", MODE_PREP: "meeting brief", MODE_NUDGE: "follow-up draft",
                   MODE_MEETING: "meeting summary", MODE_DESKTOP: "desktop plan", MODE_CAPTURE: "capture",
-                  MODE_REVISE: "rewrite"}
+                  MODE_REVISE: "rewrite", MODE_DOC: "document"}
 FREE_TITLE = "Your free time"
 
 
@@ -3875,6 +3975,8 @@ def _mode_target(request: ModeRequest) -> Any:
         return job.capture_id if isinstance(job, capture_read.CaptureJob) else None
     if request.mode == MODE_REVISE:
         return job.action_id if isinstance(job, modes.RevisionJob) else None
+    if request.mode == MODE_DOC:
+        return job.doc_id if isinstance(job, modes.DocJob) else None
     if request.mode != MODE_MEETING:
         return None
     return job.meeting_id if isinstance(job, meeting_summary.MeetingJob) else None

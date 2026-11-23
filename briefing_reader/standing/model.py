@@ -270,6 +270,11 @@ class Agent:
     status: str = STATUS_DRAFT
     created: str = ""
     bindings: tuple[tuple[str, str], ...] = ()   # (alias, Google account id) recorded at Turn on
+    # Build plan item 5: where its reports land - ("doc" | "sheet", the item's id; "" until Turn on makes a new one) -
+    # its name, and a new sheet's columns ((name, type, choices), at most 8) for Turn on to make it with.
+    lands: tuple[str, str] = ()
+    lands_name: str = ""
+    lands_columns: tuple[tuple[str, str, tuple[str, ...]], ...] = ()
 
     kind = KIND_AGENT
 
@@ -308,7 +313,50 @@ def agent_from(data: Any, *, min_every: int = MIN_EVERY_MINUTES) -> Agent:
                  status=_choice(data.get("status", STATUS_DRAFT), "the status",
                                 (STATUS_DRAFT, STATUS_LIVE, STATUS_PAUSED)),
                  created=_stamp(data.get("created"), "the creation time"),
-                 bindings=_binding(data.get("bindings")))
+                 bindings=_binding(data.get("bindings")), **_lands(data.get("lands")))
+
+
+MAX_LANDS_COLUMNS = 8
+
+
+def _lands(value: Any) -> dict[str, Any]:
+    """An agent's "lands" (build plan item 5): {} for none (an older file has none)."""
+    from ..docs import model as docs_model
+
+    if value is None or value == {}:
+        return {}
+    value = _mapping(value, "where it writes")
+    kind = _choice(value.get("kind"), "where it writes", (docs_model.KIND_DOC, docs_model.KIND_SHEET))
+    item_id = value.get("id") or ""
+    if item_id and docs_model.kind_of(item_id) != kind:
+        raise DefinitionError("where it writes is not usable")
+    name = docs_model.clean_name(value.get("name") or "")
+    columns: list[tuple[str, str, tuple[str, ...]]] = []
+    taken: list[str] = []
+    for raw in _items(value.get("columns"), "the columns it fills", MAX_LANDS_COLUMNS):
+        raw = _mapping(raw, "a column it fills")
+        column, reason = docs_model.check_column(raw.get("name"), raw.get("type"), raw.get("choices") or (),
+                                                 taken=tuple(taken))
+        if column is None:
+            raise DefinitionError(f"a column it fills is not usable ({reason})")
+        taken.append(column.name)
+        columns.append((column.name, column.type, column.choices))
+    if kind == docs_model.KIND_DOC and columns:
+        raise DefinitionError("a document has no columns")
+    if not item_id and not name:
+        raise DefinitionError("where it writes has no name")
+    if not item_id and kind == docs_model.KIND_SHEET and not columns:
+        raise DefinitionError("a new sheet needs its columns")
+    return {"lands": (kind, item_id), "lands_name": name, "lands_columns": tuple(columns)}
+
+
+def lands_data(agent: Agent) -> dict[str, Any] | None:
+    if not agent.lands:
+        return None
+    kind, item_id = agent.lands
+    return {"kind": kind, "id": item_id, "name": agent.lands_name,
+            "columns": [{"name": name, "type": type_, "choices": list(choices)}
+                        for name, type_, choices in agent.lands_columns]}
 
 
 # --------------------------------------------------------------------------
@@ -526,7 +574,8 @@ def to_data(job: Agent | Rule) -> dict[str, Any]:
                 "mail": [{"account": source.account, "query": source.query} for source in job.mail],
                 "calendar_days": job.calendar_days, "notes": job.notes, "proposes": list(job.proposes),
                 "report": job.report, "runs_per_day": job.runs_per_day, "status": job.status,
-                "created": job.created, "bindings": [list(pair) for pair in job.bindings]}
+                "created": job.created, "bindings": [list(pair) for pair in job.bindings],
+                **({"lands": lands_data(job)} if job.lands else {})}
     data: dict[str, Any] = {
         "id": job.id, "name": job.name, "sentence": job.sentence, "account": job.account, "query": job.query,
         "question": job.question,

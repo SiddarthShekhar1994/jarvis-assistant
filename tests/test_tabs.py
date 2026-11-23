@@ -682,6 +682,7 @@ class ReadingViewScreenTests(unittest.TestCase):
         reading.set_followups_available(True)
         reading.set_meetings_available(True)
         reading.set_agents_available(True)
+        reading.set_docs_available(True)                                        # [docs] (build plan item 5)
         seen: list[int] = []
         reading.tabChanged.connect(seen.append)
         screen_slots = [slot for slot in dock.SLOTS if slot != dock.DESKTOP]    # Desktop is the HUD switch

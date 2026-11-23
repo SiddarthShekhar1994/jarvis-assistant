@@ -9783,6 +9783,7 @@ LIVE_TAG_COLORS = {
     live_events.TASK_AGENT: ACCENT,             # cyan: Jarvis at work on a task
     live_events.TASK_CAPTURE: ACCENT,           # cyan: Jarvis reading what the owner dropped in
     live_events.TASK_REVISE: ACCENT,            # cyan: a draft rewritten in the owner's words (the Edit dialog)
+    live_events.TASK_DOC: ACCENT,               # cyan: Jarvis writing in a document or a sheet (his changes wait)
 }
 LIVE_TEXT_MAX_PX = 320          # an open text block grows to this height, then scrolls
 LIVE_FIELD_LABEL_PX = 104       # the field labels' column ...

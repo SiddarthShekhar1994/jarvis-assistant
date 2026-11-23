@@ -94,8 +94,8 @@ REPORTS: dict[str, dict] = {}
 # Canvas part 5B (the walk's 4): the window's close says it closes Jarvis and that "Hey Jarvis" stops
 CLOSE_JARVIS = "Close Jarvis: \u201cHey Jarvis\u201d stops (minimise keeps him listening)"
 FAILURES: dict[str, str] = {}
-WINDOW_KEYS = ["Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+6", "Ctrl+7", "Ctrl+8", "Ctrl+9", "Ctrl+,",
-               "Ctrl+K", "Ctrl+Space", "Ctrl+M", "Ctrl+B"]
+WINDOW_KEYS = ["Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+6", "Ctrl+7", "Ctrl+8", "Ctrl+9", "Ctrl+0",
+               "Ctrl+,", "Ctrl+K", "Ctrl+Space", "Ctrl+M", "Ctrl+B"]   # Ctrl+0: Documents (build plan item 5)
 NETWORK_TRIES = ("fetch_http", "fetch_https", "fetch_lan", "fetch_loopback", "xhr_http", "xhr_lan", "websocket",
                  "image_http", "image_https", "image_lan", "image_file", "image_task", "css_remote",
                  "css_outside_allowlist", "font_remote")
@@ -1601,6 +1601,12 @@ class CanvasProbeTests(BoardProbeCase):
         self.assertEqual(report["forged_went"], ["settings"])             # only the word on the list got through
         self.assertEqual(report["requests"]["dropped:go"], 3)
         self.assertEqual(report["requests"]["accepted:go"], 18)
+
+    def test_the_documents_button_shows_and_posts_its_own_word(self) -> None:
+        report = self.looks()                                          # build plan item 5: the one page change
+        self.assertTrue(report["documents_sent"])
+        self.assertEqual(report["documents"], ["Documents"])
+        self.assertEqual(report["documents_went"], ["documents"])
 
     def test_the_page_itself_refuses_hostile_orb_and_canvas_messages(self) -> None:
         report = self.looks()

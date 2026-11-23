@@ -3918,6 +3918,21 @@ def canvas_case(make: Any, wait_until: Any, pump: Any, main_world: Any, settle_e
     orb("idle", "rings")
     pump(1.4)
     report["folded"] = look()
+    # Build plan item 5: "documents" is on the page's own list - its button shows with its word and posts only it
+    del went[:]
+    report["documents_sent"] = corners(buttons=["documents"])
+    pump(0.3)
+    report["documents"] = json.loads(main_world(board, r"""JSON.stringify((function () {
+      var seen = [];
+      Array.prototype.forEach.call(document.querySelectorAll('#canvas button'), function (b) {
+        if (!b.hidden && b.textContent === 'Documents') { seen.push(b.textContent); b.click(); }
+      });
+      return seen;
+    })())"""))
+    pump(0.3)
+    report["documents_went"] = list(went)
+    corners()
+    pump(0.2)
     counts = board.counts()
     report["blocked"] = counts.get("blocked", {})
     report["allowed"] = counts.get("allowed", {})

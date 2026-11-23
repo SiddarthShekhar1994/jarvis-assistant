@@ -3239,8 +3239,8 @@
   var ORB_STATES = ['idle', 'listening', 'thinking', 'speaking', 'needs', 'waiting'];
   var ORB_FORMS = ['rings', 'badge', 'corner'];
   var CANVAS_TONES = ['holo', 'amber', 'steel'];
-  var CANVAS_BUTTONS = ['history', 'board', 'briefing', 'approvals', 'followups', 'meetings', 'agents', 'live',
-                        'memory', 'settings', 'desktop', 'minimize', 'maximize', 'close', 'mute', 'day', 'now',
+  var CANVAS_BUTTONS = ['history', 'board', 'briefing', 'approvals', 'followups', 'meetings', 'agents', 'documents',
+                        'live', 'memory', 'settings', 'desktop', 'minimize', 'maximize', 'close', 'mute', 'day', 'now',
                         'mic_settings'];
   var CANVAS_CAPS = {clock: 40, word: 40, hold: 24, rec: 40, wake: 32, approvals: 999, level: 100, mic: 60,
                      side: 4000};
@@ -3261,7 +3261,7 @@
   var CANVAS_WORDS = {
     name: 'JARVIS', wordmark: 'J.A.R.V.I.S.', history: 'History', clear: 'Clear view', board: 'Show board',
     briefing: 'Briefing', approvals: 'Approvals', followups: 'Follow-ups', meetings: 'Meetings', agents: 'Agents',
-    live: 'Live', memory: 'Memory', settings: 'Settings', desktop: 'Desktop', mute: 'Mute', unmute: 'Unmute',
+    documents: 'Documents', live: 'Live', memory: 'Memory', settings: 'Settings', desktop: 'Desktop', mute: 'Mute', unmute: 'Unmute',
     undo: 'Undo', stop: 'Stop', level: 'Lvl ', db: ' dB', micIdle: 'Mic idle',
     orb: 'Jarvis', minimize: 'Minimise the window', maximize: 'Maximise or restore the window',
     // part 5B: the window's close quits Jarvis - said where it is pressed (minimise keeps "Hey Jarvis" listening)
@@ -3275,15 +3275,17 @@
   // Part 3: the top right row is ONE line at every width (it never wraps into the frames, and the frames' area never
   // moves when a button comes or goes). While it would not fit, these fold under More, the least used first; Approvals
   // and the window's own buttons never fold. TOP_ROW is the row's order (More's list keeps it).
-  var TOP_FOLD = ['memory', 'live', 'meetings', 'followups', 'agents', 'history', 'settings', 'briefing', 'desktop',
+  var TOP_FOLD = ['memory', 'live', 'meetings', 'followups', 'agents', 'documents', 'history', 'settings', 'briefing',
+                  'desktop',
                   'pinned', 'tidy', 'now', 'board', 'clear'];
   var TOP_ROW = ['history', 'now', 'tidy', 'clear', 'pinned', 'board', 'briefing', 'approvals', 'followups', 'meetings',
-                 'agents', 'live', 'memory', 'settings', 'desktop'];
+                 'agents', 'documents', 'live', 'memory', 'settings', 'desktop'];
   var BOARD_TOP = 64;                          // the frames' area starts here, whatever the row holds
   var TL_ROOM = 402, TL_ROOM_NARROW = 312;     // the top left corner's room (from the window's left edge) ...
   var STATE_ROOM = 112, ROW_GAP = 24;          // ... with this for its state word, and this between the corners
   // The screens' buttons, left to right (the mock's order; the others take their place only while they can work).
-  var SCREEN_BUTTONS = ['briefing', 'approvals', 'followups', 'meetings', 'agents', 'live', 'memory', 'settings'];
+  var SCREEN_BUTTONS = ['briefing', 'approvals', 'followups', 'meetings', 'agents', 'documents', 'live', 'memory',
+                        'settings'];
   var canvas = null;                           // the canvas's elements and state, made at the first orb / canvas message
   var deskOn = false;                          // the board is on the canvas (desk: enter) or away (leave, folded)
   var barFrames = 0;                           // the bar's count of frames (Clear view shows while there are some)

@@ -110,7 +110,8 @@ UNDO_SECONDS_RANGE = (3, 30)
 _MISSING = object()
 _KNOWN_TABLES = ("voice", "prompt", "polling", "sections", "notion", "calendar", "actions",
                  "accounts", "schedule", "hotkey", "agenda", "display", "ask", "research", "assistant", "live",
-                 "productivity", "ui", "meetings", "desktop", "agent", "talk", "instant", "standing", "look")
+                 "productivity", "ui", "meetings", "desktop", "agent", "talk", "instant", "standing", "look",
+                 "docs")
 # Library loggers kept at WARNING, also under --debug. The Google sign-in libraries log the
 # authorization code, the access token and the refresh token at DEBUG (requests_oauthlib),
 # before Jarvis could register them for redaction, so they never get DEBUG here.
@@ -584,6 +585,17 @@ class TalkConfig:
 
 
 @dataclass(frozen=True)
+class DocsConfig:
+    """``[docs]``: documents and datasheets kept on this PC (build plan item 5; on by default; the table may be absent
+    from config.toml: these defaults hold). What the owner types is written at once; what Jarvis writes (an Ask, a
+    standing agent's run) waits as a change to Keep. ``export_folder`` ("" = Jarvis\\Exports in the user folder) is
+    only where an export's file picker starts; a folder OneDrive syncs is asked about first."""
+
+    enabled: bool = True
+    export_folder: str = field(default="", repr=False)
+
+
+@dataclass(frozen=True)
 class Config:
     notion_token: str = field(repr=False)   # "" when missing; NEVER logged
     page_id: str                            # normalized 32-hex, no dashes; "" when missing or invalid
@@ -619,6 +631,7 @@ class Config:
     instant: InstantConfig = field(default_factory=InstantConfig)
     standing: StandingConfig = field(default_factory=StandingConfig)
     look: LookConfig = field(default_factory=LookConfig)
+    docs: DocsConfig = field(default_factory=DocsConfig)
 
     @property
     def notion_url(self) -> str:
@@ -752,6 +765,7 @@ def load_config(project_root: Path | None = None, *,
         instant=_parse_instant(doc, environ),
         standing=_parse_standing(doc, environ),
         look=_parse_look(doc),
+        docs=_parse_docs(doc),
     )
 
 
@@ -1517,6 +1531,22 @@ def _parse_standing(doc: Mapping[str, Any], environ: Mapping[str, str] | None = 
                           quiet_from=r.time_of_day("quiet_from", d.quiet_from),
                           quiet_until=r.time_of_day("quiet_until", d.quiet_until),
                           open_when_closed=r.boolean("open_when_closed", d.open_when_closed), **numbers)
+
+
+def _parse_docs(doc: Mapping[str, Any]) -> DocsConfig:
+    """``[docs]`` from config.toml, or the defaults when the table is absent (the repo's config.toml has none: the
+    installed copy keeps its own). A bad export_folder (not a full folder path) is the default; the warning names the
+    setting only (it may be a folder path)."""
+    d = DocsConfig()
+    r = _TableReader(doc, "docs", _field_names(DocsConfig), echo=False)
+    raw = r._get("export_folder")
+    folder = d.export_folder
+    if isinstance(raw, str) and (not raw.strip() or _absolute_folder(raw.strip())):
+        folder = raw.strip()
+    elif raw is not _MISSING:
+        logger.warning("config.toml: docs.export_folder is not a full folder path; using the default (Jarvis\\Exports "
+                       "in your user folder)")
+    return DocsConfig(enabled=r.boolean("enabled", d.enabled), export_folder=folder)
 
 
 def _parse_assistant(doc: Mapping[str, Any]) -> AssistantConfig:

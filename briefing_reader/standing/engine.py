@@ -58,8 +58,12 @@ class StandingResult:
         return "ok" if self.failure is None else self.failure.kind
 
 
-def schema_text(kind: str) -> str:
-    return cli.compact_json(json.loads(SCHEMAS[kind].read_text(encoding="utf-8")))
+def schema_text(kind: str, extra: Mapping[str, Any] | None = None) -> str:
+    """The kind's --json-schema; ``extra``: more properties for this run (an agent landing in a sheet: "rows")."""
+    data = json.loads(SCHEMAS[kind].read_text(encoding="utf-8"))
+    if extra:
+        data.setdefault("properties", {}).update({key: dict(value) for key, value in extra.items()})
+    return cli.compact_json(data)
 
 
 class StandingEngine:
@@ -75,14 +79,15 @@ class StandingEngine:
         return self.claude.readiness()
 
     def run(self, prompt: str, *, kind: str, model: str, timeout_s: float,
-            read: Callable[[Mapping[str, Any], Any], Any], cancel: threading.Event | None = None) -> StandingResult:
+            read: Callable[[Mapping[str, Any], Any], Any], cancel: threading.Event | None = None,
+            schema_extra: Mapping[str, Any] | None = None) -> StandingResult:
         if kind not in PROMPTS:
             raise ValueError("not a standing run kind")
         ready, refused = self.claude.preflight()
         if refused is not None:
             return StandingResult(failure=refused, started=False)
         assert ready.exe is not None
-        argv = cli.build_argv(ready.exe.path, model=model, max_turns=MAX_TURNS, schema=schema_text(kind),
+        argv = cli.build_argv(ready.exe.path, model=model, max_turns=MAX_TURNS, schema=schema_text(kind, schema_extra),
                               hardened=ready.hardened, prompt_file=PROMPTS[kind], settings_file=cli.SETTINGS_FILE,
                               streaming=False)
         env = {**cli.clean_env(self._environ), **cli.PRIVATE_RUN_ENV}

@@ -74,7 +74,7 @@ def read_setup(event: Mapping[str, Any], init: Any) -> Mapping[str, Any] | AskFa
 
 def definition(answer: Mapping[str, Any], words: str, *, aliases: Sequence[str], readable: Sequence[str],
                labels: Callable[[str], Sequence[tuple[str, str]]] | None = None, min_every: int = 30,
-               now: datetime | None = None) -> Agent | Rule | None:
+               now: datetime | None = None, docs_dir: Any = None) -> Agent | Rule | None:
     kind = answer.get("kind")
     if kind == "neither":
         return None
@@ -84,7 +84,7 @@ def definition(answer: Mapping[str, Any], words: str, *, aliases: Sequence[str],
         if kind == KIND_RULE:
             return _rule(answer.get("rule") or {}, words, name, created, aliases, readable, labels)
         if kind == KIND_AGENT:
-            return _agent(answer.get("agent") or {}, words, name, created, aliases, readable, min_every)
+            return _agent(answer.get("agent") or {}, words, name, created, aliases, readable, min_every, docs_dir)
     except FilterRefused as refused:
         raise SetupRefused(str(refused)) from None
     except DefinitionError as error:
@@ -119,8 +119,30 @@ def _rule(spec: Mapping[str, Any], words: str, name: str, created: str, aliases:
                       "action": action, "tidy": tidy_data, "status": STATUS_DRAFT, "created": created})
 
 
+def lands_of(spec: Any, docs_dir: Any) -> dict[str, Any] | None:
+    """Where an agent's reports land (build plan item 5): the document or sheet the owner named - found by its name in
+    the docs folder, read only (docs.store.find_by_name) - or a new one Turn on makes (a new sheet's columns checked
+    by docs.model). None: none asked for, or [docs] is off here (``docs_dir`` None)."""
+    if docs_dir is None or not isinstance(spec, Mapping) or spec.get("kind") not in ("doc", "sheet"):
+        return None
+    from ..docs import model as docs_model
+    from ..docs import store as docs_store
+
+    kind = spec["kind"]
+    name = docs_model.clean_name(spec.get("name") or "")
+    if not name:
+        raise SetupRefused("Say which document or sheet the agent writes to")
+    found = docs_store.find_by_name(docs_dir, name, kind)
+    if found is not None:
+        return {"kind": kind, "id": found.id, "name": found.name, "columns": []}
+    columns = list(spec.get("columns") or []) if kind == "sheet" else []
+    if kind == "sheet" and not columns:
+        raise SetupRefused("Say which columns the new sheet has (Company, Role, Deadline ...)")
+    return {"kind": kind, "id": "", "name": name, "columns": columns}
+
+
 def _agent(spec: Mapping[str, Any], words: str, name: str, created: str, aliases: Sequence[str],
-           readable: Sequence[str], min_every: int) -> Agent:
+           readable: Sequence[str], min_every: int, docs_dir: Any = None) -> Agent:
     mail = []
     for source in spec.get("mail") or ():
         account = source.get("account") if isinstance(source, Mapping) else None
@@ -132,5 +154,6 @@ def _agent(spec: Mapping[str, Any], words: str, name: str, created: str, aliases
     return agent_from({"id": new_id(KIND_AGENT), "name": name, "words": words, "trigger": spec.get("trigger") or {},
                        "mail": mail, "calendar_days": spec.get("calendar_days") or 0,
                        "notes": bool(spec.get("notes")), "proposes": list(spec.get("proposes") or []),
-                       "report": spec.get("report") or "when_needed", "status": STATUS_DRAFT, "created": created},
+                       "report": spec.get("report") or "when_needed", "status": STATUS_DRAFT, "created": created,
+                       **({"lands": lands} if (lands := lands_of(spec.get("lands"), docs_dir)) else {})},
                       min_every=min_every)

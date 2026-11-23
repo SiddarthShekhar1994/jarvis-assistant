@@ -79,24 +79,27 @@ ORIGIN_CAPTURE = "capture"
 # Mail extras (part 2): the Edit dialog's Rewrite - one draft rewritten in the owner's plain words (RevisionJob). Its
 # answer is a message text, never a card line (MODE_KINDS empty); nothing is kept before Save. Counts as an Ask run.
 MODE_REVISE = "revise"
+# Documents and datasheets (build plan item 5): Jarvis writes in one document or sheet (DocJob). Its answer is a set of
+# changes that wait for the owner's Keep (ask.docs_mode), never a card line (MODE_KINDS empty). Counts as an Ask run.
+MODE_DOC = "doc"
 ORIGIN_OFFER, ORIGIN_TYPED, ORIGIN_CHOICE, ORIGIN_LIST, ORIGIN_BRIEF = "offer", "typed", "choice", "list", "brief"
 # A summary runs only when the owner asked for it: ORIGIN_AUTO - his own "summarise it" tick on that meeting's
 # start card (unticked every time), once the transcript is ready; ORIGIN_SUMMARISE - his click on Summarise.
 ORIGIN_AUTO, ORIGIN_SUMMARISE = "auto", "summarise"
 MODE_KINDS = {MODE_PLAN: frozenset({CALENDAR}), MODE_PREP: frozenset({REPLY}), MODE_NUDGE: frozenset({REPLY}),
               MODE_MEETING: frozenset({EMAIL}), MODE_DESKTOP: frozenset(), MODE_CAPTURE: frozenset({CALENDAR, TODO}),
-              MODE_REVISE: frozenset()}
+              MODE_REVISE: frozenset(), MODE_DOC: frozenset()}
 # A desktop plan has no lines: at most this many steps (desktop_schema.json's steps maxItems).
 MODE_MAX_LINES = {MODE_PLAN: 8, MODE_PREP: 2, MODE_NUDGE: 1, MODE_MEETING: 3, MODE_DESKTOP: 12, MODE_CAPTURE: 30,
-                  MODE_REVISE: 0}
+                  MODE_REVISE: 0, MODE_DOC: 0}
 MODE_TASKS = {MODE_PLAN: live.TASK_PLAN, MODE_PREP: live.TASK_PREP, MODE_NUDGE: live.TASK_NUDGE,
               MODE_MEETING: live.TASK_MEETING, MODE_DESKTOP: live.TASK_DESKTOP, MODE_CAPTURE: live.TASK_CAPTURE,
-              MODE_REVISE: live.TASK_REVISE}
+              MODE_REVISE: live.TASK_REVISE, MODE_DOC: live.TASK_DOC}
 MODE_USAGE = {MODE_PLAN: usage.KIND_PLAN_DAY, MODE_PREP: usage.KIND_PREP, MODE_NUDGE: usage.KIND_NUDGE,
               MODE_MEETING: usage.KIND_PLAN, MODE_DESKTOP: usage.KIND_PLAN, MODE_CAPTURE: usage.KIND_PLAN,
-              MODE_REVISE: usage.KIND_PLAN}
+              MODE_REVISE: usage.KIND_PLAN, MODE_DOC: usage.KIND_PLAN}
 MODE_TITLES = {MODE_PLAN: "Plan", MODE_PREP: "Prep", MODE_NUDGE: "Nudge", MODE_MEETING: "Meeting",
-               MODE_DESKTOP: "Desktop", MODE_CAPTURE: "Capture", MODE_REVISE: "Revise"}
+               MODE_DESKTOP: "Desktop", MODE_CAPTURE: "Capture", MODE_REVISE: "Revise", MODE_DOC: "Document"}
 FIXED_COMMANDS: dict[Any, str] = {
     MODE_PLAN: "Plan the day in <day> for the owner: propose time blocks inside <free> for what needs time in "
                "<todos> and <briefing>, as Calendar lines, or ask one question.",
@@ -124,6 +127,9 @@ FIXED_COMMANDS: dict[Any, str] = {
     # A revise: the owner's words follow ("The owner's words: ..."): they say how to change it.
     MODE_REVISE: "Rewrite the message in <draft> as the owner's words say; keep its meaning, its people and its "
                  "sign-off unless they ask otherwise.",
+    # A document or a sheet: the owner's words follow ("The owner's words: ..."): they say what to write or fill in.
+    MODE_DOC: "Propose the changes to <doc> or <sheet> that the owner's words ask for, as changes that wait for his "
+              "Keep, or ask one question.",
 }
 OWNER_WORDS = "The owner's words: "
 OWNER_WORDS_CAP = 300
@@ -691,6 +697,134 @@ def build_revise_prompt(now: datetime, owner: str, job: RevisionJob, words: str,
         command += f"\n{OWNER_WORDS}{said}"
     blocks = [f"<now>\n{now_line(now, zone)}\n</now>", f"<owner>{data(owner)}</owner>",
               f'<draft subject="{subject}">\n{_draft_text(job.draft)}\n</draft>', f"<command>\n{command}\n</command>"]
+    return "\n".join(blocks) + "\n"
+
+
+# --------------------------------------------------------------------------
+# A document or a sheet Jarvis writes in (build plan item 5)
+# --------------------------------------------------------------------------
+
+DOC_CAP = 24_000                 # the document or sheet as data; past it, its outline and what matches the words
+DOC_NAME_CAP = 60
+DOC_TABLES = 3
+DOC_TABLE_ROWS = 12
+DOC_TABLE_CHARS = 3_000
+DOC_WORDS_CAP = 2_000
+
+
+@dataclass(frozen=True)
+class DocJob:
+    """One run for a document or a sheet: its id ("" never: a new one is made first), kind ("doc" | "sheet"), name,
+    what it held when the run started (``snapshot``: the text, or a docs.store.SheetData) and its digest (the answer
+    lands only on what it saw: a change made meanwhile makes it "stale" - docs_ui offers it again), ``new`` (made for
+    this request: a sheet may get its columns), the tables on the board (title, column names, rows: at most 3) and what
+    was said before (conversation.Turn). Memory only; the repr holds the kind and sizes."""
+
+    doc_id: str
+    kind: str
+    name: str = field(repr=False)
+    snapshot: Any = field(repr=False)
+    digest: str = ""
+    new: bool = False
+    tables: tuple[tuple[str, tuple[str, ...], tuple[tuple[str, ...], ...]], ...] = field(default=(), repr=False)
+    conversation: tuple[Any, ...] = field(default=(), repr=False)
+
+    def __repr__(self) -> str:
+        return f"DocJob({self.kind}, {self.doc_id}, new={self.new})"
+
+
+def _doc_lines(text: str) -> list[str]:
+    return [data(line) for line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+
+
+def _shared(words: str, text: str) -> int:
+    wanted = {word for word in data(words).casefold().split() if len(word) > 2}
+    return sum(1 for word in data(text).casefold().split() if word in wanted)
+
+
+def doc_block(name: str, text: str, words: str = "", cap: int = DOC_CAP) -> str:
+    """<doc name="..."> with its <headings> and its text as data, lines kept; past ``cap``: the headings, then the
+    sections that share the most words with ``words`` while they fit (the rest left out, and said so)."""
+    from ..docs.model import headings as doc_headings
+
+    found = doc_headings(text)
+    outline = "\n".join(f"- {data(heading.title, 200)}" for heading in found) or "- (no headings)"
+    body = "\n".join(_doc_lines(text)).strip("\n")
+    if len(body) > cap:
+        sections = [(heading, text[heading.start:heading.end]) for heading in found if heading.level <= 2]
+        sections.sort(key=lambda item: -_shared(words, item[1]))
+        kept: list[str] = []
+        used = 0
+        for _heading, section in sections:
+            shown = "\n".join(_doc_lines(section)).strip("\n")
+            if used + len(shown) + 1 > cap:
+                continue
+            kept.append(shown)
+            used += len(shown) + 1
+        body = "\n".join(kept) + "\n[the rest of the document is left out: it is longer than this run takes]"
+    title = data(name, DOC_NAME_CAP).replace('"', "'")
+    return f'<doc name="{title}">\n<headings>\n{outline}\n</headings>\n{body}\n</doc>'
+
+
+def sheet_block(name: str, sheet: Any, words: str = "", cap: int = DOC_CAP) -> str:
+    """<sheet name="..."> with its columns (name and type, a choice's choices) and its rows ("r-1a2b3c4d | Acme |
+    2026-12-01"), each cell as data; past ``cap``: the rows that share the most words with ``words`` while they fit."""
+    from ..docs.model import TYPE_CHOICE, show_value
+
+    columns = list(getattr(sheet, "columns", ()) or ())
+    heads = []
+    for column in columns:
+        extra = f" ({', '.join(data(choice, 40) for choice in column.choices)})" if column.type == TYPE_CHOICE else ""
+        heads.append(f"{data(column.name, 40)} [{column.type}{extra}]")
+    lines = [f"columns: {' | '.join(heads) if heads else '(none yet: a new sheet)'}"]
+    rows = []
+    for row in getattr(sheet, "rows", ()) or ():
+        cells = [data(show_value(column, row.cells.get(column.id)), 500) for column in columns]
+        rows.append(f"{row.id} | " + " | ".join(cells))
+    body = "\n".join(rows)
+    if len(body) > cap:
+        ranked = sorted(rows, key=lambda line: -_shared(words, line))
+        kept, used = [], 0
+        for line in ranked:
+            if used + len(line) + 1 > cap:
+                continue
+            kept.append(line)
+            used += len(line) + 1
+        body = "\n".join(kept) + "\n[more rows are left out: the sheet is longer than this run takes]"
+    title = data(name, DOC_NAME_CAP).replace('"', "'")
+    lines.append(body if body else "(no rows yet)")
+    return f'<sheet name="{title}">\n' + "\n".join(lines) + "\n</sheet>"
+
+
+def tables_block(tables: Sequence[tuple[str, Sequence[str], Sequence[Sequence[str]]]]) -> str:
+    """<tables>: the tables on the board now (at most 3, each at most 12 rows), as data."""
+    parts = []
+    for title, heads, rows in list(tables)[:DOC_TABLES]:
+        lines = [f"table: {data(title, 80)}", " | ".join(data(head, 40) for head in heads)]
+        lines += [" | ".join(data(cell, 120) for cell in row) for row in list(rows)[:DOC_TABLE_ROWS]]
+        text = "\n".join(lines)
+        parts.append(text[:DOC_TABLE_CHARS])
+    return "<tables>\n" + ("\n\n".join(parts) if parts else _NONE) + "\n</tables>"
+
+
+def build_doc_prompt(now: datetime, owner: str, job: DocJob, words: str, *, notes: Sequence[str] = (),
+                     zone: str = "") -> str:
+    """A document's or sheet's run stdin: <now> <owner> <doc> or <sheet> (only that one, as data), <tables> (the board's,
+    at most 3), <conversation>, <memory> (chosen as for an Ask, by the owner's words) and <command> (the fixed words,
+    then "The owner's words: ..."). No mail, calendar, accounts or web."""
+    from .context import conversation_block, conversation_exchanges
+
+    if job.kind == "sheet":
+        item = sheet_block(job.name, job.snapshot, words)
+    else:
+        item = doc_block(job.name, str(job.snapshot or ""), words)
+    command = FIXED_COMMANDS[MODE_DOC]
+    said = data(words, DOC_WORDS_CAP)
+    if said:
+        command += f"\n{OWNER_WORDS}{said}"
+    blocks = [f"<now>\n{now_line(now, zone)}\n</now>", f"<owner>{data(owner)}</owner>", item,
+              tables_block(job.tables), conversation_block(conversation_exchanges(job.conversation)),
+              memory_block(notes, command=words), f"<command>\n{command}\n</command>"]
     return "\n".join(blocks) + "\n"
 
 

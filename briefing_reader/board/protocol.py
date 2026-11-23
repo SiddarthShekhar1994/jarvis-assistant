@@ -238,8 +238,8 @@ REC_CAP = 40                     # "REC 12:03 · No call audio"
 WAKE_CAP = 32                    # "Not listening: add-on missing" (wake_ui.SHORT_CAP: its few words, whole)
 APPROVALS_MAX = 999
 CANVAS_TONES = ("holo", "amber", "steel")
-CANVAS_BUTTONS = ("history", "board", "briefing", "approvals", "followups", "meetings", "agents", "live", "memory",
-                  "settings", "desktop", "minimize", "maximize", "close", "mute", "day", "now", "mic_settings")
+CANVAS_BUTTONS = ("history", "board", "briefing", "approvals", "followups", "meetings", "agents", "documents", "live",
+                  "memory", "settings", "desktop", "minimize", "maximize", "close", "mute", "day", "now", "mic_settings")
 # The window brief: "Hey Jarvis" on the canvas (wake_ui.WakeController.hearing) and the can't-hear note's microphone.
 HEAR_STATES = ("", "listening", "paused", "cant_hear", "other", "hearing")
 SIDE_MAX = 4000                  # px: the side tile's box at most (canvas part 5B)

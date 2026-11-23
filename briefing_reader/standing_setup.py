@@ -159,8 +159,10 @@ def run_setup(engine: Any, words: str, config: Any, usage: Any, *, now: datetime
     answer = result.answer
     say = " ".join(str(answer.get("say") or "").split())[:300]
     try:
+        docs_on = getattr(getattr(config, "docs", None), "enabled", True)
         job = setup.definition(answer, words, aliases=sorted(accounts_caps(config)), readable=readable(config),
-                               labels=labels, min_every=settings.min_every_minutes, now=now)
+                               labels=labels, min_every=settings.min_every_minutes, now=now,
+                               docs_dir=getattr(config, "data_dir", None) if docs_on else None)
     except setup.SetupRefused as refused:
         logger.info("Standing: a setup answer was refused")
         return SetupOutcome(say=say, refusal=str(refused))
@@ -348,6 +350,18 @@ def _trigger(job: Agent, hour24: bool) -> str:
     return trigger_text(job, hour24)
 
 
+def writes_to(job: Agent) -> str:
+    """"Writes to: Internships (a new sheet: Company · Role · Deadline · Status)" (build plan item 5)."""
+    kind, item_id = job.lands
+    noun = "document" if kind == "doc" else "sheet"
+    if item_id:
+        return f"Writes to: {job.lands_name} (your {noun}; what it writes waits for your Keep)"
+    if kind == "sheet":
+        columns = " \u00b7 ".join(name for name, _type, _choices in job.lands_columns)
+        return f"Writes to: {job.lands_name} (a new sheet: {columns})"
+    return f"Writes to: {job.lands_name} (a new document)"
+
+
 def job_lines(job: Agent | Rule, config: Any, hour24: bool = False) -> tuple[str, ...]:
     """What a setup card says a draft does (plain text; the filters and words as the definition holds them)."""
     if isinstance(job, Agent):
@@ -366,6 +380,8 @@ def job_lines(job: Agent | Rule, config: Any, hour24: bool = False) -> tuple[str
             lines.append(f"May line up: {', '.join(offers)} (each waits for your click)")
         lines.append("Reports: every run" if job.report == REPORT_EVERY else
                      "Reports: only when something needs you")
+        if job.lands:
+            lines.append(writes_to(job))
         lines.append(f"At most {job.runs_per_day} runs a day")
         return tuple(lines)
     lines = [f"Watches: new {job.account} mail matching {job.query}", f"Asks: {job.question}"]

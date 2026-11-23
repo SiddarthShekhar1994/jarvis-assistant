@@ -66,9 +66,9 @@ class DockTests(unittest.TestCase):
     # ---- layout -------------------------------------------------------------
 
     def test_slots_and_layout(self) -> None:
-        # Desktop and Agents start hidden ([desktop] and [standing] show them): the rail is the eight slots it
-        # always had.
-        screens = [key for key in dock.SLOTS if key not in (dock.DESKTOP, dock.AGENTS)]
+        # Desktop, Agents and Documents start hidden ([desktop], [standing] and [docs] show them): the rail is the
+        # eight slots it always had.
+        screens = [key for key in dock.SLOTS if key not in (dock.DESKTOP, dock.AGENTS, dock.DOCS)]
         self.assertEqual(self.dock.visible_slots(), screens)
         self.assertEqual(self.dock.width(), 64)
         rects = {key: self.dock.slot_rect(key) for key in screens}
@@ -103,7 +103,7 @@ class DockTests(unittest.TestCase):
         self.dock.set_hud_key("Ctrl+Alt+H")
         self.dock.set_slot_visible(dock.DESKTOP, True)
         settle()
-        self.assertEqual(self.dock.visible_slots(), [key for key in dock.SLOTS if key != dock.AGENTS])
+        self.assertEqual(self.dock.visible_slots(), [key for key in dock.SLOTS if key not in (dock.AGENTS, dock.DOCS)])
         self.assertEqual(self.dock.sizeHint().height(), 2 * dock.PAD_Y + 10 * dock.BUTTON)
         desktop, meetings = self.dock.slot_rect(dock.DESKTOP), self.dock.slot_rect(dock.MEETINGS)
         self.assertEqual((desktop.width(), desktop.height(), desktop.x()), (44, 44, 10))

@@ -1070,6 +1070,9 @@ ICONS: dict[str, tuple[str, ...]] = {
     # Agents (the standing agents and rules: a clock whose hand comes round again).
     "agents": ("M20 12a8 8 0 1 1-2.45-5.75", "M20 4.5v4.5h-4.5", "M12 8v4l2.6 1.6"),
     "record": ("M12 6a6 6 0 1 0 0 12a6 6 0 1 0 0-12z",),
+    # Documents (build plan item 5: a page with its folded corner over a second page).
+    "documents": ("M9 3.5h7l3.5 3.5v10.5a.5.5 0 0 1-.5.5H9a.5.5 0 0 1-.5-.5V4a.5.5 0 0 1 .5-.5z", "M16 3.5V7h3.5",
+                  "M5.5 7.5v12.5a.5.5 0 0 0 .5.5h9", "M11 11h5.5M11 14h4"),
     # Desktop (the Switch prototype's monitor: the Dock's switch to the HUD).
     "desktop": ("M4.5 4.5h15a1.5 1.5 0 0 1 1.5 1.5v8.5a1.5 1.5 0 0 1-1.5 1.5h-15a1.5 1.5 0 0 1-1.5-1.5V6"
                 "a1.5 1.5 0 0 1 1.5-1.5z", "M8.5 20h7M12 16v4"),

@@ -30,3 +30,9 @@ THE LINES (optional; only the kinds <job> allows; at most 4)
   the owner's time zone (<now>).
 - A Todo is something the owner should do, with its due date.
 - "|" never appears inside a field. Never claim anything is done, sent or added: say what you lined up.
+
+A SHEET (only when <sheet> is given)
+- <sheet> names the owner's sheet this job fills and its columns (name and type). You never see its rows.
+- "rows": each new thing this run found that belongs in the sheet, one row each, its cells in the columns' order, as
+  text: a number as digits, a date as 2026-11-22, a checkbox as yes or no, a choice as one of its choices, a link only
+  as the email gives it, an empty cell as "". At most 20 rows. Every row waits for the owner's Keep.
