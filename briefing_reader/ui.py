@@ -126,7 +126,7 @@ from PySide6.QtWidgets import (
 from . import (alive, approvals_view, batch, brief_view, briefing_view, context_view, docs_view, find_view,
                followups_view, live_view, meetings_view, memory_view, offer_view, plan_view, settings_view,
                standing_view, states_view, transcript_view, voice_fx)
-from . import canvas_view, desk_view
+from . import canvas_view, desk_view, overrides
 from . import dock as dock_mod
 from . import holo, home, hud, window_chrome
 from .board import view as board_view
@@ -6601,7 +6601,9 @@ class AppController(QObject):
         orb_mod.set_lock_probe(self._locked)        # the lock screen check the announcements use
         reading = self.window.reading
         reading.settings_page.set_paths(str(self._config_path()), str(self.config.data_dir))
-        reading.settings_page.set_config(self.config)         # read only: shown, never written back
+        reading.settings_page.set_config(self.config)         # shown; config.toml is never written back
+        # Smaller items part 4: Change on a comfort row writes settings.json in the data folder (used after a restart)
+        reading.settings_page.set_store(overrides.SettingsStore(overrides.settings_file(self.config.data_dir)))
         reading.set_address(self.config.assistant.address)
         reading.set_greeting(self._resting_greeting())
         # Round 2, part 3b (HOLOGRAM_SPEC 16.7): quiet hours are the bundle's (no bundle: none shown), and the
@@ -13362,7 +13364,8 @@ class AppController(QObject):
         controller.fallback.connect(self._on_instant_fallback)
         settings = self.window.reading.settings_page                   # round 2: Settings > Instant answers
         settings.add_group(instant_ui.SETTINGS_KEY, instant_ui.SETTINGS_TITLE, note=instant_ui.SETTINGS_NOTE,
-                           how=instant_ui.SETTINGS_HOW, rows=controller.settings_rows)
+                           how=instant_ui.SETTINGS_HOW, rows=controller.settings_rows,
+                           edits=settings_view.INSTANT_EDITS)
         controller.townChanged.connect(settings.refresh)
         timers.ended.connect(self._on_instant_timer_ended)
         timers.changed.connect(self._on_instant_timers_changed)
@@ -16369,7 +16372,8 @@ class AppController(QObject):
         if visibility is not None:
             visibility.connect(self._talk_visibility)
         reading.settings_page.add_group(talk_ui.SETTINGS_KEY, talk_ui.SETTINGS_TITLE, note=talk_ui.SETTINGS_NOTE,
-                                        how=talk_ui.SETTINGS_HOW, rows=controller.settings_rows, extra=panel)
+                                        how=talk_ui.SETTINGS_HOW, rows=controller.settings_rows, extra=panel,
+                                        edits=settings_view.TALK_EDITS)
         # Canvas part 5B: Settings > Talk's Microphone row - the same saved pick as Settings > Meetings' (one setting:
         # either row changes it, both show it), listed whenever Settings > Talk opens
         controller.mic_picker = getattr(self, "_pick_microphone", None)

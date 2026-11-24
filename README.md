@@ -450,8 +450,7 @@ Planned for later versions; none of these is built yet, and all of them will
 keep the same rules (they propose, your click approves, and what they did
 shows, in LIVE or, for standing jobs, on the Agents screen):
 
-- **Smaller items**: changing settings in the app (the Settings screen is
-  read only today), a fallback model that runs on
+- **Smaller items**: a fallback model that runs on
   this PC, filling forms in the apps you allow (see
   [Jarvis on your desktop](#jarvis-on-your-desktop-the-hud)), and for his
   voice: knowing yours, staying quiet during calls and live captions while
@@ -1358,12 +1357,28 @@ effects off, and so does turning off "Show animations in Windows".
 - **Settings** (**Ctrl+,**) shows the settings as Jarvis
   loaded them (Voice, Briefing times, Ask, Accounts, Quiet hours, LIVE and
   privacy, Look and the rest), says which `config.toml` tables hold them and
-  opens `config.toml` or the data folder. Every setting lives in `config.toml`
-  (secrets in `.env`); change it there and restart Jarvis. Nothing on this
-  screen changes `config.toml`; the few switches it has act on this PC only
-  (such as Settings > Look's soft sounds and "Show Jarvis on my second
-  screen", kept in `assistant.json`), and it never shows a secret, a token or
-  an email address.
+  opens `config.toml` or the data folder. The comfort settings have
+  **Change** on their row: his speed and volume, whether he speaks on his own,
+  his answers and what happened after an approval, the greeting (and its one
+  fact), how long his voice stays loaded, how a scheduled briefing arrives, the
+  clock, the screen motion, where LIVE opens, and, with their features on,
+  quiet hours and the meeting brief's lead time, the instant answers'
+  temperature, and the quiet that ends a talk and how long its speech model
+  stays loaded. Change opens the row's own editor under it (On / Off or a
+  choice as buttons, a number with **Less** and **More** inside its limits, a
+  time as HH:MM); **Save** keeps it on this PC, **Cancel** keeps nothing, and
+  Esc is Cancel. A changed row says "Changed here" (until the restart:
+  "Changed here to ... - used after a restart") and has **Back to
+  config.toml**, which takes the change away again. Changes are used after you
+  restart Jarvis; there is no Restart button. Everything else, and anything
+  that decides what leaves the PC, what Jarvis reads, who gets something or
+  what runs by itself (every `enabled`, the accounts, models, keys, folders,
+  the schedule and the network switches), is changed only in `config.toml`
+  (secrets in `.env`), then a restart. Nothing on this screen writes
+  `config.toml`; what Change sets is kept in the data folder's
+  `settings.json` (see [Configuration](#configuration)), and the few switches
+  of Settings > Look act on this PC only (`assistant.json`). It never shows a
+  secret, a token or an email address.
 
 Elsewhere in this README "the JARVIS tab" means Home's Transcript, "the
 BRIEFING / LIVE / MEMORY tab" the screen of that name and "the NEEDS YOUR OK
@@ -3743,8 +3758,10 @@ as typed words do, and "stop" stops it.
 - **Turning it on.** Install the two add-ons yourself (Jarvis never runs pip;
   Settings > Talk shows the command), click Download in Settings > Talk, add
   `JARVIS_TALK_ENABLED=true` to `.env` and restart the "Briefing hotkey" task.
-  The key (`[talk] key`), the model and the quiet that ends a talk (`[talk]
-  quiet_ms`) are in `config.toml`. It needs Ask Jarvis on.
+  The key (`[talk] key`) and the model are in `config.toml`; the quiet that
+  ends a talk (`[talk] quiet_ms`) and how long the model stays loaded are
+  there too, or set with **Change** in Settings > Talk (used after a restart).
+  It needs Ask Jarvis on.
 
   ```powershell
   C:/Users/<you>/AppData/Local/Programs/Python/Python313/python.exe -m pip install faster-whisper==1.2.1 PyAudioWPatch==0.2.12.9
@@ -5282,6 +5299,29 @@ optional. A bad value never stops the app: an invalid value is replaced by the
 default, a number outside its range is clamped, and a warning is written to the
 log. Changes apply the next time the app starts.
 
+**`settings.json`** (in the data folder, `%LOCALAPPDATA%\briefing-reader`):
+what you changed with **Change** in [Settings](#using-it), as
+`{"version": 1, "values": {"voice.rate": "+10%"}}`. Its values win over
+`config.toml` for these keys only: `[voice] rate`, `volume` and
+`keep_warm_minutes`; `[assistant] speak`, `greet`, `greeting_context`,
+`speak_replies`, `speak_results` and `scheduled_prompt`; `[display] clock`;
+`[ui] motion`; `[live] auto_open`; `[productivity] quiet_from`, `quiet_until`
+and `prep_lead_minutes`; `[instant] temperature`; `[talk] quiet_ms` and
+`keep_warm_minutes`. They are merged into `config.toml`'s values before they
+are checked, so every value keeps the limits in the table below; a value that
+does not fit, or any other key in the file, is left out with a warning that
+names only the key, and `config.toml`'s value (or the default) is used. No
+`enabled` can be set there, so `.env`'s `JARVIS_*_ENABLED` still decide. Every
+Jarvis process (the app, the hotkey agent, a standing run) reads the same file
+when it starts. The log says "Settings: N value(s) changed here" at the start
+and "Settings: <table.key> changed here" or "... back to config.toml" for each
+change, never a value. A file Jarvis cannot use as a whole (not readable, too
+big, damaged or written by another version) counts as empty, and before the
+first **Save** replaces it, it is kept as `settings.json.bak` (if that copy
+cannot be made, nothing is saved). A file edited or deleted while Jarvis runs
+is read again before each change and when Settings shows its rows. Delete the
+file to go back to `config.toml` for all of them.
+
 | Key | Default | Meaning |
 |---|---|---|
 | `[voice] engine` | `"local"` | Where his voice is made: `"local"` = on this PC (Kokoro-82M; nothing he says leaves the PC, so lines that may be private are said too; the Windows voice speaks until it is downloaded or when it can't run - never the online one), `"online"` = Microsoft's online voice (edge-tts), with private lines kept on screen. See [Jarvis's voice, made on this PC](#jarviss-voice-made-on-this-pc). |
@@ -5816,6 +5856,7 @@ Other files in `%LOCALAPPDATA%\briefing-reader`:
 | `ask\` | The empty folder Claude Code runs in for Ask. Ask refuses to run while anything is in it (a `CLAUDE.md` or `.mcp.json` there would add instructions or tools). |
 | `research\` | The empty folder Claude Code runs in for web research; research refuses to run while anything is in it. |
 | `runstate.json` | Per scheduled briefing: when it was first shown, when it was announced (`announced_at`) and first viewed (`viewed_at`), when and how a classic prompt was answered (read, dismissed, done), and (the productivity bundle) when the plan offer was posted for it (`plan_offered_at`) and when its day was planned (`planned_at`; an evening "plan tomorrow" marks tomorrow's AM slot), kept for 14 days. The catch-up task uses it, and it keeps a briefing from being announced twice; see [Catch-up and the hotkey](#catch-up-and-the-hotkey). Safe to delete (a briefing may then be announced once more). |
+| `settings.json` | The settings you changed with Change in Settings (`{"version": 1, "values": {...}}`, the keys listed under [Configuration](#configuration)); they win over `config.toml` from the next start. Never a secret, an address or a path. Safe to delete (`config.toml`'s values hold again). A file Jarvis could not use is kept as `settings.json.bak` before a Save replaces it; safe to delete too. |
 | `assistant.json` | Whether Jarvis's voice is muted, the ids of the last 5 greetings (so the next one differs), whether the briefings an older version read through its prompt were taken as viewed (done once, at the first start after the update, so they are not announced again), and, once you used it, where the LIVE pop-out window was and whether it was open, and `prod_hint_shown` once the "minimize instead of Done" hint was shown, and `followups_off` while the follow-up list is turned off on this PC, and `desktop_turned_on` (with `desktop_consent_version`, the card's version) once you turned [Jarvis on your desktop](#jarvis-on-your-desktop-the-hud) on, and `look`: whether you turned the soft sounds off or the second screen on or off in Settings > Look, and how many times the empty board's hint line was shown. Never any text. Safe to delete. |
 | `sounds\` | The [soft sounds](#soft-sounds), `sound_<name>_v<n>.wav` (13 short tones: the nine moments, the frame's sound in four steps), made by Jarvis the first time the sounds are on and written once (again only when a file is missing or their recipe changes; nothing while the sounds are off). Nothing is ever recorded. Safe to delete: they are made again. The board itself writes nothing to disk: its frames last for the session only. |
 | `desktop\` | Jarvis on your desktop's own records, on this PC only: `journal\<run id>.jsonl`, for each NEEDS YOUR OK card you clicked, every file it moved, copied, renamed, zipped or put in the Recycle Bin with its old and new path (Undo needs them; never logged, never sent to Claude; kept 30 days); `timers.json`, your running timers and reminders and their labels (so a restart keeps them); `focus.json` while focus mode runs. Safe to delete (Undo of those changes goes with it). |
@@ -6824,6 +6865,7 @@ briefing_reader/speech.py     Jarvis's voice: utterance kinds, the Voice interfa
 briefing_reader/voice_ui.py   Jarvis's voice in the app: his own player and the voice the controller speaks through (pauses and resumes the briefing, mute, the hold during a Send)
 briefing_reader/hotkey.py     global hotkey agent (RegisterHotKey), press handling, activation pipe
 briefing_reader/config.py     .env, environment and config.toml loading, paths, logging with secret redaction
+briefing_reader/overrides.py  the settings changed in the app (settings.json; no Qt): the editable keys and their limits, merged before the parsers
 briefing_reader/models.py     shared data types (flattened lines, script, audio, launch kinds)
 briefing_reader/notion_client.py  Notion REST client, block flattener, header parsing, freshness, polling, fixtures
 briefing_reader/text_prep.py  markdown stripping, text for listening, script with sections, stale note and Needs your OK part
@@ -6860,6 +6902,7 @@ briefing_reader/player.py     QtMultimedia player that plays sections in order w
 briefing_reader/hud.py        Jarvis HUD widget kit: colours, fonts, chamfered panels, orb, buttons, cards, agenda, command bar, tabs, conversation, the LIVE log, its pictures and the picture viewer
 briefing_reader/ui.py         assistant screen (JARVIS / BRIEFING / LIVE / MEMORY tabs), the LIVE pop-out window, classic prompt, tray icon, approvals, TODAY / DEADLINES, app controller (launch kinds, NEW, greeting, announcement)
 briefing_reader/orb.py        the orb: Jarvis's ring at every size, its looks and facing you, its frame clock and paint budget
+briefing_reader/settings_edit.py  Settings' Change editors (On / Off and choice buttons, Less / More steppers, HH:MM times; Save and Cancel)
 briefing_reader/look_ui.py    the new look in the app: the soft sounds' moments, Settings > Look, the board's and the second screen's controllers
 briefing_reader/sounds.py     the soft sounds, made in code: their recipes and every rule that keeps them quiet
 briefing_reader/board/        the board: its own address scheme (scheme), the messages both ways and their checks

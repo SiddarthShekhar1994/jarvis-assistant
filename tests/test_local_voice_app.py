@@ -324,7 +324,8 @@ class SettingsRowsTests(unittest.TestCase):
         self.assertEqual(rows[0], ("Voice", "George (British), made on this PC"))
         self.assertEqual(dict(rows)["When that voice can't run"], "Windows' default voice")
         self.assertEqual(dict(rows)["Speed"], "Normal")
-        self.assertEqual(len(rows), 9)                     # as many as before: Open config.toml stays in view
+        self.assertEqual(dict(rows)["Voice kept loaded"], "While Jarvis runs")   # Smaller items part 5 (Change)
+        self.assertEqual(len(rows), 10)    # one more; Open config.toml still in view (test_settings_edit checks it)
 
     def test_the_online_voice_rows(self) -> None:
         rows = settings_view.settings_rows(self.config("online"), "voice")

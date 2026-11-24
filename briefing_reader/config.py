@@ -1,6 +1,6 @@
 """Configuration, application paths and logging for briefing-reader.
 
-Settings come from three places:
+Settings come from four places:
 
 * ``.env`` in the project folder, loaded into the process environment without
   overriding variables that are already set: ``NOTION_TOKEN`` and
@@ -14,7 +14,9 @@ Settings come from three places:
   agenda, display, Ask Jarvis (``[ask]``, off by default), assistant (``[assistant]``: how
   Jarvis speaks on his own), LIVE view (``[live]``: the tab that shows every step Jarvis
   takes, on screen only) and screen (``[ui]``: how much the hologram moves) options. Which
-  Google account an alias is never goes here: the sign-ins live in %LOCALAPPDATA%\\briefing-reader.
+  Google account an alias is never goes here: the sign-ins live in %LOCALAPPDATA%\\briefing-reader;
+* ``settings.json`` in that data folder (overrides.py): the comfort settings changed in the app's Settings, merged
+  into config.toml's values before the parsers run (config.toml < settings.json; never an ``enabled``).
 
 A bad setting never stops the app: invalid values are logged as warnings and
 replaced by their defaults. The Notion token is never logged. As soon as it is
@@ -638,6 +640,10 @@ class Config:
     standing: StandingConfig = field(default_factory=StandingConfig)
     look: LookConfig = field(default_factory=LookConfig)
     docs: DocsConfig = field(default_factory=DocsConfig)
+    # Settings changed in the app (overrides.py: settings.json in the data folder, merged before the parsers): the
+    # "table.key" names in use here, and what config.toml alone gives each of them. hash=False keeps Config hashable.
+    overridden: frozenset[str] = frozenset()
+    toml_values: Mapping[str, Any] = field(default_factory=_empty_mapping, hash=False)
 
     @property
     def notion_url(self) -> str:
@@ -736,6 +742,18 @@ def load_config(project_root: Path | None = None, *,
             logger.warning("config.toml: unknown setting %r ignored", name)
 
     data_dir = _data_dir_from(environ)
+    # Settings changed in the app win over config.toml (never over .env's JARVIS_*_ENABLED: no enabled is editable);
+    # merged here, before the parsers, so they pass the same checks. A bad value was left out by overrides.load.
+    from . import overrides
+
+    try:
+        changed_here = overrides.load(overrides.settings_file(data_dir))
+    except Exception as exc:  # noqa: BLE001 - load handles the file's own errors; nothing here may stop a start
+        logger.warning("Settings: settings.json was not used (%s); config.toml as it is", type(exc).__name__)
+        changed_here = {}
+    doc, overridden, toml_values = overrides.apply(doc, changed_here)
+    if overridden:
+        logger.info("Settings: %d value(s) changed here", len(overridden))
     hotkey = _parse_hotkey(doc)
     desktop = _parse_desktop(doc, environ, hotkey.combo)
     return Config(
@@ -772,6 +790,8 @@ def load_config(project_root: Path | None = None, *,
         standing=_parse_standing(doc, environ),
         look=_parse_look(doc),
         docs=_parse_docs(doc),
+        overridden=overridden,
+        toml_values=MappingProxyType(toml_values),
     )
 
 

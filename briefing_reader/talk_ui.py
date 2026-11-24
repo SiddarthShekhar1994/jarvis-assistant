@@ -62,8 +62,9 @@ SETTINGS_NOTE = ("Tap the talk key, say what you want, and Jarvis takes it after
                  "again to end sooner, Esc to cancel. He hears you only from the tap to the end, and shows that he is "
                  "listening. Your speech becomes text on this PC and the sound is never saved; what he heard goes in as "
                  "if you had typed it, so cards still need your click.")
-SETTINGS_HOW = ("Turn it on with JARVIS_TALK_ENABLED=true in .env, then restart the \"Briefing hotkey\" task. The key, "
-                "the model and the quiet that ends a talk are [talk] in config.toml.")
+SETTINGS_HOW = ("Turn it on with JARVIS_TALK_ENABLED=true in .env, then restart the \"Briefing hotkey\" task. The key "
+                "and the model are [talk] in config.toml; Change sets the quiet that ends a talk and how long the model "
+                "stays loaded on this PC (used after a restart).")
 
 NOT_CAUGHT = "I didn't catch that."
 MUTED = "I heard nothing at all: is your microphone muted?"
