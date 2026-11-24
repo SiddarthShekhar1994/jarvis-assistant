@@ -243,6 +243,134 @@ class SpeechClientTests(unittest.TestCase):
         self.assertFalse(client.running())
 
 
+class Scripted(EchoTranscriber):
+    """Says how many samples it was given, after the next of ``delays`` (seconds; then none); ``device`` is where it
+    says it runs. ``began`` is set as each clip starts (a partial in flight)."""
+
+    delays: list[float] = []
+    device = "cpu"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.began = threading.Event()
+
+    def transcribe(self, pcm: bytes) -> str:
+        self.clips.append(len(pcm) // 2)
+        self.began.set()
+        delay = type(self).delays.pop(0) if type(self).delays else 0.0
+        time.sleep(delay)
+        return f"heard {len(pcm) // 2} samples"
+
+
+class PeekTests(unittest.TestCase):
+    """SpeechClient.peek (smaller items part 8): a fake process (serve() on a thread) with scripted delays."""
+
+    def client(self, delays=(), device: str = "cpu", **kwargs) -> tuple[SpeechClient, list, list]:
+        made: list[Scripted] = []
+        cls = type("Run", (Scripted,), {"delays": list(delays), "device": device})
+
+        def load():
+            transcriber = cls()
+            made.append(transcriber)
+            return transcriber
+
+        procs: list[FakeProc] = []
+
+        def spawn(_command):
+            proc = FakeProc(load)
+            procs.append(proc)
+            return proc
+
+        client = SpeechClient(Path("C:/models/x"), spawn=spawn, **kwargs)
+        self.addCleanup(lambda: [proc.tidy() for proc in procs])
+        self.addCleanup(client.close)
+        return client, procs, made
+
+    def test_a_peek_never_starts_the_process(self) -> None:
+        client, procs, _made = self.client()
+        self.assertIsNone(client.peek(b"\x01\x00" * 50))
+        self.assertEqual(procs, [])
+        self.assertIsNone(client.peek(b""))
+
+    def test_partials_then_the_final_each_answered_in_order(self) -> None:
+        client, procs, made = self.client()
+        self.assertTrue(client.understand(b"\x01\x00" * 4).ok)            # an earlier talk: the process is warm
+        self.assertEqual(client.peek(b"\x01\x00" * 10), "heard 10 samples")
+        self.assertEqual(client.peek(b"\x01\x00" * 20), "heard 20 samples")
+        heard = client.understand(b"\x01\x00" * 30)
+        self.assertEqual((heard.ok, heard.text), (True, "heard 30 samples"))   # the final text, unchanged
+        self.assertEqual((made[0].clips, len(procs)), ([4, 10, 20, 30], 1))
+
+    def test_the_final_waits_for_at_most_the_one_partial_in_flight(self) -> None:
+        client, _procs, made = self.client(delays=[0.0, 0.5, 0.0])
+        client.understand(b"\x01\x00" * 4)
+        result: list = []
+        peeking = threading.Thread(target=lambda: result.append(client.peek(b"\x01\x00" * 10)))
+        made[0].began.clear()
+        peeking.start()
+        self.assertTrue(made[0].began.wait(5))                              # the partial is being made
+        self.assertIsNone(client.peek(b"\x01\x00" * 12))                  # never a second one meanwhile
+        began = time.monotonic()
+        heard = client.understand(b"\x01\x00" * 30)
+        waited = time.monotonic() - began
+        peeking.join(5)
+        self.assertEqual((heard.text, result), ("heard 30 samples", ["heard 10 samples"]))
+        self.assertLess(waited, 3.0)
+        self.assertEqual(made[0].clips, [4, 10, 30])
+
+    def test_a_peek_while_understanding_gives_nothing_at_once(self) -> None:
+        client, _procs, made = self.client(delays=[0.0, 0.6])
+        client.understand(b"\x01\x00" * 4)
+        made[0].began.clear()
+        final: list = []
+        thread = threading.Thread(target=lambda: final.append(client.understand(b"\x01\x00" * 30)))
+        thread.start()
+        self.assertTrue(made[0].began.wait(5))
+        began = time.monotonic()
+        self.assertIsNone(client.peek(b"\x01\x00" * 10))
+        self.assertLess(time.monotonic() - began, 0.3)
+        thread.join(5)
+        self.assertEqual(final[0].text, "heard 30 samples")
+
+    def test_a_slow_partial_is_given_up_never_killed_and_the_final_is_never_its_answer(self) -> None:
+        # Fix round MEDIUM: the warm process stays; the partial's late answer is read and dropped first.
+        client, procs, made = self.client(delays=[0.0, 0.5], peek_timeout_s=0.1)
+        client.understand(b"\x01\x00" * 4)
+        self.assertIsNone(client.peek(b"\x01\x00" * 10))
+        self.assertTrue(client.running())
+        self.assertIsNone(client.peek(b"\x01\x00" * 12))                  # an answer still owed: none piled on
+        heard = client.understand(b"\x01\x00" * 30)
+        self.assertEqual((heard.ok, heard.text, len(procs)), (True, "heard 30 samples", 1))
+        self.assertEqual(made[0].clips, [4, 10, 30])
+        self.assertEqual(client.peek(b"\x01\x00" * 6), "heard 6 samples")   # in step again
+
+    def test_a_cancelled_peek_sends_nothing(self) -> None:
+        # Fix round LOW 4: the talk ended before the peek had the lock: the final never waits behind it.
+        client, _procs, made = self.client()
+        client.understand(b"\x01\x00" * 4)
+        cancelled = threading.Event()
+        cancelled.set()
+        self.assertIsNone(client.peek(b"\x01\x00" * 10, cancelled))
+        self.assertEqual(made[0].clips, [4])
+        self.assertEqual(client.peek(b"\x01\x00" * 10, threading.Event()), "heard 10 samples")
+
+    def test_the_device_comes_from_the_answers(self) -> None:
+        client, _procs, _made = self.client(device="cuda")
+        client.understand(b"\x01\x00" * 4)
+        self.assertEqual(client.device, "cuda")
+        self.assertTrue(talk.captions_on("auto", client.device))
+        cpu, _p, _m = self.client(device="cpu")
+        cpu.understand(b"\x01\x00" * 4)
+        self.assertFalse(talk.captions_on("auto", cpu.device))
+
+    def test_a_process_about_to_go_idle_is_not_peeked(self) -> None:
+        client, procs, _made = self.client(idle_s=6.0)
+        client.understand(b"\x01\x00" * 4)
+        client._last_used -= 2.0                                         # within IDLE_MARGIN_S of its idle end
+        self.assertIsNone(client.peek(b"\x01\x00" * 10))
+        self.assertEqual(len(procs), 1)
+
+
 class FakeStream:
     """A device stream like meeting_audio's _QueueStream: its rate and channels say the device's own (48 kHz
     stereo here), but ``read_available`` gives 16 kHz mono int16 (the AudioStream contract), in pieces. A talk that

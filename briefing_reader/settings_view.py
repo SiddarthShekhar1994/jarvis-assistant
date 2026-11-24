@@ -112,7 +112,8 @@ EDIT_ROWS: dict[str, dict[str, tuple[str, ...]]] = {
 }
 INSTANT_EDITS: dict[str, tuple[str, ...]] = {"Temperature": ("instant.temperature",)}
 TALK_EDITS: dict[str, tuple[str, ...]] = {"Quiet that ends a talk": ("talk.quiet_ms",),
-                                          "Model kept loaded": ("talk.keep_warm_minutes",)}
+                                          "Model kept loaded": ("talk.keep_warm_minutes",),
+                                          "Live captions": ("talk.live_captions",)}
 DATA_TEXT = "What Jarvis keeps on this PC (memory, decisions, voice cache, logs) is in the data folder."
 OPEN_CONFIG_TEXT = "Open config.toml"
 OPEN_DATA_TEXT = "Open the data folder"

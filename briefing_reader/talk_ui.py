@@ -15,6 +15,14 @@ Settings > Meetings' - else the Windows default); the orb listens (``set_look``)
 through ``submit`` (AskController.submit_spoken: the same routes and gates as typed words, so cards still need a
 click - voice never approves or undoes). Logs hold kinds, counts and times only: never what was said.
 
+Live captions (smaller items part 9, owner decisions 2026-11-24): while the owner talks, the words heard so far
+(talk.CaptionPump over SpeechClient.peek; [talk] live_captions "auto" / "on" / "off") show on the bar's status line -
+the window's and the HUD's - in quotes, the newest CAPTION_WORDS, and through it as Home's caption's dim thinking line.
+They go nowhere else: not to the second screen, LIVE, the conversation or the log, and never in. Each talk's end (what
+was said going in, Esc, a cancel, the microphone stopping) clears them at once, and a partial that comes back after is
+dropped. During a call they still show (they are on screen only). The same for a talk "Hey Jarvis" started, without the
+wake words.
+
 "Hey Jarvis" (wake_ui, owner decisions 2026-11-12) starts the same talk through :meth:`TalkController.listen_from_wake`
 on the listener's audio instead of a microphone of its own: 5 s to start the request; a request said in the same
 breath ("Hey Jarvis, open Spotify") keeps the audio from before the wake in its clip and loses the wake words from what
@@ -63,8 +71,8 @@ SETTINGS_NOTE = ("Tap the talk key, say what you want, and Jarvis takes it after
                  "listening. Your speech becomes text on this PC and the sound is never saved; what he heard goes in as "
                  "if you had typed it, so cards still need your click.")
 SETTINGS_HOW = ("Turn it on with JARVIS_TALK_ENABLED=true in .env, then restart the \"Briefing hotkey\" task. The key "
-                "and the model are [talk] in config.toml; Change sets the quiet that ends a talk and how long the model "
-                "stays loaded on this PC (used after a restart).")
+                "and the model are [talk] in config.toml; Change sets the quiet that ends a talk, how long the model "
+                "stays loaded and live captions on this PC (used after a restart).")
 
 NOT_CAUGHT = "I didn't catch that."
 MUTED = "I heard nothing at all: is your microphone muted?"
@@ -84,6 +92,7 @@ def muted_text(name: str = "", follows_default: bool = False) -> str:
             + (" Another can be picked in Settings > Talk > Microphone." if follows_default else ""))
 CANCELLED = "Cancelled."
 LISTENING_TEXT = "Listening: tap {key} to end, Esc to cancel."   # (whole on the canvas's one status line)
+CAPTION_FORMAT = "\u201c{words}\u201d"     # a live caption on the status line: the words heard so far, in quotes
 WAKE_NOTHING = "I didn't hear a request."      # a talk "Hey Jarvis" started that heard nothing (a false wake, often)
 # How a talk "Hey Jarvis" started ended (wakeTalkEnded): what was heard went in / nothing was heard / Esc or Stop /
 # the microphone or the understanding failed.
@@ -167,6 +176,7 @@ class TalkController(QObject):
     stateChanged = Signal(str)
     wakeTalkEnded = Signal(str)     # a talk "Hey Jarvis" started ended: WAKE_REQUEST, WAKE_HEARD_NOTHING, ...
     _heard = Signal(object, int)
+    _partial = Signal(int, str)     # a live caption's words, from the pump's worker thread (never logged)
     _download_progress = Signal(int, int)
     _downloaded = Signal(str)
     _global_esc = Signal()          # the global Esc (desktop.stopkeys) fires on its own thread
@@ -180,7 +190,8 @@ class TalkController(QObject):
                  audio_missing: Callable[[], str] | None = None, speech_missing: Callable[[], str] | None = None,
                  downloader_factory: Callable[..., Any] | None = None, threaded: bool = True,
                  clock: Callable[[], float] = time.monotonic, stopkeys: Any = None,
-                 chime: Callable[[], Any] | None = None) -> None:
+                 chime: Callable[[], Any] | None = None,
+                 caption_start: Callable[[Callable[[], Any]], Any] | None = None) -> None:
         super().__init__(parent)
         from . import meeting_audio, meeting_speech, meetings
 
@@ -220,6 +231,11 @@ class TalkController(QObject):
         self._timer.setInterval(POLL_MS)
         self._timer.timeout.connect(self._poll)
         self._heard.connect(self._on_heard, Qt.ConnectionType.QueuedConnection)
+        self._partial.connect(self._on_partial, Qt.ConnectionType.QueuedConnection)
+        self._pump: talk.CaptionPump | None = None     # the talk under way's live captions (None: off for it)
+        # How a partial is asked for (tests: in place, or later): a daemon thread when threaded, else in place.
+        self._caption_start = caption_start if caption_start is not None else (
+            None if threaded else (lambda work: work()))
         self._download_progress.connect(self._on_download_progress, Qt.ConnectionType.QueuedConnection)
         self._downloaded.connect(self._on_downloaded, Qt.ConnectionType.QueuedConnection)
         self._downloading = False
@@ -389,6 +405,11 @@ class TalkController(QObject):
             logger.warning("Talk: starting to listen failed (%s)", type(exc).__name__)
             self._finish(talk.END_DEVICE)
             return
+        try:
+            self._pump = self._new_pump()
+        except Exception as exc:  # noqa: BLE001 - no captions this talk; the talk goes on
+            self._pump = None
+            logger.info("Talk: no live captions this talk (%s)", type(exc).__name__)
         logger.info("Talk: listening%s (global Esc %s)", " after \"Hey Jarvis\"" if self._wake_talk else "",
                     "held" if self._esc_armed else "not held")
 
@@ -419,9 +440,63 @@ class TalkController(QObject):
             reason = talk.END_DEVICE
         if reason:
             self._finish(reason)
+            return
+        pump = self._pump
+        if pump is not None:
+            try:
+                pump.tick(session)
+            except Exception as exc:  # noqa: BLE001 - captions never end a talk
+                logger.info("Talk: live captions stopped (%s)", type(exc).__name__)
+                self._pump = None
+                pump.stop()
+
+    # ---- live captions (smaller items part 9) ---------------------------------------------------------------
+
+    def _captions_setting(self) -> str:
+        setting = str(getattr(self._cfg, "live_captions", talk.CAPTIONS_AUTO) or talk.CAPTIONS_AUTO)
+        return setting if setting in (talk.CAPTIONS_AUTO, talk.CAPTIONS_ON, talk.CAPTIONS_OFF) else talk.CAPTIONS_AUTO
+
+    def _new_pump(self) -> talk.CaptionPump | None:
+        """The talk's live captions, unless [talk] live_captions is "off" (or the client cannot peek). "auto" is asked
+        again at every partial: the device the speech process last reported (GPU: on; the CPU, or not said yet: off).
+        Making the client starts no process, and a partial never starts one."""
+        setting = self._captions_setting()
+        if setting == talk.CAPTIONS_OFF:
+            return None
+        client = self._ensure_client()
+        peek = getattr(client, "peek", None)
+        if not callable(peek):
+            return None
+
+        def wanted() -> bool:
+            return talk.captions_on(setting, str(getattr(client, "device", "") or ""))
+
+        deliver = self._partial.emit if self._threaded else self._on_partial
+        return talk.CaptionPump(peek, deliver, wanted=wanted, clock=self._clock, start=self._caption_start)
+
+    def _on_partial(self, generation: int, text: str) -> None:
+        """A partial came back (on the GUI thread): its newest words on the status line - shown, never said, never
+        logged, never in - unless the talk ended meanwhile."""
+        pump = self._pump
+        if pump is None or self._state != LISTENING or self._closing:
+            return
+        if self._wake_talk:
+            from .wake import strip_wake_words
+
+            text = strip_wake_words(text)       # "Hey Jarvis, open..." -> "Open..."
+        words = pump.take(generation, text)
+        if words:
+            line = CAPTION_FORMAT.format(words=words)
+            self._show(line, hud.TONE_WORKING, hud_text=line)
+
+    def _stop_captions(self) -> None:
+        pump, self._pump = self._pump, None
+        if pump is not None:
+            pump.stop()
 
     def _finish(self, reason: str) -> None:
         session, self._session = self._session, None
+        self._stop_captions()                   # a partial still in flight is dropped; the line below replaces one shown
         self._timer.stop()
         self._chime_timer.stop()
         self._watch_escape(False)
@@ -484,11 +559,15 @@ class TalkController(QObject):
 
         return SpeechClient(folder, hints=hints, idle_s=idle_s, device=getattr(self._cfg, "device", "auto"))
 
-    def _understand(self, clip: bytes) -> None:
+    def _ensure_client(self) -> Any:
+        """The speech process's client (made once; making it starts no process)."""
         if self._client is None:
             self._client = self._client_factory(self._folder, talk.hint_prompt(self._cfg.hints),
                                                 float(self._cfg.keep_warm_minutes * 60))
-        client = self._client
+        return self._client
+
+    def _understand(self, clip: bytes) -> None:
+        client = self._ensure_client()
 
         def work() -> None:
             from .talk_speech import ERR_FAILED, Heard
@@ -640,7 +719,7 @@ class TalkController(QObject):
         key = self._key if self._cfg.key else "None"
         if self._cfg.key and key_taken(self._data_dir, "talk", self._cfg.key) is not None:
             key = KEY_TAKEN_TEXT.format(key=self._key)
-        from . import gpu
+        from . import gpu, settings_edit
 
         reported = str(getattr(self._client, "device", "") or "") if self._client is not None else ""
         runs_on = gpu.runs_on_text(gpu.status(getattr(self._cfg, "device", gpu.DEVICE_AUTO)), reported,
@@ -651,7 +730,8 @@ class TalkController(QObject):
                 ("Add-ons", "installed" if not missing else "missing: " + ", ".join(missing)),
                 ("Last talk used", self._microphone_row()),
                 ("Quiet that ends a talk", f"{self._cfg.quiet_ms} ms"),
-                ("Model kept loaded", f"{self._cfg.keep_warm_minutes} min after a talk")]
+                ("Model kept loaded", f"{self._cfg.keep_warm_minutes} min after a talk"),
+                ("Live captions", settings_edit.value_words("talk.live_captions", self._captions_setting()))]
         if self.extra_rows is not None:
             try:
                 rows += list(self.extra_rows())

@@ -27,6 +27,7 @@ CHANGED = {
     "display.clock": "24h", "ui.motion": "calm", "live.auto_open": "window",
     "productivity.quiet_from": "21:30", "productivity.quiet_until": "07:15", "productivity.prep_lead_minutes": 25,
     "instant.temperature": "celsius", "talk.quiet_ms": 800, "talk.keep_warm_minutes": 20,
+    "talk.live_captions": "on",
 }
 
 

@@ -49,8 +49,10 @@ _CLOCK_WORDS = {"12h": "12-hour (1:05 PM)", "24h": "24-hour (13:05)"}
 _MOTION_WORDS = {"lively": "Lively", "calm": "Calm", "off": "Off"}
 _LIVE_WORDS = {"tab": "On the Live screen", "window": "In its own window", "off": "Only when you open it"}
 _TEMPERATURE_WORDS = {"auto": "Auto - the Windows region", "celsius": "Celsius", "fahrenheit": "Fahrenheit"}
+_CAPTION_WORDS = {"auto": "Auto - when the graphics card runs it", "on": "On", "off": "Off"}
 _CHOICE_WORDS: dict[str, Mapping[str, str]] = {"display.clock": _CLOCK_WORDS, "ui.motion": _MOTION_WORDS,
-                                               "live.auto_open": _LIVE_WORDS, "instant.temperature": _TEMPERATURE_WORDS}
+                                               "live.auto_open": _LIVE_WORDS, "instant.temperature": _TEMPERATURE_WORDS,
+                                               "talk.live_captions": _CAPTION_WORDS}
 _BOOL_WORDS: dict[str, tuple[str, str]] = {          # (true, false)
     "assistant.speak": ("Yes", "No - text only"),
     "assistant.scheduled_prompt": ('Asks "Hear it now?" first', "Says it is ready"),

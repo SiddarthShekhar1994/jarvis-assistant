@@ -15,6 +15,13 @@ writes no file and keeps no audio.
 :class:`SpeechClient` is the app's side (no Qt). ``understand(pcm)`` starts the process if it is not running,
 sends the clip and waits for its answer (blocking: never on the GUI thread); a process that ended meanwhile (it
 went idle) is started again once. ``close()`` ends it. ``spawn`` (tests) replaces the real process.
+
+Live captions (smaller items part 8): ``peek(pcm)`` sends the audio of a talk still going the same way (a clip like
+any other: the process answers each in order) and gives its words, for the screen only. A peek never starts the
+process and never waits for it: with none running, one busy or one about to go idle it gives None at once. It holds
+the same lock as ``understand``, so the final clip waits for at most the one partial in flight, then is understood
+whole, as before. A partial that takes longer than PEEK_TIMEOUT_S is given up, never killed: its answer is owed, and
+the next clip's reading drops it first, so each answer still meets its own clip and the warm process stays.
 """
 
 from __future__ import annotations
@@ -41,6 +48,7 @@ IDLE_S = 600.0
 THREADS = 4
 READY_TIMEOUT_S = 90.0            # loading the model (the first talk after a while; a slow disk)
 ANSWER_TIMEOUT_S = 60.0           # understanding one clip (at most MAX_TALK_S of speech)
+PEEK_TIMEOUT_S = 10.0             # a live caption's partial: later, given up (its answer owed, read and dropped later)
 CLOSE_WAIT_S = 3.0
 IDLE_MARGIN_S = 5.0               # a process this close to its idle end is replaced rather than raced
 BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
@@ -240,7 +248,8 @@ class SpeechClient:
     def __init__(self, model_dir: Path, *, threads: int = THREADS, idle_s: float = IDLE_S, hints: str = "",
                  python: str | None = None, root: Path | None = None,
                  spawn: Callable[[list[str]], Any] | None = None, ready_timeout_s: float = READY_TIMEOUT_S,
-                 answer_timeout_s: float = ANSWER_TIMEOUT_S, device: str = gpu.DEVICE_AUTO) -> None:
+                 answer_timeout_s: float = ANSWER_TIMEOUT_S, device: str = gpu.DEVICE_AUTO,
+                 peek_timeout_s: float = PEEK_TIMEOUT_S) -> None:
         self.model_dir = Path(model_dir)
         self._device_setting = device if device in gpu.DEVICES else gpu.DEVICE_AUTO
         self.device = ""                       # where the process said it runs (gpu.CUDA or gpu.CPU; "" before)
@@ -249,10 +258,12 @@ class SpeechClient:
         self._root = root or Path(__file__).resolve().parent.parent
         self._spawn = spawn or self._popen
         self._ready_timeout_s, self._answer_timeout_s = ready_timeout_s, answer_timeout_s
+        self._peek_timeout_s = peek_timeout_s
         self._lock = threading.Lock()
         self._proc: Any = None
         self._lines: queue.Queue = queue.Queue()
         self._last_used = 0.0                  # when the process last answered (time.monotonic)
+        self._owed = 0                         # answers of given-up partials still to come (read and dropped first)
 
     def _command(self) -> list[str]:
         return [self._python, "-B", "-m", "briefing_reader.talk_speech", "--model", str(self.model_dir),
@@ -296,7 +307,7 @@ class SpeechClient:
             return ERR_START, 0
         lines: queue.Queue = queue.Queue()
         threading.Thread(target=self._pump, args=(proc, lines), name="talk-speech-out", daemon=True).start()
-        self._proc, self._lines = proc, lines
+        self._proc, self._lines, self._owed = proc, lines, 0
         try:
             ready = lines.get(timeout=self._ready_timeout_s)
         except queue.Empty:
@@ -310,17 +321,32 @@ class SpeechClient:
         self.device = device if device in (gpu.CUDA, gpu.CPU) else gpu.CPU
         return "", int(ready.get("load_ms") or 0)
 
-    def _send(self, pcm: bytes) -> dict | None:
-        """The answer to ``pcm``, or None when the process was gone before it was sent."""
+    def _send(self, pcm: bytes, timeout_s: float | None = None, *, owe: bool = False) -> dict | None:
+        """The answer to ``pcm``, or None when the process was gone before it was sent. Answers still owed to given-up
+        partials come first and are dropped. No answer within the timeout (``timeout_s``, else ANSWER_TIMEOUT_S): with
+        ``owe`` (a partial) it is given up and owed; else the process is killed, so a late answer is never read as the
+        next clip's."""
         proc = self._proc
         try:
             proc.stdin.write(struct.pack("<I", len(pcm)) + pcm)
             proc.stdin.flush()
         except (OSError, ValueError, AttributeError):
             return None
+        while self._owed > 0:
+            try:
+                late = self._lines.get(timeout=self._answer_timeout_s)
+            except queue.Empty:
+                self._kill()
+                return {"ok": False, "error": ERR_TIMEOUT}
+            if not isinstance(late, dict):
+                return None                                    # its output ended
+            self._owed -= 1                                    # a given-up partial's answer: dropped
         try:
-            answer = self._lines.get(timeout=self._answer_timeout_s)
+            answer = self._lines.get(timeout=self._answer_timeout_s if timeout_s is None else timeout_s)
         except queue.Empty:
+            if owe:
+                self._owed += 1
+                return {"ok": False, "error": ERR_TIMEOUT, "owed": True}
             self._kill()
             return {"ok": False, "error": ERR_TIMEOUT}
         return answer if isinstance(answer, dict) else None    # its output ended: it went idle, or failed
@@ -356,6 +382,33 @@ class SpeechClient:
                 return Heard(False, error=str(answer.get("error") or ERR_FAILED), load_ms=load_ms)
         return Heard(False, error=ERR_ENDED)
 
+    def peek(self, pcm: bytes, cancelled: threading.Event | None = None) -> str | None:
+        """A live caption's words for ``pcm`` (the talk so far), or None (see the module docstring). Blocking: the
+        caption pump's worker thread. ``cancelled`` set (the talk ended meanwhile): nothing is sent, so the final never
+        waits behind it. The words are never logged."""
+        if not pcm or len(pcm) > MAX_CLIP_BYTES:
+            return None
+        if not self._lock.acquire(blocking=False):
+            return None                                # understanding (or another peek): no partial now
+        try:
+            if cancelled is not None and cancelled.is_set():
+                return None                            # the talk ended before this reached the process
+            if self._owed or not self.running() or time.monotonic() - self._last_used > self._idle_s - IDLE_MARGIN_S:
+                return None                            # nothing warm and free to ask: a peek never starts the process
+            answer = self._send(pcm, self._peek_timeout_s, owe=True)
+            if answer is None:
+                self._gpu_gave_out(self._exit_code())
+                self._kill()                           # it ended: the final starts it again
+                return None
+            if answer.get("device") in (gpu.CUDA, gpu.CPU):
+                self.device = answer["device"]
+            if answer.get("error") == ERR_TIMEOUT:
+                return None                            # given up, never killed: its answer is read and dropped later
+            self._last_used = time.monotonic()
+            return str(answer.get("text") or "") if answer.get("ok") else None
+        finally:
+            self._lock.release()
+
     def _exit_code(self) -> int | None:
         """The ended process's exit code (None: it has not ended within a second)."""
         proc = self._proc
@@ -372,6 +425,7 @@ class SpeechClient:
 
     def _kill(self) -> None:
         proc, self._proc = self._proc, None
+        self._owed = 0
         if proc is None:
             return
         try:

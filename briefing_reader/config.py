@@ -548,6 +548,8 @@ class StandingConfig:
 DEFAULT_TALK_KEY = "ctrl+alt+space"   # owner decision 2026-11-09: tap it, speak, and a short quiet ends the talk
 TALK_MODELS = ("small.en", "base.en", "medium.en", "distil-large-v3")   # faster-whisper models (default: small.en)
 SPEECH_DEVICES = ("auto", "cpu")     # "auto": an NVIDIA GPU when it works (gpu.py), else the CPU; "cpu": never the GPU
+# Live captions while the owner talks (talk.CaptionPump): "auto" while the speech process runs on the GPU, "on", "off"
+LIVE_CAPTIONS = ("auto", "on", "off")
 TALK_RANGES = {"keep_warm_minutes": (1, 120), "quiet_ms": (300, 2000)}
 TALK_HINTS_MAX = 20                  # names the speech model should expect ("Jarvis" is always one)
 TALK_HINT_CHARS = 40
@@ -591,6 +593,7 @@ class TalkConfig:
     keep_warm_minutes: int = 10     # the speech model stays loaded this long after the last talk (1..120)
     quiet_ms: int = 500             # this much quiet after speech ends a talk (300..2000 ms)
     hints: tuple[str, ...] = ()     # names the speech model should expect, besides "Jarvis" (at most 20)
+    live_captions: str = "auto"     # one of LIVE_CAPTIONS: partial words on screen while the owner talks
 
 
 @dataclass(frozen=True)
@@ -1525,7 +1528,7 @@ def _parse_talk(doc: Mapping[str, Any], environ: Mapping[str, str] | None = None
                       keep_warm_minutes=r.integer("keep_warm_minutes", d.keep_warm_minutes,
                                                   *TALK_RANGES["keep_warm_minutes"]),
                       quiet_ms=r.integer("quiet_ms", d.quiet_ms, *TALK_RANGES["quiet_ms"]),
-                      hints=tuple(hints))
+                      hints=tuple(hints), live_captions=r.choice("live_captions", d.live_captions, LIVE_CAPTIONS))
 
 
 INSTANT_ENABLED_ENV = "JARVIS_INSTANT_ENABLED"

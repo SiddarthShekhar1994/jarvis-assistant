@@ -109,6 +109,7 @@ EDITABLE: dict[str, Editable] = {
     "instant.temperature": Editable(KIND_CHOICE, choices=cfg.INSTANT_TEMPERATURES),
     "talk.quiet_ms": _number(cfg.TALK_RANGES["quiet_ms"], 100),
     "talk.keep_warm_minutes": _number(cfg.TALK_RANGES["keep_warm_minutes"], 5),
+    "talk.live_captions": Editable(KIND_CHOICE, choices=cfg.LIVE_CAPTIONS),
 }
 
 # The tables' own settings, for a key's code default (what holds when config.toml does not set it).

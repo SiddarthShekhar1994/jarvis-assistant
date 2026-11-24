@@ -12,7 +12,7 @@ from unittest import mock
 
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLineEdit
+from PySide6.QtWidgets import QApplication, QLabel, QLineEdit
 
 from briefing_reader import config, overrides, settings_edit, settings_view, ui
 from briefing_reader.config import load_config
@@ -352,9 +352,9 @@ class FixRoundTests(StageCase):
 
 
 class AppSettingsTests(unittest.TestCase):
-    def assert_config_button_in_window(self, size: tuple[int, int]) -> None:
+    def assert_config_button_in_window(self, size: tuple[int, int], config_extra: str = "") -> None:
         """Open config.toml lies wholly inside the window on every group, at ``size`` (the screen harness's check)."""
-        app = AppHarness(self, productivity=True)
+        app = AppHarness(self, productivity=True, config_extra=config_extra)
         app.reading(autoplay=False)
         window = app.c.window
         window.resize(*size)
@@ -379,6 +379,74 @@ class AppSettingsTests(unittest.TestCase):
 
     def test_open_config_toml_stays_in_the_window_at_1120_by_700(self) -> None:
         self.assert_config_button_in_window((1120, 700))
+
+    def test_open_config_toml_stays_in_view_with_settings_talk_at_900_by_600(self) -> None:
+        # Smaller items part 9: Settings > Talk gains "Live captions"; the button still sits in the window.
+        self.assert_config_button_in_window((900, 600), config_extra="\n[talk]\nenabled = true\n")
+
+    def test_the_live_captions_row_and_its_longest_value_are_whole_at_900_by_600(self) -> None:
+        app = AppHarness(self, config_extra="\n[talk]\nenabled = true\n")
+        app.reading(autoplay=False)
+        window = app.c.window
+        window.resize(900, 600)
+        reading = window.reading
+        stage = reading.settings_page
+        reading.set_tab(ui.SCREEN_SETTINGS)
+        settle()
+        stage.select_group("talk")
+        settle()
+        viewport = stage.scroll.viewport()
+        right = viewport.mapTo(window, QPoint(viewport.width(), 0)).x()
+
+        def whole(widget) -> None:
+            origin = widget.mapTo(window, QPoint(0, 0))
+            self.assertTrue(widget.isVisible())
+            self.assertGreaterEqual(origin.x(), 0)
+            self.assertLessEqual(origin.x() + widget.width(), right + 1)
+            if isinstance(widget, QLabel) and widget.wordWrap():
+                self.assertGreaterEqual(widget.height(), widget.heightForWidth(widget.width()))
+            else:
+                self.assertGreaterEqual(widget.width(), widget.minimumSizeHint().width())
+
+        longest = settings_edit.value_words("talk.live_captions", "auto")
+        stage.scroll.ensureWidgetVisible(stage.change_buttons["Live captions"])
+        settle()
+        value = next(label for label in stage._value_labels if label.accessibleName().startswith("Live captions:"))
+        self.assertEqual(value.text(), longest)
+        whole(value)
+        name = next(label for label in stage._grid_box.findChildren(QLabel) if label.text() == "Live captions")
+        whole(name)
+        whole(stage.change_buttons["Live captions"])
+        stage.change_buttons["Live captions"].click()
+        settle()
+        for _value, chip in stage.editor.controls["talk.live_captions"].chips:
+            with self.subTest(chip=chip.text()):
+                stage.scroll.ensureWidgetVisible(chip)
+                settle()
+                whole(chip)
+
+    def test_live_captions_are_changed_in_settings_talk(self) -> None:
+        app = AppHarness(self, config_extra="\n[talk]\nenabled = true\n")
+        app.reading(autoplay=False)
+        reading = app.c.window.reading
+        stage = reading.settings_page
+        reading.set_tab(ui.SCREEN_SETTINGS)
+        settle()
+        stage.select_group("talk")
+        settle()
+        self.assertEqual(dict(stage.rows())["Live captions"], "Auto - when the graphics card runs it")
+        self.assertIn("Live captions", stage.change_buttons)
+        stage.change_buttons["Live captions"].click()
+        chips = stage.editor.controls["talk.live_captions"]
+        self.assertEqual([chip.text() for _value, chip in chips.chips],
+                         ["Auto - when the graphics card runs it", "On", "Off"])
+        chips.chips[2][1].click()
+        stage.editor.save_button.click()
+        self.assertEqual(json.loads(overrides.settings_file(app.config.data_dir).read_text(encoding="utf-8")),
+                         {"version": 1, "values": {"talk.live_captions": "off"}})
+        self.assertEqual(stage.row_note("Live captions"), settings_view.CHANGED_RESTART.format(words="Off"))
+        loaded = load_config(Path(app.root), environ={"LOCALAPPDATA": str(Path(app.root) / "local")})
+        self.assertEqual(loaded.talk.live_captions, "off")                     # used after a restart
 
     def test_the_app_wires_the_store_and_config_toml_stays_as_it_is(self) -> None:
         app = AppHarness(self, config_extra="\n[productivity]\nenabled = true\n")

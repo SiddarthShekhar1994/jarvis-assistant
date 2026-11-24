@@ -453,7 +453,7 @@ shows, in LIVE or, for standing jobs, on the Agents screen):
 - **Smaller items**: a fallback model that runs on
   this PC, filling forms in the apps you allow (see
   [Jarvis on your desktop](#jarvis-on-your-desktop-the-hud)), and for his
-  voice: knowing yours and live captions while you talk.
+  voice: knowing yours.
 
 ## About the name
 
@@ -3779,6 +3779,22 @@ as typed words do, and "stop" stops it.
   many characters). The model stays loaded for 10 minutes after a talk
   (`[talk] keep_warm_minutes`), so the next one starts at once; the first after
   a while takes a few seconds while it loads.
+- **Live captions.** While you talk, the words he has heard so far show on the
+  bar's status line (in the window and on the HUD) and as Home's dim caption
+  line, the newest eight words in quotes, a little behind you. They are on screen
+  only: never on the second screen, in LIVE, in the conversation or in a log, and
+  they never go in. What goes in is still what the speech model makes of your
+  whole request once you stop, so a caption that misheard a word changes
+  nothing. They go the moment the talk ends (Esc and a cancel too), and they
+  show during a call as well. `[talk] live_captions`: `"auto"` (the default)
+  shows them only while talk's speech runs on the graphics card (Settings >
+  Talk's **Runs on** row says where), where they keep up;
+  `"on"` shows them on the processor too, where each caption can take seconds:
+  the final words then wait for the one being made, and after one caption slower
+  than a second and a half no more are shown in that talk; `"off"` never. In a
+  long request the captions follow its newest twelve seconds. Captions need the
+  speech model already loaded from an earlier talk (they never load it). The log
+  keeps only how many captions a talk had and how long each took.
 - **The microphone** is the one picked on Settings > Talk's **Microphone**
   row, else the Windows default. It is one setting with Settings > Meetings'
   "Microphone (You)" (when meetings are on): either row changes it, and it is
@@ -3794,8 +3810,9 @@ as typed words do, and "stop" stops it.
   Settings > Talk shows the command), click Download in Settings > Talk, add
   `JARVIS_TALK_ENABLED=true` to `.env` and restart the "Briefing hotkey" task.
   The key (`[talk] key`) and the model are in `config.toml`; the quiet that
-  ends a talk (`[talk] quiet_ms`) and how long the model stays loaded are
-  there too, or set with **Change** in Settings > Talk (used after a restart).
+  ends a talk (`[talk] quiet_ms`), how long the model stays loaded and live
+  captions (`[talk] live_captions`) are there too, or set with **Change** in
+  Settings > Talk (used after a restart).
   It needs Ask Jarvis on.
 
   ```powershell
@@ -5342,8 +5359,8 @@ what you changed with **Change** in [Settings](#using-it), as
 `keep_warm_minutes` and `quiet_in_calls`; `[assistant] speak`, `greet`, `greeting_context`,
 `speak_replies`, `speak_results` and `scheduled_prompt`; `[display] clock`;
 `[ui] motion`; `[live] auto_open`; `[productivity] quiet_from`, `quiet_until`
-and `prep_lead_minutes`; `[instant] temperature`; `[talk] quiet_ms` and
-`keep_warm_minutes`. They are merged into `config.toml`'s values before they
+and `prep_lead_minutes`; `[instant] temperature`; `[talk] quiet_ms`,
+`keep_warm_minutes` and `live_captions`. They are merged into `config.toml`'s values before they
 are checked, so every value keeps the limits in the table below; a value that
 does not fit, or any other key in the file, is left out with a warning that
 names only the key, and `config.toml`'s value (or the default) is used. No
@@ -5486,6 +5503,7 @@ file to go back to `config.toml` for all of them.
 | `[meetings] device` | `"auto"` | Where a meeting is written down: `"auto"` (an NVIDIA card when it works, else the processor) or `"cpu"`. |
 | `[talk] keep_warm_minutes` | `10` | How long the speech model stays loaded after a talk, so the next starts at once (1..120). |
 | `[talk] quiet_ms` | `500` | How much quiet after you speak ends a talk, in milliseconds (300..2000). |
+| `[talk] live_captions` | `"auto"` | [Live captions](#talk-to-jarvis-the-talk-key) while you talk, on screen only: `"auto"` while talk's speech runs on the graphics card, `"on"` on the processor too (there a caption can take seconds and the final words wait for the one being made; after one slower than 1.5 s none more that talk), `"off"`. Not in the shipped `config.toml` (the code default holds); Settings > Talk's Change sets it too. |
 | `[talk] hints` | `[]` | Names Jarvis should expect to hear, e.g. `["Spotify", "Notion"]` ("Jarvis" always is); at most 20 short names. |
 | `[instant] enabled` | `true` | [Instant answers](#instant-answers): the time, dates, sums, conversions, timers and reminders on this PC, your calendar, the weather and currencies from free services. `JARVIS_INSTANT_ENABLED` in `.env` overrides it both ways. Needs Ask Jarvis. |
 | `[instant] weather` | `true` | Weather answers: only a town's name (then its coordinates) goes to Open-Meteo. |
