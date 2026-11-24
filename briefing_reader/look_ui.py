@@ -360,6 +360,9 @@ class LookController(QObject):
             return "focus mode"
         if host._meeting_recording():
             return "a meeting records"
+        call = getattr(host, "_call_quiet", None)
+        if callable(call) and call():
+            return "call"                      # quiet during calls: another app uses the microphone
         if host._locked_now():
             return "locked"
         from .standing import schedule

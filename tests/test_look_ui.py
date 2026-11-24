@@ -50,7 +50,7 @@ class FakeHost:
         self.player = SimpleNamespace(state="stopped")
         self._utterance = ""
         self.quiet_until = ""
-        self.focus = self.meeting = self.locked = False
+        self.focus = self.meeting = self.locked = self.call = False
         self._prefs = prefs.AssistantPrefs(root / prefs.PREFS_FILE)
 
     def _prefs_store(self) -> prefs.AssistantPrefs:
@@ -67,6 +67,9 @@ class FakeHost:
 
     def _locked_now(self) -> bool:
         return self.locked
+
+    def _call_quiet(self) -> bool:
+        return self.call
 
 
 class ControllerTestCase(unittest.TestCase):

@@ -86,7 +86,7 @@ class Deps:
     written_to: Callable[[str], bool] = lambda address: True   # the owner has written to this address (read only)
     # alias -> the Google account (sub) it is signed in to now ("" unknown or not the bound one); None: not checked
     binding: Callable[[str], str] | None = None
-    busy: Callable[[], bool] = lambda: False                   # Windows says the owner is busy (presentation, ...)
+    busy: Callable[[], bool] = lambda: False                   # Windows says busy (presentation, ...) or a call
     time_zone_name: str = ""
     deadline_s: float = DEADLINE_S
 
@@ -732,7 +732,8 @@ def real_deps(config: Any, instance: str) -> Deps:
 
     return Deps(readers=readers, engine=StandingEngine(config.ask, StandingFiles(config.data_dir)),
                 calendars=calendars, notes=notes, own=own, tidy=tidy_clients, written_to=history.knows,
-                binding=binding, busy=schedule.windows_busy,
+                binding=binding,
+                busy=lambda: schedule.busy(bool(getattr(getattr(config, "voice", None), "quiet_in_calls", True))),
                 app_running=lambda: hotkey.mutex_exists("Local\\" + instance),
                 tell_app=lambda runs: hotkey.send_activation(instance, {"cmd": "standing", "runs": list(runs)[:50]}),
                 start_app=start_app, extra_usage_held=held, hold_extra_usage=usage_log.hold,

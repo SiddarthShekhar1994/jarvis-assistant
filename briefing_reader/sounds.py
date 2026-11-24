@@ -25,8 +25,8 @@ never anything else). In order:
 - ``tests``: never while the tests run (JARVIS_DESKTOP_TEST_GUARD=1): no test ever touches an audio device;
 - ``off``: [look] sounds = "off", or Settings > Look's Off on this PC (``enabled()`` is False);
 - ``loading``: the sounds are still being built (a worker thread at start), or the player could not load one;
-- the host's ``quiet()`` answer (muted, quiet hours, focus mode, a meeting records, the PC is locked, Windows says
-  busy or a full-screen app runs);
+- the host's ``quiet()`` answer (muted, quiet hours, focus mode, a meeting records, a call, the PC is locked, Windows
+  says busy or a full-screen app runs);
 - ``speaking``: Jarvis speaks or a briefing plays, or did within the last 250 ms (``set_speaking``); the sound is
   dropped, never queued;
 - ``hidden``: a board sound (FRAME, SETTLED, CHANGED, OPEN_BIG, CLOSE_BIG) while the window is not visible;

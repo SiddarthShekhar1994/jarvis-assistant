@@ -453,8 +453,7 @@ shows, in LIVE or, for standing jobs, on the Agents screen):
 - **Smaller items**: a fallback model that runs on
   this PC, filling forms in the apps you allow (see
   [Jarvis on your desktop](#jarvis-on-your-desktop-the-hud)), and for his
-  voice: knowing yours, staying quiet during calls and live captions while
-  you talk.
+  voice: knowing yours and live captions while you talk.
 
 ## About the name
 
@@ -1237,8 +1236,9 @@ board and when a group of frames has settled, when something new waits for
 your OK, when a frame changes, when an approved card is done or has failed,
 and when a frame opens big or goes back. They are quiet (at most 8 % of full
 volume) and silent while Jarvis is muted, in quiet hours, in focus mode, while
-a meeting records, while the PC is locked, while Windows says you are busy or
-a full-screen app runs, and over his voice (a sound that would play then is
+a meeting records, while you are on a call (see
+[Quiet during calls](#quiet-during-calls)), while the PC is locked, while
+Windows says you are busy or a full-screen app runs, and over his voice (a sound that would play then is
 dropped, never kept for later). The board's sounds play only while its window
 shows, and the frame and change sounds not with motion off. Settings > Look
 turns them off (or on again) on this PC; `[look] sounds = "off"` turns them
@@ -1630,8 +1630,9 @@ voice when the online one cannot be reached), politely and to the point:
   your OK.", "Sir, your agents have 1 new item for you." With the voice made
   on this PC it names the job ("Sir, Bills left 1 card for your OK."). Never a
   report, a subject, a sender or a card's text. It waits while the PC is
-  locked, in `[standing]` quiet hours, while a meeting records, in focus mode
-  or while Windows says you are busy, and each run is told once.
+  locked, in `[standing]` quiet hours, while a meeting records, in focus mode,
+  while you are on a call or while Windows says you are busy, and each run is
+  told once.
 
 Everything he says is also written in the JARVIS tab. While he speaks the orb
 reads SPEAKING and the large line next to it shows his words. He never talks
@@ -1651,6 +1652,39 @@ voice off for good (no speaker button), `speak_replies = false` keeps Ask
 silent, `speak_results = false` keeps the confirmations silent, `greet = false`
 drops the greeting, and `address` changes "sir" (see
 [Configuration](#configuration)).
+
+#### Quiet during calls
+
+While another app is using your microphone (a call or a video meeting),
+Jarvis keeps to captions, as while a meeting records:
+
+- **His voice is captions only.** His words show on Home and in the JARVIS
+  tab and are not said; nothing is kept to say later. A line he was saying
+  stops, and a playing briefing pauses (Play carries on). Home's line says
+  "You're on a call, sir: I'll keep to captions." (shown, never said).
+- **The soft sounds and the end sound of a timer or reminder keep quiet**; the
+  timer's or reminder's toast still shows.
+- **"Hey Jarvis" pauses**; the talk key still works, and its answer is
+  captions only.
+- **A standing agent's or rule's line waits**, and a background check does not
+  open Jarvis while you are on a call.
+- **A scheduled briefing waits**: it comes forward (without the focus) once
+  the call ends, if that is within the 3-hour catch-up; if the call outlasts
+  it, nothing is shown and the briefing waits for you under BRIEFING. A setup
+  problem is still shown at once (as text; nothing is said).
+
+How it knows: every 3 seconds it reads Windows' own record of which apps are
+using the microphone (the same list as Windows' microphone privacy page),
+read only, and leaves out an entry that started before the PC last started
+(one a crash left behind). It keeps only a yes or no: never which app, in
+memory or in a log.
+Jarvis's own Python programs are left out, so his own listening never counts;
+that also leaves out your other Python programs. A call is over 6 seconds after
+the microphone was let go, so a short gap is not taken as the end. An app that
+keeps the microphone open all day keeps him quiet all day: Home's line shows
+it, and Settings > Voice > **Quiet during calls** (Change) or `[voice]
+quiet_in_calls = false` turns this off after a restart (then nothing is read
+at all; a background standing check follows it from its next run).
 
 ### LIVE: watch Jarvis work
 
@@ -3510,8 +3544,9 @@ the job when the news is from one ("Sir, Bills left 1 card for your OK."),
 since nothing he says then leaves the PC. The JARVIS tab shows it at
 once with **View agents**, and so does a toast when you are in another app.
 The spoken line waits while the PC is locked, during `[standing]` quiet hours
-(22:00-08:00), while a meeting records, in focus mode, or while Windows says
-you are busy (presentation mode, a full-screen program or game, quiet time).
+(22:00-08:00), while a meeting records, in focus mode, while you are on a call
+(see [Quiet during calls](#quiet-during-calls)), or while Windows says you are
+busy (presentation mode, a full-screen program or game, quiet time).
 Each run is told once, and one more than 12 hours old is only shown. With
 Jarvis closed, a check opens him quietly, without taking the focus (as a
 scheduled briefing does; `--standing-show`), but never in quiet hours or with
@@ -3797,8 +3832,9 @@ your click). "Hey Jarvis" itself is taken off the front.
   breath. **Nothing is saved or sent while it waits**, and no log holds
   audio, words or device names.
 - **It pauses** while he speaks or reads the briefing (so he never wakes
-  himself), while a talk listens, while a meeting records and in focus mode,
-  and listens again a moment after. Saying "Hey Jarvis" while he speaks does
+  himself), while a talk listens, while a meeting records, in focus mode and
+  while you are on a call ([Quiet during calls](#quiet-during-calls)), and
+  listens again a moment after. Saying "Hey Jarvis" while he speaks does
   nothing: tap the talk key to interrupt him. While he is in control on your
   desktop it is ignored, as the talk key is.
 - **What shows it.** A small HEY JARVIS mark at the canvas's bottom left (in
@@ -5302,8 +5338,8 @@ log. Changes apply the next time the app starts.
 **`settings.json`** (in the data folder, `%LOCALAPPDATA%\briefing-reader`):
 what you changed with **Change** in [Settings](#using-it), as
 `{"version": 1, "values": {"voice.rate": "+10%"}}`. Its values win over
-`config.toml` for these keys only: `[voice] rate`, `volume` and
-`keep_warm_minutes`; `[assistant] speak`, `greet`, `greeting_context`,
+`config.toml` for these keys only: `[voice] rate`, `volume`,
+`keep_warm_minutes` and `quiet_in_calls`; `[assistant] speak`, `greet`, `greeting_context`,
 `speak_replies`, `speak_results` and `scheduled_prompt`; `[display] clock`;
 `[ui] motion`; `[live] auto_open`; `[productivity] quiet_from`, `quiet_until`
 and `prep_lead_minutes`; `[instant] temperature`; `[talk] quiet_ms` and
@@ -5327,6 +5363,7 @@ file to go back to `config.toml` for all of them.
 | `[voice] engine` | `"local"` | Where his voice is made: `"local"` = on this PC (Kokoro-82M; nothing he says leaves the PC, so lines that may be private are said too; the Windows voice speaks until it is downloaded or when it can't run - never the online one), `"online"` = Microsoft's online voice (edge-tts), with private lines kept on screen. See [Jarvis's voice, made on this PC](#jarviss-voice-made-on-this-pc). |
 | `[voice] local_voice` | `"bm_george"` | The local voice: `bm_george`, `bm_fable`, `bm_lewis`, `bm_daniel` (British men), `bf_emma`, `bf_isabella`, `bf_alice`, `bf_lily` (British women), or an American one (`am_adam`, `am_echo`, `am_eric`, `am_fenrir`, `am_liam`, `am_michael`, `am_onyx`, `am_puck`, `am_santa`, `af_alloy`, `af_aoede`, `af_bella`, `af_heart`, `af_jessica`, `af_kore`, `af_nicole`, `af_nova`, `af_river`, `af_sarah`, `af_sky`). All 28 come in the one download. |
 | `[voice] keep_warm_minutes` | `0` | Minutes the local voice stays loaded after he last spoke (0 to 1440). `0` keeps it loaded while Jarvis runs, so he never waits for it; it takes about 1.3 GB of memory and about 5 seconds to load again. |
+| `[voice] quiet_in_calls` | `true` | While another app uses the microphone (a call), his voice is captions only, the soft sounds and timer end sounds keep quiet, "Hey Jarvis" pauses and a scheduled briefing waits for the call's end (see [Quiet during calls](#quiet-during-calls)). Not in the shipped `config.toml` (the code default holds); Settings > Voice's Change sets it too. `false` reads nothing. |
 | `[voice] voice` | `"en-GB-RyanNeural"` | Online edge-tts voice (`engine = "online"`). List them with `py -3.13 -m edge_tts --list-voices`. |
 | `[voice] rate` | `"+0%"` | Speed, a signed percentage from `"-50%"` to `"+100%"`, e.g. `"+15%"` faster, `"-10%"` slower. |
 | `[voice] volume` | `"+0%"` | Loudness, `"-100%"` to `"+100%"`, e.g. `"-20%"` quieter. |
@@ -5893,6 +5930,14 @@ what you said. What he heard then goes where typed words go.
 PC for those words only: the audio stays in memory, nothing is saved or sent
 while it waits, and its one download (the wake model from GitHub) happens only
 when you click.
+[Quiet during calls](#quiet-during-calls) reads, every 3 seconds and read only,
+Windows' own record of which apps are using the microphone (in your user part
+of the registry), and asks Windows how long the PC has been on (to leave out
+entries older than its last start); nothing in Windows is changed. Only a yes
+or no is kept, never an app's name; the log holds only status words, counts
+and minutes (a call starting and how long it lasted, how many entries could
+not be read, a briefing waiting for the call, watching off), never an app.
+`[voice] quiet_in_calls = false` stops the reading (after a restart).
 
 [Instant answers](#instant-answers) about the time, dates, sums, conversions,
 timers and reminders never leave this PC. A weather question sends only the
@@ -6865,6 +6910,7 @@ briefing_reader/speech.py     Jarvis's voice: utterance kinds, the Voice interfa
 briefing_reader/voice_ui.py   Jarvis's voice in the app: his own player and the voice the controller speaks through (pauses and resumes the briefing, mute, the hold during a Send)
 briefing_reader/hotkey.py     global hotkey agent (RegisterHotKey), press handling, activation pipe
 briefing_reader/config.py     .env, environment and config.toml loading, paths, logging with secret redaction
+briefing_reader/calls.py      quiet during calls (no Qt): another app using the microphone, read only from Windows' own record; a yes/no only
 briefing_reader/overrides.py  the settings changed in the app (settings.json; no Qt): the editable keys and their limits, merged before the parsers
 briefing_reader/models.py     shared data types (flattened lines, script, audio, launch kinds)
 briefing_reader/notion_client.py  Notion REST client, block flattener, header parsing, freshness, polling, fixtures

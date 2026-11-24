@@ -1507,6 +1507,7 @@ class ReadingView(QWidget):
         self._offers = 0
         self._muted_look = False
         self._offline_voice = False
+        self._on_call = False              # quiet during calls: Home's resting line says so
         self._paused = False
         self._waiting = False
         self._waiting_run = ""                    # the run waited for ("AM" / "PM"; "" unknown)
@@ -2082,6 +2083,17 @@ class ReadingView(QWidget):
     def offline_voice(self) -> bool:
         return self._offline_voice
 
+    def set_on_call(self, on: bool) -> None:
+        """Quiet during calls: Home's resting line "You're on a call, sir: I'll keep to captions." while another app
+        uses the microphone (shown, never said)."""
+        if bool(on) == self._on_call:
+            return
+        self._on_call = bool(on)
+        self._sync_resting()
+
+    def on_call(self) -> bool:
+        return self._on_call
+
     def set_briefing_paused(self, paused: bool) -> None:
         if bool(paused) != self._paused:
             self._paused = bool(paused)
@@ -2141,10 +2153,13 @@ class ReadingView(QWidget):
         self._sync_resting()
 
     def _sync_resting(self) -> None:
-        """Home's resting line: "Checking for your AM briefing, sir." while Jarvis waits for one, "My usual
+        """Home's resting line: "You're on a call, sir: I'll keep to captions." on a call (quiet during calls),
+        "Checking for your AM briefing, sir." while Jarvis waits for one, "My usual
         voice is out of reach, sir. I'll keep trying." on the Windows voice, else the greeting (an open offer's
         question shows over any of them)."""
-        if self._waiting:
+        if self._on_call:
+            text = states_view.call_line(self._address)
+        elif self._waiting:
             text = states_view.waiting_line(self._waiting_run, self._address)
         elif self._offline_voice:
             text = states_view.offline_line(self._address)
@@ -6466,7 +6481,20 @@ class AppController(QObject):
     his toasts and voice are held and the offers see no activity; when it ends - at its end, by the focus chip's Undo,
     by Undo all or by a Turn off (``focusChanged``) - the newest toast and the last few sentences come back and the
     offers tick again. The owner's own timers still end with their toast.
+
+    Quiet during calls ([voice] quiet_in_calls, on by default; smaller items part 7): from start() on, calls.CallWatch
+    asks every 3 s whether another app uses the microphone (``call_probe`` replaces that read: tests). While it does
+    (``_call_quiet``) his voice is captions only, as while a meeting records (nothing kept for later); the soft sounds
+    and the timers' and reminders' end sounds keep quiet (their toasts still show); "Hey Jarvis" pauses; a standing
+    line waits; a scheduled briefing's arrival waits for the call's end (within the catch-up window); Home's resting
+    line says "You're on a call, sir: I'll keep to captions." (shown, never said).
     """
+
+    call_probe: Callable[[], bool] | None = None     # quiet during calls: None is calls.py's registry read
+    _call_watch: Any = None
+    _call_timer: QTimer | None = None
+    _call_arrival_held = False                      # a scheduled arrival waits for the call's end
+    _call_deadline: QTimer | None = None            # ... at most until the catch-up window closes
 
     def __init__(self, config: Config, client: NotionClient, *, expected_run: str | None,
                  now_mode: bool, startup_error: str | None = None, volume: float = 1.0,
@@ -7107,6 +7135,7 @@ class AppController(QObject):
             self._hold_prerender()      # ... and says his start-up line before the briefing's audio is made
         self._create_tray()
         self._wake_call("start")    # "Hey Jarvis": the listener runs from now while it is on (never before start)
+        self._start_calls()         # quiet during calls: another app using the microphone is watched from now
         if self.meetings is not None:
             self.meetings.start()   # a recording a crash left is saved; retention; nothing records by itself
         else:
@@ -7637,6 +7666,9 @@ class AppController(QObject):
         logger.info("Fetching finished after %d attempt(s): %s", result.attempts, _describe_poll(result))
         if result.briefing is None and result.error is not None:
             self._fetch_error = result.error
+        if self.state == STATE_WAITING and self._call_arrival_held:
+            logger.info("The %s briefing is in; it comes forward when the call ends", self.expected_run or "new")
+            return
         if self.state == STATE_WAITING:
             # Nothing new arrived in time (or Notion kept failing): nothing is shown or said; the
             # slot stays open, so the catch-up looks again at the next logon or unlock.
@@ -11268,6 +11300,7 @@ class AppController(QObject):
             backend_factory=getattr(self, "_desktop_backend", None), consent_store=self._prefs_store,
             window_api=getattr(self, "_desktop_window_api", None), click_guard=self._desktop_click_guard,
             timers=self._shared_timer_book(), parent=self)
+        controller.chime_quiet = self._call_quiet            # quiet during calls: a timer's end sound
         controller.hudChanged.connect(self._on_hud_changed)
         controller.answered.connect(self._on_desktop_answered)
         controller.plannerNeeded.connect(self._on_desktop_planner)
@@ -12091,6 +12124,105 @@ class AppController(QObject):
         except Exception:  # noqa: BLE001 - unknown: not recording
             return False
 
+    # ---- quiet during calls (smaller items part 7) -----------------------------------------------------------
+
+    def _call_quiet(self) -> bool:
+        """The owner is on a call - another app uses the microphone - and [voice] quiet_in_calls is on."""
+        watch = self._call_watch
+        return watch is not None and bool(watch.on_call)
+
+    def _start_calls(self) -> None:
+        """From start(): the watch and its 3 s poll, only while [voice] quiet_in_calls is on (off: nothing is read)."""
+        if not bool(getattr(self.config.voice, "quiet_in_calls", True)):
+            logger.info("Calls: not watched (quiet during calls is off)")
+            return
+        from . import calls
+
+        self._call_watch = calls.CallWatch(self.call_probe)
+        self._call_timer = self._make_timer(self._poll_call, single_shot=False, interval_ms=int(calls.POLL_S * 1000))
+        self._call_timer.start()
+        self._poll_call()
+
+    def _poll_call(self) -> None:
+        watch = self._call_watch
+        if watch is None or self.state == STATE_QUITTING:
+            return
+        from . import calls
+
+        try:
+            change = watch.poll()
+        except Exception as exc:  # noqa: BLE001 - the watch never stops the app
+            logger.warning("Calls: the check failed (%s)", type(exc).__name__)
+            return
+        if change is not None:
+            self._on_call_changed(change == calls.ON)
+
+    def _on_call_changed(self, on: bool) -> None:
+        """A call started: his line and a playing briefing stop (the owner's Play resumes it), "Hey Jarvis" pauses,
+        Home says so. It ended: all of that comes back, and a scheduled arrival that waited comes forward now (past
+        the catch-up window nothing is shown, as for a briefing that never came)."""
+        self.window.reading.set_on_call(on)
+        self._wake_call("refresh_holds")
+        if on:
+            self._voice_call("stop")
+            if self._script is not None and self.player.state in (PLAYING, WAITING):
+                self.player.pause()
+            self._update_reading_controls()
+            return
+        if not self._call_arrival_held:
+            return
+        self._release_arrival_hold()
+        if self.state != STATE_WAITING:
+            return
+        from .runstate import CATCH_UP_MAX_AGE
+
+        if self._now() - self._run_started > CATCH_UP_MAX_AGE:
+            logger.info("Calls: the briefing waited past its catch-up window; nothing shown")
+            self.quit()
+            return
+        self._arrive()
+
+    def _hold_arrival_for_call(self) -> None:
+        """A scheduled arrival waits for the call's end - at most until the catch-up window (CATCH_UP_MAX_AGE from
+        the run's start) closes: a single-shot timer then ends the hidden run, showing nothing."""
+        if self._call_arrival_held:
+            return
+        from .runstate import CATCH_UP_MAX_AGE
+
+        self._call_arrival_held = True
+        left_ms = int((self._run_started + CATCH_UP_MAX_AGE - self._now()).total_seconds() * 1000)
+        self._call_deadline = self._make_timer(self._call_deadline_passed, single_shot=True,
+                                               interval_ms=max(0, left_ms))
+        self._call_deadline.start()
+        logger.info("Calls: the %s briefing waits for the call to end (at most %d min)", self.expected_run or "new",
+                    max(0, left_ms) // 60_000)
+
+    def _release_arrival_hold(self) -> None:
+        self._call_arrival_held = False
+        timer, self._call_deadline = self._call_deadline, None
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+
+    def _call_deadline_passed(self) -> None:
+        """The catch-up window closed while a call still held the arrival: nothing is shown; the hidden run ends."""
+        if not self._call_arrival_held:
+            return
+        self._release_arrival_hold()
+        if self.state != STATE_WAITING:
+            return
+        logger.info("Calls: the briefing waited past its catch-up window; nothing shown")
+        self.quit()
+
+    def _timer_chime(self) -> None:
+        """A timer's or a reminder's end sound (instant_ui's), kept quiet on a call (its toast still shows)."""
+        if self._call_quiet():
+            logger.info("Instant: the end sound kept quiet (call)")
+            return
+        from . import instant_ui
+
+        instant_ui._chime()
+
     def _record_buttons_on(self) -> bool:
         """Record on Home's next-meeting tile and the Day view's meeting rows: [meetings] on, nothing records."""
         return getattr(self, "meetings", None) is not None and not self._meeting_recording()
@@ -12615,7 +12747,7 @@ class AppController(QObject):
         busy = bool(self.ask is not None and self.ask.busy) or speaking or bool(self._utterance)
         return QuietFacts(activity=self._prod_activity(), locked=self._locked_now(),
                           speak_ok=bool(assistant.speak and assistant.speak_replies) and not muted
-                          and not self._meeting_recording(), playing=playing,
+                          and not self._meeting_recording() and not self._call_quiet(), playing=playing,
                           card_busy=self._send_hold is not None or bool(self._jobs), busy=busy)
 
     def _prod_ask_state(self) -> tuple[bool, bool, float]:
@@ -13352,7 +13484,8 @@ class AppController(QObject):
                                             hour24=self.config.display.hour24,
                                             now=lambda: self._instant_now().astimezone(timezone.utc),
                                             local=lambda moment: wall(moment, self._instant_now()),
-                                            say_labels=is_local(self.config), parent=self)
+                                            say_labels=is_local(self.config), chime=self._timer_chime,
+                                            parent=self)
         self._instant_calendar_job: Any = None          # round 2: the calendars' read on its way (one at a time)
         self._instant_calendar_seq = 0
         calendar_read = self._instant_calendar_read if self._any_calendar_configured() else None
@@ -14180,8 +14313,8 @@ class AppController(QObject):
         if self._focus_quiet():
             self._hold_for_focus(kind, text, key)
             said = False
-        elif self._meeting_recording():
-            said = False
+        elif self._meeting_recording() or self._call_quiet():
+            said = False                  # a call: his voice would be heard by the others (captions only)
         else:
             try:
                 said = bool(self.voice.say(kind, text, key=key))
@@ -14204,9 +14337,10 @@ class AppController(QObject):
             del held[:-FOCUS_SPEECH_KEPT]
 
     def _voice_silent(self) -> bool:
-        """Jarvis's voice is muted or off, a meeting records or focus mode runs (P2.5): what he would say shows as a
-        caption only."""
-        if not self.config.assistant.speak or self._meeting_recording() or self._focus_quiet():
+        """Jarvis's voice is muted or off, a meeting records, focus mode runs (P2.5) or the owner is on a call
+        (``_call_quiet``): what he would say shows as a caption only."""
+        if (not self.config.assistant.speak or self._meeting_recording() or self._focus_quiet()
+                or self._call_quiet()):
             return True
         try:
             return bool(self.voice.muted)
@@ -15025,7 +15159,9 @@ class AppController(QObject):
     def _arrive(self) -> None:
         """The scheduled run's fresh briefing is here: shown without the focus and announced with a
         greeting before it, unless it was announced or viewed already (then the process just ends).
-        A setup error is shown the same way, as text only."""
+        A setup error is shown the same way, as text only (never held for a call: nothing is said). On a call
+        (quiet during calls) the briefing waits for the call's end (_on_call_changed), at most until the catch-up
+        window closes (_call_deadline: then nothing is shown and the hidden run ends)."""
         if self.startup_error:
             self._arriving = True
             try:
@@ -15035,6 +15171,9 @@ class AppController(QObject):
             headline = _split_startup_error(self.startup_error)[0].rstrip(".")
             self._jarvis(f"I can't reach your briefing: {headline}.", tone=hud.TONE_WARN)
             logger.info("Showing the setup error without the focus (nothing is said)")
+            return
+        if self._call_quiet():
+            self._hold_arrival_for_call()
             return
         key = briefing_key(self._briefing.header, self.slots) if self._briefing is not None else None
         if key is not None and (self._is_announced(key) or self._is_viewed(key)):
@@ -15636,9 +15775,10 @@ class AppController(QObject):
         logger.info("Reading the briefing: %d section(s)%s%s", len(script.section_indices(False)),
                     ", with a stale note" if script.stale else "", "" if self._autoplay else " (waiting for Play)")
         self._render_reading()
-        if self._autoplay and self._meeting_recording():
-            self._autoplay = False                # a meeting records: the briefing waits for Play (never aloud)
-            logger.info("A meeting records: the briefing waits for Play")
+        if self._autoplay and (self._meeting_recording() or self._call_quiet()):
+            self._autoplay = False                # a meeting records or a call: the briefing waits for Play
+            logger.info("%s: the briefing waits for Play",
+                        "A meeting records" if self._meeting_recording() else "On a call")
         if self._autoplay:
             self._start_playback(script.section_indices(False))
         self._after_briefing_shown()
@@ -16477,7 +16617,7 @@ class AppController(QObject):
 
     def _wake_holds(self) -> list[str]:
         """What pauses "Hey Jarvis" now (wake_ui.HOLD_*): a talk under way, Jarvis speaking or reading the briefing, a
-        meeting recording, focus mode."""
+        meeting recording, focus mode, a call (quiet during calls)."""
         from . import talk_ui, wake_ui
 
         holds: list[str] = []
@@ -16494,6 +16634,8 @@ class AppController(QObject):
             holds.append(wake_ui.HOLD_MEETING)
         if self._focus_quiet():
             holds.append(wake_ui.HOLD_FOCUS)
+        if self._call_quiet():
+            holds.append(wake_ui.HOLD_CALL)
         return holds
 
     def _wake_in_control(self) -> bool:
@@ -16827,6 +16969,8 @@ class AppController(QObject):
             return
         self._shut_down = True
         logger.info("Shutting down")
+        if self._call_timer is not None:
+            self._call_timer.stop()          # quiet during calls: nothing is read any more
         if getattr(getattr(self, "agent", None), "running", False):
             self._note_task_ended("stopped")   # closing ends it, and a later Ask sees that, not only its promise
         self._save_conversation()      # the conversation as it is now stays on this PC (its timers stop below)

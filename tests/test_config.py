@@ -358,7 +358,8 @@ class ConfigFileTests(ProjectTestCase):
         raw.decode("ascii")  # must be plain ASCII
         doc = tomllib.loads(raw.decode("utf-8"))
         expected_keys = {
-            "voice": {f.name for f in dataclasses.fields(VoiceConfig)},
+            # Smaller items part 7: [voice] quiet_in_calls holds its config.py default (on); config.toml is not changed.
+            "voice": {f.name for f in dataclasses.fields(VoiceConfig)} - {"quiet_in_calls"},
             "prompt": {f.name for f in dataclasses.fields(PromptConfig)},
             "polling": {f.name for f in dataclasses.fields(PollingConfig)},
             "sections": {f.name for f in dataclasses.fields(SectionsConfig)},

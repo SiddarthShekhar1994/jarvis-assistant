@@ -15,6 +15,7 @@
                                  an interval job: DUE once ``every_minutes`` passed since its last run, however long
                                  the PC slept (one catch-up run, never a backlog); no last run is a BASELINE
     next_time(trigger, now) / next_every(trigger, last_run, now)   the next run to show ("Next: Tue 8:00 AM")
+    busy(quiet_in_calls)         the background check's busy probe: windows_busy, or on a call (calls.py)
     in_quiet(now, quiet_from, quiet_until)    quiet hours (they may run past midnight; from == until: never quiet)
 """
 
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from typing import Any
 
 from .model import TRIGGER_EVERY, TRIGGER_TIME, Trigger
 
@@ -142,6 +144,24 @@ def windows_busy() -> bool:
     # 1 not present, 2 busy, 3 full-screen Direct3D, 4 presentation mode, 5 accepts notifications, 6 quiet time,
     # 7 a full-screen app.
     return result == 0 and state.value in (1, 2, 3, 4, 6, 7)
+
+
+def busy(quiet_in_calls: bool = True, *, windows: Any = None, call: Any = None) -> bool:
+    """The standing check's busy probe: Windows says busy (``windows_busy``), or - with [voice] quiet_in_calls on -
+    the owner is on a call (another app uses the microphone: calls.mic_in_use_by_others). Either way the check
+    opens nothing and says nothing. ``windows`` / ``call`` replace the two probes (tests)."""
+    if (windows or windows_busy)():
+        return True
+    if not quiet_in_calls:
+        return False
+    if call is None:
+        from .. import calls
+
+        call = calls.mic_in_use_by_others
+    try:
+        return bool(call())
+    except Exception:  # noqa: BLE001 - unknown: not on a call
+        return False
 
 
 def in_quiet(now: datetime, quiet_from: str, quiet_until: str) -> bool:

@@ -216,7 +216,7 @@ class EditorFlowTests(StageCase):
         stage = self.stage()
         for group, editable in (("voice", {"Speed", "Volume", "Speaks on his own", "Speaks his answers",
                                            "Says what happened after an approval", "Greets you when opened",
-                                           "Voice kept loaded"}),
+                                           "Voice kept loaded", "Quiet during calls"}),
                                 ("times", {"When a briefing arrives", "Clock on screen", "Screen motion"}),
                                 ("ask", set()), ("accounts", set()), ("quiet", set()), ("live", {"Opens"})):
             stage.select_group(group)

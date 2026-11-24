@@ -11,6 +11,7 @@ Words (plain text; British spelling; never a vendor name in what Jarvis says)
     ``waiting_word(run)``                   "WAITING FOR THE AM BRIEFING" (the header readout)
     ``waiting_readout(interval, until)``    "EVERY MINUTE \u00b7 UNTIL 10:27 AM" (when Jarvis checks)
     ``OFFLINE_LINE`` / ``offline_line(address)``   "My usual voice is out of reach, sir. I'll keep trying."
+    ``CALL_LINE`` / ``call_line(address)``   "You're on a call, sir: I'll keep to captions."
     ``offline_badge(retry)``                "WINDOWS VOICE" or "WINDOWS VOICE \u00b7 RETRY 10:14"
     ``quiet_word(until)``                   "QUIET HOURS UNTIL 8:00 AM"
     ``clock_text(moment, hour24)``          "8:00 AM" / "08:00"
@@ -73,6 +74,7 @@ TOAST_CANVAS = holo.CanvasFrameLook(QColor(3, 10, 13), holo.CANVAS_EDGE, holo.CA
                                     QColor(255, 255, 255, 150), holo.BRACKETS_ALL)   # the canvas look's frame
 TOAST_LINES = 3                   # the line wraps beside the action (8 words fit)
 OFFLINE_LINE = "My usual voice is out of reach, {sir}. I'll keep trying."
+CALL_LINE = "You're on a call, {sir}: I'll keep to captions."     # quiet during calls (shown, never said)
 OFFLINE_BADGE = "WINDOWS VOICE"
 QUIET_DIM = 0.7                   # the idle orb in quiet hours (spec 16.7)
 VIEW_TEXT = "View"
@@ -116,6 +118,11 @@ def waiting_readout(interval: str, until: str) -> str:
 def offline_line(address: str = "sir") -> str:
     """"My usual voice is out of reach, sir. I'll keep trying." (no vendor names in Jarvis's lines)."""
     return with_address(OFFLINE_LINE, address)
+
+
+def call_line(address: str = "sir") -> str:
+    """"You're on a call, sir: I'll keep to captions." (quiet during calls)."""
+    return with_address(CALL_LINE, address)
 
 
 def offline_badge(retry: str = "") -> str:

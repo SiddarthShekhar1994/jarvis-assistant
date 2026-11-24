@@ -115,6 +115,7 @@ class HookTests(unittest.TestCase):
 
     def test_every_quiet_rule_holds_every_board_sound(self) -> None:
         cases = [("voice", "muted"), ("quiet", "quiet hours"), ("focus", "focus mode"), ("meeting", "a meeting records"),
+                 ("call", "call"),                    # quiet during calls (smaller items part 7)
                  ("locked", "locked"), ("busy", "Windows says busy")]
         for attribute, reason in cases:
             with self.subTest(reason=reason):

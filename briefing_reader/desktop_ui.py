@@ -688,6 +688,7 @@ class DesktopController(QObject):
         # controller's own book, as before.
         self._shared_timers = timers is not None
         self.shared_timers_changed: Callable[[], Any] | None = None   # the app's TimerController.poke (shared book)
+        self.chime_quiet: Callable[[], bool] = lambda: False           # the app's _call_quiet (quiet during calls)
         self.timers = timers if timers is not None else pcctl.TimerBook(self._timers_folder(), now=self._timer_now)
         self._timer_check = QTimer(self)
         self._timer_check.setSingleShot(True)
@@ -2246,7 +2247,14 @@ class DesktopController(QObject):
         self._arm_timers()
 
     def _chime(self) -> None:
-        """A timer's end sound, played on the desktop thread (its seam is there)."""
+        """A timer's end sound, played on the desktop thread (its seam is there); kept quiet on a call (the toast
+        still says it)."""
+        try:
+            if self.chime_quiet():
+                logger.info("Desktop: the timer sound kept quiet (call)")
+                return
+        except Exception:  # noqa: BLE001 - unknown: played
+            pass
         try:
             worker, service = self._ensure_worker()
             worker.submit(service.chime)

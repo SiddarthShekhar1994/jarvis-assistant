@@ -2091,6 +2091,9 @@ class StandingController(QObject):
             return "a meeting records"
         if host._focus_quiet():
             return "focus mode"
+        call = getattr(host, "_call_quiet", None)
+        if callable(call) and call():
+            return "on a call"                 # quiet during calls (the background check's probe asks it too)
         try:
             if self.busy_probe():
                 return "Windows says busy"

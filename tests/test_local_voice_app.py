@@ -325,13 +325,13 @@ class SettingsRowsTests(unittest.TestCase):
         self.assertEqual(dict(rows)["When that voice can't run"], "Windows' default voice")
         self.assertEqual(dict(rows)["Speed"], "Normal")
         self.assertEqual(dict(rows)["Voice kept loaded"], "While Jarvis runs")   # Smaller items part 5 (Change)
-        self.assertEqual(len(rows), 10)    # one more; Open config.toml still in view (test_settings_edit checks it)
+        self.assertEqual(len(rows), 11)    # +Quiet during calls (part 7); Open config.toml still in view
 
     def test_the_online_voice_rows(self) -> None:
         rows = settings_view.settings_rows(self.config("online"), "voice")
         self.assertEqual(rows[0], ("Voice", "en-GB-RyanNeural, online (Microsoft)"))
         self.assertIn("When that voice is out of reach", dict(rows))
-        self.assertEqual(len(rows), 9)
+        self.assertEqual(len(rows), 10)   # +Quiet during calls (part 7)
 
 
 class FakeDownloader:

@@ -21,7 +21,7 @@ _REPO_BYTES = _REPO_CONFIG.read_bytes()
 
 # A value other than the code default for every editable key (and inside the parser's limits).
 CHANGED = {
-    "voice.rate": "+10%", "voice.volume": "-20%", "voice.keep_warm_minutes": 30,
+    "voice.rate": "+10%", "voice.volume": "-20%", "voice.keep_warm_minutes": 30, "voice.quiet_in_calls": False,
     "assistant.speak": False, "assistant.greet": False, "assistant.greeting_context": False,
     "assistant.speak_replies": False, "assistant.speak_results": False, "assistant.scheduled_prompt": True,
     "display.clock": "24h", "ui.motion": "calm", "live.auto_open": "window",

@@ -102,7 +102,8 @@ EDIT_ROWS: dict[str, dict[str, tuple[str, ...]]] = {
               "Speaks his answers": ("assistant.speak_replies",),
               "Says what happened after an approval": ("assistant.speak_results",),
               "Greets you when opened": ("assistant.greet", "assistant.greeting_context"),
-              "Voice kept loaded": ("voice.keep_warm_minutes",)},
+              "Voice kept loaded": ("voice.keep_warm_minutes",),
+              "Quiet during calls": ("voice.quiet_in_calls",)},
     "times": {"When a briefing arrives": ("assistant.scheduled_prompt",), "Clock on screen": ("display.clock",),
               "Screen motion": ("ui.motion",)},
     "quiet": {"Quiet hours": ("productivity.quiet_from", "productivity.quiet_until"),
@@ -227,6 +228,8 @@ def settings_rows(config: Any, group: str, connected: Mapping[str, bool] | None 
         if local:
             minutes = int(getattr(voice, "keep_warm_minutes", 0) or 0)
             rows.append(("Voice kept loaded", settings_edit.value_words("voice.keep_warm_minutes", minutes)))
+        rows.append(("Quiet during calls", settings_edit.value_words("voice.quiet_in_calls",
+                                                                     bool(getattr(voice, "quiet_in_calls", True)))))
         rows.append(("Calls you", f'"{address}"' if address else "Nothing"))
         return rows
     if group == "times":

@@ -54,6 +54,7 @@ _CHOICE_WORDS: dict[str, Mapping[str, str]] = {"display.clock": _CLOCK_WORDS, "u
 _BOOL_WORDS: dict[str, tuple[str, str]] = {          # (true, false)
     "assistant.speak": ("Yes", "No - text only"),
     "assistant.scheduled_prompt": ('Asks "Hear it now?" first', "Says it is ready"),
+    "voice.quiet_in_calls": ("Yes - captions only while another app uses the microphone", "No - speaks as usual"),
 }
 _PERCENT_WORDS = {"voice.rate": ("faster", "slower"), "voice.volume": ("louder", "quieter")}
 

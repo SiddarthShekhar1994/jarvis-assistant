@@ -143,6 +143,7 @@ class VoiceConfig:
     engine: str = VOICE_ENGINE_LOCAL          # VOICE_ENGINES: "local" (this PC) or "online" (Microsoft's edge-tts)
     local_voice: str = DEFAULT_LOCAL_VOICE    # one of LOCAL_VOICES
     keep_warm_minutes: int = 0                # the local voice is let go after this many quiet minutes; 0 = never
+    quiet_in_calls: bool = True               # captions only while another app uses the microphone (calls.py)
 
 
 @dataclass(frozen=True)
@@ -1062,6 +1063,7 @@ def _parse_voice(doc: Mapping[str, Any]) -> VoiceConfig:
         engine=r.choice("engine", d.engine, VOICE_ENGINES),
         local_voice=r.choice("local_voice", d.local_voice, LOCAL_VOICES),
         keep_warm_minutes=r.integer("keep_warm_minutes", d.keep_warm_minutes, *KEEP_WARM_RANGE),
+        quiet_in_calls=r.boolean("quiet_in_calls", d.quiet_in_calls),
     )
 
 

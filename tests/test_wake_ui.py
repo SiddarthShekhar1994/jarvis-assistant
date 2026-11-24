@@ -586,7 +586,7 @@ class AppHookTests(unittest.TestCase):
         def stub(**kwargs):
             values = dict(talk=SimpleNamespace(state=talk_ui.IDLE), voice=SimpleNamespace(speaking=False),
                           player=SimpleNamespace(state=ui.IDLE), meetings=SimpleNamespace(is_recording=lambda: False),
-                          _focus_quiet=lambda: False)
+                          _focus_quiet=lambda: False, _call_quiet=lambda: False)
             values.update(kwargs)
             return SimpleNamespace(**values)
 
@@ -596,6 +596,7 @@ class AppHookTests(unittest.TestCase):
             wake_ui.HOLD_SPEAKING: dict(voice=SimpleNamespace(speaking=True)),
             wake_ui.HOLD_MEETING: dict(meetings=SimpleNamespace(is_recording=lambda: True)),
             wake_ui.HOLD_FOCUS: dict(_focus_quiet=lambda: True),
+            wake_ui.HOLD_CALL: dict(_call_quiet=lambda: True),          # quiet during calls (smaller items 7)
         }
         for hold, values in cases.items():
             with self.subTest(hold):

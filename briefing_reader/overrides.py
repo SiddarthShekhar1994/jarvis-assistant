@@ -92,6 +92,7 @@ EDITABLE: dict[str, Editable] = {
     "voice.rate": Editable(KIND_PERCENT, low=cfg.RATE_RANGE[0], high=cfg.RATE_RANGE[1], step=5),
     "voice.volume": Editable(KIND_PERCENT, low=cfg.VOLUME_RANGE[0], high=cfg.VOLUME_RANGE[1], step=5),
     "voice.keep_warm_minutes": _number(cfg.KEEP_WARM_RANGE, 15),
+    "voice.quiet_in_calls": _flag(),
     "assistant.speak": _flag(),
     "assistant.greet": _flag(),
     "assistant.greeting_context": _flag(),

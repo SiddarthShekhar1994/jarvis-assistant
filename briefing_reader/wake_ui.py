@@ -8,8 +8,9 @@ own add-ons and speech model), it runs the listener process (wake_listen.WakeCli
 it works while Jarvis runs - his window open, minimized or on the desktop HUD - and stops when he is closed.
 
 The listener pauses (a hold, from the app's ``holds()``) while a talk listens or is understood, while Jarvis speaks or
-reads the briefing, while a meeting records and in focus mode; it listens again HOLD_TAIL_MS after the last hold went
-(his last word's echo). While Jarvis is in control on the desktop a wake is ignored, as the talk key is.
+reads the briefing, while a meeting records, in focus mode and on a call (quiet during calls); it listens again
+HOLD_TAIL_MS after the last hold went (his last word's echo). While Jarvis is in control on the desktop a wake is
+ignored, as the talk key is.
 
 A wake: the listener's reader thread gathers the audio from before the wake (the pre-roll) into a
 :class:`HandoffStream`, then the talk takes over on it (talk_ui.TalkController.listen_from_wake: Jarvis comes forward,
@@ -81,8 +82,9 @@ HEAR_HEARING = "hearing"          # canvas part 5B: a talk "Hey Jarvis" started 
 SHORT_WORDS = (SHORT_OFF, SHORT_SETUP, SHORT_STOPPED, SHORT_PAUSED, SHORT_LISTENING, SHORT_VIRTUAL, SHORT_NO_MIC,
                SHORT_BUSY, SHORT_SILENT, SHORT_NO_AUDIO, SHORT_RESTARTING, SHORT_STARTING)
 HOLD_TALK, HOLD_SPEAKING, HOLD_MEETING, HOLD_FOCUS = "talk", "speaking", "meeting", "focus"
+HOLD_CALL = "call"                # quiet during calls: another app uses the microphone
 HOLD_TEXTS = {HOLD_TALK: "while you talk to him", HOLD_SPEAKING: "while he speaks",
-              HOLD_MEETING: "while a meeting records", HOLD_FOCUS: "in focus mode"}
+              HOLD_MEETING: "while a meeting records", HOLD_FOCUS: "in focus mode", HOLD_CALL: "while you're on a call"}
 PROBLEM_STOPPED = "stopped"       # the listener kept failing: it is not started again until the owner turns it on
 PROBLEM_UNSAVED = "unsaved"       # Turn on could not be saved (fail-closed: it stays off)
 PROBLEM_UNSAVED_OFF = "unsaved_off"   # Turn off could not be saved: off for this run, on again at the next start
