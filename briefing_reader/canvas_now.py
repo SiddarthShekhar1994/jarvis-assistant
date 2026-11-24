@@ -1,4 +1,4 @@
-"""The canvas's resting group "Now" (PLAN-canvas part 3, "the Hedwig mix"; brief part 3B item 9).
+"""The canvas's resting group "Now" (PLAN-canvas part 3, "the mix"; brief part 3B item 9).
 
 ``NowController(canvas)`` is made by canvas_ui.CanvasController. Once the board's page is ready it puts up one group,
 topic "Now", built only from what the app already holds (no read, no run, no model, no network):

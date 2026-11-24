@@ -1,4 +1,4 @@
-"""The canvas's resting frames (PLAN-canvas part 3, "the Hedwig mix"): the "waits for your OK" frame and the Agents
+"""The canvas's resting frames (PLAN-canvas part 3, "the mix"): the "waits for your OK" frame and the Agents
 frame, built only from what the app already holds - the cards the Approvals screen shows and the standing agents the
 Agents screen shows. Qt-free and pure: no file, no log, no network, no clock, no model; nothing here raises for odd data
 (only a frame id that is not one raises ValueError: the caller's mistake).
