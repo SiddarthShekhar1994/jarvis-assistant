@@ -8,6 +8,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,7 +16,7 @@ from unittest import mock
 
 from PySide6.QtWidgets import QApplication
 
-from briefing_reader import hud, local_voice as lv, settings_view, tts
+from briefing_reader import hud, local_voice as lv, settings_view, speech, tts
 from briefing_reader.local_voice import LocalResult, LocalVoiceError
 from briefing_reader.tts import LOCAL, SAPI, SpeechSynthesizer
 from tests.test_local_voice import make_models, tone_wav, wav_ms
@@ -188,6 +189,84 @@ class LocalSynthTests(unittest.TestCase):
         current[0] = "zz_unknown"
         synth.synthesize_section(make_section(entry("Three."), key="s3"))
         self.assertEqual([call[1] for call in local.calls], ["bm_george", "bf_emma", "bm_george"])
+
+    def test_his_line_logs_its_audio_time_and_what_it_waited_for(self) -> None:
+        clock = self.clock
+
+        class Waited(FakeLocal):
+            def synthesize(self, text, out, *, voice, speed, gain, urgent):
+                result = super().synthesize(text, out, voice=voice, speed=speed, gain=gain, urgent=urgent)
+                clock.now += 12.3                                # a 12 s load, then the line
+                return dataclasses.replace(result, waited_ms=12000, held_by=lv.HELD_LOADING)
+
+        synth = self.make(Waited(), urgent=True)
+        with self.assertLogs("briefing_reader.tts", level="INFO") as captured:
+            audio = synth.synthesize_section(make_section(entry(SECRET)))
+        self.assertEqual(audio.engine, LOCAL)                    # his own voice, not the Windows one
+        lines = [line for line in captured.output if "Voice: line audio" in line]
+        self.assertEqual(lines, ["INFO:briefing_reader.tts:Voice: line audio after 12300 ms "
+                                 "(local; waited 12000 ms, loading)"])
+        self.assertNotIn("Ana", "\n".join(captured.output))
+        briefing = self.make(FakeLocal())                        # the briefing's sections: no such line
+        with self.assertLogs("briefing_reader.tts", level="INFO") as captured:
+            briefing.synthesize_section(make_section(entry("Section."), key="b1"))
+        self.assertFalse(any("line audio" in line for line in captured.output))
+
+    def test_a_busy_voice_names_what_held_it_and_the_windows_voice_says_the_line(self) -> None:
+        local = FakeLocal(error=LocalVoiceError(lv.ERR_BUSY, waited_ms=25000, held_by=lv.HELD_LOADING))
+        synth = self.make(local, urgent=True)
+        with self.assertLogs("briefing_reader.tts", level="INFO") as captured:
+            audio = synth.synthesize_section(make_section(entry(SECRET)))
+        self.assertEqual(audio.engine, SAPI)
+        text = "\n".join(captured.output)
+        self.assertIn("could not say one segment (busy: loading); the Windows voice says it", text)
+        self.assertIn("Voice: line audio after 0 ms (windows; waited 25000 ms, loading)", text)
+        self.assertNotIn("Ana", text)
+        local.error = None                                       # the next line asks the local voice again
+        self.assertEqual(synth.synthesize_section(make_section(entry("Two."), key="s2")).engine, LOCAL)
+
+    def test_his_start_up_line_s_queue_limit_and_the_load_wait_fit_together(self) -> None:
+        """A greeting waits for a loading voice at most its own limit less the margin, so the Windows voice still makes
+        it in time; and that is at least the load wait (his first words get the whole 25 s)."""
+        for kind in (speech.KIND_GREETING, speech.KIND_ANNOUNCE):
+            self.assertGreaterEqual(speech.wait_limit_s(kind), lv.URGENT_LOAD_WAIT_S)
+        for kind, limit in speech.STALE_AFTER_S.items():
+            self.assertEqual(speech.wait_limit_s(kind), max(0.0, limit - speech.SAY_MARGIN_S))
+
+        class Limited(FakeLocal):
+            def synthesize(self, text, out, *, voice, speed, gain, urgent, most_wait_s=None):
+                self.most = most_wait_s
+                return super().synthesize(text, out, voice=voice, speed=speed, gain=gain, urgent=urgent)
+
+        local = Limited()
+        results: list = []
+        done = threading.Event()
+        worker = speech.SayWorker(lambda: self.make(local, urgent=True),
+                                  lambda seq, audio, error: (results.append((seq, error)), done.set()))
+        worker.start()
+        self.addCleanup(worker.stop)
+        limit = speech.wait_limit_s(speech.KIND_GREETING)
+        worker.submit(1, "Good morning, sir.", within_s=limit)
+        self.assertTrue(done.wait(10))
+        self.assertEqual(results, [(1, None)])
+        self.assertLessEqual(local.most, limit)                  # the say thread's limit reached the voice's wait
+        self.assertGreater(local.most, limit - 5)
+
+    def test_a_wait_limit_that_ran_out_asks_the_voice_for_no_wait(self) -> None:
+        class Limited(FakeLocal):
+            def synthesize(self, text, out, *, voice, speed, gain, urgent, most_wait_s=None):
+                self.most = most_wait_s
+                return super().synthesize(text, out, voice=voice, speed=speed, gain=gain, urgent=urgent)
+
+        local = Limited()
+        synth = self.make(local, urgent=True)
+        synth.set_wait_limit(3.0)
+        self.clock.now += 5                                       # it waited in the say thread's queue meanwhile
+        synth.synthesize_section(make_section(entry("Hello.")))
+        self.assertEqual(local.most, 0.0)
+        synth.set_wait_limit(None)
+        synth.synthesize_section(make_section(entry("Again."), key="s2"))
+        self.assertIsNone(local.most)
 
     def test_the_online_mode_is_unchanged(self) -> None:
         local = FakeLocal()
@@ -368,6 +447,107 @@ class VoicePickTests(unittest.TestCase):
         self.assertEqual(picker.title.text(), local_voice_ui.PICK_LATER_TEXT)
 
 
+class FakeTts:
+    """The briefing's TTS worker: records each section asked for (generation, index)."""
+
+    def __init__(self) -> None:
+        self.submitted: list[tuple[int, int]] = []
+
+    def set_generation(self, generation: int) -> None:
+        self.generation = generation
+
+    def submit(self, generation: int, index: int, section) -> None:
+        self.submitted.append((generation, index))
+
+    def __getattr__(self, name):
+        return lambda *args, **kwargs: None
+
+
+class PrerenderTests(unittest.TestCase):
+    """The briefing's audio is made after his start-up line (2026-11-24): never ahead of it at the shared voice."""
+
+    def held(self) -> tuple[AppHarness, FakeTts]:
+        harness = AppHarness(self)
+        c = harness.c
+        c._tts = fake = FakeTts()
+        c._hold_prerender()
+        harness.briefing()                                      # the briefing arrives while he is about to speak
+        self.assertTrue(c._prerender_held)
+        self.assertEqual(fake.submitted, [])
+        return harness, fake
+
+    def test_the_audio_is_made_once_his_line_was_said(self) -> None:
+        harness, fake = self.held()
+        c = harness.c
+        c._on_voice_speaking("Good morning, sir. Your AM briefing is ready to view.")
+        self.assertEqual(fake.submitted, [])                    # still saying it
+        with self.assertLogs("briefing_reader.ui", level="INFO") as captured:
+            c._on_voice_speaking("")
+        self.assertTrue(fake.submitted)
+        self.assertFalse(c._prerender_held)
+        line = [entry for entry in captured.output if "Briefing audio: waited" in entry]
+        self.assertEqual(len(line), 1)
+        self.assertRegex(line[0], r"waited \d+ ms for the start-up line \(said\)$")
+        count = len(fake.submitted)
+        c._on_voice_speaking("Another line.")
+        c._on_voice_speaking("")
+        self.assertEqual(len(fake.submitted), count)            # made once
+
+    def test_at_the_latest_after_30_s(self) -> None:
+        harness, fake = self.held()
+        harness.c._prerender_timer.timeout.emit()
+        self.assertTrue(fake.submitted)
+
+    def test_a_line_shown_as_text_only_lets_it_go_at_once(self) -> None:
+        harness, fake = self.held()
+        harness.voice.speaks = False
+        harness.c._say(speech.KIND_GREETING, "Good morning, sir.")
+        self.assertTrue(fake.submitted)
+
+    def test_reading_lets_it_go_once(self) -> None:
+        harness, fake = self.held()
+        harness.c.enter_reading()
+        self.assertFalse(harness.c._prerender_held)
+        generations = {generation for generation, _index in fake.submitted}
+        self.assertEqual(len(generations), 1)                   # the held script, not made twice
+
+    def test_the_main_open_shows_the_briefing_but_its_audio_waits_for_his_line(self) -> None:
+        harness = AppHarness(self)
+        c = harness.c
+        c._tts = fake = FakeTts()
+        c._hold_prerender()
+        c.open_assistant()                                      # the main launch: the reading screen, no autoplay
+        harness.briefing()                                      # the fetch answers before his line is said
+        self.assertIsNotNone(c._script)                         # the screen renders as before
+        self.assertTrue(c._prerender_held)
+        self.assertEqual(fake.submitted, [])
+        c._on_voice_speaking("Good morning, sir.")
+        c._on_voice_speaking("")
+        self.assertTrue(fake.submitted)
+        self.assertEqual(len({generation for generation, _index in fake.submitted}), 1)
+
+    def test_the_hud_start_s_reading_screen_waits_too_and_play_lets_it_go(self) -> None:
+        harness = AppHarness(self)
+        c = harness.c
+        c._tts = fake = FakeTts()
+        c._hold_prerender()
+        c.enter_reading(autoplay=False, settle=False)           # as _start_on_hud and open_assistant enter it
+        harness.briefing()
+        self.assertEqual(fake.submitted, [])
+        c.toggle_play()                                         # the owner's Play: the audio is made now
+        self.assertFalse(c._prerender_held)
+        self.assertTrue(fake.submitted)
+
+    def test_nothing_waits_when_he_does_not_speak(self) -> None:
+        harness = AppHarness(self, config_extra="\n[assistant]\nspeak = false\n")
+        c = harness.c
+        c._tts = fake = FakeTts()
+        c._hold_prerender()
+        self.assertFalse(c._prerender_held)
+        harness.briefing()
+        self.assertTrue(fake.submitted)
+
+
 class AppVoiceTests(unittest.TestCase):
     def test_a_click_makes_it_his_voice_and_he_greets_in_it(self) -> None:
         harness = AppHarness(self)
@@ -443,6 +623,20 @@ class AppVoiceTests(unittest.TestCase):
         c._local_client = fake
         c._local_voice_downloaded()
         self.assertEqual((fake.warmed, fake.forgotten), (1, 1))     # a failed load before it is forgotten
+
+    def test_start_holds_the_briefing_audio_for_his_first_line(self) -> None:
+        harness = self.make()
+        c = harness.c
+        fake = FakeLocal()
+        c._start_tts = lambda: setattr(c, "_tts", FakeTts())
+        c._ensure_local_voice = lambda: fake
+        c._local_client = fake
+        with mock.patch.object(c, "_start_calendar", lambda: None):
+            c.start()
+        self.addCleanup(c.shutdown)
+        self.assertTrue(c._prerender_held)
+        self.assertTrue(c._prerender_timer.isActive())
+        self.assertEqual(c._prerender_timer.interval(), 30_000)
 
     def test_start_warms_the_voice_and_shutdown_ends_it(self) -> None:
         harness = self.make()

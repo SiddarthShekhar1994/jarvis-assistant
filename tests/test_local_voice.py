@@ -762,12 +762,105 @@ class ClientTests(unittest.TestCase):
         client.warm()
         time.sleep(0.1)                                    # the warm-up holds the voice while it loads
         began = time.monotonic()
-        with mock.patch.object(lv, "URGENT_WAIT_S", 0.2), self.assertRaises(lv.LocalVoiceError) as caught:
+        with mock.patch.object(lv, "URGENT_WAIT_S", 0.05), mock.patch.object(lv, "URGENT_LOAD_WAIT_S", 0.3), \
+                self.assertRaises(lv.LocalVoiceError) as caught:
             client.synthesize("good morning", self.audio / "a.wav", urgent=True)
         self.assertEqual(caught.exception.code, lv.ERR_BUSY)
+        self.assertEqual(caught.exception.held_by, lv.HELD_LOADING)
+        self.assertGreaterEqual(caught.exception.waited_ms, 250)   # the load wait, not the 0.05 s one
         self.assertLess(time.monotonic() - began, 0.9)
         self.assertIn(lv.ERR_BUSY, lv.LINE_ERRORS)          # the Windows voice says that line; no cooldown
         self.assertEqual(client.synthesize("later", self.audio / "b.wav", urgent=True).duration_ms, 100)
+
+    def test_the_wait_constants(self) -> None:
+        self.assertEqual((lv.URGENT_WAIT_S, lv.URGENT_LOAD_WAIT_S), (10.0, 25.0))
+
+    def test_his_line_during_a_load_shorter_than_the_load_wait_is_said_by_the_local_voice(self) -> None:
+        class SlowToLoad(FakeSpeaker):
+            def prepare(self, voice: str) -> None:
+                time.sleep(0.5)                            # 12 s at the real scale: past URGENT_WAIT_S, inside 25 s
+
+        client, procs = self.client(load=SlowToLoad)
+        client.warm()
+        time.sleep(0.1)
+        with mock.patch.object(lv, "URGENT_WAIT_S", 0.1), mock.patch.object(lv, "URGENT_LOAD_WAIT_S", 2.0):
+            result = client.synthesize("good morning", self.audio / "a.wav", urgent=True)
+        self.assertEqual((result.duration_ms, len(procs)), (200, 1))
+        self.assertEqual(result.held_by, lv.HELD_LOADING)
+        self.assertGreaterEqual(result.waited_ms, 250)
+        self.assertNotIn("morning", repr(result))
+
+    def test_his_line_waits_the_load_wait_behind_a_briefing_section(self) -> None:
+        client, _procs = self.client(load=lambda: FakeSpeaker(delay=0.4))
+        client.synthesize("warm", self.audio / "w.wav")
+        briefing = threading.Thread(target=client.synthesize, args=("section one", self.audio / "s.wav"))
+        briefing.start()
+        time.sleep(0.1)                                    # the briefing's section holds the voice
+        with mock.patch.object(lv, "URGENT_WAIT_S", 0.1), mock.patch.object(lv, "URGENT_LOAD_WAIT_S", 2.0):
+            result = client.synthesize("good morning", self.audio / "a.wav", urgent=True)
+        briefing.join(5)
+        self.assertEqual(result.held_by, lv.HELD_BRIEFING)
+        self.assertGreaterEqual(result.waited_ms, 150)
+
+    def test_behind_another_of_his_lines_the_short_wait_stays(self) -> None:
+        client, _procs = self.client(load=lambda: FakeSpeaker(delay=0.6))
+        client.synthesize("warm", self.audio / "w.wav")
+        first = threading.Thread(target=client.synthesize, args=("first line", self.audio / "f.wav"),
+                                 kwargs={"urgent": True})
+        first.start()
+        time.sleep(0.1)
+        began = time.monotonic()
+        with mock.patch.object(lv, "URGENT_WAIT_S", 0.1), mock.patch.object(lv, "URGENT_LOAD_WAIT_S", 2.0), \
+                self.assertRaises(lv.LocalVoiceError) as caught:
+            client.synthesize("second line", self.audio / "a.wav", urgent=True)
+        elapsed = time.monotonic() - began
+        first.join(5)
+        self.assertEqual((caught.exception.code, caught.exception.held_by), (lv.ERR_BUSY, lv.HELD_LINE))
+        self.assertLess(elapsed, 0.45)                     # the 0.1 s wait, not the 2 s one
+
+    def test_his_line_s_own_limit_caps_the_load_wait(self) -> None:
+        class SlowToLoad(FakeSpeaker):
+            def prepare(self, voice: str) -> None:
+                time.sleep(1.0)
+
+        client, _procs = self.client(load=SlowToLoad)
+        client.warm()
+        time.sleep(0.1)
+        began = time.monotonic()
+        with mock.patch.object(lv, "URGENT_LOAD_WAIT_S", 5.0), self.assertRaises(lv.LocalVoiceError) as caught:
+            client.synthesize("good morning", self.audio / "a.wav", urgent=True, most_wait_s=0.2)
+        self.assertEqual((caught.exception.code, caught.exception.held_by), (lv.ERR_BUSY, lv.HELD_LOADING))
+        self.assertLess(time.monotonic() - began, 0.7)     # its utterance's limit, not the 5 s load wait
+
+    def test_a_warm_up_that_ended_before_ready_is_not_loaded_again_by_his_line(self) -> None:
+        def dies():
+            time.sleep(0.3)
+            raise SystemExit                               # the process ends before its ready line (not yet broken)
+
+        client, procs = self.client(load=dies)
+        client.warm()
+        time.sleep(0.1)
+        with mock.patch.object(lv, "URGENT_LOAD_WAIT_S", 5.0), self.assertRaises(lv.LocalVoiceError) as caught:
+            client.synthesize("good morning", self.audio / "a.wav", urgent=True)
+        self.assertEqual((caught.exception.code, caught.exception.held_by), (lv.ERR_BUSY, lv.HELD_LOADING))
+        self.assertEqual(client.reason(), "")              # one failure: not given up
+        self.assertEqual(len(procs), 1)                    # the Windows voice says it; no second load in its turn
+
+    def test_a_load_that_fails_while_his_line_waits_falls_back_at_once(self) -> None:
+        def missing():
+            time.sleep(0.3)
+            raise ImportError("misaki")
+
+        client, procs = self.client(load=missing)
+        client.warm()
+        time.sleep(0.1)
+        began = time.monotonic()
+        with mock.patch.object(lv, "URGENT_LOAD_WAIT_S", 5.0), self.assertRaises(lv.LocalVoiceError) as caught:
+            client.synthesize("good morning", self.audio / "a.wav", urgent=True)
+        self.assertEqual(caught.exception.code, f"{lv.ERR_LOAD}:{lv.ERR_ADDON}")
+        self.assertEqual(caught.exception.held_by, lv.HELD_LOADING)
+        self.assertLess(time.monotonic() - began, 2.0)     # at the load's end, not after the 5 s wait
+        self.assertEqual(len(procs), 1)                    # and no second load for his line
 
     def test_a_close_while_it_starts_leaves_no_process(self) -> None:
         procs: list[FakeProc] = []

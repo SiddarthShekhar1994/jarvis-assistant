@@ -451,7 +451,7 @@ keep the same rules (they propose, your click approves, and what they did
 shows, in LIVE or, for standing jobs, on the Agents screen):
 
 - **Smaller items**: changing settings in the app (the Settings screen is
-  read only today), his first words sooner, a fallback model that runs on
+  read only today), a fallback model that runs on
   this PC, filling forms in the apps you allow (see
   [Jarvis on your desktop](#jarvis-on-your-desktop-the-hud)), and for his
   voice: knowing yours, staying quiet during calls and live captions while
@@ -1624,7 +1624,7 @@ over the briefing: if it is playing he pauses it and it carries on 0.4 seconds
 after he has finished (unless you pressed Play, Pause, Skip section or a
 section meanwhile). Pressing one of those, or Read everything, stops him at
 once and drops what he still had to say. Something that waited too long (a
-greeting 20 seconds, an answer 30, a result 60) is left out; it stays in the
+greeting 30 seconds, an answer 30, a result 60) is left out; it stays in the
 JARVIS tab.
 
 **Mute.** The speaker button in the header (left of minimize, on the assistant
@@ -3044,7 +3044,12 @@ at once: the process is killed and anything it was still doing is dropped, and h
 more: what he was saying goes too, and a Turn off leaves nothing of the task in the conversation
 either, nor his report in LIVE. (A briefing being read aloud reads on.) The bar says
 "Passing that on, sir." when your words went in; in the first seconds of a task they go in right
-after your request.
+after your request. While one of his steps runs it says "Passing that on, sir: he'll have it when
+this step ends.", for Claude Code hands your words over only when that step returns (words that
+wait to go in with his next turn get the plain "Passing that on, sir."). Once they
+reached him the bar says "He has your message, sir." (shown, not said) and LIVE notes "Your message
+reached him"; while a card waits for a click, only LIVE does, and the bar keeps saying the card
+needs a click.
 
 **Its budget.** After `[agent] max_turns` turns or `max_minutes` minutes of work he asks
 "Keep going?" (the clock rests while he waits for you and while the PC sleeps). Reached while a card is up or a batch is at
@@ -5589,6 +5594,22 @@ says what is missing: an add-on (with the line to install it) or the
 download. The log says `The local voice can't run yet (addon_missing)` (or
 `model_missing`), or `The local voice failed (...); the Windows voice
 speaks, and the local voice is tried again in 60 s`.
+
+**His first words, in his own voice.** At a start his voice loads in the
+background (a few seconds, longer on a cold start). His own line waits for
+it up to 25 seconds while it loads or while it makes the briefing's audio,
+shown as a caption meanwhile; behind another of his own lines it waits up to
+10 seconds. A line never waits past its own time to be said less 4 seconds
+(an acknowledgement 8 s, so 4 s), so the Windows voice still says it in time.
+The briefing's audio is made only after his start-up line was said (or shown
+as text only, or you press Play, or 30 seconds went by); the reading screen
+shows the briefing meanwhile. A voice that fails to load, or whose start
+ends before it is ready, hands that line to the Windows voice at once; the
+next line tries his voice again. The log
+says `Voice: line audio after N ms (local; waited N ms, loading)` for each
+of his lines (`windows` when the Windows voice said it), and `The local
+voice could not say one segment (busy: loading); the Windows voice says it`
+when a line waited the whole time.
 
 ## Offline fallback
 

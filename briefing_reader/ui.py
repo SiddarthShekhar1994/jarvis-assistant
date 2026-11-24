@@ -5178,6 +5178,9 @@ _MEMORY_DROP_WORDS = {"read_only": "memory.json can't be read", "duplicate": "yo
 # How the conversation shows what Jarvis says after a card was carried out (persona.outcome_tone).
 _RESULT_TONES = {OUTCOME_GOOD: hud.TONE_GOOD, OUTCOME_ERROR: hud.TONE_ERROR, OUTCOME_WARN: hud.TONE_WARN}
 _GREETING_WAIT_MS = 3000          # an opening greeting waits this long for the first fetch answer
+# The briefing's audio is made only after his start-up line was said (the local voice loads and says his line first),
+# or at the latest this long after the start (2026-11-24).
+_PRERENDER_WAIT_MS = 30_000
 _GREETING_REPEAT_S = 120.0        # an open of a hidden or minimized window greets again after this
 _LOCK_RECHECK_MS = 5000           # a held announcement checks the lock screen again this often
 _CONVERSATION_SAVE_MS = 500       # conversation.json is written this long after the conversation changed
@@ -6736,6 +6739,10 @@ class AppController(QObject):
 
     def _init_script_state(self) -> None:
         self._prefetch: Script | None = None     # script prepared while the prompt shows
+        self._prerender_held = False             # the briefing's audio waits for the start-up line (local voice)
+        self._prerender_due: tuple[Script, bool] | None = None   # what waits: the script and its include_note
+        self._prerender_heard = False            # an utterance started while it waited (its end lets the audio go)
+        self._prerender_began = 0.0
         self._script: Script | None = None       # frozen script on the reading screen
         self._generation = 0
         self._audio: dict[int, SectionAudio] = {}
@@ -6887,6 +6894,9 @@ class AppController(QObject):
                                                 interval_ms=_GREETING_WAIT_MS)
         # An announcement held while the session is locked looks again.
         self._held_timer = self._make_timer(self._on_held_timer, single_shot=True, interval_ms=_LOCK_RECHECK_MS)
+        # The briefing's audio waits at most this long for the start-up line.
+        self._prerender_timer = self._make_timer(lambda: self._release_prerender("30 s"), single_shot=True,
+                                                 interval_ms=_PRERENDER_WAIT_MS)
 
     def _make_timer(self, slot: Callable[[], None], *, single_shot: bool, interval_ms: int = 0) -> QTimer:
         timer = QTimer(self)
@@ -7092,6 +7102,7 @@ class AppController(QObject):
         self._start_voice()
         if self._local_client is not None:
             self._local_client.warm()   # the voice loads in the background now: his first line needs no wait
+            self._hold_prerender()      # ... and says his start-up line before the briefing's audio is made
         self._create_tray()
         self._wake_call("start")    # "Hey Jarvis": the listener runs from now while it is on (never before start)
         if self.meetings is not None:
@@ -14177,6 +14188,8 @@ class AppController(QObject):
         if not said and text and self.state == STATE_READING and self._voice_silent():
             # Muted (or no voice): the same words as Home's caption, text only (HOLOGRAM_SPEC 14.7).
             self.window.reading.say_caption(scrub_for_speech(text), spoken=False)
+        if not said and kind in (KIND_GREETING, KIND_ANNOUNCE):
+            self._release_prerender("text only")   # the start-up line was not said: nothing to wait for
         return said
 
     def _hold_for_focus(self, kind: str, text: str, key: str) -> None:
@@ -14222,11 +14235,17 @@ class AppController(QObject):
         self._voice_call("owner_acted")
         self._voice_call("stop")
         self._prod_call("on_speech_dropped")   # a queued offer sentence that never started is held again
+        self._release_prerender("play")         # the owner plays the briefing: its audio is made now
 
     def _on_voice_speaking(self, text: str) -> None:
         """Jarvis started saying ``text`` (the orb says SPEAKING and the speech line shows his words)
         or finished (""; the briefing's own state and line come back)."""
         self._utterance = text or ""
+        if self._prerender_held:                 # his start-up line: the briefing's audio is made once it ends
+            if text:
+                self._prerender_heard = True
+            elif self._prerender_heard:
+                self._release_prerender("said")
         self._wake_call("refresh_holds")         # "Hey Jarvis" pauses while he speaks: he never wakes himself
         self._look_call("on_speaking")           # the soft sounds never play over him
         if text:
@@ -15118,7 +15137,8 @@ class AppController(QObject):
             announce=self.config.sections.announce, actions=self._pending_page_actions())
 
     def _refresh_prefetch(self) -> None:
-        """Prepare audio for the briefing while the prompt shows (rebuilt when it changes)."""
+        """Prepare audio for the briefing while the prompt shows (rebuilt when it changes); while the start-up line
+        holds it (``_hold_prerender``) the newest script waits."""
         if self.state in (STATE_READING, STATE_QUITTING) or self._briefing is None:
             return
         # No stale note while still waiting for the run; a one-off re-check keeps it.
@@ -15126,10 +15146,40 @@ class AppController(QObject):
         script = self._build_script(include_note)
         unchanged = self._prefetch is not None and script.sections == self._prefetch.sections
         self._prefetch = script
+        if self._prerender_held:
+            if not unchanged or self._prerender_due is not None:
+                self._prerender_due = (script, include_note)
+            return
         if not unchanged:
             self._submit_all(script)
             if not include_note:
                 self._warm_noted_intro(script)
+
+    def _hold_prerender(self) -> None:
+        """At start (the local voice): the briefing's audio is made only once his start-up line was said, or it was
+        shown as text only, or the owner reads, or _PRERENDER_WAIT_MS went by - so his first words never wait behind
+        the briefing's sections, nor come in the Windows voice for it. Nothing to wait for when he does not speak."""
+        if not self.config.assistant.speak or self._voice_silent():
+            return
+        self._prerender_held, self._prerender_heard, self._prerender_due = True, False, None
+        self._prerender_began = time.monotonic()
+        self._prerender_timer.start()
+
+    def _release_prerender(self, why: str) -> None:
+        """The start-up line is over (``why``: a reason word): what waits is made now."""
+        if not self._prerender_held:
+            return
+        self._prerender_held, self._prerender_heard = False, False
+        self._prerender_timer.stop()
+        due, self._prerender_due = self._prerender_due, None
+        logger.info("Briefing audio: waited %d ms for the start-up line (%s)",
+                    int((time.monotonic() - self._prerender_began) * 1000), why)
+        if due is None or self.state == STATE_QUITTING:
+            return
+        script, include_note = due                      # the newest script (each change while held replaced it)
+        self._submit_all(script)
+        if not include_note:
+            self._warm_noted_intro(script)
 
     def _warm_noted_intro(self, script: Script) -> None:
         """Also synthesize the intro with the stale note, so Read now during the wait starts at once.
@@ -15568,7 +15618,11 @@ class AppController(QObject):
             self._stop_fetch()
         self._recheck_timer.stop()
         script = self._build_script(include_note=True)
-        if self._prefetch is None or script.sections != self._prefetch.sections:
+        if self._autoplay:
+            self._release_prerender("reading")   # it plays now: nothing waits for the start-up line any more
+        if self._prerender_held:                 # shown, waiting for Play: its audio still waits for his first line
+            self._prerender_due = (script, True)
+        elif self._prefetch is None or script.sections != self._prefetch.sections:
             self._submit_all(script)
         self._script = script
         self._include_ignored = False

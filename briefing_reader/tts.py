@@ -451,9 +451,16 @@ class SpeechSynthesizer:
         self._local_retry_after_s = float(local_retry_after_s)
         self._local_failed_at: float | None = None
         self._local_reason_said = ""                 # why it can't run, logged once until that changes
+        self._line_wait: tuple[int, str] = (0, "")   # this segment's wait for the local voice: (ms, what held it)
+        self._wait_until: float | None = None        # the say thread's line must have its audio by then (set_wait_limit)
         self._last_engine = LOCAL if self._local_mode else EDGE
         self._sapi_engine: Any = None
         self._com_initialized = False
+
+    def set_wait_limit(self, seconds: float | None) -> None:
+        """The next line's audio is wanted within ``seconds`` (speech.SayWorker: its utterance's limit less a margin):
+        a wait for the local voice never outlasts it, so the Windows voice says the line in time. None: no limit."""
+        self._wait_until = None if seconds is None else self._clock() + max(0.0, float(seconds))
 
     @property
     def last_engine(self) -> str:
@@ -494,6 +501,22 @@ class SpeechSynthesizer:
 
     def _synthesize_segment(self, text: str, starts: list[tuple[int, int]],
                             pause_after_ms: int) -> tuple[AudioSegment, str]:
+        began = self._clock()
+        self._line_wait = (0, "")
+        clip = self._segment_clip(text)
+        if self._local_mode and self._urgent:
+            self._log_line_audio(clip.engine, began)
+        return self._make_segment(clip, text, starts, pause_after_ms), clip.engine
+
+    def _log_line_audio(self, engine: str, began: float) -> None:
+        """His line's audio is made: how long it took and in which voice, and what it waited for (numbers and
+        words only)."""
+        waited_ms, held_by = self._line_wait
+        ms = max(0, round((self._clock() - began) * 1000))
+        logger.info("Voice: line audio after %d ms (%s%s)", ms, "local" if engine == LOCAL else "windows",
+                    f"; waited {waited_ms} ms, {held_by}" if held_by else "")
+
+    def _segment_clip(self, text: str) -> _Clip:
         if self._local_mode:              # this PC's voice, else the Windows voice: never the online one
             clip = self._cached(self._cache_key(LOCAL, text))
             if clip is None and self._local_allowed():
@@ -508,7 +531,7 @@ class SpeechSynthesizer:
                 logger.debug("Reusing cached SAPI audio %s", clip.path.name)
             else:
                 clip = self._run_sapi(text)
-        return self._make_segment(clip, text, starts, pause_after_ms), clip.engine
+        return clip
 
     def _voice_name(self) -> str:
         """The local voice to speak in now (the pick may change between two lines); an unknown one is the default."""
@@ -555,16 +578,23 @@ class SpeechSynthesizer:
             for index, group in enumerate(groups):
                 part = path.with_name(f"{path.stem}-{index}.wav")
                 parts.append(part)
+                limit = {}
+                if self._urgent and self._wait_until is not None:
+                    limit["most_wait_s"] = max(0.0, self._wait_until - self._clock())
                 result = self._local.synthesize(group, part, voice=self._voice_name(), speed=speed, gain=gain,
-                                                urgent=self._urgent)
+                                                urgent=self._urgent, **limit)
+                self._note_wait(result)
                 words.extend((offset + ms, word) for ms, word in result.words)
                 offset += max(0, int(result.duration_ms))
             duration_ms, _lengths = _lv.join_wavs(parts, path)
         except _lv.LocalVoiceError as exc:
             if exc.code == _lv.ERR_CLOSED:          # the app is closing: no Windows voice either, nothing more is made
                 raise TtsError("Speech stopped: the app is closing") from None
+            self._note_wait(exc)
             if exc.code in _lv.LINE_ERRORS:         # this line only: the Windows voice says it, the next asks again
-                logger.info("The local voice could not say one segment (%s); the Windows voice says it", exc.code)
+                held_by = getattr(exc, "held_by", "")
+                logger.info("The local voice could not say one segment (%s%s); the Windows voice says it", exc.code,
+                            f": {held_by}" if held_by else "")
             else:
                 self._on_local_failure(exc.code)
             return None
@@ -580,6 +610,12 @@ class SpeechSynthesizer:
         clip = _Clip(path, max(0, int(duration_ms)), tuple(words), LOCAL, envelope=voice_fx.wav_envelope(path))
         self._cache[key] = clip
         return clip
+
+    def _note_wait(self, answer: Any) -> None:
+        """The first wait for the local voice in this segment (a result's or an error's ``held_by``) is kept."""
+        held_by = getattr(answer, "held_by", "")
+        if held_by in (_lv.HELD_LOADING, _lv.HELD_BRIEFING, _lv.HELD_LINE) and not self._line_wait[1]:
+            self._line_wait = (max(0, int(getattr(answer, "waited_ms", 0) or 0)), held_by)
 
     def _on_local_failure(self, code: str) -> None:
         self._local_failed_at = self._clock()

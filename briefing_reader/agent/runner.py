@@ -40,7 +40,9 @@ say, but ask for nothing at once, for the question was the model's (agent.owner)
 ``result`` with no wait pending and no
 finish gets one prompt to carry on or finish, and after another one the task ends as partial. A message sent mid-run is
 delivered by Claude Code after the running tool returns (``--replay-user-messages`` shows when; a ``result`` while one is
-on its way is not idle). Words typed before the goal has gone in go in right after it, in order.
+on its way is not idle). Words typed before the goal has gone in go in right after it, in order. Each message sent is
+remembered as the owner's or Jarvis's, in order; when the owner's shows as delivered, an E_NOTICE with the code
+C_DELIVERED (and no text) says so (the app: "He has your message").
 
 The budget (agent.policy.Budget): reaching a turn or minute cap asks "Keep going?" through the same seam; tool calls
 then return "end your turn" until the answer. Yes: as much again. No, or no answer: the model is told to report and
@@ -68,6 +70,7 @@ and, for the length of the run, the MCP config (D11).
 
 from __future__ import annotations
 
+import collections
 import itertools
 import logging
 import re
@@ -123,6 +126,8 @@ WEB_ALLOW_WORD = "Allow"               # the one word on the firewall's card tha
 SUBMIT_SEND_WORD, SUBMIT_DONT_WORD = "Send", "Don't"     # the Send card's; only the first, clicked, sends anything
 SUBMIT_CHOICES = (SUBMIT_SEND_WORD, SUBMIT_DONT_WORD)
 C_OWNER_PAUSED, C_OWNER_RESUMED = "owner_paused", "owner_resumed"      # E_NOTICE's codes: the owner's Pause, Resume
+C_DELIVERED = "delivered"              # E_NOTICE's code (no text): the owner's words reached the model (its replay)
+SENT_OWNER, SENT_JARVIS = "owner", "jarvis"   # whose message went in (the FIFO the replays are matched against)
 STOPPED_CODE = "stopped"
 
 OWNER_LABEL = "The owner says: "
@@ -498,6 +503,9 @@ class AgentRun:
         self._question_ids = itertools.count(1)
         self._idle = False                  # the last result came and nothing has gone in since
         self._unreplayed = 0                # messages sent that have not shown as delivered
+        # Each message sent, in order: (SENT_OWNER / SENT_JARVIS, its text); a replay is matched to it by its text.
+        self._sent_kinds: collections.deque[tuple[str, str]] = collections.deque()
+        self._owner_texts: collections.Counter[str] = collections.Counter()   # the owner's messages not yet sent
         self._replay_since: float | None = None   # a result came while one was on its way
         self._outbox: list[str] = []        # goes in at the next result (or, before the goal has gone in, after it)
         self._goal_sent = False             # the first message has gone in: nothing may go before it
@@ -608,7 +616,8 @@ class AgentRun:
         self._finish_run(OUTCOME_STOPPED, C_STOPPED, STOPPED_WORDS)
 
     def owner_says(self, text: str) -> str:
-        """The owner's words while the task runs: "answered" (the question that waits), "sent", "held" (the plan's limit
+        """The owner's words while the task runs: "answered" (the question that waits), "sent" (gone in now), "queued"
+        (behind what waits for the next result, or the goal: they go in with it), "held" (the plan's limit
         holds, or a card waits while it is paused: they go in with the resume, or, with no time given, as that card ends)
         or "refused" (it has ended). Never past what is on its way already, the goal among it: they go in the order they
         were said. They answer the model's question when ask_owner's waits, or when a line of the model's (say, its own
@@ -636,17 +645,19 @@ class AgentRun:
                 wait.typed = True                        # its end says so: never "no answer came"
             if self._paused:
                 if self._limit_holds() or wait is not None:
-                    self._held_owner.append(owner_message(text))     # the resume lets them go; with no time given,
+                    self._held_owner.append(self._owner_message(text))   # the resume lets them go; no time given:
                     self._owner_word = True              # so does the end of the wait that is up (_let_go)
                     if wait is None or wait.at_work:     # (a click awaited: the app says so: agent_ui.take_request)
                         later = HELD_AT_WORK_WORDS if wait is not None and self._paused_until is None else HELD_WORDS
                         self._emit(AgentEvent(E_NOTICE, text=later, code="held"))
                     return "held"
-                self._resume("", [owner_message(text)])  # what waited goes first: the order they were said in
+                self._resume("", [self._owner_message(text)])  # what waited goes first: the order they were said in
             elif self._outbox or not self._goal_sent:
-                self._outbox.append(owner_message(text))  # after what waits for the next result, or the goal: never past it
+                self._outbox.append(self._owner_message(text))  # after what waits for the next result, or the goal
+                logger.info("Agent %s: a message from the owner waits for the next result", self.run_id)
+                return "queued"
             else:
-                self._send(owner_message(text))
+                self._send(self._owner_message(text))
             logger.info("Agent %s: a message from the owner went in", self.run_id)
             return "sent"
 
@@ -753,6 +764,7 @@ class AgentRun:
                 return False
             self._process.send(cli.stream_message(message))
             self._unreplayed += 1
+            self._sent_kinds.append((SENT_JARVIS, message))   # the goal: its replay makes no note
             self._started_at = self._clock()
             self._goal_sent = True
             for waiting in self._take_outbox():          # typed in the first seconds: after the goal, in order
@@ -1062,9 +1074,34 @@ class AgentRun:
                               cache_read_tokens=self._cache_read_tokens, cache_write_tokens=self._cache_write_tokens))
 
     def _on_user(self, event: Mapping[str, Any]) -> None:
-        if event.get("isReplay") is True and self._unreplayed > 0:
+        if event.get("isReplay") is not True:
+            return
+        if self._unreplayed > 0:
             self._unreplayed -= 1
             self._replay_since = None
+        if self._replayed(event) == SENT_OWNER:
+            logger.info("Agent %s: a message from the owner was delivered", self.run_id)
+            self._emit(AgentEvent(E_NOTICE, code=C_DELIVERED))
+
+    def _replayed(self, event: Mapping[str, Any]) -> str:
+        """Whose message this replay is (SENT_OWNER / SENT_JARVIS), or "" when it is none still on its way. Matched by
+        its text: those sent before it whose replays never came are passed over (a late replay after the replay wait
+        gave up never stands for a later message). A replay with no text it can read takes the oldest."""
+        if not self._sent_kinds:
+            return ""
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, Mapping) else None
+        if isinstance(content, list):
+            content = "\n".join(block.get("text", "") for block in content
+                                if isinstance(block, Mapping) and block.get("type") == "text")
+        if not isinstance(content, str):
+            return self._sent_kinds.popleft()[0]
+        for index, (_kind, text) in enumerate(self._sent_kinds):
+            if text == content:
+                for _ in range(index):
+                    self._sent_kinds.popleft()
+                return self._sent_kinds.popleft()[0]
+        return ""
 
     def _on_result(self, event: Mapping[str, Any]) -> None:
         usage = event.get("usage") if isinstance(event.get("usage"), Mapping) else {}
@@ -1137,11 +1174,22 @@ class AgentRun:
         messages, self._outbox = self._outbox, []
         return messages
 
+    def _owner_message(self, text: str) -> str:
+        """The owner's words as they go in, remembered as theirs until sent (whichever queue they wait in)."""
+        message = owner_message(text)
+        self._owner_texts[message] += 1
+        return message
+
     def _send(self, message: str) -> None:
         process = self._process
         if process is None or not process.send(cli.stream_message(message)):
             return
         self._unreplayed += 1
+        if self._owner_texts[message] > 0:
+            self._owner_texts[message] -= 1
+            self._sent_kinds.append((SENT_OWNER, message))
+        else:
+            self._sent_kinds.append((SENT_JARVIS, message))
         self._replay_since = None
         self._idle = False
         self.budget.work()

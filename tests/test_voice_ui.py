@@ -56,11 +56,13 @@ def audio(seq: int) -> SectionAudio:
 class FakeWorker:
     def __init__(self) -> None:
         self.submitted: list[tuple[int, str]] = []
+        self.within: list[float | None] = []      # each job's wait limit (SayWorker.submit's within_s)
         self.forgotten: list[int] = []
         self.stopped = False
 
-    def submit(self, seq: int, text: str) -> None:
+    def submit(self, seq: int, text: str, within_s: float | None = None) -> None:
         self.submitted.append((seq, text))
+        self.within.append(within_s)
 
     def forget(self, seq: int) -> None:
         self.forgotten.append(seq)
@@ -265,6 +267,21 @@ class SpeakingTests(VoiceTestCase):
         clock[0] += 9
         self.assertTrue(wait_for(lambda: not self.voice.pending()))
         self.assertEqual(self.player.played, [])
+
+    def test_each_utterance_s_making_is_told_its_wait_limit(self) -> None:
+        for kind in (KIND_GREETING, KIND_REPLY, KIND_ACK):
+            self.voice.say(kind, f"A {kind} line.")
+        self.assertEqual(self.worker.within, [speech.wait_limit_s(KIND_GREETING), speech.wait_limit_s(KIND_REPLY),
+                                              speech.wait_limit_s(KIND_ACK)])
+
+    def test_a_stale_utterance_is_never_made(self) -> None:
+        clock = [100.0]
+        self.voice = self.make(clock=lambda: clock[0])
+        self.voice.say(KIND_GREETING, "Good morning, sir.")
+        seq = self.worker.submitted[-1][0]
+        clock[0] += speech.STALE_AFTER_S[KIND_GREETING] + 1
+        self.voice.pump()
+        self.assertIn(seq, self.worker.forgotten)                 # the say thread skips it (no 25 s spent on it)
 
     def test_the_log_never_holds_the_text(self) -> None:
         with self.assertLogs("briefing_reader", level="DEBUG") as logs:

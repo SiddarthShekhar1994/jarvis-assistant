@@ -533,10 +533,12 @@ class OneTaskAtATimeTests(AgentApp):
         self.c.agent.acknowledged.connect(acknowledged.append)
         self.type_it("open my LING essay and use the blue one")     # even a desktop verb: it goes to the task
         self.assertEqual(self.c.ask.bar.text(), "")                 # it left the bar
-        self.assertEqual(acknowledged, ["Passing that on, sir."])
+        self.assertEqual(acknowledged[0], "Passing that on, sir.")
         self.assertNotIn("Passing that on, sir.", self.said())      # shown, not said
         end = self.ended()
         self.assertEqual(end.summary, "Heard: The owner says: open my LING essay and use the blue one")
+        self.assertEqual(acknowledged, ["Passing that on, sir.", "He has your message, sir."])   # then it reached him
+        self.assertNotIn("He has your message, sir.", self.said())
         self.assertEqual(len(self.runs()), planner_runs)            # no planner run for it
         self.assertFalse(self.desktop.busy())
         self.assertIsNone(blocked.engine.failure)

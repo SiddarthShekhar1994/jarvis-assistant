@@ -125,7 +125,7 @@ class StalenessTests(LaneTestCase):
     def test_limits_per_kind(self) -> None:
         self.assertEqual((STALE_AFTER_S[KIND_ACK], STALE_AFTER_S[KIND_GREETING], STALE_AFTER_S[KIND_ANNOUNCE],
                           STALE_AFTER_S[KIND_REPLY], STALE_AFTER_S[KIND_RESULT], STALE_AFTER_S[KIND_NOTICE]),
-                         (8.0, 20.0, 20.0, 30.0, 60.0, 60.0))
+                         (8.0, 30.0, 30.0, 30.0, 60.0, 60.0))   # greeting, announce 30 s: 2026-11-24
 
     def test_each_kind_is_dropped_only_after_its_limit(self) -> None:
         for kind, limit in STALE_AFTER_S.items():
@@ -142,7 +142,7 @@ class StalenessTests(LaneTestCase):
     def test_a_stale_head_is_dropped_when_it_would_start(self) -> None:
         self.push(KIND_GREETING, "late greeting")
         self.push(KIND_RESULT, "result")
-        self.clock.t += 21
+        self.clock.t += 31
         with self.assertLogs("briefing_reader.speech", level="INFO") as logs:
             started = self.lane.start_next()
         self.assertEqual(started.text, "result")
@@ -151,7 +151,7 @@ class StalenessTests(LaneTestCase):
 
     def test_a_greeting_waiting_for_its_audio_too_long_is_dropped(self) -> None:
         self.push(KIND_GREETING, "never synthesized", ready=False)
-        self.clock.t += 25
+        self.clock.t += 31
         self.assertIsNone(self.lane.start_next())
         self.assertTrue(self.lane.idle)
 

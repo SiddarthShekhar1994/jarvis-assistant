@@ -960,6 +960,84 @@ class BarTests(FeedApp):
         self.assertEqual(self.ended().summary, "The owner says: use the cheaper ones too")
         self.assertNotIn("Passing that on, sir.", self.said())         # shown, not said
 
+    def live_notes(self) -> list[str]:
+        return [note.text for step in self.agent_tasks()[-1].steps for note in step.notes]
+
+    def test_words_typed_while_a_step_runs_say_when_he_has_them_then_that_he_does(self) -> None:
+        stages = Stages()
+
+        def script(engine: FakeEngine) -> None:
+            engine.wait_message()
+            engine.call("update_plan", found="", steps=STEPS)
+            stages.reach(1)
+            engine.end_turn("Working.")
+            said = engine.wait_message()                              # delivered: its replay
+            stages.reach(2)
+            engine.call("finish", summary=said, outcome="done")
+            engine.end_turn()
+
+        self.start(script)
+        self.reached(stages, 1)
+        bar = self.c.ask.bar
+        with mock.patch.object(self.c.agent, "tools_running", return_value=True):   # a step of his runs now
+            self.type_it("use the cheaper ones too")
+        self.assertEqual(bar.status(), "Passing that on, sir: he'll have it when this step ends.")
+        self.assertNotIn(agent_ui.DELIVERED_NOTE, self.live_notes())
+        stages.go(1)
+        self.reached(stages, 2)
+        self.assertTrue(wait_for(lambda: bar.status() == "He has your message, sir.", timeout=5), bar.status())
+        self.assertEqual(bar.tone(), hud.TONE_DONE)
+        self.assertIn(agent_ui.DELIVERED_NOTE, self.live_notes())
+        stages.go(2)
+        self.assertEqual(self.ended().summary, "The owner says: use the cheaper ones too")
+        self.assertFalse([text for text in self.said() if "message" in text or "Passing" in text])   # shown, not said
+
+    def test_words_queued_for_the_next_result_never_promise_the_step_s_end(self) -> None:
+        stages = Stages()
+
+        def script(engine: FakeEngine) -> None:
+            engine.wait_message()
+            engine.call("update_plan", found="", steps=STEPS)
+            stages.reach(1)
+            engine.call("finish", summary="Done.", outcome="done")
+            engine.end_turn()
+
+        self.start(script)
+        self.reached(stages, 1)
+        run = self.c.agent._run
+        with mock.patch.object(self.c.agent, "tools_running", return_value=True), \
+                mock.patch.object(run, "owner_says", return_value="queued"):   # behind a message of Jarvis's
+            self.type_it("and the cheaper ones")
+        self.assertEqual(self.c.ask.bar.status(), "Passing that on, sir.")
+        self.assertIn("Your message goes in next", self.live_notes())
+        stages.go(1)
+        self.ended()
+
+    def test_delivered_while_a_click_only_card_waits_keeps_the_bar_s_words(self) -> None:
+        stages = Stages()
+
+        def script(engine: FakeEngine) -> None:
+            engine.wait_message()
+            engine.call("update_plan", found="", steps=STEPS)
+            stages.reach(1)
+            engine.call("finish", summary="Done.", outcome="done")
+            engine.end_turn()
+
+        self.start(script)
+        self.reached(stages, 1)
+        acknowledged: list[str] = []
+        self.c.agent.acknowledged.connect(acknowledged.append)
+        agent, run = self.c.agent, self.c.agent._run
+        delivered = ar.AgentEvent(ar.E_NOTICE, code=ar.C_DELIVERED)
+        with mock.patch.object(run, "click_awaited", return_value=object()):
+            agent._on_event(agent._seq, delivered)
+        self.assertEqual(acknowledged, [])                             # the card still needs its click
+        self.assertIn(agent_ui.DELIVERED_NOTE, self.live_notes())      # LIVE says it reached him
+        agent._on_event(agent._seq, delivered)
+        self.assertEqual(acknowledged, ["He has your message, sir."])
+        stages.go(1)
+        self.ended()
+
     def test_a_plain_ask_s_bar_stays_read_only_while_it_runs(self) -> None:
         self.make_agent(plan_stream({"say": "It's at two.", "question": "", "lines": []}))
         release = threading.Event()

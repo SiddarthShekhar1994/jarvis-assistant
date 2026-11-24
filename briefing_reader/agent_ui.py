@@ -35,7 +35,7 @@
         stepEnded()            a tool call ended
         said(str)              a line it said (the say tool): the app's caption and voice
         noticed(str, str)      Jarvis's own words about the task and their tone (paused by the plan's limit ...)
-        acknowledged(str)      a few words that what was typed went in (shown, not said)
+        acknowledged(str)      a few words that what was typed went in, and later that it reached him (shown, not said)
         clickNeeded(str)       words came while a card only a click answers waits ("sent" or "held"): the feed says so
         cardAtWork(bool)       the owner's click started a file card's batch (False: it ran nothing, and the card waits on)
         limitPaused(bool)      the plan's limit holds the task now (False: it let go)
@@ -136,7 +136,12 @@ LIMIT_TEXT = "That's the most tasks for one day ({count}), {sir}; nothing was st
 HOLD_TEXT = "Tasks are paused until your plan's limit resets, {sir}: Claude Code said a run would use extra usage."
 OFF_TEXT = "Tasks need Jarvis on your desktop turned on, {sir}; nothing was started."
 TOO_OLD_TEXT = "This Claude Code is too old for tasks, {sir}: update it and ask again. Nothing was started."
-TAKEN_TEXT = {"sent": "Passing that on, {sir}.", "answered": "Thank you, {sir}."}
+# "sent_busy": sent while a tool runs - Claude Code hands it over only when that step returns (2026-11-24). "queued":
+# behind what waits for his next result (or the goal), so it goes in later, with it: the plain words.
+TAKEN_TEXT = {"sent": "Passing that on, {sir}.", "sent_busy": "Passing that on, {sir}: he'll have it when this step ends.",
+              "queued": "Passing that on, {sir}.", "answered": "Thank you, {sir}."}
+DELIVERED_TEXT = "He has your message, {sir}."     # the owner's words reached the model (shown on the bar, not said)
+DELIVERED_NOTE = "Your message reached him"        # ... and in LIVE
 TURNED_OFF = "turned off"         # stop()'s reason for a Turn off: nothing stays, even a report
 STOPPED_BY_OWNER = "stopped"      # AgentController.stopped_by: their Stop, in the words of any end (else TURNED_OFF)
 # What is said in place of a line of the model's that may hold something private (AgentController.spoken).
@@ -434,9 +439,12 @@ class _Feed:
 
     @live_events.quiet()
     def you_said(self, status: str, click: bool = False) -> None:
-        """What was typed. "answered": gone() says so, for a click or for words."""
-        if status != "answered":
-            self.task.note({"held": "Your message waits", "sent": "Your message went in"}.get(
+        """What was typed. "answered": gone() says so, for a click or for words. "delivered": it reached the model."""
+        if status == "delivered":
+            self.task.note(DELIVERED_NOTE)
+        elif status != "answered":
+            self.task.note({"held": "Your message waits", "sent": "Your message went in",
+                            "queued": "Your message goes in next"}.get(
                 status, "Your message came too late") + (": the card still needs a click" if click else ""))
 
     @live_events.quiet()
@@ -736,13 +744,14 @@ class AgentController(QObject):
         status = run.owner_says(text)
         if status == "refused":
             return False
-        click = status in ("sent", "held") and run.click_awaited() is not None
+        click = status in ("sent", "queued", "held") and run.click_awaited() is not None
         if self._feed is not None:
             self._feed.you_said(status, click)
         if click:
-            self.clickNeeded.emit(status)
+            self.clickNeeded.emit("sent" if status == "queued" else status)
         elif status in TAKEN_TEXT:
-            self.acknowledged.emit(self._words(TAKEN_TEXT[status]))
+            busy = status == "sent" and self.tools_running()     # it reaches the model when that step returns
+            self.acknowledged.emit(self._words(TAKEN_TEXT["sent_busy" if busy else status]))
         return True
 
     def answer(self, question_id: str, text: str) -> bool:
@@ -955,6 +964,10 @@ class AgentController(QObject):
             self.said.emit(event.text)
         elif kind == agent_runner.E_TEXT:
             feed.note(event.text)
+        elif kind == agent_runner.E_NOTICE and event.code == agent_runner.C_DELIVERED:
+            feed.you_said("delivered")
+            if self._run.click_awaited() is None:      # a card that only a click answers keeps the bar's words
+                self.acknowledged.emit(self._words(DELIVERED_TEXT))
         elif kind == agent_runner.E_NOTICE:
             feed.note(self._words(event.text))
             # The plan's limit: nothing can be decided now, so never amber (a decision waiting); a limit is coral, as a
